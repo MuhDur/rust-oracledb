@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use oracledb::protocol::thin::{
     BindValue, ColumnMetadata, QueryResult, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR,
-    ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER,
-    ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_VARCHAR,
+    ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW,
+    ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection};
@@ -300,9 +300,11 @@ fn env_password_for_user(user: &str) -> PyResult<String> {
 }
 
 fn extract_bind_values(
+    py: Python<'_>,
     statement: &str,
     parameters: Option<&Bound<'_, PyAny>>,
     keyword_parameters: Option<&Bound<'_, PyAny>>,
+    named_input_sizes: &[(String, Py<PyAny>)],
 ) -> PyResult<Vec<BindValue>> {
     let has_parameters = has_bind_payload(parameters)?;
     let has_keywords = has_bind_payload(keyword_parameters)?;
@@ -311,16 +313,22 @@ fn extract_bind_values(
     }
     if let Some(value) = keyword_parameters.filter(|_| has_keywords) {
         let dict = value.cast::<PyDict>()?;
-        return extract_named_bind_values(statement, dict);
+        return extract_named_bind_values(py, statement, Some(dict), named_input_sizes);
     }
     let Some(value) = parameters else {
+        if !named_input_sizes.is_empty() {
+            return extract_named_bind_values(py, statement, None, named_input_sizes);
+        }
         return Ok(Vec::new());
     };
     if !has_parameters {
+        if !named_input_sizes.is_empty() {
+            return extract_named_bind_values(py, statement, None, named_input_sizes);
+        }
         return Ok(Vec::new());
     }
     if let Ok(dict) = value.cast::<PyDict>() {
-        return extract_named_bind_values(statement, dict);
+        return extract_named_bind_values(py, statement, Some(dict), named_input_sizes);
     }
     extract_positional_bind_values(statement, value)
 }
@@ -371,31 +379,54 @@ fn extract_positional_bind_values(
 }
 
 fn extract_named_bind_values(
+    py: Python<'_>,
     statement: &str,
-    parameters: &Bound<'_, PyDict>,
+    parameters: Option<&Bound<'_, PyDict>>,
+    named_input_sizes: &[(String, Py<PyAny>)],
 ) -> PyResult<Vec<BindValue>> {
     let names = unique_sql_bind_names(statement)?;
-    for (key, _) in parameters.iter() {
-        let key = key.extract::<String>()?;
-        if !names.iter().any(|name| bind_name_matches_key(name, &key)) {
-            return Err(dpy_bind_error(
-                "DPY-4008",
-                format!("no bind placeholder named \":{key}\" was found in the SQL text"),
-            ));
+    let return_names = statement_return_bind_names(statement)?;
+    if let Some(parameters) = parameters {
+        for (key, _) in parameters.iter() {
+            let key = key.extract::<String>()?;
+            if !names.iter().any(|name| bind_name_matches_key(name, &key)) {
+                return Err(dpy_bind_error(
+                    "DPY-4008",
+                    format!("no bind placeholder named \":{key}\" was found in the SQL text"),
+                ));
+            }
         }
     }
     names
         .iter()
         .map(|name| {
-            let value = get_named_bind_value(parameters, name)?.ok_or_else(|| {
-                dpy_bind_error(
-                    "DPY-4010",
-                    format!(
-                        "a bind variable replacement value for placeholder \":{name}\" was not provided"
-                    ),
-                )
-            })?;
-            py_value_to_bind(&value)
+            let is_return_bind = return_names
+                .iter()
+                .any(|return_name| bind_names_equal(return_name, name));
+            if let Some(parameters) = parameters {
+                if let Some(value) = get_named_bind_value(parameters, name)? {
+                    let value = py_value_to_bind(&value)?;
+                    return Ok(if is_return_bind {
+                        output_only_bind(value)
+                    } else {
+                        value
+                    });
+                }
+            }
+            if let Some(value) = named_input_size_value(py, named_input_sizes, name) {
+                let value = py_value_to_bind(value.bind(py))?;
+                return Ok(if is_return_bind {
+                    output_only_bind(value)
+                } else {
+                    value
+                });
+            }
+            Err(dpy_bind_error(
+                "DPY-4010",
+                format!(
+                    "a bind variable replacement value for placeholder \":{name}\" was not provided"
+                ),
+            ))
         })
         .collect()
 }
@@ -411,7 +442,7 @@ fn extract_bind_rows(
         .cast::<PyList>()
         .map_err(|_| not_implemented("ThinCursorImpl executemany parameters"))?;
     list.iter()
-        .map(|row| extract_bind_values(statement, Some(&row), None))
+        .map(|row| extract_bind_values(row.py(), statement, Some(&row), None, &[]))
         .collect()
 }
 
@@ -420,6 +451,7 @@ fn extract_bind_var_objects(
     statement: &str,
     parameters: Option<&Bound<'_, PyAny>>,
     keyword_parameters: Option<&Bound<'_, PyAny>>,
+    named_input_sizes: &[(String, Py<PyAny>)],
 ) -> PyResult<Vec<Py<ThinVar>>> {
     let has_parameters = has_bind_payload(parameters)?;
     let has_keywords = has_bind_payload(keyword_parameters)?;
@@ -427,16 +459,27 @@ fn extract_bind_var_objects(
         return Ok(Vec::new());
     }
     if let Some(value) = keyword_parameters.filter(|_| has_keywords) {
-        return extract_named_bind_var_objects(py, statement, value.cast::<PyDict>()?);
+        return extract_named_bind_var_objects(
+            py,
+            statement,
+            Some(value.cast::<PyDict>()?),
+            named_input_sizes,
+        );
     }
     let Some(value) = parameters else {
+        if !named_input_sizes.is_empty() {
+            return extract_named_bind_var_objects(py, statement, None, named_input_sizes);
+        }
         return Ok(Vec::new());
     };
     if !has_parameters {
+        if !named_input_sizes.is_empty() {
+            return extract_named_bind_var_objects(py, statement, None, named_input_sizes);
+        }
         return Ok(Vec::new());
     }
     if let Ok(dict) = value.cast::<PyDict>() {
-        return extract_named_bind_var_objects(py, statement, dict);
+        return extract_named_bind_var_objects(py, statement, Some(dict), named_input_sizes);
     }
     extract_positional_bind_var_objects(py, value)
 }
@@ -466,13 +509,33 @@ fn extract_positional_bind_var_objects(
 fn extract_named_bind_var_objects(
     py: Python<'_>,
     statement: &str,
-    parameters: &Bound<'_, PyDict>,
+    parameters: Option<&Bound<'_, PyDict>>,
+    named_input_sizes: &[(String, Py<PyAny>)],
 ) -> PyResult<Vec<Py<ThinVar>>> {
     unique_sql_bind_names(statement)?
         .iter()
-        .filter_map(|name| get_named_bind_value(parameters, name).transpose())
-        .map(|value| bind_var_from_value(py, &value?))
+        .filter_map(|name| match parameters {
+            Some(parameters) => match get_named_bind_value(parameters, name) {
+                Ok(Some(value)) => Some(bind_var_from_value(py, &value)),
+                Ok(None) => named_input_size_value(py, named_input_sizes, name)
+                    .map(|value| bind_var_from_value(py, value.bind(py))),
+                Err(err) => Some(Err(err)),
+            },
+            None => named_input_size_value(py, named_input_sizes, name)
+                .map(|value| bind_var_from_value(py, value.bind(py))),
+        })
         .collect()
+}
+
+fn named_input_size_value(
+    py: Python<'_>,
+    named_input_sizes: &[(String, Py<PyAny>)],
+    name: &str,
+) -> Option<Py<PyAny>> {
+    named_input_sizes
+        .iter()
+        .find(|(key, _)| bind_name_matches_key(name, key))
+        .map(|(_, value)| value.clone_ref(py))
 }
 
 fn validate_positional_bind_count(statement: &str, actual_num: usize) -> PyResult<()> {
@@ -518,6 +581,18 @@ fn unique_sql_bind_names(statement: &str) -> PyResult<Vec<String>> {
         }
     }
     Ok(names)
+}
+
+fn statement_return_bind_names(statement: &str) -> PyResult<Vec<String>> {
+    let lower = statement.to_ascii_lowercase();
+    let Some(returning_pos) = lower.find("returning") else {
+        return Ok(Vec::new());
+    };
+    let Some(into_relative_pos) = lower[returning_pos..].find("into") else {
+        return Ok(Vec::new());
+    };
+    let into_pos = returning_pos + into_relative_pos + "into".len();
+    scan_sql_bind_names(&statement[into_pos..])
 }
 
 fn scan_sql_bind_names(statement: &str) -> PyResult<Vec<String>> {
@@ -603,6 +678,38 @@ fn bind_name_matches_key(bind_name: &str, key: &str) -> bool {
     }
 }
 
+fn output_only_bind(value: BindValue) -> BindValue {
+    let (ora_type_num, csfrm, buffer_size) = match value {
+        BindValue::Null => (ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 1),
+        BindValue::TypedNull {
+            ora_type_num,
+            csfrm,
+            buffer_size,
+        }
+        | BindValue::Output {
+            ora_type_num,
+            csfrm,
+            buffer_size,
+        } => (ora_type_num, csfrm, buffer_size.max(1)),
+        BindValue::Text(value) => (
+            ORA_TYPE_NUM_VARCHAR,
+            CS_FORM_IMPLICIT,
+            u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
+        ),
+        BindValue::Raw(value) => (
+            ORA_TYPE_NUM_RAW,
+            0,
+            u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
+        ),
+        BindValue::Number(_) => (ORA_TYPE_NUM_NUMBER, 0, 22),
+    };
+    BindValue::Output {
+        ora_type_num,
+        csfrm,
+        buffer_size,
+    }
+}
+
 fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> {
     if value.is_none() {
         return Ok(BindValue::Null);
@@ -623,6 +730,47 @@ fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> {
         return Ok(BindValue::Number(number.to_string()));
     }
     Err(not_implemented("ThinCursorImpl bind value type"))
+}
+
+fn bind_template_from_type(typ: &Bound<'_, PyAny>, size: u32) -> BindValue {
+    let type_name = typ
+        .getattr("name")
+        .or_else(|_| typ.getattr("__name__"))
+        .and_then(|value| value.extract::<String>())
+        .unwrap_or_default();
+    match type_name.as_str() {
+        "NUMBER"
+        | "DB_TYPE_NUMBER"
+        | "NATIVE_FLOAT"
+        | "DB_TYPE_BINARY_DOUBLE"
+        | "int"
+        | "float" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_NUMBER,
+            csfrm: 0,
+            buffer_size: 22,
+        },
+        "STRING" | "DB_TYPE_VARCHAR" | "DB_TYPE_CHAR" | "str" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_VARCHAR,
+            csfrm: CS_FORM_IMPLICIT,
+            buffer_size: size.max(1).max(4000),
+        },
+        "DB_TYPE_NCHAR" | "DB_TYPE_NVARCHAR" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_VARCHAR,
+            csfrm: CS_FORM_NCHAR,
+            buffer_size: size.max(1).max(4000),
+        },
+        "DB_TYPE_RAW" | "bytes" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_RAW,
+            csfrm: 0,
+            buffer_size: size.max(1).max(4000),
+        },
+        "DB_TYPE_CURSOR" | "CURSOR" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_CURSOR,
+            csfrm: 0,
+            buffer_size: 4,
+        },
+        _ => BindValue::Null,
+    }
 }
 
 fn bind_optional_text(value: Option<&str>) -> BindValue {
@@ -651,6 +799,7 @@ fn query_value_to_string(value: &Option<QueryValue>) -> Option<String> {
         Some(QueryValue::Text(value)) => Some(value.clone()),
         Some(QueryValue::Raw(value)) => String::from_utf8(value.clone()).ok(),
         Some(QueryValue::Number { text, .. }) => Some(text.clone()),
+        Some(QueryValue::Cursor { .. }) => None,
         None => None,
     }
 }
@@ -719,6 +868,8 @@ fn single_text_result(column_name: &str, value: Option<String>) -> QueryResult {
     QueryResult {
         columns: vec![varchar_metadata(column_name)],
         rows: vec![vec![value.map(QueryValue::Text)]],
+        out_values: Vec::new(),
+        return_values: Vec::new(),
         cursor_id: 0,
         row_count: 1,
         more_rows: false,
@@ -787,19 +938,37 @@ impl ThinConnState {
 #[pyclass(module = "oracledb.thin_impl", name = "ThinVar")]
 struct ThinVar {
     value: Arc<Mutex<Option<Py<PyAny>>>>,
+    default_bind: BindValue,
 }
 
 impl ThinVar {
     fn from_py_value(value: Option<Py<PyAny>>) -> Self {
         Self {
             value: Arc::new(Mutex::new(value)),
+            default_bind: BindValue::Null,
+        }
+    }
+
+    fn typed_with_value(default_bind: BindValue, value: Option<Py<PyAny>>) -> Self {
+        Self {
+            value: Arc::new(Mutex::new(value)),
+            default_bind,
         }
     }
 
     fn to_bind_value(&self, py: Python<'_>) -> PyResult<BindValue> {
+        if matches!(
+            self.default_bind,
+            BindValue::TypedNull {
+                ora_type_num: ORA_TYPE_NUM_CURSOR,
+                ..
+            }
+        ) {
+            return Ok(self.default_bind.clone());
+        }
         let guard = self.value.lock().map_err(runtime_error)?;
         let Some(value) = guard.as_ref() else {
-            return Ok(BindValue::Null);
+            return Ok(self.default_bind.clone());
         };
         py_value_to_bind(value.bind(py))
     }
@@ -838,6 +1007,15 @@ impl ThinVar {
         self.get_py_value(py)
     }
 
+    fn get_all_values(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        Ok(vec![self.get_py_value(py)?])
+    }
+
+    #[getter]
+    fn values(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        self.get_all_values(py)
+    }
+
     fn setvalue(&self, pos: u32, value: Py<PyAny>) -> PyResult<()> {
         let _ = pos;
         self.set_py_value(Some(value))
@@ -854,6 +1032,57 @@ fn bind_var_from_value(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Py<
         return Ok(var);
     }
     Py::new(py, ThinVar::from_py_value(Some(value.clone().unbind())))
+}
+
+fn apply_out_bind_values(
+    py: Python<'_>,
+    bind_vars: &[Py<ThinVar>],
+    out_values: &[(usize, Option<QueryValue>)],
+    return_values: &[(usize, Vec<Option<QueryValue>>)],
+) -> PyResult<()> {
+    for (index, value) in out_values {
+        let Some(var) = bind_vars.get(*index) else {
+            continue;
+        };
+        if let Some(QueryValue::Cursor { columns, cursor_id }) = value {
+            apply_cursor_out_bind(py, var, columns, *cursor_id)?;
+            continue;
+        }
+        let value = query_value_to_py(py, value)?;
+        var.borrow(py).set_py_value(Some(value))?;
+    }
+    for (index, values) in return_values {
+        let Some(var) = bind_vars.get(*index) else {
+            continue;
+        };
+        let values = values
+            .iter()
+            .map(|value| query_value_to_py(py, value))
+            .collect::<PyResult<Vec<_>>>()?;
+        let values = PyList::new(py, values)?.unbind().into();
+        var.borrow(py).set_py_value(Some(values))?;
+    }
+    Ok(())
+}
+
+fn apply_cursor_out_bind(
+    py: Python<'_>,
+    var: &Py<ThinVar>,
+    columns: &[ColumnMetadata],
+    cursor_id: u32,
+) -> PyResult<()> {
+    let cursor = var.borrow(py).get_py_value(py)?;
+    let cursor = cursor.bind(py);
+    let impl_obj = cursor.getattr("_impl")?;
+    let mut cursor_impl = impl_obj.extract::<PyRefMut<'_, ThinCursorImpl>>()?;
+    cursor_impl.columns = columns.to_vec();
+    cursor_impl.rows.clear();
+    cursor_impl.row_index = 0;
+    cursor_impl.cursor_id = cursor_id;
+    cursor_impl.more_rows = cursor_id != 0;
+    cursor_impl.rowcount = 0;
+    cursor_impl.is_query = true;
+    Ok(())
 }
 
 fn local_query_result(
@@ -1659,6 +1888,7 @@ struct ThinCursorImpl {
     warning: Option<Py<PyAny>>,
     has_positional_input_sizes: bool,
     has_named_input_sizes: bool,
+    named_input_sizes: Vec<(String, Py<PyAny>)>,
     statement_changed: bool,
     is_query: bool,
 }
@@ -1699,6 +1929,7 @@ impl ThinCursorImpl {
             warning: None,
             has_positional_input_sizes: false,
             has_named_input_sizes: false,
+            named_input_sizes: Vec::new(),
             statement_changed: false,
             is_query: false,
         }
@@ -1842,6 +2073,7 @@ impl ThinCursorImpl {
         self.bind_values.clear();
         self.bind_vars.clear();
         self.bind_names.clear();
+        self.named_input_sizes.clear();
         self.many_bind_rows.clear();
         self.columns.clear();
         self.rows.clear();
@@ -1896,9 +2128,23 @@ impl ThinCursorImpl {
             ));
         }
         self.bind_names = unique_sql_bind_names(statement)?;
-        self.bind_values = extract_bind_values(statement, parameters, keyword_parameters)?;
+        self.bind_values = Python::attach(|py| {
+            extract_bind_values(
+                py,
+                statement,
+                parameters,
+                keyword_parameters,
+                &self.named_input_sizes,
+            )
+        })?;
         self.bind_vars = Python::attach(|py| {
-            extract_bind_var_objects(py, statement, parameters, keyword_parameters)
+            extract_bind_var_objects(
+                py,
+                statement,
+                parameters,
+                keyword_parameters,
+                &self.named_input_sizes,
+            )
         })?;
         self.many_bind_rows.clear();
         Ok(())
@@ -2003,6 +2249,14 @@ impl ThinCursorImpl {
                 "the database or network closed the connection",
             ));
         }
+        Python::attach(|py| {
+            apply_out_bind_values(
+                py,
+                &self.bind_vars,
+                &result.out_values,
+                &result.return_values,
+            )
+        })?;
         self.state.lock().map_err(runtime_error)?.record_statement(
             statement,
             is_query,
@@ -2079,6 +2333,14 @@ impl ThinCursorImpl {
                 "the database or network closed the connection",
             ));
         }
+        Python::attach(|py| {
+            apply_out_bind_values(
+                py,
+                &self.bind_vars,
+                &result.out_values,
+                &result.return_values,
+            )
+        })?;
         let is_query = !result.columns.is_empty();
         let should_commit = !is_query && *self.autocommit.lock().map_err(runtime_error)?;
         if should_commit {
@@ -2118,10 +2380,11 @@ impl ThinCursorImpl {
             let connection = guard
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-            let result = BlockingConnection::fetch_rows(
+            let result = BlockingConnection::fetch_rows_with_columns(
                 connection,
                 self.cursor_id,
                 self.arraysize,
+                &self.columns,
                 previous_row.as_deref(),
             )
             .map_err(runtime_error)?;
@@ -2184,13 +2447,20 @@ impl ThinCursorImpl {
         }
         self.has_positional_input_sizes = has_args;
         self.has_named_input_sizes = has_kwargs;
+        self.named_input_sizes.clear();
+        if let Some(kwargs) = kwargs {
+            for (key, value) in kwargs.iter() {
+                self.named_input_sizes
+                    .push((key.extract::<String>()?, value.clone().unbind()));
+            }
+        }
         Ok(PyList::empty(py).unbind().into())
     }
 
     #[pyo3(signature = (
-        _connection,
-        _typ,
-        _size=0,
+        connection,
+        typ,
+        size=0,
         _arraysize=1,
         _inconverter=None,
         _outconverter=None,
@@ -2201,9 +2471,9 @@ impl ThinCursorImpl {
     fn create_var(
         &self,
         py: Python<'_>,
-        _connection: &Bound<'_, PyAny>,
-        _typ: &Bound<'_, PyAny>,
-        _size: u32,
+        connection: &Bound<'_, PyAny>,
+        typ: &Bound<'_, PyAny>,
+        size: u32,
         _arraysize: u32,
         _inconverter: Option<Py<PyAny>>,
         _outconverter: Option<Py<PyAny>>,
@@ -2212,7 +2482,19 @@ impl ThinCursorImpl {
         convert_nulls: bool,
     ) -> PyResult<Py<ThinVar>> {
         let _ = convert_nulls;
-        Py::new(py, ThinVar::from_py_value(None))
+        let default_bind = bind_template_from_type(typ, size);
+        let value = if matches!(
+            default_bind,
+            BindValue::TypedNull {
+                ora_type_num: ORA_TYPE_NUM_CURSOR,
+                ..
+            }
+        ) {
+            Some(connection.call_method0("cursor")?.unbind())
+        } else {
+            None
+        };
+        Py::new(py, ThinVar::typed_with_value(default_bind, value))
     }
 
     fn get_array_dml_row_counts(&self) -> PyResult<Vec<u64>> {
@@ -2248,6 +2530,9 @@ fn query_value_to_py(py: Python<'_>, value: &Option<QueryValue>) -> PyResult<Py<
         Some(QueryValue::Number { text, .. }) => {
             let value = text.parse::<f64>().map_err(runtime_error)?;
             Ok(value.into_pyobject(py)?.unbind().into())
+        }
+        Some(QueryValue::Cursor { .. }) => {
+            Err(not_implemented("ThinCursorImpl cursor value conversion"))
         }
     }
 }

@@ -12,10 +12,11 @@ use oracledb_protocol::thin::{
     build_execute_payload_with_bind_rows_with_seq, build_execute_payload_with_binds_with_seq,
     build_execute_payload_with_seq, build_fast_auth_phase_one_payload,
     build_fetch_payload_with_seq, build_function_payload_with_seq, parse_accept_payload,
-    parse_auth_response, parse_query_response, parse_query_response_with_context, BindValue,
-    ClientCapabilities, ColumnMetadata, QueryResult, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF,
-    TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT,
-    TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE,
+    parse_auth_response, parse_query_response, parse_query_response_with_binds,
+    parse_query_response_with_context, BindValue, ClientCapabilities, ColumnMetadata, QueryResult,
+    TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_PACKET_TYPE_ACCEPT,
+    TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT,
+    TNS_PACKET_TYPE_REFUSE,
 };
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};
@@ -318,7 +319,8 @@ impl Connection {
         send_data_packet(&mut self.stream, &payload, self.sdu)?;
         let response = read_data_response(&mut self.stream)?;
         trace_query_bytes("EXECUTE query response", &response);
-        let result = parse_query_response(&response, self.capabilities).map_err(Error::from)?;
+        let result = parse_query_response_with_binds(&response, self.capabilities, binds)
+            .map_err(Error::from)?;
         self.remember_cursor_columns(&result);
         Ok(result)
     }
@@ -344,7 +346,12 @@ impl Connection {
         send_data_packet(&mut self.stream, &payload, self.sdu)?;
         let response = read_data_response(&mut self.stream)?;
         trace_query_bytes("EXECUTE query response", &response);
-        let result = parse_query_response(&response, self.capabilities).map_err(Error::from)?;
+        let result = parse_query_response_with_binds(
+            &response,
+            self.capabilities,
+            bind_rows.first().map(Vec::as_slice).unwrap_or(&[]),
+        )
+        .map_err(Error::from)?;
         self.remember_cursor_columns(&result);
         Ok(result)
     }
@@ -354,6 +361,18 @@ impl Connection {
         cx: &Cx,
         cursor_id: u32,
         arraysize: u32,
+        previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
+    ) -> Result<QueryResult> {
+        self.fetch_rows_with_columns(cx, cursor_id, arraysize, &[], previous_row)
+            .await
+    }
+
+    pub async fn fetch_rows_with_columns(
+        &mut self,
+        cx: &Cx,
+        cursor_id: u32,
+        arraysize: u32,
+        known_columns: &[ColumnMetadata],
         previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
     ) -> Result<QueryResult> {
         cx.checkpoint()
@@ -368,7 +387,7 @@ impl Connection {
             .cursor_columns
             .get(&cursor_id)
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_else(|| known_columns.to_vec());
         let result =
             parse_query_response_with_context(&response, self.capabilities, &columns, previous_row)
                 .map_err(Error::from)?;
@@ -574,6 +593,25 @@ impl BlockingConnection {
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection
                 .fetch_rows(&cx, cursor_id, arraysize, previous_row)
+                .await
+        })
+    }
+
+    pub fn fetch_rows_with_columns(
+        connection: &mut Connection,
+        cursor_id: u32,
+        arraysize: u32,
+        known_columns: &[ColumnMetadata],
+        previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
+    ) -> Result<QueryResult> {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .fetch_rows_with_columns(&cx, cursor_id, arraysize, known_columns, previous_row)
                 .await
         })
     }

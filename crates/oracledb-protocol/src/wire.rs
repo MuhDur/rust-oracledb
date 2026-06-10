@@ -267,6 +267,26 @@ impl<'a> TtcReader<'a> {
         Ok(value)
     }
 
+    pub fn read_sb4(&mut self) -> Result<i32> {
+        let len = self.read_u8()?;
+        let is_negative = len & 0x80 != 0;
+        let len = len & 0x7f;
+        if len == 0 {
+            return Ok(0);
+        }
+        if len > 4 {
+            return Err(ProtocolError::TtcDecode("invalid sb4 length"));
+        }
+        let mut value = 0i32;
+        for byte in self.read_raw(usize::from(len))? {
+            value = (value << 8) | i32::from(*byte);
+        }
+        if is_negative {
+            value = -value;
+        }
+        Ok(value)
+    }
+
     pub fn read_ub8(&mut self) -> Result<u64> {
         let len = self.read_u8()?;
         if len == 0 {
