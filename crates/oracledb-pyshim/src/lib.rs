@@ -6,9 +6,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use oracledb::protocol::thin::{
     BindValue, ColumnMetadata, QueryResult, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR,
-    ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_LONG,
-    ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW,
-    ORA_TYPE_NUM_VARCHAR,
+    ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_DATE,
+    ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT,
+    ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
+    ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection};
@@ -425,9 +426,20 @@ fn extract_named_bind_values(
                 .any(|return_name| bind_names_equal(return_name, name));
             if let Some(parameters) = parameters {
                 if let Some(value) = get_named_bind_value(parameters, name)? {
-                    let value = py_value_to_execute_bind(&value)?;
+                    let value = if let Some(input_size_var) =
+                        named_input_size_value(py, named_input_sizes, name)
+                    {
+                        if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
+                            var.set_py_value(Some(value.clone().unbind()))?;
+                            var.to_bind_value(py)?
+                        } else {
+                            py_value_to_execute_bind(&value)?
+                        }
+                    } else {
+                        py_value_to_execute_bind(&value)?
+                    };
                     return Ok(if is_return_bind {
-                        output_only_bind(value)
+                        returning_output_bind(value)
                     } else {
                         value
                     });
@@ -436,7 +448,7 @@ fn extract_named_bind_values(
             if let Some(value) = named_input_size_value(py, named_input_sizes, name) {
                 let value = py_value_to_bind(value.bind(py))?;
                 return Ok(if is_return_bind {
-                    output_only_bind(value)
+                    returning_output_bind(value)
                 } else {
                     value
                 });
@@ -532,19 +544,27 @@ fn extract_named_bind_var_objects(
     parameters: Option<&Bound<'_, PyDict>>,
     named_input_sizes: &[(String, Py<PyAny>)],
 ) -> PyResult<Vec<Py<ThinVar>>> {
-    unique_sql_bind_names(statement)?
-        .iter()
-        .filter_map(|name| match parameters {
-            Some(parameters) => match get_named_bind_value(parameters, name) {
-                Ok(Some(value)) => Some(bind_var_from_value(py, &value)),
-                Ok(None) => named_input_size_value(py, named_input_sizes, name)
-                    .map(|value| bind_var_from_value(py, value.bind(py))),
-                Err(err) => Some(Err(err)),
-            },
-            None => named_input_size_value(py, named_input_sizes, name)
-                .map(|value| bind_var_from_value(py, value.bind(py))),
-        })
-        .collect()
+    let mut values = Vec::new();
+    for name in unique_sql_bind_names(statement)? {
+        let input_size_var = named_input_size_value(py, named_input_sizes, &name);
+        if let Some(parameters) = parameters {
+            if let Some(value) = get_named_bind_value(parameters, &name)? {
+                if let Some(input_size_var) = input_size_var {
+                    if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
+                        var.set_py_value(Some(value.clone().unbind()))?;
+                    }
+                    values.push(bind_var_from_value(py, input_size_var.bind(py))?);
+                } else {
+                    values.push(bind_var_from_value(py, &value)?);
+                }
+                continue;
+            }
+        }
+        if let Some(input_size_var) = input_size_var {
+            values.push(bind_var_from_value(py, input_size_var.bind(py))?);
+        }
+    }
+    Ok(values)
 }
 
 fn named_input_size_value(
@@ -710,6 +730,11 @@ fn output_only_bind(value: BindValue) -> BindValue {
             ora_type_num,
             csfrm,
             buffer_size,
+        }
+        | BindValue::ReturnOutput {
+            ora_type_num,
+            csfrm,
+            buffer_size,
         } => (ora_type_num, csfrm, buffer_size.max(1)),
         BindValue::Text(value) => (
             ORA_TYPE_NUM_VARCHAR,
@@ -725,9 +750,41 @@ fn output_only_bind(value: BindValue) -> BindValue {
             u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
         ),
         BindValue::Number(_) => (ORA_TYPE_NUM_NUMBER, 0, 22),
+        BindValue::DateTime { .. } => (ORA_TYPE_NUM_DATE, 0, 7),
+        BindValue::Timestamp { ora_type_num, .. } => (
+            ora_type_num,
+            0,
+            if ora_type_num == ORA_TYPE_NUM_TIMESTAMP_TZ {
+                13
+            } else {
+                11
+            },
+        ),
+        BindValue::Array {
+            ora_type_num,
+            csfrm,
+            buffer_size,
+            ..
+        } => (ora_type_num, csfrm, buffer_size.max(1)),
         BindValue::Cursor { .. } => (ORA_TYPE_NUM_CURSOR, 0, 4),
     };
     BindValue::Output {
+        ora_type_num,
+        csfrm,
+        buffer_size,
+    }
+}
+
+fn returning_output_bind(value: BindValue) -> BindValue {
+    let BindValue::Output {
+        ora_type_num,
+        csfrm,
+        buffer_size,
+    } = output_only_bind(value)
+    else {
+        unreachable!("output_only_bind always returns BindValue::Output")
+    };
+    BindValue::ReturnOutput {
         ora_type_num,
         csfrm,
         buffer_size,
@@ -857,6 +914,31 @@ fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> {
     if let Ok(bytes) = value.cast::<PyBytes>() {
         return Ok(BindValue::Raw(bytes.as_bytes().to_vec()));
     }
+    if value.cast::<PyList>().is_ok() || value.cast::<PyTuple>().is_ok() {
+        let values = py_list_to_array_bind_values(value)?;
+        let (ora_type_num, csfrm, buffer_size) = values
+            .iter()
+            .find_map(|value| value.as_ref().and_then(bind_type_info))
+            .unwrap_or((ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 1));
+        return Ok(BindValue::Array {
+            ora_type_num,
+            csfrm,
+            buffer_size,
+            max_elements: u32::try_from(values.len()).unwrap_or(u32::MAX).max(1),
+            values,
+        });
+    }
+    if let Some((year, month, day, hour, minute, second, _nanosecond)) = py_date_time_fields(value)?
+    {
+        return Ok(BindValue::DateTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        });
+    }
     if let Ok(text) = value.extract::<String>() {
         return Ok(BindValue::Text(text));
     }
@@ -867,6 +949,97 @@ fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> {
         return Ok(BindValue::Number(number.to_string()));
     }
     Err(not_implemented("ThinCursorImpl bind value type"))
+}
+
+fn py_value_to_bind_with_template(
+    value: &Bound<'_, PyAny>,
+    template: &BindValue,
+) -> PyResult<BindValue> {
+    let Some((year, month, day, hour, minute, second, nanosecond)) = py_date_time_fields(value)?
+    else {
+        return py_value_to_bind(value);
+    };
+    let Some((ora_type_num, _csfrm, _buffer_size)) = bind_type_info(template) else {
+        return py_value_to_bind(value);
+    };
+    if matches!(
+        ora_type_num,
+        ORA_TYPE_NUM_TIMESTAMP | ORA_TYPE_NUM_TIMESTAMP_LTZ | ORA_TYPE_NUM_TIMESTAMP_TZ
+    ) {
+        return Ok(BindValue::Timestamp {
+            ora_type_num,
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+        });
+    }
+    py_value_to_bind(value)
+}
+
+fn py_list_to_array_bind_values(value: &Bound<'_, PyAny>) -> PyResult<Vec<Option<BindValue>>> {
+    if let Ok(list) = value.cast::<PyList>() {
+        return list
+            .iter()
+            .map(|item| {
+                if item.is_none() {
+                    Ok(None)
+                } else {
+                    py_value_to_bind(&item).map(Some)
+                }
+            })
+            .collect();
+    }
+    let tuple = value.cast::<PyTuple>()?;
+    tuple
+        .iter()
+        .map(|item| {
+            if item.is_none() {
+                Ok(None)
+            } else {
+                py_value_to_bind(&item).map(Some)
+            }
+        })
+        .collect()
+}
+
+fn py_optional_u8_attr(value: &Bound<'_, PyAny>, name: &str) -> PyResult<u8> {
+    match value.getattr(name) {
+        Ok(attr) => attr.extract::<u8>(),
+        Err(_) => Ok(0),
+    }
+}
+
+fn py_optional_u32_attr(value: &Bound<'_, PyAny>, name: &str) -> PyResult<u32> {
+    match value.getattr(name) {
+        Ok(attr) => attr.extract::<u32>(),
+        Err(_) => Ok(0),
+    }
+}
+
+fn py_required_u8_attr(value: &Bound<'_, PyAny>, name: &str) -> PyResult<u8> {
+    value.getattr(name)?.extract::<u8>()
+}
+
+fn py_date_time_fields(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Option<(i32, u8, u8, u8, u8, u8, u32)>> {
+    if !(value.hasattr("year")? && value.hasattr("month")? && value.hasattr("day")?) {
+        return Ok(None);
+    }
+    let microsecond = py_optional_u32_attr(value, "microsecond")?;
+    Ok(Some((
+        value.getattr("year")?.extract::<i32>()?,
+        py_required_u8_attr(value, "month")?,
+        py_required_u8_attr(value, "day")?,
+        py_optional_u8_attr(value, "hour")?,
+        py_optional_u8_attr(value, "minute")?,
+        py_optional_u8_attr(value, "second")?,
+        microsecond * 1000,
+    )))
 }
 
 fn bind_template_from_type(typ: &Bound<'_, PyAny>, size: u32) -> BindValue {
@@ -901,9 +1074,115 @@ fn bind_template_from_type(typ: &Bound<'_, PyAny>, size: u32) -> BindValue {
             csfrm: 0,
             buffer_size: size.max(1).max(4000),
         },
+        "DATETIME" | "DB_TYPE_DATE" | "date" | "datetime" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_DATE,
+            csfrm: 0,
+            buffer_size: 7,
+        },
+        "DB_TYPE_TIMESTAMP" | "TIMESTAMP" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_TIMESTAMP,
+            csfrm: 0,
+            buffer_size: 11,
+        },
+        "DB_TYPE_TIMESTAMP_LTZ" | "TIMESTAMP WITH LOCAL TIME ZONE" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_TIMESTAMP_LTZ,
+            csfrm: 0,
+            buffer_size: 11,
+        },
+        "DB_TYPE_TIMESTAMP_TZ" | "TIMESTAMP WITH TIME ZONE" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_TIMESTAMP_TZ,
+            csfrm: 0,
+            buffer_size: 13,
+        },
         "DB_TYPE_CURSOR" | "CURSOR" => cursor_bind_template(),
         _ => BindValue::Null,
     }
+}
+
+fn bind_template_from_input_size(value: &Bound<'_, PyAny>) -> PyResult<BindValue> {
+    if let Ok(size) = value.extract::<u32>() {
+        return Ok(BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_VARCHAR,
+            csfrm: CS_FORM_IMPLICIT,
+            buffer_size: size.max(1),
+        });
+    }
+    if let Ok(tuple) = value.cast::<PyTuple>() {
+        if let Some(typ) = tuple.get_item(0).ok() {
+            let size = tuple
+                .get_item(2)
+                .ok()
+                .and_then(|item| item.extract::<u32>().ok())
+                .unwrap_or(0);
+            return Ok(bind_template_from_type(&typ, size));
+        }
+    }
+    if let Ok(list) = value.cast::<PyList>() {
+        if let Some(typ) = list.get_item(0).ok() {
+            let size = list
+                .get_item(2)
+                .ok()
+                .and_then(|item| item.extract::<u32>().ok())
+                .unwrap_or(0);
+            return Ok(bind_template_from_type(&typ, size));
+        }
+    }
+    Ok(bind_template_from_type(value, 0))
+}
+
+fn thin_var_from_type_spec(
+    py: Python<'_>,
+    connection: &Bound<'_, PyAny>,
+    typ: &Bound<'_, PyAny>,
+    size: u32,
+    is_array: bool,
+    num_elements: u32,
+) -> PyResult<Py<ThinVar>> {
+    let default_bind = bind_template_from_type(typ, size);
+    let value = if is_cursor_bind_template(&default_bind) {
+        Some(connection.call_method0("cursor")?.unbind())
+    } else {
+        None
+    };
+    Py::new(
+        py,
+        ThinVar::typed_with_options(default_bind, value, is_array, num_elements),
+    )
+}
+
+fn thin_var_from_input_size(
+    py: Python<'_>,
+    connection: &Bound<'_, PyAny>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Py<ThinVar>> {
+    if let Some(var) = thin_var_from_value(value)? {
+        return Ok(var);
+    }
+    let default_bind = bind_template_from_input_size(value)?;
+    let (is_array, num_elements) = input_size_array_info(value)?;
+    let value = if is_cursor_bind_template(&default_bind) {
+        Some(connection.call_method0("cursor")?.unbind())
+    } else {
+        None
+    };
+    Py::new(
+        py,
+        ThinVar::typed_with_options(default_bind, value, is_array, num_elements),
+    )
+}
+
+fn input_size_array_info(value: &Bound<'_, PyAny>) -> PyResult<(bool, u32)> {
+    if let Ok(tuple) = value.cast::<PyTuple>() {
+        if tuple.len() == 2 {
+            return Ok((true, tuple.get_item(1)?.extract::<u32>()?.max(1)));
+        }
+    }
+    if let Ok(list) = value.cast::<PyList>() {
+        if list.len() == 2 {
+            return Ok((true, list.get_item(1)?.extract::<u32>()?.max(1)));
+        }
+    }
+    Ok((false, 1))
 }
 
 fn bind_type_info(value: &BindValue) -> Option<(u8, u8, u32)> {
@@ -914,6 +1193,11 @@ fn bind_type_info(value: &BindValue) -> Option<(u8, u8, u32)> {
             buffer_size,
         }
         | BindValue::Output {
+            ora_type_num,
+            csfrm,
+            buffer_size,
+        }
+        | BindValue::ReturnOutput {
             ora_type_num,
             csfrm,
             buffer_size,
@@ -932,6 +1216,22 @@ fn bind_type_info(value: &BindValue) -> Option<(u8, u8, u32)> {
             u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
         )),
         BindValue::Number(_) => Some((ORA_TYPE_NUM_NUMBER, 0, 22)),
+        BindValue::DateTime { .. } => Some((ORA_TYPE_NUM_DATE, 0, 7)),
+        BindValue::Timestamp { ora_type_num, .. } => Some((
+            *ora_type_num,
+            0,
+            if *ora_type_num == ORA_TYPE_NUM_TIMESTAMP_TZ {
+                13
+            } else {
+                11
+            },
+        )),
+        BindValue::Array {
+            ora_type_num,
+            csfrm,
+            buffer_size,
+            ..
+        } => Some((*ora_type_num, *csfrm, (*buffer_size).max(1))),
         BindValue::Cursor { .. } => Some((ORA_TYPE_NUM_CURSOR, 0, 4)),
         BindValue::Null => None,
     }
@@ -993,6 +1293,8 @@ fn query_value_to_string(value: &Option<QueryValue>) -> Option<String> {
         Some(QueryValue::Text(value)) => Some(value.clone()),
         Some(QueryValue::Raw(value)) => String::from_utf8(value.clone()).ok(),
         Some(QueryValue::Number { text, .. }) => Some(text.clone()),
+        Some(QueryValue::DateTime { .. }) => None,
+        Some(QueryValue::Array(_)) => None,
         Some(QueryValue::Cursor { .. }) => None,
         None => None,
     }
@@ -1057,6 +1359,7 @@ fn varchar_metadata(name: &str) -> ColumnMetadata {
         is_oson: false,
         object_schema: None,
         object_type_name: None,
+        is_array: false,
     }
 }
 
@@ -1135,6 +1438,8 @@ impl ThinConnState {
 struct ThinVar {
     value: Arc<Mutex<Option<Py<PyAny>>>>,
     default_bind: BindValue,
+    is_array: bool,
+    num_elements: u32,
 }
 
 impl ThinVar {
@@ -1142,17 +1447,43 @@ impl ThinVar {
         Self {
             value: Arc::new(Mutex::new(value)),
             default_bind: BindValue::Null,
+            is_array: false,
+            num_elements: 1,
         }
     }
 
-    fn typed_with_value(default_bind: BindValue, value: Option<Py<PyAny>>) -> Self {
+    fn typed_with_options(
+        default_bind: BindValue,
+        value: Option<Py<PyAny>>,
+        is_array: bool,
+        num_elements: u32,
+    ) -> Self {
         Self {
             value: Arc::new(Mutex::new(value)),
             default_bind,
+            is_array,
+            num_elements: num_elements.max(1),
         }
     }
 
     fn to_bind_value(&self, py: Python<'_>) -> PyResult<BindValue> {
+        if self.is_array {
+            let guard = self.value.lock().map_err(runtime_error)?;
+            let values = if let Some(value) = guard.as_ref() {
+                py_list_to_array_bind_values(value.bind(py))?
+            } else {
+                Vec::new()
+            };
+            let (ora_type_num, csfrm, buffer_size) = bind_type_info(&self.default_bind)
+                .unwrap_or((ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 1));
+            return Ok(BindValue::Array {
+                ora_type_num,
+                csfrm,
+                buffer_size,
+                max_elements: self.num_elements,
+                values,
+            });
+        }
         if is_cursor_bind_template(&self.default_bind) {
             if let Some(value) = self.value.lock().map_err(runtime_error)?.as_ref() {
                 validate_public_cursor_is_open(value.bind(py))?;
@@ -1163,7 +1494,7 @@ impl ThinVar {
         let Some(value) = guard.as_ref() else {
             return Ok(self.default_bind.clone());
         };
-        py_value_to_bind(value.bind(py))
+        py_value_to_bind_with_template(value.bind(py), &self.default_bind)
     }
 
     fn set_py_value(&self, value: Option<Py<PyAny>>) -> PyResult<()> {
@@ -1335,14 +1666,7 @@ impl FetchHandlerCursor {
     ) -> PyResult<Py<ThinVar>> {
         let _ = arraysize;
         let _ = convert_nulls;
-        let default_bind = bind_template_from_type(typ, size);
-        let connection = self.connection.bind(py);
-        let value = if is_cursor_bind_template(&default_bind) {
-            Some(connection.call_method0("cursor")?.unbind())
-        } else {
-            None
-        };
-        Py::new(py, ThinVar::typed_with_value(default_bind, value))
+        thin_var_from_type_spec(py, self.connection.bind(py), typ, size, false, 1)
     }
 }
 
@@ -2175,6 +2499,10 @@ impl FetchMetadataImpl {
             ORA_TYPE_NUM_NUMBER => "DB_TYPE_NUMBER",
             ORA_TYPE_NUM_CURSOR => "DB_TYPE_CURSOR",
             ORA_TYPE_NUM_OBJECT => "DB_TYPE_OBJECT",
+            ORA_TYPE_NUM_DATE => "DB_TYPE_DATE",
+            ORA_TYPE_NUM_TIMESTAMP => "DB_TYPE_TIMESTAMP",
+            ORA_TYPE_NUM_TIMESTAMP_LTZ => "DB_TYPE_TIMESTAMP_LTZ",
+            ORA_TYPE_NUM_TIMESTAMP_TZ => "DB_TYPE_TIMESTAMP_TZ",
             _ => "DB_TYPE_VARCHAR",
         };
         Ok(module.getattr(name)?.unbind())
@@ -2995,7 +3323,7 @@ impl ThinCursorImpl {
     fn setinputsizes(
         &mut self,
         py: Python<'_>,
-        _connection: &Bound<'_, PyAny>,
+        connection: &Bound<'_, PyAny>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
@@ -3008,24 +3336,37 @@ impl ThinCursorImpl {
         self.has_named_input_sizes = has_kwargs;
         self.named_input_sizes.clear();
         if let Some(kwargs) = kwargs {
+            let result = PyDict::new(py);
             for (key, value) in kwargs.iter() {
+                let key = key.extract::<String>()?;
+                let var = thin_var_from_input_size(py, connection, &value)?;
                 self.named_input_sizes
-                    .push((key.extract::<String>()?, value.clone().unbind()));
+                    .push((key.clone(), var.clone_ref(py).into_any()));
+                result.set_item(key, var)?;
             }
+            return Ok(result.unbind().into());
         }
-        Ok(PyList::empty(py).unbind().into())
+        let result = PyList::empty(py);
+        for value in args.iter() {
+            let var = thin_var_from_input_size(py, connection, &value)?;
+            result.append(var.clone_ref(py))?;
+            self.named_input_sizes
+                .push((result.len().to_string(), var.into_any()));
+        }
+        Ok(result.unbind().into())
     }
 
     #[pyo3(signature = (
         connection,
         typ,
         size=0,
-        _arraysize=1,
+        num_elements=1,
         _inconverter=None,
         _outconverter=None,
         _encoding_errors=None,
         _bypass_decode=false,
-        convert_nulls=false
+        convert_nulls=false,
+        is_array=false
     ))]
     fn create_var(
         &self,
@@ -3033,21 +3374,18 @@ impl ThinCursorImpl {
         connection: &Bound<'_, PyAny>,
         typ: &Bound<'_, PyAny>,
         size: u32,
-        _arraysize: u32,
+        num_elements: u32,
         _inconverter: Option<Py<PyAny>>,
         _outconverter: Option<Py<PyAny>>,
         _encoding_errors: Option<String>,
         _bypass_decode: bool,
         convert_nulls: bool,
+        is_array: bool,
     ) -> PyResult<Py<ThinVar>> {
+        let _ = num_elements;
+        let _ = is_array;
         let _ = convert_nulls;
-        let default_bind = bind_template_from_type(typ, size);
-        let value = if is_cursor_bind_template(&default_bind) {
-            Some(connection.call_method0("cursor")?.unbind())
-        } else {
-            None
-        };
-        Py::new(py, ThinVar::typed_with_value(default_bind, value))
+        thin_var_from_type_spec(py, connection, typ, size, is_array, num_elements)
     }
 
     fn get_array_dml_row_counts(&self) -> PyResult<Vec<u64>> {
@@ -3087,6 +3425,28 @@ fn query_value_to_py(
         Some(QueryValue::Number { text, .. }) => {
             let value = text.parse::<f64>().map_err(runtime_error)?;
             Ok(value.into_pyobject(py)?.unbind().into())
+        }
+        Some(QueryValue::DateTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+        }) => {
+            let datetime = PyModule::import(py, "datetime")?.getattr("datetime")?;
+            let microsecond = nanosecond / 1000;
+            Ok(datetime
+                .call1((*year, *month, *day, *hour, *minute, *second, microsecond))?
+                .unbind())
+        }
+        Some(QueryValue::Array(values)) => {
+            let values = values
+                .iter()
+                .map(|value| query_value_to_py(py, value, owner_cursor))
+                .collect::<PyResult<Vec<_>>>()?;
+            Ok(PyList::new(py, values)?.unbind().into())
         }
         Some(QueryValue::Cursor { columns, cursor_id }) => {
             let Some(owner_cursor) = owner_cursor else {

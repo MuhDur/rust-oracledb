@@ -49,12 +49,16 @@ pub const TNS_VERIFIER_TYPE_12C: u32 = 0x4815;
 pub const ORA_TYPE_NUM_VARCHAR: u8 = 1;
 pub const ORA_TYPE_NUM_NUMBER: u8 = 2;
 pub const ORA_TYPE_NUM_LONG: u8 = 8;
+pub const ORA_TYPE_NUM_DATE: u8 = 12;
 pub const ORA_TYPE_NUM_RAW: u8 = 23;
 pub const ORA_TYPE_NUM_CURSOR: u8 = 102;
 pub const ORA_TYPE_NUM_LONG_RAW: u8 = 24;
 pub const ORA_TYPE_NUM_CHAR: u8 = 96;
 pub const ORA_TYPE_NUM_CLOB: u8 = 112;
 pub const ORA_TYPE_NUM_OBJECT: u8 = 109;
+pub const ORA_TYPE_NUM_TIMESTAMP: u8 = 180;
+pub const ORA_TYPE_NUM_TIMESTAMP_TZ: u8 = 181;
+pub const ORA_TYPE_NUM_TIMESTAMP_LTZ: u8 = 231;
 
 pub const CS_FORM_IMPLICIT: u8 = 1;
 pub const CS_FORM_NCHAR: u8 = 2;
@@ -93,6 +97,7 @@ const TNS_EXEC_OPTION_PLSQL_BIND: u32 = 0x400;
 const TNS_EXEC_OPTION_NOT_PLSQL: u32 = 0x8000;
 const TNS_EXEC_FLAGS_IMPLICIT_RESULTSET: u32 = 0x8000;
 const TNS_BIND_USE_INDICATORS: u8 = 0x01;
+const TNS_BIND_ARRAY: u8 = 0x40;
 const TNS_BIND_DIR_INPUT: u8 = 32;
 const TNS_CHARSET_UTF8: u16 = 873;
 const TNS_MAX_LONG_LENGTH: u32 = 0x7fff_ffff;
@@ -100,6 +105,12 @@ const TNS_ERR_NO_DATA_FOUND: u32 = 1403;
 const TNS_UDS_FLAGS_IS_JSON: u32 = 0x01;
 const TNS_UDS_FLAGS_IS_OSON: u32 = 0x02;
 const ORA_TYPE_SIZE_NUMBER: u32 = 22;
+const ORA_TYPE_SIZE_DATE: u32 = 7;
+const ORA_TYPE_SIZE_TIMESTAMP: u32 = 11;
+const ORA_TYPE_SIZE_TIMESTAMP_TZ: u32 = 13;
+const TNS_HAS_REGION_ID: u8 = 0x80;
+const TZ_HOUR_OFFSET: u8 = 20;
+const TZ_MINUTE_OFFSET: u8 = 60;
 const NUMBER_AS_TEXT_CHARS: usize = 172;
 const NUMBER_MAX_DIGITS: usize = 40;
 
@@ -219,6 +230,7 @@ pub struct ColumnMetadata {
     pub is_oson: bool,
     pub object_schema: Option<String>,
     pub object_type_name: Option<String>,
+    pub is_array: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -233,6 +245,16 @@ pub enum QueryValue {
         columns: Vec<ColumnMetadata>,
         cursor_id: u32,
     },
+    DateTime {
+        year: i32,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        nanosecond: u32,
+    },
+    Array(Vec<Option<QueryValue>>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -248,9 +270,39 @@ pub enum BindValue {
         csfrm: u8,
         buffer_size: u32,
     },
+    ReturnOutput {
+        ora_type_num: u8,
+        csfrm: u8,
+        buffer_size: u32,
+    },
     Text(String),
     Raw(Vec<u8>),
     Number(String),
+    DateTime {
+        year: i32,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+    },
+    Timestamp {
+        ora_type_num: u8,
+        year: i32,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        nanosecond: u32,
+    },
+    Array {
+        ora_type_num: u8,
+        csfrm: u8,
+        buffer_size: u32,
+        max_elements: u32,
+        values: Vec<Option<BindValue>>,
+    },
     Cursor {
         cursor_id: u32,
     },
@@ -561,17 +613,29 @@ fn write_bind_params(
 impl BindValue {
     fn is_output_only(&self) -> bool {
         matches!(self, BindValue::Output { .. })
+            || matches!(self, BindValue::ReturnOutput { .. })
+            || matches!(self, BindValue::Array { values, .. } if values.is_empty())
+    }
+
+    fn is_return_output(&self) -> bool {
+        matches!(self, BindValue::ReturnOutput { .. })
     }
 }
 
 fn write_bind_metadata(writer: &mut TtcWriter, value: &BindValue) {
     let (ora_type_num, csfrm, buffer_size) = bind_metadata(value);
+    let (flags, max_elements) = match value {
+        BindValue::Array { max_elements, .. } => {
+            (TNS_BIND_USE_INDICATORS | TNS_BIND_ARRAY, *max_elements)
+        }
+        _ => (TNS_BIND_USE_INDICATORS, 0),
+    };
     writer.write_u8(ora_type_num);
-    writer.write_u8(TNS_BIND_USE_INDICATORS);
+    writer.write_u8(flags);
     writer.write_u8(0);
     writer.write_u8(0);
     writer.write_ub4(buffer_size);
-    writer.write_ub4(0);
+    writer.write_ub4(max_elements);
     writer.write_ub8(0);
     writer.write_ub4(0);
     writer.write_ub2(0);
@@ -597,6 +661,11 @@ fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
             ora_type_num,
             csfrm,
             buffer_size,
+        }
+        | BindValue::ReturnOutput {
+            ora_type_num,
+            csfrm,
+            buffer_size,
         } => (*ora_type_num, *csfrm, (*buffer_size).max(1)),
         BindValue::Text(value) => (
             ORA_TYPE_NUM_VARCHAR,
@@ -612,6 +681,22 @@ fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
             u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
         ),
         BindValue::Number(_) => (ORA_TYPE_NUM_NUMBER, 0, ORA_TYPE_SIZE_NUMBER),
+        BindValue::DateTime { .. } => (ORA_TYPE_NUM_DATE, 0, ORA_TYPE_SIZE_DATE),
+        BindValue::Timestamp { ora_type_num, .. } => (
+            *ora_type_num,
+            0,
+            if *ora_type_num == ORA_TYPE_NUM_TIMESTAMP_TZ {
+                ORA_TYPE_SIZE_TIMESTAMP_TZ
+            } else {
+                ORA_TYPE_SIZE_TIMESTAMP
+            },
+        ),
+        BindValue::Array {
+            ora_type_num,
+            csfrm,
+            buffer_size,
+            ..
+        } => (*ora_type_num, *csfrm, (*buffer_size).max(1)),
         BindValue::Cursor { .. } => (ORA_TYPE_NUM_CURSOR, 0, 4),
     }
 }
@@ -630,7 +715,7 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue) -> Result<()> {
             writer.write_u8(0);
             Ok(())
         }
-        BindValue::Output { .. } => {
+        BindValue::Output { .. } | BindValue::ReturnOutput { .. } => {
             writer.write_u8(0);
             Ok(())
         }
@@ -639,6 +724,57 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue) -> Result<()> {
         BindValue::Number(value) => {
             let bytes = encode_number_text(value)?;
             writer.write_bytes_with_length(&bytes)
+        }
+        BindValue::DateTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        } => {
+            let bytes = encode_oracle_date(*year, *month, *day, *hour, *minute, *second)?;
+            writer.write_bytes_with_length(&bytes)
+        }
+        BindValue::Timestamp {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+            ora_type_num,
+        } => {
+            let bytes = if *ora_type_num == ORA_TYPE_NUM_TIMESTAMP_TZ {
+                encode_oracle_timestamp_tz(
+                    *year,
+                    *month,
+                    *day,
+                    *hour,
+                    *minute,
+                    *second,
+                    *nanosecond,
+                )?
+            } else {
+                encode_oracle_timestamp(*year, *month, *day, *hour, *minute, *second, *nanosecond)?
+            };
+            writer.write_bytes_with_length(&bytes)
+        }
+        BindValue::Array { values, .. } => {
+            writer.write_ub4(u32::try_from(values.len()).map_err(|_| {
+                ProtocolError::InvalidPacketLength {
+                    length: values.len(),
+                    minimum: 0,
+                }
+            })?);
+            for value in values {
+                match value {
+                    Some(value) => write_bind_value(writer, value)?,
+                    None => writer.write_u8(0),
+                }
+            }
+            Ok(())
         }
         BindValue::Cursor { cursor_id } => {
             if *cursor_id == 0 {
@@ -773,7 +909,7 @@ pub fn parse_query_response_with_binds(
     let output_bind_indexes = binds
         .iter()
         .enumerate()
-        .filter_map(|(index, value)| value.is_output_only().then_some(index))
+        .filter_map(|(index, value)| value.is_return_output().then_some(index))
         .collect::<Vec<_>>();
     parse_query_response_with_context_and_binds(
         payload,
@@ -871,7 +1007,10 @@ fn parse_query_response_with_context_and_binds(
                 let _seq = reader.read_ub2()?;
             }
             TNS_MSG_TYPE_IO_VECTOR => {
-                out_bind_indexes = parse_io_vector(&mut reader, bind_columns.len())?;
+                out_bind_indexes = parse_io_vector(&mut reader, bind_columns.len())?
+                    .into_iter()
+                    .filter(|index| !output_bind_indexes.contains(index))
+                    .collect();
             }
             TNS_MSG_TYPE_FLUSH_OUT_BINDS => break,
             TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => skip_server_side_piggyback(&mut reader)?,
@@ -920,6 +1059,7 @@ fn bind_column_metadata(value: &BindValue) -> ColumnMetadata {
         is_oson: false,
         object_schema: None,
         object_type_name: None,
+        is_array: matches!(value, BindValue::Array { .. }),
     }
 }
 
@@ -1319,6 +1459,7 @@ fn parse_column_metadata(
         is_oson: uds_flags & TNS_UDS_FLAGS_IS_OSON != 0,
         object_schema,
         object_type_name,
+        is_array: false,
     })
 }
 
@@ -1383,6 +1524,27 @@ fn parse_out_bind_row_data(
         let metadata = bind_columns.get(*index).ok_or(ProtocolError::TtcDecode(
             "out bind index without bind metadata",
         ))?;
+        if metadata.is_array {
+            let num_elements = usize::try_from(reader.read_ub4()?).map_err(|_| {
+                ProtocolError::InvalidPacketLength {
+                    length: usize::MAX,
+                    minimum: 0,
+                }
+            })?;
+            let mut values = Vec::with_capacity(num_elements);
+            for _ in 0..num_elements {
+                let value = parse_column_value(reader, metadata)?;
+                let actual_num_bytes = reader.read_sb4()?;
+                if actual_num_bytes != 0 && value.is_some() {
+                    return Err(ProtocolError::TtcDecode("truncated array OUT bind value"));
+                }
+                values.push(value);
+            }
+            result
+                .out_values
+                .push((*index, Some(QueryValue::Array(values))));
+            continue;
+        }
         let value = parse_column_value(reader, metadata)?;
         let actual_num_bytes = reader.read_sb4()?;
         if actual_num_bytes != 0 && value.is_some() {
@@ -1460,6 +1622,15 @@ fn parse_column_value(
             };
             decode_number_value(&bytes).map(Some)
         }
+        ORA_TYPE_NUM_DATE
+        | ORA_TYPE_NUM_TIMESTAMP
+        | ORA_TYPE_NUM_TIMESTAMP_LTZ
+        | ORA_TYPE_NUM_TIMESTAMP_TZ => {
+            let Some(bytes) = reader.read_bytes()? else {
+                return Ok(None);
+            };
+            decode_datetime_value(&bytes).map(Some)
+        }
         ORA_TYPE_NUM_CURSOR => parse_cursor_value(reader).map(Some),
         ORA_TYPE_NUM_OBJECT => parse_object_value(reader).map(|()| None),
         _ => Err(ProtocolError::UnsupportedFeature("query column type")),
@@ -1488,6 +1659,190 @@ fn parse_cursor_value(reader: &mut TtcReader<'_>) -> Result<QueryValue> {
         columns: result.columns,
         cursor_id,
     })
+}
+
+fn encode_oracle_date(
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+) -> Result<[u8; ORA_TYPE_SIZE_DATE as usize]> {
+    if !(1..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return Err(ProtocolError::TtcDecode("invalid DATE bind"));
+    }
+    let century = year / 100 + 100;
+    let year_in_century = year % 100 + 100;
+    Ok([
+        u8::try_from(century).map_err(|_| ProtocolError::TtcDecode("invalid DATE century"))?,
+        u8::try_from(year_in_century).map_err(|_| ProtocolError::TtcDecode("invalid DATE year"))?,
+        month,
+        day,
+        hour + 1,
+        minute + 1,
+        second + 1,
+    ])
+}
+
+fn encode_oracle_timestamp(
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+    nanosecond: u32,
+) -> Result<Vec<u8>> {
+    if nanosecond > 999_999_999 {
+        return Err(ProtocolError::TtcDecode("invalid TIMESTAMP fraction"));
+    }
+    let date = encode_oracle_date(year, month, day, hour, minute, second)?;
+    if nanosecond == 0 {
+        return Ok(date.to_vec());
+    }
+    let mut bytes = Vec::with_capacity(ORA_TYPE_SIZE_TIMESTAMP as usize);
+    bytes.extend_from_slice(&date);
+    bytes.extend_from_slice(&nanosecond.to_be_bytes());
+    Ok(bytes)
+}
+
+fn encode_oracle_timestamp_tz(
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+    nanosecond: u32,
+) -> Result<Vec<u8>> {
+    if nanosecond > 999_999_999 {
+        return Err(ProtocolError::TtcDecode(
+            "invalid TIMESTAMP WITH TIME ZONE fraction",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(ORA_TYPE_SIZE_TIMESTAMP_TZ as usize);
+    let date = encode_oracle_date(year, month, day, hour, minute, second)?;
+    bytes.extend_from_slice(&date);
+    bytes.extend_from_slice(&nanosecond.to_be_bytes());
+    bytes.push(TZ_HOUR_OFFSET);
+    bytes.push(TZ_MINUTE_OFFSET);
+    Ok(bytes)
+}
+
+fn decode_datetime_value(bytes: &[u8]) -> Result<QueryValue> {
+    if bytes.len() < ORA_TYPE_SIZE_DATE as usize {
+        return Err(ProtocolError::TtcDecode("DATE value too short"));
+    }
+    let mut year = (i32::from(bytes[0]) - 100) * 100 + i32::from(bytes[1]) - 100;
+    let mut month = bytes[2];
+    let mut day = bytes[3];
+    let mut hour = bytes[4].saturating_sub(1);
+    let mut minute = bytes[5].saturating_sub(1);
+    let mut second = bytes[6].saturating_sub(1);
+    let nanosecond = if bytes.len() >= ORA_TYPE_SIZE_TIMESTAMP as usize {
+        u32::from_be_bytes(
+            bytes[7..11]
+                .try_into()
+                .map_err(|_| ProtocolError::TtcDecode("invalid TIMESTAMP fraction"))?,
+        )
+    } else {
+        0
+    };
+    if bytes.len() >= ORA_TYPE_SIZE_TIMESTAMP_TZ as usize && bytes[11] != 0 && bytes[12] != 0 {
+        if bytes[11] & TNS_HAS_REGION_ID != 0 {
+            return Err(ProtocolError::UnsupportedFeature(
+                "named TIMESTAMP WITH TIME ZONE region",
+            ));
+        }
+        let offset_minutes = (i32::from(bytes[11]) - i32::from(TZ_HOUR_OFFSET)) * 60
+            + i32::from(bytes[12])
+            - i32::from(TZ_MINUTE_OFFSET);
+        (year, month, day, hour, minute, second) =
+            adjust_datetime_by_minutes(year, month, day, hour, minute, second, offset_minutes)?;
+    }
+    Ok(QueryValue::DateTime {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        nanosecond,
+    })
+}
+
+fn adjust_datetime_by_minutes(
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+    offset_minutes: i32,
+) -> Result<(i32, u8, u8, u8, u8, u8)> {
+    let days = days_from_civil(year, month, day)?;
+    let seconds_of_day = i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second);
+    let total_seconds = days
+        .checked_mul(86_400)
+        .and_then(|value| value.checked_add(seconds_of_day))
+        .and_then(|value| value.checked_add(i64::from(offset_minutes) * 60))
+        .ok_or(ProtocolError::TtcDecode(
+            "TIMESTAMP WITH TIME ZONE offset overflow",
+        ))?;
+    let adjusted_days = total_seconds.div_euclid(86_400);
+    let adjusted_seconds = total_seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(adjusted_days)?;
+    let hour = u8::try_from(adjusted_seconds / 3_600)
+        .map_err(|_| ProtocolError::TtcDecode("invalid adjusted TIMESTAMP hour"))?;
+    let minute = u8::try_from((adjusted_seconds % 3_600) / 60)
+        .map_err(|_| ProtocolError::TtcDecode("invalid adjusted TIMESTAMP minute"))?;
+    let second = u8::try_from(adjusted_seconds % 60)
+        .map_err(|_| ProtocolError::TtcDecode("invalid adjusted TIMESTAMP second"))?;
+    Ok((year, month, day, hour, minute, second))
+}
+
+fn days_from_civil(year: i32, month: u8, day: u8) -> Result<i64> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return Err(ProtocolError::TtcDecode("invalid TIMESTAMP date"));
+    }
+    let year = year - i32::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month = i32::from(month);
+    let day = i32::from(day);
+    let month_prime = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Ok(i64::from(era) * 146_097 + i64::from(day_of_era) - 719_468)
+}
+
+fn civil_from_days(days: i64) -> Result<(i32, u8, u8)> {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    let year = year + i64::from(month <= 2);
+    Ok((
+        i32::try_from(year)
+            .map_err(|_| ProtocolError::TtcDecode("invalid adjusted TIMESTAMP year"))?,
+        u8::try_from(month)
+            .map_err(|_| ProtocolError::TtcDecode("invalid adjusted TIMESTAMP month"))?,
+        u8::try_from(day)
+            .map_err(|_| ProtocolError::TtcDecode("invalid adjusted TIMESTAMP day"))?,
+    ))
 }
 
 fn encode_number_text(value: &str) -> Result<Vec<u8>> {
@@ -2119,6 +2474,7 @@ mod tests {
             is_oson: false,
             object_schema: None,
             object_type_name: None,
+            is_array: false,
         }
     }
 }
