@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use oracledb::protocol::thin::{
@@ -10,7 +10,7 @@ use oracledb::protocol::thin::{
     ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::protocol::ClientIdentity;
-use oracledb::{BlockingConnection, ConnectOptions, Connection as RustConnection};
+use oracledb::{BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection};
 use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyBytesMethods, PyDict, PyList, PyTuple};
@@ -27,6 +27,14 @@ fn runtime_error(err: impl std::fmt::Display) -> PyErr {
         return Python::attach(|py| database_error(py, server_message))
             .unwrap_or_else(|_| PyRuntimeError::new_err(message));
     }
+    if let Some(timeout_text) = message
+        .strip_prefix("call timeout of ")
+        .and_then(|value| value.strip_suffix(" ms exceeded"))
+    {
+        if let Ok(timeout) = timeout_text.parse::<u32>() {
+            return raise_call_timeout_exceeded(timeout);
+        }
+    }
     PyRuntimeError::new_err(message)
 }
 
@@ -38,9 +46,55 @@ fn database_error(py: Python<'_>, message: &str) -> PyResult<PyErr> {
     Ok(PyErr::from_value(exc))
 }
 
+fn operational_error(py: Python<'_>, message: &str) -> PyResult<PyErr> {
+    let errors = PyModule::import(py, "oracledb.errors")?;
+    let error_obj = errors.getattr("_Error")?.call1((message,))?;
+    let module = PyModule::import(py, "oracledb")?;
+    let exc = module.getattr("OperationalError")?.call1((error_obj,))?;
+    Ok(PyErr::from_value(exc))
+}
+
 fn dpy_database_error(code: &str, message: &str) -> PyErr {
     Python::attach(|py| database_error(py, &format!("{code}: {message}")))
         .unwrap_or_else(|_| PyRuntimeError::new_err(format!("{code}: {message}")))
+}
+
+fn dpy_operational_error(code: &str, message: &str) -> PyErr {
+    Python::attach(|py| operational_error(py, &format!("{code}: {message}")))
+        .unwrap_or_else(|_| PyRuntimeError::new_err(format!("{code}: {message}")))
+}
+
+fn raise_oracledb_driver_error(error_name: &str) -> PyErr {
+    Python::attach(|py| -> PyResult<PyErr> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        let error_num = errors.getattr(error_name)?;
+        match errors.getattr("_raise_err")?.call1((error_num,)) {
+            Ok(_) => Ok(PyRuntimeError::new_err(format!(
+                "oracledb.errors._raise_err({error_name}) returned without raising"
+            ))),
+            Err(err) => Ok(err),
+        }
+    })
+    .unwrap_or_else(|_| PyRuntimeError::new_err(error_name.to_string()))
+}
+
+fn raise_call_timeout_exceeded(timeout: u32) -> PyErr {
+    Python::attach(|py| -> PyResult<PyErr> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        let error_num = errors.getattr("ERR_CALL_TIMEOUT_EXCEEDED")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("timeout", timeout)?;
+        match errors
+            .getattr("_raise_err")?
+            .call((error_num,), Some(&kwargs))
+        {
+            Ok(_) => Ok(PyRuntimeError::new_err(
+                "oracledb.errors._raise_err(ERR_CALL_TIMEOUT_EXCEEDED) returned without raising",
+            )),
+            Err(err) => Ok(err),
+        }
+    })
+    .unwrap_or_else(|_| PyRuntimeError::new_err(format!("call timeout of {timeout} ms exceeded")))
 }
 
 fn get_string_attr(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<String> {
@@ -56,7 +110,27 @@ fn get_optional_string_attr(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Opti
     }
 }
 
+fn extract_optional_string(value: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    if value.is_none() {
+        Ok(None)
+    } else {
+        value.extract().map(Some)
+    }
+}
+
 fn get_optional_u32_attr(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Option<u32>> {
+    if !obj.hasattr(name)? {
+        return Ok(None);
+    }
+    let value = obj.getattr(name)?;
+    if value.is_none() {
+        Ok(None)
+    } else {
+        value.extract().map(Some)
+    }
+}
+
+fn get_optional_bool_attr(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Option<bool>> {
     if !obj.hasattr(name)? {
         return Ok(None);
     }
@@ -613,6 +687,8 @@ fn init_thin_impl(_package: &Bound<'_, PyAny>) -> PyResult<()> {
 #[pyclass(module = "oracledb.thin_impl", name = "ThinConnImpl")]
 struct ThinConnImpl {
     connection: Arc<Mutex<Option<RustConnection>>>,
+    cancel_handle: Arc<Mutex<Option<CancelHandle>>>,
+    cancel_requested: Arc<AtomicBool>,
     state: Arc<Mutex<ThinConnState>>,
     dsn: String,
     username: String,
@@ -632,31 +708,42 @@ struct ThinConnImpl {
 
 impl ThinConnImpl {
     fn execute_statement(&self, sql: &str) -> PyResult<()> {
+        let call_timeout = self.call_timeout()?;
         let mut guard = self.connection.lock().map_err(runtime_error)?;
         let connection = guard
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-        BlockingConnection::execute_query(connection, sql, 1).map_err(runtime_error)?;
-        Ok(())
-    }
-
-    fn execute_statement_with_binds(&self, sql: &str, binds: &[BindValue]) -> PyResult<()> {
-        let mut guard = self.connection.lock().map_err(runtime_error)?;
-        let connection = guard
-            .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-        BlockingConnection::execute_query_with_binds(connection, sql, 1, binds)
+        BlockingConnection::execute_query_with_timeout(connection, sql, 1, call_timeout)
             .map_err(runtime_error)?;
         Ok(())
     }
 
+    fn execute_statement_with_binds(&self, sql: &str, binds: &[BindValue]) -> PyResult<()> {
+        let call_timeout = self.call_timeout()?;
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        BlockingConnection::execute_query_with_binds_and_timeout(
+            connection,
+            sql,
+            1,
+            binds,
+            call_timeout,
+        )
+        .map_err(runtime_error)?;
+        Ok(())
+    }
+
     fn query_first_value(&self, sql: &str) -> PyResult<Option<QueryValue>> {
+        let call_timeout = self.call_timeout()?;
         let mut guard = self.connection.lock().map_err(runtime_error)?;
         let connection = guard
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
         let result =
-            BlockingConnection::execute_query(connection, sql, 1).map_err(runtime_error)?;
+            BlockingConnection::execute_query_with_timeout(connection, sql, 1, call_timeout)
+                .map_err(runtime_error)?;
         Ok(result
             .rows
             .first()
@@ -673,6 +760,11 @@ impl ThinConnImpl {
     fn query_first_i64(&self, sql: &str) -> PyResult<i64> {
         let value = self.query_first_value(sql)?;
         query_value_to_i64(&value)
+    }
+
+    fn call_timeout(&self) -> PyResult<Option<u32>> {
+        let call_timeout = self.state.lock().map_err(runtime_error)?.call_timeout;
+        Ok((call_timeout > 0).then_some(call_timeout))
     }
 }
 
@@ -693,6 +785,8 @@ impl ThinConnImpl {
         let connect_args = consume_next_connect_args()?;
         Ok(Self {
             connection: Arc::new(Mutex::new(None)),
+            cancel_handle: Arc::new(Mutex::new(None)),
+            cancel_requested: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(ThinConnState::new(
                 stmt_cache_size,
                 edition,
@@ -841,7 +935,9 @@ impl ThinConnImpl {
         .with_app_context(app_context)
         .with_sdu(sdu);
         let connection = BlockingConnection::connect(options).map_err(runtime_error)?;
+        let cancel_handle = connection.cancel_handle().map_err(runtime_error)?;
         self.server_version = (0, 0, 0, 0, 0);
+        *self.cancel_handle.lock().map_err(runtime_error)? = Some(cancel_handle);
         *self.connection.lock().map_err(runtime_error)? = Some(connection);
         if let Some(new_password) = &self.new_password {
             self.change_password(&password, new_password)?;
@@ -859,10 +955,22 @@ impl ThinConnImpl {
     #[pyo3(signature = (in_del=None))]
     fn close(&self, in_del: Option<bool>) -> PyResult<()> {
         let _ = in_del;
+        *self.cancel_handle.lock().map_err(runtime_error)? = None;
         let Some(connection) = self.connection.lock().map_err(runtime_error)?.take() else {
             return Ok(());
         };
-        BlockingConnection::close(connection).map_err(runtime_error)
+        match BlockingConnection::close(connection) {
+            Ok(()) => Ok(()),
+            Err(err)
+                if err.to_string().contains("Broken pipe")
+                    || err
+                        .to_string()
+                        .contains("Transport endpoint is not connected") =>
+            {
+                Ok(())
+            }
+            Err(err) => Err(runtime_error(err)),
+        }
     }
 
     fn ping(&self) -> PyResult<()> {
@@ -937,7 +1045,23 @@ impl ThinConnImpl {
         Ok(())
     }
 
+    fn clear_end_user_security_context(&self) -> PyResult<()> {
+        Ok(())
+    }
+
+    fn set_end_user_security_context(&self, _context: &Bound<'_, PyAny>) -> PyResult<()> {
+        if !self.dsn.to_ascii_lowercase().contains("tcps") {
+            return Err(raise_oracledb_driver_error(
+                "ERR_END_USER_SECURITY_CONTEXT_REQUIRES_TCPS",
+            ));
+        }
+        Err(not_implemented(
+            "ThinConnImpl.set_end_user_security_context",
+        ))
+    }
+
     fn cancel(&self) -> PyResult<()> {
+        self.cancel_requested.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -1111,6 +1235,7 @@ impl ThinConnImpl {
         ThinCursorImpl::new(
             Arc::clone(&self.connection),
             Arc::clone(&self.autocommit_state),
+            Arc::clone(&self.cancel_requested),
             Arc::clone(&self.state),
             scrollable,
         )
@@ -1265,6 +1390,7 @@ impl ExecutemanyManager {
 struct ThinCursorImpl {
     connection: Arc<Mutex<Option<RustConnection>>>,
     autocommit: Arc<Mutex<bool>>,
+    cancel_requested: Arc<AtomicBool>,
     state: Arc<Mutex<ThinConnState>>,
     statement: Option<String>,
     bind_values: Vec<BindValue>,
@@ -1293,12 +1419,14 @@ impl ThinCursorImpl {
     fn new(
         connection: Arc<Mutex<Option<RustConnection>>>,
         autocommit: Arc<Mutex<bool>>,
+        cancel_requested: Arc<AtomicBool>,
         state: Arc<Mutex<ThinConnState>>,
         scrollable: bool,
     ) -> Self {
         Self {
             connection,
             autocommit,
+            cancel_requested,
             state,
             statement: None,
             bind_values: Vec::new(),
@@ -1520,7 +1648,7 @@ impl ThinCursorImpl {
 
     fn executemany(
         &mut self,
-        _cursor: &Bound<'_, PyAny>,
+        cursor: &Bound<'_, PyAny>,
         num_execs: u32,
         batcherrors: bool,
         arraydmlrowcounts: bool,
@@ -1548,21 +1676,47 @@ impl ThinCursorImpl {
             .get(start..end)
             .ok_or_else(|| PyRuntimeError::new_err("executemany batch is out of range"))?
             .to_vec();
-        let mut guard = self.connection.lock().map_err(runtime_error)?;
-        let connection = guard
-            .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-        let result = BlockingConnection::execute_query_with_bind_rows(
-            connection,
-            statement,
-            self.prefetchrows,
-            &bind_rows,
-        )
-        .map_err(runtime_error)?;
+        let call_timeout = {
+            let value = self.state.lock().map_err(runtime_error)?.call_timeout;
+            (value > 0).then_some(value)
+        };
+        let result = cursor
+            .py()
+            .detach({
+                let connection = Arc::clone(&self.connection);
+                let statement = statement.to_string();
+                let bind_rows = bind_rows.clone();
+                let prefetchrows = self.prefetchrows;
+                move || -> Result<QueryResult, String> {
+                    let mut guard = connection.lock().map_err(|err| err.to_string())?;
+                    let connection = guard
+                        .as_mut()
+                        .ok_or_else(|| "connection is closed".to_string())?;
+                    BlockingConnection::execute_query_with_bind_rows_and_timeout(
+                        connection,
+                        &statement,
+                        prefetchrows,
+                        &bind_rows,
+                        call_timeout,
+                    )
+                    .map_err(|err| err.to_string())
+                }
+            })
+            .map_err(runtime_error)?;
         let is_query = !result.columns.is_empty();
         let should_commit = !is_query && *self.autocommit.lock().map_err(runtime_error)?;
         if should_commit {
+            let mut guard = self.connection.lock().map_err(runtime_error)?;
+            let connection = guard
+                .as_mut()
+                .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
             BlockingConnection::commit(connection).map_err(runtime_error)?;
+        }
+        if self.cancel_requested.swap(false, Ordering::SeqCst) {
+            return Err(dpy_operational_error(
+                "DPY-4011",
+                "the database or network closed the connection",
+            ));
         }
         self.state.lock().map_err(runtime_error)?.record_statement(
             statement,
@@ -1579,7 +1733,7 @@ impl ThinCursorImpl {
         Ok(())
     }
 
-    fn execute(&mut self, _cursor: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn execute(&mut self, cursor: &Bound<'_, PyAny>) -> PyResult<()> {
         let statement = self
             .statement
             .as_deref()
@@ -1604,20 +1758,46 @@ impl ThinCursorImpl {
             self.is_query = false;
             return Ok(());
         }
-        let mut guard = self.connection.lock().map_err(runtime_error)?;
-        let connection = guard
-            .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-        let result = BlockingConnection::execute_query_with_binds(
-            connection,
-            statement,
-            self.prefetchrows,
-            &self.bind_values,
-        )
-        .map_err(runtime_error)?;
+        let call_timeout = {
+            let value = self.state.lock().map_err(runtime_error)?.call_timeout;
+            (value > 0).then_some(value)
+        };
+        let result = cursor
+            .py()
+            .detach({
+                let connection = Arc::clone(&self.connection);
+                let statement = statement.to_string();
+                let bind_values = self.bind_values.clone();
+                let prefetchrows = self.prefetchrows;
+                move || -> Result<QueryResult, String> {
+                    let mut guard = connection.lock().map_err(|err| err.to_string())?;
+                    let connection = guard
+                        .as_mut()
+                        .ok_or_else(|| "connection is closed".to_string())?;
+                    BlockingConnection::execute_query_with_binds_and_timeout(
+                        connection,
+                        &statement,
+                        prefetchrows,
+                        &bind_values,
+                        call_timeout,
+                    )
+                    .map_err(|err| err.to_string())
+                }
+            })
+            .map_err(runtime_error)?;
+        if self.cancel_requested.swap(false, Ordering::SeqCst) {
+            return Err(dpy_operational_error(
+                "DPY-4011",
+                "the database or network closed the connection",
+            ));
+        }
         let is_query = !result.columns.is_empty();
         let should_commit = !is_query && *self.autocommit.lock().map_err(runtime_error)?;
         if should_commit {
+            let mut guard = self.connection.lock().map_err(runtime_error)?;
+            let connection = guard
+                .as_mut()
+                .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
             BlockingConnection::commit(connection).map_err(runtime_error)?;
         }
         self.state.lock().map_err(runtime_error)?.record_statement(
@@ -1787,18 +1967,182 @@ impl AsyncThinConnImpl {
 }
 
 #[pyclass(module = "oracledb.thin_impl", name = "ThinPoolImpl")]
-#[derive(Default)]
-struct ThinPoolImpl;
+struct ThinPoolImpl {
+    #[pyo3(get)]
+    dsn: String,
+    #[pyo3(get)]
+    username: String,
+    #[pyo3(get)]
+    homogeneous: bool,
+    #[pyo3(get)]
+    increment: u32,
+    #[pyo3(get)]
+    max: u32,
+    #[pyo3(get)]
+    min: u32,
+    #[pyo3(get)]
+    name: String,
+    getmode: u32,
+    max_lifetime_session: u32,
+    max_sessions_per_shard: u32,
+    opened: Arc<Mutex<bool>>,
+    open_count: Arc<Mutex<u32>>,
+    busy_count: Arc<Mutex<u32>>,
+    ping_interval: u32,
+    soda_metadata_cache: bool,
+    stmt_cache_size: u32,
+    timeout: u32,
+    wait_timeout: u32,
+}
 
 #[pymethods]
 impl ThinPoolImpl {
     #[new]
-    fn new(_dsn: &Bound<'_, PyAny>, _params_impl: &Bound<'_, PyAny>) -> PyResult<Self> {
-        Err(not_implemented("ThinPoolImpl.__new__"))
+    fn new(dsn: &Bound<'_, PyAny>, params_impl: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let dsn = normalize_connect_string(dsn.extract()?);
+        let username = get_string_attr(params_impl, "user")?;
+        let min = get_optional_u32_attr(params_impl, "min")?.unwrap_or(1);
+        let max = get_optional_u32_attr(params_impl, "max")?.unwrap_or(2);
+        let increment = get_optional_u32_attr(params_impl, "increment")?.unwrap_or(1);
+        let homogeneous = get_optional_bool_attr(params_impl, "homogeneous")?.unwrap_or(true);
+        let getmode = get_optional_u32_attr(params_impl, "getmode")?.unwrap_or(0);
+        let max_lifetime_session =
+            get_optional_u32_attr(params_impl, "max_lifetime_session")?.unwrap_or(0);
+        let max_sessions_per_shard =
+            get_optional_u32_attr(params_impl, "max_sessions_per_shard")?.unwrap_or(0);
+        let ping_interval = get_optional_u32_attr(params_impl, "ping_interval")?.unwrap_or(60);
+        let soda_metadata_cache =
+            get_optional_bool_attr(params_impl, "soda_metadata_cache")?.unwrap_or(false);
+        let stmt_cache_size = get_optional_u32_attr(params_impl, "stmtcachesize")?.unwrap_or(20);
+        let timeout = get_optional_u32_attr(params_impl, "timeout")?.unwrap_or(0);
+        let wait_timeout = get_optional_u32_attr(params_impl, "wait_timeout")?.unwrap_or(0);
+        Ok(Self {
+            dsn,
+            username,
+            homogeneous,
+            increment,
+            max,
+            min,
+            name: String::new(),
+            getmode,
+            max_lifetime_session,
+            max_sessions_per_shard,
+            opened: Arc::new(Mutex::new(true)),
+            open_count: Arc::new(Mutex::new(0)),
+            busy_count: Arc::new(Mutex::new(0)),
+            ping_interval,
+            soda_metadata_cache,
+            stmt_cache_size,
+            timeout,
+            wait_timeout,
+        })
     }
 
     fn acquire(&self, _params_impl: &Bound<'_, PyAny>) -> PyResult<()> {
+        if !*self.opened.lock().map_err(runtime_error)? {
+            return Err(raise_oracledb_driver_error("ERR_POOL_NOT_OPEN"));
+        }
         Err(not_implemented("ThinPoolImpl.acquire"))
+    }
+
+    fn close(&self, _force: bool) -> PyResult<()> {
+        *self.opened.lock().map_err(runtime_error)? = false;
+        *self.open_count.lock().map_err(runtime_error)? = 0;
+        *self.busy_count.lock().map_err(runtime_error)? = 0;
+        Ok(())
+    }
+
+    fn drop(&self, _conn_impl: &Bound<'_, PyAny>) -> PyResult<()> {
+        Err(not_implemented("ThinPoolImpl.drop"))
+    }
+
+    fn get_busy_count(&self) -> PyResult<u32> {
+        Ok(*self.busy_count.lock().map_err(runtime_error)?)
+    }
+
+    fn get_getmode(&self) -> u32 {
+        self.getmode
+    }
+
+    fn get_max_lifetime_session(&self) -> u32 {
+        self.max_lifetime_session
+    }
+
+    fn get_max_sessions_per_shard(&self) -> u32 {
+        self.max_sessions_per_shard
+    }
+
+    fn get_open_count(&self) -> PyResult<u32> {
+        Ok(*self.open_count.lock().map_err(runtime_error)?)
+    }
+
+    fn get_ping_interval(&self) -> u32 {
+        self.ping_interval
+    }
+
+    fn get_soda_metadata_cache(&self) -> bool {
+        self.soda_metadata_cache
+    }
+
+    fn get_stmt_cache_size(&self) -> u32 {
+        self.stmt_cache_size
+    }
+
+    fn get_timeout(&self) -> u32 {
+        self.timeout
+    }
+
+    fn get_wait_timeout(&self) -> u32 {
+        if self.getmode == 2 {
+            self.wait_timeout
+        } else {
+            0
+        }
+    }
+
+    fn reconfigure(&mut self, min: u32, max: u32, increment: u32) {
+        self.min = min;
+        self.max = max;
+        self.increment = increment;
+    }
+
+    fn return_connection(&self, _conn_impl: &Bound<'_, PyAny>) -> PyResult<()> {
+        Err(not_implemented("ThinPoolImpl.return_connection"))
+    }
+
+    fn set_getmode(&mut self, value: u32) {
+        self.getmode = value;
+        if value != 2 {
+            self.wait_timeout = 0;
+        }
+    }
+
+    fn set_max_lifetime_session(&mut self, value: u32) {
+        self.max_lifetime_session = value;
+    }
+
+    fn set_max_sessions_per_shard(&mut self, value: u32) {
+        self.max_sessions_per_shard = value;
+    }
+
+    fn set_ping_interval(&mut self, value: u32) {
+        self.ping_interval = value;
+    }
+
+    fn set_soda_metadata_cache(&mut self, value: bool) {
+        self.soda_metadata_cache = value;
+    }
+
+    fn set_stmt_cache_size(&mut self, value: u32) {
+        self.stmt_cache_size = value;
+    }
+
+    fn set_timeout(&mut self, value: u32) {
+        self.timeout = value;
+    }
+
+    fn set_wait_timeout(&mut self, value: u32) {
+        self.wait_timeout = value;
     }
 }
 
@@ -1820,22 +2164,57 @@ impl AsyncThinPoolImpl {
 
 #[pyclass(module = "oracledb.thin_impl", name = "EndUserSecurityContextImpl")]
 #[derive(Default)]
-struct EndUserSecurityContextImpl;
+struct EndUserSecurityContextImpl {
+    #[allow(dead_code)]
+    payload: BTreeMap<String, String>,
+    #[allow(dead_code)]
+    encoded_len: usize,
+}
 
 #[pymethods]
 impl EndUserSecurityContextImpl {
     #[staticmethod]
     fn create_end_user_security_context(
-        _end_user_token: &Bound<'_, PyAny>,
-        _end_user_name: &Bound<'_, PyAny>,
-        _key: &Bound<'_, PyAny>,
-        _database_access_token: &Bound<'_, PyAny>,
-        _data_roles: &Bound<'_, PyAny>,
-        _attributes: &Bound<'_, PyAny>,
+        end_user_token: &Bound<'_, PyAny>,
+        end_user_name: &Bound<'_, PyAny>,
+        key: &Bound<'_, PyAny>,
+        database_access_token: &Bound<'_, PyAny>,
+        data_roles: &Bound<'_, PyAny>,
+        attributes: &Bound<'_, PyAny>,
     ) -> PyResult<Self> {
-        Err(not_implemented(
-            "EndUserSecurityContextImpl.create_end_user_security_context",
-        ))
+        let mut payload = BTreeMap::new();
+        payload.insert("ver".to_string(), "1.0".to_string());
+        if let Some(value) = extract_optional_string(end_user_token)? {
+            payload.insert("end_user_token".to_string(), value);
+        }
+        if let Some(value) = extract_optional_string(end_user_name)? {
+            payload.insert("end_user_name".to_string(), value);
+        }
+        if let Some(value) = extract_optional_string(key)? {
+            payload.insert("end_user_contextid".to_string(), value);
+        }
+        if let Some(value) = extract_optional_string(database_access_token)? {
+            payload.insert("database_access_token".to_string(), value);
+        }
+        if !data_roles.is_none() {
+            payload.insert("data_roles".to_string(), data_roles.str()?.to_string());
+        }
+        if !attributes.is_none() {
+            payload.insert("attributes".to_string(), attributes.str()?.to_string());
+        }
+        let encoded_len = payload
+            .iter()
+            .map(|(key, value)| key.len() + value.len() + 8)
+            .sum::<usize>();
+        if encoded_len > 65_535 {
+            return Err(raise_oracledb_driver_error(
+                "ERR_INVALID_END_USER_SECURITY_CONTEXT_LENGTH",
+            ));
+        }
+        Ok(Self {
+            payload,
+            encoded_len,
+        })
     }
 }
 

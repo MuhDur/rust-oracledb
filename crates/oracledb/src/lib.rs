@@ -42,6 +42,8 @@ pub enum Error {
     FastAuthRequired,
     #[error("server response did not contain {0}")]
     MissingSessionField(&'static str),
+    #[error("call timeout of {0} ms exceeded")]
+    CallTimeout(u32),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -97,6 +99,11 @@ pub struct Connection {
     ttc_seq_num: u8,
     sdu: usize,
     cursor_columns: BTreeMap<u32, Vec<ColumnMetadata>>,
+}
+
+#[derive(Debug)]
+pub struct CancelHandle {
+    stream: TcpStream,
 }
 
 impl Connection {
@@ -241,6 +248,12 @@ impl Connection {
 
     pub fn sdu(&self) -> usize {
         self.sdu
+    }
+
+    pub fn cancel_handle(&self) -> Result<CancelHandle> {
+        Ok(CancelHandle {
+            stream: self.stream.try_clone()?,
+        })
     }
 
     pub async fn ping(&mut self, cx: &Cx) -> Result<()> {
@@ -408,6 +421,12 @@ impl Connection {
     }
 }
 
+impl CancelHandle {
+    pub fn cancel(&mut self) -> Result<()> {
+        send_marker(&mut self.stream, TNS_MARKER_TYPE_BREAK)
+    }
+}
+
 pub struct BlockingConnection;
 
 impl BlockingConnection {
@@ -470,6 +489,17 @@ impl BlockingConnection {
         })
     }
 
+    pub fn execute_query_with_timeout(
+        connection: &mut Connection,
+        sql: &str,
+        prefetch_rows: u32,
+        timeout_ms: Option<u32>,
+    ) -> Result<QueryResult> {
+        with_call_timeout(connection, timeout_ms, |connection| {
+            Self::execute_query(connection, sql, prefetch_rows)
+        })
+    }
+
     pub fn execute_query_with_binds(
         connection: &mut Connection,
         sql: &str,
@@ -488,6 +518,18 @@ impl BlockingConnection {
         })
     }
 
+    pub fn execute_query_with_binds_and_timeout(
+        connection: &mut Connection,
+        sql: &str,
+        prefetch_rows: u32,
+        binds: &[BindValue],
+        timeout_ms: Option<u32>,
+    ) -> Result<QueryResult> {
+        with_call_timeout(connection, timeout_ms, |connection| {
+            Self::execute_query_with_binds(connection, sql, prefetch_rows, binds)
+        })
+    }
+
     pub fn execute_query_with_bind_rows(
         connection: &mut Connection,
         sql: &str,
@@ -503,6 +545,18 @@ impl BlockingConnection {
             connection
                 .execute_query_with_bind_rows(&cx, sql, prefetch_rows, bind_rows)
                 .await
+        })
+    }
+
+    pub fn execute_query_with_bind_rows_and_timeout(
+        connection: &mut Connection,
+        sql: &str,
+        prefetch_rows: u32,
+        bind_rows: &[Vec<BindValue>],
+        timeout_ms: Option<u32>,
+    ) -> Result<QueryResult> {
+        with_call_timeout(connection, timeout_ms, |connection| {
+            Self::execute_query_with_bind_rows(connection, sql, prefetch_rows, bind_rows)
         })
     }
 
@@ -533,6 +587,45 @@ impl BlockingConnection {
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection.close(&cx).await
         })
+    }
+}
+
+fn with_call_timeout<T>(
+    connection: &mut Connection,
+    timeout_ms: Option<u32>,
+    f: impl FnOnce(&mut Connection) -> Result<T>,
+) -> Result<T> {
+    let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
+        return f(connection);
+    };
+    let old_read_timeout = connection.stream.read_timeout()?;
+    let old_write_timeout = connection.stream.write_timeout()?;
+    let timeout = Duration::from_millis(u64::from(timeout_ms));
+    connection.stream.set_read_timeout(Some(timeout))?;
+    connection.stream.set_write_timeout(Some(timeout))?;
+    let result = f(connection);
+    let restore_result = connection
+        .stream
+        .set_read_timeout(old_read_timeout)
+        .and_then(|()| connection.stream.set_write_timeout(old_write_timeout));
+    match result {
+        Ok(value) => {
+            restore_result?;
+            Ok(value)
+        }
+        Err(Error::Io(err))
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) =>
+        {
+            let _ = connection.stream.shutdown(Shutdown::Both);
+            Err(Error::CallTimeout(timeout_ms))
+        }
+        Err(err) => {
+            restore_result?;
+            Err(err)
+        }
     }
 }
 
@@ -593,6 +686,7 @@ fn read_data_response(stream: &mut TcpStream) -> Result<Vec<u8>> {
 }
 
 const TNS_PACKET_TYPE_MARKER: u8 = 12;
+const TNS_MARKER_TYPE_BREAK: u8 = 1;
 const TNS_MARKER_TYPE_RESET: u8 = 2;
 
 fn reset_after_marker(stream: &mut TcpStream, initial_marker: &IncomingPacket) -> Result<()> {
@@ -631,10 +725,11 @@ fn send_marker(stream: &mut TcpStream, marker_type: u8) -> Result<()> {
 fn read_packet(stream: &mut TcpStream, width: PacketLengthWidth) -> Result<IncomingPacket> {
     let mut header = [0u8; 8];
     stream.read_exact(&mut header)?;
+    let [len0, len1, len2, len3, packet_type, _, _, _] = header;
     let declared = match width {
-        PacketLengthWidth::Legacy16 => usize::from(u16::from_be_bytes([header[0], header[1]])),
+        PacketLengthWidth::Legacy16 => usize::from(u16::from_be_bytes([len0, len1])),
         PacketLengthWidth::Large32 => {
-            u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize
+            usize::try_from(u32::from_be_bytes([len0, len1, len2, len3])).unwrap_or(usize::MAX)
         }
     };
     if declared < header.len() {
@@ -647,7 +742,7 @@ fn read_packet(stream: &mut TcpStream, width: PacketLengthWidth) -> Result<Incom
     let mut payload = vec![0u8; declared - header.len()];
     stream.read_exact(&mut payload)?;
     Ok(IncomingPacket {
-        packet_type: header[4],
+        packet_type,
         payload,
     })
 }
