@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use oracledb::protocol::thin::{
@@ -112,9 +113,31 @@ fn get_app_context_attr(obj: &Bound<'_, PyAny>) -> PyResult<Vec<(String, String,
 }
 
 static PASSWORD_OVERRIDES: OnceLock<Mutex<BTreeMap<String, String>>> = OnceLock::new();
+static NEXT_CONNECT_ARGS: OnceLock<Mutex<VecDeque<ConnectArgs>>> = OnceLock::new();
+static NEXT_CONNECT_ARGS_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Debug, Default)]
+struct ConnectArgs {
+    id: u64,
+    password: Option<String>,
+    new_password: Option<String>,
+    invalid_user_dsn: bool,
+}
 
 fn password_overrides() -> &'static Mutex<BTreeMap<String, String>> {
     PASSWORD_OVERRIDES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn next_connect_args_queue() -> &'static Mutex<VecDeque<ConnectArgs>> {
+    NEXT_CONNECT_ARGS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn consume_next_connect_args() -> PyResult<ConnectArgs> {
+    Ok(next_connect_args_queue()
+        .lock()
+        .map_err(runtime_error)?
+        .pop_front()
+        .unwrap_or_default())
 }
 
 fn password_override_for_user(user: &str) -> PyResult<Option<String>> {
@@ -131,6 +154,36 @@ fn set_password_override_for_user(user: &str, password: &str) -> PyResult<()> {
         .map_err(runtime_error)?
         .insert(user.to_ascii_uppercase(), password.to_string());
     Ok(())
+}
+
+#[pyfunction]
+#[pyo3(signature = (password=None, new_password=None, invalid_user_dsn=false))]
+fn record_next_connect_args(
+    password: Option<String>,
+    new_password: Option<String>,
+    invalid_user_dsn: bool,
+) -> PyResult<u64> {
+    let id = NEXT_CONNECT_ARGS_ID.fetch_add(1, Ordering::Relaxed);
+    next_connect_args_queue()
+        .lock()
+        .map_err(runtime_error)?
+        .push_back(ConnectArgs {
+            id,
+            password,
+            new_password,
+            invalid_user_dsn,
+        });
+    Ok(id)
+}
+
+#[pyfunction]
+fn discard_pending_connect_args(id: u64) -> PyResult<bool> {
+    let mut queue = next_connect_args_queue().lock().map_err(runtime_error)?;
+    if let Some(pos) = queue.iter().position(|entry| entry.id == id) {
+        queue.remove(pos);
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn env_password_for_user(user: &str) -> PyResult<String> {
@@ -573,6 +626,8 @@ struct ThinConnImpl {
     outputtypehandler: Option<Py<PyAny>>,
     invoke_session_callback: bool,
     thin: bool,
+    connect_password: Option<String>,
+    new_password: Option<String>,
 }
 
 impl ThinConnImpl {
@@ -635,12 +690,13 @@ impl ThinConnImpl {
         let username = get_string_attr(params_impl, "user")?;
         let stmt_cache_size = get_optional_u32_attr(params_impl, "stmtcachesize")?.unwrap_or(20);
         let edition = get_optional_string_attr(params_impl, "edition")?;
+        let connect_args = consume_next_connect_args()?;
         Ok(Self {
             connection: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(ThinConnState::new(
                 stmt_cache_size,
                 edition,
-                invalid_connect_string,
+                invalid_connect_string || connect_args.invalid_user_dsn,
             ))),
             dsn,
             username,
@@ -654,6 +710,8 @@ impl ThinConnImpl {
             outputtypehandler: None,
             invoke_session_callback: false,
             thin: true,
+            connect_password: connect_args.password,
+            new_password: connect_args.new_password,
         })
     }
 
@@ -761,7 +819,11 @@ impl ThinConnImpl {
         let osuser = get_string_attr(params_impl, "osuser")?;
         let driver_name = get_optional_string_attr(params_impl, "driver_name")?
             .unwrap_or_else(|| "rust-oracledb thn : 0.0.0".into());
-        let password = env_password_for_user(&self.username)?;
+        let password = self
+            .connect_password
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| env_password_for_user(&self.username))?;
         let app_context = get_app_context_attr(params_impl)?;
         let edition = get_optional_string_attr(params_impl, "edition")?;
         let sdu = get_connect_sdu_attr(params_impl)?.unwrap_or(8192);
@@ -770,13 +832,20 @@ impl ThinConnImpl {
         }
         let identity = ClientIdentity::new(program, machine, osuser, terminal, driver_name)
             .map_err(runtime_error)?;
-        let options =
-            ConnectOptions::new(self.dsn.clone(), self.username.clone(), password, identity)
-                .with_app_context(app_context)
-                .with_sdu(sdu);
+        let options = ConnectOptions::new(
+            self.dsn.clone(),
+            self.username.clone(),
+            password.clone(),
+            identity,
+        )
+        .with_app_context(app_context)
+        .with_sdu(sdu);
         let connection = BlockingConnection::connect(options).map_err(runtime_error)?;
         self.server_version = (0, 0, 0, 0, 0);
         *self.connection.lock().map_err(runtime_error)? = Some(connection);
+        if let Some(new_password) = &self.new_password {
+            self.change_password(&password, new_password)?;
+        }
         if let Some(edition) = edition {
             let identifier = sql_identifier(&edition)?;
             self.execute_statement(&format!("alter session set edition = {identifier}"))?;
@@ -1773,6 +1842,8 @@ impl EndUserSecurityContextImpl {
 #[pymodule]
 fn oracledb_pyshim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(init_thin_impl, m)?)?;
+    m.add_function(wrap_pyfunction!(record_next_connect_args, m)?)?;
+    m.add_function(wrap_pyfunction!(discard_pending_connect_args, m)?)?;
     m.add_class::<ThinConnImpl>()?;
     m.add_class::<ThinCursorImpl>()?;
     m.add_class::<FetchMetadataImpl>()?;
