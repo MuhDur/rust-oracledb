@@ -10,9 +10,10 @@ use oracledb_protocol::thin::{
     build_auth_phase_two_payload_with_seq, build_connect_packet_payload,
     build_execute_payload_with_seq, build_fast_auth_phase_one_payload,
     build_fetch_payload_with_seq, build_function_payload_with_seq, parse_accept_payload,
-    parse_auth_response, parse_query_response, ClientCapabilities, QueryResult, TNS_FUNC_LOGOFF,
-    TNS_FUNC_PING, TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA,
-    TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE,
+    parse_auth_response, parse_query_response, ClientCapabilities, QueryResult, TNS_FUNC_COMMIT,
+    TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_PACKET_TYPE_ACCEPT,
+    TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT,
+    TNS_PACKET_TYPE_REFUSE,
 };
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};
@@ -223,6 +224,14 @@ impl Connection {
         Ok(())
     }
 
+    pub async fn commit(&mut self, cx: &Cx) -> Result<()> {
+        self.send_function(cx, TNS_FUNC_COMMIT).await
+    }
+
+    pub async fn rollback(&mut self, cx: &Cx) -> Result<()> {
+        self.send_function(cx, TNS_FUNC_ROLLBACK).await
+    }
+
     pub async fn execute_query(
         &mut self,
         cx: &Cx,
@@ -261,6 +270,7 @@ impl Connection {
     pub async fn close(mut self, cx: &Cx) -> Result<()> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
+        self.rollback(cx).await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         send_data_packet(
             &mut self.stream,
@@ -277,6 +287,18 @@ impl Connection {
         self.stream.write_all(&eof)?;
         self.stream.flush()?;
         let _ = self.stream.shutdown(Shutdown::Both);
+        Ok(())
+    }
+
+    async fn send_function(&mut self, cx: &Cx, function_code: u8) -> Result<()> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        send_data_packet(
+            &mut self.stream,
+            &build_function_payload_with_seq(function_code, seq_num),
+        )?;
+        let _ = read_data_response(&mut self.stream)?;
         Ok(())
     }
 }
@@ -303,6 +325,28 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection.ping(&cx).await
+        })
+    }
+
+    pub fn commit(connection: &mut Connection) -> Result<()> {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.commit(&cx).await
+        })
+    }
+
+    pub fn rollback(connection: &mut Connection) -> Result<()> {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.rollback(&cx).await
         })
     }
 

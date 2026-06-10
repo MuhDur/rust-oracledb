@@ -93,6 +93,7 @@ struct ThinConnImpl {
     proxy_user: Option<String>,
     server_version: (u8, u8, u8, u8, u8),
     autocommit: bool,
+    autocommit_state: Arc<Mutex<bool>>,
     tag: Option<String>,
     warning: Option<Py<PyAny>>,
     inputtypehandler: Option<Py<PyAny>>,
@@ -118,6 +119,7 @@ impl ThinConnImpl {
             proxy_user: get_optional_string_attr(params_impl, "proxy_user")?,
             server_version: (0, 0, 0, 0, 0),
             autocommit: false,
+            autocommit_state: Arc::new(Mutex::new(false)),
             tag: None,
             warning: None,
             inputtypehandler: None,
@@ -163,8 +165,10 @@ impl ThinConnImpl {
     }
 
     #[setter]
-    fn set_autocommit(&mut self, value: bool) {
+    fn set_autocommit(&mut self, value: bool) -> PyResult<()> {
         self.autocommit = value;
+        *self.autocommit_state.lock().map_err(runtime_error)? = value;
+        Ok(())
     }
 
     #[getter]
@@ -250,6 +254,22 @@ impl ThinConnImpl {
         BlockingConnection::ping(connection).map_err(runtime_error)
     }
 
+    fn commit(&self) -> PyResult<()> {
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        BlockingConnection::commit(connection).map_err(runtime_error)
+    }
+
+    fn rollback(&self) -> PyResult<()> {
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        BlockingConnection::rollback(connection).map_err(runtime_error)
+    }
+
     fn get_is_healthy(&self) -> PyResult<bool> {
         Ok(self.connection.lock().map_err(runtime_error)?.is_some())
     }
@@ -275,7 +295,11 @@ impl ThinConnImpl {
     }
 
     fn create_cursor_impl(&self, scrollable: bool) -> ThinCursorImpl {
-        ThinCursorImpl::new(Arc::clone(&self.connection), scrollable)
+        ThinCursorImpl::new(
+            Arc::clone(&self.connection),
+            Arc::clone(&self.autocommit_state),
+            scrollable,
+        )
     }
 }
 
@@ -386,6 +410,7 @@ impl FetchMetadataImpl {
 #[pyclass(module = "oracledb.thin_impl", name = "ThinCursorImpl")]
 struct ThinCursorImpl {
     connection: Arc<Mutex<Option<RustConnection>>>,
+    autocommit: Arc<Mutex<bool>>,
     statement: Option<String>,
     columns: Vec<ColumnMetadata>,
     rows: Vec<Vec<Option<QueryValue>>>,
@@ -407,9 +432,14 @@ struct ThinCursorImpl {
 }
 
 impl ThinCursorImpl {
-    fn new(connection: Arc<Mutex<Option<RustConnection>>>, scrollable: bool) -> Self {
+    fn new(
+        connection: Arc<Mutex<Option<RustConnection>>>,
+        autocommit: Arc<Mutex<bool>>,
+        scrollable: bool,
+    ) -> Self {
         Self {
             connection,
+            autocommit,
             statement: None,
             columns: Vec::new(),
             rows: Vec::new(),
@@ -613,13 +643,18 @@ impl ThinCursorImpl {
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
         let result = BlockingConnection::execute_query(connection, statement, self.prefetchrows)
             .map_err(runtime_error)?;
+        let is_query = !result.columns.is_empty();
+        let should_commit = !is_query && *self.autocommit.lock().map_err(runtime_error)?;
+        if should_commit {
+            BlockingConnection::commit(connection).map_err(runtime_error)?;
+        }
         self.columns = result.columns;
         self.rows = result.rows;
         self.row_index = 0;
         self.cursor_id = result.cursor_id;
         self.more_rows = result.more_rows;
         self.rowcount = 0;
-        self.is_query = !self.columns.is_empty();
+        self.is_query = is_query;
         Ok(())
     }
 
@@ -703,6 +738,14 @@ fn query_value_to_py(py: Python<'_>, value: &Option<QueryValue>) -> PyResult<Py<
         None => Ok(py.None()),
         Some(QueryValue::Text(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
         Some(QueryValue::Raw(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
+        Some(QueryValue::Number { text, is_integer }) if *is_integer => {
+            let value = text.parse::<i128>().map_err(runtime_error)?;
+            Ok(value.into_pyobject(py)?.unbind().into())
+        }
+        Some(QueryValue::Number { text, .. }) => {
+            let value = text.parse::<f64>().map_err(runtime_error)?;
+            Ok(value.into_pyobject(py)?.unbind().into())
+        }
     }
 }
 

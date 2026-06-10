@@ -30,10 +30,12 @@ pub const TNS_MSG_TYPE_END_OF_RESPONSE: u8 = 29;
 
 pub const TNS_FUNC_AUTH_PHASE_ONE: u8 = 118;
 pub const TNS_FUNC_AUTH_PHASE_TWO: u8 = 115;
+pub const TNS_FUNC_COMMIT: u8 = 14;
 pub const TNS_FUNC_EXECUTE: u8 = 94;
 pub const TNS_FUNC_FETCH: u8 = 5;
 pub const TNS_FUNC_LOGOFF: u8 = 9;
 pub const TNS_FUNC_PING: u8 = 147;
+pub const TNS_FUNC_ROLLBACK: u8 = 15;
 
 pub const TNS_AUTH_MODE_LOGON: u32 = 0x0000_0001;
 pub const TNS_AUTH_MODE_WITH_PASSWORD: u32 = 0x0000_0100;
@@ -207,6 +209,7 @@ pub struct ColumnMetadata {
 pub enum QueryValue {
     Text(String),
     Raw(Vec<u8>),
+    Number { text: String, is_integer: bool },
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -856,11 +859,96 @@ fn parse_column_value(
             decode_text_value(&bytes, metadata.csfrm).map(|value| Some(QueryValue::Text(value)))
         }
         ORA_TYPE_NUM_RAW | ORA_TYPE_NUM_LONG_RAW => Ok(reader.read_bytes()?.map(QueryValue::Raw)),
-        ORA_TYPE_NUM_NUMBER => Err(ProtocolError::UnsupportedFeature(
-            "query NUMBER column decoding",
-        )),
+        ORA_TYPE_NUM_NUMBER => {
+            let Some(bytes) = reader.read_bytes()? else {
+                return Ok(None);
+            };
+            decode_number_value(&bytes).map(Some)
+        }
         _ => Err(ProtocolError::UnsupportedFeature("query column type")),
     }
+}
+
+fn decode_number_value(bytes: &[u8]) -> Result<QueryValue> {
+    if bytes.len() > 21 {
+        return Err(ProtocolError::TtcDecode("encoded NUMBER too long"));
+    }
+    let Some(&first) = bytes.first() else {
+        return Err(ProtocolError::TtcDecode("empty NUMBER"));
+    };
+    let is_positive = first & 0x80 != 0;
+    if bytes.len() == 1 {
+        if is_positive {
+            return Ok(QueryValue::Number {
+                text: "0".into(),
+                is_integer: true,
+            });
+        }
+        return Ok(QueryValue::Number {
+            text: "-1e126".into(),
+            is_integer: true,
+        });
+    }
+
+    let exponent_byte = if is_positive { first } else { !first };
+    let exponent = i16::from(exponent_byte) - 193;
+    let mut decimal_point_index = exponent * 2 + 2;
+    let mut end = bytes.len();
+    if !is_positive && bytes[end - 1] == 102 {
+        end -= 1;
+    }
+
+    let mut digits = Vec::with_capacity((end.saturating_sub(1)) * 2);
+    for (index, encoded) in bytes.iter().enumerate().take(end).skip(1) {
+        let value = if is_positive {
+            encoded.saturating_sub(1)
+        } else {
+            101u8.saturating_sub(*encoded)
+        };
+
+        let first_digit = value / 10;
+        if first_digit == 0 && digits.is_empty() {
+            decimal_point_index -= 1;
+        } else if first_digit == 10 {
+            digits.push(1);
+            digits.push(0);
+            decimal_point_index += 1;
+        } else if first_digit != 0 || index > 0 {
+            digits.push(first_digit);
+        }
+
+        let second_digit = value % 10;
+        if second_digit != 0 || index < end - 1 {
+            digits.push(second_digit);
+        }
+    }
+
+    let mut text = String::with_capacity(digits.len() + 4);
+    let mut is_integer = true;
+    if !is_positive {
+        text.push('-');
+    }
+    if decimal_point_index <= 0 {
+        text.push_str("0.");
+        is_integer = false;
+        for _ in decimal_point_index..0 {
+            text.push('0');
+        }
+    }
+    for (index, digit) in digits.iter().enumerate() {
+        if index > 0 && i16::try_from(index).unwrap_or(i16::MAX) == decimal_point_index {
+            text.push('.');
+            is_integer = false;
+        }
+        text.push(char::from(b'0' + *digit));
+    }
+    if decimal_point_index > i16::try_from(digits.len()).unwrap_or(i16::MAX) {
+        for _ in i16::try_from(digits.len()).unwrap_or(i16::MAX)..decimal_point_index {
+            text.push('0');
+        }
+    }
+
+    Ok(QueryValue::Number { text, is_integer })
 }
 
 fn decode_text_value(bytes: &[u8], csfrm: u8) -> Result<String> {
