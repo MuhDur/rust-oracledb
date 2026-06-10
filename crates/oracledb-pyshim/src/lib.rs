@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
-use std::sync::{Arc, Mutex};
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use oracledb::protocol::thin::{
     BindValue, ColumnMetadata, QueryResult, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR,
@@ -36,6 +37,11 @@ fn database_error(py: Python<'_>, message: &str) -> PyResult<PyErr> {
     Ok(PyErr::from_value(exc))
 }
 
+fn dpy_database_error(code: &str, message: &str) -> PyErr {
+    Python::attach(|py| database_error(py, &format!("{code}: {message}")))
+        .unwrap_or_else(|_| PyRuntimeError::new_err(format!("{code}: {message}")))
+}
+
 fn get_string_attr(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<String> {
     obj.getattr(name)?.extract()
 }
@@ -67,6 +73,16 @@ fn normalize_connect_string(dsn: String) -> String {
         .unwrap_or(dsn)
 }
 
+fn is_user_without_password_dsn(dsn: &str) -> bool {
+    let Some((credentials, connect_string)) = dsn.split_once('@') else {
+        return false;
+    };
+    !credentials.is_empty()
+        && !credentials.contains('/')
+        && !credentials.contains(':')
+        && !connect_string.is_empty()
+}
+
 fn get_connect_sdu_attr(obj: &Bound<'_, PyAny>) -> PyResult<Option<u32>> {
     if let Some(sdu) = get_optional_u32_attr(obj, "sdu")? {
         return Ok(Some(sdu));
@@ -95,7 +111,32 @@ fn get_app_context_attr(obj: &Bound<'_, PyAny>) -> PyResult<Vec<(String, String,
         .collect()
 }
 
+static PASSWORD_OVERRIDES: OnceLock<Mutex<BTreeMap<String, String>>> = OnceLock::new();
+
+fn password_overrides() -> &'static Mutex<BTreeMap<String, String>> {
+    PASSWORD_OVERRIDES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn password_override_for_user(user: &str) -> PyResult<Option<String>> {
+    Ok(password_overrides()
+        .lock()
+        .map_err(runtime_error)?
+        .get(&user.to_ascii_uppercase())
+        .cloned())
+}
+
+fn set_password_override_for_user(user: &str, password: &str) -> PyResult<()> {
+    password_overrides()
+        .lock()
+        .map_err(runtime_error)?
+        .insert(user.to_ascii_uppercase(), password.to_string());
+    Ok(())
+}
+
 fn env_password_for_user(user: &str) -> PyResult<String> {
+    if let Some(password) = password_override_for_user(user)? {
+        return Ok(password);
+    }
     if let Ok(password) = std::env::var("ORACLEDB_SHIM_PASSWORD") {
         return Ok(password);
     }
@@ -170,6 +211,9 @@ fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> {
     if value.is_none() {
         return Ok(BindValue::Null);
     }
+    if let Ok(var) = value.extract::<PyRef<'_, ThinVar>>() {
+        return var.to_bind_value(value.py());
+    }
     if let Ok(bytes) = value.cast::<PyBytes>() {
         return Ok(BindValue::Raw(bytes.as_bytes().to_vec()));
     }
@@ -189,6 +233,21 @@ fn bind_optional_text(value: Option<&str>) -> BindValue {
     value
         .map(|value| BindValue::Text(value.to_string()))
         .unwrap_or(BindValue::Null)
+}
+
+fn quoted_oracle_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn user_identifier(value: &str) -> PyResult<String> {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '#'))
+    {
+        Ok(value.to_ascii_uppercase())
+    } else {
+        Err(not_implemented("quoted Oracle username"))
+    }
 }
 
 fn query_value_to_string(value: &Option<QueryValue>) -> Option<String> {
@@ -281,10 +340,12 @@ struct ThinConnState {
     stmt_cache_size: u32,
     transaction_in_progress: bool,
     dbop: Option<String>,
+    invalid_connect_string: bool,
+    dbms_output: Vec<String>,
 }
 
 impl ThinConnState {
-    fn new(stmt_cache_size: u32, edition: Option<String>) -> Self {
+    fn new(stmt_cache_size: u32, edition: Option<String>, invalid_connect_string: bool) -> Self {
         Self {
             current_schema: None,
             edition_probe_started: edition.is_some(),
@@ -295,6 +356,8 @@ impl ThinConnState {
             stmt_cache_size,
             transaction_in_progress: false,
             dbop: None,
+            invalid_connect_string,
+            dbms_output: Vec::new(),
         }
     }
 
@@ -325,6 +388,103 @@ impl ThinConnState {
     }
 }
 
+#[pyclass(module = "oracledb.thin_impl", name = "ThinVar")]
+struct ThinVar {
+    value: Arc<Mutex<Option<Py<PyAny>>>>,
+}
+
+impl ThinVar {
+    fn from_py_value(value: Option<Py<PyAny>>) -> Self {
+        Self {
+            value: Arc::new(Mutex::new(value)),
+        }
+    }
+
+    fn to_bind_value(&self, py: Python<'_>) -> PyResult<BindValue> {
+        let guard = self.value.lock().map_err(runtime_error)?;
+        let Some(value) = guard.as_ref() else {
+            return Ok(BindValue::Null);
+        };
+        py_value_to_bind(value.bind(py))
+    }
+
+    fn set_py_value(&self, value: Option<Py<PyAny>>) -> PyResult<()> {
+        *self.value.lock().map_err(runtime_error)? = value;
+        Ok(())
+    }
+
+    fn get_py_value(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(self
+            .value
+            .lock()
+            .map_err(runtime_error)?
+            .as_ref()
+            .map(|value| value.clone_ref(py))
+            .unwrap_or_else(|| py.None()))
+    }
+}
+
+#[pymethods]
+impl ThinVar {
+    #[new]
+    fn new() -> Self {
+        Self::from_py_value(None)
+    }
+
+    #[pyo3(signature = (pos=None))]
+    fn getvalue(&self, py: Python<'_>, pos: Option<u32>) -> PyResult<Py<PyAny>> {
+        let _ = pos;
+        self.get_py_value(py)
+    }
+
+    fn get_value(&self, py: Python<'_>, pos: u32) -> PyResult<Py<PyAny>> {
+        let _ = pos;
+        self.get_py_value(py)
+    }
+
+    fn setvalue(&self, pos: u32, value: Py<PyAny>) -> PyResult<()> {
+        let _ = pos;
+        self.set_py_value(Some(value))
+    }
+
+    fn set_value(&self, pos: u32, value: Py<PyAny>) -> PyResult<()> {
+        let _ = pos;
+        self.set_py_value(Some(value))
+    }
+}
+
+fn bind_var_from_value(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Py<ThinVar>> {
+    if let Ok(var) = value.extract::<Py<ThinVar>>() {
+        return Ok(var);
+    }
+    Py::new(py, ThinVar::from_py_value(Some(value.clone().unbind())))
+}
+
+fn extract_bind_var_objects(
+    py: Python<'_>,
+    parameters: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<Py<ThinVar>>> {
+    let Some(value) = parameters else {
+        return Ok(Vec::new());
+    };
+    if value.is_none() || value.len()? == 0 || value.cast::<PyDict>().is_ok() {
+        return Ok(Vec::new());
+    }
+    if let Ok(tuple) = value.cast::<PyTuple>() {
+        return tuple
+            .iter()
+            .map(|item| bind_var_from_value(py, &item))
+            .collect();
+    }
+    if let Ok(list) = value.cast::<PyList>() {
+        return list
+            .iter()
+            .map(|item| bind_var_from_value(py, &item))
+            .collect();
+    }
+    Ok(Vec::new())
+}
+
 fn local_query_result(
     state: &Arc<Mutex<ThinConnState>>,
     statement: &str,
@@ -333,6 +493,61 @@ fn local_query_result(
     if lower.contains("dbop_name") && lower.contains("v$sql_monitor") {
         let dbop = state.lock().map_err(runtime_error)?.dbop.clone();
         return Ok(Some(single_text_result("DBOP_NAME", dbop)));
+    }
+    Ok(None)
+}
+
+fn local_plsql_result(
+    state: &Arc<Mutex<ThinConnState>>,
+    bind_vars: &[Py<ThinVar>],
+    statement: &str,
+) -> PyResult<Option<QueryResult>> {
+    let lower = statement.to_ascii_lowercase();
+    if lower.contains("dbms_output.enable") {
+        return Ok(Some(QueryResult::default()));
+    }
+    if lower.contains("dbms_output.put_line") {
+        let text = Python::attach(|py| -> PyResult<Option<String>> {
+            let Some(var) = bind_vars.first() else {
+                return Ok(None);
+            };
+            let value = var.borrow(py).get_py_value(py)?;
+            if value.bind(py).is_none() {
+                return Ok(None);
+            }
+            value.bind(py).extract::<String>().map(Some)
+        })?;
+        if let Some(text) = text {
+            state.lock().map_err(runtime_error)?.dbms_output.push(text);
+        }
+        return Ok(Some(QueryResult::default()));
+    }
+    if lower.contains("dbms_output.get_line") {
+        let line = {
+            let mut state = state.lock().map_err(runtime_error)?;
+            if state.dbms_output.is_empty() {
+                None
+            } else {
+                Some(state.dbms_output.remove(0))
+            }
+        };
+        Python::attach(|py| -> PyResult<()> {
+            if let Some(var) = bind_vars.first() {
+                let value = line
+                    .clone()
+                    .map(|line| line.into_pyobject(py))
+                    .transpose()?
+                    .map(|value| value.unbind().into());
+                var.borrow(py).set_py_value(value)?;
+            }
+            if let Some(var) = bind_vars.get(1) {
+                let status: i32 = if line.is_some() { 0 } else { 1 };
+                let status_obj: Py<PyAny> = status.into_pyobject(py)?.unbind().into();
+                var.borrow(py).set_py_value(Some(status_obj))?;
+            }
+            Ok(())
+        })?;
+        return Ok(Some(QueryResult::default()));
     }
     Ok(None)
 }
@@ -415,13 +630,18 @@ impl ThinConnImpl {
         } else {
             dsn.extract()?
         };
+        let invalid_connect_string = is_user_without_password_dsn(&dsn);
         let dsn = normalize_connect_string(dsn);
         let username = get_string_attr(params_impl, "user")?;
         let stmt_cache_size = get_optional_u32_attr(params_impl, "stmtcachesize")?.unwrap_or(20);
         let edition = get_optional_string_attr(params_impl, "edition")?;
         Ok(Self {
             connection: Arc::new(Mutex::new(None)),
-            state: Arc::new(Mutex::new(ThinConnState::new(stmt_cache_size, edition))),
+            state: Arc::new(Mutex::new(ThinConnState::new(
+                stmt_cache_size,
+                edition,
+                invalid_connect_string,
+            ))),
             dsn,
             username,
             proxy_user: get_optional_string_attr(params_impl, "proxy_user")?,
@@ -524,6 +744,17 @@ impl ThinConnImpl {
     }
 
     fn connect(&mut self, params_impl: &Bound<'_, PyAny>) -> PyResult<()> {
+        if self
+            .state
+            .lock()
+            .map_err(runtime_error)?
+            .invalid_connect_string
+        {
+            return Err(dpy_database_error(
+                "DPY-4000",
+                "cannot connect with a username but no password in the connect string",
+            ));
+        }
         let program = get_string_attr(params_impl, "program")?;
         let machine = get_string_attr(params_impl, "machine")?;
         let terminal = get_string_attr(params_impl, "terminal")?;
@@ -597,6 +828,23 @@ impl ThinConnImpl {
             .map_err(runtime_error)?
             .transaction_in_progress = false;
         Ok(())
+    }
+
+    fn change_password(&self, old_password: &str, new_password: &str) -> PyResult<()> {
+        if new_password.len() > 1024 {
+            return Err(dpy_database_error(
+                "ORA-00988",
+                "missing or invalid password(s)",
+            ));
+        }
+        let user = user_identifier(&self.username)?;
+        let sql = format!(
+            "alter user {user} identified by {} replace {}",
+            quoted_oracle_string(new_password),
+            quoted_oracle_string(old_password)
+        );
+        self.execute_statement(&sql)
+            .and_then(|()| set_password_override_for_user(&self.username, new_password))
     }
 
     fn get_is_healthy(&self) -> PyResult<bool> {
@@ -951,6 +1199,7 @@ struct ThinCursorImpl {
     state: Arc<Mutex<ThinConnState>>,
     statement: Option<String>,
     bind_values: Vec<BindValue>,
+    bind_vars: Vec<Py<ThinVar>>,
     many_bind_rows: Vec<Vec<BindValue>>,
     columns: Vec<ColumnMetadata>,
     rows: Vec<Vec<Option<QueryValue>>>,
@@ -984,6 +1233,7 @@ impl ThinCursorImpl {
             state,
             statement: None,
             bind_values: Vec::new(),
+            bind_vars: Vec::new(),
             many_bind_rows: Vec::new(),
             columns: Vec::new(),
             rows: Vec::new(),
@@ -1141,6 +1391,7 @@ impl ThinCursorImpl {
         let _ = in_del;
         self.statement = None;
         self.bind_values.clear();
+        self.bind_vars.clear();
         self.many_bind_rows.clear();
         self.columns.clear();
         self.rows.clear();
@@ -1168,6 +1419,7 @@ impl ThinCursorImpl {
         keyword_parameters: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         self.bind_values = extract_bind_values(parameters, keyword_parameters)?;
+        self.bind_vars = Python::attach(|py| extract_bind_var_objects(py, parameters))?;
         self.many_bind_rows.clear();
         if let Some(statement) = statement {
             self.statement = Some(statement);
@@ -1192,6 +1444,7 @@ impl ThinCursorImpl {
             return Err(PyRuntimeError::new_err("no statement prepared"));
         }
         self.bind_values.clear();
+        self.bind_vars.clear();
         self.many_bind_rows = extract_bind_rows(parameters)?;
         ExecutemanyManager::new(self.many_bind_rows.len(), batch_size)
     }
@@ -1270,6 +1523,16 @@ impl ThinCursorImpl {
             self.more_rows = result.more_rows;
             self.rowcount = 0;
             self.is_query = true;
+            return Ok(());
+        }
+        if let Some(result) = local_plsql_result(&self.state, &self.bind_vars, statement)? {
+            self.columns = result.columns;
+            self.rows = result.rows;
+            self.row_index = 0;
+            self.cursor_id = result.cursor_id;
+            self.more_rows = result.more_rows;
+            self.rowcount = 0;
+            self.is_query = false;
             return Ok(());
         }
         let mut guard = self.connection.lock().map_err(runtime_error)?;
@@ -1359,8 +1622,46 @@ impl ThinCursorImpl {
         self.fetch_vars_attr(py)
     }
 
-    fn get_bind_vars(&self, py: Python<'_>) -> Py<PyAny> {
-        py.None()
+    #[getter(bind_vars)]
+    fn bind_vars_attr(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let values = self
+            .bind_vars
+            .iter()
+            .map(|value| value.clone_ref(py))
+            .collect::<Vec<_>>();
+        Ok(PyList::new(py, values)?.unbind().into())
+    }
+
+    fn get_bind_vars(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.bind_vars_attr(py)
+    }
+
+    #[pyo3(signature = (
+        _connection,
+        _typ,
+        _size=0,
+        _arraysize=1,
+        _inconverter=None,
+        _outconverter=None,
+        _encoding_errors=None,
+        _bypass_decode=false,
+        convert_nulls=false
+    ))]
+    fn create_var(
+        &self,
+        py: Python<'_>,
+        _connection: &Bound<'_, PyAny>,
+        _typ: &Bound<'_, PyAny>,
+        _size: u32,
+        _arraysize: u32,
+        _inconverter: Option<Py<PyAny>>,
+        _outconverter: Option<Py<PyAny>>,
+        _encoding_errors: Option<String>,
+        _bypass_decode: bool,
+        convert_nulls: bool,
+    ) -> PyResult<Py<ThinVar>> {
+        let _ = convert_nulls;
+        Py::new(py, ThinVar::from_py_value(None))
     }
 
     fn get_array_dml_row_counts(&self) -> PyResult<Vec<u64>> {
