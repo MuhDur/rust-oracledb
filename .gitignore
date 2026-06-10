@@ -1,0 +1,30 @@
+# OS/Editor artifacts
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+.idea/
+.vscode/
+*.sublime-*
+
+# Environment/secrets (never commit these)
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build artifacts (add project-specific patterns below)
+dist/
+build/
+*.pyc
+__pycache__/
+node_modules/
+.venv/
+venv/
