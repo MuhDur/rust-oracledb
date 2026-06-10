@@ -53,6 +53,7 @@ pub struct ConnectOptions {
     pub password: String,
     pub identity: ClientIdentity,
     pub app_context: Vec<(String, String, String)>,
+    pub sdu: u16,
 }
 
 impl ConnectOptions {
@@ -68,11 +69,18 @@ impl ConnectOptions {
             password: password.into(),
             identity,
             app_context: Vec::new(),
+            sdu: 8192,
         }
     }
 
     pub fn with_app_context(mut self, app_context: Vec<(String, String, String)>) -> Self {
         self.app_context = app_context;
+        self
+    }
+
+    pub fn with_sdu(mut self, sdu: u32) -> Self {
+        let clamped = sdu.clamp(512, u32::from(u16::MAX));
+        self.sdu = u16::try_from(clamped).unwrap_or(u16::MAX);
         self
     }
 }
@@ -106,7 +114,7 @@ impl Connection {
 
         let connect_descriptor = listener_connect_descriptor(&descriptor, &identity);
         trace_connect_value("CONNECT descriptor", &connect_descriptor);
-        let connect_payload = build_connect_packet_payload(&connect_descriptor, 8192)?;
+        let connect_payload = build_connect_packet_payload(&connect_descriptor, options.sdu)?;
         let packet = encode_packet(
             TNS_PACKET_TYPE_CONNECT,
             0,
@@ -229,6 +237,10 @@ impl Connection {
 
     pub fn server_version(&self) -> Option<&str> {
         self.server_version.as_deref()
+    }
+
+    pub fn sdu(&self) -> usize {
+        self.sdu
     }
 
     pub async fn ping(&mut self, cx: &Cx) -> Result<()> {

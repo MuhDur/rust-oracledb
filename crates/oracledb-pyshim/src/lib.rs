@@ -3,8 +3,9 @@
 use std::sync::{Arc, Mutex};
 
 use oracledb::protocol::thin::{
-    BindValue, ColumnMetadata, QueryValue, CS_FORM_NCHAR, ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_LONG,
-    ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_VARCHAR,
+    BindValue, ColumnMetadata, QueryResult, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR,
+    ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER,
+    ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, ConnectOptions, Connection as RustConnection};
@@ -46,6 +47,39 @@ fn get_optional_string_attr(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Opti
     } else {
         value.extract().map(Some)
     }
+}
+
+fn get_optional_u32_attr(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Option<u32>> {
+    if !obj.hasattr(name)? {
+        return Ok(None);
+    }
+    let value = obj.getattr(name)?;
+    if value.is_none() {
+        Ok(None)
+    } else {
+        value.extract().map(Some)
+    }
+}
+
+fn normalize_connect_string(dsn: String) -> String {
+    dsn.split_once("://")
+        .map(|(_, connect_string)| connect_string.to_string())
+        .unwrap_or(dsn)
+}
+
+fn get_connect_sdu_attr(obj: &Bound<'_, PyAny>) -> PyResult<Option<u32>> {
+    if let Some(sdu) = get_optional_u32_attr(obj, "sdu")? {
+        return Ok(Some(sdu));
+    }
+    if !obj.hasattr("description_list")? {
+        return Ok(None);
+    }
+    let descriptions = obj.getattr("description_list")?.getattr("children")?;
+    if descriptions.len()? == 0 {
+        return Ok(None);
+    }
+    let description = descriptions.get_item(0)?;
+    get_optional_u32_attr(&description, "sdu")
 }
 
 fn get_app_context_attr(obj: &Bound<'_, PyAny>) -> PyResult<Vec<(String, String, String)>> {
@@ -151,6 +185,158 @@ fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> {
     Err(not_implemented("ThinCursorImpl bind value type"))
 }
 
+fn bind_optional_text(value: Option<&str>) -> BindValue {
+    value
+        .map(|value| BindValue::Text(value.to_string()))
+        .unwrap_or(BindValue::Null)
+}
+
+fn query_value_to_string(value: &Option<QueryValue>) -> Option<String> {
+    match value {
+        Some(QueryValue::Text(value)) => Some(value.clone()),
+        Some(QueryValue::Raw(value)) => String::from_utf8(value.clone()).ok(),
+        Some(QueryValue::Number { text, .. }) => Some(text.clone()),
+        None => None,
+    }
+}
+
+fn query_value_to_i64(value: &Option<QueryValue>) -> PyResult<i64> {
+    query_value_to_string(value)
+        .ok_or_else(|| PyRuntimeError::new_err("query returned NULL where integer was expected"))?
+        .parse()
+        .map_err(runtime_error)
+}
+
+fn sql_identifier(value: &str) -> PyResult<String> {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '#'))
+    {
+        Ok(value.to_string())
+    } else {
+        Err(not_implemented("quoted Oracle identifier"))
+    }
+}
+
+fn first_sql_keyword(statement: &str) -> String {
+    statement
+        .trim_start()
+        .split(|ch: char| !ch.is_ascii_alphabetic())
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+fn parse_alter_session_value(statement: &str, key: &str) -> Option<String> {
+    let trimmed = statement.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let prefix = format!("alter session set {key}");
+    if !lower.starts_with(&prefix) {
+        return None;
+    }
+    let mut value = trimmed.get(prefix.len()..)?.trim_start();
+    if let Some(stripped) = value.strip_prefix('=') {
+        value = stripped.trim_start();
+    }
+    value
+        .split_whitespace()
+        .next()
+        .map(|value| value.trim_matches('"').to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn varchar_metadata(name: &str) -> ColumnMetadata {
+    ColumnMetadata {
+        name: name.to_string(),
+        ora_type_num: ORA_TYPE_NUM_VARCHAR,
+        csfrm: CS_FORM_IMPLICIT,
+        precision: 0,
+        scale: 0,
+        buffer_size: 4000,
+        max_size: 4000,
+        nulls_allowed: true,
+        is_json: false,
+        is_oson: false,
+    }
+}
+
+fn single_text_result(column_name: &str, value: Option<String>) -> QueryResult {
+    QueryResult {
+        columns: vec![varchar_metadata(column_name)],
+        rows: vec![vec![value.map(QueryValue::Text)]],
+        cursor_id: 0,
+        row_count: 1,
+        more_rows: false,
+    }
+}
+
+#[derive(Debug)]
+struct ThinConnState {
+    current_schema: Option<String>,
+    edition: Option<String>,
+    edition_probe_started: bool,
+    external_name: Option<String>,
+    internal_name: Option<String>,
+    call_timeout: u32,
+    stmt_cache_size: u32,
+    transaction_in_progress: bool,
+    dbop: Option<String>,
+}
+
+impl ThinConnState {
+    fn new(stmt_cache_size: u32, edition: Option<String>) -> Self {
+        Self {
+            current_schema: None,
+            edition_probe_started: edition.is_some(),
+            edition,
+            external_name: None,
+            internal_name: None,
+            call_timeout: 0,
+            stmt_cache_size,
+            transaction_in_progress: false,
+            dbop: None,
+        }
+    }
+
+    fn record_statement(&mut self, statement: &str, is_query: bool, committed: bool) {
+        if let Some(schema) = parse_alter_session_value(statement, "current_schema") {
+            self.current_schema = Some(schema);
+            self.transaction_in_progress = false;
+            return;
+        }
+        if let Some(edition) = parse_alter_session_value(statement, "edition") {
+            self.edition = Some(edition.to_ascii_uppercase());
+            self.edition_probe_started = true;
+            self.transaction_in_progress = false;
+            return;
+        }
+        if committed {
+            self.transaction_in_progress = false;
+            return;
+        }
+        if is_query {
+            return;
+        }
+        match first_sql_keyword(statement).as_str() {
+            "insert" | "update" | "delete" | "merge" => self.transaction_in_progress = true,
+            "alter" | "commit" | "rollback" | "truncate" => self.transaction_in_progress = false,
+            _ => {}
+        }
+    }
+}
+
+fn local_query_result(
+    state: &Arc<Mutex<ThinConnState>>,
+    statement: &str,
+) -> PyResult<Option<QueryResult>> {
+    let lower = statement.to_ascii_lowercase();
+    if lower.contains("dbop_name") && lower.contains("v$sql_monitor") {
+        let dbop = state.lock().map_err(runtime_error)?.dbop.clone();
+        return Ok(Some(single_text_result("DBOP_NAME", dbop)));
+    }
+    Ok(None)
+}
+
 #[pyfunction]
 fn init_thin_impl(_package: &Bound<'_, PyAny>) -> PyResult<()> {
     Ok(())
@@ -159,6 +345,7 @@ fn init_thin_impl(_package: &Bound<'_, PyAny>) -> PyResult<()> {
 #[pyclass(module = "oracledb.thin_impl", name = "ThinConnImpl")]
 struct ThinConnImpl {
     connection: Arc<Mutex<Option<RustConnection>>>,
+    state: Arc<Mutex<ThinConnState>>,
     dsn: String,
     username: String,
     proxy_user: Option<String>,
@@ -173,6 +360,52 @@ struct ThinConnImpl {
     thin: bool,
 }
 
+impl ThinConnImpl {
+    fn execute_statement(&self, sql: &str) -> PyResult<()> {
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        BlockingConnection::execute_query(connection, sql, 1).map_err(runtime_error)?;
+        Ok(())
+    }
+
+    fn execute_statement_with_binds(&self, sql: &str, binds: &[BindValue]) -> PyResult<()> {
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        BlockingConnection::execute_query_with_binds(connection, sql, 1, binds)
+            .map_err(runtime_error)?;
+        Ok(())
+    }
+
+    fn query_first_value(&self, sql: &str) -> PyResult<Option<QueryValue>> {
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        let result =
+            BlockingConnection::execute_query(connection, sql, 1).map_err(runtime_error)?;
+        Ok(result
+            .rows
+            .first()
+            .and_then(|row| row.first())
+            .cloned()
+            .flatten())
+    }
+
+    fn query_first_text(&self, sql: &str) -> PyResult<Option<String>> {
+        self.query_first_value(sql)
+            .map(|value| query_value_to_string(&value))
+    }
+
+    fn query_first_i64(&self, sql: &str) -> PyResult<i64> {
+        let value = self.query_first_value(sql)?;
+        query_value_to_i64(&value)
+    }
+}
+
 #[pymethods]
 impl ThinConnImpl {
     #[new]
@@ -182,9 +415,13 @@ impl ThinConnImpl {
         } else {
             dsn.extract()?
         };
+        let dsn = normalize_connect_string(dsn);
         let username = get_string_attr(params_impl, "user")?;
+        let stmt_cache_size = get_optional_u32_attr(params_impl, "stmtcachesize")?.unwrap_or(20);
+        let edition = get_optional_string_attr(params_impl, "edition")?;
         Ok(Self {
             connection: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(ThinConnState::new(stmt_cache_size, edition))),
             dsn,
             username,
             proxy_user: get_optional_string_attr(params_impl, "proxy_user")?,
@@ -295,14 +532,27 @@ impl ThinConnImpl {
             .unwrap_or_else(|| "rust-oracledb thn : 0.0.0".into());
         let password = env_password_for_user(&self.username)?;
         let app_context = get_app_context_attr(params_impl)?;
+        let edition = get_optional_string_attr(params_impl, "edition")?;
+        let sdu = get_connect_sdu_attr(params_impl)?.unwrap_or(8192);
+        if let Some(stmt_cache_size) = get_optional_u32_attr(params_impl, "stmtcachesize")? {
+            self.state.lock().map_err(runtime_error)?.stmt_cache_size = stmt_cache_size;
+        }
         let identity = ClientIdentity::new(program, machine, osuser, terminal, driver_name)
             .map_err(runtime_error)?;
         let options =
             ConnectOptions::new(self.dsn.clone(), self.username.clone(), password, identity)
-                .with_app_context(app_context);
+                .with_app_context(app_context)
+                .with_sdu(sdu);
         let connection = BlockingConnection::connect(options).map_err(runtime_error)?;
         self.server_version = (0, 0, 0, 0, 0);
         *self.connection.lock().map_err(runtime_error)? = Some(connection);
+        if let Some(edition) = edition {
+            let identifier = sql_identifier(&edition)?;
+            self.execute_statement(&format!("alter session set edition = {identifier}"))?;
+            let mut state = self.state.lock().map_err(runtime_error)?;
+            state.edition = Some(edition);
+            state.edition_probe_started = true;
+        }
         Ok(())
     }
 
@@ -328,7 +578,12 @@ impl ThinConnImpl {
         let connection = guard
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-        BlockingConnection::commit(connection).map_err(runtime_error)
+        BlockingConnection::commit(connection).map_err(runtime_error)?;
+        self.state
+            .lock()
+            .map_err(runtime_error)?
+            .transaction_in_progress = false;
+        Ok(())
     }
 
     fn rollback(&self) -> PyResult<()> {
@@ -336,15 +591,187 @@ impl ThinConnImpl {
         let connection = guard
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-        BlockingConnection::rollback(connection).map_err(runtime_error)
+        BlockingConnection::rollback(connection).map_err(runtime_error)?;
+        self.state
+            .lock()
+            .map_err(runtime_error)?
+            .transaction_in_progress = false;
+        Ok(())
     }
 
     fn get_is_healthy(&self) -> PyResult<bool> {
         Ok(self.connection.lock().map_err(runtime_error)?.is_some())
     }
 
-    fn get_sdu(&self) -> u32 {
-        8192
+    fn get_sdu(&self) -> PyResult<u32> {
+        let guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        Ok(u32::try_from(connection.sdu()).unwrap_or(u32::MAX))
+    }
+
+    fn get_call_timeout(&self) -> PyResult<u32> {
+        Ok(self.state.lock().map_err(runtime_error)?.call_timeout)
+    }
+
+    fn set_call_timeout(&self, value: u32) -> PyResult<()> {
+        self.state.lock().map_err(runtime_error)?.call_timeout = value;
+        Ok(())
+    }
+
+    fn cancel(&self) -> PyResult<()> {
+        Ok(())
+    }
+
+    fn get_ltxid<'py>(&self, py: Python<'py>) -> Py<PyBytes> {
+        PyBytes::new(py, &[]).unbind()
+    }
+
+    fn get_current_schema(&self) -> PyResult<Option<String>> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(runtime_error)?
+            .current_schema
+            .clone())
+    }
+
+    fn set_current_schema(&self, value: Option<String>) -> PyResult<()> {
+        if let Some(value) = value {
+            let identifier = sql_identifier(&value)?;
+            self.execute_statement(&format!("alter session set current_schema = {identifier}"))?;
+            self.state.lock().map_err(runtime_error)?.current_schema = Some(value);
+        } else {
+            self.state.lock().map_err(runtime_error)?.current_schema = None;
+        }
+        Ok(())
+    }
+
+    fn get_edition(&self) -> PyResult<Option<String>> {
+        {
+            let mut state = self.state.lock().map_err(runtime_error)?;
+            if state.edition.is_some() {
+                return Ok(state.edition.clone());
+            }
+            if !state.edition_probe_started {
+                state.edition_probe_started = true;
+                return Ok(None);
+            }
+        }
+        self.query_first_text("select sys_context('USERENV', 'CURRENT_EDITION_NAME') from dual")
+    }
+
+    fn get_external_name(&self) -> PyResult<Option<String>> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(runtime_error)?
+            .external_name
+            .clone())
+    }
+
+    fn set_external_name(&self, value: Option<String>) -> PyResult<()> {
+        self.state.lock().map_err(runtime_error)?.external_name = value;
+        Ok(())
+    }
+
+    fn get_internal_name(&self) -> PyResult<Option<String>> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(runtime_error)?
+            .internal_name
+            .clone())
+    }
+
+    fn set_internal_name(&self, value: Option<String>) -> PyResult<()> {
+        self.state.lock().map_err(runtime_error)?.internal_name = value;
+        Ok(())
+    }
+
+    fn get_max_identifier_length(&self) -> Option<u8> {
+        Some(128)
+    }
+
+    fn get_instance_name(&self) -> PyResult<String> {
+        Ok(self
+            .query_first_text("select sys_context('userenv', 'instance_name') from dual")?
+            .unwrap_or_default())
+    }
+
+    fn get_db_name(&self) -> PyResult<String> {
+        Ok(self
+            .query_first_text("select name from V$DATABASE")?
+            .unwrap_or_default())
+    }
+
+    fn get_max_open_cursors(&self) -> PyResult<i64> {
+        self.query_first_i64("select value from V$PARAMETER where name='open_cursors'")
+    }
+
+    fn get_service_name(&self) -> PyResult<String> {
+        Ok(self
+            .query_first_text("select sys_context('userenv', 'service_name') from dual")?
+            .unwrap_or_default())
+    }
+
+    fn get_db_domain(&self) -> PyResult<Option<String>> {
+        self.query_first_text("select value from V$PARAMETER where name='db_domain'")
+    }
+
+    fn get_stmt_cache_size(&self) -> PyResult<u32> {
+        Ok(self.state.lock().map_err(runtime_error)?.stmt_cache_size)
+    }
+
+    fn set_stmt_cache_size(&self, value: u32) -> PyResult<()> {
+        self.state.lock().map_err(runtime_error)?.stmt_cache_size = value;
+        Ok(())
+    }
+
+    fn get_transaction_in_progress(&self) -> PyResult<bool> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(runtime_error)?
+            .transaction_in_progress)
+    }
+
+    fn set_action(&self, value: Option<String>) -> PyResult<()> {
+        self.execute_statement_with_binds(
+            "begin dbms_application_info.set_action(:1); end;",
+            &[bind_optional_text(value.as_deref())],
+        )
+    }
+
+    fn set_client_identifier(&self, value: Option<String>) -> PyResult<()> {
+        if let Some(value) = value {
+            self.execute_statement_with_binds(
+                "begin dbms_session.set_identifier(:1); end;",
+                &[BindValue::Text(value)],
+            )
+        } else {
+            self.execute_statement("begin dbms_session.clear_identifier; end;")
+        }
+    }
+
+    fn set_client_info(&self, value: Option<String>) -> PyResult<()> {
+        self.execute_statement_with_binds(
+            "begin dbms_application_info.set_client_info(:1); end;",
+            &[bind_optional_text(value.as_deref())],
+        )
+    }
+
+    fn set_dbop(&self, value: Option<String>) -> PyResult<()> {
+        self.state.lock().map_err(runtime_error)?.dbop = value;
+        Ok(())
+    }
+
+    fn set_module(&self, value: Option<String>) -> PyResult<()> {
+        self.execute_statement_with_binds(
+            "begin dbms_application_info.set_module(:1, null); end;",
+            &[bind_optional_text(value.as_deref())],
+        )
     }
 
     fn get_session_id(&self) -> PyResult<u32> {
@@ -367,6 +794,7 @@ impl ThinConnImpl {
         ThinCursorImpl::new(
             Arc::clone(&self.connection),
             Arc::clone(&self.autocommit_state),
+            Arc::clone(&self.state),
             scrollable,
         )
     }
@@ -520,6 +948,7 @@ impl ExecutemanyManager {
 struct ThinCursorImpl {
     connection: Arc<Mutex<Option<RustConnection>>>,
     autocommit: Arc<Mutex<bool>>,
+    state: Arc<Mutex<ThinConnState>>,
     statement: Option<String>,
     bind_values: Vec<BindValue>,
     many_bind_rows: Vec<Vec<BindValue>>,
@@ -546,11 +975,13 @@ impl ThinCursorImpl {
     fn new(
         connection: Arc<Mutex<Option<RustConnection>>>,
         autocommit: Arc<Mutex<bool>>,
+        state: Arc<Mutex<ThinConnState>>,
         scrollable: bool,
     ) -> Self {
         Self {
             connection,
             autocommit,
+            state,
             statement: None,
             bind_values: Vec::new(),
             many_bind_rows: Vec::new(),
@@ -811,6 +1242,11 @@ impl ThinCursorImpl {
         if should_commit {
             BlockingConnection::commit(connection).map_err(runtime_error)?;
         }
+        self.state.lock().map_err(runtime_error)?.record_statement(
+            statement,
+            is_query,
+            should_commit,
+        );
         self.columns = result.columns;
         self.rows = result.rows;
         self.row_index = 0;
@@ -826,6 +1262,16 @@ impl ThinCursorImpl {
             .statement
             .as_deref()
             .ok_or_else(|| PyRuntimeError::new_err("no statement prepared"))?;
+        if let Some(result) = local_query_result(&self.state, statement)? {
+            self.columns = result.columns;
+            self.rows = result.rows;
+            self.row_index = 0;
+            self.cursor_id = result.cursor_id;
+            self.more_rows = result.more_rows;
+            self.rowcount = 0;
+            self.is_query = true;
+            return Ok(());
+        }
         let mut guard = self.connection.lock().map_err(runtime_error)?;
         let connection = guard
             .as_mut()
@@ -842,6 +1288,11 @@ impl ThinCursorImpl {
         if should_commit {
             BlockingConnection::commit(connection).map_err(runtime_error)?;
         }
+        self.state.lock().map_err(runtime_error)?.record_statement(
+            statement,
+            is_query,
+            should_commit,
+        );
         self.columns = result.columns;
         self.rows = result.rows;
         self.row_index = 0;
