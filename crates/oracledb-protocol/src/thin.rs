@@ -53,6 +53,7 @@ pub const ORA_TYPE_NUM_RAW: u8 = 23;
 pub const ORA_TYPE_NUM_CURSOR: u8 = 102;
 pub const ORA_TYPE_NUM_LONG_RAW: u8 = 24;
 pub const ORA_TYPE_NUM_CHAR: u8 = 96;
+pub const ORA_TYPE_NUM_OBJECT: u8 = 109;
 
 pub const CS_FORM_IMPLICIT: u8 = 1;
 pub const CS_FORM_NCHAR: u8 = 2;
@@ -214,6 +215,8 @@ pub struct ColumnMetadata {
     pub nulls_allowed: bool,
     pub is_json: bool,
     pub is_oson: bool,
+    pub object_schema: Option<String>,
+    pub object_type_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -786,6 +789,8 @@ fn bind_column_metadata(value: &BindValue) -> ColumnMetadata {
         nulls_allowed: true,
         is_json: false,
         is_oson: false,
+        object_schema: None,
+        object_type_name: None,
     }
 }
 
@@ -1145,8 +1150,8 @@ fn parse_column_metadata(
     let nulls_allowed = reader.read_u8()? != 0;
     reader.skip(1)?;
     let name = reader.read_string_with_length()?.unwrap_or_default();
-    let _schema = reader.read_string_with_length()?;
-    let _type_name = reader.read_string_with_length()?;
+    let object_schema = reader.read_string_with_length()?;
+    let object_type_name = reader.read_string_with_length()?;
     let _column_position = reader.read_ub2()?;
     let uds_flags = reader.read_ub4()?;
     if capabilities.ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1 {
@@ -1183,6 +1188,8 @@ fn parse_column_metadata(
         nulls_allowed,
         is_json: uds_flags & TNS_UDS_FLAGS_IS_JSON != 0,
         is_oson: uds_flags & TNS_UDS_FLAGS_IS_OSON != 0,
+        object_schema,
+        object_type_name,
     })
 }
 
@@ -1325,8 +1332,22 @@ fn parse_column_value(
             decode_number_value(&bytes).map(Some)
         }
         ORA_TYPE_NUM_CURSOR => parse_cursor_value(reader).map(Some),
+        ORA_TYPE_NUM_OBJECT => parse_object_value(reader).map(|()| None),
         _ => Err(ProtocolError::UnsupportedFeature("query column type")),
     }
+}
+
+fn parse_object_value(reader: &mut TtcReader<'_>) -> Result<()> {
+    let _toid = reader.read_bytes_with_length()?;
+    let _oid = reader.read_bytes_with_length()?;
+    let _snapshot = reader.read_bytes_with_length()?;
+    let _version = reader.read_ub2()?;
+    let num_bytes = reader.read_ub4()?;
+    reader.skip(2)?;
+    if num_bytes > 0 {
+        let _packed_data = reader.read_bytes()?;
+    }
+    Ok(())
 }
 
 fn parse_cursor_value(reader: &mut TtcReader<'_>) -> Result<QueryValue> {
@@ -1967,6 +1988,8 @@ mod tests {
             nulls_allowed: true,
             is_json: false,
             is_oson: false,
+            object_schema: None,
+            object_type_name: None,
         }
     }
 }

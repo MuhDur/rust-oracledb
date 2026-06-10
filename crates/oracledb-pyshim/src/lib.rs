@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use oracledb::protocol::thin::{
     BindValue, ColumnMetadata, QueryResult, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR,
     ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW,
-    ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_VARCHAR,
+    ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection};
@@ -99,6 +99,25 @@ fn raise_call_timeout_exceeded(timeout: u32) -> PyErr {
         }
     })
     .unwrap_or_else(|_| PyRuntimeError::new_err(format!("call timeout of {timeout} ms exceeded")))
+}
+
+fn raise_invalid_object_type_name(name: &str) -> PyErr {
+    Python::attach(|py| -> PyResult<PyErr> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        let error_num = errors.getattr("ERR_INVALID_OBJECT_TYPE_NAME")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("name", name)?;
+        match errors
+            .getattr("_raise_err")?
+            .call((error_num,), Some(&kwargs))
+        {
+            Ok(_) => Ok(PyRuntimeError::new_err(
+                "oracledb.errors._raise_err(ERR_INVALID_OBJECT_TYPE_NAME) returned without raising",
+            )),
+            Err(err) => Ok(err),
+        }
+    })
+    .unwrap_or_else(|_| PyRuntimeError::new_err(format!("invalid object type name: {name}")))
 }
 
 fn get_string_attr(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<String> {
@@ -861,6 +880,8 @@ fn varchar_metadata(name: &str) -> ColumnMetadata {
         nulls_allowed: true,
         is_json: false,
         is_oson: false,
+        object_schema: None,
+        object_type_name: None,
     }
 }
 
@@ -1225,6 +1246,27 @@ impl ThinConnImpl {
             .flatten())
     }
 
+    fn query_first_row_with_binds(
+        &self,
+        sql: &str,
+        binds: &[BindValue],
+    ) -> PyResult<Option<Vec<Option<QueryValue>>>> {
+        let call_timeout = self.call_timeout()?;
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        let result = BlockingConnection::execute_query_with_binds_and_timeout(
+            connection,
+            sql,
+            1,
+            binds,
+            call_timeout,
+        )
+        .map_err(runtime_error)?;
+        Ok(result.rows.into_iter().next())
+    }
+
     fn query_first_text(&self, sql: &str) -> PyResult<Option<String>> {
         self.query_first_value(sql)
             .map(|value| query_value_to_string(&value))
@@ -1509,6 +1551,50 @@ impl ThinConnImpl {
         Ok(u32::try_from(connection.sdu()).unwrap_or(u32::MAX))
     }
 
+    fn get_type(&self, _conn: &Bound<'_, PyAny>, name: &str) -> PyResult<DbObjectTypeImpl> {
+        let parts: Vec<&str> = name
+            .split('.')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect();
+        let requested_type_name = parts.last().copied().unwrap_or(name).to_ascii_uppercase();
+        let requested_owner = (parts.len() == 2).then(|| parts[0].to_ascii_uppercase());
+        let mut sql = String::from(
+            "select owner, type_name, typecode \
+             from all_types \
+             where type_name = :1",
+        );
+        let mut binds = vec![BindValue::Text(requested_type_name.clone())];
+        if let Some(owner) = requested_owner {
+            sql.push_str(" and owner = :2");
+            binds.push(BindValue::Text(owner));
+        } else {
+            sql.push_str(" and owner = sys_context('USERENV', 'CURRENT_SCHEMA')");
+        }
+        sql.push_str(" order by owner");
+        let Some(row) = self.query_first_row_with_binds(&sql, &binds)? else {
+            return Err(raise_invalid_object_type_name(name));
+        };
+        let schema = row
+            .first()
+            .and_then(query_value_to_string)
+            .unwrap_or_else(|| self.username.to_ascii_uppercase());
+        let type_name = row
+            .get(1)
+            .and_then(query_value_to_string)
+            .unwrap_or(requested_type_name);
+        let typecode = row
+            .get(2)
+            .and_then(query_value_to_string)
+            .unwrap_or_else(|| "OBJECT".to_string());
+        Ok(DbObjectTypeImpl::new(
+            schema.to_ascii_uppercase(),
+            None,
+            type_name.to_ascii_uppercase(),
+            &typecode,
+        ))
+    }
+
     fn get_call_timeout(&self) -> PyResult<u32> {
         Ok(self.state.lock().map_err(runtime_error)?.call_timeout)
     }
@@ -1715,6 +1801,89 @@ impl ThinConnImpl {
     }
 }
 
+#[pyclass(module = "oracledb.thin_impl", name = "ThinDbObjectTypeImpl")]
+#[derive(Debug, Eq, PartialEq)]
+struct DbObjectTypeImpl {
+    schema: String,
+    package_name: Option<String>,
+    name: String,
+    is_collection: bool,
+}
+
+impl DbObjectTypeImpl {
+    fn new(schema: String, package_name: Option<String>, name: String, typecode: &str) -> Self {
+        Self {
+            schema,
+            package_name,
+            name,
+            is_collection: typecode.eq_ignore_ascii_case("COLLECTION"),
+        }
+    }
+
+    fn from_column_metadata(metadata: &ColumnMetadata) -> Option<Self> {
+        let name = metadata.object_type_name.as_ref()?.to_ascii_uppercase();
+        let schema = metadata
+            .object_schema
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        Some(Self::new(schema, None, name, "OBJECT"))
+    }
+}
+
+#[pymethods]
+impl DbObjectTypeImpl {
+    #[getter]
+    fn schema(&self) -> &str {
+        &self.schema
+    }
+
+    #[getter]
+    fn package_name(&self) -> Option<&str> {
+        self.package_name.as_deref()
+    }
+
+    #[getter]
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[getter]
+    fn is_collection(&self) -> bool {
+        self.is_collection
+    }
+
+    #[getter]
+    fn attrs(&self, py: Python<'_>) -> Py<PyAny> {
+        PyList::empty(py).unbind().into()
+    }
+
+    #[getter]
+    fn element_metadata(&self, py: Python<'_>) -> Py<PyAny> {
+        py.None()
+    }
+
+    fn _get_fqn(&self) -> String {
+        if let Some(package_name) = &self.package_name {
+            format!("{}.{}.{}", self.schema, package_name, self.name)
+        } else {
+            format!("{}.{}", self.schema, self.name)
+        }
+    }
+
+    fn create_new_object(&self) -> PyResult<()> {
+        Err(not_implemented("ThinDbObjectTypeImpl.create_new_object"))
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self == other
+    }
+
+    fn __ne__(&self, other: &Self) -> bool {
+        self != other
+    }
+}
+
 #[pyclass(
     module = "oracledb.thin_impl",
     name = "FetchMetadataImpl",
@@ -1743,6 +1912,7 @@ impl FetchMetadataImpl {
             ORA_TYPE_NUM_VARCHAR | ORA_TYPE_NUM_CHAR | ORA_TYPE_NUM_LONG => "DB_TYPE_VARCHAR",
             ORA_TYPE_NUM_RAW | ORA_TYPE_NUM_LONG_RAW => "DB_TYPE_RAW",
             ORA_TYPE_NUM_NUMBER => "DB_TYPE_NUMBER",
+            ORA_TYPE_NUM_OBJECT => "DB_TYPE_OBJECT",
             _ => "DB_TYPE_VARCHAR",
         };
         Ok(module.getattr(name)?.unbind())
@@ -1784,7 +1954,10 @@ impl FetchMetadataImpl {
     }
 
     #[getter]
-    fn objtype(&self) -> Option<Py<PyAny>> {
+    fn objtype(&self) -> Option<DbObjectTypeImpl> {
+        if self.metadata.ora_type_num == ORA_TYPE_NUM_OBJECT {
+            return DbObjectTypeImpl::from_column_metadata(&self.metadata);
+        }
         None
     }
 
@@ -2811,6 +2984,7 @@ fn oracledb_pyshim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(record_next_connect_args, m)?)?;
     m.add_function(wrap_pyfunction!(discard_pending_connect_args, m)?)?;
     m.add_class::<ThinConnImpl>()?;
+    m.add_class::<DbObjectTypeImpl>()?;
     m.add_class::<ThinCursorImpl>()?;
     m.add_class::<FetchMetadataImpl>()?;
     m.add_class::<ExecutemanyManager>()?;
