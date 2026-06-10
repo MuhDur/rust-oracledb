@@ -53,6 +53,7 @@ pub const ORA_TYPE_NUM_RAW: u8 = 23;
 pub const ORA_TYPE_NUM_CURSOR: u8 = 102;
 pub const ORA_TYPE_NUM_LONG_RAW: u8 = 24;
 pub const ORA_TYPE_NUM_CHAR: u8 = 96;
+pub const ORA_TYPE_NUM_CLOB: u8 = 112;
 pub const ORA_TYPE_NUM_OBJECT: u8 = 109;
 
 pub const CS_FORM_IMPLICIT: u8 = 1;
@@ -85,6 +86,7 @@ const TNS_RCAP_TTC: usize = 6;
 const TNS_RCAP_TTC_32K: u8 = 0x04;
 const TNS_EXEC_OPTION_PARSE: u32 = 0x01;
 const TNS_EXEC_OPTION_BIND: u32 = 0x08;
+const TNS_EXEC_OPTION_DEFINE: u32 = 0x10;
 const TNS_EXEC_OPTION_EXECUTE: u32 = 0x20;
 const TNS_EXEC_OPTION_FETCH: u32 = 0x40;
 const TNS_EXEC_OPTION_PLSQL_BIND: u32 = 0x400;
@@ -417,6 +419,17 @@ pub fn build_execute_payload_with_bind_rows_with_seq(
             length: bind_rows.len(),
             minimum: 0,
         })?;
+    let has_ref_cursor_output = bind_rows.iter().any(|row| {
+        row.iter().any(|value| {
+            matches!(
+                value,
+                BindValue::Output {
+                    ora_type_num: ORA_TYPE_NUM_CURSOR,
+                    ..
+                }
+            )
+        })
+    });
     let mut writer = TtcWriter::new();
     writer.write_function_code_with_seq(TNS_FUNC_EXECUTE, seq_num);
     writer.write_ub8(0);
@@ -439,7 +452,7 @@ pub fn build_execute_payload_with_bind_rows_with_seq(
     let num_iters = if is_query { prefetch_rows } else { 1 };
     let exec_count = if is_query { 0 } else { bind_row_count.max(1) };
     let query_flag = u32::from(is_query);
-    let exec_flags = if is_query {
+    let exec_flags = if is_query || has_ref_cursor_output {
         TNS_EXEC_FLAGS_IMPLICIT_RESULTSET
     } else {
         0
@@ -503,7 +516,7 @@ pub fn build_execute_payload_with_bind_rows_with_seq(
     writer.write_ub4(0);
     writer.write_ub4(0);
     if !bind_rows.is_empty() {
-        write_bind_params(&mut writer, bind_rows)?;
+        write_bind_params(&mut writer, bind_rows, is_plsql)?;
     }
     Ok(writer.into_bytes())
 }
@@ -519,7 +532,11 @@ fn statement_is_plsql(sql: &str) -> bool {
         })
 }
 
-fn write_bind_params(writer: &mut TtcWriter, bind_rows: &[Vec<BindValue>]) -> Result<()> {
+fn write_bind_params(
+    writer: &mut TtcWriter,
+    bind_rows: &[Vec<BindValue>],
+    is_plsql: bool,
+) -> Result<()> {
     let Some(first_row) = bind_rows.first() else {
         return Ok(());
     };
@@ -527,12 +544,12 @@ fn write_bind_params(writer: &mut TtcWriter, bind_rows: &[Vec<BindValue>]) -> Re
         write_bind_metadata(writer, value);
     }
     for row in bind_rows {
-        if row.iter().all(BindValue::is_output_only) {
+        if !is_plsql && row.iter().all(BindValue::is_output_only) {
             continue;
         }
         writer.write_u8(TNS_MSG_TYPE_ROW_DATA);
         for value in row {
-            if value.is_output_only() {
+            if !is_plsql && value.is_output_only() {
                 continue;
             }
             write_bind_value(writer, value)?;
@@ -584,7 +601,10 @@ fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
         BindValue::Text(value) => (
             ORA_TYPE_NUM_VARCHAR,
             CS_FORM_IMPLICIT,
-            u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
+            u32::try_from(value.chars().count())
+                .unwrap_or(u32::MAX)
+                .saturating_mul(4)
+                .max(1),
         ),
         BindValue::Raw(value) => (
             ORA_TYPE_NUM_RAW,
@@ -610,7 +630,10 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue) -> Result<()> {
             writer.write_u8(0);
             Ok(())
         }
-        BindValue::Output { .. } => Ok(()),
+        BindValue::Output { .. } => {
+            writer.write_u8(0);
+            Ok(())
+        }
         BindValue::Text(value) => writer.write_bytes_with_length(value.as_bytes()),
         BindValue::Raw(value) => writer.write_bytes_with_length(value),
         BindValue::Number(value) => {
@@ -641,6 +664,97 @@ pub fn build_fetch_payload_with_seq(cursor_id: u32, arraysize: u32, seq_num: u8)
     writer.write_ub4(cursor_id);
     writer.write_ub4(arraysize);
     writer.into_bytes()
+}
+
+pub fn build_define_fetch_payload_with_seq(
+    cursor_id: u32,
+    arraysize: u32,
+    seq_num: u8,
+    define_columns: &[ColumnMetadata],
+) -> Result<Vec<u8>> {
+    let define_count =
+        u32::try_from(define_columns.len()).map_err(|_| ProtocolError::InvalidPacketLength {
+            length: define_columns.len(),
+            minimum: 0,
+        })?;
+    let mut writer = TtcWriter::new();
+    writer.write_function_code_with_seq(TNS_FUNC_EXECUTE, seq_num);
+    writer.write_ub8(0);
+    writer.write_ub4(TNS_EXEC_OPTION_DEFINE | TNS_EXEC_OPTION_NOT_PLSQL);
+    writer.write_ub4(cursor_id);
+    writer.write_u8(0);
+    writer.write_ub4(0);
+    writer.write_u8(1);
+    writer.write_ub4(13);
+    writer.write_u8(0);
+    writer.write_u8(0);
+    writer.write_ub4(0);
+    writer.write_ub4(arraysize);
+    writer.write_ub4(TNS_MAX_LONG_LENGTH);
+    writer.write_u8(0);
+    writer.write_ub4(0);
+    writer.write_u8(0);
+    writer.write_u8(0);
+    writer.write_u8(0);
+    writer.write_u8(0);
+    writer.write_u8(0);
+    writer.write_u8(1);
+    writer.write_ub4(define_count);
+    writer.write_ub4(0);
+    writer.write_u8(0);
+    writer.write_u8(1);
+    writer.write_u8(0);
+    writer.write_ub4(0);
+    writer.write_u8(0);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_u8(0);
+    writer.write_ub4(0);
+    writer.write_u8(0);
+    writer.write_u8(0);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_ub4(arraysize);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_ub4(1);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    for metadata in define_columns {
+        write_define_column_metadata(&mut writer, metadata);
+    }
+    Ok(writer.into_bytes())
+}
+
+fn write_define_column_metadata(writer: &mut TtcWriter, metadata: &ColumnMetadata) {
+    writer.write_u8(metadata.ora_type_num);
+    writer.write_u8(TNS_BIND_USE_INDICATORS);
+    writer.write_u8(0);
+    writer.write_u8(0);
+    writer.write_ub4(metadata.buffer_size.max(1));
+    writer.write_ub4(0);
+    writer.write_ub8(0);
+    writer.write_ub4(0);
+    writer.write_ub2(0);
+    if metadata.csfrm != 0 {
+        writer.write_ub2(TNS_CHARSET_UTF8);
+    } else {
+        writer.write_ub2(0);
+    }
+    writer.write_u8(metadata.csfrm);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
 }
 
 pub fn parse_query_response(
@@ -714,6 +828,7 @@ fn parse_query_response_with_context_and_binds(
     while reader.remaining() > 0 {
         let message_type = reader.read_u8()?;
         match message_type {
+            0 => {}
             TNS_MSG_TYPE_DESCRIBE_INFO => {
                 let _describe_name = reader.read_bytes()?;
                 result.columns.clear();

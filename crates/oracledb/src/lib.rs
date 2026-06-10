@@ -9,14 +9,14 @@ use std::time::Duration;
 use asupersync::{runtime::RuntimeBuilder, Cx};
 use oracledb_protocol::thin::{
     build_auth_phase_two_payload_with_context_with_seq, build_connect_packet_payload,
-    build_execute_payload_with_bind_rows_with_seq, build_execute_payload_with_binds_with_seq,
-    build_execute_payload_with_seq, build_fast_auth_phase_one_payload,
-    build_fetch_payload_with_seq, build_function_payload_with_seq, parse_accept_payload,
-    parse_auth_response, parse_query_response, parse_query_response_with_binds,
-    parse_query_response_with_context, BindValue, ClientCapabilities, ColumnMetadata, QueryResult,
-    TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_PACKET_TYPE_ACCEPT,
-    TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT,
-    TNS_PACKET_TYPE_REFUSE,
+    build_define_fetch_payload_with_seq, build_execute_payload_with_bind_rows_with_seq,
+    build_execute_payload_with_binds_with_seq, build_execute_payload_with_seq,
+    build_fast_auth_phase_one_payload, build_fetch_payload_with_seq,
+    build_function_payload_with_seq, parse_accept_payload, parse_auth_response,
+    parse_query_response, parse_query_response_with_binds, parse_query_response_with_context,
+    BindValue, ClientCapabilities, ColumnMetadata, QueryResult, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF,
+    TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT,
+    TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE,
 };
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};
@@ -307,6 +307,19 @@ impl Connection {
     ) -> Result<QueryResult> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
+        let has_ref_cursor_output = binds.iter().any(|value| {
+            matches!(
+                value,
+                BindValue::Output {
+                    ora_type_num: oracledb_protocol::thin::ORA_TYPE_NUM_CURSOR,
+                    ..
+                }
+            )
+        });
+        if has_ref_cursor_output {
+            // python-oracledb reserves this sequence slot for a close-cursor piggyback.
+            let _ = next_ttc_sequence(&mut self.ttc_seq_num);
+        }
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_execute_payload_with_binds_with_seq(
             sql,
@@ -391,6 +404,36 @@ impl Connection {
         let result =
             parse_query_response_with_context(&response, self.capabilities, &columns, previous_row)
                 .map_err(Error::from)?;
+        self.remember_cursor_columns(&result);
+        Ok(result)
+    }
+
+    pub async fn define_and_fetch_rows_with_columns(
+        &mut self,
+        cx: &Cx,
+        cursor_id: u32,
+        arraysize: u32,
+        define_columns: &[ColumnMetadata],
+        previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
+    ) -> Result<QueryResult> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload =
+            build_define_fetch_payload_with_seq(cursor_id, arraysize, seq_num, define_columns)?;
+        trace_query_bytes("DEFINE FETCH payload", &payload);
+        send_data_packet(&mut self.stream, &payload, self.sdu)?;
+        let response = read_data_response(&mut self.stream)?;
+        trace_query_bytes("DEFINE FETCH response", &response);
+        let result = parse_query_response_with_context(
+            &response,
+            self.capabilities,
+            define_columns,
+            previous_row,
+        )
+        .map_err(Error::from)?;
+        self.cursor_columns
+            .insert(cursor_id, define_columns.to_vec());
         self.remember_cursor_columns(&result);
         Ok(result)
     }
@@ -612,6 +655,31 @@ impl BlockingConnection {
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection
                 .fetch_rows_with_columns(&cx, cursor_id, arraysize, known_columns, previous_row)
+                .await
+        })
+    }
+
+    pub fn define_and_fetch_rows_with_columns(
+        connection: &mut Connection,
+        cursor_id: u32,
+        arraysize: u32,
+        define_columns: &[ColumnMetadata],
+        previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
+    ) -> Result<QueryResult> {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .define_and_fetch_rows_with_columns(
+                    &cx,
+                    cursor_id,
+                    arraysize,
+                    define_columns,
+                    previous_row,
+                )
                 .await
         })
     }

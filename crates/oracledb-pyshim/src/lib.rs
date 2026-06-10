@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use oracledb::protocol::thin::{
     BindValue, ColumnMetadata, QueryResult, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR,
-    ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW,
-    ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_VARCHAR,
+    ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_LONG,
+    ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW,
+    ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection};
@@ -374,7 +375,7 @@ fn extract_positional_bind_values(
     if let Ok(tuple) = value.cast::<PyTuple>() {
         let values = tuple
             .iter()
-            .map(|item| py_value_to_bind(&item))
+            .map(|item| py_value_to_execute_bind(&item))
             .collect::<PyResult<Vec<_>>>()?;
         validate_positional_bind_count(statement, values.len())?;
         return Ok(values);
@@ -382,7 +383,7 @@ fn extract_positional_bind_values(
     if let Ok(list) = value.cast::<PyList>() {
         let values = list
             .iter()
-            .map(|item| py_value_to_bind(&item))
+            .map(|item| py_value_to_execute_bind(&item))
             .collect::<PyResult<Vec<_>>>()?;
         validate_positional_bind_count(statement, values.len())?;
         return Ok(values);
@@ -391,7 +392,7 @@ fn extract_positional_bind_values(
         .try_iter()
         .map_err(|_| raise_oracledb_driver_error("ERR_WRONG_EXECUTE_PARAMETERS_TYPE"))?;
     let values = iter
-        .map(|item| py_value_to_bind(&item?))
+        .map(|item| py_value_to_execute_bind(&item?))
         .collect::<PyResult<Vec<_>>>()?;
     validate_positional_bind_count(statement, values.len())?;
     Ok(values)
@@ -424,7 +425,7 @@ fn extract_named_bind_values(
                 .any(|return_name| bind_names_equal(return_name, name));
             if let Some(parameters) = parameters {
                 if let Some(value) = get_named_bind_value(parameters, name)? {
-                    let value = py_value_to_bind(&value)?;
+                    let value = py_value_to_execute_bind(&value)?;
                     return Ok(if is_return_bind {
                         output_only_bind(value)
                     } else {
@@ -713,7 +714,10 @@ fn output_only_bind(value: BindValue) -> BindValue {
         BindValue::Text(value) => (
             ORA_TYPE_NUM_VARCHAR,
             CS_FORM_IMPLICIT,
-            u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
+            u32::try_from(value.chars().count())
+                .unwrap_or(u32::MAX)
+                .saturating_mul(4)
+                .max(1),
         ),
         BindValue::Raw(value) => (
             ORA_TYPE_NUM_RAW,
@@ -900,6 +904,67 @@ fn bind_template_from_type(typ: &Bound<'_, PyAny>, size: u32) -> BindValue {
         "DB_TYPE_CURSOR" | "CURSOR" => cursor_bind_template(),
         _ => BindValue::Null,
     }
+}
+
+fn bind_type_info(value: &BindValue) -> Option<(u8, u8, u32)> {
+    match value {
+        BindValue::TypedNull {
+            ora_type_num,
+            csfrm,
+            buffer_size,
+        }
+        | BindValue::Output {
+            ora_type_num,
+            csfrm,
+            buffer_size,
+        } => Some((*ora_type_num, *csfrm, (*buffer_size).max(1))),
+        BindValue::Text(value) => Some((
+            ORA_TYPE_NUM_VARCHAR,
+            CS_FORM_IMPLICIT,
+            u32::try_from(value.chars().count())
+                .unwrap_or(u32::MAX)
+                .saturating_mul(4)
+                .max(1),
+        )),
+        BindValue::Raw(value) => Some((
+            ORA_TYPE_NUM_RAW,
+            0,
+            u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
+        )),
+        BindValue::Number(_) => Some((ORA_TYPE_NUM_NUMBER, 0, 22)),
+        BindValue::Cursor { .. } => Some((ORA_TYPE_NUM_CURSOR, 0, 4)),
+        BindValue::Null => None,
+    }
+}
+
+fn fetch_define_metadata_from_var(source: &ColumnMetadata, value: &BindValue) -> ColumnMetadata {
+    let Some((mut ora_type_num, mut csfrm, buffer_size)) = bind_type_info(value) else {
+        return source.clone();
+    };
+    if source.ora_type_num == ORA_TYPE_NUM_CLOB
+        && matches!(
+            ora_type_num,
+            ORA_TYPE_NUM_CHAR | ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_VARCHAR
+        )
+    {
+        ora_type_num = ORA_TYPE_NUM_LONG;
+        csfrm = if source.csfrm != 0 {
+            source.csfrm
+        } else {
+            csfrm
+        };
+    }
+    let mut metadata = source.clone();
+    metadata.ora_type_num = ora_type_num;
+    metadata.csfrm = csfrm;
+    if ora_type_num == ORA_TYPE_NUM_LONG {
+        metadata.buffer_size = i32::MAX as u32;
+        metadata.max_size = 0;
+    } else {
+        metadata.buffer_size = buffer_size.max(1);
+        metadata.max_size = buffer_size.max(1);
+    }
+    metadata
 }
 
 fn bind_optional_text(value: Option<&str>) -> BindValue {
@@ -1155,11 +1220,35 @@ impl ThinVar {
     }
 }
 
-fn bind_var_from_value(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Py<ThinVar>> {
+fn thin_var_from_value(value: &Bound<'_, PyAny>) -> PyResult<Option<Py<ThinVar>>> {
     if let Ok(var) = value.extract::<Py<ThinVar>>() {
+        return Ok(Some(var));
+    }
+    if value.hasattr("_impl")? {
+        let impl_obj = value.getattr("_impl")?;
+        if let Ok(var) = impl_obj.extract::<Py<ThinVar>>() {
+            return Ok(Some(var));
+        }
+    }
+    Ok(None)
+}
+
+fn bind_var_from_value(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Py<ThinVar>> {
+    if let Some(var) = thin_var_from_value(value)? {
         return Ok(var);
     }
     Py::new(py, ThinVar::from_py_value(Some(value.clone().unbind())))
+}
+
+fn py_value_to_execute_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> {
+    if let Some(var) = thin_var_from_value(value)? {
+        let bind = var.borrow(value.py()).to_bind_value(value.py())?;
+        if is_cursor_bind_template(&bind) {
+            return Ok(output_only_bind(bind));
+        }
+        return Ok(bind);
+    }
+    py_value_to_bind(value)
 }
 
 fn apply_out_bind_values(
@@ -1204,6 +1293,59 @@ fn apply_cursor_out_bind(
     hydrate_cursor_impl(cursor, columns, cursor_id, cursor_id == 0)
 }
 
+#[pyclass(module = "oracledb.thin_impl", name = "FetchHandlerCursor")]
+struct FetchHandlerCursor {
+    connection: Py<PyAny>,
+    arraysize: u32,
+}
+
+#[pymethods]
+impl FetchHandlerCursor {
+    #[getter]
+    fn arraysize(&self) -> u32 {
+        self.arraysize
+    }
+
+    #[getter]
+    fn connection(&self, py: Python<'_>) -> Py<PyAny> {
+        self.connection.clone_ref(py)
+    }
+
+    #[pyo3(signature = (
+        typ,
+        size=0,
+        arraysize=1,
+        _inconverter=None,
+        _outconverter=None,
+        _encoding_errors=None,
+        _bypass_decode=false,
+        convert_nulls=false
+    ))]
+    fn var(
+        &self,
+        py: Python<'_>,
+        typ: &Bound<'_, PyAny>,
+        size: u32,
+        arraysize: u32,
+        _inconverter: Option<Py<PyAny>>,
+        _outconverter: Option<Py<PyAny>>,
+        _encoding_errors: Option<String>,
+        _bypass_decode: bool,
+        convert_nulls: bool,
+    ) -> PyResult<Py<ThinVar>> {
+        let _ = arraysize;
+        let _ = convert_nulls;
+        let default_bind = bind_template_from_type(typ, size);
+        let connection = self.connection.bind(py);
+        let value = if is_cursor_bind_template(&default_bind) {
+            Some(connection.call_method0("cursor")?.unbind())
+        } else {
+            None
+        };
+        Py::new(py, ThinVar::typed_with_value(default_bind, value))
+    }
+}
+
 fn hydrate_cursor_impl(
     cursor: &Bound<'_, PyAny>,
     columns: &[ColumnMetadata],
@@ -1213,6 +1355,7 @@ fn hydrate_cursor_impl(
     let impl_obj = cursor.getattr("_impl")?;
     let mut cursor_impl = impl_obj.extract::<PyRefMut<'_, ThinCursorImpl>>()?;
     cursor_impl.columns = columns.to_vec();
+    cursor_impl.reset_fetch_define_state();
     cursor_impl.rows.clear();
     cursor_impl.row_index = 0;
     cursor_impl.cursor_id = cursor_id;
@@ -2038,6 +2181,11 @@ impl FetchMetadataImpl {
     }
 
     #[getter]
+    fn type_code(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.dbtype(py)
+    }
+
+    #[getter]
     fn max_size(&self) -> u32 {
         self.metadata.max_size
     }
@@ -2163,6 +2311,9 @@ struct ThinCursorImpl {
     bind_names: Vec<String>,
     many_bind_rows: Vec<Vec<BindValue>>,
     columns: Vec<ColumnMetadata>,
+    fetch_vars: Vec<Option<Py<ThinVar>>>,
+    fetch_define_columns: Vec<ColumnMetadata>,
+    requires_define: bool,
     rows: Vec<Vec<Option<QueryValue>>>,
     row_index: usize,
     cursor_id: u32,
@@ -2205,6 +2356,9 @@ impl ThinCursorImpl {
             bind_names: Vec::new(),
             many_bind_rows: Vec::new(),
             columns: Vec::new(),
+            fetch_vars: Vec::new(),
+            fetch_define_columns: Vec::new(),
+            requires_define: false,
             rows: Vec::new(),
             row_index: 0,
             cursor_id: 0,
@@ -2227,6 +2381,74 @@ impl ThinCursorImpl {
             statement_changed: false,
             is_query: false,
         }
+    }
+
+    fn reset_fetch_define_state(&mut self) {
+        self.fetch_vars.clear();
+        self.fetch_define_columns.clear();
+        self.requires_define = false;
+    }
+
+    fn active_output_type_handler(
+        &self,
+        py: Python<'_>,
+        cursor: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        if let Some(handler) = &self.outputtypehandler {
+            return Ok(Some(handler.clone_ref(py)));
+        }
+        let connection = cursor.getattr("connection")?;
+        let conn_impl = connection.getattr("_impl")?;
+        let conn_impl = conn_impl.extract::<PyRef<'_, ThinConnImpl>>()?;
+        Ok(conn_impl
+            .outputtypehandler
+            .as_ref()
+            .map(|handler| handler.clone_ref(py)))
+    }
+
+    fn prepare_fetch_defines(&mut self, py: Python<'_>, cursor: &Bound<'_, PyAny>) -> PyResult<()> {
+        if !self.fetch_define_columns.is_empty() || self.columns.is_empty() {
+            return Ok(());
+        }
+        self.fetch_vars = std::iter::repeat_with(|| None)
+            .take(self.columns.len())
+            .collect();
+        self.fetch_define_columns = self.columns.clone();
+        let Some(handler) = self.active_output_type_handler(py, cursor)? else {
+            return Ok(());
+        };
+        let handler = handler.bind(py);
+        let handler_cursor = Py::new(
+            py,
+            FetchHandlerCursor {
+                connection: cursor.getattr("connection")?.unbind(),
+                arraysize: self.arraysize,
+            },
+        )?;
+        let handler_cursor = handler_cursor.bind(py);
+        for (index, metadata) in self.columns.iter().enumerate() {
+            let pub_metadata = Py::new(
+                py,
+                FetchMetadataImpl {
+                    metadata: metadata.clone(),
+                },
+            )?;
+            let value = handler.call1((handler_cursor, pub_metadata.bind(py)))?;
+            if value.is_none() {
+                continue;
+            }
+            let Some(var) = thin_var_from_value(&value)? else {
+                return Err(raise_oracledb_driver_error("ERR_EXPECTING_VAR"));
+            };
+            let default_bind = var.borrow(py).default_bind.clone();
+            let define_metadata = fetch_define_metadata_from_var(metadata, &default_bind);
+            if define_metadata != *metadata {
+                self.requires_define = true;
+            }
+            self.fetch_define_columns[index] = define_metadata;
+            self.fetch_vars[index] = Some(var);
+        }
+        Ok(())
     }
 }
 
@@ -2276,7 +2498,17 @@ impl ThinCursorImpl {
     #[pyo3(name = "fetch_vars")]
     fn fetch_vars_attr(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if self.is_query {
-            Ok(PyList::empty(py).unbind().into())
+            let values = self
+                .fetch_vars
+                .iter()
+                .map(|value| {
+                    value
+                        .as_ref()
+                        .map(|var| var.clone_ref(py).into_any())
+                        .unwrap_or_else(|| py.None())
+                })
+                .collect::<Vec<_>>();
+            Ok(PyList::new(py, values)?.unbind().into())
         } else {
             Ok(py.None())
         }
@@ -2370,6 +2602,7 @@ impl ThinCursorImpl {
         self.named_input_sizes.clear();
         self.many_bind_rows.clear();
         self.columns.clear();
+        self.reset_fetch_define_state();
         self.rows.clear();
         self.row_index = 0;
         self.cursor_id = 0;
@@ -2559,6 +2792,7 @@ impl ThinCursorImpl {
             should_commit,
         );
         self.columns = result.columns;
+        self.reset_fetch_define_state();
         self.rows = result.rows;
         self.row_index = 0;
         self.cursor_id = result.cursor_id;
@@ -2579,6 +2813,7 @@ impl ThinCursorImpl {
             .ok_or_else(|| PyRuntimeError::new_err("no statement prepared"))?;
         if let Some(result) = local_query_result(&self.state, statement)? {
             self.columns = result.columns;
+            self.reset_fetch_define_state();
             self.rows = result.rows;
             self.row_index = 0;
             self.cursor_id = result.cursor_id;
@@ -2590,6 +2825,7 @@ impl ThinCursorImpl {
         }
         if let Some(result) = local_plsql_result(&self.state, &self.bind_vars, statement)? {
             self.columns = result.columns;
+            self.reset_fetch_define_state();
             self.rows = result.rows;
             self.row_index = 0;
             self.cursor_id = result.cursor_id;
@@ -2655,6 +2891,7 @@ impl ThinCursorImpl {
             should_commit,
         );
         self.columns = result.columns;
+        self.reset_fetch_define_state();
         self.rows = result.rows;
         self.row_index = 0;
         self.cursor_id = result.cursor_id;
@@ -2678,21 +2915,36 @@ impl ThinCursorImpl {
             return Err(raise_oracledb_driver_error("ERR_INVALID_REF_CURSOR"));
         }
         if self.row_index >= self.rows.len() && self.more_rows && self.cursor_id != 0 {
+            self.prepare_fetch_defines(py, _cursor)?;
             let previous_row = self.rows.last().cloned();
+            let requires_define = self.requires_define;
+            let define_columns = self.fetch_define_columns.clone();
             let mut guard = self.connection.lock().map_err(runtime_error)?;
             let connection = guard
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-            let result = BlockingConnection::fetch_rows_with_columns(
-                connection,
-                self.cursor_id,
-                self.arraysize,
-                &self.columns,
-                previous_row.as_deref(),
-            )
+            let result = if requires_define {
+                BlockingConnection::define_and_fetch_rows_with_columns(
+                    connection,
+                    self.cursor_id,
+                    self.prefetchrows,
+                    &define_columns,
+                    previous_row.as_deref(),
+                )
+            } else {
+                BlockingConnection::fetch_rows_with_columns(
+                    connection,
+                    self.cursor_id,
+                    self.arraysize,
+                    &self.columns,
+                    previous_row.as_deref(),
+                )
+            }
             .map_err(runtime_error)?;
             if !result.columns.is_empty() {
                 self.columns = result.columns;
+            } else if requires_define {
+                self.columns = define_columns;
             }
             self.rows = result.rows;
             self.row_index = 0;
@@ -2700,6 +2952,9 @@ impl ThinCursorImpl {
                 self.cursor_id = result.cursor_id;
             }
             self.more_rows = result.more_rows;
+            if requires_define {
+                self.requires_define = false;
+            }
             self.invalid_ref_cursor = false;
         }
         let Some(row) = self.rows.get(self.row_index) else {
