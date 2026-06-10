@@ -8,7 +8,14 @@ repository.workspace = true
 description = "Sans-I/O Oracle TNS/TTC protocol core for the oracledb crate."
 
 [dependencies]
+aes.workspace = true
+hex.workspace = true
+md-5.workspace = true
+pbkdf2.workspace = true
+rand.workspace = true
 serde.workspace = true
+sha1.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 
 [lints]

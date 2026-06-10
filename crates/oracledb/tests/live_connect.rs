@@ -1,0 +1,68 @@
+use asupersync::{runtime::RuntimeBuilder, Cx};
+use oracledb::{ConnectOptions, Connection};
+use oracledb_protocol::{thin::QueryValue, ClientIdentity};
+
+#[test]
+#[ignore = "requires local Oracle listener from scripts/container.sh up"]
+fn live_connect_ping_and_close() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("current-thread Asupersync runtime should build");
+
+    runtime.block_on(async {
+        let cx = Cx::current().expect("Runtime::block_on should install an ambient Cx");
+        let identity = ClientIdentity::new(
+            "rust-oracledb",
+            "rusthost",
+            "rustuser",
+            "rustterm",
+            "rust-oracledb thn : 0.0.0",
+        )
+        .expect("test identity should be valid");
+        let options = ConnectOptions::new(
+            std::env::var("PYO_TEST_CONNECT_STRING")
+                .unwrap_or_else(|_| "localhost:1522/FREEPDB1".to_string()),
+            std::env::var("PYO_TEST_MAIN_USER").unwrap_or_else(|_| "pythontest".to_string()),
+            std::env::var("PYO_TEST_MAIN_PASSWORD")
+                .expect("PYO_TEST_MAIN_PASSWORD must be set for ignored live test"),
+            identity,
+        );
+        let mut conn = Connection::connect(&cx, options)
+            .await
+            .expect("Rust thin connection should authenticate");
+        assert!(conn.session_id() > 0);
+        assert!(conn.serial_num() > 0);
+        let charset = conn
+            .execute_query(
+                &cx,
+                "select value from nls_database_parameters where parameter = 'NLS_CHARACTERSET'",
+                2,
+            )
+            .await
+            .expect("Rust thin query should execute and fetch text");
+        assert_eq!(charset.columns.len(), 1);
+        assert_eq!(charset.rows.len(), 1);
+        assert!(matches!(
+            charset.rows[0][0],
+            Some(QueryValue::Text(ref value)) if !value.is_empty()
+        ));
+
+        let ratios = conn
+            .execute_query(
+                &cx,
+                "select cast('X' as varchar2(1)), cast('Y' as nvarchar2(1)) from dual",
+                2,
+            )
+            .await
+            .expect("Rust thin query should describe varchar and nvarchar");
+        assert_eq!(ratios.columns.len(), 2);
+        assert!(ratios.columns[0].buffer_size > 0);
+        assert!(ratios.columns[1].buffer_size > 0);
+        conn.ping(&cx)
+            .await
+            .expect("Rust thin ping should round-trip");
+        conn.close(&cx)
+            .await
+            .expect("Rust thin logoff should round-trip");
+    });
+}

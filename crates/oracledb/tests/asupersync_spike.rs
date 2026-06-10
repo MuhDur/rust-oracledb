@@ -12,9 +12,14 @@ fn connect_seam_is_cx_first_and_cancel_checkpointed() {
         let cx = Cx::current().expect("Runtime::block_on should install an ambient Cx");
         let identity = ClientIdentity::new("program", "machine", "osuser", "terminal", "driver")
             .expect("test identity should be valid");
-        let options = ConnectOptions::new("localhost/FREEPDB1", "user", "password", identity);
+        let options = ConnectOptions::new("", "user", "password", identity);
         Connection::connect(&cx, options).await
     });
 
-    assert!(matches!(result, Err(Error::NotImplemented)));
+    assert!(matches!(
+        result,
+        Err(Error::Protocol(
+            oracledb_protocol::ProtocolError::InvalidConnectDescriptor(_)
+        ))
+    ));
 }

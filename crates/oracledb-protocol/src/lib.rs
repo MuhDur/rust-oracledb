@@ -1,8 +1,11 @@
 #![forbid(unsafe_code)]
 
 pub mod capabilities;
+pub mod crypto;
 pub mod net;
 pub mod packet;
+pub mod thin;
+pub mod wire;
 
 use std::borrow::Cow;
 
@@ -30,6 +33,22 @@ pub enum ProtocolError {
     },
     #[error("invalid connect descriptor: {0}")]
     InvalidConnectDescriptor(String),
+    #[error("TTC decode failed: {0}")]
+    TtcDecode(&'static str),
+    #[error("unknown TTC message type {message_type} at position {position}")]
+    UnknownMessageType { message_type: u8, position: usize },
+    #[error("server returned Oracle error: {0}")]
+    ServerError(String),
+    #[error("unsupported feature: {0}")]
+    UnsupportedFeature(&'static str),
+    #[error("missing authentication parameter {key}")]
+    MissingAuthParameter { key: &'static str },
+    #[error("unsupported password verifier type {verifier_type:#x}")]
+    UnsupportedVerifier { verifier_type: u32 },
+    #[error("invalid AES key length")]
+    InvalidAesKey,
+    #[error("invalid server authentication response")]
+    InvalidServerResponse,
 }
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;
