@@ -16,11 +16,11 @@ the pinned reference checkout (see Source Snapshot Lock).
 | D3 | What stays Python in the harness | Public layer (`src/oracledb/*.py`) + compiled `base_impl` (params objects, DPY error machinery) | Harness-only plumbing. Anything semantically wire-relevant must execute in Rust; see Fake-Parity Guard |
 | D4 | Rust architecture | 3-crate workspace: sans-io `oracledb-protocol` core + `oracledb` driver (asupersync I/O) + `oracledb-pyshim` (harness-only cdylib) | Sans-io core = fuzzable, deterministic, runtime-independent; matches asupersync guidance (runtime at boundary only) |
 | D5 | Async runtime | **asupersync 0.3.4** (crates.io), `&Cx`-first APIs, rustls driven sans-io; **no tokio anywhere** | Locked by plan.md guideline #2; crate confirmed published |
-| D6 | Scope additions vs plan.md | **Defer dataframe/Arrow modules** (test_8000/8100/8900/9000/9100/9200/9300/9400, ~8k LOC) and **direct path load** (test_9600/9700) | Arrow/PyCapsule is a Python-ecosystem integration, not thin protocol; DPL exists to feed it. plan.md grants planning-session this call ("include only if cheap, else defer") — it is not cheap. Revisit post-goal with arrow-rs |
+| D6 | Scope additions vs plan.md | **Dataframe/Arrow modules IN** (test_8000/8100/8900/9000/9100/9200/9300/9400, ~8k LOC) and **direct path load IN** (test_9600/9700) — operator decision 2026-06-10 | Rust side: `arrow` integration via **arrow-rs** (RecordBatch fetch/ingest as a first-class crate surface) + Arrow C Data Interface export so the shim satisfies the pyarrow/PyCapsule tests; DPL = TTC messages 128/129/130 in the sans-io core. Upstream is itself WIP here (fixes still landing through 2026: #561 leak, #574 view corruption, #593 boolean DPL) — **where the pinned reference is buggy, our port may exceed the baseline, recorded as divergences (Q7)** |
 | D7 | Edge features kept IN | **Pipelining** (test_7600) and **sessionless transactions** (test_8700/8800) | Both are protocol-core TTC work on framing/auth the port needs anyway; 23ai Free container supports both |
 | D8 | cwallet.sso | Build it as a **value-add beyond the reference** with our own Rust tests | Verified: thin mode reads only `ewallet.pem` (impl/thin/transport.pyx:161-174); cwallet.sso appears only in thick-mode docs. The reference suite cannot cover it — our tests must |
 | D9 | Local database | `gvenzl/oracle-free` (23ai Free, FREEPDB1); image `23-slim` already pulled locally | The goal's ONLY database; suite + schema scripts confirmed compatible |
-| D10 | Definition of done | Filtered reference suite (62 modules, ~30.5k LOC) **matches-or-beats the recorded python-oracledb baseline manifest** on the same container, plus M1 identity gate + gauntlet certification | "Green" alone is ill-defined (env-dependent skips); differential vs baseline is objective |
+| D10 | Definition of done | Filtered reference suite (**72 modules, ~39.5k LOC**) **matches-or-beats the recorded python-oracledb baseline manifest** on the same container, plus M1 identity gate + gauntlet certification | "Green" alone is ill-defined (env-dependent skips); differential vs baseline is objective. Match-or-beat also covers reference WIP bugs: baseline failures we fix count as "beat", logged as divergences |
 
 ## Source-Of-Truth Ladder
 
@@ -66,6 +66,8 @@ checkout, verify commit hash). Any version bump is an operator decision recorded
 | TCPS/TLS, ewallet.pem, ssl_server_cert_dn matching, SNI encoding | impl/thin/transport.pyx:127-185, crypto.pyx:85-115 | test_4500 + M3 TCPS-on-container gate |
 | Async-first API + pipelining (v319 END_OF_RESPONSE framing) | protocol.pyx:580-1043; packet.pyx data flags 0x0800/0x1000/0x2000 | 30 async modules; test_7600 |
 | Sessionless transactions (23.6+) | v4 TTC support | test_8700/8800 |
+| Arrow dataframe fetch + ingest (`fetch_df_all`/`fetch_df_batches`, dataframe `executemany`) | impl/arrow + base/converters Arrow paths; nanoarrow C lib; Arrow C Data API 0.8 | test_8000/8100/8900/9000/9100–9400 |
+| Direct path load (block-level bulk load) | messages/direct_path_prepare.pyx (128), direct_path_load_stream.pyx (129), direct_path_op.pyx (130); base/batch_load_manager.pyx | test_9600/9700 |
 | DPY-####/ORA-#### error surfaces | errors.py XREF tables (stays Python; Rust errors must map into it losslessly) | test_1700, 6800 |
 
 ## Target Rust Architecture
@@ -78,7 +80,7 @@ rust-oracledb/                       (cargo workspace)
 │   │   ├── capabilities/            #   compile/runtime caps, version negotiation v300–319
 │   │   ├── messages/                #   TTC messages: connect, protocol, dtypes, auth, fast_auth, execute,
 │   │   │                            #   fetch, lob_op, commit, rollback, ping, logoff, session_release,
-│   │   │                            #   end_pipeline, tpc-free sessionless txn
+│   │   │                            #   end_pipeline, sessionless txn, direct path (128/129/130)
 │   │   ├── auth/                    #   O5LOGON/11g + 12c verifiers, AES-CBC, PBKDF2 (RustCrypto)
 │   │   ├── types/                   #   NUMBER (lossless), datetime family, charsets, ROWID/UROWID,
 │   │   │                            #   OSON, VECTOR, DbObject pickle format, BOOLEAN, intervals
@@ -88,8 +90,11 @@ rust-oracledb/                       (cargo workspace)
 │   │   ├── transport (asupersync TCP + rustls ClientConnection driven sans-io; &Cx-first)
 │   │   ├── connection / cursor / lob / dbobject / pool (async-native; region-owned tasks,
 │   │   │   cx.checkpoint() in fetch/pool loops, cancel-correct two-phase effects)
+│   │   ├── arrow (feature flag): RecordBatch fetch/ingest via arrow-rs; direct-path-load API
 │   │   └── blocking facade (RuntimeHandle bridge; what the sync shim half uses)
 │   └── oracledb-pyshim/             # PyO3 cdylib masquerading as oracledb.thin_impl. NOT published.
+│                                    # Also exposes the arrow_impl-compatible surface for dataframe
+│                                    # tests via arrow-rs Arrow C Data Interface (PyCapsule) export.
 └── harness/
     ├── pin-reference.sh, container.sh (gvenzl up/down/health, user setup)
     ├── shim_inject/                 # pytest plugin: sys.modules["oracledb.thin_impl"] = oracledb_pyshim
@@ -138,7 +143,7 @@ A suite-green claim is invalid where the green never crossed the shim boundary:
 | test_4500/test_7200 (connect-string/tnsnames parsing) exercise *base_impl's* Python parser, not ours | Corpus differential runner: extract every connect string those tests construct; parse with `oracledb-protocol::net` AND with base_impl; diff the resolved parameter trees. Gate of M3 |
 | Pure-Python param/validation tests passing trivially | Per-module annotation in `harness/filter.txt`: `crosses-shim: yes/no/partial`; `no/partial` modules get a named compensating Rust-native or differential test |
 | Shim implementing behavior in Python instead of delegating | Shim code-review rule: shim contains marshalling ONLY — no SQL strings, no protocol logic, no type math; `fake_parity_scanner` / mock-code-finder sweep before each milestone claim |
-| Hardcoded/short-circuited impl methods to pass a test | Same sweep + adversarial review at M5 (gauntlet) |
+| Hardcoded/short-circuited impl methods to pass a test | Same sweep + adversarial review at M6 (gauntlet) |
 
 ### Exclusion filter (exact, evidence-checked)
 
@@ -152,12 +157,13 @@ self-skip via `skip_unless_thick_mode` — verified, e.g. test_2000_long_var.py:
 | XA/TPC | 4400, 7400 | plan.md hard-exclusion |
 | CQN/subscription | 3000 | plan.md hard-exclusion (thin support is new in 4.0; still out) |
 | External OCI | 9800 | thick-only by nature |
-| Dataframe/Arrow | 8000, 8100, 8900, 9000, 9100, 9200, 9300, 9400 | D6 deferral |
-| Direct path load | 9600, 9700 | D6 deferral |
 | Sharding | (no test modules exist in v4.0.1) | nothing to filter |
 
-**In scope: 62 modules, ~30.5k LOC** (incl. all 1000–7700-series core, pipelining 7600,
-sessionless 8700/8800, scrollable-async 8600, LONG 2000, tnsnames 7200, vector 6400/6500/7500/7700).
+**In scope: 72 modules, ~39.5k LOC** (all 1000–7700-series core, pipelining 7600, sessionless
+8700/8800, scrollable-async 8600, LONG 2000, tnsnames 7200, vector 6400/6500/7500/7700, **plus the
+dataframe/Arrow modules 8000/8100/8900/9000/9100–9400 and direct path load 9600/9700 per D6**).
+The dataframe modules need `pyarrow`, `pandas`, `numpy` in the harness venv (the `[test]` extra
+already pulls them).
 
 ## Primitive Replacement Map (key rows)
 
@@ -173,6 +179,8 @@ sessionless 8700/8800, scrollable-async 8600, LONG 2000, tnsnames 7200, vector 6
 | getpass/socket/sys defaults for identity | std-only equivalents, 30-char sanitize (utils.pyx) — and **first-class overridability** (the differentiator) | base/defaults.pyx:31-55 |
 | DPY error machinery (errors.py) | Rust error enum carrying DPY code + ORA code + offsets; shim raises so the vendored errors.py XREF produces byte-identical messages | errors.py:424-587 |
 | tnsnames.ora/IFILE/sqlnet parsing | `oracledb-protocol::net` parser with include resolution; differential-tested (Fake-Parity Guard) | base/connect_params.pyx:459, v4.0.1 IFILE fix |
+| `arrow_impl` Cython + vendored nanoarrow C | **arrow-rs**: native RecordBatch surface in the crate; Arrow C Data Interface (FFI) export in the shim for pyarrow/PyCapsule compatibility | impl/arrow, Arrow C Data API 0.8 (v4.0 release notes) |
+| batch_load_manager.pyx + direct path messages | DPL state machine in `oracledb-protocol` (messages 128/129/130) + column-array encoder; crate API accepts RecordBatch or row slices | base/batch_load_manager.pyx (389 LOC), messages/direct_path_*.pyx |
 
 ## Verification Strategy Matrix
 
@@ -186,6 +194,8 @@ sessionless 8700/8800, scrollable-async 8600, LONG 2000, tnsnames 7200, vector 6
 | Sync facade | the 57 sync suite modules themselves |
 | asyncio bridge | the 30 async suite modules |
 | cwallet.sso (value-add) | own Rust tests with a generated wallet; **experimental flag if format risk materializes** (open question Q1) |
+| Arrow fetch/ingest | dataframe suite modules via shim (pyarrow asserts schema+values) + Rust-native RecordBatch roundtrip tests + known-upstream-bug list checked both ways (Q7) |
+| Direct path load | test_9600/9700 via shim + Rust-native bulk-load test comparing DPL results vs executemany on same data |
 | Performance | honest criterion benches vs python-oracledb thin AND rust-oracle (thick): connect, single-row, bulk fetch, LOB, executemany — published with methodology |
 | Metamorphic | same ops via sync facade / async / pipelined batch must produce identical results |
 
@@ -214,10 +224,14 @@ TCPS against the container (self-signed cert config), ewallet.pem, DN match, tns
 
 **M4 — Objects/JSON/VECTOR/pool/async breadth:**
 DbObject+collections+XMLType, OSON/JSON 23ai, vectors (dense/binary/sparse), pooling+DRCP, pipelining, sessionless txns, all 30 async modules, error parity (1700/6800).
-- **Gate:** full in-scope 62-module run matches baseline except a named, shrinking red list.
+- **Gate:** all in-scope modules except dataframe/DPL (those gate M5) match baseline except a named, shrinking red list.
 
-**M5 — Gauntlet & certification:**
-full filtered suite matches-or-beats baseline; fuzz corpora clean; fake-parity sweep; perf benches published; `/running-the-gauntlet-on-your-rust-port` certification; release scorecard vs rust-oracle gap matrix (identity, proxy, cwallet.sso, tnsnames, DN match, objects, LONG/XMLType/BFILE).
+**M5 — Arrow dataframes + direct path load:**
+arrow-rs RecordBatch fetch/ingest in the crate (`arrow` feature); Arrow C Data Interface export in the shim (pyarrow/PyCapsule compatibility incl. large string/binary view formats, requested_schema, null-only columns, nanosecond timestamps); DPL messages 128/129/130 + column-array encoding + batch manager. Upstream-WIP policy per Q7: known reference bugs may be fixed, not reproduced.
+- **Gate:** modules 8000/8100/8900/9000/9100–9400/9600/9700 match-or-beat baseline; Rust-native RecordBatch + DPL tests green.
+
+**M6 — Gauntlet & certification:**
+full filtered 72-module suite matches-or-beats baseline; fuzz corpora clean; fake-parity sweep; perf benches published (incl. bulk-load: DPL vs executemany vs python-oracledb); `/running-the-gauntlet-on-your-rust-port` certification; release scorecard vs rust-oracle gap matrix (identity, proxy, cwallet.sso, tnsnames, DN match, objects, LONG/XMLType/BFILE, Arrow/DPL).
 - **Gate:** claim contract below satisfiable with evidence artifacts.
 
 ## Runtime Proof Readiness
@@ -230,9 +244,10 @@ The post-goal production-snapshot acceptance stays operator-run per plan.md §"A
 
 ## Claim Contract
 
-- **Allowed after M5:** "Passes python-oracledb v4.0.1's own thin-mode test suite — 62 of 87
-  modules; AQ, SODA, XA/TPC, CQN, sharding, dataframe/Arrow and direct-path-load excluded —
-  against Oracle Database 23ai Free, verified differentially against python-oracledb itself."
+- **Allowed after M6:** "Passes python-oracledb v4.0.1's own thin-mode test suite — 72 of 87
+  modules; AQ, SODA, XA/TPC, CQN and sharding excluded — including Arrow dataframes and direct
+  path load, against Oracle Database 23ai Free, verified differentially against python-oracledb
+  itself."
 - **Forbidden ever:** "drop-in", "production-ready", "certified by Oracle", unqualified "full parity".
 - README must carry: independent-project disclaimer, NOTICE crediting python-oracledb (UPL/Apache),
   dated known-gaps list (the exclusions + cwallet.sso status).
@@ -245,8 +260,9 @@ The post-goal production-snapshot acceptance stays operator-run per plan.md §"A
 | Q2 | DRCP available on gvenzl Free image for test_2400 DRCP paths? | conftest auto-detects (`skip_if_drcp` etc.); baseline manifest decides — whatever baseline does, we match | nothing (self-resolving) |
 | Q3 | asupersync 0.3.4 maturity for socket+TLS workloads | T0.5 spike in M0; escalate to operator if a runtime gap is found (do NOT silently fall back to tokio) | M1 |
 | Q4 | asyncio↔asupersync bridge under pytest-anyio | Standard threadsafe-wakeup pattern in T0.4 skeleton; measure early | M1 |
-| Q5 | No git remote configured (plan.md names github.com/MuhDur/rust-oracledb) | **Operator action:** create repo + `git remote add origin …`; until then, work commits locally | session-end push only |
+| Q5 | Git remote | **Resolved by operator decision 2026-06-10: fully local for now.** The goal performs NO remote git/network-publishing operations (no push, no GitHub, no crates.io publish); local commits only. Remote setup is a later operator action | nothing |
 | Q6 | XMLType fetch semantics in thin (returns str/CLOB) | Port reference behavior exactly (packet.pyx:618-636) | M4 |
+| Q7 | Dataframe/Arrow + DPL are WIP upstream (fixes still landing in 4.0.x) | Pin stays v4.0.1. Where a baseline test FAILS because the reference itself is buggy, our implementation fixes it and "beats" the baseline — every such case gets a divergence-ledger entry citing the upstream issue (e.g. #561/#574/#593) or a minimal repro. Never reproduce a reference bug to match it | M5 claims |
 
 ## The Codex Goal (copy-ready, supersedes plan.md draft)
 
@@ -260,19 +276,24 @@ The post-goal production-snapshot acceptance stays operator-run per plan.md §"A
 > `oracledb-pyshim`), `#![forbid(unsafe_code)]`, fail-closed parsing.
 > **Build the harness first (M0):** vendor the reference, start the local disposable
 > `gvenzl/oracle-free` container (the ONLY database — no remote/production connection ever),
-> record the baseline manifest by running the filtered reference pytest suite (62 modules per
-> `harness/filter.txt`; AQ/SODA/XA-TPC/CQN/sharding/dataframe/direct-path excluded) with real
+> record the baseline manifest by running the filtered reference pytest suite (72 modules per
+> `harness/filter.txt`; only AQ/SODA/XA-TPC/CQN/sharding/external-OCI excluded) with real
 > python-oracledb thin, then inject the PyO3 shim as `oracledb.thin_impl` and iterate:
-> build → run filtered suite → fix red → repeat, milestone gates M1→M5, until the Rust-backed
+> build → run filtered suite → fix red → repeat, milestone gates M1→M6, until the Rust-backed
 > run **matches-or-beats the baseline manifest** — covering caller-set
 > program/osuser/machine/terminal identity (M1 gate: assert v$session reflects chosen values),
 > proxy auth `user[schema]`, 11g+12c verifiers, TCPS+ewallet.pem (+cwallet.sso value-add with
 > own tests), tnsnames/EZConnect/IFILE parsing (with the anti-fake-parity corpus differential),
-> and the full in-scope type set (scalars, lossless NUMBER, LOB, LONG, RAW, ROWID, JSON/OSON,
+> the full in-scope type set (scalars, lossless NUMBER, LOB, LONG, RAW, ROWID, JSON/OSON,
 > VECTOR incl. binary+sparse, BOOLEAN, object types/collections, XMLType, BFILE, intervals),
-> pooling+DRCP, pipelining, sessionless transactions, sync facade + asyncio bridge.
+> pooling+DRCP, pipelining, sessionless transactions, sync facade + asyncio bridge, **and
+> (M5) Arrow dataframe fetch/ingest via arrow-rs (RecordBatch crate API + Arrow C Data
+> Interface export in the shim) plus direct path load (TTC 128/129/130)** — where the
+> reference's WIP Arrow/DPL code is itself buggy, fix and beat the baseline with a
+> divergence-ledger entry (Q7), never reproduce a bug to match it.
 > Enforce the Fake-Parity Guard for every milestone claim. Then certify with
 > `/running-the-gauntlet-on-your-rust-port`: differential parity vs python-oracledb AND
 > rust-oracle, fuzz corpora clean, honest published perf. Keep the repo fully generic — never
 > hard-code any deployment-specific name, host, schema, or identity. Track all work as beads
-> (`br`), commit `.beads/` with code.
+> (`br`), commit `.beads/` with code. **Operate fully locally: no git remote operations, no
+> pushing, no publishing anywhere — local commits only.**
