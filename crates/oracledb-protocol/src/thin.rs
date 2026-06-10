@@ -616,7 +616,7 @@ pub fn parse_query_response_with_context(
                     result.cursor_id = u32::from(info.cursor_id);
                 }
                 result.row_count = info.row_count;
-                if info.number == TNS_ERR_NO_DATA_FOUND {
+                if info.number == TNS_ERR_NO_DATA_FOUND && !result.columns.is_empty() {
                     result.more_rows = false;
                 } else if info.number != 0 {
                     return Err(ProtocolError::ServerError(info.message));
