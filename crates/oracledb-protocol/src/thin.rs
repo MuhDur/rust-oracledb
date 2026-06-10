@@ -80,14 +80,20 @@ const TNS_CCAP_FIELD_VERSION_23_4: u8 = 24;
 const TNS_RCAP_TTC: usize = 6;
 const TNS_RCAP_TTC_32K: u8 = 0x04;
 const TNS_EXEC_OPTION_PARSE: u32 = 0x01;
+const TNS_EXEC_OPTION_BIND: u32 = 0x08;
 const TNS_EXEC_OPTION_EXECUTE: u32 = 0x20;
 const TNS_EXEC_OPTION_FETCH: u32 = 0x40;
 const TNS_EXEC_OPTION_NOT_PLSQL: u32 = 0x8000;
 const TNS_EXEC_FLAGS_IMPLICIT_RESULTSET: u32 = 0x8000;
+const TNS_BIND_USE_INDICATORS: u8 = 0x01;
+const TNS_CHARSET_UTF8: u16 = 873;
 const TNS_MAX_LONG_LENGTH: u32 = 0x7fff_ffff;
 const TNS_ERR_NO_DATA_FOUND: u32 = 1403;
 const TNS_UDS_FLAGS_IS_JSON: u32 = 0x01;
 const TNS_UDS_FLAGS_IS_OSON: u32 = 0x02;
+const ORA_TYPE_SIZE_NUMBER: u32 = 22;
+const NUMBER_AS_TEXT_CHARS: usize = 172;
+const NUMBER_MAX_DIGITS: usize = 40;
 
 const FAST_AUTH_PREFIX_HEX: &str = concat!(
     "22010100010600707974686f6e2d6f7261636c6564620000000000000d0269036903033506000000",
@@ -212,6 +218,14 @@ pub enum QueryValue {
     Number { text: String, is_integer: bool },
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum BindValue {
+    Null,
+    Text(String),
+    Raw(Vec<u8>),
+    Number(String),
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct QueryResult {
     pub columns: Vec<ColumnMetadata>,
@@ -327,10 +341,50 @@ pub fn build_execute_payload_with_seq(
     seq_num: u8,
     is_query: bool,
 ) -> Result<Vec<u8>> {
+    build_execute_payload_with_binds_with_seq(sql, prefetch_rows, seq_num, is_query, &[])
+}
+
+pub fn build_execute_payload_with_binds_with_seq(
+    sql: &str,
+    prefetch_rows: u32,
+    seq_num: u8,
+    is_query: bool,
+    binds: &[BindValue],
+) -> Result<Vec<u8>> {
+    let bind_rows = if binds.is_empty() {
+        Vec::new()
+    } else {
+        vec![binds.to_vec()]
+    };
+    build_execute_payload_with_bind_rows_with_seq(sql, prefetch_rows, seq_num, is_query, &bind_rows)
+}
+
+pub fn build_execute_payload_with_bind_rows_with_seq(
+    sql: &str,
+    prefetch_rows: u32,
+    seq_num: u8,
+    is_query: bool,
+    bind_rows: &[Vec<BindValue>],
+) -> Result<Vec<u8>> {
     let sql_bytes = sql.as_bytes();
     let sql_len =
         u32::try_from(sql_bytes.len()).map_err(|_| ProtocolError::InvalidPacketLength {
             length: sql_bytes.len(),
+            minimum: 0,
+        })?;
+    let bind_count = bind_rows.first().map_or(0, Vec::len);
+    for row in bind_rows {
+        if row.len() != bind_count {
+            return Err(ProtocolError::TtcDecode("inconsistent bind row width"));
+        }
+    }
+    let bind_count = u32::try_from(bind_count).map_err(|_| ProtocolError::InvalidPacketLength {
+        length: bind_count,
+        minimum: 0,
+    })?;
+    let bind_row_count =
+        u32::try_from(bind_rows.len()).map_err(|_| ProtocolError::InvalidPacketLength {
+            length: bind_rows.len(),
             minimum: 0,
         })?;
     let mut writer = TtcWriter::new();
@@ -341,8 +395,11 @@ pub fn build_execute_payload_with_seq(
     if is_query {
         options |= TNS_EXEC_OPTION_FETCH;
     }
+    if bind_count > 0 {
+        options |= TNS_EXEC_OPTION_BIND;
+    }
     let num_iters = if is_query { prefetch_rows } else { 1 };
-    let exec_count = u32::from(!is_query);
+    let exec_count = if is_query { 0 } else { bind_row_count.max(1) };
     let query_flag = u32::from(is_query);
     let exec_flags = if is_query {
         TNS_EXEC_FLAGS_IMPLICIT_RESULTSET
@@ -360,8 +417,13 @@ pub fn build_execute_payload_with_seq(
     writer.write_ub4(0);
     writer.write_ub4(num_iters);
     writer.write_ub4(TNS_MAX_LONG_LENGTH);
-    writer.write_u8(0);
-    writer.write_ub4(0);
+    if bind_count == 0 {
+        writer.write_u8(0);
+        writer.write_ub4(0);
+    } else {
+        writer.write_u8(1);
+        writer.write_ub4(bind_count);
+    }
     writer.write_u8(0);
     writer.write_u8(0);
     writer.write_u8(0);
@@ -402,7 +464,79 @@ pub fn build_execute_payload_with_seq(
     writer.write_ub4(0);
     writer.write_ub4(0);
     writer.write_ub4(0);
+    if !bind_rows.is_empty() {
+        write_bind_params(&mut writer, bind_rows)?;
+    }
     Ok(writer.into_bytes())
+}
+
+fn write_bind_params(writer: &mut TtcWriter, bind_rows: &[Vec<BindValue>]) -> Result<()> {
+    let Some(first_row) = bind_rows.first() else {
+        return Ok(());
+    };
+    for value in first_row {
+        write_bind_metadata(writer, value);
+    }
+    for row in bind_rows {
+        writer.write_u8(TNS_MSG_TYPE_ROW_DATA);
+        for value in row {
+            write_bind_value(writer, value)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_bind_metadata(writer: &mut TtcWriter, value: &BindValue) {
+    let (ora_type_num, csfrm, buffer_size) = bind_metadata(value);
+    writer.write_u8(ora_type_num);
+    writer.write_u8(TNS_BIND_USE_INDICATORS);
+    writer.write_u8(0);
+    writer.write_u8(0);
+    writer.write_ub4(buffer_size);
+    writer.write_ub4(0);
+    writer.write_ub8(0);
+    writer.write_ub4(0);
+    writer.write_ub2(0);
+    if csfrm != 0 {
+        writer.write_ub2(TNS_CHARSET_UTF8);
+    } else {
+        writer.write_ub2(0);
+    }
+    writer.write_u8(csfrm);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+}
+
+fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
+    match value {
+        BindValue::Null => (ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 1),
+        BindValue::Text(value) => (
+            ORA_TYPE_NUM_VARCHAR,
+            CS_FORM_IMPLICIT,
+            u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
+        ),
+        BindValue::Raw(value) => (
+            ORA_TYPE_NUM_RAW,
+            0,
+            u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
+        ),
+        BindValue::Number(_) => (ORA_TYPE_NUM_NUMBER, 0, ORA_TYPE_SIZE_NUMBER),
+    }
+}
+
+fn write_bind_value(writer: &mut TtcWriter, value: &BindValue) -> Result<()> {
+    match value {
+        BindValue::Null => {
+            writer.write_u8(0);
+            Ok(())
+        }
+        BindValue::Text(value) => writer.write_bytes_with_length(value.as_bytes()),
+        BindValue::Raw(value) => writer.write_bytes_with_length(value),
+        BindValue::Number(value) => {
+            let bytes = encode_number_text(value)?;
+            writer.write_bytes_with_length(&bytes)
+        }
+    }
 }
 
 pub fn build_fetch_payload(cursor_id: u32, arraysize: u32) -> Vec<u8> {
@@ -422,8 +556,26 @@ pub fn parse_query_response(
     payload: &[u8],
     capabilities: ClientCapabilities,
 ) -> Result<QueryResult> {
+    parse_query_response_with_previous(payload, capabilities, None)
+}
+
+pub fn parse_query_response_with_previous(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    previous_row: Option<&[Option<QueryValue>]>,
+) -> Result<QueryResult> {
+    parse_query_response_with_context(payload, capabilities, &[], previous_row)
+}
+
+pub fn parse_query_response_with_context(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    previous_columns: &[ColumnMetadata],
+    previous_row: Option<&[Option<QueryValue>]>,
+) -> Result<QueryResult> {
     let mut reader = TtcReader::new(payload);
     let mut result = QueryResult {
+        columns: previous_columns.to_vec(),
         more_rows: true,
         ..QueryResult::default()
     };
@@ -433,13 +585,19 @@ pub fn parse_query_response(
         match message_type {
             TNS_MSG_TYPE_DESCRIBE_INFO => {
                 let _describe_name = reader.read_bytes()?;
+                result.columns.clear();
                 parse_describe_info(&mut reader, capabilities, &mut result)?;
             }
             TNS_MSG_TYPE_ROW_HEADER => {
                 bit_vector = parse_row_header(&mut reader)?;
             }
             TNS_MSG_TYPE_ROW_DATA => {
-                parse_row_data(&mut reader, &mut result, bit_vector.as_deref())?;
+                parse_row_data(
+                    &mut reader,
+                    &mut result,
+                    bit_vector.as_deref(),
+                    previous_row,
+                )?;
                 bit_vector = None;
             }
             TNS_MSG_TYPE_BIT_VECTOR => {
@@ -465,14 +623,39 @@ pub fn parse_query_response(
                 }
             }
             _ => {
+                let position = reader.position().saturating_sub(1);
+                if let Some(message) =
+                    find_embedded_server_error(payload, capabilities.ttc_field_version, position)
+                {
+                    return Err(ProtocolError::ServerError(message));
+                }
                 return Err(ProtocolError::UnknownMessageType {
                     message_type,
-                    position: reader.position().saturating_sub(1),
-                })
+                    position,
+                });
             }
         }
     }
     Ok(result)
+}
+
+fn find_embedded_server_error(
+    payload: &[u8],
+    ttc_field_version: u8,
+    position: usize,
+) -> Option<String> {
+    let start = position.saturating_sub(64);
+    for candidate in start..=position {
+        if !matches!(payload.get(candidate).copied(), Some(TNS_MSG_TYPE_ERROR)) {
+            continue;
+        }
+        let mut reader = TtcReader::new(payload.get(candidate + 1..)?);
+        let info = parse_server_error_info(&mut reader, ttc_field_version).ok()?;
+        if info.number != 0 && info.message.starts_with("ORA-") {
+            return Some(info.message);
+        }
+    }
+    None
 }
 
 pub fn append_auth_phase_one(
@@ -521,6 +704,26 @@ pub fn build_auth_phase_two_payload_with_seq(
     connect_string: &str,
     seq_num: u8,
 ) -> Result<Vec<u8>> {
+    build_auth_phase_two_payload_with_context_with_seq(
+        user,
+        encrypted,
+        driver_name,
+        version_num,
+        connect_string,
+        seq_num,
+        &[],
+    )
+}
+
+pub fn build_auth_phase_two_payload_with_context_with_seq(
+    user: &str,
+    encrypted: &crate::crypto::EncryptedPassword,
+    driver_name: &str,
+    version_num: u32,
+    connect_string: &str,
+    seq_num: u8,
+    app_context: &[(String, String, String)],
+) -> Result<Vec<u8>> {
     let mut writer = TtcWriter::new();
     writer.write_function_code_with_seq(TNS_FUNC_AUTH_PHASE_TWO, seq_num);
     writer.write_ub8(0);
@@ -531,6 +734,19 @@ pub fn build_auth_phase_two_payload_with_seq(
     if !connect_string.is_empty() {
         num_pairs += 1;
     }
+    let app_context_pairs =
+        app_context
+            .len()
+            .checked_mul(3)
+            .ok_or(ProtocolError::InvalidPacketLength {
+                length: app_context.len(),
+                minimum: 0,
+            })?;
+    num_pairs +=
+        u32::try_from(app_context_pairs).map_err(|_| ProtocolError::InvalidPacketLength {
+            length: app_context.len(),
+            minimum: 0,
+        })?;
     write_auth_header(
         &mut writer,
         user,
@@ -556,6 +772,11 @@ pub fn build_auth_phase_two_payload_with_seq(
         "ALTER SESSION SET TIME_ZONE='+00:00'\0",
         1,
     )?;
+    for (namespace, name, value) in app_context {
+        write_key_value(&mut writer, "AUTH_APPCTX_NSPACE\0", namespace, 0)?;
+        write_key_value(&mut writer, "AUTH_APPCTX_ATTR\0", name, 0)?;
+        write_key_value(&mut writer, "AUTH_APPCTX_VALUE\0", value, 0)?;
+    }
     if !connect_string.is_empty() {
         write_key_value(&mut writer, "AUTH_CONNECT_STRING", connect_string, 0)?;
     }
@@ -807,6 +1028,7 @@ fn parse_row_data(
     reader: &mut TtcReader<'_>,
     result: &mut QueryResult,
     bit_vector: Option<&[u8]>,
+    previous_row: Option<&[Option<QueryValue>]>,
 ) -> Result<()> {
     let mut row = Vec::with_capacity(result.columns.len());
     for (index, metadata) in result.columns.iter().enumerate() {
@@ -814,6 +1036,8 @@ fn parse_row_data(
             let previous = result
                 .rows
                 .last()
+                .map(Vec::as_slice)
+                .or(previous_row)
                 .and_then(|last| last.get(index))
                 .cloned()
                 .ok_or(ProtocolError::TtcDecode(
@@ -867,6 +1091,157 @@ fn parse_column_value(
         }
         _ => Err(ProtocolError::UnsupportedFeature("query column type")),
     }
+}
+
+fn encode_number_text(value: &str) -> Result<Vec<u8>> {
+    let value = value.as_bytes();
+    if value.is_empty() {
+        return Err(ProtocolError::TtcDecode("empty NUMBER bind"));
+    }
+    if value.len() > NUMBER_AS_TEXT_CHARS {
+        return Err(ProtocolError::TtcDecode("NUMBER bind text too long"));
+    }
+
+    let mut pos = 0;
+    let mut is_negative = false;
+    if value[pos] == b'-' {
+        is_negative = true;
+        pos += 1;
+    }
+
+    let mut digits = Vec::with_capacity(NUMBER_AS_TEXT_CHARS);
+    while pos < value.len() {
+        if matches!(value[pos], b'.' | b'e' | b'E') {
+            break;
+        }
+        if !value[pos].is_ascii_digit() {
+            return Err(ProtocolError::TtcDecode("invalid NUMBER bind"));
+        }
+        let digit = value[pos] - b'0';
+        pos += 1;
+        if digit == 0 && digits.is_empty() {
+            continue;
+        }
+        digits.push(digit);
+    }
+    let mut decimal_point_index = i32::try_from(digits.len()).unwrap_or(i32::MAX);
+
+    if pos < value.len() && value[pos] == b'.' {
+        pos += 1;
+        while pos < value.len() {
+            if matches!(value[pos], b'e' | b'E') {
+                break;
+            }
+            if !value[pos].is_ascii_digit() {
+                return Err(ProtocolError::TtcDecode("invalid NUMBER bind"));
+            }
+            let digit = value[pos] - b'0';
+            pos += 1;
+            if digit == 0 && digits.is_empty() {
+                decimal_point_index -= 1;
+                continue;
+            }
+            digits.push(digit);
+        }
+    }
+
+    if pos < value.len() && matches!(value[pos], b'e' | b'E') {
+        pos += 1;
+        let mut exponent_is_negative = false;
+        if pos < value.len() {
+            if value[pos] == b'-' {
+                exponent_is_negative = true;
+                pos += 1;
+            } else if value[pos] == b'+' {
+                pos += 1;
+            }
+        }
+        let exponent_start = pos;
+        while pos < value.len() {
+            if !value[pos].is_ascii_digit() {
+                return Err(ProtocolError::TtcDecode("invalid NUMBER exponent"));
+            }
+            pos += 1;
+        }
+        if exponent_start == pos {
+            return Err(ProtocolError::TtcDecode("empty NUMBER exponent"));
+        }
+        let exponent_text = std::str::from_utf8(&value[exponent_start..pos])
+            .map_err(|_| ProtocolError::TtcDecode("invalid NUMBER exponent"))?;
+        let mut exponent = exponent_text
+            .parse::<i32>()
+            .map_err(|_| ProtocolError::TtcDecode("invalid NUMBER exponent"))?;
+        if exponent_is_negative {
+            exponent = -exponent;
+        }
+        decimal_point_index += exponent;
+    }
+
+    if pos < value.len() {
+        return Err(ProtocolError::TtcDecode("invalid NUMBER bind suffix"));
+    }
+
+    while digits.last().is_some_and(|digit| *digit == 0) {
+        digits.pop();
+    }
+    if digits.len() > NUMBER_MAX_DIGITS || decimal_point_index > 126 || decimal_point_index < -129 {
+        return Err(ProtocolError::TtcDecode("NUMBER bind out of range"));
+    }
+
+    let mut prepend_zero = false;
+    if decimal_point_index % 2 != 0 {
+        prepend_zero = true;
+        if !digits.is_empty() {
+            digits.push(0);
+            decimal_point_index += 1;
+        }
+    }
+    if digits.len() % 2 == 1 {
+        digits.push(0);
+    }
+
+    if digits.is_empty() {
+        return Ok(vec![128]);
+    }
+
+    let mut encoded = Vec::with_capacity(digits.len() / 2 + 2);
+    let exponent_on_wire = decimal_point_index / 2 + 192;
+    if !(0..=255).contains(&exponent_on_wire) {
+        return Err(ProtocolError::TtcDecode(
+            "NUMBER bind exponent out of range",
+        ));
+    }
+    let exponent_byte = exponent_on_wire as u8;
+    encoded.push(if is_negative {
+        !exponent_byte
+    } else {
+        exponent_byte
+    });
+
+    let mut digit_pos = 0;
+    for pair_num in 0..(digits.len() / 2) {
+        let mut digit = if pair_num == 0 && prepend_zero {
+            let digit = digits[digit_pos];
+            digit_pos += 1;
+            digit
+        } else {
+            let digit = digits[digit_pos] * 10 + digits[digit_pos + 1];
+            digit_pos += 2;
+            digit
+        };
+        if is_negative {
+            digit = 101 - digit;
+        } else {
+            digit += 1;
+        }
+        encoded.push(digit);
+    }
+
+    if is_negative && digits.len() < NUMBER_MAX_DIGITS {
+        encoded.push(102);
+    }
+
+    Ok(encoded)
 }
 
 fn decode_number_value(bytes: &[u8]) -> Result<QueryValue> {
@@ -1252,6 +1627,93 @@ mod tests {
             vec![vec![Some(QueryValue::Text("AL32UTF8".into()))]]
         );
         assert!(!parsed.more_rows);
+    }
+
+    #[test]
+    fn fetch_response_decodes_rows_with_previous_cursor_metadata() {
+        let payload = Vec::from_hex("06020101000205dc0001010101000702c1041d")
+            .expect("fixture response should be valid hex");
+        let columns = vec![number_column("INTCOL"), number_column("NUMBERCOL")];
+        let previous_row = vec![
+            Some(QueryValue::Number {
+                text: "2".into(),
+                is_integer: true,
+            }),
+            Some(QueryValue::Number {
+                text: "0.5".into(),
+                is_integer: false,
+            }),
+        ];
+
+        let parsed = parse_query_response_with_context(
+            &payload,
+            ClientCapabilities::default(),
+            &columns,
+            Some(&previous_row),
+        )
+        .expect("fetch response should decode using cached cursor metadata");
+
+        assert_eq!(parsed.columns, columns);
+        assert_eq!(
+            parsed.rows,
+            vec![vec![
+                Some(QueryValue::Number {
+                    text: "3".into(),
+                    is_integer: true,
+                }),
+                previous_row[1].clone(),
+            ]]
+        );
+    }
+
+    #[test]
+    fn fetch_response_decodes_mid_row_oracle_error() {
+        let payload = Vec::from_hex(concat!(
+            "150101010703c20401010205100205db0205c400000106018f030000000000",
+            "0301214d0118000293b60201c60000080000000000000205db0205c40103",
+            "00244f52412d30313437363a2064697669736f7220697320657175616c20",
+            "746f207a65726f0a1d",
+        ))
+        .expect("fixture response should be valid hex");
+        let columns = vec![number_column("INTCOL"), number_column("NUMBERCOL")];
+        let previous_row = vec![
+            Some(QueryValue::Number {
+                text: "1499".into(),
+                is_integer: true,
+            }),
+            Some(QueryValue::Number {
+                text: "0.5".into(),
+                is_integer: false,
+            }),
+        ];
+
+        let err = parse_query_response_with_context(
+            &payload,
+            ClientCapabilities::default(),
+            &columns,
+            Some(&previous_row),
+        )
+        .expect_err("mid-row error info should surface as a server error");
+
+        assert_eq!(
+            err.to_string(),
+            "server returned Oracle error: ORA-01476: divisor is equal to zero"
+        );
+    }
+
+    fn number_column(name: &str) -> ColumnMetadata {
+        ColumnMetadata {
+            name: name.into(),
+            ora_type_num: ORA_TYPE_NUM_NUMBER,
+            csfrm: CS_FORM_IMPLICIT,
+            precision: 0,
+            scale: 0,
+            buffer_size: ORA_TYPE_SIZE_NUMBER,
+            max_size: ORA_TYPE_SIZE_NUMBER,
+            nulls_allowed: true,
+            is_json: false,
+            is_oson: false,
+        }
     }
 }
 

@@ -3,14 +3,14 @@
 use std::sync::{Arc, Mutex};
 
 use oracledb::protocol::thin::{
-    ColumnMetadata, QueryValue, CS_FORM_NCHAR, ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_LONG,
+    BindValue, ColumnMetadata, QueryValue, CS_FORM_NCHAR, ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_LONG,
     ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, ConnectOptions, Connection as RustConnection};
 use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::{PyBytes, PyBytesMethods, PyDict, PyList, PyTuple};
 
 fn not_implemented(name: &str) -> PyErr {
     PyNotImplementedError::new_err(format!(
@@ -19,7 +19,20 @@ fn not_implemented(name: &str) -> PyErr {
 }
 
 fn runtime_error(err: impl std::fmt::Display) -> PyErr {
-    PyRuntimeError::new_err(err.to_string())
+    let message = err.to_string();
+    if let Some(server_message) = message.strip_prefix("server returned Oracle error: ") {
+        return Python::attach(|py| database_error(py, server_message))
+            .unwrap_or_else(|_| PyRuntimeError::new_err(message));
+    }
+    PyRuntimeError::new_err(message)
+}
+
+fn database_error(py: Python<'_>, message: &str) -> PyResult<PyErr> {
+    let errors = PyModule::import(py, "oracledb.errors")?;
+    let error_obj = errors.getattr("_Error")?.call1((message,))?;
+    let module = PyModule::import(py, "oracledb")?;
+    let exc = module.getattr("DatabaseError")?.call1((error_obj,))?;
+    Ok(PyErr::from_value(exc))
 }
 
 fn get_string_attr(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<String> {
@@ -33,6 +46,19 @@ fn get_optional_string_attr(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Opti
     } else {
         value.extract().map(Some)
     }
+}
+
+fn get_app_context_attr(obj: &Bound<'_, PyAny>) -> PyResult<Vec<(String, String, String)>> {
+    let value = obj.getattr("appcontext")?;
+    if value.is_none() {
+        return Ok(Vec::new());
+    }
+    let list = value
+        .cast::<PyList>()
+        .map_err(|_| PyRuntimeError::new_err("appcontext should be a list"))?;
+    list.iter()
+        .map(|entry| entry.extract::<(String, String, String)>())
+        .collect()
 }
 
 fn env_password_for_user(user: &str) -> PyResult<String> {
@@ -67,17 +93,62 @@ fn env_password_for_user(user: &str) -> PyResult<String> {
     })
 }
 
-fn ensure_no_parameters(value: Option<&Bound<'_, PyAny>>, label: &str) -> PyResult<()> {
-    let Some(value) = value else {
-        return Ok(());
+fn extract_bind_values(
+    parameters: Option<&Bound<'_, PyAny>>,
+    keyword_parameters: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Vec<BindValue>> {
+    if let Some(value) = keyword_parameters {
+        if !value.is_none() && value.len()? > 0 {
+            return Err(not_implemented("ThinCursorImpl keyword bind parameters"));
+        }
+    }
+    let Some(value) = parameters else {
+        return Ok(Vec::new());
     };
+    if value.is_none() || value.len()? == 0 {
+        return Ok(Vec::new());
+    }
+    if value.cast::<PyDict>().is_ok() {
+        return Err(not_implemented("ThinCursorImpl named bind parameters"));
+    }
+    if let Ok(tuple) = value.cast::<PyTuple>() {
+        return tuple.iter().map(|item| py_value_to_bind(&item)).collect();
+    }
+    if let Ok(list) = value.cast::<PyList>() {
+        return list.iter().map(|item| py_value_to_bind(&item)).collect();
+    }
+    Err(not_implemented("ThinCursorImpl bind parameter container"))
+}
+
+fn extract_bind_rows(parameters: &Bound<'_, PyAny>) -> PyResult<Vec<Vec<BindValue>>> {
+    if parameters.is_none() {
+        return Ok(Vec::new());
+    }
+    let list = parameters
+        .cast::<PyList>()
+        .map_err(|_| not_implemented("ThinCursorImpl executemany parameters"))?;
+    list.iter()
+        .map(|row| extract_bind_values(Some(&row), None))
+        .collect()
+}
+
+fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> {
     if value.is_none() {
-        return Ok(());
+        return Ok(BindValue::Null);
     }
-    if value.len()? == 0 {
-        return Ok(());
+    if let Ok(bytes) = value.cast::<PyBytes>() {
+        return Ok(BindValue::Raw(bytes.as_bytes().to_vec()));
     }
-    Err(not_implemented(label))
+    if let Ok(text) = value.extract::<String>() {
+        return Ok(BindValue::Text(text));
+    }
+    if let Ok(number) = value.extract::<i128>() {
+        return Ok(BindValue::Number(number.to_string()));
+    }
+    if let Ok(number) = value.extract::<f64>() {
+        return Ok(BindValue::Number(number.to_string()));
+    }
+    Err(not_implemented("ThinCursorImpl bind value type"))
 }
 
 #[pyfunction]
@@ -223,15 +294,13 @@ impl ThinConnImpl {
         let driver_name = get_optional_string_attr(params_impl, "driver_name")?
             .unwrap_or_else(|| "rust-oracledb thn : 0.0.0".into());
         let password = env_password_for_user(&self.username)?;
+        let app_context = get_app_context_attr(params_impl)?;
         let identity = ClientIdentity::new(program, machine, osuser, terminal, driver_name)
             .map_err(runtime_error)?;
-        let connection = BlockingConnection::connect(ConnectOptions::new(
-            self.dsn.clone(),
-            self.username.clone(),
-            password,
-            identity,
-        ))
-        .map_err(runtime_error)?;
+        let options =
+            ConnectOptions::new(self.dsn.clone(), self.username.clone(), password, identity)
+                .with_app_context(app_context);
+        let connection = BlockingConnection::connect(options).map_err(runtime_error)?;
         self.server_version = (0, 0, 0, 0, 0);
         *self.connection.lock().map_err(runtime_error)? = Some(connection);
         Ok(())
@@ -407,11 +476,53 @@ impl FetchMetadataImpl {
     }
 }
 
+#[pyclass(module = "oracledb.thin_impl", name = "ExecutemanyManager")]
+struct ExecutemanyManager {
+    total_rows: u32,
+    batch_size: u32,
+    num_rows: u32,
+    message_offset: u32,
+}
+
+impl ExecutemanyManager {
+    fn new(total_rows: usize, batch_size: u32) -> PyResult<Self> {
+        let total_rows = u32::try_from(total_rows).map_err(runtime_error)?;
+        let batch_size = batch_size.max(1);
+        Ok(Self {
+            total_rows,
+            batch_size,
+            num_rows: total_rows.min(batch_size),
+            message_offset: 0,
+        })
+    }
+}
+
+#[pymethods]
+impl ExecutemanyManager {
+    #[getter]
+    fn num_rows(&self) -> u32 {
+        self.num_rows
+    }
+
+    #[getter]
+    fn message_offset(&self) -> u32 {
+        self.message_offset
+    }
+
+    fn next_batch(&mut self) {
+        self.message_offset = self.message_offset.saturating_add(self.num_rows);
+        let remaining = self.total_rows.saturating_sub(self.message_offset);
+        self.num_rows = remaining.min(self.batch_size);
+    }
+}
+
 #[pyclass(module = "oracledb.thin_impl", name = "ThinCursorImpl")]
 struct ThinCursorImpl {
     connection: Arc<Mutex<Option<RustConnection>>>,
     autocommit: Arc<Mutex<bool>>,
     statement: Option<String>,
+    bind_values: Vec<BindValue>,
+    many_bind_rows: Vec<Vec<BindValue>>,
     columns: Vec<ColumnMetadata>,
     rows: Vec<Vec<Option<QueryValue>>>,
     row_index: usize,
@@ -441,6 +552,8 @@ impl ThinCursorImpl {
             connection,
             autocommit,
             statement: None,
+            bind_values: Vec::new(),
+            many_bind_rows: Vec::new(),
             columns: Vec::new(),
             rows: Vec::new(),
             row_index: 0,
@@ -596,6 +709,8 @@ impl ThinCursorImpl {
     fn close(&mut self, in_del: Option<bool>) {
         let _ = in_del;
         self.statement = None;
+        self.bind_values.clear();
+        self.many_bind_rows.clear();
         self.columns.clear();
         self.rows.clear();
         self.row_index = 0;
@@ -621,14 +736,88 @@ impl ThinCursorImpl {
         parameters: Option<&Bound<'_, PyAny>>,
         keyword_parameters: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        ensure_no_parameters(parameters, "ThinCursorImpl bind parameters")?;
-        ensure_no_parameters(keyword_parameters, "ThinCursorImpl keyword bind parameters")?;
+        self.bind_values = extract_bind_values(parameters, keyword_parameters)?;
+        self.many_bind_rows.clear();
         if let Some(statement) = statement {
             self.statement = Some(statement);
         }
         if self.statement.is_none() {
             return Err(PyRuntimeError::new_err("no statement prepared"));
         }
+        Ok(())
+    }
+
+    fn _prepare_for_executemany(
+        &mut self,
+        _cursor: &Bound<'_, PyAny>,
+        statement: Option<String>,
+        parameters: &Bound<'_, PyAny>,
+        batch_size: u32,
+    ) -> PyResult<ExecutemanyManager> {
+        if let Some(statement) = statement {
+            self.statement = Some(statement);
+        }
+        if self.statement.is_none() {
+            return Err(PyRuntimeError::new_err("no statement prepared"));
+        }
+        self.bind_values.clear();
+        self.many_bind_rows = extract_bind_rows(parameters)?;
+        ExecutemanyManager::new(self.many_bind_rows.len(), batch_size)
+    }
+
+    fn executemany(
+        &mut self,
+        _cursor: &Bound<'_, PyAny>,
+        num_execs: u32,
+        batcherrors: bool,
+        arraydmlrowcounts: bool,
+        offset: u32,
+    ) -> PyResult<()> {
+        if batcherrors {
+            return Err(not_implemented("ThinCursorImpl executemany batcherrors"));
+        }
+        if arraydmlrowcounts {
+            return Err(not_implemented(
+                "ThinCursorImpl executemany array DML rowcounts",
+            ));
+        }
+        let statement = self
+            .statement
+            .as_deref()
+            .ok_or_else(|| PyRuntimeError::new_err("no statement prepared"))?;
+        let start = usize::try_from(offset).map_err(runtime_error)?;
+        let count = usize::try_from(num_execs).map_err(runtime_error)?;
+        let end = start
+            .checked_add(count)
+            .ok_or_else(|| PyRuntimeError::new_err("executemany offset overflow"))?;
+        let bind_rows = self
+            .many_bind_rows
+            .get(start..end)
+            .ok_or_else(|| PyRuntimeError::new_err("executemany batch is out of range"))?
+            .to_vec();
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        let result = BlockingConnection::execute_query_with_bind_rows(
+            connection,
+            statement,
+            self.prefetchrows,
+            &bind_rows,
+        )
+        .map_err(runtime_error)?;
+        let is_query = !result.columns.is_empty();
+        let should_commit = !is_query && *self.autocommit.lock().map_err(runtime_error)?;
+        if should_commit {
+            BlockingConnection::commit(connection).map_err(runtime_error)?;
+        }
+        self.columns = result.columns;
+        self.rows = result.rows;
+        self.row_index = 0;
+        self.cursor_id = result.cursor_id;
+        self.more_rows = result.more_rows;
+        self.rowcount = i64::from(num_execs);
+        self.is_query = is_query;
         Ok(())
     }
 
@@ -641,8 +830,13 @@ impl ThinCursorImpl {
         let connection = guard
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-        let result = BlockingConnection::execute_query(connection, statement, self.prefetchrows)
-            .map_err(runtime_error)?;
+        let result = BlockingConnection::execute_query_with_binds(
+            connection,
+            statement,
+            self.prefetchrows,
+            &self.bind_values,
+        )
+        .map_err(runtime_error)?;
         let is_query = !result.columns.is_empty();
         let should_commit = !is_query && *self.autocommit.lock().map_err(runtime_error)?;
         if should_commit {
@@ -668,12 +862,18 @@ impl ThinCursorImpl {
         _cursor: &Bound<'_, PyAny>,
     ) -> PyResult<Option<Py<PyAny>>> {
         if self.row_index >= self.rows.len() && self.more_rows && self.cursor_id != 0 {
+            let previous_row = self.rows.last().cloned();
             let mut guard = self.connection.lock().map_err(runtime_error)?;
             let connection = guard
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-            let result = BlockingConnection::fetch_rows(connection, self.cursor_id, self.arraysize)
-                .map_err(runtime_error)?;
+            let result = BlockingConnection::fetch_rows(
+                connection,
+                self.cursor_id,
+                self.arraysize,
+                previous_row.as_deref(),
+            )
+            .map_err(runtime_error)?;
             if !result.columns.is_empty() {
                 self.columns = result.columns;
             }
@@ -824,6 +1024,7 @@ fn oracledb_pyshim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ThinConnImpl>()?;
     m.add_class::<ThinCursorImpl>()?;
     m.add_class::<FetchMetadataImpl>()?;
+    m.add_class::<ExecutemanyManager>()?;
     m.add_class::<AsyncThinConnImpl>()?;
     m.add_class::<ThinPoolImpl>()?;
     m.add_class::<AsyncThinPoolImpl>()?;

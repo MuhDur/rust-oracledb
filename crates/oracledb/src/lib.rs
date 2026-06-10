@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::process;
@@ -7,18 +8,21 @@ use std::time::Duration;
 
 use asupersync::{runtime::RuntimeBuilder, Cx};
 use oracledb_protocol::thin::{
-    build_auth_phase_two_payload_with_seq, build_connect_packet_payload,
+    build_auth_phase_two_payload_with_context_with_seq, build_connect_packet_payload,
+    build_execute_payload_with_bind_rows_with_seq, build_execute_payload_with_binds_with_seq,
     build_execute_payload_with_seq, build_fast_auth_phase_one_payload,
     build_fetch_payload_with_seq, build_function_payload_with_seq, parse_accept_payload,
-    parse_auth_response, parse_query_response, ClientCapabilities, QueryResult, TNS_FUNC_COMMIT,
-    TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_PACKET_TYPE_ACCEPT,
-    TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT,
-    TNS_PACKET_TYPE_REFUSE,
+    parse_auth_response, parse_query_response, parse_query_response_with_context, BindValue,
+    ClientCapabilities, ColumnMetadata, QueryResult, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF,
+    TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT,
+    TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE,
 };
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};
 
 const PYTHON_ORACLEDB_COMPAT_VERSION_NUM: u32 = 0x0400_1000;
+const DEFAULT_SDU: usize = 8192;
+const TNS_DATA_PACKET_OVERHEAD: usize = 10;
 
 pub use oracledb_protocol as protocol;
 
@@ -48,6 +52,7 @@ pub struct ConnectOptions {
     pub user: String,
     pub password: String,
     pub identity: ClientIdentity,
+    pub app_context: Vec<(String, String, String)>,
 }
 
 impl ConnectOptions {
@@ -62,7 +67,13 @@ impl ConnectOptions {
             user: user.into(),
             password: password.into(),
             identity,
+            app_context: Vec::new(),
         }
+    }
+
+    pub fn with_app_context(mut self, app_context: Vec<(String, String, String)>) -> Self {
+        self.app_context = app_context;
+        self
     }
 }
 
@@ -76,6 +87,8 @@ pub struct Connection {
     server_version: Option<String>,
     capabilities: ClientCapabilities,
     ttc_seq_num: u8,
+    sdu: usize,
+    cursor_columns: BTreeMap<u32, Vec<ColumnMetadata>>,
 }
 
 impl Connection {
@@ -128,6 +141,9 @@ impl Connection {
         if !accept_info.supports_fast_auth {
             return Err(Error::FastAuthRequired);
         }
+        let sdu = usize::try_from(accept_info.sdu)
+            .unwrap_or(DEFAULT_SDU)
+            .max(TNS_DATA_PACKET_OVERHEAD + 1);
 
         let client_pid = process::id();
         let auth_one = build_fast_auth_phase_one_payload(
@@ -140,7 +156,7 @@ impl Connection {
         )?;
         trace_connect_bytes("AUTH phase one payload", &auth_one);
         trace_connect_step("send AUTH phase one");
-        send_data_packet(&mut stream, &auth_one)?;
+        send_data_packet(&mut stream, &auth_one, sdu)?;
         trace_connect_step("read AUTH phase one");
         let auth_one_response = read_data_response(&mut stream)?;
         trace_connect_bytes("AUTH phase one response", &auth_one_response);
@@ -156,17 +172,18 @@ impl Connection {
             verifier_type,
         )?;
         let auth_connect_string = auth_connect_descriptor(&descriptor);
-        let auth_two = build_auth_phase_two_payload_with_seq(
+        let auth_two = build_auth_phase_two_payload_with_context_with_seq(
             &options.user,
             &encrypted,
             &identity.driver_name,
             PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
             &auth_connect_string,
             next_ttc_sequence(&mut ttc_seq_num),
+            &options.app_context,
         )?;
         trace_connect_bytes("AUTH phase two payload", &auth_two);
         trace_connect_step("send AUTH phase two");
-        send_data_packet(&mut stream, &auth_two)?;
+        send_data_packet(&mut stream, &auth_two, sdu)?;
         trace_connect_step("read AUTH phase two");
         let auth_two_response = read_data_response(&mut stream)?;
         trace_connect_bytes("AUTH phase two response", &auth_two_response);
@@ -189,6 +206,8 @@ impl Connection {
             server_version,
             capabilities,
             ttc_seq_num,
+            sdu,
+            cursor_columns: BTreeMap::new(),
         })
     }
 
@@ -219,6 +238,7 @@ impl Connection {
         send_data_packet(
             &mut self.stream,
             &build_function_payload_with_seq(TNS_FUNC_PING, seq_num),
+            self.sdu,
         )?;
         let _ = read_data_response(&mut self.stream)?;
         Ok(())
@@ -244,10 +264,64 @@ impl Connection {
         let payload =
             build_execute_payload_with_seq(sql, prefetch_rows, seq_num, statement_is_query(sql))?;
         trace_query_bytes("EXECUTE query payload", &payload);
-        send_data_packet(&mut self.stream, &payload)?;
+        send_data_packet(&mut self.stream, &payload, self.sdu)?;
         let response = read_data_response(&mut self.stream)?;
         trace_query_bytes("EXECUTE query response", &response);
-        parse_query_response(&response, self.capabilities).map_err(Into::into)
+        let result = parse_query_response(&response, self.capabilities).map_err(Error::from)?;
+        self.remember_cursor_columns(&result);
+        Ok(result)
+    }
+
+    pub async fn execute_query_with_binds(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+        binds: &[BindValue],
+    ) -> Result<QueryResult> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = build_execute_payload_with_binds_with_seq(
+            sql,
+            prefetch_rows,
+            seq_num,
+            statement_is_query(sql),
+            binds,
+        )?;
+        trace_query_bytes("EXECUTE query payload", &payload);
+        send_data_packet(&mut self.stream, &payload, self.sdu)?;
+        let response = read_data_response(&mut self.stream)?;
+        trace_query_bytes("EXECUTE query response", &response);
+        let result = parse_query_response(&response, self.capabilities).map_err(Error::from)?;
+        self.remember_cursor_columns(&result);
+        Ok(result)
+    }
+
+    pub async fn execute_query_with_bind_rows(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+        bind_rows: &[Vec<BindValue>],
+    ) -> Result<QueryResult> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = build_execute_payload_with_bind_rows_with_seq(
+            sql,
+            prefetch_rows,
+            seq_num,
+            statement_is_query(sql),
+            bind_rows,
+        )?;
+        trace_query_bytes("EXECUTE query payload", &payload);
+        send_data_packet(&mut self.stream, &payload, self.sdu)?;
+        let response = read_data_response(&mut self.stream)?;
+        trace_query_bytes("EXECUTE query response", &response);
+        let result = parse_query_response(&response, self.capabilities).map_err(Error::from)?;
+        self.remember_cursor_columns(&result);
+        Ok(result)
     }
 
     pub async fn fetch_rows(
@@ -255,16 +329,33 @@ impl Connection {
         cx: &Cx,
         cursor_id: u32,
         arraysize: u32,
+        previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
     ) -> Result<QueryResult> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
         trace_query_bytes("FETCH payload", &payload);
-        send_data_packet(&mut self.stream, &payload)?;
+        send_data_packet(&mut self.stream, &payload, self.sdu)?;
         let response = read_data_response(&mut self.stream)?;
         trace_query_bytes("FETCH response", &response);
-        parse_query_response(&response, self.capabilities).map_err(Into::into)
+        let columns = self
+            .cursor_columns
+            .get(&cursor_id)
+            .cloned()
+            .unwrap_or_default();
+        let result =
+            parse_query_response_with_context(&response, self.capabilities, &columns, previous_row)
+                .map_err(Error::from)?;
+        self.remember_cursor_columns(&result);
+        Ok(result)
+    }
+
+    fn remember_cursor_columns(&mut self, result: &QueryResult) {
+        if result.cursor_id != 0 && !result.columns.is_empty() {
+            self.cursor_columns
+                .insert(result.cursor_id, result.columns.clone());
+        }
     }
 
     pub async fn close(mut self, cx: &Cx) -> Result<()> {
@@ -275,6 +366,7 @@ impl Connection {
         send_data_packet(
             &mut self.stream,
             &build_function_payload_with_seq(TNS_FUNC_LOGOFF, seq_num),
+            self.sdu,
         )?;
         let _ = read_data_response(&mut self.stream)?;
         let eof = encode_packet(
@@ -297,6 +389,7 @@ impl Connection {
         send_data_packet(
             &mut self.stream,
             &build_function_payload_with_seq(function_code, seq_num),
+            self.sdu,
         )?;
         let _ = read_data_response(&mut self.stream)?;
         Ok(())
@@ -365,10 +458,11 @@ impl BlockingConnection {
         })
     }
 
-    pub fn fetch_rows(
+    pub fn execute_query_with_binds(
         connection: &mut Connection,
-        cursor_id: u32,
-        arraysize: u32,
+        sql: &str,
+        prefetch_rows: u32,
+        binds: &[BindValue],
     ) -> Result<QueryResult> {
         let runtime = RuntimeBuilder::current_thread()
             .build()
@@ -376,7 +470,45 @@ impl BlockingConnection {
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            connection.fetch_rows(&cx, cursor_id, arraysize).await
+            connection
+                .execute_query_with_binds(&cx, sql, prefetch_rows, binds)
+                .await
+        })
+    }
+
+    pub fn execute_query_with_bind_rows(
+        connection: &mut Connection,
+        sql: &str,
+        prefetch_rows: u32,
+        bind_rows: &[Vec<BindValue>],
+    ) -> Result<QueryResult> {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .execute_query_with_bind_rows(&cx, sql, prefetch_rows, bind_rows)
+                .await
+        })
+    }
+
+    pub fn fetch_rows(
+        connection: &mut Connection,
+        cursor_id: u32,
+        arraysize: u32,
+        previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
+    ) -> Result<QueryResult> {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .fetch_rows(&cx, cursor_id, arraysize, previous_row)
+                .await
         })
     }
 
@@ -398,15 +530,18 @@ struct IncomingPacket {
     payload: Vec<u8>,
 }
 
-fn send_data_packet(stream: &mut TcpStream, payload: &[u8]) -> Result<()> {
-    let packet = encode_packet(
-        TNS_PACKET_TYPE_DATA,
-        0,
-        Some(0),
-        payload,
-        PacketLengthWidth::Large32,
-    )?;
-    stream.write_all(&packet)?;
+fn send_data_packet(stream: &mut TcpStream, payload: &[u8], sdu: usize) -> Result<()> {
+    let max_payload = sdu.saturating_sub(TNS_DATA_PACKET_OVERHEAD).max(1);
+    for chunk in payload.chunks(max_payload) {
+        let packet = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            chunk,
+            PacketLengthWidth::Large32,
+        )?;
+        stream.write_all(&packet)?;
+    }
     stream.flush()?;
     Ok(())
 }
