@@ -28,3 +28,14 @@ __pycache__/
 node_modules/
 .venv/
 venv/
+target/
+
+# Clean-room reference checkout (pinned via scripts/pin-reference.sh; never vendored into git)
+reference/
+
+# Harness run artifacts
+harness/.baseline/
+harness/.results/
+
+# NTM runtime artifacts
+.ntm/
