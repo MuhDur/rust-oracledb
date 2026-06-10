@@ -27,6 +27,7 @@ build/
 __pycache__/
 node_modules/
 .venv/
+.venv*/
 venv/
 target/
 
@@ -39,3 +40,6 @@ harness/.results/
 
 # NTM runtime artifacts
 .ntm/
+
+# bv (beads viewer) local config and caches
+.bv/

@@ -1,0 +1,8 @@
+rust-oracledb
+
+This project is an independent community implementation and is not affiliated
+with Oracle.
+
+The clean-room reference for the thin protocol is python-oracledb v4.0.1,
+copyright Oracle and/or its affiliates, distributed under the UPL 1.0 and
+Apache-2.0 licenses by the upstream project.

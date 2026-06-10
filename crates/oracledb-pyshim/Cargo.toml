@@ -1,0 +1,20 @@
+[package]
+name = "oracledb-pyshim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PyO3 harness shim for python-oracledb thin_impl conformance tests."
+publish = false
+
+[lib]
+name = "oracledb_pyshim"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+oracledb = { path = "../oracledb" }
+pyo3.workspace = true
+
+[lints]
+workspace = true
