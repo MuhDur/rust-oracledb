@@ -721,6 +721,7 @@ fn output_only_bind(value: BindValue) -> BindValue {
             u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
         ),
         BindValue::Number(_) => (ORA_TYPE_NUM_NUMBER, 0, 22),
+        BindValue::Cursor { .. } => (ORA_TYPE_NUM_CURSOR, 0, 4),
     };
     BindValue::Output {
         ora_type_num,
@@ -729,12 +730,125 @@ fn output_only_bind(value: BindValue) -> BindValue {
     }
 }
 
+fn cursor_bind_template() -> BindValue {
+    BindValue::TypedNull {
+        ora_type_num: ORA_TYPE_NUM_CURSOR,
+        csfrm: 0,
+        buffer_size: 4,
+    }
+}
+
+fn is_cursor_bind_template(value: &BindValue) -> bool {
+    matches!(
+        value,
+        BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_CURSOR,
+            ..
+        }
+    )
+}
+
+fn is_public_cursor_value(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    Ok(value.hasattr("_impl")? && value.hasattr("connection")? && value.hasattr("arraysize")?)
+}
+
+fn validate_public_cursor_is_open(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if !is_public_cursor_value(value)? {
+        return Ok(false);
+    }
+    let impl_obj = value.getattr("_impl")?;
+    if impl_obj.is_none() {
+        return Err(raise_oracledb_driver_error("ERR_CURSOR_NOT_OPEN"));
+    }
+    Ok(impl_obj.extract::<PyRef<'_, ThinCursorImpl>>().is_ok())
+}
+
+fn validate_cursor_bind_value(
+    executing_cursor: &Bound<'_, PyAny>,
+    executing_connection: &Arc<Mutex<Option<RustConnection>>>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    if std::ptr::eq(value.as_ptr(), executing_cursor.as_ptr()) {
+        return Err(raise_oracledb_driver_error("ERR_SELF_BIND_NOT_SUPPORTED"));
+    }
+    if !is_public_cursor_value(value)? {
+        return Ok(());
+    }
+    let impl_obj = value.getattr("_impl")?;
+    if impl_obj.is_none() {
+        return Err(raise_oracledb_driver_error("ERR_CURSOR_NOT_OPEN"));
+    }
+    if let Ok(cursor_impl) = impl_obj.extract::<PyRef<'_, ThinCursorImpl>>() {
+        if !Arc::ptr_eq(&cursor_impl.connection, executing_connection) {
+            return Err(raise_oracledb_driver_error("ERR_CURSOR_DIFF_CONNECTION"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_cursor_bind_container(
+    executing_cursor: &Bound<'_, PyAny>,
+    executing_connection: &Arc<Mutex<Option<RustConnection>>>,
+    value: Option<&Bound<'_, PyAny>>,
+) -> PyResult<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.is_none() {
+        return Ok(());
+    }
+    if let Ok(dict) = value.cast::<PyDict>() {
+        for (_, item) in dict.iter() {
+            validate_cursor_bind_value(executing_cursor, executing_connection, &item)?;
+        }
+        return Ok(());
+    }
+    if let Ok(tuple) = value.cast::<PyTuple>() {
+        for item in tuple.iter() {
+            validate_cursor_bind_value(executing_cursor, executing_connection, &item)?;
+        }
+        return Ok(());
+    }
+    if let Ok(list) = value.cast::<PyList>() {
+        for item in list.iter() {
+            validate_cursor_bind_value(executing_cursor, executing_connection, &item)?;
+        }
+        return Ok(());
+    }
+    validate_cursor_bind_value(executing_cursor, executing_connection, value)
+}
+
+fn validate_cursor_bind_parameters(
+    executing_cursor: &Bound<'_, PyAny>,
+    executing_connection: &Arc<Mutex<Option<RustConnection>>>,
+    parameters: Option<&Bound<'_, PyAny>>,
+    keyword_parameters: Option<&Bound<'_, PyAny>>,
+) -> PyResult<()> {
+    validate_cursor_bind_container(executing_cursor, executing_connection, parameters)?;
+    validate_cursor_bind_container(executing_cursor, executing_connection, keyword_parameters)
+}
+
 fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> {
     if value.is_none() {
         return Ok(BindValue::Null);
     }
     if let Ok(var) = value.extract::<PyRef<'_, ThinVar>>() {
         return var.to_bind_value(value.py());
+    }
+    if is_public_cursor_value(value)? {
+        let impl_obj = value.getattr("_impl")?;
+        if impl_obj.is_none() {
+            return Err(raise_oracledb_driver_error("ERR_CURSOR_NOT_OPEN"));
+        }
+        if let Ok(cursor_impl) = impl_obj.extract::<PyRef<'_, ThinCursorImpl>>() {
+            return Ok(if cursor_impl.cursor_id == 0 {
+                cursor_bind_template()
+            } else {
+                BindValue::Cursor {
+                    cursor_id: cursor_impl.cursor_id,
+                }
+            });
+        }
     }
     if let Ok(bytes) = value.cast::<PyBytes>() {
         return Ok(BindValue::Raw(bytes.as_bytes().to_vec()));
@@ -783,11 +897,7 @@ fn bind_template_from_type(typ: &Bound<'_, PyAny>, size: u32) -> BindValue {
             csfrm: 0,
             buffer_size: size.max(1).max(4000),
         },
-        "DB_TYPE_CURSOR" | "CURSOR" => BindValue::TypedNull {
-            ora_type_num: ORA_TYPE_NUM_CURSOR,
-            csfrm: 0,
-            buffer_size: 4,
-        },
+        "DB_TYPE_CURSOR" | "CURSOR" => cursor_bind_template(),
         _ => BindValue::Null,
     }
 }
@@ -978,13 +1088,10 @@ impl ThinVar {
     }
 
     fn to_bind_value(&self, py: Python<'_>) -> PyResult<BindValue> {
-        if matches!(
-            self.default_bind,
-            BindValue::TypedNull {
-                ora_type_num: ORA_TYPE_NUM_CURSOR,
-                ..
+        if is_cursor_bind_template(&self.default_bind) {
+            if let Some(value) = self.value.lock().map_err(runtime_error)?.as_ref() {
+                validate_public_cursor_is_open(value.bind(py))?;
             }
-        ) {
             return Ok(self.default_bind.clone());
         }
         let guard = self.value.lock().map_err(runtime_error)?;
@@ -1069,7 +1176,7 @@ fn apply_out_bind_values(
             apply_cursor_out_bind(py, var, columns, *cursor_id)?;
             continue;
         }
-        let value = query_value_to_py(py, value)?;
+        let value = query_value_to_py(py, value, None)?;
         var.borrow(py).set_py_value(Some(value))?;
     }
     for (index, values) in return_values {
@@ -1078,7 +1185,7 @@ fn apply_out_bind_values(
         };
         let values = values
             .iter()
-            .map(|value| query_value_to_py(py, value))
+            .map(|value| query_value_to_py(py, value, None))
             .collect::<PyResult<Vec<_>>>()?;
         let values = PyList::new(py, values)?.unbind().into();
         var.borrow(py).set_py_value(Some(values))?;
@@ -1094,6 +1201,15 @@ fn apply_cursor_out_bind(
 ) -> PyResult<()> {
     let cursor = var.borrow(py).get_py_value(py)?;
     let cursor = cursor.bind(py);
+    hydrate_cursor_impl(cursor, columns, cursor_id, cursor_id == 0)
+}
+
+fn hydrate_cursor_impl(
+    cursor: &Bound<'_, PyAny>,
+    columns: &[ColumnMetadata],
+    cursor_id: u32,
+    invalid_ref_cursor: bool,
+) -> PyResult<()> {
     let impl_obj = cursor.getattr("_impl")?;
     let mut cursor_impl = impl_obj.extract::<PyRefMut<'_, ThinCursorImpl>>()?;
     cursor_impl.columns = columns.to_vec();
@@ -1101,6 +1217,7 @@ fn apply_cursor_out_bind(
     cursor_impl.row_index = 0;
     cursor_impl.cursor_id = cursor_id;
     cursor_impl.more_rows = cursor_id != 0;
+    cursor_impl.invalid_ref_cursor = invalid_ref_cursor;
     cursor_impl.rowcount = 0;
     cursor_impl.is_query = true;
     Ok(())
@@ -1909,9 +2026,11 @@ impl FetchMetadataImpl {
                 "DB_TYPE_NVARCHAR"
             }
             ORA_TYPE_NUM_CHAR if self.metadata.csfrm == CS_FORM_NCHAR => "DB_TYPE_NCHAR",
-            ORA_TYPE_NUM_VARCHAR | ORA_TYPE_NUM_CHAR | ORA_TYPE_NUM_LONG => "DB_TYPE_VARCHAR",
+            ORA_TYPE_NUM_CHAR => "DB_TYPE_CHAR",
+            ORA_TYPE_NUM_VARCHAR | ORA_TYPE_NUM_LONG => "DB_TYPE_VARCHAR",
             ORA_TYPE_NUM_RAW | ORA_TYPE_NUM_LONG_RAW => "DB_TYPE_RAW",
             ORA_TYPE_NUM_NUMBER => "DB_TYPE_NUMBER",
+            ORA_TYPE_NUM_CURSOR => "DB_TYPE_CURSOR",
             ORA_TYPE_NUM_OBJECT => "DB_TYPE_OBJECT",
             _ => "DB_TYPE_VARCHAR",
         };
@@ -2048,6 +2167,7 @@ struct ThinCursorImpl {
     row_index: usize,
     cursor_id: u32,
     more_rows: bool,
+    invalid_ref_cursor: bool,
     rowcount: i64,
     arraysize: u32,
     prefetchrows: u32,
@@ -2089,6 +2209,7 @@ impl ThinCursorImpl {
             row_index: 0,
             cursor_id: 0,
             more_rows: false,
+            invalid_ref_cursor: false,
             rowcount: 0,
             arraysize: 100,
             prefetchrows: 2,
@@ -2253,6 +2374,7 @@ impl ThinCursorImpl {
         self.row_index = 0;
         self.cursor_id = 0;
         self.more_rows = false;
+        self.invalid_ref_cursor = false;
         self.is_query = false;
     }
 
@@ -2300,6 +2422,7 @@ impl ThinCursorImpl {
                 "ERR_MIXED_POSITIONAL_AND_NAMED_BINDS",
             ));
         }
+        validate_cursor_bind_parameters(_cursor, &self.connection, parameters, keyword_parameters)?;
         self.bind_names = unique_sql_bind_names(statement)?;
         self.bind_values = Python::attach(|py| {
             extract_bind_values(
@@ -2440,6 +2563,7 @@ impl ThinCursorImpl {
         self.row_index = 0;
         self.cursor_id = result.cursor_id;
         self.more_rows = result.more_rows;
+        self.invalid_ref_cursor = false;
         self.rowcount = i64::from(num_execs);
         self.is_query = is_query;
         Ok(())
@@ -2459,6 +2583,7 @@ impl ThinCursorImpl {
             self.row_index = 0;
             self.cursor_id = result.cursor_id;
             self.more_rows = result.more_rows;
+            self.invalid_ref_cursor = false;
             self.rowcount = 0;
             self.is_query = true;
             return Ok(());
@@ -2469,6 +2594,7 @@ impl ThinCursorImpl {
             self.row_index = 0;
             self.cursor_id = result.cursor_id;
             self.more_rows = result.more_rows;
+            self.invalid_ref_cursor = false;
             self.rowcount = 0;
             self.is_query = false;
             return Ok(());
@@ -2533,6 +2659,7 @@ impl ThinCursorImpl {
         self.row_index = 0;
         self.cursor_id = result.cursor_id;
         self.more_rows = result.more_rows;
+        self.invalid_ref_cursor = false;
         self.rowcount = 0;
         self.is_query = is_query;
         Ok(())
@@ -2547,6 +2674,9 @@ impl ThinCursorImpl {
         py: Python<'_>,
         _cursor: &Bound<'_, PyAny>,
     ) -> PyResult<Option<Py<PyAny>>> {
+        if self.invalid_ref_cursor {
+            return Err(raise_oracledb_driver_error("ERR_INVALID_REF_CURSOR"));
+        }
         if self.row_index >= self.rows.len() && self.more_rows && self.cursor_id != 0 {
             let previous_row = self.rows.last().cloned();
             let mut guard = self.connection.lock().map_err(runtime_error)?;
@@ -2570,6 +2700,7 @@ impl ThinCursorImpl {
                 self.cursor_id = result.cursor_id;
             }
             self.more_rows = result.more_rows;
+            self.invalid_ref_cursor = false;
         }
         let Some(row) = self.rows.get(self.row_index) else {
             return Ok(None);
@@ -2578,7 +2709,7 @@ impl ThinCursorImpl {
         self.rowcount += 1;
         let values = row
             .iter()
-            .map(|value| query_value_to_py(py, value))
+            .map(|value| query_value_to_py(py, value, Some(_cursor)))
             .collect::<PyResult<Vec<_>>>()?;
         let tuple = PyTuple::new(py, values)?;
         if let Some(rowfactory) = &self.rowfactory {
@@ -2656,13 +2787,7 @@ impl ThinCursorImpl {
     ) -> PyResult<Py<ThinVar>> {
         let _ = convert_nulls;
         let default_bind = bind_template_from_type(typ, size);
-        let value = if matches!(
-            default_bind,
-            BindValue::TypedNull {
-                ora_type_num: ORA_TYPE_NUM_CURSOR,
-                ..
-            }
-        ) {
+        let value = if is_cursor_bind_template(&default_bind) {
             Some(connection.call_method0("cursor")?.unbind())
         } else {
             None
@@ -2691,7 +2816,11 @@ impl ThinCursorImpl {
     }
 }
 
-fn query_value_to_py(py: Python<'_>, value: &Option<QueryValue>) -> PyResult<Py<PyAny>> {
+fn query_value_to_py(
+    py: Python<'_>,
+    value: &Option<QueryValue>,
+    owner_cursor: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Py<PyAny>> {
     match value {
         None => Ok(py.None()),
         Some(QueryValue::Text(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
@@ -2704,8 +2833,14 @@ fn query_value_to_py(py: Python<'_>, value: &Option<QueryValue>) -> PyResult<Py<
             let value = text.parse::<f64>().map_err(runtime_error)?;
             Ok(value.into_pyobject(py)?.unbind().into())
         }
-        Some(QueryValue::Cursor { .. }) => {
-            Err(not_implemented("ThinCursorImpl cursor value conversion"))
+        Some(QueryValue::Cursor { columns, cursor_id }) => {
+            let Some(owner_cursor) = owner_cursor else {
+                return Err(not_implemented("ThinCursorImpl cursor value conversion"));
+            };
+            let connection = owner_cursor.getattr("connection")?;
+            let child_cursor = connection.call_method0("cursor")?;
+            hydrate_cursor_impl(&child_cursor, columns, *cursor_id, false)?;
+            Ok(child_cursor.unbind())
         }
     }
 }

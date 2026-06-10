@@ -249,6 +249,9 @@ pub enum BindValue {
     Text(String),
     Raw(Vec<u8>),
     Number(String),
+    Cursor {
+        cursor_id: u32,
+    },
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -589,6 +592,7 @@ fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
             u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
         ),
         BindValue::Number(_) => (ORA_TYPE_NUM_NUMBER, 0, ORA_TYPE_SIZE_NUMBER),
+        BindValue::Cursor { .. } => (ORA_TYPE_NUM_CURSOR, 0, 4),
     }
 }
 
@@ -612,6 +616,16 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue) -> Result<()> {
         BindValue::Number(value) => {
             let bytes = encode_number_text(value)?;
             writer.write_bytes_with_length(&bytes)
+        }
+        BindValue::Cursor { cursor_id } => {
+            if *cursor_id == 0 {
+                writer.write_u8(1);
+                writer.write_u8(0);
+            } else {
+                writer.write_ub4(1);
+                writer.write_ub4(*cursor_id);
+            }
+            Ok(())
         }
     }
 }
