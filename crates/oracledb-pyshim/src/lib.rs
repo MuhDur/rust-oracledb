@@ -6,20 +6,19 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use oracledb::protocol::sql;
 use oracledb::protocol::thin::{
-    bind_template_from_type_name, bind_value_type_info, cursor_bind_template,
-    dbobject_element_bind_type_info, decode_datetime_value,
+    bind_template_from_type_name, bind_value_type_info, column_metadata_is_xmltype,
+    cursor_bind_template, dbobject_element_bind_type_info, decode_datetime_value,
     decode_dbobject_binary_double as protocol_decode_dbobject_binary_double,
     decode_dbobject_binary_float as protocol_decode_dbobject_binary_float,
     decode_dbobject_text as protocol_decode_dbobject_text, decode_dbobject_xmltype_text,
     decode_number_value, define_metadata_from_bind, is_cursor_bind_template,
     output_bind as output_only_bind, public_dbtype_name_from_bind,
-    public_dbtype_name_from_type_name, returning_output_bind, BindValue, ColumnMetadata,
-    DbObjectPackedReader, QueryResult, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR,
-    ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB,
-    ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_DATE,
-    ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT,
-    ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_ROWID, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
-    ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_UROWID, ORA_TYPE_NUM_VARCHAR,
+    public_dbtype_name_from_column_metadata, public_dbtype_name_from_type_name,
+    returning_output_bind, BindValue, ColumnMetadata, DbObjectPackedReader, QueryResult,
+    QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE,
+    ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR,
+    ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_TIMESTAMP,
+    ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection};
@@ -2537,17 +2536,6 @@ fn encode_lob_text(value: &str, csfrm: u8, locator: Option<&[u8]>) -> Vec<u8> {
         bytes.extend_from_slice(&encoded);
     }
     bytes
-}
-
-fn column_metadata_is_xmltype(metadata: &ColumnMetadata) -> bool {
-    metadata
-        .object_schema
-        .as_deref()
-        .is_some_and(|schema| schema.eq_ignore_ascii_case("SYS"))
-        && metadata
-            .object_type_name
-            .as_deref()
-            .is_some_and(|name| name.eq_ignore_ascii_case("XMLTYPE"))
 }
 
 fn lob_data_to_py(
@@ -5409,32 +5397,7 @@ impl FetchMetadataImpl {
         if column_metadata_is_xmltype(&self.metadata) {
             return Ok(module.getattr("DB_TYPE_XMLTYPE")?.unbind());
         }
-        let name = match self.metadata.ora_type_num {
-            ORA_TYPE_NUM_LONG if self.metadata.csfrm == CS_FORM_NCHAR => "DB_TYPE_LONG_NVARCHAR",
-            ORA_TYPE_NUM_LONG => "DB_TYPE_LONG",
-            ORA_TYPE_NUM_LONG_RAW => "DB_TYPE_LONG_RAW",
-            ORA_TYPE_NUM_VARCHAR if self.metadata.csfrm == CS_FORM_NCHAR => "DB_TYPE_NVARCHAR",
-            ORA_TYPE_NUM_CHAR if self.metadata.csfrm == CS_FORM_NCHAR => "DB_TYPE_NCHAR",
-            ORA_TYPE_NUM_CHAR => "DB_TYPE_CHAR",
-            ORA_TYPE_NUM_VARCHAR => "DB_TYPE_VARCHAR",
-            ORA_TYPE_NUM_RAW => "DB_TYPE_RAW",
-            ORA_TYPE_NUM_ROWID => "DB_TYPE_ROWID",
-            ORA_TYPE_NUM_UROWID => "DB_TYPE_UROWID",
-            ORA_TYPE_NUM_BINARY_DOUBLE => "DB_TYPE_BINARY_DOUBLE",
-            ORA_TYPE_NUM_BINARY_INTEGER => "DB_TYPE_BINARY_INTEGER",
-            ORA_TYPE_NUM_NUMBER => "DB_TYPE_NUMBER",
-            ORA_TYPE_NUM_CURSOR => "DB_TYPE_CURSOR",
-            ORA_TYPE_NUM_OBJECT => "DB_TYPE_OBJECT",
-            ORA_TYPE_NUM_CLOB if self.metadata.csfrm == CS_FORM_NCHAR => "DB_TYPE_NCLOB",
-            ORA_TYPE_NUM_CLOB => "DB_TYPE_CLOB",
-            ORA_TYPE_NUM_BLOB => "DB_TYPE_BLOB",
-            ORA_TYPE_NUM_BFILE => "DB_TYPE_BFILE",
-            ORA_TYPE_NUM_DATE => "DB_TYPE_DATE",
-            ORA_TYPE_NUM_TIMESTAMP => "DB_TYPE_TIMESTAMP",
-            ORA_TYPE_NUM_TIMESTAMP_LTZ => "DB_TYPE_TIMESTAMP_LTZ",
-            ORA_TYPE_NUM_TIMESTAMP_TZ => "DB_TYPE_TIMESTAMP_TZ",
-            _ => "DB_TYPE_VARCHAR",
-        };
+        let name = public_dbtype_name_from_column_metadata(&self.metadata);
         Ok(module.getattr(name)?.unbind())
     }
 

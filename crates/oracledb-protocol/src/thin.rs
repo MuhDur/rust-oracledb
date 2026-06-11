@@ -1133,6 +1133,49 @@ pub fn public_dbtype_name_from_type_name(type_name: &str) -> &'static str {
     }
 }
 
+pub fn column_metadata_is_xmltype(metadata: &ColumnMetadata) -> bool {
+    metadata
+        .object_schema
+        .as_deref()
+        .is_some_and(|schema| schema.eq_ignore_ascii_case("SYS"))
+        && metadata
+            .object_type_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("XMLTYPE"))
+}
+
+pub fn public_dbtype_name_from_column_metadata(metadata: &ColumnMetadata) -> &'static str {
+    if column_metadata_is_xmltype(metadata) {
+        return "DB_TYPE_XMLTYPE";
+    }
+    match (metadata.ora_type_num, metadata.csfrm) {
+        (ORA_TYPE_NUM_LONG, CS_FORM_NCHAR) => "DB_TYPE_LONG_NVARCHAR",
+        (ORA_TYPE_NUM_LONG, _) => "DB_TYPE_LONG",
+        (ORA_TYPE_NUM_LONG_RAW, _) => "DB_TYPE_LONG_RAW",
+        (ORA_TYPE_NUM_VARCHAR, CS_FORM_NCHAR) => "DB_TYPE_NVARCHAR",
+        (ORA_TYPE_NUM_CHAR, CS_FORM_NCHAR) => "DB_TYPE_NCHAR",
+        (ORA_TYPE_NUM_CHAR, _) => "DB_TYPE_CHAR",
+        (ORA_TYPE_NUM_VARCHAR, _) => "DB_TYPE_VARCHAR",
+        (ORA_TYPE_NUM_RAW, _) => "DB_TYPE_RAW",
+        (ORA_TYPE_NUM_ROWID, _) => "DB_TYPE_ROWID",
+        (ORA_TYPE_NUM_UROWID, _) => "DB_TYPE_UROWID",
+        (ORA_TYPE_NUM_BINARY_DOUBLE, _) => "DB_TYPE_BINARY_DOUBLE",
+        (ORA_TYPE_NUM_BINARY_INTEGER, _) => "DB_TYPE_BINARY_INTEGER",
+        (ORA_TYPE_NUM_NUMBER, _) => "DB_TYPE_NUMBER",
+        (ORA_TYPE_NUM_CURSOR, _) => "DB_TYPE_CURSOR",
+        (ORA_TYPE_NUM_OBJECT, _) => "DB_TYPE_OBJECT",
+        (ORA_TYPE_NUM_CLOB, CS_FORM_NCHAR) => "DB_TYPE_NCLOB",
+        (ORA_TYPE_NUM_CLOB, _) => "DB_TYPE_CLOB",
+        (ORA_TYPE_NUM_BLOB, _) => "DB_TYPE_BLOB",
+        (ORA_TYPE_NUM_BFILE, _) => "DB_TYPE_BFILE",
+        (ORA_TYPE_NUM_DATE, _) => "DB_TYPE_DATE",
+        (ORA_TYPE_NUM_TIMESTAMP, _) => "DB_TYPE_TIMESTAMP",
+        (ORA_TYPE_NUM_TIMESTAMP_LTZ, _) => "DB_TYPE_TIMESTAMP_LTZ",
+        (ORA_TYPE_NUM_TIMESTAMP_TZ, _) => "DB_TYPE_TIMESTAMP_TZ",
+        _ => "DB_TYPE_VARCHAR",
+    }
+}
+
 pub fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
     match value {
         BindValue::TypedNull {
@@ -3740,6 +3783,58 @@ mod tests {
                 buffer_size: 16,
             }),
             "DB_TYPE_NVARCHAR"
+        );
+    }
+
+    #[test]
+    fn public_dbtype_names_from_column_metadata_preserve_fetch_semantics() {
+        let mut metadata = number_column("VALUE");
+        assert_eq!(
+            public_dbtype_name_from_column_metadata(&metadata),
+            "DB_TYPE_NUMBER"
+        );
+
+        metadata.ora_type_num = ORA_TYPE_NUM_CHAR;
+        metadata.csfrm = CS_FORM_NCHAR;
+        assert_eq!(
+            public_dbtype_name_from_column_metadata(&metadata),
+            "DB_TYPE_NCHAR"
+        );
+
+        metadata.ora_type_num = ORA_TYPE_NUM_VARCHAR;
+        assert_eq!(
+            public_dbtype_name_from_column_metadata(&metadata),
+            "DB_TYPE_NVARCHAR"
+        );
+
+        metadata.ora_type_num = ORA_TYPE_NUM_CLOB;
+        assert_eq!(
+            public_dbtype_name_from_column_metadata(&metadata),
+            "DB_TYPE_NCLOB"
+        );
+
+        metadata.csfrm = CS_FORM_IMPLICIT;
+        for (ora_type_num, expected) in [
+            (ORA_TYPE_NUM_LONG, "DB_TYPE_LONG"),
+            (ORA_TYPE_NUM_LONG_RAW, "DB_TYPE_LONG_RAW"),
+            (ORA_TYPE_NUM_ROWID, "DB_TYPE_ROWID"),
+            (ORA_TYPE_NUM_UROWID, "DB_TYPE_UROWID"),
+            (ORA_TYPE_NUM_TIMESTAMP, "DB_TYPE_TIMESTAMP"),
+            (ORA_TYPE_NUM_TIMESTAMP_LTZ, "DB_TYPE_TIMESTAMP_LTZ"),
+            (ORA_TYPE_NUM_TIMESTAMP_TZ, "DB_TYPE_TIMESTAMP_TZ"),
+            (ORA_TYPE_NUM_BFILE, "DB_TYPE_BFILE"),
+        ] {
+            metadata.ora_type_num = ora_type_num;
+            assert_eq!(public_dbtype_name_from_column_metadata(&metadata), expected);
+        }
+
+        metadata.ora_type_num = ORA_TYPE_NUM_OBJECT;
+        metadata.object_schema = Some("SYS".into());
+        metadata.object_type_name = Some("XMLTYPE".into());
+        assert!(column_metadata_is_xmltype(&metadata));
+        assert_eq!(
+            public_dbtype_name_from_column_metadata(&metadata),
+            "DB_TYPE_XMLTYPE"
         );
     }
 
