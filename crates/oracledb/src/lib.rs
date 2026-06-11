@@ -1428,7 +1428,8 @@ fn build_io_runtime() -> Result<Runtime> {
 
 /// Runs a connection future to completion on a fresh blocking runtime,
 /// passing it the ambient [`Cx`] (shared shape of the `BlockingConnection`
-/// wrappers).
+/// wrappers). Currently only used by the arrow-feature wrappers.
+#[cfg(feature = "arrow")]
 pub(crate) fn block_on_connection<F, Fut, T>(operation: F) -> Result<T>
 where
     F: FnOnce(Cx) -> Fut,

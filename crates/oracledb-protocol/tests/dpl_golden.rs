@@ -16,10 +16,10 @@
 
 use oracledb_protocol::dpl::{
     build_direct_path_load_stream_payload, build_direct_path_op_payload,
-    build_direct_path_prepare_payload, encode_direct_path_rows,
-    parse_direct_path_prepare_response, parse_direct_path_simple_response, BatchLoadState,
-    DirectPathColumnValue, TNS_DP_OP_ABORT, TNS_DP_OP_FINISH, TNS_FUNC_DIRECT_PATH_LOAD_STREAM,
-    TNS_FUNC_DIRECT_PATH_OP, TNS_FUNC_DIRECT_PATH_PREPARE,
+    build_direct_path_prepare_payload, encode_direct_path_rows, parse_direct_path_prepare_response,
+    parse_direct_path_simple_response, BatchLoadState, DirectPathColumnValue, TNS_DP_OP_ABORT,
+    TNS_DP_OP_FINISH, TNS_FUNC_DIRECT_PATH_LOAD_STREAM, TNS_FUNC_DIRECT_PATH_OP,
+    TNS_FUNC_DIRECT_PATH_PREPARE,
 };
 use oracledb_protocol::thin::{
     ClientCapabilities, ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_NUMBER,
@@ -41,7 +41,11 @@ impl CapturedPacket {
 
     /// TTC payload of a data packet (skips 8-byte header + 2-byte data flags).
     fn data_payload(&self) -> &[u8] {
-        assert_eq!(self.packet_type(), TNS_PACKET_TYPE_DATA, "not a data packet");
+        assert_eq!(
+            self.packet_type(),
+            TNS_PACKET_TYPE_DATA,
+            "not a data packet"
+        );
         &self.bytes[10..]
     }
 
@@ -129,10 +133,12 @@ fn find_function(packets: &[CapturedPacket], function_code: u8, nth: usize) -> u
 }
 
 fn dpl_golden_column_names() -> Vec<String> {
-    ["id", "name", "salary", "hired", "updated", "payload", "rating"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    [
+        "id", "name", "salary", "hired", "updated", "payload", "rating",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 /// Rows loaded by capture 1 of capture_dpl.py, in driver intermediate form.
@@ -220,11 +226,9 @@ fn prepare_response_parses_and_overrides_metadata() {
     let packets = load_dpl_capture();
     let index = find_function(&packets, TNS_FUNC_DIRECT_PATH_PREPARE, 0);
     let response = response_after(&packets, index);
-    let result = parse_direct_path_prepare_response(
-        response.data_payload(),
-        ClientCapabilities::default(),
-    )
-    .expect("prepare response should parse");
+    let result =
+        parse_direct_path_prepare_response(response.data_payload(), ClientCapabilities::default())
+            .expect("prepare response should parse");
 
     let names: Vec<&str> = result
         .column_metadata

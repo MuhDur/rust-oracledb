@@ -17,12 +17,13 @@ use crate::thin::{
     encode_binary_double, encode_binary_float, encode_number_text, encode_oracle_date,
     encode_oracle_timestamp, encode_oracle_timestamp_tz, parse_column_metadata,
     parse_server_error_info, skip_server_side_piggyback, ClientCapabilities, ColumnMetadata,
-    CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_INTEGER,
-    ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_DATE,
-    ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_RAW,
-    ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ,
-    ORA_TYPE_NUM_VARCHAR, TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_ERROR,
-    TNS_MSG_TYPE_PARAMETER, TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK, TNS_MSG_TYPE_STATUS,
+    CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_FLOAT,
+    ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_BOOLEAN, ORA_TYPE_NUM_CHAR,
+    ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW,
+    ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
+    ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR, TNS_MSG_TYPE_END_OF_RESPONSE,
+    TNS_MSG_TYPE_ERROR, TNS_MSG_TYPE_PARAMETER, TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK,
+    TNS_MSG_TYPE_STATUS,
 };
 use crate::wire::{TtcReader, TtcWriter};
 use crate::{ProtocolError, Result};
@@ -66,9 +67,6 @@ pub const TNS_DPLS_MAX_PIECE_SIZE: usize = 0xfff0;
 const TNS_DPLS_LONG_LENGTH_INDICATOR: u8 = 0xfe;
 const TNS_NULL_LENGTH_INDICATOR: u8 = 0xff;
 
-const ORA_TYPE_NUM_BINARY_FLOAT: u8 = 100;
-const ORA_TYPE_NUM_BOOLEAN: u8 = 252;
-
 /// Builds the payload for TTC function 128 (direct path prepare).
 ///
 /// Mirrors `DirectPathPrepareMessage._write_message`.
@@ -78,12 +76,11 @@ pub fn build_direct_path_prepare_payload(
     column_names: &[String],
     seq_num: u8,
 ) -> Result<Vec<u8>> {
-    let keyword_parameters_length = u32::try_from(column_names.len() + 2).map_err(|_| {
-        ProtocolError::InvalidPacketLength {
+    let keyword_parameters_length =
+        u32::try_from(column_names.len() + 2).map_err(|_| ProtocolError::InvalidPacketLength {
             length: column_names.len(),
             minimum: 0,
-        }
-    })?;
+        })?;
 
     let mut in_values = [0u32; TNS_DPP_IN_VALUES_SENT];
     in_values[TNS_DPP_IN_INDEX_INTERFACE_VERSION] = TNS_DP_INTERFACE_VERSION;
@@ -202,12 +199,13 @@ fn parse_prepare_return_parameters(
     for _ in 0..out_values_length {
         out_values.push(reader.read_ub4()?);
     }
-    let cursor_id = out_values
-        .get(TNS_DPP_OUT_INDEX_CURSOR)
-        .copied()
-        .ok_or(ProtocolError::TtcDecode(
-            "direct path prepare response missing cursor id",
-        ))?;
+    let cursor_id =
+        out_values
+            .get(TNS_DPP_OUT_INDEX_CURSOR)
+            .copied()
+            .ok_or(ProtocolError::TtcDecode(
+                "direct path prepare response missing cursor id",
+            ))?;
     let cursor_id = u16::try_from(cursor_id)
         .map_err(|_| ProtocolError::TtcDecode("direct path cursor id out of range"))?;
     Ok(DirectPathPrepareResult {
@@ -529,10 +527,22 @@ impl DirectPathPieceBuffer {
                     // the protocol requires a timestamp with zero fractional
                     // seconds to be transmitted as a 7-byte date
                     ORA_TYPE_NUM_TIMESTAMP | ORA_TYPE_NUM_TIMESTAMP_LTZ => encode_oracle_timestamp(
-                        *year, *month, *day, *hour, *minute, *second, *nanosecond,
+                        *year,
+                        *month,
+                        *day,
+                        *hour,
+                        *minute,
+                        *second,
+                        *nanosecond,
                     )?,
                     ORA_TYPE_NUM_TIMESTAMP_TZ => encode_oracle_timestamp_tz(
-                        *year, *month, *day, *hour, *minute, *second, *nanosecond,
+                        *year,
+                        *month,
+                        *day,
+                        *hour,
+                        *minute,
+                        *second,
+                        *nanosecond,
                     )?,
                     _ => {
                         return Err(ProtocolError::TtcDecode(
@@ -972,7 +982,10 @@ mod tests {
         );
         assert_eq!(piece.num_segments(), 2);
         // number 1 encodes as c1 02; "alpha" as length + bytes
-        assert_eq!(piece.data(), &[2, 0xc1, 0x02, 5, b'a', b'l', b'p', b'h', b'a']);
+        assert_eq!(
+            piece.data(),
+            &[2, 0xc1, 0x02, 5, b'a', b'l', b'p', b'h', b'a']
+        );
         // total = data + 4-byte fast header
         assert_eq!(stream.total_piece_length, piece.data().len() as u32 + 4);
     }
@@ -1075,7 +1088,8 @@ mod tests {
         let columns: Vec<ColumnMetadata> = (0..300)
             .map(|i| column(&format!("C{i}"), ORA_TYPE_NUM_NUMBER, 0, true))
             .collect();
-        let row: Vec<DirectPathColumnValue> = (0..300).map(|_| DirectPathColumnValue::Null).collect();
+        let row: Vec<DirectPathColumnValue> =
+            (0..300).map(|_| DirectPathColumnValue::Null).collect();
         let stream = encode_direct_path_rows(&columns, &[row], 1).expect("stream should encode");
         assert_eq!(stream.pieces.len(), 2);
         assert_eq!(stream.pieces[0].num_segments(), 255);
@@ -1139,7 +1153,10 @@ mod tests {
         let mut clob = column("DOC", ORA_TYPE_NUM_CLOB, 0, true);
         clob.csfrm = CS_FORM_IMPLICIT;
         apply_direct_path_metadata_overrides(&mut clob, 178);
-        assert_eq!(clob.csfrm, CS_FORM_IMPLICIT, "single-byte charset keeps form");
+        assert_eq!(
+            clob.csfrm, CS_FORM_IMPLICIT,
+            "single-byte charset keeps form"
+        );
 
         let mut blob = column("BIN", ORA_TYPE_NUM_BLOB, 0, true);
         apply_direct_path_metadata_overrides(&mut blob, 873);
@@ -1150,11 +1167,20 @@ mod tests {
     #[test]
     fn batch_state_single_chunk_splits_by_batch_size() {
         let mut state = BatchLoadState::for_rows(5, 2).expect("state should build");
-        assert_eq!((state.num_rows(), state.offset(), state.message_offset()), (2, 0, 0));
+        assert_eq!(
+            (state.num_rows(), state.offset(), state.message_offset()),
+            (2, 0, 0)
+        );
         state.next_batch();
-        assert_eq!((state.num_rows(), state.offset(), state.message_offset()), (2, 2, 2));
+        assert_eq!(
+            (state.num_rows(), state.offset(), state.message_offset()),
+            (2, 2, 2)
+        );
         state.next_batch();
-        assert_eq!((state.num_rows(), state.offset(), state.message_offset()), (1, 4, 4));
+        assert_eq!(
+            (state.num_rows(), state.offset(), state.message_offset()),
+            (1, 4, 4)
+        );
         state.next_batch();
         assert!(state.is_done());
     }
@@ -1163,11 +1189,32 @@ mod tests {
     fn batch_state_never_spans_chunks() {
         // chunks of 3 and 2 rows with batch size 2: batches are 2, 1, 2
         let mut state = BatchLoadState::new(vec![3, 2], 2).expect("state should build");
-        assert_eq!((state.chunk_index(), state.num_rows(), state.message_offset()), (0, 2, 0));
+        assert_eq!(
+            (
+                state.chunk_index(),
+                state.num_rows(),
+                state.message_offset()
+            ),
+            (0, 2, 0)
+        );
         state.next_batch();
-        assert_eq!((state.chunk_index(), state.num_rows(), state.message_offset()), (0, 1, 2));
+        assert_eq!(
+            (
+                state.chunk_index(),
+                state.num_rows(),
+                state.message_offset()
+            ),
+            (0, 1, 2)
+        );
         state.next_batch();
-        assert_eq!((state.chunk_index(), state.num_rows(), state.message_offset()), (1, 2, 0));
+        assert_eq!(
+            (
+                state.chunk_index(),
+                state.num_rows(),
+                state.message_offset()
+            ),
+            (1, 2, 0)
+        );
         state.next_batch();
         assert!(state.is_done());
     }
@@ -1196,17 +1243,17 @@ mod tests {
         let columns = vec![column("ID", ORA_TYPE_NUM_NUMBER, 0, false)];
         let rows = vec![vec![DirectPathColumnValue::Number("1".into())]];
         let stream = encode_direct_path_rows(&columns, &rows, 1).expect("stream should encode");
-        let payload = build_direct_path_load_stream_payload(1, &stream, 11)
-            .expect("payload should build");
+        let payload =
+            build_direct_path_load_stream_payload(1, &stream, 11).expect("payload should build");
         let mut expected = vec![
             3, 129, 11, // fn code + seq
-            0, // token
+            0,  // token
             1, 1, // ub2 cursor id
             1, // buffer pointer
             1, 7, // ub4 total piece length (3 data + 4 header)
             2, 0x01, 0x90, // ub4 stream version 400
-            0, // input values pointer
-            0, // ub4 input values count
+            0,    // input values pointer
+            0,    // ub4 input values count
             1, 1, // output pointers
             0x3c, 0, 7, 1, // piece: flags, u16be total, num segments
             2, 0xc1, 0x02, // number 1

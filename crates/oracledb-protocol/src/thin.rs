@@ -56,7 +56,9 @@ pub const ORA_TYPE_NUM_LONG: u8 = 8;
 pub const ORA_TYPE_NUM_ROWID: u8 = 11;
 pub const ORA_TYPE_NUM_DATE: u8 = 12;
 pub const ORA_TYPE_NUM_RAW: u8 = 23;
+pub const ORA_TYPE_NUM_BINARY_FLOAT: u8 = 100;
 pub const ORA_TYPE_NUM_BINARY_DOUBLE: u8 = 101;
+pub const ORA_TYPE_NUM_BOOLEAN: u8 = 252;
 pub const ORA_TYPE_NUM_CURSOR: u8 = 102;
 pub const ORA_TYPE_NUM_LONG_RAW: u8 = 24;
 pub const ORA_TYPE_NUM_CHAR: u8 = 96;
@@ -134,7 +136,7 @@ const TNS_BIND_USE_INDICATORS: u8 = 0x01;
 const TNS_BIND_ARRAY: u8 = 0x40;
 const TNS_BIND_DIR_INPUT: u8 = 32;
 const TNS_CHARSET_UTF8: u16 = 873;
-const TNS_MAX_LONG_LENGTH: u32 = 0x7fff_ffff;
+pub const TNS_MAX_LONG_LENGTH: u32 = 0x7fff_ffff;
 const TNS_ERR_NO_DATA_FOUND: u32 = 1403;
 const TNS_UDS_FLAGS_IS_JSON: u32 = 0x01;
 const TNS_UDS_FLAGS_IS_OSON: u32 = 0x02;
@@ -2839,6 +2841,26 @@ fn parse_column_value(
             decode_binary_double(&bytes)
                 .map(|value| Some(QueryValue::BinaryDouble(value.to_string())))
         }
+        ORA_TYPE_NUM_BINARY_FLOAT => {
+            let Some(bytes) = reader.read_bytes()? else {
+                return Ok(None);
+            };
+            // text form keeps QueryValue stable; f32 Display round-trips
+            decode_binary_float(&bytes)
+                .map(|value| Some(QueryValue::BinaryDouble(value.to_string())))
+        }
+        ORA_TYPE_NUM_BOOLEAN => {
+            let Some(bytes) = reader.read_bytes()? else {
+                return Ok(None);
+            };
+            // reference read_bool: last byte == 1 means true; surfaced as
+            // NUMBER 0/1 (QueryValue has no dedicated boolean variant)
+            let is_true = matches!(bytes.last(), Some(&1));
+            Ok(Some(QueryValue::Number {
+                text: if is_true { "1".into() } else { "0".into() },
+                is_integer: true,
+            }))
+        }
         ORA_TYPE_NUM_DATE
         | ORA_TYPE_NUM_TIMESTAMP
         | ORA_TYPE_NUM_TIMESTAMP_LTZ
@@ -3341,6 +3363,21 @@ pub(crate) fn encode_binary_float(value: f32) -> [u8; 4] {
         }
     }
     bytes
+}
+
+fn decode_binary_float(bytes: &[u8]) -> Result<f32> {
+    let bytes: [u8; 4] = bytes
+        .try_into()
+        .map_err(|_| ProtocolError::TtcDecode("invalid BINARY_FLOAT length"))?;
+    let mut decoded = bytes;
+    if decoded[0] & 0x80 != 0 {
+        decoded[0] &= 0x7f;
+    } else {
+        for byte in &mut decoded {
+            *byte = !*byte;
+        }
+    }
+    Ok(f32::from_bits(u32::from_be_bytes(decoded)))
 }
 
 fn decode_binary_double(bytes: &[u8]) -> Result<f64> {
