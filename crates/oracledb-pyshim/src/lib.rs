@@ -2040,6 +2040,28 @@ fn dbtype_name_from_oracle_attr_type(type_name: &str) -> &'static str {
     }
 }
 
+fn normalized_attr_precision_scale(
+    type_name: &str,
+    precision: Option<i8>,
+    scale: Option<i8>,
+) -> (i8, i8) {
+    match type_name.to_ascii_uppercase().as_str() {
+        "NUMBER" => (precision.unwrap_or(0), scale.unwrap_or(-127)),
+        "INTEGER" | "SMALLINT" => (precision.unwrap_or(38), scale.unwrap_or(0)),
+        "REAL" => (precision.unwrap_or(63), scale.unwrap_or(-127)),
+        "DOUBLE PRECISION" | "FLOAT" => (precision.unwrap_or(126), scale.unwrap_or(-127)),
+        _ => (0, 0),
+    }
+}
+
+fn normalized_attr_max_size(type_name: &str, length: Option<u32>) -> u32 {
+    let length = length.unwrap_or(0);
+    match type_name.to_ascii_uppercase().as_str() {
+        "NCHAR" | "NVARCHAR2" | "NVARCHAR" => length.saturating_mul(2),
+        _ => length,
+    }
+}
+
 fn sql_identifier(value: &str) -> PyResult<String> {
     if value
         .chars()
@@ -2746,7 +2768,7 @@ impl ThinConnImpl {
 
     fn object_type_attrs(&self, schema: &str, type_name: &str) -> PyResult<Vec<DbObjectAttrImpl>> {
         let rows = self.query_rows_with_binds(
-            "select attr_name, attr_type_name, length, precision, scale \
+            "select attr_name, attr_type_name, length, precision, scale, attr_type_owner \
              from all_type_attrs \
              where owner = :1 and type_name = :2 \
              order by attr_no",
@@ -2766,15 +2788,53 @@ impl ThinConnImpl {
                     .get(1)
                     .and_then(query_value_to_string)
                     .unwrap_or_else(|| "VARCHAR2".to_string());
+                let attr_type_owner = row
+                    .get(5)
+                    .and_then(query_value_to_string)
+                    .unwrap_or_else(|| schema.to_ascii_uppercase());
+                let dbtype_name = dbtype_name_from_oracle_attr_type(&attr_type_name);
+                let (precision, scale) = normalized_attr_precision_scale(
+                    &attr_type_name,
+                    row.get(3).and_then(query_value_to_i8),
+                    row.get(4).and_then(query_value_to_i8),
+                );
                 Ok(DbObjectAttrImpl {
                     name,
-                    dbtype_name: dbtype_name_from_oracle_attr_type(&attr_type_name).to_string(),
-                    max_size: row.get(2).and_then(query_value_to_u32).unwrap_or(0),
-                    precision: row.get(3).and_then(query_value_to_i8).unwrap_or(0),
-                    scale: row.get(4).and_then(query_value_to_i8).unwrap_or(0),
+                    dbtype_name: dbtype_name.to_string(),
+                    objtype: if dbtype_name == "DB_TYPE_OBJECT" {
+                        Some(self.object_type_shallow(&attr_type_owner, &attr_type_name)?)
+                    } else {
+                        None
+                    },
+                    max_size: normalized_attr_max_size(
+                        &attr_type_name,
+                        row.get(2).and_then(query_value_to_u32),
+                    ),
+                    precision,
+                    scale,
                 })
             })
             .collect()
+    }
+
+    fn object_type_shallow(&self, schema: &str, type_name: &str) -> PyResult<DbObjectTypeImpl> {
+        let typecode = self
+            .query_first_row_with_binds(
+                "select typecode from all_types where owner = :1 and type_name = :2",
+                &[
+                    BindValue::Text(schema.to_ascii_uppercase()),
+                    BindValue::Text(type_name.to_ascii_uppercase()),
+                ],
+            )?
+            .and_then(|row| row.first().and_then(query_value_to_string))
+            .unwrap_or_else(|| "OBJECT".to_string());
+        Ok(DbObjectTypeImpl::new(
+            schema.to_ascii_uppercase(),
+            None,
+            type_name.to_ascii_uppercase(),
+            &typecode,
+            Vec::new(),
+        ))
     }
 
     fn call_timeout(&self) -> PyResult<Option<u32>> {
@@ -3439,6 +3499,7 @@ impl DbObjectTypeImpl {
 struct DbObjectAttrImpl {
     name: String,
     dbtype_name: String,
+    objtype: Option<DbObjectTypeImpl>,
     max_size: u32,
     precision: i8,
     scale: i8,
@@ -3460,7 +3521,7 @@ impl DbObjectAttrImpl {
 
     #[getter]
     fn objtype(&self) -> Option<DbObjectTypeImpl> {
-        None
+        self.objtype.clone()
     }
 
     #[getter]
