@@ -552,7 +552,8 @@ mod tests {
 
     #[test]
     fn reports_unclosed_single_quote() {
-        let err = scan_bind_names("select ':not_closed from dual").unwrap_err();
+        let err = scan_bind_names("select ':not_closed from dual")
+            .expect_err("unclosed quote should be rejected");
         assert_eq!(err, SqlError::MissingEndingSingleQuote);
     }
 
@@ -708,11 +709,13 @@ mod tests {
     #[test]
     fn reports_reference_qstring_errors() {
         assert_eq!(
-            scan_bind_names("select q'[something from dual").unwrap_err(),
+            scan_bind_names("select q'[something from dual")
+                .expect_err("unclosed q-string should be rejected"),
             SqlError::MissingEndingSingleQuote
         );
         assert_eq!(
-            scan_bind_names("select q'[abc'], 5 from dual").unwrap_err(),
+            scan_bind_names("select q'[abc'], 5 from dual")
+                .expect_err("unclosed q-string should be rejected"),
             SqlError::MissingEndingSingleQuote
         );
     }

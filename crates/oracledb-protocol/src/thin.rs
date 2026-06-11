@@ -375,9 +375,8 @@ impl<'a> DbObjectPackedReader<'a> {
     }
 
     fn skip_length(&mut self) -> Result<()> {
-        match self.read_u8()? {
-            TNS_LONG_LENGTH_INDICATOR => self.skip(4)?,
-            _ => {}
+        if self.read_u8()? == TNS_LONG_LENGTH_INDICATOR {
+            self.skip(4)?;
         }
         Ok(())
     }
@@ -1878,6 +1877,7 @@ pub fn build_lob_read_payload_with_seq(
     Ok(writer.into_bytes())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_lob_op_header(
     writer: &mut TtcWriter,
     locator: &[u8],
@@ -2586,7 +2586,7 @@ fn parse_describe_info(
     Ok(())
 }
 
-fn parse_column_metadata(
+pub(crate) fn parse_column_metadata(
     reader: &mut TtcReader<'_>,
     capabilities: ClientCapabilities,
 ) -> Result<ColumnMetadata> {
@@ -3129,7 +3129,7 @@ fn parse_lob_op_response(
     Ok(result)
 }
 
-fn encode_oracle_date(
+pub(crate) fn encode_oracle_date(
     year: i32,
     month: u8,
     day: u8,
@@ -3159,7 +3159,7 @@ fn encode_oracle_date(
     ])
 }
 
-fn encode_oracle_timestamp(
+pub(crate) fn encode_oracle_timestamp(
     year: i32,
     month: u8,
     day: u8,
@@ -3181,7 +3181,7 @@ fn encode_oracle_timestamp(
     Ok(bytes)
 }
 
-fn encode_oracle_timestamp_tz(
+pub(crate) fn encode_oracle_timestamp_tz(
     year: i32,
     month: u8,
     day: u8,
@@ -3313,7 +3313,19 @@ fn civil_from_days(days: i64) -> Result<(i32, u8, u8)> {
     ))
 }
 
-fn encode_binary_double(value: f64) -> [u8; 8] {
+pub(crate) fn encode_binary_double(value: f64) -> [u8; 8] {
+    let mut bytes = value.to_bits().to_be_bytes();
+    if bytes[0] & 0x80 == 0 {
+        bytes[0] |= 0x80;
+    } else {
+        for byte in &mut bytes {
+            *byte = !*byte;
+        }
+    }
+    bytes
+}
+
+pub(crate) fn encode_binary_float(value: f32) -> [u8; 4] {
     let mut bytes = value.to_bits().to_be_bytes();
     if bytes[0] & 0x80 == 0 {
         bytes[0] |= 0x80;
@@ -3340,7 +3352,7 @@ fn decode_binary_double(bytes: &[u8]) -> Result<f64> {
     Ok(f64::from_bits(u64::from_be_bytes(decoded)))
 }
 
-fn encode_number_text(value: &str) -> Result<Vec<u8>> {
+pub(crate) fn encode_number_text(value: &str) -> Result<Vec<u8>> {
     let value = value.as_bytes();
     if value.is_empty() {
         return Err(ProtocolError::TtcDecode("empty NUMBER bind"));
@@ -3431,7 +3443,7 @@ fn encode_number_text(value: &str) -> Result<Vec<u8>> {
     while digits.last().is_some_and(|digit| *digit == 0) {
         digits.pop();
     }
-    if digits.len() > NUMBER_MAX_DIGITS || decimal_point_index > 126 || decimal_point_index < -129 {
+    if digits.len() > NUMBER_MAX_DIGITS || !(-129..=126).contains(&decimal_point_index) {
         return Err(ProtocolError::TtcDecode("NUMBER bind out of range"));
     }
 
@@ -3615,9 +3627,9 @@ fn skip_query_return_parameters(reader: &mut TtcReader<'_>) -> Result<()> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ServerErrorInfo {
-    number: u32,
-    message: String,
+pub(crate) struct ServerErrorInfo {
+    pub(crate) number: u32,
+    pub(crate) message: String,
     cursor_id: u16,
     row_count: u64,
     compilation_error_warning: bool,
@@ -3634,7 +3646,7 @@ fn parse_server_error(reader: &mut TtcReader<'_>, ttc_field_version: u8) -> Resu
     }
 }
 
-fn parse_server_error_info(
+pub(crate) fn parse_server_error_info(
     reader: &mut TtcReader<'_>,
     ttc_field_version: u8,
 ) -> Result<ServerErrorInfo> {
@@ -3761,7 +3773,7 @@ fn parse_return_parameters(reader: &mut TtcReader<'_>) -> Result<AuthResponse> {
     Ok(response)
 }
 
-fn skip_server_side_piggyback(reader: &mut TtcReader<'_>) -> Result<()> {
+pub(crate) fn skip_server_side_piggyback(reader: &mut TtcReader<'_>) -> Result<()> {
     let opcode = reader.read_u8()?;
     match opcode {
         TNS_SERVER_PIGGYBACK_LTXID => {
@@ -3835,6 +3847,14 @@ fn skip_keyword_value_pairs(reader: &mut TtcReader<'_>, num_pairs: u16) -> Resul
         let _keyword_num = reader.read_ub2()?;
     }
     Ok(())
+}
+
+fn has_u8_flag(flags: u8, mask: u8) -> bool {
+    flags & mask > 0
+}
+
+fn has_u32_flag(flags: u32, mask: u32) -> bool {
+    flags & mask > 0
 }
 
 #[cfg(test)]
@@ -4548,12 +4568,4 @@ mod tests {
             is_array: false,
         }
     }
-}
-
-fn has_u8_flag(flags: u8, mask: u8) -> bool {
-    flags & mask > 0
-}
-
-fn has_u32_flag(flags: u32, mask: u32) -> bool {
-    flags & mask > 0
 }

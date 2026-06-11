@@ -2,6 +2,7 @@
 
 pub mod capabilities;
 pub mod crypto;
+pub mod dpl;
 pub mod net;
 pub mod packet;
 pub mod sql;
@@ -52,6 +53,25 @@ pub enum ProtocolError {
     InvalidAesKey,
     #[error("invalid server authentication response")]
     InvalidServerResponse,
+    // The next three mirror python-oracledb error numbers DPY-8000, DPY-8001
+    // and DPY-4041 so a Python-facing layer can map them one-to-one.
+    // "exeeds" reproduces the reference's spelling (errors.py ERR_VALUE_TOO_LARGE).
+    #[error(
+        "DPY-8000: value of size {actual_size} exeeds maximum allowed size of \
+         {max_size} for column \"{column_name}\" of row {row_num}"
+    )]
+    ValueTooLarge {
+        actual_size: usize,
+        max_size: u32,
+        column_name: String,
+        row_num: u64,
+    },
+    #[error("DPY-8001: value for column \"{column_name}\" may not be null on row {row_num}")]
+    NullsNotAllowed { column_name: String, row_num: u64 },
+    #[error("DPY-4041: the maximum size of a Direct Path load has been exceeded")]
+    DirectPathLoadTooMuchData,
+    #[error("not implemented: {0}")]
+    NotImplemented(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;
