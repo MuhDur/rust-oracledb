@@ -14,10 +14,10 @@ use oracledb_protocol::thin::{
     build_fast_auth_phase_one_payload, build_fetch_payload_with_seq,
     build_function_payload_with_seq, build_lob_create_temp_payload_with_seq,
     build_lob_read_payload_with_seq, build_lob_write_payload_with_seq, parse_accept_payload,
-    parse_auth_response, parse_lob_create_temp_response, parse_lob_read_response,
-    parse_lob_write_response, parse_query_response, parse_query_response_with_binds,
-    parse_query_response_with_context, BindValue, ClientCapabilities, ColumnMetadata,
-    LobReadResult, QueryResult, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK,
+    parse_auth_response, parse_fetch_response_with_context, parse_lob_create_temp_response,
+    parse_lob_read_response, parse_lob_write_response, parse_query_response,
+    parse_query_response_with_binds, BindValue, ClientCapabilities, ColumnMetadata, LobReadResult,
+    QueryResult, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK,
     TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT,
     TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT,
     TNS_PACKET_TYPE_REFUSE,
@@ -406,7 +406,7 @@ impl Connection {
             .cloned()
             .unwrap_or_else(|| known_columns.to_vec());
         let result =
-            parse_query_response_with_context(&response, self.capabilities, &columns, previous_row)
+            parse_fetch_response_with_context(&response, self.capabilities, &columns, previous_row)
                 .map_err(Error::from)?;
         self.remember_cursor_columns(&result);
         Ok(result)
@@ -429,7 +429,7 @@ impl Connection {
         send_data_packet(&mut self.stream, &payload, self.sdu)?;
         let response = read_data_response(&mut self.stream)?;
         trace_query_bytes("DEFINE FETCH response", &response);
-        let result = parse_query_response_with_context(
+        let result = parse_fetch_response_with_context(
             &response,
             self.capabilities,
             define_columns,

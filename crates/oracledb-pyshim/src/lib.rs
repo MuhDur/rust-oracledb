@@ -6234,13 +6234,14 @@ impl FetchMetadataImpl {
             return Ok(module.getattr("DB_TYPE_XMLTYPE")?.unbind());
         }
         let name = match self.metadata.ora_type_num {
-            ORA_TYPE_NUM_VARCHAR | ORA_TYPE_NUM_LONG if self.metadata.csfrm == CS_FORM_NCHAR => {
-                "DB_TYPE_NVARCHAR"
-            }
+            ORA_TYPE_NUM_LONG if self.metadata.csfrm == CS_FORM_NCHAR => "DB_TYPE_LONG_NVARCHAR",
+            ORA_TYPE_NUM_LONG => "DB_TYPE_LONG",
+            ORA_TYPE_NUM_LONG_RAW => "DB_TYPE_LONG_RAW",
+            ORA_TYPE_NUM_VARCHAR if self.metadata.csfrm == CS_FORM_NCHAR => "DB_TYPE_NVARCHAR",
             ORA_TYPE_NUM_CHAR if self.metadata.csfrm == CS_FORM_NCHAR => "DB_TYPE_NCHAR",
             ORA_TYPE_NUM_CHAR => "DB_TYPE_CHAR",
-            ORA_TYPE_NUM_VARCHAR | ORA_TYPE_NUM_LONG => "DB_TYPE_VARCHAR",
-            ORA_TYPE_NUM_RAW | ORA_TYPE_NUM_LONG_RAW => "DB_TYPE_RAW",
+            ORA_TYPE_NUM_VARCHAR => "DB_TYPE_VARCHAR",
+            ORA_TYPE_NUM_RAW => "DB_TYPE_RAW",
             ORA_TYPE_NUM_ROWID => "DB_TYPE_ROWID",
             ORA_TYPE_NUM_UROWID => "DB_TYPE_UROWID",
             ORA_TYPE_NUM_BINARY_DOUBLE => "DB_TYPE_BINARY_DOUBLE",

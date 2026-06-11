@@ -1205,6 +1205,7 @@ pub fn parse_query_response_with_binds(
         None,
         &bind_columns,
         &output_bind_indexes,
+        false,
     )
 }
 
@@ -1229,6 +1230,24 @@ pub fn parse_query_response_with_context(
         previous_row,
         &[],
         &[],
+        false,
+    )
+}
+
+pub fn parse_fetch_response_with_context(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    previous_columns: &[ColumnMetadata],
+    previous_row: Option<&[Option<QueryValue>]>,
+) -> Result<QueryResult> {
+    parse_query_response_with_context_and_binds(
+        payload,
+        capabilities,
+        previous_columns,
+        previous_row,
+        &[],
+        &[],
+        true,
     )
 }
 
@@ -1239,6 +1258,7 @@ fn parse_query_response_with_context_and_binds(
     previous_row: Option<&[Option<QueryValue>]>,
     bind_columns: &[ColumnMetadata],
     output_bind_indexes: &[usize],
+    fetch_long_status: bool,
 ) -> Result<QueryResult> {
     let mut reader = TtcReader::new(payload);
     let mut result = QueryResult {
@@ -1281,6 +1301,7 @@ fn parse_query_response_with_context_and_binds(
                         &mut result,
                         bit_vector.as_deref(),
                         previous_row,
+                        fetch_long_status,
                     )?;
                 }
                 bit_vector = None;
@@ -1787,6 +1808,7 @@ fn parse_row_data(
     result: &mut QueryResult,
     bit_vector: Option<&[u8]>,
     previous_row: Option<&[Option<QueryValue>]>,
+    fetch_long_status: bool,
 ) -> Result<()> {
     let mut row = Vec::with_capacity(result.columns.len());
     for (index, metadata) in result.columns.iter().enumerate() {
@@ -1805,6 +1827,15 @@ fn parse_row_data(
             continue;
         }
         row.push(parse_column_value(reader, metadata)?);
+        if fetch_long_status
+            && matches!(
+                metadata.ora_type_num,
+                ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_LONG_RAW
+            )
+        {
+            let _null_indicator = reader.read_sb4()?;
+            let _return_code = reader.read_ub4()?;
+        }
     }
     result.rows.push(row);
     Ok(())
@@ -2984,6 +3015,26 @@ mod tests {
     }
 
     #[test]
+    fn fetch_response_skips_long_status_fields() {
+        let payload =
+            Vec::from_hex("07036162638101001d").expect("fixture response should be valid hex");
+        let columns = vec![long_column("LONGCOL")];
+
+        let parsed = parse_fetch_response_with_context(
+            &payload,
+            ClientCapabilities::default(),
+            &columns,
+            None,
+        )
+        .expect("fetch response should consume LONG status fields");
+
+        assert_eq!(
+            parsed.rows,
+            vec![vec![Some(QueryValue::Text("abc".into()))]]
+        );
+    }
+
+    #[test]
     fn fetch_response_decodes_mid_row_oracle_error() {
         let payload = Vec::from_hex(concat!(
             "150101010703c20401010205100205db0205c400000106018f030000000000",
@@ -3109,6 +3160,24 @@ mod tests {
             scale: 0,
             buffer_size: ORA_TYPE_SIZE_NUMBER,
             max_size: ORA_TYPE_SIZE_NUMBER,
+            nulls_allowed: true,
+            is_json: false,
+            is_oson: false,
+            object_schema: None,
+            object_type_name: None,
+            is_array: false,
+        }
+    }
+
+    fn long_column(name: &str) -> ColumnMetadata {
+        ColumnMetadata {
+            name: name.into(),
+            ora_type_num: ORA_TYPE_NUM_LONG,
+            csfrm: CS_FORM_IMPLICIT,
+            precision: 0,
+            scale: 0,
+            buffer_size: i32::MAX as u32,
+            max_size: 0,
             nulls_allowed: true,
             is_json: false,
             is_oson: false,
