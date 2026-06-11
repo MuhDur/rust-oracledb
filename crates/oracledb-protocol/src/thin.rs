@@ -254,6 +254,11 @@ pub enum QueryValue {
         second: u8,
         nanosecond: u32,
     },
+    Object {
+        schema: Option<String>,
+        type_name: Option<String>,
+        packed_data: Vec<u8>,
+    },
     Array(Vec<Option<QueryValue>>),
 }
 
@@ -1632,22 +1637,32 @@ fn parse_column_value(
             decode_datetime_value(&bytes).map(Some)
         }
         ORA_TYPE_NUM_CURSOR => parse_cursor_value(reader).map(Some),
-        ORA_TYPE_NUM_OBJECT => parse_object_value(reader).map(|()| None),
+        ORA_TYPE_NUM_OBJECT => parse_object_value(reader, metadata),
         _ => Err(ProtocolError::UnsupportedFeature("query column type")),
     }
 }
 
-fn parse_object_value(reader: &mut TtcReader<'_>) -> Result<()> {
+fn parse_object_value(
+    reader: &mut TtcReader<'_>,
+    metadata: &ColumnMetadata,
+) -> Result<Option<QueryValue>> {
     let _toid = reader.read_bytes_with_length()?;
     let _oid = reader.read_bytes_with_length()?;
     let _snapshot = reader.read_bytes_with_length()?;
     let _version = reader.read_ub2()?;
     let num_bytes = reader.read_ub4()?;
     reader.skip(2)?;
-    if num_bytes > 0 {
-        let _packed_data = reader.read_bytes()?;
+    if num_bytes == 0 {
+        return Ok(None);
     }
-    Ok(())
+    let Some(packed_data) = reader.read_bytes()? else {
+        return Ok(None);
+    };
+    Ok(Some(QueryValue::Object {
+        schema: metadata.object_schema.clone(),
+        type_name: metadata.object_type_name.clone(),
+        packed_data,
+    }))
 }
 
 fn parse_cursor_value(reader: &mut TtcReader<'_>) -> Result<QueryValue> {
@@ -1736,7 +1751,7 @@ fn encode_oracle_timestamp_tz(
     Ok(bytes)
 }
 
-fn decode_datetime_value(bytes: &[u8]) -> Result<QueryValue> {
+pub fn decode_datetime_value(bytes: &[u8]) -> Result<QueryValue> {
     if bytes.len() < ORA_TYPE_SIZE_DATE as usize {
         return Err(ProtocolError::TtcDecode("DATE value too short"));
     }
@@ -1996,7 +2011,7 @@ fn encode_number_text(value: &str) -> Result<Vec<u8>> {
     Ok(encoded)
 }
 
-fn decode_number_value(bytes: &[u8]) -> Result<QueryValue> {
+pub fn decode_number_value(bytes: &[u8]) -> Result<QueryValue> {
     if bytes.len() > 21 {
         return Err(ProtocolError::TtcDecode("encoded NUMBER too long"));
     }

@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use oracledb::protocol::thin::{
-    BindValue, ColumnMetadata, QueryResult, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR,
-    ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_DATE,
-    ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT,
-    ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
+    decode_datetime_value, decode_number_value, BindValue, ColumnMetadata, QueryResult, QueryValue,
+    CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR,
+    ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER,
+    ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
     ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::protocol::ClientIdentity;
@@ -2332,6 +2332,7 @@ fn query_value_to_string(value: &Option<QueryValue>) -> Option<String> {
         Some(QueryValue::DateTime { .. }) => None,
         Some(QueryValue::Array(_)) => None,
         Some(QueryValue::Cursor { .. }) => None,
+        Some(QueryValue::Object { .. }) => None,
         None => None,
     }
 }
@@ -2375,6 +2376,7 @@ fn dbtype_name_from_oracle_attr_type(type_name: &str) -> &'static str {
         "CLOB" => "DB_TYPE_CLOB",
         "NCLOB" => "DB_TYPE_NCLOB",
         "BLOB" => "DB_TYPE_BLOB",
+        "XMLTYPE" => "DB_TYPE_XMLTYPE",
         "BINARY_FLOAT" => "DB_TYPE_BINARY_FLOAT",
         "BINARY_DOUBLE" => "DB_TYPE_BINARY_DOUBLE",
         "NUMBER" | "INTEGER" | "SMALLINT" | "REAL" | "DOUBLE PRECISION" | "FLOAT" => {
@@ -3406,12 +3408,17 @@ impl ThinConnImpl {
             .unwrap_or_else(|| "OBJECT".to_string());
         let (element_metadata, max_num_elements, is_assoc_array) =
             self.object_type_collection_metadata(schema, type_name)?;
+        let attrs = if element_metadata.is_some() {
+            Vec::new()
+        } else {
+            self.object_type_attrs(schema, type_name)?
+        };
         Ok(DbObjectTypeImpl::new(
             schema.to_ascii_uppercase(),
             None,
             type_name.to_ascii_uppercase(),
             &typecode,
-            Vec::new(),
+            attrs,
             element_metadata,
             max_num_elements,
             is_assoc_array,
@@ -4253,6 +4260,123 @@ struct DbObjectImpl {
     attr_values: Arc<Mutex<BTreeMap<String, Py<PyAny>>>>,
     collection_values: Arc<Mutex<Vec<Py<PyAny>>>>,
     assoc_values: Arc<Mutex<BTreeMap<i32, Py<PyAny>>>>,
+    packed_data: Arc<Mutex<Option<Vec<u8>>>>,
+}
+
+const TNS_LONG_LENGTH_INDICATOR: u8 = 254;
+const TNS_NULL_LENGTH_INDICATOR: u8 = 255;
+const TNS_OBJ_ATOMIC_NULL: u8 = 253;
+const TNS_OBJ_IS_DEGENERATE: u8 = 0x10;
+const TNS_OBJ_NO_PREFIX_SEG: u8 = 0x04;
+const TNS_XML_TYPE_LOB: u32 = 0x0001;
+const TNS_XML_TYPE_STRING: u32 = 0x0004;
+const TNS_XML_TYPE_FLAG_SKIP_NEXT_4: u32 = 0x100000;
+
+struct DbObjectPickleReader<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> DbObjectPickleReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
+
+    fn read_u8(&mut self) -> PyResult<u8> {
+        let value = self
+            .bytes
+            .get(self.pos)
+            .copied()
+            .ok_or_else(|| PyRuntimeError::new_err("truncated DbObject packed data"))?;
+        self.pos += 1;
+        Ok(value)
+    }
+
+    fn read_raw(&mut self, len: usize) -> PyResult<&'a [u8]> {
+        let end = self
+            .pos
+            .checked_add(len)
+            .ok_or_else(|| PyRuntimeError::new_err("DbObject packed data offset overflow"))?;
+        let bytes = self
+            .bytes
+            .get(self.pos..end)
+            .ok_or_else(|| PyRuntimeError::new_err("truncated DbObject packed data"))?;
+        self.pos = end;
+        Ok(bytes)
+    }
+
+    fn skip(&mut self, len: usize) -> PyResult<()> {
+        self.read_raw(len).map(|_| ())
+    }
+
+    fn read_u32be(&mut self) -> PyResult<u32> {
+        let bytes = self.read_raw(4)?;
+        Ok(u32::from_be_bytes(bytes.try_into().map_err(|_| {
+            PyRuntimeError::new_err("invalid DbObject u32")
+        })?))
+    }
+
+    fn read_i32be(&mut self) -> PyResult<i32> {
+        let bytes = self.read_raw(4)?;
+        Ok(i32::from_be_bytes(bytes.try_into().map_err(|_| {
+            PyRuntimeError::new_err("invalid DbObject i32")
+        })?))
+    }
+
+    fn read_length(&mut self) -> PyResult<usize> {
+        match self.read_u8()? {
+            TNS_LONG_LENGTH_INDICATOR => usize::try_from(self.read_u32be()?)
+                .map_err(|_| PyRuntimeError::new_err("DbObject length overflow")),
+            length => Ok(usize::from(length)),
+        }
+    }
+
+    fn skip_length(&mut self) -> PyResult<()> {
+        match self.read_u8()? {
+            TNS_LONG_LENGTH_INDICATOR => self.skip(4)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn read_value_bytes(&mut self) -> PyResult<Option<Vec<u8>>> {
+        let length = match self.read_u8()? {
+            0 | TNS_NULL_LENGTH_INDICATOR => return Ok(None),
+            TNS_LONG_LENGTH_INDICATOR => usize::try_from(self.read_u32be()?)
+                .map_err(|_| PyRuntimeError::new_err("DbObject value length overflow"))?,
+            length => usize::from(length),
+        };
+        Ok(Some(self.read_raw(length)?.to_vec()))
+    }
+
+    fn read_header(&mut self) -> PyResult<()> {
+        let flags = self.read_u8()?;
+        let _version = self.read_u8()?;
+        self.skip_length()?;
+        if flags & TNS_OBJ_IS_DEGENERATE != 0 {
+            return Err(not_implemented("DbObject stored in a LOB"));
+        }
+        if flags & TNS_OBJ_NO_PREFIX_SEG == 0 {
+            let prefix_len = self.read_length()?;
+            self.skip(prefix_len)?;
+        }
+        Ok(())
+    }
+
+    fn bytes_left(&self) -> usize {
+        self.bytes.len().saturating_sub(self.pos)
+    }
+
+    fn read_atomic_null(&mut self, is_collection_context: bool) -> PyResult<bool> {
+        let value = self.read_u8()?;
+        match (value, is_collection_context) {
+            (TNS_OBJ_ATOMIC_NULL, _) | (TNS_NULL_LENGTH_INDICATOR, true) => Ok(true),
+            _ => {
+                self.pos = self.pos.saturating_sub(1);
+                Ok(false)
+            }
+        }
+    }
 }
 
 fn validated_dbobject_value(
@@ -4317,7 +4441,18 @@ impl DbObjectImpl {
             attr_values: Arc::new(Mutex::new(attr_values)),
             collection_values: Arc::new(Mutex::new(Vec::new())),
             assoc_values: Arc::new(Mutex::new(BTreeMap::new())),
+            packed_data: Arc::new(Mutex::new(None)),
         })
+    }
+
+    fn with_packed_data(object_type: DbObjectTypeImpl, packed_data: Vec<u8>) -> Self {
+        Self {
+            object_type,
+            attr_values: Arc::new(Mutex::new(BTreeMap::new())),
+            collection_values: Arc::new(Mutex::new(Vec::new())),
+            assoc_values: Arc::new(Mutex::new(BTreeMap::new())),
+            packed_data: Arc::new(Mutex::new(Some(packed_data))),
+        }
     }
 
     fn with_attr(
@@ -4346,6 +4481,7 @@ impl DbObjectImpl {
     }
 
     fn attr_value(&self, py: Python<'_>, attr_name: &str) -> PyResult<Py<PyAny>> {
+        self.ensure_unpacked(py)?;
         Ok(self
             .attr_values
             .lock()
@@ -4377,6 +4513,7 @@ impl DbObjectImpl {
     }
 
     fn append_collection_value(&self, py: Python<'_>, value: Py<PyAny>) -> PyResult<()> {
+        self.ensure_unpacked(py)?;
         let value = if value.bind(py).is_none() {
             py.None()
         } else {
@@ -4406,6 +4543,194 @@ impl DbObjectImpl {
         }
         values.push(value);
         Ok(())
+    }
+
+    fn ensure_unpacked(&self, py: Python<'_>) -> PyResult<()> {
+        let packed_data = self.packed_data.lock().map_err(runtime_error)?.clone();
+        let Some(packed_data) = packed_data else {
+            return Ok(());
+        };
+        let mut reader = DbObjectPickleReader::new(&packed_data);
+        reader.read_header()?;
+        self.unpack_from_reader(py, &mut reader)?;
+        *self.packed_data.lock().map_err(runtime_error)? = None;
+        Ok(())
+    }
+
+    fn unpack_from_reader(
+        &self,
+        py: Python<'_>,
+        reader: &mut DbObjectPickleReader<'_>,
+    ) -> PyResult<()> {
+        if self.object_type.is_collection {
+            let _collection_flags = reader.read_u8()?;
+            let num_elements = reader.read_length()?;
+            if self.object_type.is_assoc_array {
+                let mut values = BTreeMap::new();
+                let Some(metadata) = self.object_type.element_metadata.as_deref() else {
+                    return Err(PyRuntimeError::new_err(
+                        "missing collection element metadata",
+                    ));
+                };
+                for _ in 0..num_elements {
+                    let index = reader.read_i32be()?;
+                    let value = dbobject_unpack_value(py, metadata, reader, true)?;
+                    values.insert(index, value);
+                }
+                *self.assoc_values.lock().map_err(runtime_error)? = values;
+            } else {
+                let mut values = Vec::with_capacity(num_elements);
+                let Some(metadata) = self.object_type.element_metadata.as_deref() else {
+                    return Err(PyRuntimeError::new_err(
+                        "missing collection element metadata",
+                    ));
+                };
+                for _ in 0..num_elements {
+                    values.push(dbobject_unpack_value(py, metadata, reader, true)?);
+                }
+                *self.collection_values.lock().map_err(runtime_error)? = values;
+            }
+            return Ok(());
+        }
+
+        let mut values = BTreeMap::new();
+        for attr in &self.object_type.attrs {
+            values.insert(
+                attr.name.clone(),
+                dbobject_unpack_value(py, attr, reader, false)?,
+            );
+        }
+        *self.attr_values.lock().map_err(runtime_error)? = values;
+        Ok(())
+    }
+}
+
+fn decode_dbobject_text(bytes: &[u8], dbtype_name: &str) -> PyResult<String> {
+    if matches!(dbtype_name, "DB_TYPE_NCHAR" | "DB_TYPE_NVARCHAR") {
+        let mut chunks = bytes.chunks_exact(2);
+        let units = chunks
+            .by_ref()
+            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        if !chunks.remainder().is_empty() {
+            return Err(PyRuntimeError::new_err("invalid DbObject UTF-16 text"));
+        }
+        return String::from_utf16(&units)
+            .map_err(|_| PyRuntimeError::new_err("invalid DbObject UTF-16 text"));
+    }
+    String::from_utf8(bytes.to_vec())
+        .map_err(|_| PyRuntimeError::new_err("invalid DbObject UTF-8 text"))
+}
+
+fn decode_dbobject_xmltype(py: Python<'_>, bytes: &[u8]) -> PyResult<Py<PyAny>> {
+    let mut reader = DbObjectPickleReader::new(bytes);
+    reader.read_header()?;
+    reader.skip(1)?;
+    let xml_flag = reader.read_u32be()?;
+    if xml_flag & TNS_XML_TYPE_FLAG_SKIP_NEXT_4 != 0 {
+        reader.skip(4)?;
+    }
+    let bytes = reader.read_raw(reader.bytes_left())?;
+    if xml_flag & TNS_XML_TYPE_STRING != 0 {
+        return Ok(decode_dbobject_text(bytes, "DB_TYPE_VARCHAR")?
+            .into_pyobject(py)?
+            .unbind()
+            .into());
+    }
+    if xml_flag & TNS_XML_TYPE_LOB != 0 {
+        return Ok(py.None());
+    }
+    Err(PyRuntimeError::new_err(format!(
+        "unexpected XMLTYPE flag {xml_flag}"
+    )))
+}
+
+fn decode_dbobject_binary_float(bytes: &[u8]) -> PyResult<f32> {
+    let mut bytes: [u8; 4] = bytes
+        .try_into()
+        .map_err(|_| PyRuntimeError::new_err("invalid DbObject BINARY_FLOAT"))?;
+    if bytes[0] & 0x80 != 0 {
+        bytes[0] &= 0x7f;
+    } else {
+        for byte in &mut bytes {
+            *byte = !*byte;
+        }
+    }
+    Ok(f32::from_bits(u32::from_be_bytes(bytes)))
+}
+
+fn decode_dbobject_binary_double(bytes: &[u8]) -> PyResult<f64> {
+    let mut bytes: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| PyRuntimeError::new_err("invalid DbObject BINARY_DOUBLE"))?;
+    if bytes[0] & 0x80 != 0 {
+        bytes[0] &= 0x7f;
+    } else {
+        for byte in &mut bytes {
+            *byte = !*byte;
+        }
+    }
+    Ok(f64::from_bits(u64::from_be_bytes(bytes)))
+}
+
+fn dbobject_unpack_value(
+    py: Python<'_>,
+    metadata: &DbObjectAttrImpl,
+    reader: &mut DbObjectPickleReader<'_>,
+    parent_is_collection: bool,
+) -> PyResult<Py<PyAny>> {
+    if metadata.dbtype_name == "DB_TYPE_OBJECT" {
+        let Some(object_type) = metadata.objtype.clone() else {
+            let _ = reader.read_value_bytes()?;
+            return Ok(py.None());
+        };
+        let is_collection_context = parent_is_collection || object_type.is_collection;
+        if reader.read_atomic_null(is_collection_context)? {
+            return Ok(py.None());
+        }
+        let object = if is_collection_context {
+            let Some(packed_data) = reader.read_value_bytes()? else {
+                return Ok(py.None());
+            };
+            DbObjectImpl::with_packed_data(object_type, packed_data)
+        } else {
+            let object = DbObjectImpl::new(py, object_type)?;
+            object.unpack_from_reader(py, reader)?;
+            object
+        };
+        return py_db_object_from_impl(py, object);
+    }
+
+    let Some(bytes) = reader.read_value_bytes()? else {
+        return Ok(py.None());
+    };
+    match metadata.dbtype_name.as_str() {
+        "DB_TYPE_CHAR" | "DB_TYPE_NCHAR" | "DB_TYPE_VARCHAR" | "DB_TYPE_NVARCHAR" => {
+            Ok(decode_dbobject_text(&bytes, &metadata.dbtype_name)?
+                .into_pyobject(py)?
+                .unbind()
+                .into())
+        }
+        "DB_TYPE_RAW" => Ok(PyBytes::new(py, &bytes).unbind().into()),
+        "DB_TYPE_XMLTYPE" => decode_dbobject_xmltype(py, &bytes),
+        "DB_TYPE_NUMBER" => {
+            let value = decode_number_value(&bytes).map_err(runtime_error)?;
+            query_value_to_py(py, &Some(value), None)
+        }
+        "DB_TYPE_DATE" | "DB_TYPE_TIMESTAMP" | "DB_TYPE_TIMESTAMP_TZ" | "DB_TYPE_TIMESTAMP_LTZ" => {
+            let value = decode_datetime_value(&bytes).map_err(runtime_error)?;
+            query_value_to_py(py, &Some(value), None)
+        }
+        "DB_TYPE_BINARY_FLOAT" => Ok(f64::from(decode_dbobject_binary_float(&bytes)?)
+            .into_pyobject(py)?
+            .unbind()
+            .into()),
+        "DB_TYPE_BINARY_DOUBLE" => Ok(decode_dbobject_binary_double(&bytes)?
+            .into_pyobject(py)?
+            .unbind()
+            .into()),
+        "DB_TYPE_CLOB" | "DB_TYPE_NCLOB" | "DB_TYPE_BLOB" => Ok(py.None()),
+        _ => Ok(py.None()),
     }
 }
 
@@ -4461,6 +4786,7 @@ impl DbObjectImpl {
     }
 
     fn copy(&self, py: Python<'_>) -> PyResult<Self> {
+        self.ensure_unpacked(py)?;
         let mut attr_values = BTreeMap::new();
         for (name, value) in self.attr_values.lock().map_err(runtime_error)?.iter() {
             attr_values.insert(name.clone(), value.clone_ref(py));
@@ -4484,6 +4810,7 @@ impl DbObjectImpl {
                     .map(|(index, value)| (*index, value.clone_ref(py)))
                     .collect(),
             )),
+            packed_data: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -4513,7 +4840,8 @@ impl DbObjectImpl {
         self.append_collection_value(py, value)
     }
 
-    fn delete_by_index(&self, index: i32) -> PyResult<()> {
+    fn delete_by_index(&self, py: Python<'_>, index: i32) -> PyResult<()> {
+        self.ensure_unpacked(py)?;
         if self.object_type.is_assoc_array {
             let mut values = self.assoc_values.lock().map_err(runtime_error)?;
             if values.remove(&index).is_none() {
@@ -4534,7 +4862,8 @@ impl DbObjectImpl {
         Ok(())
     }
 
-    fn exists_by_index(&self, index: i32) -> PyResult<bool> {
+    fn exists_by_index(&self, py: Python<'_>, index: i32) -> PyResult<bool> {
+        self.ensure_unpacked(py)?;
         if self.object_type.is_assoc_array {
             return Ok(self
                 .assoc_values
@@ -4549,6 +4878,7 @@ impl DbObjectImpl {
     }
 
     fn get_element_by_index(&self, py: Python<'_>, index: i32) -> PyResult<Py<PyAny>> {
+        self.ensure_unpacked(py)?;
         if self.object_type.is_assoc_array {
             return self
                 .assoc_values
@@ -4568,7 +4898,8 @@ impl DbObjectImpl {
             .ok_or_else(|| raise_invalid_coll_index_get(i32::try_from(index).unwrap_or(i32::MAX)))
     }
 
-    fn get_first_index(&self) -> PyResult<Option<i32>> {
+    fn get_first_index(&self, py: Python<'_>) -> PyResult<Option<i32>> {
+        self.ensure_unpacked(py)?;
         if self.object_type.is_assoc_array {
             return Ok(self
                 .assoc_values
@@ -4582,7 +4913,8 @@ impl DbObjectImpl {
         Ok((!values.is_empty()).then_some(0))
     }
 
-    fn get_last_index(&self) -> PyResult<Option<i32>> {
+    fn get_last_index(&self, py: Python<'_>) -> PyResult<Option<i32>> {
+        self.ensure_unpacked(py)?;
         if self.object_type.is_assoc_array {
             return Ok(self
                 .assoc_values
@@ -4599,7 +4931,8 @@ impl DbObjectImpl {
             .map(|index| i32::try_from(index).unwrap_or(i32::MAX)))
     }
 
-    fn get_next_index(&self, index: i32) -> PyResult<Option<i32>> {
+    fn get_next_index(&self, py: Python<'_>, index: i32) -> PyResult<Option<i32>> {
+        self.ensure_unpacked(py)?;
         if self.object_type.is_assoc_array {
             return Ok(self
                 .assoc_values
@@ -4617,7 +4950,8 @@ impl DbObjectImpl {
             .map(|_| next))
     }
 
-    fn get_prev_index(&self, index: i32) -> PyResult<Option<i32>> {
+    fn get_prev_index(&self, py: Python<'_>, index: i32) -> PyResult<Option<i32>> {
+        self.ensure_unpacked(py)?;
         if self.object_type.is_assoc_array {
             return Ok(self
                 .assoc_values
@@ -4630,7 +4964,8 @@ impl DbObjectImpl {
         Ok((index > 0).then_some(index - 1))
     }
 
-    fn get_size(&self) -> PyResult<usize> {
+    fn get_size(&self, py: Python<'_>) -> PyResult<usize> {
+        self.ensure_unpacked(py)?;
         if self.object_type.is_assoc_array {
             return Ok(self.assoc_values.lock().map_err(runtime_error)?.len());
         }
@@ -4638,6 +4973,7 @@ impl DbObjectImpl {
     }
 
     fn set_element_by_index(&self, py: Python<'_>, index: i32, value: Py<PyAny>) -> PyResult<()> {
+        self.ensure_unpacked(py)?;
         let Some(metadata) = self.object_type.element_metadata.as_deref() else {
             return Err(raise_oracledb_driver_error(
                 "ERR_OBJECT_IS_NOT_A_COLLECTION",
@@ -4656,10 +4992,16 @@ impl DbObjectImpl {
                 }
             }
         }
-        self.set_element_by_index_checked(index, value)
+        self.set_element_by_index_checked(py, index, value)
     }
 
-    fn set_element_by_index_checked(&self, index: i32, value: Py<PyAny>) -> PyResult<()> {
+    fn set_element_by_index_checked(
+        &self,
+        py: Python<'_>,
+        index: i32,
+        value: Py<PyAny>,
+    ) -> PyResult<()> {
+        self.ensure_unpacked(py)?;
         if self.object_type.is_assoc_array {
             self.assoc_values
                 .lock()
@@ -4683,7 +5025,8 @@ impl DbObjectImpl {
         Ok(())
     }
 
-    fn trim(&self, num_to_trim: i32) -> PyResult<()> {
+    fn trim(&self, py: Python<'_>, num_to_trim: i32) -> PyResult<()> {
+        self.ensure_unpacked(py)?;
         if num_to_trim <= 0 {
             return Ok(());
         }
@@ -5735,6 +6078,34 @@ fn query_value_to_py(
             let child_cursor = connection.call_method0("cursor")?;
             hydrate_cursor_impl(&child_cursor, columns, *cursor_id, false)?;
             Ok(child_cursor.unbind())
+        }
+        Some(QueryValue::Object {
+            schema,
+            type_name,
+            packed_data,
+        }) => {
+            let Some(owner_cursor) = owner_cursor else {
+                return Err(not_implemented("ThinCursorImpl DbObject value conversion"));
+            };
+            let type_name = type_name
+                .as_deref()
+                .ok_or_else(|| PyRuntimeError::new_err("missing DbObject type name"))?;
+            let fqn = schema
+                .as_deref()
+                .filter(|schema| !schema.is_empty())
+                .map(|schema| format!("{schema}.{type_name}"))
+                .unwrap_or_else(|| type_name.to_string());
+            let connection = owner_cursor.getattr("connection")?;
+            let public_type = connection.call_method1("gettype", (fqn,))?;
+            let Some(object_type) = py_db_object_type_impl(&public_type)? else {
+                return Err(PyRuntimeError::new_err(
+                    "gettype() did not return a DbObjectType",
+                ));
+            };
+            py_db_object_from_impl(
+                py,
+                DbObjectImpl::with_packed_data(object_type, packed_data.clone()),
+            )
         }
     }
 }
