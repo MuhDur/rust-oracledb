@@ -363,3 +363,11 @@ merge; the tree stays clean between waves.
   `j0o` (epic), `grk` (M2, in_progress), `0ue` (M3), `gj0` (M4), `12e` (M5), `7r6` (M6),
   `d49` (in_progress) / `p5o` (shim logic migration), `nto`/`tmr` (async facade, in_progress),
   `xvf` (scanner), `u4w` (operator: GitHub remote); 16 closed.
+
+## Build-contention hazard (discovered 2026-06-11, M5 lane)
+
+A global `CARGO_TARGET_DIR=/tmp/cargo-target` is shared across checkouts: concurrent
+builds from different worktrees cross-contaminate artifacts (one lane's in-progress
+enum variants leaked into another lane's build). RULE: every concurrent agent exports
+its own `CARGO_TARGET_DIR=/tmp/cargo-target-<lane>` for all cargo/maturin invocations.
+Single-builder sessions (main checkout only) may keep the default for cache warmth.
