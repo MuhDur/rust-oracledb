@@ -45,20 +45,61 @@ fn runtime_error(err: impl std::fmt::Display) -> PyErr {
     PyRuntimeError::new_err(message)
 }
 
+fn parse_ora_code(message: &str) -> Option<i32> {
+    let start = message.find("ORA-")? + "ORA-".len();
+    let digits = message.get(start..start + 5)?;
+    digits
+        .chars()
+        .all(|ch| ch.is_ascii_digit())
+        .then(|| digits.parse::<i32>().ok())
+        .flatten()
+}
+
+fn parse_ora_offset(message: &str) -> Option<i32> {
+    let column_start = message.find(", column ")? + ", column ".len();
+    let digits = message
+        .get(column_start..)?
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    let column = digits.parse::<i32>().ok()?;
+    Some(column.saturating_sub(1))
+}
+
 fn database_error(py: Python<'_>, message: &str) -> PyResult<PyErr> {
     let errors = PyModule::import(py, "oracledb.errors")?;
-    let error_obj = errors.getattr("_Error")?.call1((message,))?;
-    let module = PyModule::import(py, "oracledb")?;
-    let exc = module.getattr("DatabaseError")?.call1((error_obj,))?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("message", message)?;
+    if let Some(code) = parse_ora_code(message) {
+        kwargs.set_item("code", code)?;
+    }
+    if let Some(offset) = parse_ora_offset(message) {
+        kwargs.set_item("offset", offset)?;
+    }
+    let error_obj = errors.getattr("_Error")?.call((), Some(&kwargs))?;
+    let exc_type = error_obj.getattr("exc_type")?;
+    let exc = exc_type.call1((error_obj,))?;
     Ok(PyErr::from_value(exc))
 }
 
 fn operational_error(py: Python<'_>, message: &str) -> PyResult<PyErr> {
     let errors = PyModule::import(py, "oracledb.errors")?;
     let error_obj = errors.getattr("_Error")?.call1((message,))?;
-    let module = PyModule::import(py, "oracledb")?;
-    let exc = module.getattr("OperationalError")?.call1((error_obj,))?;
+    let exc_type = error_obj.getattr("exc_type")?;
+    let exc = exc_type.call1((error_obj,))?;
     Ok(PyErr::from_value(exc))
+}
+
+fn compilation_error_warning(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let errors = PyModule::import(py, "oracledb.errors")?;
+    Ok(errors.getattr("_create_warning")?.call1((7000,))?.unbind())
+}
+
+fn query_result_warning(py: Python<'_>, result: &QueryResult) -> PyResult<Option<Py<PyAny>>> {
+    result
+        .compilation_error_warning
+        .then(|| compilation_error_warning(py))
+        .transpose()
 }
 
 fn dpy_database_error(code: &str, message: &str) -> PyErr {
@@ -1275,6 +1316,11 @@ fn extract_bind_rows(
 ) -> PyResult<Vec<Vec<BindValue>>> {
     if parameters.is_none() {
         return Ok(Vec::new());
+    }
+    if let Ok(num_iters) = parameters.extract::<usize>() {
+        if unique_sql_bind_names(statement)?.is_empty() {
+            return Ok(vec![Vec::new(); num_iters]);
+        }
     }
     let list = parameters
         .cast::<PyList>()
@@ -5999,6 +6045,7 @@ impl ThinCursorImpl {
         } else {
             self.statement_changed = false;
         }
+        self.warning = None;
         let statement = self
             .statement
             .as_deref()
@@ -6066,6 +6113,7 @@ impl ThinCursorImpl {
         } else {
             self.statement_changed = false;
         }
+        self.warning = None;
         if self.statement.is_none() {
             return Err(PyRuntimeError::new_err("no statement prepared"));
         }
@@ -6163,6 +6211,7 @@ impl ThinCursorImpl {
                 "the database or network closed the connection",
             ));
         }
+        self.warning = Python::attach(|py| query_result_warning(py, &result))?;
         Python::attach(|py| {
             apply_out_bind_values(
                 py,
@@ -6230,6 +6279,7 @@ impl ThinCursorImpl {
                 "the database or network closed the connection",
             ));
         }
+        self.warning = Python::attach(|py| query_result_warning(py, &result))?;
         Python::attach(|py| {
             apply_out_bind_values(
                 py,

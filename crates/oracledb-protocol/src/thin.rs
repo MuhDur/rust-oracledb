@@ -345,6 +345,7 @@ pub struct QueryResult {
     pub cursor_id: u32,
     pub row_count: u64,
     pub more_rows: bool,
+    pub compilation_error_warning: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1127,6 +1128,7 @@ fn parse_query_response_with_context_and_binds(
                     result.cursor_id = u32::from(info.cursor_id);
                 }
                 result.row_count = info.row_count;
+                result.compilation_error_warning |= info.compilation_error_warning;
                 if info.number == TNS_ERR_NO_DATA_FOUND && !result.columns.is_empty() {
                     result.more_rows = false;
                 } else if info.number != 0 {
@@ -2326,6 +2328,7 @@ struct ServerErrorInfo {
     message: String,
     cursor_id: u16,
     row_count: u64,
+    compilation_error_warning: bool,
 }
 
 fn parse_server_error(reader: &mut TtcReader<'_>, ttc_field_version: u8) -> Result<Option<String>> {
@@ -2352,7 +2355,7 @@ fn parse_server_error_info(
     let cursor_id = reader.read_ub2()?;
     skip_sb2(reader)?;
     reader.skip(5)?;
-    let _flags = reader.read_u8()?;
+    let warning_flags = reader.read_u8()?;
     skip_rowid(reader)?;
     let _os_error = reader.read_ub4()?;
     reader.skip(2)?;
@@ -2402,6 +2405,7 @@ fn parse_server_error_info(
         message,
         cursor_id,
         row_count,
+        compilation_error_warning: warning_flags & 0x20 != 0,
     })
 }
 
