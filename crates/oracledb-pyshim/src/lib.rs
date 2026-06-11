@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 
+use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
+use asupersync::Cx;
 use oracledb::protocol::sql;
 use oracledb::protocol::thin::{
     bind_template_from_type_name, bind_value_type_info, column_metadata_is_xmltype,
@@ -152,6 +154,14 @@ where
         Ok(_) => BlockingTask { shared },
         Err(err) => BlockingTask::ready(Err(format!("failed to spawn blocking task: {err}"))),
     }
+}
+
+fn build_pyshim_io_runtime() -> Result<Runtime, String> {
+    let reactor = reactor::create_reactor().map_err(|err| err.to_string())?;
+    RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .map_err(|err| err.to_string())
 }
 
 fn close_connection_result(connection: RustConnection) -> Result<(), String> {
@@ -2381,6 +2391,104 @@ fn materialize_typed_lob_bind_rows(
     Ok(())
 }
 
+async fn materialize_typed_lob_text_bind_async(
+    cx: &Cx,
+    connection: &mut RustConnection,
+    value: &mut BindValue,
+    ora_type_num: u8,
+    csfrm: u8,
+    call_timeout: Option<u32>,
+) -> Result<(), String> {
+    let BindValue::Text(text) = value else {
+        return Ok(());
+    };
+    let text = std::mem::take(text);
+    let mut locator = connection
+        .create_temp_lob(cx, ora_type_num, csfrm)
+        .await
+        .map_err(|err| err.to_string())?
+        .locator;
+    if !text.is_empty() {
+        let bytes = protocol_encode_lob_text(&text, csfrm, Some(&locator));
+        locator = connection
+            .write_lob_with_timeout(cx, &locator, 1, &bytes, call_timeout)
+            .await
+            .map_err(|err| err.to_string())?
+            .locator;
+    }
+    *value = BindValue::Lob {
+        ora_type_num,
+        csfrm,
+        locator,
+    };
+    Ok(())
+}
+
+async fn materialize_typed_lob_raw_bind_async(
+    cx: &Cx,
+    connection: &mut RustConnection,
+    value: &mut BindValue,
+    ora_type_num: u8,
+    csfrm: u8,
+    call_timeout: Option<u32>,
+) -> Result<(), String> {
+    let BindValue::Raw(bytes) = value else {
+        return Ok(());
+    };
+    let bytes = std::mem::take(bytes);
+    let mut locator = connection
+        .create_temp_lob(cx, ora_type_num, csfrm)
+        .await
+        .map_err(|err| err.to_string())?
+        .locator;
+    if !bytes.is_empty() {
+        locator = connection
+            .write_lob_with_timeout(cx, &locator, 1, &bytes, call_timeout)
+            .await
+            .map_err(|err| err.to_string())?
+            .locator;
+    }
+    *value = BindValue::Lob {
+        ora_type_num,
+        csfrm,
+        locator,
+    };
+    Ok(())
+}
+
+async fn materialize_typed_lob_bind_values_async(
+    cx: &Cx,
+    connection: &mut RustConnection,
+    values: &mut [BindValue],
+    hints: &[Option<(u8, u8)>],
+    call_timeout: Option<u32>,
+) -> Result<(), String> {
+    for (index, value) in values.iter_mut().enumerate() {
+        let Some((ora_type_num, csfrm)) = hints.get(index).copied().flatten() else {
+            continue;
+        };
+        materialize_typed_lob_text_bind_async(
+            cx,
+            connection,
+            value,
+            ora_type_num,
+            csfrm,
+            call_timeout,
+        )
+        .await?;
+        materialize_typed_lob_raw_bind_async(
+            cx,
+            connection,
+            value,
+            ora_type_num,
+            csfrm,
+            call_timeout,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 fn bind_template_from_input_size(value: &Bound<'_, PyAny>) -> PyResult<BindValue> {
     if let Ok(size) = value.extract::<u32>() {
         return Ok(BindValue::TypedNull {
@@ -2567,6 +2675,46 @@ fn supplement_json_lob_column_metadata(
             call_timeout,
         )
         .map_err(runtime_error)?;
+        if !result.rows.is_empty() {
+            columns[index].is_json = true;
+        }
+    }
+    Ok(())
+}
+
+async fn supplement_json_lob_column_metadata_async(
+    cx: &Cx,
+    connection: &mut RustConnection,
+    columns: &mut [ColumnMetadata],
+    call_timeout: Option<u32>,
+) -> Result<(), String> {
+    let candidates = columns
+        .iter()
+        .enumerate()
+        .filter(|(_, metadata)| {
+            !metadata.is_json
+                && matches!(metadata.ora_type_num, ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB)
+                && !metadata.name.is_empty()
+        })
+        .map(|(index, metadata)| (index, metadata.name.to_ascii_uppercase()))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    for (index, column_name) in candidates {
+        let result = connection
+            .execute_query_with_binds_and_timeout(
+                cx,
+                "select 1 \
+                 from all_json_columns \
+                 where owner = sys_context('USERENV', 'CURRENT_SCHEMA') \
+                   and column_name = :1",
+                1,
+                &[BindValue::Text(column_name)],
+                call_timeout,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
         if !result.rows.is_empty() {
             columns[index].is_json = true;
         }
@@ -3712,6 +3860,52 @@ fn apply_pending_current_schema_from_state(
     .map_err(runtime_error);
     if result.is_err() {
         state.lock().map_err(runtime_error)?.current_schema_modified = true;
+    }
+    result.map(|_| ())
+}
+
+async fn apply_pending_current_schema_from_state_async(
+    cx: &Cx,
+    state: &Arc<Mutex<ThinConnState>>,
+    connection: &mut RustConnection,
+    call_timeout: Option<u32>,
+) -> Result<(), String> {
+    let pending_schema = {
+        let mut state = state.lock().map_err(|err| err.to_string())?;
+        if !state.current_schema_modified {
+            None
+        } else {
+            state.current_schema_modified = false;
+            state.current_schema.clone()
+        }
+    };
+    let Some(schema) = pending_schema else {
+        return Ok(());
+    };
+    let identifier = match sql_identifier(&schema) {
+        Ok(identifier) => identifier,
+        Err(err) => {
+            state
+                .lock()
+                .map_err(|err| err.to_string())?
+                .current_schema_modified = true;
+            return Err(err.to_string());
+        }
+    };
+    let result = connection
+        .execute_query_with_timeout(
+            cx,
+            &format!("alter session set current_schema = {identifier}"),
+            1,
+            call_timeout,
+        )
+        .await
+        .map_err(|err| err.to_string());
+    if result.is_err() {
+        state
+            .lock()
+            .map_err(|err| err.to_string())?
+            .current_schema_modified = true;
     }
     result.map(|_| ())
 }
@@ -6848,6 +7042,14 @@ impl ThinCursorImpl {
             }
             self.invalid_ref_cursor = false;
         }
+        self.fetch_buffered_next_row(py, _cursor)
+    }
+
+    fn fetch_buffered_next_row(
+        &mut self,
+        py: Python<'_>,
+        _cursor: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<Py<PyAny>>> {
         let Some(row) = self.rows.get(self.row_index) else {
             return Ok(None);
         };
@@ -7217,6 +7419,118 @@ fn json_query_value_to_py(
         .unbind())
 }
 
+struct AsyncExecuteOutcome {
+    result: QueryResult,
+    should_commit: bool,
+}
+
+fn spawn_async_execute_task(
+    connection: Arc<Mutex<Option<RustConnection>>>,
+    state: Arc<Mutex<ThinConnState>>,
+    statement: String,
+    mut bind_values: Vec<BindValue>,
+    typed_lob_hints: Vec<Option<(u8, u8)>>,
+    prefetchrows: u32,
+    call_timeout: Option<u32>,
+    autocommit: bool,
+) -> BlockingTask<AsyncExecuteOutcome> {
+    spawn_blocking_task("oracledb-pyshim-async-execute", move || {
+        let mut guard = connection.lock().map_err(|err| err.to_string())?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| "connection is closed".to_string())?;
+        let runtime = build_pyshim_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| "asupersync did not install an ambient Cx".to_string())?;
+            apply_pending_current_schema_from_state_async(&cx, &state, connection, call_timeout)
+                .await?;
+            materialize_typed_lob_bind_values_async(
+                &cx,
+                connection,
+                &mut bind_values,
+                &typed_lob_hints,
+                call_timeout,
+            )
+            .await?;
+            let mut result = connection
+                .execute_query_with_binds_and_timeout(
+                    &cx,
+                    &statement,
+                    prefetchrows,
+                    &bind_values,
+                    call_timeout,
+                )
+                .await
+                .map_err(|err| err.to_string())?;
+            supplement_json_lob_column_metadata_async(
+                &cx,
+                connection,
+                &mut result.columns,
+                call_timeout,
+            )
+            .await?;
+            let should_commit = result.columns.is_empty() && autocommit;
+            if should_commit {
+                connection
+                    .commit(&cx)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            }
+            Ok(AsyncExecuteOutcome {
+                result,
+                should_commit,
+            })
+        })
+    })
+}
+
+fn spawn_async_fetch_task(
+    connection: Arc<Mutex<Option<RustConnection>>>,
+    cursor_id: u32,
+    arraysize: u32,
+    prefetchrows: u32,
+    columns: Vec<ColumnMetadata>,
+    define_columns: Vec<ColumnMetadata>,
+    previous_row: Option<Vec<Option<QueryValue>>>,
+    requires_define: bool,
+) -> BlockingTask<QueryResult> {
+    spawn_blocking_task("oracledb-pyshim-async-fetch", move || {
+        let mut guard = connection.lock().map_err(|err| err.to_string())?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| "connection is closed".to_string())?;
+        let runtime = build_pyshim_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| "asupersync did not install an ambient Cx".to_string())?;
+            if requires_define {
+                connection
+                    .define_and_fetch_rows_with_columns(
+                        &cx,
+                        cursor_id,
+                        prefetchrows,
+                        &define_columns,
+                        previous_row.as_deref(),
+                    )
+                    .await
+                    .map_err(|err| err.to_string())
+            } else {
+                connection
+                    .fetch_rows_with_columns(
+                        &cx,
+                        cursor_id,
+                        arraysize,
+                        &columns,
+                        previous_row.as_deref(),
+                    )
+                    .await
+                    .map_err(|err| err.to_string())
+            }
+        })
+    })
+}
+
 #[pyclass(module = "oracledb.thin_impl", name = "AsyncThinCursorImpl")]
 struct AsyncThinCursorImpl {
     inner: ThinCursorImpl,
@@ -7427,6 +7741,9 @@ impl AsyncThinCursorImpl {
         if self.inner.statement_changed {
             self.inner.rowfactory = None;
         }
+        if !self.inner.fetch_lobs_overridden {
+            self.inner.fetch_lobs = Python::attach(default_fetch_lobs)?;
+        }
         let statement = self
             .inner
             .statement
@@ -7437,45 +7754,31 @@ impl AsyncThinCursorImpl {
             let value = self.inner.state.lock().map_err(runtime_error)?.call_timeout;
             (value > 0).then_some(value)
         };
-        let query_statement = statement.clone();
-        let query = spawn_blocking_task("oracledb-pyshim-async-execute", {
-            let connection = Arc::clone(&self.inner.connection);
-            let state = Arc::clone(&self.inner.state);
-            let bind_values = self.inner.bind_values.clone();
-            let prefetchrows = self.inner.prefetchrows;
-            move || -> Result<QueryResult, String> {
-                let mut guard = connection.lock().map_err(|err| err.to_string())?;
-                let connection = guard
-                    .as_mut()
-                    .ok_or_else(|| "connection is closed".to_string())?;
-                apply_pending_current_schema_from_state(&state, connection, call_timeout)
-                    .map_err(|err| err.to_string())?;
-                BlockingConnection::execute_query_with_binds_and_timeout(
-                    connection,
-                    &query_statement,
-                    prefetchrows,
-                    &bind_values,
-                    call_timeout,
-                )
-                .map_err(|err| err.to_string())
-            }
-        });
-        let mut result = match query.await {
-            Ok(result) => result,
+        let typed_lob_hints = Python::attach(|py| typed_lob_bind_hints(py, &self.inner.bind_vars));
+        let autocommit = *self.inner.autocommit.lock().map_err(runtime_error)?;
+        let query = spawn_async_execute_task(
+            Arc::clone(&self.inner.connection),
+            Arc::clone(&self.inner.state),
+            statement.clone(),
+            self.inner.bind_values.clone(),
+            typed_lob_hints,
+            self.inner.prefetchrows,
+            call_timeout,
+            autocommit,
+        );
+        let outcome = match query.await {
+            Ok(outcome) => outcome,
             Err(_) if self.inner.cancel_requested.swap(false, Ordering::SeqCst) => {
                 return Err(ora_cancel_error());
             }
             Err(err) => return Err(runtime_error(err)),
         };
+        let result = outcome.result;
+        let should_commit = outcome.should_commit;
         if self.inner.cancel_requested.swap(false, Ordering::SeqCst) {
             self.inner.drain_cancel_response()?;
             return Err(ora_cancel_error());
         }
-        supplement_json_lob_column_metadata(
-            &self.inner.connection,
-            &mut result.columns,
-            call_timeout,
-        )?;
         self.inner.warning = Python::attach(|py| query_result_warning(py, &result))?;
         let lob_context = ThinLobContext {
             connection: Arc::clone(&self.inner.connection),
@@ -7493,14 +7796,6 @@ impl AsyncThinCursorImpl {
         })?;
         let is_query = !result.columns.is_empty();
         let is_plsql = statement_is_plsql(&statement);
-        let should_commit = !is_query && *self.inner.autocommit.lock().map_err(runtime_error)?;
-        if should_commit {
-            let mut guard = self.inner.connection.lock().map_err(runtime_error)?;
-            let connection = guard
-                .as_mut()
-                .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-            BlockingConnection::commit(connection).map_err(runtime_error)?;
-        }
         self.inner
             .state
             .lock()
@@ -7528,9 +7823,47 @@ impl AsyncThinCursorImpl {
     }
 
     async fn fetch_next_row(&mut self, cursor: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
+        if self.inner.invalid_ref_cursor {
+            return Err(raise_oracledb_driver_error("ERR_INVALID_REF_CURSOR"));
+        }
+        Python::attach(|py| self.inner.prepare_fetch_defines(py, cursor.bind(py)))?;
+        if self.inner.row_index >= self.inner.rows.len()
+            && self.inner.more_rows
+            && self.inner.cursor_id != 0
+        {
+            let previous_row = self.inner.rows.last().cloned();
+            let requires_define = self.inner.requires_define;
+            let define_columns = self.inner.fetch_define_columns.clone();
+            let fetch = spawn_async_fetch_task(
+                Arc::clone(&self.inner.connection),
+                self.inner.cursor_id,
+                self.inner.arraysize,
+                self.inner.prefetchrows,
+                self.inner.columns.clone(),
+                define_columns.clone(),
+                previous_row,
+                requires_define,
+            );
+            let result = fetch.await.map_err(runtime_error)?;
+            if !result.columns.is_empty() {
+                self.inner.columns = result.columns;
+            } else if requires_define {
+                self.inner.columns = define_columns;
+            }
+            self.inner.rows = result.rows;
+            self.inner.row_index = 0;
+            if result.cursor_id != 0 {
+                self.inner.cursor_id = result.cursor_id;
+            }
+            self.inner.more_rows = result.more_rows;
+            if requires_define {
+                self.inner.requires_define = false;
+            }
+            self.inner.invalid_ref_cursor = false;
+        }
         Python::attach(|py| {
             self.inner.fetch_async_lobs = true;
-            let result = self.inner.fetch_next_row(py, cursor.bind(py));
+            let result = self.inner.fetch_buffered_next_row(py, cursor.bind(py));
             self.inner.fetch_async_lobs = false;
             result
         })

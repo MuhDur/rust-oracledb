@@ -13,6 +13,7 @@ name = "oracledb_pyshim"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+asupersync.workspace = true
 oracledb = { path = "../oracledb" }
 pyo3.workspace = true
 

@@ -315,6 +315,17 @@ impl Connection {
         Ok(result)
     }
 
+    pub async fn execute_query_with_timeout(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+        timeout_ms: Option<u32>,
+    ) -> Result<QueryResult> {
+        self.execute_query_call_timeout(cx, sql, prefetch_rows, timeout_ms)
+            .await
+    }
+
     pub async fn execute_query_with_binds(
         &mut self,
         cx: &Cx,
@@ -357,6 +368,18 @@ impl Connection {
         Ok(result)
     }
 
+    pub async fn execute_query_with_binds_and_timeout(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+        binds: &[BindValue],
+        timeout_ms: Option<u32>,
+    ) -> Result<QueryResult> {
+        self.execute_query_with_binds_call_timeout(cx, sql, prefetch_rows, binds, timeout_ms)
+            .await
+    }
+
     pub async fn execute_query_with_bind_rows(
         &mut self,
         cx: &Cx,
@@ -388,6 +411,24 @@ impl Connection {
         .map_err(Error::from)?;
         self.remember_cursor_columns(&result);
         Ok(result)
+    }
+
+    pub async fn execute_query_with_bind_rows_and_timeout(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+        bind_rows: &[Vec<BindValue>],
+        timeout_ms: Option<u32>,
+    ) -> Result<QueryResult> {
+        self.execute_query_with_bind_rows_call_timeout(
+            cx,
+            sql,
+            prefetch_rows,
+            bind_rows,
+            timeout_ms,
+        )
+        .await
     }
 
     pub async fn fetch_rows(
@@ -527,6 +568,18 @@ impl Connection {
         let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("LOB WRITE response", &response);
         parse_lob_write_response(&response, self.capabilities, locator).map_err(Error::from)
+    }
+
+    pub async fn write_lob_with_timeout(
+        &mut self,
+        cx: &Cx,
+        locator: &[u8],
+        offset: u64,
+        data: &[u8],
+        timeout_ms: Option<u32>,
+    ) -> Result<LobReadResult> {
+        self.write_lob_call_timeout(cx, locator, offset, data, timeout_ms)
+            .await
     }
 
     pub async fn trim_lob(
