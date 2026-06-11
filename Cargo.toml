@@ -19,6 +19,12 @@ categories = ["database", "asynchronous"]
 
 [workspace.dependencies]
 aes = "0.8"
+# arrow-rs pinned as a single version family; the pyarrow/pyo3 features are
+# deliberately NOT enabled (PyCapsule FFI is hand-rolled in the shim layer)
+arrow-array = "59.0.0"
+arrow-buffer = "59.0.0"
+arrow-data = "59.0.0"
+arrow-schema = "59.0.0"
 asupersync = "0.3.4"
 hex = "0.4"
 md-5 = "0.10"

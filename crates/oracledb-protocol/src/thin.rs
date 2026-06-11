@@ -243,6 +243,9 @@ pub struct AuthResponse {
 pub struct ClientCapabilities {
     pub ttc_field_version: u8,
     pub max_string_size: u32,
+    /// Database character set id from the protocol-info response. Charset
+    /// ids >= 800 are multi-byte (drives direct path CLOB form selection).
+    pub charset_id: u16,
 }
 
 impl Default for ClientCapabilities {
@@ -250,6 +253,8 @@ impl Default for ClientCapabilities {
         Self {
             ttc_field_version: 24,
             max_string_size: 32_767,
+            // AL32UTF8: the charset the thin protocol always negotiates
+            charset_id: 873,
         }
     }
 }
@@ -2515,7 +2520,7 @@ fn skip_protocol_message(reader: &mut TtcReader<'_>) -> Result<Option<ClientCapa
             break;
         }
     }
-    let _charset = reader.read_u16le()?;
+    let charset_id = reader.read_u16le()?;
     let _server_flags = reader.read_u8()?;
     let num_elem = reader.read_u16le()?;
     reader.skip(usize::from(num_elem) * 5)?;
@@ -2544,6 +2549,7 @@ fn skip_protocol_message(reader: &mut TtcReader<'_>) -> Result<Option<ClientCapa
     Ok(Some(ClientCapabilities {
         ttc_field_version,
         max_string_size,
+        charset_id,
     }))
 }
 

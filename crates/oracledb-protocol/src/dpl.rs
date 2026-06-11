@@ -138,14 +138,13 @@ pub struct DirectPathPrepareResult {
 
 /// Parses the response to TTC function 128 (direct path prepare).
 ///
-/// `charset_id` is the database charset id negotiated during connect; it
-/// drives the CLOB metadata override (charset ids >= 800 are multi-byte, in
-/// which case implicit-charset CLOBs switch to the NCHAR form). Mirrors
+/// `capabilities.charset_id` drives the CLOB metadata override (charset ids
+/// of 800 and above are multi-byte, in which case implicit-charset CLOBs
+/// switch to the NCHAR form). Mirrors the reference's
 /// `DirectPathPrepareMessage._process_metadata`/`_process_return_parameters`.
 pub fn parse_direct_path_prepare_response(
     payload: &[u8],
     capabilities: ClientCapabilities,
-    charset_id: u16,
 ) -> Result<DirectPathPrepareResult> {
     let mut reader = TtcReader::new(payload);
     let mut result: Option<DirectPathPrepareResult> = None;
@@ -154,11 +153,7 @@ pub fn parse_direct_path_prepare_response(
         match message_type {
             0 => {}
             TNS_MSG_TYPE_PARAMETER => {
-                result = Some(parse_prepare_return_parameters(
-                    &mut reader,
-                    capabilities,
-                    charset_id,
-                )?);
+                result = Some(parse_prepare_return_parameters(&mut reader, capabilities)?);
             }
             TNS_MSG_TYPE_STATUS => {
                 let _call_status = reader.read_ub4()?;
@@ -188,13 +183,12 @@ pub fn parse_direct_path_prepare_response(
 fn parse_prepare_return_parameters(
     reader: &mut TtcReader<'_>,
     capabilities: ClientCapabilities,
-    charset_id: u16,
 ) -> Result<DirectPathPrepareResult> {
     let num_columns = reader.read_ub4()?;
     let mut column_metadata = Vec::with_capacity(num_columns.min(1_024) as usize);
     for _ in 0..num_columns {
         let mut metadata = parse_column_metadata(reader, capabilities)?;
-        apply_direct_path_metadata_overrides(&mut metadata, charset_id);
+        apply_direct_path_metadata_overrides(&mut metadata, capabilities.charset_id);
         column_metadata.push(metadata);
     }
     let num_params = reader.read_ub2()?;

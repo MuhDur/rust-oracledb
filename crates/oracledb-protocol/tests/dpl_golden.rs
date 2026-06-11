@@ -11,6 +11,7 @@
 //!   * the TTC sequence number (payload byte 2 of each function message),
 //!   * the direct path cursor id (parsed from the prepare response by the
 //!     code under test).
+//!
 //! Everything else must match byte-for-byte.
 
 use oracledb_protocol::dpl::{
@@ -24,9 +25,6 @@ use oracledb_protocol::thin::{
     ClientCapabilities, ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_NUMBER,
     ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_VARCHAR,
 };
-
-/// AL32UTF8 (the container database character set); >= 800 means multi-byte.
-const DB_CHARSET_ID: u16 = 873;
 
 const TNS_PACKET_TYPE_DATA: u8 = 6;
 
@@ -111,7 +109,7 @@ fn load_dpl_capture() -> Vec<CapturedPacket> {
 
 /// The response that follows a sent function message (the next received data
 /// packet). DPL responses in the capture are single-packet.
-fn response_after<'a>(packets: &'a [CapturedPacket], index: usize) -> &'a CapturedPacket {
+fn response_after(packets: &[CapturedPacket], index: usize) -> &CapturedPacket {
     let response = packets[index + 1..]
         .iter()
         .find(|p| !p.sending)
@@ -225,7 +223,6 @@ fn prepare_response_parses_and_overrides_metadata() {
     let result = parse_direct_path_prepare_response(
         response.data_payload(),
         ClientCapabilities::default(),
-        DB_CHARSET_ID,
     )
     .expect("prepare response should parse");
 
@@ -271,7 +268,6 @@ fn load_stream_payload_byte_matches_reference_client() {
     let prepare = parse_direct_path_prepare_response(
         response_after(&packets, prepare_index).data_payload(),
         ClientCapabilities::default(),
-        DB_CHARSET_ID,
     )
     .expect("prepare response should parse");
 
@@ -299,7 +295,6 @@ fn finish_and_abort_op_payloads_byte_match_reference_client() {
     let prepare = parse_direct_path_prepare_response(
         response_after(&packets, prepare_index).data_payload(),
         ClientCapabilities::default(),
-        DB_CHARSET_ID,
     )
     .expect("prepare response should parse");
 
@@ -325,7 +320,6 @@ fn finish_and_abort_op_payloads_byte_match_reference_client() {
     let abort_prepare = parse_direct_path_prepare_response(
         response_after(&packets, abort_prepare_index).data_payload(),
         ClientCapabilities::default(),
-        DB_CHARSET_ID,
     )
     .expect("prepare response should parse");
     let built = build_direct_path_op_payload(
@@ -344,7 +338,6 @@ fn batched_load_stream_payloads_byte_match_reference_client() {
     let prepare = parse_direct_path_prepare_response(
         response_after(&packets, prepare_index).data_payload(),
         ClientCapabilities::default(),
-        DB_CHARSET_ID,
     )
     .expect("prepare response should parse");
 
@@ -405,7 +398,6 @@ fn long_segment_load_stream_byte_matches_reference_client() {
     let prepare = parse_direct_path_prepare_response(
         response_after(&packets, prepare_index).data_payload(),
         ClientCapabilities::default(),
-        DB_CHARSET_ID,
     )
     .expect("prepare response should parse");
 

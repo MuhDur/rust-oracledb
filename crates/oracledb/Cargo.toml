@@ -12,9 +12,13 @@ categories.workspace = true
 
 [features]
 default = []
-arrow = []
+arrow = ["dep:arrow-array", "dep:arrow-buffer", "dep:arrow-data", "dep:arrow-schema"]
 
 [dependencies]
+arrow-array = { workspace = true, optional = true }
+arrow-buffer = { workspace = true, optional = true }
+arrow-data = { workspace = true, optional = true }
+arrow-schema = { workspace = true, optional = true }
 asupersync.workspace = true
 oracledb-protocol = { path = "../oracledb-protocol" }
 thiserror.workspace = true
