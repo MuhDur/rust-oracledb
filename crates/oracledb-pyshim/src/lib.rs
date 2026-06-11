@@ -6,10 +6,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use oracledb::protocol::thin::{
     decode_datetime_value, decode_number_value, BindValue, ColumnMetadata, QueryResult, QueryValue,
-    CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR,
-    ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER,
-    ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
-    ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR,
+    CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CHAR,
+    ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_LONG,
+    ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW,
+    ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ,
+    ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection};
@@ -2333,6 +2334,7 @@ fn query_value_to_string(value: &Option<QueryValue>) -> Option<String> {
         Some(QueryValue::Array(_)) => None,
         Some(QueryValue::Cursor { .. }) => None,
         Some(QueryValue::Object { .. }) => None,
+        Some(QueryValue::Lob { .. }) => None,
         None => None,
     }
 }
@@ -2346,6 +2348,12 @@ fn query_value_to_i64(value: &Option<QueryValue>) -> PyResult<i64> {
 
 fn query_value_to_u32(value: &Option<QueryValue>) -> Option<u32> {
     query_value_to_string(value)?.parse().ok()
+}
+
+fn columns_require_define(columns: &[ColumnMetadata]) -> bool {
+    columns
+        .iter()
+        .any(|metadata| matches!(metadata.ora_type_num, ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB))
 }
 
 fn query_value_to_i8(value: &Option<QueryValue>) -> Option<i8> {
@@ -2538,6 +2546,12 @@ impl ThinConnState {
     }
 }
 
+#[derive(Clone)]
+struct ThinLobContext {
+    connection: Arc<Mutex<Option<RustConnection>>>,
+    state: Arc<Mutex<ThinConnState>>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ThinVarReturnKind {
     Plain,
@@ -2546,23 +2560,173 @@ enum ThinVarReturnKind {
 
 #[pyclass(module = "oracledb.thin_impl", name = "ThinLob")]
 struct ThinLob {
-    data: String,
+    data: Option<Vec<u8>>,
+    locator: Arc<Mutex<Option<Vec<u8>>>>,
+    ora_type_num: u8,
+    csfrm: u8,
+    size: u64,
+    chunk_size: u32,
+    context: Option<ThinLobContext>,
+}
+
+const TNS_LOB_LOC_OFFSET_FLAG_3: usize = 6;
+const TNS_LOB_LOC_OFFSET_FLAG_4: usize = 7;
+const TNS_LOB_LOC_FLAGS_VAR_LENGTH_CHARSET: u8 = 0x80;
+const TNS_LOB_LOC_FLAGS_LITTLE_ENDIAN: u8 = 0x40;
+
+fn decode_lob_text(bytes: &[u8], csfrm: u8, locator: Option<&[u8]>) -> PyResult<String> {
+    let use_utf16 = csfrm == CS_FORM_NCHAR
+        || locator
+            .and_then(|locator| locator.get(TNS_LOB_LOC_OFFSET_FLAG_3))
+            .is_some_and(|flags| flags & TNS_LOB_LOC_FLAGS_VAR_LENGTH_CHARSET != 0);
+    if !use_utf16 {
+        return String::from_utf8(bytes.to_vec())
+            .map_err(|_| PyRuntimeError::new_err("invalid LOB UTF-8 text"));
+    }
+    let little_endian = locator
+        .and_then(|locator| locator.get(TNS_LOB_LOC_OFFSET_FLAG_4))
+        .is_some_and(|flags| flags & TNS_LOB_LOC_FLAGS_LITTLE_ENDIAN != 0);
+    let mut chunks = bytes.chunks_exact(2);
+    let units = chunks
+        .by_ref()
+        .map(|chunk| {
+            if little_endian {
+                u16::from_le_bytes([chunk[0], chunk[1]])
+            } else {
+                u16::from_be_bytes([chunk[0], chunk[1]])
+            }
+        })
+        .collect::<Vec<_>>();
+    if !chunks.remainder().is_empty() {
+        return Err(PyRuntimeError::new_err("invalid LOB UTF-16 text"));
+    }
+    String::from_utf16(&units).map_err(|_| PyRuntimeError::new_err("invalid LOB UTF-16 text"))
+}
+
+fn lob_data_to_py(
+    py: Python<'_>,
+    ora_type_num: u8,
+    csfrm: u8,
+    locator: Option<&[u8]>,
+    data: &[u8],
+    offset: u64,
+    amount: Option<u64>,
+) -> PyResult<Py<PyAny>> {
+    if matches!(ora_type_num, ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_BFILE) {
+        let start = offset.saturating_sub(1) as usize;
+        let bytes = data.get(start..).unwrap_or_default();
+        let bytes = amount
+            .and_then(|amount| usize::try_from(amount).ok())
+            .map(|amount| bytes.get(..amount).unwrap_or(bytes))
+            .unwrap_or(bytes);
+        return Ok(PyBytes::new(py, bytes).unbind().into());
+    }
+    let text = decode_lob_text(data, csfrm, locator)?;
+    let start = offset.saturating_sub(1) as usize;
+    let chars = text.chars().skip(start);
+    let value = match amount.and_then(|amount| usize::try_from(amount).ok()) {
+        Some(amount) => chars.take(amount).collect::<String>(),
+        None => chars.collect::<String>(),
+    };
+    Ok(value.into_pyobject(py)?.unbind().into())
+}
+
+fn py_lob_from_impl(py: Python<'_>, lob: ThinLob) -> PyResult<Py<PyAny>> {
+    let impl_obj = Py::new(py, lob)?;
+    let module = PyModule::import(py, "oracledb")?;
+    let cls = module.getattr("LOB")?;
+    Ok(cls.call_method1("_from_impl", (impl_obj,))?.unbind())
 }
 
 #[pymethods]
 impl ThinLob {
     #[pyo3(signature = (offset=1, amount=None))]
-    fn read(&self, offset: usize, amount: Option<usize>) -> String {
-        let start = offset.saturating_sub(1);
-        let iter = self.data.chars().skip(start);
-        match amount {
-            Some(amount) => iter.take(amount).collect(),
-            None => iter.collect(),
+    fn read(&self, py: Python<'_>, offset: u64, amount: Option<u64>) -> PyResult<Py<PyAny>> {
+        if let Some(data) = self.data.as_deref() {
+            return lob_data_to_py(
+                py,
+                self.ora_type_num,
+                self.csfrm,
+                self.locator.lock().map_err(runtime_error)?.as_deref(),
+                data,
+                offset,
+                amount,
+            );
         }
+        let Some(context) = self.context.as_ref() else {
+            return lob_data_to_py(py, self.ora_type_num, self.csfrm, None, &[], offset, amount);
+        };
+        let locator = self
+            .locator
+            .lock()
+            .map_err(runtime_error)?
+            .clone()
+            .unwrap_or_default();
+        let call_timeout = {
+            let value = context.state.lock().map_err(runtime_error)?.call_timeout;
+            (value > 0).then_some(value)
+        };
+        let mut guard = context.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        let result = BlockingConnection::read_lob_with_timeout(
+            connection,
+            &locator,
+            offset,
+            amount.unwrap_or(u64::from(u32::MAX)),
+            call_timeout,
+        )
+        .map_err(runtime_error)?;
+        *self.locator.lock().map_err(runtime_error)? = Some(result.locator.clone());
+        lob_data_to_py(
+            py,
+            self.ora_type_num,
+            self.csfrm,
+            Some(&result.locator),
+            result.data.as_deref().unwrap_or_default(),
+            1,
+            None,
+        )
     }
 
-    fn size(&self) -> usize {
-        self.data.chars().count()
+    fn get_max_amount(&self) -> u64 {
+        u64::from(u32::MAX)
+    }
+
+    fn get_size(&self) -> u64 {
+        self.size
+    }
+
+    fn size(&self) -> u64 {
+        self.get_size()
+    }
+
+    fn get_chunk_size(&self) -> u32 {
+        self.chunk_size
+    }
+
+    #[getter]
+    fn dbtype(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let module = PyModule::import(py, "oracledb")?;
+        let name = match self.ora_type_num {
+            ORA_TYPE_NUM_BLOB => "DB_TYPE_BLOB",
+            ORA_TYPE_NUM_BFILE => "DB_TYPE_BFILE",
+            ORA_TYPE_NUM_CLOB if self.csfrm == CS_FORM_NCHAR => "DB_TYPE_NCLOB",
+            ORA_TYPE_NUM_CLOB => "DB_TYPE_CLOB",
+            _ => "DB_TYPE_CLOB",
+        };
+        Ok(module.getattr(name)?.unbind())
+    }
+
+    fn free_lob(&self) {}
+
+    fn close(&self) {}
+
+    fn open(&self) {}
+
+    fn get_is_open(&self) -> bool {
+        false
     }
 }
 
@@ -2711,13 +2875,18 @@ impl ThinVar {
         value: &Option<QueryValue>,
     ) -> PyResult<Py<PyAny>> {
         let value = match (self.return_kind, value) {
-            (ThinVarReturnKind::ClobAsLong, Some(QueryValue::Text(value))) => Py::new(
+            (ThinVarReturnKind::ClobAsLong, Some(QueryValue::Text(value))) => py_lob_from_impl(
                 py,
                 ThinLob {
-                    data: value.clone(),
+                    data: Some(value.as_bytes().to_vec()),
+                    locator: Arc::new(Mutex::new(None)),
+                    ora_type_num: ORA_TYPE_NUM_CLOB,
+                    csfrm: CS_FORM_IMPLICIT,
+                    size: value.chars().count() as u64,
+                    chunk_size: 0,
+                    context: None,
                 },
-            )?
-            .into_any(),
+            )?,
             (ThinVarReturnKind::Plain, Some(QueryValue::Text(value)))
                 if self.object_type.is_some() =>
             {
@@ -2735,7 +2904,7 @@ impl ThinVar {
                 let object = DbObjectImpl::with_attr(py, object_type, &attr_name, value.clone())?;
                 py_db_object_from_impl(py, object)?
             }
-            _ => query_value_to_py(py, value, None)?,
+            _ => query_value_to_py(py, value, None, None)?,
         };
         if let Some(outconverter) = self.outconverter.as_ref() {
             if !value.bind(py).is_none() || self.convert_nulls {
@@ -4261,6 +4430,7 @@ struct DbObjectImpl {
     collection_values: Arc<Mutex<Vec<Py<PyAny>>>>,
     assoc_values: Arc<Mutex<BTreeMap<i32, Py<PyAny>>>>,
     packed_data: Arc<Mutex<Option<Vec<u8>>>>,
+    lob_context: Option<ThinLobContext>,
 }
 
 const TNS_LONG_LENGTH_INDICATOR: u8 = 254;
@@ -4442,16 +4612,22 @@ impl DbObjectImpl {
             collection_values: Arc::new(Mutex::new(Vec::new())),
             assoc_values: Arc::new(Mutex::new(BTreeMap::new())),
             packed_data: Arc::new(Mutex::new(None)),
+            lob_context: None,
         })
     }
 
-    fn with_packed_data(object_type: DbObjectTypeImpl, packed_data: Vec<u8>) -> Self {
+    fn with_packed_data(
+        object_type: DbObjectTypeImpl,
+        packed_data: Vec<u8>,
+        lob_context: Option<ThinLobContext>,
+    ) -> Self {
         Self {
             object_type,
             attr_values: Arc::new(Mutex::new(BTreeMap::new())),
             collection_values: Arc::new(Mutex::new(Vec::new())),
             assoc_values: Arc::new(Mutex::new(BTreeMap::new())),
             packed_data: Arc::new(Mutex::new(Some(packed_data))),
+            lob_context,
         }
     }
 
@@ -4574,7 +4750,13 @@ impl DbObjectImpl {
                 };
                 for _ in 0..num_elements {
                     let index = reader.read_i32be()?;
-                    let value = dbobject_unpack_value(py, metadata, reader, true)?;
+                    let value = dbobject_unpack_value(
+                        py,
+                        metadata,
+                        reader,
+                        true,
+                        self.lob_context.as_ref(),
+                    )?;
                     values.insert(index, value);
                 }
                 *self.assoc_values.lock().map_err(runtime_error)? = values;
@@ -4586,7 +4768,13 @@ impl DbObjectImpl {
                     ));
                 };
                 for _ in 0..num_elements {
-                    values.push(dbobject_unpack_value(py, metadata, reader, true)?);
+                    values.push(dbobject_unpack_value(
+                        py,
+                        metadata,
+                        reader,
+                        true,
+                        self.lob_context.as_ref(),
+                    )?);
                 }
                 *self.collection_values.lock().map_err(runtime_error)? = values;
             }
@@ -4597,7 +4785,7 @@ impl DbObjectImpl {
         for attr in &self.object_type.attrs {
             values.insert(
                 attr.name.clone(),
-                dbobject_unpack_value(py, attr, reader, false)?,
+                dbobject_unpack_value(py, attr, reader, false, self.lob_context.as_ref())?,
             );
         }
         *self.attr_values.lock().map_err(runtime_error)? = values;
@@ -4678,6 +4866,7 @@ fn dbobject_unpack_value(
     metadata: &DbObjectAttrImpl,
     reader: &mut DbObjectPickleReader<'_>,
     parent_is_collection: bool,
+    lob_context: Option<&ThinLobContext>,
 ) -> PyResult<Py<PyAny>> {
     if metadata.dbtype_name == "DB_TYPE_OBJECT" {
         let Some(object_type) = metadata.objtype.clone() else {
@@ -4692,9 +4881,10 @@ fn dbobject_unpack_value(
             let Some(packed_data) = reader.read_value_bytes()? else {
                 return Ok(py.None());
             };
-            DbObjectImpl::with_packed_data(object_type, packed_data)
+            DbObjectImpl::with_packed_data(object_type, packed_data, lob_context.cloned())
         } else {
-            let object = DbObjectImpl::new(py, object_type)?;
+            let mut object = DbObjectImpl::new(py, object_type)?;
+            object.lob_context = lob_context.cloned();
             object.unpack_from_reader(py, reader)?;
             object
         };
@@ -4715,11 +4905,11 @@ fn dbobject_unpack_value(
         "DB_TYPE_XMLTYPE" => decode_dbobject_xmltype(py, &bytes),
         "DB_TYPE_NUMBER" => {
             let value = decode_number_value(&bytes).map_err(runtime_error)?;
-            query_value_to_py(py, &Some(value), None)
+            query_value_to_py(py, &Some(value), None, None)
         }
         "DB_TYPE_DATE" | "DB_TYPE_TIMESTAMP" | "DB_TYPE_TIMESTAMP_TZ" | "DB_TYPE_TIMESTAMP_LTZ" => {
             let value = decode_datetime_value(&bytes).map_err(runtime_error)?;
-            query_value_to_py(py, &Some(value), None)
+            query_value_to_py(py, &Some(value), None, None)
         }
         "DB_TYPE_BINARY_FLOAT" => Ok(f64::from(decode_dbobject_binary_float(&bytes)?)
             .into_pyobject(py)?
@@ -4729,7 +4919,30 @@ fn dbobject_unpack_value(
             .into_pyobject(py)?
             .unbind()
             .into()),
-        "DB_TYPE_CLOB" | "DB_TYPE_NCLOB" | "DB_TYPE_BLOB" => Ok(py.None()),
+        "DB_TYPE_CLOB" | "DB_TYPE_NCLOB" | "DB_TYPE_BLOB" => {
+            let ora_type_num = if metadata.dbtype_name == "DB_TYPE_BLOB" {
+                ORA_TYPE_NUM_BLOB
+            } else {
+                ORA_TYPE_NUM_CLOB
+            };
+            let csfrm = if metadata.dbtype_name == "DB_TYPE_NCLOB" {
+                CS_FORM_NCHAR
+            } else {
+                CS_FORM_IMPLICIT
+            };
+            py_lob_from_impl(
+                py,
+                ThinLob {
+                    data: None,
+                    locator: Arc::new(Mutex::new(Some(bytes))),
+                    ora_type_num,
+                    csfrm,
+                    size: 0,
+                    chunk_size: 0,
+                    context: lob_context.cloned(),
+                },
+            )
+        }
         _ => Ok(py.None()),
     }
 }
@@ -4811,6 +5024,7 @@ impl DbObjectImpl {
                     .collect(),
             )),
             packed_data: Arc::new(Mutex::new(None)),
+            lob_context: self.lob_context.clone(),
         })
     }
 
@@ -5068,6 +5282,10 @@ impl FetchMetadataImpl {
             ORA_TYPE_NUM_NUMBER => "DB_TYPE_NUMBER",
             ORA_TYPE_NUM_CURSOR => "DB_TYPE_CURSOR",
             ORA_TYPE_NUM_OBJECT => "DB_TYPE_OBJECT",
+            ORA_TYPE_NUM_CLOB if self.metadata.csfrm == CS_FORM_NCHAR => "DB_TYPE_NCLOB",
+            ORA_TYPE_NUM_CLOB => "DB_TYPE_CLOB",
+            ORA_TYPE_NUM_BLOB => "DB_TYPE_BLOB",
+            ORA_TYPE_NUM_BFILE => "DB_TYPE_BFILE",
             ORA_TYPE_NUM_DATE => "DB_TYPE_DATE",
             ORA_TYPE_NUM_TIMESTAMP => "DB_TYPE_TIMESTAMP",
             ORA_TYPE_NUM_TIMESTAMP_LTZ => "DB_TYPE_TIMESTAMP_LTZ",
@@ -5728,6 +5946,7 @@ impl ThinCursorImpl {
         );
         self.columns = result.columns;
         self.reset_fetch_define_state();
+        self.requires_define = columns_require_define(&self.columns);
         self.rows = result.rows;
         self.row_index = 0;
         self.cursor_id = result.cursor_id;
@@ -5749,6 +5968,7 @@ impl ThinCursorImpl {
         if let Some(result) = local_query_result(&self.state, statement)? {
             self.columns = result.columns;
             self.reset_fetch_define_state();
+            self.requires_define = columns_require_define(&self.columns);
             self.rows = result.rows;
             self.row_index = 0;
             self.cursor_id = result.cursor_id;
@@ -5761,6 +5981,7 @@ impl ThinCursorImpl {
         if let Some(result) = local_plsql_result(&self.state, &self.bind_vars, statement)? {
             self.columns = result.columns;
             self.reset_fetch_define_state();
+            self.requires_define = columns_require_define(&self.columns);
             self.rows = result.rows;
             self.row_index = 0;
             self.cursor_id = result.cursor_id;
@@ -5828,6 +6049,7 @@ impl ThinCursorImpl {
         );
         self.columns = result.columns;
         self.reset_fetch_define_state();
+        self.requires_define = columns_require_define(&self.columns);
         self.rows = result.rows;
         self.row_index = 0;
         self.cursor_id = result.cursor_id;
@@ -5902,9 +6124,13 @@ impl ThinCursorImpl {
         };
         self.row_index += 1;
         self.rowcount += 1;
+        let lob_context = ThinLobContext {
+            connection: Arc::clone(&self.connection),
+            state: Arc::clone(&self.state),
+        };
         let values = row
             .iter()
-            .map(|value| query_value_to_py(py, value, Some(_cursor)))
+            .map(|value| query_value_to_py(py, value, Some(_cursor), Some(&lob_context)))
             .collect::<PyResult<Vec<_>>>()?;
         let tuple = PyTuple::new(py, values)?;
         if let Some(rowfactory) = &self.rowfactory {
@@ -6031,10 +6257,20 @@ impl ThinCursorImpl {
     }
 }
 
+fn thin_lob_context_from_cursor(owner_cursor: &Bound<'_, PyAny>) -> PyResult<ThinLobContext> {
+    let impl_obj = owner_cursor.getattr("_impl")?;
+    let cursor_impl = impl_obj.extract::<PyRef<'_, ThinCursorImpl>>()?;
+    Ok(ThinLobContext {
+        connection: Arc::clone(&cursor_impl.connection),
+        state: Arc::clone(&cursor_impl.state),
+    })
+}
+
 fn query_value_to_py(
     py: Python<'_>,
     value: &Option<QueryValue>,
     owner_cursor: Option<&Bound<'_, PyAny>>,
+    lob_context: Option<&ThinLobContext>,
 ) -> PyResult<Py<PyAny>> {
     match value {
         None => Ok(py.None()),
@@ -6066,7 +6302,7 @@ fn query_value_to_py(
         Some(QueryValue::Array(values)) => {
             let values = values
                 .iter()
-                .map(|value| query_value_to_py(py, value, owner_cursor))
+                .map(|value| query_value_to_py(py, value, owner_cursor, lob_context))
                 .collect::<PyResult<Vec<_>>>()?;
             Ok(PyList::new(py, values)?.unbind().into())
         }
@@ -6078,6 +6314,33 @@ fn query_value_to_py(
             let child_cursor = connection.call_method0("cursor")?;
             hydrate_cursor_impl(&child_cursor, columns, *cursor_id, false)?;
             Ok(child_cursor.unbind())
+        }
+        Some(QueryValue::Lob {
+            ora_type_num,
+            csfrm,
+            locator,
+            size,
+            chunk_size,
+        }) => {
+            let Some(owner_cursor) = owner_cursor else {
+                return Err(not_implemented("ThinCursorImpl LOB value conversion"));
+            };
+            let context = match lob_context {
+                Some(context) => context.clone(),
+                None => thin_lob_context_from_cursor(owner_cursor)?,
+            };
+            py_lob_from_impl(
+                py,
+                ThinLob {
+                    data: None,
+                    locator: Arc::new(Mutex::new(Some(locator.clone()))),
+                    ora_type_num: *ora_type_num,
+                    csfrm: *csfrm,
+                    size: *size,
+                    chunk_size: *chunk_size,
+                    context: Some(context),
+                },
+            )
         }
         Some(QueryValue::Object {
             schema,
@@ -6102,9 +6365,13 @@ fn query_value_to_py(
                     "gettype() did not return a DbObjectType",
                 ));
             };
+            let lob_context = match lob_context {
+                Some(context) => Some(context.clone()),
+                None => Some(thin_lob_context_from_cursor(owner_cursor)?),
+            };
             py_db_object_from_impl(
                 py,
-                DbObjectImpl::with_packed_data(object_type, packed_data.clone()),
+                DbObjectImpl::with_packed_data(object_type, packed_data.clone(), lob_context),
             )
         }
     }

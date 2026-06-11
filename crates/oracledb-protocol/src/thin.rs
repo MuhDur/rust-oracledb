@@ -24,6 +24,7 @@ pub const TNS_MSG_TYPE_ROW_DATA: u8 = 7;
 pub const TNS_MSG_TYPE_PARAMETER: u8 = 8;
 pub const TNS_MSG_TYPE_STATUS: u8 = 9;
 pub const TNS_MSG_TYPE_IO_VECTOR: u8 = 11;
+pub const TNS_MSG_TYPE_LOB_DATA: u8 = 14;
 pub const TNS_MSG_TYPE_FLUSH_OUT_BINDS: u8 = 19;
 pub const TNS_MSG_TYPE_BIT_VECTOR: u8 = 21;
 pub const TNS_MSG_TYPE_DESCRIBE_INFO: u8 = 16;
@@ -36,6 +37,7 @@ pub const TNS_FUNC_COMMIT: u8 = 14;
 pub const TNS_FUNC_EXECUTE: u8 = 94;
 pub const TNS_FUNC_FETCH: u8 = 5;
 pub const TNS_FUNC_LOGOFF: u8 = 9;
+pub const TNS_FUNC_LOB_OP: u8 = 96;
 pub const TNS_FUNC_PING: u8 = 147;
 pub const TNS_FUNC_ROLLBACK: u8 = 15;
 
@@ -55,6 +57,8 @@ pub const ORA_TYPE_NUM_CURSOR: u8 = 102;
 pub const ORA_TYPE_NUM_LONG_RAW: u8 = 24;
 pub const ORA_TYPE_NUM_CHAR: u8 = 96;
 pub const ORA_TYPE_NUM_CLOB: u8 = 112;
+pub const ORA_TYPE_NUM_BLOB: u8 = 113;
+pub const ORA_TYPE_NUM_BFILE: u8 = 114;
 pub const ORA_TYPE_NUM_OBJECT: u8 = 109;
 pub const ORA_TYPE_NUM_TIMESTAMP: u8 = 180;
 pub const ORA_TYPE_NUM_TIMESTAMP_TZ: u8 = 181;
@@ -84,6 +88,7 @@ const TNS_CCAP_FIELD_VERSION: usize = 7;
 const TNS_CCAP_FIELD_VERSION_12_2: u8 = 8;
 const TNS_CCAP_FIELD_VERSION_20_1: u8 = 14;
 const TNS_CCAP_FIELD_VERSION_23_1: u8 = 17;
+const TNS_CCAP_FIELD_VERSION_23_1_EXT_1: u8 = 18;
 const TNS_CCAP_FIELD_VERSION_23_1_EXT_3: u8 = 20;
 const TNS_CCAP_FIELD_VERSION_23_4: u8 = 24;
 const TNS_RCAP_TTC: usize = 6;
@@ -95,6 +100,8 @@ const TNS_EXEC_OPTION_EXECUTE: u32 = 0x20;
 const TNS_EXEC_OPTION_FETCH: u32 = 0x40;
 const TNS_EXEC_OPTION_PLSQL_BIND: u32 = 0x400;
 const TNS_EXEC_OPTION_NOT_PLSQL: u32 = 0x8000;
+const TNS_LOB_OP_READ: u32 = 0x0002;
+const TNS_LOB_PREFETCH_FLAG: u64 = 0x0200_0000;
 const TNS_EXEC_FLAGS_IMPLICIT_RESULTSET: u32 = 0x8000;
 const TNS_BIND_USE_INDICATORS: u8 = 0x01;
 const TNS_BIND_ARRAY: u8 = 0x40;
@@ -259,6 +266,13 @@ pub enum QueryValue {
         type_name: Option<String>,
         packed_data: Vec<u8>,
     },
+    Lob {
+        ora_type_num: u8,
+        csfrm: u8,
+        locator: Vec<u8>,
+        size: u64,
+        chunk_size: u32,
+    },
     Array(Vec<Option<QueryValue>>),
 }
 
@@ -322,6 +336,13 @@ pub struct QueryResult {
     pub cursor_id: u32,
     pub row_count: u64,
     pub more_rows: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct LobReadResult {
+    pub data: Option<Vec<u8>>,
+    pub locator: Vec<u8>,
+    pub amount: u64,
 }
 
 pub fn build_connect_packet_payload(connect_data: &str, sdu: u16) -> Result<Vec<u8>> {
@@ -885,7 +906,12 @@ fn write_define_column_metadata(writer: &mut TtcWriter, metadata: &ColumnMetadat
     writer.write_u8(0);
     writer.write_ub4(metadata.buffer_size.max(1));
     writer.write_ub4(0);
-    writer.write_ub8(0);
+    let cont_flags = if matches!(metadata.ora_type_num, ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB) {
+        TNS_LOB_PREFETCH_FLAG
+    } else {
+        0
+    };
+    writer.write_ub8(cont_flags);
     writer.write_ub4(0);
     writer.write_ub2(0);
     if metadata.csfrm != 0 {
@@ -896,6 +922,46 @@ fn write_define_column_metadata(writer: &mut TtcWriter, metadata: &ColumnMetadat
     writer.write_u8(metadata.csfrm);
     writer.write_ub4(0);
     writer.write_ub4(0);
+}
+
+pub fn build_lob_read_payload_with_seq(
+    locator: &[u8],
+    offset: u64,
+    amount: u64,
+    seq_num: u8,
+    ttc_field_version: u8,
+) -> Result<Vec<u8>> {
+    let locator_len =
+        u32::try_from(locator.len()).map_err(|_| ProtocolError::InvalidPacketLength {
+            length: locator.len(),
+            minimum: 0,
+        })?;
+    let mut writer = TtcWriter::new();
+    writer.write_function_code_with_seq(TNS_FUNC_LOB_OP, seq_num);
+    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
+        writer.write_ub8(0);
+    }
+    writer.write_u8(1);
+    writer.write_ub4(locator_len);
+    writer.write_u8(0);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_u8(0);
+    writer.write_u8(0);
+    writer.write_u8(0);
+    writer.write_ub4(TNS_LOB_OP_READ);
+    writer.write_u8(0);
+    writer.write_u8(0);
+    writer.write_ub8(offset);
+    writer.write_ub8(0);
+    writer.write_u8(1);
+    for _ in 0..3 {
+        writer.write_u16be(0);
+    }
+    writer.write_raw(locator);
+    writer.write_ub8(amount);
+    Ok(writer.into_bytes())
 }
 
 pub fn parse_query_response(
@@ -1636,10 +1702,38 @@ fn parse_column_value(
             };
             decode_datetime_value(&bytes).map(Some)
         }
+        ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_BFILE => {
+            parse_lob_value(reader, metadata)
+        }
         ORA_TYPE_NUM_CURSOR => parse_cursor_value(reader).map(Some),
         ORA_TYPE_NUM_OBJECT => parse_object_value(reader, metadata),
         _ => Err(ProtocolError::UnsupportedFeature("query column type")),
     }
+}
+
+fn parse_lob_value(
+    reader: &mut TtcReader<'_>,
+    metadata: &ColumnMetadata,
+) -> Result<Option<QueryValue>> {
+    let num_bytes = reader.read_ub4()?;
+    if num_bytes == 0 {
+        return Ok(None);
+    }
+    let (size, chunk_size) = if matches!(metadata.ora_type_num, ORA_TYPE_NUM_BFILE) {
+        (0, 0)
+    } else {
+        (reader.read_ub8()?, reader.read_ub4()?)
+    };
+    let Some(locator) = reader.read_bytes()? else {
+        return Ok(None);
+    };
+    Ok(Some(QueryValue::Lob {
+        ora_type_num: metadata.ora_type_num,
+        csfrm: metadata.csfrm,
+        locator,
+        size,
+        chunk_size,
+    }))
 }
 
 fn parse_object_value(
@@ -1674,6 +1768,55 @@ fn parse_cursor_value(reader: &mut TtcReader<'_>) -> Result<QueryValue> {
         columns: result.columns,
         cursor_id,
     })
+}
+
+pub fn parse_lob_read_response(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    locator: &[u8],
+) -> Result<LobReadResult> {
+    let mut reader = TtcReader::new(payload);
+    let mut result = LobReadResult {
+        locator: locator.to_vec(),
+        ..LobReadResult::default()
+    };
+    while reader.remaining() > 0 {
+        let message_type = reader.read_u8()?;
+        match message_type {
+            0 => {}
+            TNS_MSG_TYPE_LOB_DATA => {
+                result.data = reader.read_bytes()?;
+            }
+            TNS_MSG_TYPE_PARAMETER => {
+                if !result.locator.is_empty() {
+                    result.locator = reader.read_raw(result.locator.len())?.to_vec();
+                }
+                let amount = reader.read_sb8()?;
+                if amount > 0 {
+                    result.amount = amount as u64;
+                }
+            }
+            TNS_MSG_TYPE_STATUS => {
+                let _call_status = reader.read_ub4()?;
+                let _seq = reader.read_ub2()?;
+            }
+            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => skip_server_side_piggyback(&mut reader)?,
+            TNS_MSG_TYPE_END_OF_RESPONSE => break,
+            TNS_MSG_TYPE_ERROR => {
+                let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
+                if info.number != 0 {
+                    return Err(ProtocolError::ServerError(info.message));
+                }
+            }
+            _ => {
+                return Err(ProtocolError::UnknownMessageType {
+                    message_type,
+                    position: reader.position().saturating_sub(1),
+                })
+            }
+        }
+    }
+    Ok(result)
 }
 
 fn encode_oracle_date(
@@ -2472,6 +2615,26 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "server returned Oracle error: ORA-01476: divisor is equal to zero"
+        );
+    }
+
+    #[test]
+    fn lob_read_payload_writes_modern_token_field() {
+        let locator = [0x00, 0x70, 0xaa];
+        let modern =
+            build_lob_read_payload_with_seq(&locator, 1, 5, 8, TNS_CCAP_FIELD_VERSION_23_1_EXT_1)
+                .expect("LOB read payload should encode");
+        assert_eq!(
+            &modern[..7],
+            &[TNS_MSG_TYPE_FUNCTION, TNS_FUNC_LOB_OP, 8, 0, 1, 1, 3]
+        );
+
+        let legacy =
+            build_lob_read_payload_with_seq(&locator, 1, 5, 8, TNS_CCAP_FIELD_VERSION_23_1)
+                .expect("LOB read payload should encode");
+        assert_eq!(
+            &legacy[..6],
+            &[TNS_MSG_TYPE_FUNCTION, TNS_FUNC_LOB_OP, 8, 1, 1, 3]
         );
     }
 

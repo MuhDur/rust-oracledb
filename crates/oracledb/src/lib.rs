@@ -12,12 +12,13 @@ use oracledb_protocol::thin::{
     build_define_fetch_payload_with_seq, build_execute_payload_with_bind_rows_with_seq,
     build_execute_payload_with_binds_with_seq, build_execute_payload_with_seq,
     build_fast_auth_phase_one_payload, build_fetch_payload_with_seq,
-    build_function_payload_with_seq, parse_accept_payload, parse_auth_response,
-    parse_query_response, parse_query_response_with_binds, parse_query_response_with_context,
-    BindValue, ClientCapabilities, ColumnMetadata, QueryResult, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF,
-    TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS,
-    TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA,
-    TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE,
+    build_function_payload_with_seq, build_lob_read_payload_with_seq, parse_accept_payload,
+    parse_auth_response, parse_lob_read_response, parse_query_response,
+    parse_query_response_with_binds, parse_query_response_with_context, BindValue,
+    ClientCapabilities, ColumnMetadata, LobReadResult, QueryResult, TNS_FUNC_COMMIT,
+    TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE,
+    TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT,
+    TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE,
 };
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};
@@ -439,6 +440,30 @@ impl Connection {
         Ok(result)
     }
 
+    pub async fn read_lob(
+        &mut self,
+        cx: &Cx,
+        locator: &[u8],
+        offset: u64,
+        amount: u64,
+    ) -> Result<LobReadResult> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = build_lob_read_payload_with_seq(
+            locator,
+            offset,
+            amount,
+            seq_num,
+            self.capabilities.ttc_field_version,
+        )?;
+        trace_query_bytes("LOB READ payload", &payload);
+        send_data_packet(&mut self.stream, &payload, self.sdu)?;
+        let response = read_data_response(&mut self.stream)?;
+        trace_query_bytes("LOB READ response", &response);
+        parse_lob_read_response(&response, self.capabilities, locator).map_err(Error::from)
+    }
+
     fn remember_cursor_columns(&mut self, result: &QueryResult) {
         if result.cursor_id != 0 && !result.columns.is_empty() {
             self.cursor_columns
@@ -682,6 +707,34 @@ impl BlockingConnection {
                     previous_row,
                 )
                 .await
+        })
+    }
+
+    pub fn read_lob(
+        connection: &mut Connection,
+        locator: &[u8],
+        offset: u64,
+        amount: u64,
+    ) -> Result<LobReadResult> {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.read_lob(&cx, locator, offset, amount).await
+        })
+    }
+
+    pub fn read_lob_with_timeout(
+        connection: &mut Connection,
+        locator: &[u8],
+        offset: u64,
+        amount: u64,
+        timeout_ms: Option<u32>,
+    ) -> Result<LobReadResult> {
+        with_call_timeout(connection, timeout_ms, |connection| {
+            Self::read_lob(connection, locator, offset, amount)
         })
     }
 
