@@ -1078,7 +1078,7 @@ fn output_only_bind(value: BindValue) -> BindValue {
         BindValue::Timestamp { ora_type_num, .. } => (
             ora_type_num,
             0,
-            if ora_type_num == ORA_TYPE_NUM_TIMESTAMP_TZ {
+            if matches!(ora_type_num, ORA_TYPE_NUM_TIMESTAMP_TZ) {
                 13
             } else {
                 11
@@ -1366,14 +1366,20 @@ fn py_date_time_fields(
     )))
 }
 
-fn bind_template_from_type(typ: &Bound<'_, PyAny>, size: u32) -> BindValue {
-    let type_name = typ
-        .getattr("name")
+fn py_type_name(typ: &Bound<'_, PyAny>) -> String {
+    typ.getattr("name")
         .or_else(|_| typ.getattr("__name__"))
         .and_then(|value| value.extract::<String>())
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+fn bind_template_from_type(typ: &Bound<'_, PyAny>, size: u32) -> BindValue {
+    bind_template_from_type_name(&py_type_name(typ), size)
+}
+
+fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
     let text_buffer_size = if size == 0 { 4000 } else { size.max(1) };
-    match type_name.as_str() {
+    match type_name {
         "NUMBER"
         | "DB_TYPE_NUMBER"
         | "NATIVE_FLOAT"
@@ -1393,6 +1399,31 @@ fn bind_template_from_type(typ: &Bound<'_, PyAny>, size: u32) -> BindValue {
             ora_type_num: ORA_TYPE_NUM_VARCHAR,
             csfrm: CS_FORM_NCHAR,
             buffer_size: text_buffer_size,
+        },
+        "DB_TYPE_CLOB" | "CLOB" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_LONG,
+            csfrm: CS_FORM_IMPLICIT,
+            buffer_size: i32::MAX as u32,
+        },
+        "DB_TYPE_NCLOB" | "NCLOB" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_LONG,
+            csfrm: CS_FORM_NCHAR,
+            buffer_size: i32::MAX as u32,
+        },
+        "DB_TYPE_LONG" | "LONG" | "LONG_STRING" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_LONG,
+            csfrm: CS_FORM_IMPLICIT,
+            buffer_size: i32::MAX as u32,
+        },
+        "DB_TYPE_LONG_NVARCHAR" | "LONG NVARCHAR" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_LONG,
+            csfrm: CS_FORM_NCHAR,
+            buffer_size: i32::MAX as u32,
+        },
+        "DB_TYPE_LONG_RAW" | "LONG RAW" | "LONG_BINARY" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_LONG_RAW,
+            csfrm: 0,
+            buffer_size: i32::MAX as u32,
         },
         "DB_TYPE_RAW" | "bytes" => BindValue::TypedNull {
             ora_type_num: ORA_TYPE_NUM_RAW,
@@ -1426,6 +1457,13 @@ fn bind_template_from_type(typ: &Bound<'_, PyAny>, size: u32) -> BindValue {
         },
         "DB_TYPE_CURSOR" | "CURSOR" => cursor_bind_template(),
         _ => BindValue::Null,
+    }
+}
+
+fn return_kind_from_type_name(type_name: &str) -> ThinVarReturnKind {
+    match type_name {
+        "DB_TYPE_CLOB" | "CLOB" | "DB_TYPE_NCLOB" | "NCLOB" => ThinVarReturnKind::ClobAsLong,
+        _ => ThinVarReturnKind::Plain,
     }
 }
 
@@ -1467,8 +1505,12 @@ fn thin_var_from_type_spec(
     size: u32,
     is_array: bool,
     num_elements: u32,
+    outconverter: Option<Py<PyAny>>,
+    convert_nulls: bool,
 ) -> PyResult<Py<ThinVar>> {
-    let default_bind = bind_template_from_type(typ, size);
+    let type_name = py_type_name(typ);
+    let default_bind = bind_template_from_type_name(&type_name, size);
+    let return_kind = return_kind_from_type_name(&type_name);
     let value = if is_cursor_bind_template(&default_bind) {
         Some(connection.call_method0("cursor")?.unbind())
     } else {
@@ -1476,7 +1518,15 @@ fn thin_var_from_type_spec(
     };
     Py::new(
         py,
-        ThinVar::typed_with_options(default_bind, value, is_array, num_elements),
+        ThinVar::typed_with_options(
+            default_bind,
+            value,
+            is_array,
+            num_elements,
+            outconverter,
+            convert_nulls,
+            return_kind,
+        ),
     )
 }
 
@@ -1497,7 +1547,15 @@ fn thin_var_from_input_size(
     };
     Py::new(
         py,
-        ThinVar::typed_with_options(default_bind, value, is_array, num_elements),
+        ThinVar::typed_with_options(
+            default_bind,
+            value,
+            is_array,
+            num_elements,
+            None,
+            false,
+            ThinVarReturnKind::Plain,
+        ),
     )
 }
 
@@ -1550,7 +1608,7 @@ fn bind_type_info(value: &BindValue) -> Option<(u8, u8, u32)> {
         BindValue::Timestamp { ora_type_num, .. } => Some((
             *ora_type_num,
             0,
-            if *ora_type_num == ORA_TYPE_NUM_TIMESTAMP_TZ {
+            if matches!(*ora_type_num, ORA_TYPE_NUM_TIMESTAMP_TZ) {
                 13
             } else {
                 11
@@ -1764,13 +1822,44 @@ impl ThinConnState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ThinVarReturnKind {
+    Plain,
+    ClobAsLong,
+}
+
+#[pyclass(module = "oracledb.thin_impl", name = "ThinLob")]
+struct ThinLob {
+    data: String,
+}
+
+#[pymethods]
+impl ThinLob {
+    #[pyo3(signature = (offset=1, amount=None))]
+    fn read(&self, offset: usize, amount: Option<usize>) -> String {
+        let start = offset.saturating_sub(1);
+        let iter = self.data.chars().skip(start);
+        match amount {
+            Some(amount) => iter.take(amount).collect(),
+            None => iter.collect(),
+        }
+    }
+
+    fn size(&self) -> usize {
+        self.data.chars().count()
+    }
+}
+
 #[pyclass(module = "oracledb.thin_impl", name = "ThinVar")]
 struct ThinVar {
     value: Arc<Mutex<Option<Py<PyAny>>>>,
     returned_values: Arc<Mutex<Option<Vec<Py<PyAny>>>>>,
     default_bind: BindValue,
+    outconverter: Option<Py<PyAny>>,
+    convert_nulls: bool,
     is_array: bool,
     num_elements: u32,
+    return_kind: ThinVarReturnKind,
 }
 
 impl ThinVar {
@@ -1779,8 +1868,11 @@ impl ThinVar {
             value: Arc::new(Mutex::new(value)),
             returned_values: Arc::new(Mutex::new(None)),
             default_bind: BindValue::Null,
+            outconverter: None,
+            convert_nulls: false,
             is_array: false,
             num_elements: 1,
+            return_kind: ThinVarReturnKind::Plain,
         }
     }
 
@@ -1789,13 +1881,19 @@ impl ThinVar {
         value: Option<Py<PyAny>>,
         is_array: bool,
         num_elements: u32,
+        outconverter: Option<Py<PyAny>>,
+        convert_nulls: bool,
+        return_kind: ThinVarReturnKind,
     ) -> Self {
         Self {
             value: Arc::new(Mutex::new(value)),
             returned_values: Arc::new(Mutex::new(None)),
             default_bind,
+            outconverter,
+            convert_nulls,
             is_array,
             num_elements: num_elements.max(1),
+            return_kind,
         }
     }
 
@@ -1862,6 +1960,29 @@ impl ThinVar {
             .as_ref()
             .map(|value| value.clone_ref(py))
             .unwrap_or_else(|| py.None()))
+    }
+
+    fn output_value_to_py(
+        &self,
+        py: Python<'_>,
+        value: &Option<QueryValue>,
+    ) -> PyResult<Py<PyAny>> {
+        let value = match (self.return_kind, value) {
+            (ThinVarReturnKind::ClobAsLong, Some(QueryValue::Text(value))) => Py::new(
+                py,
+                ThinLob {
+                    data: value.clone(),
+                },
+            )?
+            .into_any(),
+            _ => query_value_to_py(py, value, None)?,
+        };
+        if let Some(outconverter) = self.outconverter.as_ref() {
+            if !value.bind(py).is_none() || self.convert_nulls {
+                return Ok(outconverter.bind(py).call1((value,))?.unbind());
+            }
+        }
+        Ok(value)
     }
 }
 
@@ -1951,7 +2072,7 @@ fn apply_out_bind_values(
             apply_cursor_out_bind(py, var, columns, *cursor_id)?;
             continue;
         }
-        let value = query_value_to_py(py, value, None)?;
+        let value = var.borrow(py).output_value_to_py(py, value)?;
         var.borrow(py).set_py_value(Some(value))?;
     }
     for (index, _) in return_values {
@@ -1964,10 +2085,12 @@ fn apply_out_bind_values(
         let Some(var) = bind_vars.get(*index) else {
             continue;
         };
+        let var_ref = var.borrow(py);
         let values = values
             .iter()
-            .map(|value| query_value_to_py(py, value, None))
+            .map(|value| var_ref.output_value_to_py(py, value))
             .collect::<PyResult<Vec<_>>>()?;
+        drop(var_ref);
         let values = PyList::new(py, values)?.unbind().into();
         var.borrow(py).push_returned_py_value(values)?;
     }
@@ -2026,8 +2149,16 @@ impl FetchHandlerCursor {
         convert_nulls: bool,
     ) -> PyResult<Py<ThinVar>> {
         let _ = arraysize;
-        let _ = convert_nulls;
-        thin_var_from_type_spec(py, self.connection.bind(py), typ, size, false, 1)
+        thin_var_from_type_spec(
+            py,
+            self.connection.bind(py),
+            typ,
+            size,
+            false,
+            1,
+            _outconverter,
+            convert_nulls,
+        )
     }
 }
 
@@ -3778,10 +3909,16 @@ impl ThinCursorImpl {
         convert_nulls: bool,
         is_array: bool,
     ) -> PyResult<Py<ThinVar>> {
-        let _ = num_elements;
-        let _ = is_array;
-        let _ = convert_nulls;
-        thin_var_from_type_spec(py, connection, typ, size, is_array, num_elements)
+        thin_var_from_type_spec(
+            py,
+            connection,
+            typ,
+            size,
+            is_array,
+            num_elements,
+            _outconverter,
+            convert_nulls,
+        )
     }
 
     fn get_array_dml_row_counts(&self) -> PyResult<Vec<u64>> {
@@ -4133,6 +4270,7 @@ fn oracledb_pyshim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(record_next_connect_args, m)?)?;
     m.add_function(wrap_pyfunction!(discard_pending_connect_args, m)?)?;
     m.add_class::<ThinConnImpl>()?;
+    m.add_class::<ThinLob>()?;
     m.add_class::<DbObjectTypeImpl>()?;
     m.add_class::<ThinCursorImpl>()?;
     m.add_class::<FetchMetadataImpl>()?;
