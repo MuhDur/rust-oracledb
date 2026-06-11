@@ -837,13 +837,308 @@ pub fn define_metadata_from_bind(source: &ColumnMetadata, value: &BindValue) -> 
     metadata.ora_type_num = info.ora_type_num;
     metadata.csfrm = info.csfrm;
     if info.ora_type_num == ORA_TYPE_NUM_LONG {
-        metadata.buffer_size = i32::MAX as u32;
+        metadata.buffer_size = TNS_MAX_LONG_LENGTH;
         metadata.max_size = 0;
     } else {
         metadata.buffer_size = info.buffer_size.max(1);
         metadata.max_size = info.buffer_size.max(1);
     }
     metadata
+}
+
+pub fn output_bind(value: BindValue) -> BindValue {
+    match value {
+        BindValue::ObjectOutput {
+            schema,
+            type_name,
+            oid,
+            version,
+            buffer_size,
+            ..
+        } => BindValue::ObjectOutput {
+            schema,
+            type_name,
+            oid,
+            version,
+            buffer_size: buffer_size.max(1),
+            is_return: false,
+        },
+        value => {
+            let info = bind_value_type_info(&value).unwrap_or(BindTypeInfo {
+                ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                csfrm: CS_FORM_IMPLICIT,
+                buffer_size: 1,
+            });
+            BindValue::Output {
+                ora_type_num: info.ora_type_num,
+                csfrm: info.csfrm,
+                buffer_size: info.buffer_size,
+            }
+        }
+    }
+}
+
+pub fn returning_output_bind(value: BindValue) -> BindValue {
+    match value {
+        BindValue::ObjectOutput {
+            schema,
+            type_name,
+            oid,
+            version,
+            buffer_size,
+            ..
+        } => BindValue::ObjectOutput {
+            schema,
+            type_name,
+            oid,
+            version,
+            buffer_size: buffer_size.max(1),
+            is_return: true,
+        },
+        value => {
+            let info = bind_value_type_info(&value).unwrap_or(BindTypeInfo {
+                ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                csfrm: CS_FORM_IMPLICIT,
+                buffer_size: 1,
+            });
+            BindValue::ReturnOutput {
+                ora_type_num: info.ora_type_num,
+                csfrm: info.csfrm,
+                buffer_size: info.buffer_size,
+            }
+        }
+    }
+}
+
+pub fn cursor_bind_template() -> BindValue {
+    BindValue::TypedNull {
+        ora_type_num: ORA_TYPE_NUM_CURSOR,
+        csfrm: 0,
+        buffer_size: 4,
+    }
+}
+
+pub fn is_cursor_bind_template(value: &BindValue) -> bool {
+    matches!(
+        value,
+        BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_CURSOR,
+            ..
+        }
+    )
+}
+
+pub fn public_dbtype_name_from_type_name(type_name: &str) -> &'static str {
+    match type_name {
+        "NUMBER" | "DB_TYPE_NUMBER" | "int" | "float" => "DB_TYPE_NUMBER",
+        "NATIVE_INT" | "DB_TYPE_BINARY_INTEGER" => "DB_TYPE_BINARY_INTEGER",
+        "NATIVE_FLOAT" | "DB_TYPE_BINARY_DOUBLE" => "DB_TYPE_BINARY_DOUBLE",
+        "STRING" | "DB_TYPE_VARCHAR" | "str" => "DB_TYPE_VARCHAR",
+        "DB_TYPE_CHAR" => "DB_TYPE_CHAR",
+        "DB_TYPE_NCHAR" => "DB_TYPE_NCHAR",
+        "DB_TYPE_NVARCHAR" => "DB_TYPE_NVARCHAR",
+        "DB_TYPE_CLOB" | "CLOB" => "DB_TYPE_CLOB",
+        "DB_TYPE_NCLOB" | "NCLOB" => "DB_TYPE_NCLOB",
+        "DB_TYPE_LONG" | "LONG" | "LONG_STRING" => "DB_TYPE_LONG",
+        "DB_TYPE_LONG_NVARCHAR" | "LONG NVARCHAR" => "DB_TYPE_LONG_NVARCHAR",
+        "DB_TYPE_LONG_RAW" | "LONG RAW" | "LONG_BINARY" => "DB_TYPE_LONG_RAW",
+        "DB_TYPE_RAW" | "bytes" => "DB_TYPE_RAW",
+        "ROWID" | "DB_TYPE_ROWID" => "DB_TYPE_ROWID",
+        "DB_TYPE_UROWID" => "DB_TYPE_UROWID",
+        "DATETIME" | "DB_TYPE_DATE" | "date" | "datetime" => "DB_TYPE_DATE",
+        "DB_TYPE_TIMESTAMP" | "TIMESTAMP" => "DB_TYPE_TIMESTAMP",
+        "DB_TYPE_TIMESTAMP_LTZ" | "TIMESTAMP WITH LOCAL TIME ZONE" => "DB_TYPE_TIMESTAMP_LTZ",
+        "DB_TYPE_TIMESTAMP_TZ" | "TIMESTAMP WITH TIME ZONE" => "DB_TYPE_TIMESTAMP_TZ",
+        "DB_TYPE_CURSOR" | "CURSOR" => "DB_TYPE_CURSOR",
+        _ => "DB_TYPE_VARCHAR",
+    }
+}
+
+pub fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
+    match value {
+        BindValue::TypedNull {
+            ora_type_num,
+            csfrm,
+            ..
+        }
+        | BindValue::Output {
+            ora_type_num,
+            csfrm,
+            ..
+        }
+        | BindValue::ReturnOutput {
+            ora_type_num,
+            csfrm,
+            ..
+        }
+        | BindValue::Array {
+            ora_type_num,
+            csfrm,
+            ..
+        } => public_dbtype_name_from_type_info(*ora_type_num, *csfrm),
+        BindValue::ObjectOutput { .. } => "DB_TYPE_OBJECT",
+        BindValue::Text(_) => "DB_TYPE_VARCHAR",
+        BindValue::Raw(_) => "DB_TYPE_RAW",
+        BindValue::Lob {
+            ora_type_num,
+            csfrm,
+            ..
+        } => match (*ora_type_num, *csfrm) {
+            (ORA_TYPE_NUM_BLOB, _) => "DB_TYPE_BLOB",
+            (ORA_TYPE_NUM_CLOB, CS_FORM_NCHAR) => "DB_TYPE_NCLOB",
+            (ORA_TYPE_NUM_CLOB, _) => "DB_TYPE_CLOB",
+            _ => "DB_TYPE_CLOB",
+        },
+        BindValue::Number(_) => "DB_TYPE_NUMBER",
+        BindValue::BinaryInteger(_) => "DB_TYPE_BINARY_INTEGER",
+        BindValue::BinaryDouble(_) => "DB_TYPE_BINARY_DOUBLE",
+        BindValue::DateTime { .. } => "DB_TYPE_DATE",
+        BindValue::Timestamp { ora_type_num, .. } => match *ora_type_num {
+            ORA_TYPE_NUM_TIMESTAMP_LTZ => "DB_TYPE_TIMESTAMP_LTZ",
+            ORA_TYPE_NUM_TIMESTAMP_TZ => "DB_TYPE_TIMESTAMP_TZ",
+            _ => "DB_TYPE_TIMESTAMP",
+        },
+        BindValue::Cursor { .. } => "DB_TYPE_CURSOR",
+        BindValue::Null => "DB_TYPE_VARCHAR",
+    }
+}
+
+pub fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
+    let text_buffer_size = if size == 0 { 4000 } else { size.max(1) };
+    let nchar_buffer_size = text_buffer_size.saturating_mul(4);
+    match type_name {
+        "NUMBER" | "DB_TYPE_NUMBER" | "int" | "float" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_NUMBER,
+            csfrm: 0,
+            buffer_size: ORA_TYPE_SIZE_NUMBER,
+        },
+        "NATIVE_INT" | "DB_TYPE_BINARY_INTEGER" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_BINARY_INTEGER,
+            csfrm: 0,
+            buffer_size: ORA_TYPE_SIZE_NUMBER,
+        },
+        "NATIVE_FLOAT" | "DB_TYPE_BINARY_DOUBLE" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_BINARY_DOUBLE,
+            csfrm: 0,
+            buffer_size: ORA_TYPE_SIZE_BINARY_DOUBLE,
+        },
+        "STRING" | "DB_TYPE_VARCHAR" | "DB_TYPE_CHAR" | "str" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_VARCHAR,
+            csfrm: CS_FORM_IMPLICIT,
+            buffer_size: text_buffer_size,
+        },
+        "DB_TYPE_NCHAR" | "DB_TYPE_NVARCHAR" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_VARCHAR,
+            csfrm: CS_FORM_NCHAR,
+            buffer_size: nchar_buffer_size,
+        },
+        "DB_TYPE_CLOB" | "CLOB" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_LONG,
+            csfrm: CS_FORM_IMPLICIT,
+            buffer_size: TNS_MAX_LONG_LENGTH,
+        },
+        "DB_TYPE_NCLOB" | "NCLOB" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_LONG,
+            csfrm: CS_FORM_NCHAR,
+            buffer_size: TNS_MAX_LONG_LENGTH,
+        },
+        "DB_TYPE_LONG" | "LONG" | "LONG_STRING" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_LONG,
+            csfrm: CS_FORM_IMPLICIT,
+            buffer_size: TNS_MAX_LONG_LENGTH,
+        },
+        "DB_TYPE_LONG_NVARCHAR" | "LONG NVARCHAR" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_LONG,
+            csfrm: CS_FORM_NCHAR,
+            buffer_size: TNS_MAX_LONG_LENGTH,
+        },
+        "DB_TYPE_LONG_RAW" | "LONG RAW" | "LONG_BINARY" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_LONG_RAW,
+            csfrm: 0,
+            buffer_size: TNS_MAX_LONG_LENGTH,
+        },
+        "DB_TYPE_RAW" | "bytes" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_RAW,
+            csfrm: 0,
+            buffer_size: size.max(1).max(4000),
+        },
+        "ROWID" | "DB_TYPE_ROWID" | "DB_TYPE_UROWID" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_VARCHAR,
+            csfrm: CS_FORM_IMPLICIT,
+            buffer_size: 5267,
+        },
+        "DATETIME" | "DB_TYPE_DATE" | "date" | "datetime" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_DATE,
+            csfrm: 0,
+            buffer_size: ORA_TYPE_SIZE_DATE,
+        },
+        "DB_TYPE_TIMESTAMP" | "TIMESTAMP" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_TIMESTAMP,
+            csfrm: 0,
+            buffer_size: ORA_TYPE_SIZE_TIMESTAMP,
+        },
+        "DB_TYPE_TIMESTAMP_LTZ" | "TIMESTAMP WITH LOCAL TIME ZONE" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_TIMESTAMP_LTZ,
+            csfrm: 0,
+            buffer_size: ORA_TYPE_SIZE_TIMESTAMP,
+        },
+        "DB_TYPE_TIMESTAMP_TZ" | "TIMESTAMP WITH TIME ZONE" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_TIMESTAMP_TZ,
+            csfrm: 0,
+            buffer_size: ORA_TYPE_SIZE_TIMESTAMP_TZ,
+        },
+        "DB_TYPE_CURSOR" | "CURSOR" => cursor_bind_template(),
+        _ => BindValue::Null,
+    }
+}
+
+pub fn dbobject_element_bind_type_info(dbtype_name: &str, max_size: u32) -> BindTypeInfo {
+    let buffer_size = max_size.max(1);
+    let (ora_type_num, csfrm, buffer_size) = match dbtype_name {
+        "DB_TYPE_NUMBER" => (ORA_TYPE_NUM_NUMBER, 0, ORA_TYPE_SIZE_NUMBER),
+        "DB_TYPE_RAW" | "DB_TYPE_BLOB" => (ORA_TYPE_NUM_RAW, 0, buffer_size.max(4000)),
+        "DB_TYPE_NCHAR" | "DB_TYPE_NVARCHAR" | "DB_TYPE_NCLOB" => {
+            (ORA_TYPE_NUM_VARCHAR, CS_FORM_NCHAR, buffer_size.max(4000))
+        }
+        "DB_TYPE_DATE" => (ORA_TYPE_NUM_DATE, 0, ORA_TYPE_SIZE_DATE),
+        "DB_TYPE_TIMESTAMP" => (ORA_TYPE_NUM_TIMESTAMP, 0, ORA_TYPE_SIZE_TIMESTAMP),
+        "DB_TYPE_TIMESTAMP_LTZ" => (ORA_TYPE_NUM_TIMESTAMP_LTZ, 0, ORA_TYPE_SIZE_TIMESTAMP),
+        "DB_TYPE_TIMESTAMP_TZ" => (ORA_TYPE_NUM_TIMESTAMP_TZ, 0, ORA_TYPE_SIZE_TIMESTAMP_TZ),
+        _ => (
+            ORA_TYPE_NUM_VARCHAR,
+            CS_FORM_IMPLICIT,
+            buffer_size.max(4000),
+        ),
+    };
+    BindTypeInfo {
+        ora_type_num,
+        csfrm,
+        buffer_size,
+    }
+}
+
+fn public_dbtype_name_from_type_info(ora_type_num: u8, csfrm: u8) -> &'static str {
+    match (ora_type_num, csfrm) {
+        (ORA_TYPE_NUM_BINARY_DOUBLE, _) => "DB_TYPE_BINARY_DOUBLE",
+        (ORA_TYPE_NUM_BINARY_INTEGER, _) => "DB_TYPE_BINARY_INTEGER",
+        (ORA_TYPE_NUM_NUMBER, _) => "DB_TYPE_NUMBER",
+        (ORA_TYPE_NUM_CHAR, CS_FORM_NCHAR) | (ORA_TYPE_NUM_VARCHAR, CS_FORM_NCHAR) => {
+            "DB_TYPE_NVARCHAR"
+        }
+        (ORA_TYPE_NUM_CHAR, _) => "DB_TYPE_CHAR",
+        (ORA_TYPE_NUM_VARCHAR, _) => "DB_TYPE_VARCHAR",
+        (ORA_TYPE_NUM_LONG, CS_FORM_NCHAR) => "DB_TYPE_LONG_NVARCHAR",
+        (ORA_TYPE_NUM_LONG, _) => "DB_TYPE_LONG",
+        (ORA_TYPE_NUM_LONG_RAW, _) => "DB_TYPE_LONG_RAW",
+        (ORA_TYPE_NUM_RAW, _) => "DB_TYPE_RAW",
+        (ORA_TYPE_NUM_DATE, _) => "DB_TYPE_DATE",
+        (ORA_TYPE_NUM_TIMESTAMP, _) => "DB_TYPE_TIMESTAMP",
+        (ORA_TYPE_NUM_TIMESTAMP_LTZ, _) => "DB_TYPE_TIMESTAMP_LTZ",
+        (ORA_TYPE_NUM_TIMESTAMP_TZ, _) => "DB_TYPE_TIMESTAMP_TZ",
+        (ORA_TYPE_NUM_CURSOR, _) => "DB_TYPE_CURSOR",
+        (ORA_TYPE_NUM_OBJECT, _) => "DB_TYPE_OBJECT",
+        _ => "DB_TYPE_VARCHAR",
+    }
 }
 
 fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
@@ -3224,8 +3519,69 @@ mod tests {
 
         assert_eq!(metadata.ora_type_num, ORA_TYPE_NUM_LONG);
         assert_eq!(metadata.csfrm, CS_FORM_NCHAR);
-        assert_eq!(metadata.buffer_size, i32::MAX as u32);
+        assert_eq!(metadata.buffer_size, TNS_MAX_LONG_LENGTH);
         assert_eq!(metadata.max_size, 0);
+    }
+
+    #[test]
+    fn output_bind_normalizes_type_metadata() {
+        assert_eq!(
+            output_bind(BindValue::Text("abc".into())),
+            BindValue::Output {
+                ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                csfrm: CS_FORM_IMPLICIT,
+                buffer_size: 12,
+            }
+        );
+        assert_eq!(
+            returning_output_bind(BindValue::Null),
+            BindValue::ReturnOutput {
+                ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                csfrm: CS_FORM_IMPLICIT,
+                buffer_size: 1,
+            }
+        );
+        assert!(is_cursor_bind_template(&cursor_bind_template()));
+    }
+
+    #[test]
+    fn public_dbtype_names_come_from_protocol_metadata() {
+        assert_eq!(
+            public_dbtype_name_from_type_name("NATIVE_FLOAT"),
+            "DB_TYPE_BINARY_DOUBLE"
+        );
+        assert_eq!(
+            public_dbtype_name_from_bind(&BindValue::BinaryDouble(1.25)),
+            "DB_TYPE_BINARY_DOUBLE"
+        );
+        assert_eq!(
+            public_dbtype_name_from_bind(&BindValue::TypedNull {
+                ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                csfrm: CS_FORM_NCHAR,
+                buffer_size: 16,
+            }),
+            "DB_TYPE_NVARCHAR"
+        );
+    }
+
+    #[test]
+    fn bind_templates_are_protocol_owned() {
+        assert_eq!(
+            bind_template_from_type_name("DB_TYPE_NCLOB", 0),
+            BindValue::TypedNull {
+                ora_type_num: ORA_TYPE_NUM_LONG,
+                csfrm: CS_FORM_NCHAR,
+                buffer_size: TNS_MAX_LONG_LENGTH,
+            }
+        );
+        assert_eq!(
+            dbobject_element_bind_type_info("DB_TYPE_NCHAR", 12),
+            BindTypeInfo {
+                ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                csfrm: CS_FORM_NCHAR,
+                buffer_size: 4000,
+            }
+        );
     }
 
     fn number_column(name: &str) -> ColumnMetadata {
@@ -3253,7 +3609,7 @@ mod tests {
             csfrm: CS_FORM_IMPLICIT,
             precision: 0,
             scale: 0,
-            buffer_size: i32::MAX as u32,
+            buffer_size: TNS_MAX_LONG_LENGTH,
             max_size: 0,
             nulls_allowed: true,
             is_json: false,
