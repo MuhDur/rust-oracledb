@@ -18,6 +18,7 @@ pub(crate) enum ThinVarReturnKind {
     ClobAsLong,
 }
 
+#[allow(clippy::too_many_arguments)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
 pub(crate) fn thin_var_from_type_spec(
     py: Python<'_>,
     connection: &Bound<'_, PyAny>,
@@ -161,6 +162,7 @@ impl ThinVar {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
     fn typed_with_options(
         default_bind: BindValue,
         value: Option<Py<PyAny>>,

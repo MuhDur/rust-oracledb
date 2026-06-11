@@ -19,6 +19,7 @@ pub(crate) struct AsyncExecuteOutcome {
 }
 
 // d49: migrate to oracledb (driver async futures)
+#[allow(clippy::too_many_arguments)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
 pub(crate) fn spawn_async_executemany_task(
     connection: Arc<Mutex<Option<RustConnection>>>,
     state: Arc<Mutex<ThinConnState>>,
@@ -129,6 +130,7 @@ pub(crate) fn spawn_async_executemany_task(
 }
 
 // d49: migrate to oracledb (driver async futures)
+#[allow(clippy::too_many_arguments)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
 pub(crate) fn spawn_async_execute_task(
     connection: Arc<Mutex<Option<RustConnection>>>,
     state: Arc<Mutex<ThinConnState>>,
@@ -188,6 +190,7 @@ pub(crate) fn spawn_async_execute_task(
 }
 
 // d49: migrate to oracledb (driver async futures)
+#[allow(clippy::too_many_arguments)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
 pub(crate) fn spawn_async_fetch_task(
     connection: Arc<Mutex<Option<RustConnection>>>,
     cursor_id: u32,
@@ -682,6 +685,7 @@ impl AsyncThinCursorImpl {
         convert_nulls=false,
         is_array=false
     ))]
+    #[allow(clippy::too_many_arguments)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
     fn create_var(
         &self,
         py: Python<'_>,

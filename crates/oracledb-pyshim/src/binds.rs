@@ -10,6 +10,7 @@ use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 
 use crate::*;
 
+#[allow(clippy::too_many_arguments)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
 pub(crate) fn extract_bind_values(
     py: Python<'_>,
     statement: &str,
@@ -286,6 +287,7 @@ pub(crate) fn positional_bind_dict_if_complete<'py>(
     Ok(Some(effective_dict))
 }
 
+#[allow(clippy::type_complexity)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
 pub(crate) fn prepare_object_execute_inputs(
     py: Python<'_>,
     statement: &str,

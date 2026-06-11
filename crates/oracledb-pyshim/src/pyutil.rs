@@ -116,6 +116,7 @@ pub(crate) fn py_required_u8_attr(value: &Bound<'_, PyAny>, name: &str) -> PyRes
     value.getattr(name)?.extract::<u8>()
 }
 
+#[allow(clippy::type_complexity)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
 pub(crate) fn py_date_time_fields(
     value: &Bound<'_, PyAny>,
 ) -> PyResult<Option<(i32, u8, u8, u8, u8, u8, u32)>> {

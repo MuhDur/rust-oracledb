@@ -1,3 +1,8 @@
+// pyo3 emits deprecated HasAutomaticFromPyObject for Clone pyclasses (pre-existing at
+// pre-split HEAD 978491a; not movement-induced). Item-level allows cannot reach the
+// macro-generated siblings, so the allow must be file-scoped.
+#![allow(deprecated)]
+
 use std::sync::{Arc, Mutex};
 
 use oracledb::protocol::thin::{

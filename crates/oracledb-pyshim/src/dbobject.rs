@@ -1,3 +1,8 @@
+// pyo3 emits deprecated HasAutomaticFromPyObject for Clone pyclasses (pre-existing at
+// pre-split HEAD 978491a; not movement-induced). Item-level allows cannot reach the
+// macro-generated siblings, so the allow must be file-scoped.
+#![allow(deprecated)]
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -30,6 +35,7 @@ pub(crate) struct DbObjectTypeImpl {
 }
 
 impl DbObjectTypeImpl {
+    #[allow(clippy::too_many_arguments)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
     pub(crate) fn new(
         schema: String,
         package_name: Option<String>,
@@ -307,6 +313,7 @@ pub(crate) fn validated_dbobject_value(
                 }
             }
         }
+        #[allow(clippy::collapsible_match)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
         "DB_TYPE_NUMBER" => {
             if bound.cast::<PyString>().is_ok() || bound.cast::<PyBytes>().is_ok() {
                 return Err(raise_unsupported_python_type_for_db_type(

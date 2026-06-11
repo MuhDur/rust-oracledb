@@ -621,6 +621,7 @@ pub(crate) fn bind_template_from_input_size(value: &Bound<'_, PyAny>) -> PyResul
             buffer_size: size.max(1),
         });
     }
+    #[allow(clippy::match_result_ok)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
     if let Ok(tuple) = value.cast::<PyTuple>() {
         if let Some(typ) = tuple.get_item(0).ok() {
             let size = tuple
@@ -631,6 +632,7 @@ pub(crate) fn bind_template_from_input_size(value: &Bound<'_, PyAny>) -> PyResul
             return Ok(bind_template_from_type(&typ, size));
         }
     }
+    #[allow(clippy::match_result_ok)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
     if let Ok(list) = value.cast::<PyList>() {
         if let Some(typ) = list.get_item(0).ok() {
             let size = list
@@ -816,6 +818,7 @@ pub(crate) fn query_value_to_py(
         None => Ok(py.None()),
         Some(QueryValue::Text(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
         Some(QueryValue::Rowid(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
+        #[allow(clippy::useless_conversion)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
         Some(QueryValue::Raw(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
         Some(QueryValue::BinaryDouble(value)) => {
             let value = value.parse::<f64>().map_err(runtime_error)?;

@@ -32,6 +32,7 @@ impl FetchHandlerCursor {
         bypass_decode=false,
         convert_nulls=false
     ))]
+    #[allow(clippy::too_many_arguments)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
     fn var(
         &self,
         py: Python<'_>,

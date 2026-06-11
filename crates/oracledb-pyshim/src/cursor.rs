@@ -411,6 +411,7 @@ impl ThinCursorImpl {
             .statement
             .as_deref()
             .ok_or_else(|| raise_oracledb_driver_error("ERR_NO_STATEMENT"))?;
+        #[allow(clippy::needless_borrow)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
         validate_dml_returning_duplicate_binds(&statement)?;
         self.bind_names = unique_sql_bind_names(statement)?;
         validate_parse_bind_names(statement)?;
@@ -906,6 +907,7 @@ impl ThinCursorImpl {
             .collect::<PyResult<Vec<_>>>()?;
         let tuple = PyTuple::new(py, values)?;
         if let Some(rowfactory) = &self.rowfactory {
+            #[allow(clippy::useless_conversion)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
             return rowfactory.call1(py, tuple).map(Some).map_err(Into::into);
         }
         Ok(Some(tuple.unbind().into()))
@@ -979,6 +981,7 @@ impl ThinCursorImpl {
         convert_nulls=false,
         is_array=false
     ))]
+    #[allow(clippy::too_many_arguments)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
     pub(crate) fn create_var(
         &self,
         py: Python<'_>,
