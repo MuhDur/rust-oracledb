@@ -7,11 +7,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use oracledb::protocol::thin::{
     decode_datetime_value, decode_number_value, BindValue, ColumnMetadata, QueryResult, QueryValue,
     CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE,
-    ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR,
-    ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER,
-    ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_ROWID, ORA_TYPE_NUM_TIMESTAMP,
-    ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_UROWID,
-    ORA_TYPE_NUM_VARCHAR,
+    ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB,
+    ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW,
+    ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_ROWID,
+    ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ,
+    ORA_TYPE_NUM_UROWID, ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection};
@@ -33,6 +33,27 @@ fn runtime_error(err: impl std::fmt::Display) -> PyErr {
     }
     match message.as_str() {
         "TTC decode failed: truncated DML RETURNING value" => return raise_column_truncated(),
+        "TTC decode failed: NUMBER bind out of range" => {
+            return raise_oracledb_driver_error("ERR_ORACLE_NUMBER_NO_REPR");
+        }
+        "TTC decode failed: invalid NUMBER bind" => {
+            return raise_oracledb_driver_error("ERR_INVALID_NUMBER");
+        }
+        "TTC decode failed: invalid NUMBER bind suffix" => {
+            return raise_oracledb_driver_error("ERR_CONTENT_INVALID_AFTER_NUMBER");
+        }
+        "TTC decode failed: invalid NUMBER exponent" => {
+            return raise_oracledb_driver_error("ERR_NUMBER_WITH_INVALID_EXPONENT");
+        }
+        "TTC decode failed: empty NUMBER exponent" => {
+            return raise_oracledb_driver_error("ERR_NUMBER_WITH_EMPTY_EXPONENT");
+        }
+        "TTC decode failed: NUMBER bind text too long" => {
+            return raise_oracledb_driver_error("ERR_NUMBER_STRING_TOO_LONG");
+        }
+        "TTC decode failed: empty NUMBER bind" => {
+            return raise_oracledb_driver_error("ERR_NUMBER_STRING_OF_ZERO_LENGTH");
+        }
         _ => {}
     }
     if let Some(timeout_text) = message
@@ -1970,6 +1991,7 @@ fn output_only_bind(value: BindValue) -> BindValue {
             ..
         } => (ora_type_num, csfrm, 1),
         BindValue::Number(_) => (ORA_TYPE_NUM_NUMBER, 0, 22),
+        BindValue::BinaryInteger(_) => (ORA_TYPE_NUM_BINARY_INTEGER, 0, 22),
         BindValue::BinaryDouble(_) => (ORA_TYPE_NUM_BINARY_DOUBLE, 0, 8),
         BindValue::DateTime { .. } => (ORA_TYPE_NUM_DATE, 0, 7),
         BindValue::Timestamp { ora_type_num, .. } => (
@@ -2205,6 +2227,17 @@ fn py_value_to_bind_with_template(
     let Some((ora_type_num, _csfrm, _buffer_size)) = bind_type_info(template) else {
         return py_value_to_bind(value);
     };
+    if ora_type_num == ORA_TYPE_NUM_BINARY_INTEGER {
+        if value.is_none() {
+            return Ok(BindValue::Null);
+        }
+        return Ok(BindValue::BinaryInteger(
+            python_int_from_value(value)?
+                .bind(value.py())
+                .str()?
+                .extract::<String>()?,
+        ));
+    }
     if ora_type_num == ORA_TYPE_NUM_BINARY_DOUBLE {
         if value.is_none() {
             return Ok(BindValue::Null);
@@ -2319,6 +2352,23 @@ fn py_value_type_name(value: &Bound<'_, PyAny>) -> String {
         .getattr("__name__")
         .and_then(|name| name.extract::<String>())
         .unwrap_or_default()
+}
+
+fn python_int_from_value(value: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let py = value.py();
+    if let Ok(text) = value.extract::<String>() {
+        return python_int_from_decimal_text(py, &text);
+    }
+    let builtins = PyModule::import(py, "builtins")?;
+    Ok(builtins.getattr("int")?.call1((value,))?.unbind())
+}
+
+fn python_int_from_decimal_text(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
+    let decimal = PyModule::import(py, "decimal")?
+        .getattr("Decimal")?
+        .call1((text,))?;
+    let builtins = PyModule::import(py, "builtins")?;
+    Ok(builtins.getattr("int")?.call1((decimal,))?.unbind())
 }
 
 fn py_db_object_type_impl(value: &Bound<'_, PyAny>) -> PyResult<Option<DbObjectTypeImpl>> {
@@ -2475,6 +2525,7 @@ fn bind_template_from_type(typ: &Bound<'_, PyAny>, size: u32) -> BindValue {
 fn public_dbtype_name_from_type_name(type_name: &str) -> &'static str {
     match type_name {
         "NUMBER" | "DB_TYPE_NUMBER" | "int" | "float" => "DB_TYPE_NUMBER",
+        "NATIVE_INT" | "DB_TYPE_BINARY_INTEGER" => "DB_TYPE_BINARY_INTEGER",
         "NATIVE_FLOAT" | "DB_TYPE_BINARY_DOUBLE" => "DB_TYPE_BINARY_DOUBLE",
         "STRING" | "DB_TYPE_VARCHAR" | "str" => "DB_TYPE_VARCHAR",
         "DB_TYPE_CHAR" => "DB_TYPE_CHAR",
@@ -2520,6 +2571,7 @@ fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
             ..
         } => match (*ora_type_num, *csfrm) {
             (ORA_TYPE_NUM_BINARY_DOUBLE, _) => "DB_TYPE_BINARY_DOUBLE",
+            (ORA_TYPE_NUM_BINARY_INTEGER, _) => "DB_TYPE_BINARY_INTEGER",
             (ORA_TYPE_NUM_NUMBER, _) => "DB_TYPE_NUMBER",
             (ORA_TYPE_NUM_CHAR, CS_FORM_NCHAR) | (ORA_TYPE_NUM_VARCHAR, CS_FORM_NCHAR) => {
                 "DB_TYPE_NVARCHAR"
@@ -2552,6 +2604,7 @@ fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
             _ => "DB_TYPE_CLOB",
         },
         BindValue::Number(_) => "DB_TYPE_NUMBER",
+        BindValue::BinaryInteger(_) => "DB_TYPE_BINARY_INTEGER",
         BindValue::BinaryDouble(_) => "DB_TYPE_BINARY_DOUBLE",
         BindValue::DateTime { .. } => "DB_TYPE_DATE",
         BindValue::Timestamp { ora_type_num, .. } => match *ora_type_num {
@@ -2569,6 +2622,11 @@ fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
     match type_name {
         "NUMBER" | "DB_TYPE_NUMBER" | "int" | "float" => BindValue::TypedNull {
             ora_type_num: ORA_TYPE_NUM_NUMBER,
+            csfrm: 0,
+            buffer_size: 22,
+        },
+        "NATIVE_INT" | "DB_TYPE_BINARY_INTEGER" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_BINARY_INTEGER,
             csfrm: 0,
             buffer_size: 22,
         },
@@ -2833,6 +2891,7 @@ fn bind_type_info(value: &BindValue) -> Option<(u8, u8, u32)> {
             ..
         } => Some((*ora_type_num, *csfrm, 1)),
         BindValue::Number(_) => Some((ORA_TYPE_NUM_NUMBER, 0, 22)),
+        BindValue::BinaryInteger(_) => Some((ORA_TYPE_NUM_BINARY_INTEGER, 0, 22)),
         BindValue::BinaryDouble(_) => Some((ORA_TYPE_NUM_BINARY_DOUBLE, 0, 8)),
         BindValue::DateTime { .. } => Some((ORA_TYPE_NUM_DATE, 0, 7)),
         BindValue::Timestamp { ora_type_num, .. } => Some((
@@ -3602,6 +3661,16 @@ impl ThinVar {
             )?,
             (ThinVarReturnKind::Plain, Some(QueryValue::Text(value))) if self.bypass_decode => {
                 PyBytes::new(py, value.as_bytes()).unbind().into()
+            }
+            (ThinVarReturnKind::Plain, Some(QueryValue::Text(value)))
+                if self.dbtype_name == "DB_TYPE_BINARY_INTEGER" =>
+            {
+                python_int_from_decimal_text(py, value)?
+            }
+            (ThinVarReturnKind::Plain, Some(QueryValue::Number { text, .. }))
+                if self.dbtype_name == "DB_TYPE_BINARY_INTEGER" =>
+            {
+                python_int_from_decimal_text(py, text)?
             }
             (ThinVarReturnKind::Plain, Some(QueryValue::Number { text, .. }))
                 if matches!(
@@ -6174,6 +6243,7 @@ impl FetchMetadataImpl {
             ORA_TYPE_NUM_ROWID => "DB_TYPE_ROWID",
             ORA_TYPE_NUM_UROWID => "DB_TYPE_UROWID",
             ORA_TYPE_NUM_BINARY_DOUBLE => "DB_TYPE_BINARY_DOUBLE",
+            ORA_TYPE_NUM_BINARY_INTEGER => "DB_TYPE_BINARY_INTEGER",
             ORA_TYPE_NUM_NUMBER => "DB_TYPE_NUMBER",
             ORA_TYPE_NUM_CURSOR => "DB_TYPE_CURSOR",
             ORA_TYPE_NUM_OBJECT => "DB_TYPE_OBJECT",
@@ -7174,8 +7244,7 @@ fn query_value_to_py(
             Ok(value.into_pyobject(py)?.unbind().into())
         }
         Some(QueryValue::Number { text, is_integer }) if *is_integer => {
-            let value = text.parse::<i128>().map_err(runtime_error)?;
-            Ok(value.into_pyobject(py)?.unbind().into())
+            python_int_from_decimal_text(py, text)
         }
         Some(QueryValue::Number { text, .. }) => {
             let value = text.parse::<f64>().map_err(runtime_error)?;

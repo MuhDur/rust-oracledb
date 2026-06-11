@@ -50,6 +50,7 @@ pub const TNS_VERIFIER_TYPE_12C: u32 = 0x4815;
 
 pub const ORA_TYPE_NUM_VARCHAR: u8 = 1;
 pub const ORA_TYPE_NUM_NUMBER: u8 = 2;
+pub const ORA_TYPE_NUM_BINARY_INTEGER: u8 = 3;
 pub const ORA_TYPE_NUM_LONG: u8 = 8;
 pub const ORA_TYPE_NUM_ROWID: u8 = 11;
 pub const ORA_TYPE_NUM_DATE: u8 = 12;
@@ -323,6 +324,7 @@ pub enum BindValue {
         locator: Vec<u8>,
     },
     Number(String),
+    BinaryInteger(String),
     BinaryDouble(f64),
     DateTime {
         year: i32,
@@ -786,6 +788,7 @@ fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
             ..
         } => (*ora_type_num, *csfrm, 1),
         BindValue::Number(_) => (ORA_TYPE_NUM_NUMBER, 0, ORA_TYPE_SIZE_NUMBER),
+        BindValue::BinaryInteger(_) => (ORA_TYPE_NUM_BINARY_INTEGER, 0, ORA_TYPE_SIZE_NUMBER),
         BindValue::BinaryDouble(_) => (ORA_TYPE_NUM_BINARY_DOUBLE, 0, ORA_TYPE_SIZE_BINARY_DOUBLE),
         BindValue::DateTime { .. } => (ORA_TYPE_NUM_DATE, 0, ORA_TYPE_SIZE_DATE),
         BindValue::Timestamp { ora_type_num, .. } => (
@@ -837,7 +840,7 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue) -> Result<()> {
         BindValue::Text(value) => writer.write_bytes_with_length(value.as_bytes()),
         BindValue::Raw(value) => writer.write_bytes_with_length(value),
         BindValue::Lob { locator, .. } => writer.write_bytes_with_two_lengths(Some(locator)),
-        BindValue::Number(value) => {
+        BindValue::Number(value) | BindValue::BinaryInteger(value) => {
             let bytes = encode_number_text(value)?;
             writer.write_bytes_with_length(&bytes)
         }
@@ -1886,7 +1889,7 @@ fn parse_column_value(
         ORA_TYPE_NUM_RAW | ORA_TYPE_NUM_LONG_RAW => Ok(reader.read_bytes()?.map(QueryValue::Raw)),
         ORA_TYPE_NUM_ROWID => parse_rowid_value(reader).map(|value| value.map(QueryValue::Rowid)),
         ORA_TYPE_NUM_UROWID => parse_urowid_value(reader).map(|value| value.map(QueryValue::Rowid)),
-        ORA_TYPE_NUM_NUMBER => {
+        ORA_TYPE_NUM_NUMBER | ORA_TYPE_NUM_BINARY_INTEGER => {
             let Some(bytes) = reader.read_bytes()? else {
                 return Ok(None);
             };
