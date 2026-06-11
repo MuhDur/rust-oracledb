@@ -12,13 +12,15 @@ use oracledb_protocol::thin::{
     build_define_fetch_payload_with_seq, build_execute_payload_with_bind_rows_with_seq,
     build_execute_payload_with_binds_with_seq, build_execute_payload_with_seq,
     build_fast_auth_phase_one_payload, build_fetch_payload_with_seq,
-    build_function_payload_with_seq, build_lob_read_payload_with_seq, parse_accept_payload,
-    parse_auth_response, parse_lob_read_response, parse_query_response,
-    parse_query_response_with_binds, parse_query_response_with_context, BindValue,
-    ClientCapabilities, ColumnMetadata, LobReadResult, QueryResult, TNS_FUNC_COMMIT,
-    TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE,
-    TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT,
-    TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE,
+    build_function_payload_with_seq, build_lob_create_temp_payload_with_seq,
+    build_lob_read_payload_with_seq, build_lob_write_payload_with_seq, parse_accept_payload,
+    parse_auth_response, parse_lob_create_temp_response, parse_lob_read_response,
+    parse_lob_write_response, parse_query_response, parse_query_response_with_binds,
+    parse_query_response_with_context, BindValue, ClientCapabilities, ColumnMetadata,
+    LobReadResult, QueryResult, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK,
+    TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT,
+    TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT,
+    TNS_PACKET_TYPE_REFUSE,
 };
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};
@@ -464,6 +466,52 @@ impl Connection {
         parse_lob_read_response(&response, self.capabilities, locator).map_err(Error::from)
     }
 
+    pub async fn create_temp_lob(
+        &mut self,
+        cx: &Cx,
+        ora_type_num: u8,
+        csfrm: u8,
+    ) -> Result<LobReadResult> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = build_lob_create_temp_payload_with_seq(
+            ora_type_num,
+            csfrm,
+            seq_num,
+            self.capabilities.ttc_field_version,
+        )?;
+        trace_query_bytes("LOB CREATE TEMP payload", &payload);
+        send_data_packet(&mut self.stream, &payload, self.sdu)?;
+        let response = read_data_response(&mut self.stream)?;
+        trace_query_bytes("LOB CREATE TEMP response", &response);
+        parse_lob_create_temp_response(&response, self.capabilities).map_err(Error::from)
+    }
+
+    pub async fn write_lob(
+        &mut self,
+        cx: &Cx,
+        locator: &[u8],
+        offset: u64,
+        data: &[u8],
+    ) -> Result<LobReadResult> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = build_lob_write_payload_with_seq(
+            locator,
+            offset,
+            data,
+            seq_num,
+            self.capabilities.ttc_field_version,
+        )?;
+        trace_query_bytes("LOB WRITE payload", &payload);
+        send_data_packet(&mut self.stream, &payload, self.sdu)?;
+        let response = read_data_response(&mut self.stream)?;
+        trace_query_bytes("LOB WRITE response", &response);
+        parse_lob_write_response(&response, self.capabilities, locator).map_err(Error::from)
+    }
+
     fn remember_cursor_columns(&mut self, result: &QueryResult) {
         if result.cursor_id != 0 && !result.columns.is_empty() {
             self.cursor_columns
@@ -738,6 +786,49 @@ impl BlockingConnection {
         })
     }
 
+    pub fn create_temp_lob(
+        connection: &mut Connection,
+        ora_type_num: u8,
+        csfrm: u8,
+    ) -> Result<LobReadResult> {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.create_temp_lob(&cx, ora_type_num, csfrm).await
+        })
+    }
+
+    pub fn write_lob(
+        connection: &mut Connection,
+        locator: &[u8],
+        offset: u64,
+        data: &[u8],
+    ) -> Result<LobReadResult> {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.write_lob(&cx, locator, offset, data).await
+        })
+    }
+
+    pub fn write_lob_with_timeout(
+        connection: &mut Connection,
+        locator: &[u8],
+        offset: u64,
+        data: &[u8],
+        timeout_ms: Option<u32>,
+    ) -> Result<LobReadResult> {
+        with_call_timeout(connection, timeout_ms, |connection| {
+            Self::write_lob(connection, locator, offset, data)
+        })
+    }
+
     pub fn close(connection: Connection) -> Result<()> {
         let runtime = RuntimeBuilder::current_thread()
             .build()
@@ -824,7 +915,7 @@ fn read_data_response_flushing_out_binds(stream: &mut TcpStream, sdu: usize) -> 
     let mut response = read_data_response_boundary(stream)?;
     let mut payload = response.payload;
     while response.flush_out_binds {
-        if payload.last() == Some(&TNS_MSG_TYPE_FLUSH_OUT_BINDS) {
+        if matches!(payload.last(), Some(&TNS_MSG_TYPE_FLUSH_OUT_BINDS)) {
             payload.pop();
         }
         send_data_packet(stream, &[TNS_MSG_TYPE_FLUSH_OUT_BINDS], sdu)?;
@@ -859,14 +950,14 @@ fn read_data_response_boundary(stream: &mut TcpStream) -> Result<DataResponse> {
                 .map_err(|_| oracledb_protocol::ProtocolError::TtcDecode("invalid flags"))?,
         );
         response.extend_from_slice(payload);
-        if payload.last() == Some(&TNS_MSG_TYPE_FLUSH_OUT_BINDS) {
+        if matches!(payload.last(), Some(&TNS_MSG_TYPE_FLUSH_OUT_BINDS)) {
             flush_out_binds = true;
             break;
         }
         if flags & oracledb_protocol::thin::TNS_DATA_FLAGS_END_OF_RESPONSE != 0 {
             break;
         }
-        if payload.last() == Some(&TNS_MSG_TYPE_END_OF_RESPONSE) {
+        if matches!(payload.last(), Some(&TNS_MSG_TYPE_END_OF_RESPONSE)) {
             break;
         }
     }

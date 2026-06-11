@@ -1964,6 +1964,11 @@ fn output_only_bind(value: BindValue) -> BindValue {
             0,
             u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
         ),
+        BindValue::Lob {
+            ora_type_num,
+            csfrm,
+            ..
+        } => (ora_type_num, csfrm, 1),
         BindValue::Number(_) => (ORA_TYPE_NUM_NUMBER, 0, 22),
         BindValue::BinaryDouble(_) => (ORA_TYPE_NUM_BINARY_DOUBLE, 0, 8),
         BindValue::DateTime { .. } => (ORA_TYPE_NUM_DATE, 0, 7),
@@ -2359,6 +2364,13 @@ fn py_lob_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<Option<BindValue>>
     let Some(lob) = py_lob_impl(value)? else {
         return Ok(None);
     };
+    if let Some(locator) = lob.locator.lock().map_err(runtime_error)?.as_ref() {
+        return Ok(Some(BindValue::Lob {
+            ora_type_num: lob.ora_type_num,
+            csfrm: lob.csfrm,
+            locator: locator.clone(),
+        }));
+    }
     let py = value.py();
     let data = lob.read(py, 1, None)?;
     let data = data.bind(py);
@@ -2529,6 +2541,16 @@ fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
         BindValue::ObjectOutput { .. } => "DB_TYPE_OBJECT",
         BindValue::Text(_) => "DB_TYPE_VARCHAR",
         BindValue::Raw(_) => "DB_TYPE_RAW",
+        BindValue::Lob {
+            ora_type_num,
+            csfrm,
+            ..
+        } => match (*ora_type_num, *csfrm) {
+            (ORA_TYPE_NUM_BLOB, _) => "DB_TYPE_BLOB",
+            (ORA_TYPE_NUM_CLOB, CS_FORM_NCHAR) => "DB_TYPE_NCLOB",
+            (ORA_TYPE_NUM_CLOB, _) => "DB_TYPE_CLOB",
+            _ => "DB_TYPE_CLOB",
+        },
         BindValue::Number(_) => "DB_TYPE_NUMBER",
         BindValue::BinaryDouble(_) => "DB_TYPE_BINARY_DOUBLE",
         BindValue::DateTime { .. } => "DB_TYPE_DATE",
@@ -2805,6 +2827,11 @@ fn bind_type_info(value: &BindValue) -> Option<(u8, u8, u32)> {
             0,
             u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
         )),
+        BindValue::Lob {
+            ora_type_num,
+            csfrm,
+            ..
+        } => Some((*ora_type_num, *csfrm, 1)),
         BindValue::Number(_) => Some((ORA_TYPE_NUM_NUMBER, 0, 22)),
         BindValue::BinaryDouble(_) => Some((ORA_TYPE_NUM_BINARY_DOUBLE, 0, 8)),
         BindValue::DateTime { .. } => Some((ORA_TYPE_NUM_DATE, 0, 7)),
@@ -3099,17 +3126,11 @@ const TNS_LOB_LOC_FLAGS_VAR_LENGTH_CHARSET: u8 = 0x80;
 const TNS_LOB_LOC_FLAGS_LITTLE_ENDIAN: u8 = 0x40;
 
 fn decode_lob_text(bytes: &[u8], csfrm: u8, locator: Option<&[u8]>) -> PyResult<String> {
-    let use_utf16 = csfrm == CS_FORM_NCHAR
-        || locator
-            .and_then(|locator| locator.get(TNS_LOB_LOC_OFFSET_FLAG_3))
-            .is_some_and(|flags| flags & TNS_LOB_LOC_FLAGS_VAR_LENGTH_CHARSET != 0);
+    let (use_utf16, little_endian) = lob_text_uses_utf16(csfrm, locator);
     if !use_utf16 {
         return String::from_utf8(bytes.to_vec())
             .map_err(|_| PyRuntimeError::new_err("invalid LOB UTF-8 text"));
     }
-    let little_endian = locator
-        .and_then(|locator| locator.get(TNS_LOB_LOC_OFFSET_FLAG_4))
-        .is_some_and(|flags| flags & TNS_LOB_LOC_FLAGS_LITTLE_ENDIAN != 0);
     let mut chunks = bytes.chunks_exact(2);
     let units = chunks
         .by_ref()
@@ -3125,6 +3146,34 @@ fn decode_lob_text(bytes: &[u8], csfrm: u8, locator: Option<&[u8]>) -> PyResult<
         return Err(PyRuntimeError::new_err("invalid LOB UTF-16 text"));
     }
     String::from_utf16(&units).map_err(|_| PyRuntimeError::new_err("invalid LOB UTF-16 text"))
+}
+
+fn lob_text_uses_utf16(csfrm: u8, locator: Option<&[u8]>) -> (bool, bool) {
+    let use_utf16 = csfrm == CS_FORM_NCHAR
+        || locator
+            .and_then(|locator| locator.get(TNS_LOB_LOC_OFFSET_FLAG_3))
+            .is_some_and(|flags| flags & TNS_LOB_LOC_FLAGS_VAR_LENGTH_CHARSET != 0);
+    let little_endian = locator
+        .and_then(|locator| locator.get(TNS_LOB_LOC_OFFSET_FLAG_4))
+        .is_some_and(|flags| flags & TNS_LOB_LOC_FLAGS_LITTLE_ENDIAN != 0);
+    (use_utf16, little_endian)
+}
+
+fn encode_lob_text(value: &str, csfrm: u8, locator: Option<&[u8]>) -> Vec<u8> {
+    let (use_utf16, little_endian) = lob_text_uses_utf16(csfrm, locator);
+    if !use_utf16 {
+        return value.as_bytes().to_vec();
+    }
+    let mut bytes = Vec::with_capacity(value.len() * 2);
+    for unit in value.encode_utf16() {
+        let encoded = if little_endian {
+            unit.to_le_bytes()
+        } else {
+            unit.to_be_bytes()
+        };
+        bytes.extend_from_slice(&encoded);
+    }
+    bytes
 }
 
 fn column_metadata_is_xmltype(metadata: &ColumnMetadata) -> bool {
@@ -3227,14 +3276,69 @@ impl ThinLob {
     }
 
     fn write(&mut self, value: &Bound<'_, PyAny>, offset: u64) -> PyResult<()> {
+        let is_binary = matches!(self.ora_type_num, ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_BFILE);
+        let raw_bytes = if is_binary {
+            Some(value.cast::<PyBytes>()?.as_bytes().to_vec())
+        } else {
+            None
+        };
+        let text = if is_binary {
+            None
+        } else {
+            Some(value.extract::<String>()?)
+        };
+        if let Some(context) = self.context.as_ref() {
+            let locator = self
+                .locator
+                .lock()
+                .map_err(runtime_error)?
+                .clone()
+                .unwrap_or_default();
+            let bytes = raw_bytes.as_ref().cloned().unwrap_or_else(|| {
+                encode_lob_text(
+                    text.as_deref().unwrap_or_default(),
+                    self.csfrm,
+                    Some(&locator),
+                )
+            });
+            let call_timeout = {
+                let value = context.state.lock().map_err(runtime_error)?.call_timeout;
+                (value > 0).then_some(value)
+            };
+            let mut guard = context.connection.lock().map_err(runtime_error)?;
+            let connection = guard
+                .as_mut()
+                .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+            let result = BlockingConnection::write_lob_with_timeout(
+                connection,
+                &locator,
+                offset,
+                &bytes,
+                call_timeout,
+            )
+            .map_err(runtime_error)?;
+            *self.locator.lock().map_err(runtime_error)? = Some(result.locator);
+            self.size = if is_binary {
+                self.size.max(offset.saturating_sub(1) + bytes.len() as u64)
+            } else {
+                self.size.max(
+                    offset.saturating_sub(1)
+                        + text.as_deref().unwrap_or_default().chars().count() as u64,
+                )
+            };
+            return Ok(());
+        }
         let Some(data) = self.data.as_ref() else {
             return Err(not_implemented("ThinLob.write persistent LOB"));
         };
-        let bytes = if matches!(self.ora_type_num, ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_BFILE) {
-            value.cast::<PyBytes>()?.as_bytes().to_vec()
-        } else {
-            value.extract::<String>()?.into_bytes()
-        };
+        let locator = self.locator.lock().map_err(runtime_error)?.clone();
+        let bytes = raw_bytes.as_ref().cloned().unwrap_or_else(|| {
+            encode_lob_text(
+                text.as_deref().unwrap_or_default(),
+                self.csfrm,
+                locator.as_deref(),
+            )
+        });
         let start = usize::try_from(offset.saturating_sub(1)).map_err(runtime_error)?;
         let mut data = data.lock().map_err(runtime_error)?;
         if start > data.len() {
@@ -4944,16 +5048,25 @@ impl ThinConnImpl {
             "DB_TYPE_NCLOB" => (ORA_TYPE_NUM_CLOB, CS_FORM_NCHAR),
             _ => (ORA_TYPE_NUM_CLOB, CS_FORM_IMPLICIT),
         };
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        let result = BlockingConnection::create_temp_lob(connection, ora_type_num, csfrm)
+            .map_err(runtime_error)?;
         Py::new(
             py,
             ThinLob {
-                data: Some(Arc::new(Mutex::new(Vec::new()))),
-                locator: Arc::new(Mutex::new(None)),
+                data: None,
+                locator: Arc::new(Mutex::new(Some(result.locator))),
                 ora_type_num,
                 csfrm,
                 size: 0,
                 chunk_size: 0,
-                context: None,
+                context: Some(ThinLobContext {
+                    connection: Arc::clone(&self.connection),
+                    state: Arc::clone(&self.state),
+                }),
             },
         )
     }

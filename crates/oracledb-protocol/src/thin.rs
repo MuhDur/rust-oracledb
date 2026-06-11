@@ -104,7 +104,10 @@ const TNS_EXEC_OPTION_EXECUTE: u32 = 0x20;
 const TNS_EXEC_OPTION_FETCH: u32 = 0x40;
 const TNS_EXEC_OPTION_PLSQL_BIND: u32 = 0x400;
 const TNS_EXEC_OPTION_NOT_PLSQL: u32 = 0x8000;
+const TNS_DURATION_SESSION: u32 = 10;
 const TNS_LOB_OP_READ: u32 = 0x0002;
+const TNS_LOB_OP_WRITE: u32 = 0x0040;
+const TNS_LOB_OP_CREATE_TEMP: u32 = 0x0110;
 const TNS_LOB_PREFETCH_FLAG: u64 = 0x0200_0000;
 const TNS_EXEC_FLAGS_IMPLICIT_RESULTSET: u32 = 0x8000;
 const TNS_BIND_USE_INDICATORS: u8 = 0x01;
@@ -314,6 +317,11 @@ pub enum BindValue {
     },
     Text(String),
     Raw(Vec<u8>),
+    Lob {
+        ora_type_num: u8,
+        csfrm: u8,
+        locator: Vec<u8>,
+    },
     Number(String),
     BinaryDouble(f64),
     DateTime {
@@ -772,6 +780,11 @@ fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
             0,
             u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
         ),
+        BindValue::Lob {
+            ora_type_num,
+            csfrm,
+            ..
+        } => (*ora_type_num, *csfrm, 1),
         BindValue::Number(_) => (ORA_TYPE_NUM_NUMBER, 0, ORA_TYPE_SIZE_NUMBER),
         BindValue::BinaryDouble(_) => (ORA_TYPE_NUM_BINARY_DOUBLE, 0, ORA_TYPE_SIZE_BINARY_DOUBLE),
         BindValue::DateTime { .. } => (ORA_TYPE_NUM_DATE, 0, ORA_TYPE_SIZE_DATE),
@@ -823,6 +836,7 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue) -> Result<()> {
         }
         BindValue::Text(value) => writer.write_bytes_with_length(value.as_bytes()),
         BindValue::Raw(value) => writer.write_bytes_with_length(value),
+        BindValue::Lob { locator, .. } => writer.write_bytes_with_two_lengths(Some(locator)),
         BindValue::Number(value) => {
             let bytes = encode_number_text(value)?;
             writer.write_bytes_with_length(&bytes)
@@ -1041,6 +1055,100 @@ pub fn build_lob_read_payload_with_seq(
     }
     writer.write_raw(locator);
     writer.write_ub8(amount);
+    Ok(writer.into_bytes())
+}
+
+fn write_lob_op_header(
+    writer: &mut TtcWriter,
+    locator: &[u8],
+    seq_num: u8,
+    ttc_field_version: u8,
+    operation: u32,
+    dest_length: u32,
+    source_offset: u64,
+    dest_offset: u64,
+    pointer_charset: bool,
+    pointer_null_lob: bool,
+    send_amount: bool,
+) -> Result<()> {
+    let locator_len =
+        u32::try_from(locator.len()).map_err(|_| ProtocolError::InvalidPacketLength {
+            length: locator.len(),
+            minimum: 0,
+        })?;
+    writer.write_function_code_with_seq(TNS_FUNC_LOB_OP, seq_num);
+    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
+        writer.write_ub8(0);
+    }
+    writer.write_u8(1);
+    writer.write_ub4(locator_len);
+    writer.write_u8(0);
+    writer.write_ub4(dest_length);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_u8(u8::from(pointer_charset));
+    writer.write_u8(0);
+    writer.write_u8(u8::from(pointer_null_lob));
+    writer.write_ub4(operation);
+    writer.write_u8(0);
+    writer.write_u8(0);
+    writer.write_ub8(source_offset);
+    writer.write_ub8(dest_offset);
+    writer.write_u8(u8::from(send_amount));
+    for _ in 0..3 {
+        writer.write_u16be(0);
+    }
+    writer.write_raw(locator);
+    Ok(())
+}
+
+pub fn build_lob_create_temp_payload_with_seq(
+    ora_type_num: u8,
+    csfrm: u8,
+    seq_num: u8,
+    ttc_field_version: u8,
+) -> Result<Vec<u8>> {
+    let mut writer = TtcWriter::new();
+    write_lob_op_header(
+        &mut writer,
+        &[0; 40],
+        seq_num,
+        ttc_field_version,
+        TNS_LOB_OP_CREATE_TEMP,
+        TNS_DURATION_SESSION,
+        u64::from(csfrm),
+        u64::from(ora_type_num),
+        true,
+        true,
+        false,
+    )?;
+    writer.write_ub4(TNS_CHARSET_UTF8.into());
+    Ok(writer.into_bytes())
+}
+
+pub fn build_lob_write_payload_with_seq(
+    locator: &[u8],
+    offset: u64,
+    data: &[u8],
+    seq_num: u8,
+    ttc_field_version: u8,
+) -> Result<Vec<u8>> {
+    let mut writer = TtcWriter::new();
+    write_lob_op_header(
+        &mut writer,
+        locator,
+        seq_num,
+        ttc_field_version,
+        TNS_LOB_OP_WRITE,
+        0,
+        offset,
+        0,
+        false,
+        false,
+        false,
+    )?;
+    writer.write_u8(TNS_MSG_TYPE_LOB_DATA);
+    writer.write_bytes_with_length(data)?;
     Ok(writer.into_bytes())
 }
 
@@ -1971,6 +2079,31 @@ pub fn parse_lob_read_response(
     capabilities: ClientCapabilities,
     locator: &[u8],
 ) -> Result<LobReadResult> {
+    parse_lob_op_response(payload, capabilities, locator, false, true)
+}
+
+pub fn parse_lob_create_temp_response(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+) -> Result<LobReadResult> {
+    parse_lob_op_response(payload, capabilities, &[0; 40], true, false)
+}
+
+pub fn parse_lob_write_response(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    locator: &[u8],
+) -> Result<LobReadResult> {
+    parse_lob_op_response(payload, capabilities, locator, false, false)
+}
+
+fn parse_lob_op_response(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    locator: &[u8],
+    is_create_temp: bool,
+    read_amount: bool,
+) -> Result<LobReadResult> {
     let mut reader = TtcReader::new(payload);
     let mut result = LobReadResult {
         locator: locator.to_vec(),
@@ -1987,9 +2120,14 @@ pub fn parse_lob_read_response(
                 if !result.locator.is_empty() {
                     result.locator = reader.read_raw(result.locator.len())?.to_vec();
                 }
-                let amount = reader.read_sb8()?;
-                if amount > 0 {
-                    result.amount = amount as u64;
+                if is_create_temp {
+                    let _charset = reader.read_ub2()?;
+                    reader.skip(1)?;
+                } else if read_amount {
+                    let amount = reader.read_sb8()?;
+                    if amount > 0 {
+                        result.amount = amount as u64;
+                    }
                 }
             }
             TNS_MSG_TYPE_STATUS => {
