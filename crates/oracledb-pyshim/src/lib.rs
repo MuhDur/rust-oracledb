@@ -576,6 +576,192 @@ enum BindSourceKind {
     Keywords,
 }
 
+fn thin_var_null_object_type(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Option<DbObjectTypeImpl>> {
+    let Some(var) = thin_var_from_value(value)? else {
+        return Ok(None);
+    };
+    let var = var.borrow(py);
+    let Some(object_type) = var.object_type.clone() else {
+        return Ok(None);
+    };
+    if var.get_py_value(py)?.bind(py).is_none() {
+        return Ok(Some(object_type));
+    }
+    Ok(None)
+}
+
+fn object_bind_sql_expr(
+    py: Python<'_>,
+    bind_name: &str,
+    value: &Bound<'_, PyAny>,
+    effective_dict: &Bound<'_, PyDict>,
+    allow_null_var_cast: bool,
+) -> PyResult<Option<String>> {
+    if let Some(object) = py_db_object_impl(value)? {
+        let object_type = object.object_type.clone();
+        if object_type.is_collection {
+            if object_type.is_assoc_array || object_type.package_name.is_some() {
+                return Ok(None);
+            }
+            let collection_values = object
+                .collection_values
+                .lock()
+                .map_err(runtime_error)?
+                .iter()
+                .map(|value| value.clone_ref(py))
+                .collect::<Vec<_>>();
+            let mut constructor_args = Vec::with_capacity(collection_values.len());
+            for (index, element_value) in collection_values.into_iter().enumerate() {
+                let element_value_bound = element_value.bind(py);
+                if element_value_bound.is_none() {
+                    constructor_args.push("null".to_string());
+                    continue;
+                }
+                let generated_name =
+                    generated_object_attr_bind_name(bind_name, &format!("E{index}"));
+                if let Some(expr) = object_bind_sql_expr(
+                    py,
+                    &generated_name,
+                    element_value_bound,
+                    effective_dict,
+                    true,
+                )? {
+                    constructor_args.push(expr);
+                } else {
+                    constructor_args.push(format!(":{generated_name}"));
+                    effective_dict.set_item(&generated_name, element_value)?;
+                }
+            }
+            return Ok(Some(format!(
+                "{}({})",
+                object_type._get_fqn(),
+                constructor_args.join(", ")
+            )));
+        }
+        if object_type.attrs.is_empty() {
+            return Ok(None);
+        }
+        let mut constructor_args = Vec::with_capacity(object_type.attrs.len());
+        for attr in &object_type.attrs {
+            let attr_value = object.attr_bind_value(py, &attr.name)?;
+            let attr_value_bound = attr_value.bind(py);
+            if attr_value_bound.is_none() {
+                constructor_args.push("null".to_string());
+                continue;
+            }
+            let generated_name = generated_object_attr_bind_name(bind_name, &attr.name);
+            if let Some(expr) =
+                object_bind_sql_expr(py, &generated_name, attr_value_bound, effective_dict, true)?
+            {
+                constructor_args.push(expr);
+            } else {
+                constructor_args.push(format!(":{generated_name}"));
+                effective_dict.set_item(&generated_name, attr_value)?;
+            }
+        }
+        return Ok(Some(format!(
+            "{}({})",
+            object_type._get_fqn(),
+            constructor_args.join(", ")
+        )));
+    }
+
+    if allow_null_var_cast {
+        if let Some(object_type) = thin_var_null_object_type(py, value)? {
+            if !object_type.is_collection {
+                return Ok(Some(format!("cast(null as {})", object_type._get_fqn())));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn plsql_function_return_bind_name(statement: &str) -> Option<String> {
+    let rest = statement.trim_start();
+    if !rest.get(.."begin".len())?.eq_ignore_ascii_case("begin") {
+        return None;
+    }
+    let rest = rest.get("begin".len()..)?.trim_start();
+    let rest = rest.strip_prefix(':')?;
+    let mut name_end = 0;
+    for (offset, ch) in rest.char_indices() {
+        if is_bind_name_char(ch) {
+            name_end = offset + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if name_end == 0 {
+        return None;
+    }
+    let (name, rest) = rest.split_at(name_end);
+    rest.trim_start()
+        .starts_with(":=")
+        .then(|| name.to_string())
+}
+
+fn rewrite_object_bind_dict(
+    py: Python<'_>,
+    statement: &str,
+    effective_dict: &Bound<'_, PyDict>,
+) -> PyResult<(String, bool)> {
+    let function_return_name = plsql_function_return_bind_name(statement);
+    let dml_return_names = statement_return_bind_names(statement)?;
+    let mut bind_entries = Vec::new();
+    for (key, value) in effective_dict.iter() {
+        bind_entries.push((key.extract::<String>()?, value.clone().unbind()));
+    }
+
+    let mut effective_statement = statement.to_string();
+    let mut changed = false;
+    for (key, value) in bind_entries {
+        let is_function_return_bind = function_return_name
+            .as_deref()
+            .is_some_and(|name| bind_names_equal(name, &key));
+        let is_dml_return_bind = dml_return_names
+            .iter()
+            .any(|name| bind_names_equal(name, &key));
+        let value = value.bind(py);
+        let Some(sql_expr) = object_bind_sql_expr(
+            py,
+            &key,
+            value,
+            effective_dict,
+            !(is_function_return_bind || is_dml_return_bind),
+        )?
+        else {
+            continue;
+        };
+        effective_statement = replace_input_bind_placeholder(&effective_statement, &key, &sql_expr);
+        let _ = effective_dict.del_item(&key);
+        changed = true;
+    }
+
+    Ok((effective_statement, changed))
+}
+
+fn positional_bind_dict_if_complete<'py>(
+    py: Python<'py>,
+    statement: &str,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyDict>>> {
+    let row_values = positional_bind_items(value)?;
+    let names = unique_sql_bind_names(statement)?;
+    if row_values.len() != names.len() {
+        return Ok(None);
+    }
+
+    let effective_dict = PyDict::new(py);
+    for (name, value) in names.iter().zip(row_values.iter()) {
+        effective_dict.set_item(name, value)?;
+    }
+    Ok(Some(effective_dict))
+}
+
 fn prepare_object_execute_inputs(
     py: Python<'_>,
     statement: &str,
@@ -593,7 +779,7 @@ fn prepare_object_execute_inputs(
             original_keywords,
         ));
     }
-    let (source_kind, source_dict) = if has_keywords {
+    let (source_kind, source_dict): (BindSourceKind, Bound<'_, PyDict>) = if has_keywords {
         let Some(value) = keyword_parameters else {
             return Ok((
                 statement.to_string(),
@@ -608,7 +794,7 @@ fn prepare_object_execute_inputs(
                 original_keywords,
             ));
         };
-        (BindSourceKind::Keywords, dict)
+        (BindSourceKind::Keywords, dict.clone())
     } else if has_parameters {
         let Some(value) = parameters else {
             return Ok((
@@ -617,12 +803,17 @@ fn prepare_object_execute_inputs(
                 original_keywords,
             ));
         };
-        let Ok(dict) = value.cast::<PyDict>() else {
-            return Ok((
-                statement.to_string(),
-                original_parameters,
-                original_keywords,
-            ));
+        let dict = if let Ok(dict) = value.cast::<PyDict>() {
+            dict.clone()
+        } else {
+            let Some(dict) = positional_bind_dict_if_complete(py, statement, value)? else {
+                return Ok((
+                    statement.to_string(),
+                    original_parameters,
+                    original_keywords,
+                ));
+            };
+            dict
         };
         (BindSourceKind::Parameters, dict)
     } else {
@@ -638,38 +829,8 @@ fn prepare_object_execute_inputs(
         effective_dict.set_item(&key, &value)?;
     }
 
-    let mut effective_statement = statement.to_string();
-    let mut changed = false;
-    for (key, value) in source_dict.iter() {
-        let key = key.extract::<String>()?;
-        let Some(object) = py_db_object_impl(&value)? else {
-            continue;
-        };
-        let object_type = object.object_type.clone();
-        if object_type.is_collection || object_type.attrs.is_empty() {
-            continue;
-        }
-        let mut constructor_args = Vec::with_capacity(object_type.attrs.len());
-        for attr in &object_type.attrs {
-            let attr_value = object.attr_bind_value(py, &attr.name)?;
-            if attr_value.bind(py).is_none() {
-                constructor_args.push("null".to_string());
-            } else {
-                let generated_name = generated_object_attr_bind_name(&key, &attr.name);
-                constructor_args.push(format!(":{generated_name}"));
-                effective_dict.set_item(&generated_name, attr_value)?;
-            }
-        }
-        let constructor = format!(
-            "{}({})",
-            object_type._get_fqn(),
-            constructor_args.join(", ")
-        );
-        effective_statement =
-            replace_input_bind_placeholder(&effective_statement, &key, &constructor);
-        let _ = effective_dict.del_item(&key);
-        changed = true;
-    }
+    let (mut effective_statement, mut changed) =
+        rewrite_object_bind_dict(py, statement, &effective_dict)?;
 
     if let Some(statement) =
         rewrite_object_return_projection(&effective_statement, &effective_dict)?
