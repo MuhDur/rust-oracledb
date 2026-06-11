@@ -7,10 +7,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 use oracledb::protocol::sql;
 use oracledb::protocol::thin::{
     bind_template_from_type_name, bind_value_type_info, cursor_bind_template,
-    dbobject_element_bind_type_info, decode_datetime_value, decode_number_value,
-    define_metadata_from_bind, is_cursor_bind_template, output_bind as output_only_bind,
-    public_dbtype_name_from_bind, public_dbtype_name_from_type_name, returning_output_bind,
-    BindValue, ColumnMetadata, QueryResult, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR,
+    dbobject_element_bind_type_info, decode_datetime_value,
+    decode_dbobject_binary_double as protocol_decode_dbobject_binary_double,
+    decode_dbobject_binary_float as protocol_decode_dbobject_binary_float,
+    decode_dbobject_text as protocol_decode_dbobject_text, decode_dbobject_xmltype_text,
+    decode_number_value, define_metadata_from_bind, is_cursor_bind_template,
+    output_bind as output_only_bind, public_dbtype_name_from_bind,
+    public_dbtype_name_from_type_name, returning_output_bind, BindValue, ColumnMetadata,
+    DbObjectPackedReader, QueryResult, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR,
     ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB,
     ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_DATE,
     ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT,
@@ -4685,119 +4689,41 @@ struct DbObjectImpl {
     lob_context: Option<ThinLobContext>,
 }
 
-const TNS_LONG_LENGTH_INDICATOR: u8 = 254;
-const TNS_NULL_LENGTH_INDICATOR: u8 = 255;
-const TNS_OBJ_ATOMIC_NULL: u8 = 253;
-const TNS_OBJ_IS_DEGENERATE: u8 = 0x10;
-const TNS_OBJ_NO_PREFIX_SEG: u8 = 0x04;
-const TNS_XML_TYPE_LOB: u32 = 0x0001;
-const TNS_XML_TYPE_STRING: u32 = 0x0004;
-const TNS_XML_TYPE_FLAG_SKIP_NEXT_4: u32 = 0x100000;
-
 struct DbObjectPickleReader<'a> {
-    bytes: &'a [u8],
-    pos: usize,
+    inner: DbObjectPackedReader<'a>,
 }
 
 impl<'a> DbObjectPickleReader<'a> {
     fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0 }
+        Self {
+            inner: DbObjectPackedReader::new(bytes),
+        }
     }
 
     fn read_u8(&mut self) -> PyResult<u8> {
-        let value = self
-            .bytes
-            .get(self.pos)
-            .copied()
-            .ok_or_else(|| PyRuntimeError::new_err("truncated DbObject packed data"))?;
-        self.pos += 1;
-        Ok(value)
-    }
-
-    fn read_raw(&mut self, len: usize) -> PyResult<&'a [u8]> {
-        let end = self
-            .pos
-            .checked_add(len)
-            .ok_or_else(|| PyRuntimeError::new_err("DbObject packed data offset overflow"))?;
-        let bytes = self
-            .bytes
-            .get(self.pos..end)
-            .ok_or_else(|| PyRuntimeError::new_err("truncated DbObject packed data"))?;
-        self.pos = end;
-        Ok(bytes)
-    }
-
-    fn skip(&mut self, len: usize) -> PyResult<()> {
-        self.read_raw(len).map(|_| ())
-    }
-
-    fn read_u32be(&mut self) -> PyResult<u32> {
-        let bytes = self.read_raw(4)?;
-        Ok(u32::from_be_bytes(bytes.try_into().map_err(|_| {
-            PyRuntimeError::new_err("invalid DbObject u32")
-        })?))
+        self.inner.read_u8().map_err(runtime_error)
     }
 
     fn read_i32be(&mut self) -> PyResult<i32> {
-        let bytes = self.read_raw(4)?;
-        Ok(i32::from_be_bytes(bytes.try_into().map_err(|_| {
-            PyRuntimeError::new_err("invalid DbObject i32")
-        })?))
+        self.inner.read_i32be().map_err(runtime_error)
     }
 
     fn read_length(&mut self) -> PyResult<usize> {
-        match self.read_u8()? {
-            TNS_LONG_LENGTH_INDICATOR => usize::try_from(self.read_u32be()?)
-                .map_err(|_| PyRuntimeError::new_err("DbObject length overflow")),
-            length => Ok(usize::from(length)),
-        }
-    }
-
-    fn skip_length(&mut self) -> PyResult<()> {
-        match self.read_u8()? {
-            TNS_LONG_LENGTH_INDICATOR => self.skip(4)?,
-            _ => {}
-        }
-        Ok(())
+        self.inner.read_length().map_err(runtime_error)
     }
 
     fn read_value_bytes(&mut self) -> PyResult<Option<Vec<u8>>> {
-        let length = match self.read_u8()? {
-            0 | TNS_NULL_LENGTH_INDICATOR => return Ok(None),
-            TNS_LONG_LENGTH_INDICATOR => usize::try_from(self.read_u32be()?)
-                .map_err(|_| PyRuntimeError::new_err("DbObject value length overflow"))?,
-            length => usize::from(length),
-        };
-        Ok(Some(self.read_raw(length)?.to_vec()))
+        self.inner.read_value_bytes().map_err(runtime_error)
     }
 
     fn read_header(&mut self) -> PyResult<()> {
-        let flags = self.read_u8()?;
-        let _version = self.read_u8()?;
-        self.skip_length()?;
-        if flags & TNS_OBJ_IS_DEGENERATE != 0 {
-            return Err(not_implemented("DbObject stored in a LOB"));
-        }
-        if flags & TNS_OBJ_NO_PREFIX_SEG == 0 {
-            let prefix_len = self.read_length()?;
-            self.skip(prefix_len)?;
-        }
-        Ok(())
-    }
-
-    fn bytes_left(&self) -> usize {
-        self.bytes.len().saturating_sub(self.pos)
+        self.inner.read_header().map_err(runtime_error)
     }
 
     fn read_atomic_null(&mut self, is_collection_context: bool) -> PyResult<bool> {
-        let value = self.read_u8()?;
-        match (value, is_collection_context) {
-            (TNS_OBJ_ATOMIC_NULL, _) | (TNS_NULL_LENGTH_INDICATOR, true) => Ok(true),
-            _ => {
-                self.pos = self.pos.saturating_sub(1);
-                Ok(false)
-            }
-        }
+        self.inner
+            .read_atomic_null(is_collection_context)
+            .map_err(runtime_error)
     }
 }
 
@@ -5046,71 +4972,22 @@ impl DbObjectImpl {
 }
 
 fn decode_dbobject_text(bytes: &[u8], dbtype_name: &str) -> PyResult<String> {
-    if matches!(dbtype_name, "DB_TYPE_NCHAR" | "DB_TYPE_NVARCHAR") {
-        let mut chunks = bytes.chunks_exact(2);
-        let units = chunks
-            .by_ref()
-            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
-            .collect::<Vec<_>>();
-        if !chunks.remainder().is_empty() {
-            return Err(PyRuntimeError::new_err("invalid DbObject UTF-16 text"));
-        }
-        return String::from_utf16(&units)
-            .map_err(|_| PyRuntimeError::new_err("invalid DbObject UTF-16 text"));
-    }
-    String::from_utf8(bytes.to_vec())
-        .map_err(|_| PyRuntimeError::new_err("invalid DbObject UTF-8 text"))
+    protocol_decode_dbobject_text(bytes, dbtype_name).map_err(runtime_error)
 }
 
 fn decode_dbobject_xmltype(py: Python<'_>, bytes: &[u8]) -> PyResult<Py<PyAny>> {
-    let mut reader = DbObjectPickleReader::new(bytes);
-    reader.read_header()?;
-    reader.skip(1)?;
-    let xml_flag = reader.read_u32be()?;
-    if xml_flag & TNS_XML_TYPE_FLAG_SKIP_NEXT_4 != 0 {
-        reader.skip(4)?;
+    match decode_dbobject_xmltype_text(bytes).map_err(runtime_error)? {
+        Some(value) => Ok(value.into_pyobject(py)?.unbind().into()),
+        None => Ok(py.None()),
     }
-    let bytes = reader.read_raw(reader.bytes_left())?;
-    if xml_flag & TNS_XML_TYPE_STRING != 0 {
-        return Ok(decode_dbobject_text(bytes, "DB_TYPE_VARCHAR")?
-            .into_pyobject(py)?
-            .unbind()
-            .into());
-    }
-    if xml_flag & TNS_XML_TYPE_LOB != 0 {
-        return Ok(py.None());
-    }
-    Err(PyRuntimeError::new_err(format!(
-        "unexpected XMLTYPE flag {xml_flag}"
-    )))
 }
 
 fn decode_dbobject_binary_float(bytes: &[u8]) -> PyResult<f32> {
-    let mut bytes: [u8; 4] = bytes
-        .try_into()
-        .map_err(|_| PyRuntimeError::new_err("invalid DbObject BINARY_FLOAT"))?;
-    if bytes[0] & 0x80 != 0 {
-        bytes[0] &= 0x7f;
-    } else {
-        for byte in &mut bytes {
-            *byte = !*byte;
-        }
-    }
-    Ok(f32::from_bits(u32::from_be_bytes(bytes)))
+    protocol_decode_dbobject_binary_float(bytes).map_err(runtime_error)
 }
 
 fn decode_dbobject_binary_double(bytes: &[u8]) -> PyResult<f64> {
-    let mut bytes: [u8; 8] = bytes
-        .try_into()
-        .map_err(|_| PyRuntimeError::new_err("invalid DbObject BINARY_DOUBLE"))?;
-    if bytes[0] & 0x80 != 0 {
-        bytes[0] &= 0x7f;
-    } else {
-        for byte in &mut bytes {
-            *byte = !*byte;
-        }
-    }
-    Ok(f64::from_bits(u64::from_be_bytes(bytes)))
+    protocol_decode_dbobject_binary_double(bytes).map_err(runtime_error)
 }
 
 fn dbobject_unpack_value(

@@ -69,6 +69,14 @@ pub const ORA_TYPE_NUM_TIMESTAMP_TZ: u8 = 181;
 pub const ORA_TYPE_NUM_UROWID: u8 = 208;
 pub const ORA_TYPE_NUM_TIMESTAMP_LTZ: u8 = 231;
 pub const TNS_OBJ_TOP_LEVEL: u32 = 0x01;
+const TNS_LONG_LENGTH_INDICATOR: u8 = 254;
+const TNS_NULL_LENGTH_INDICATOR: u8 = 255;
+const TNS_OBJ_ATOMIC_NULL: u8 = 253;
+const TNS_OBJ_IS_DEGENERATE: u8 = 0x10;
+const TNS_OBJ_NO_PREFIX_SEG: u8 = 0x04;
+const TNS_XML_TYPE_LOB: u32 = 0x0001;
+const TNS_XML_TYPE_STRING: u32 = 0x0004;
+const TNS_XML_TYPE_FLAG_SKIP_NEXT_4: u32 = 0x100000;
 
 pub const CS_FORM_IMPLICIT: u8 = 1;
 pub const CS_FORM_NCHAR: u8 = 2;
@@ -296,6 +304,177 @@ pub enum QueryValue {
         chunk_size: u32,
     },
     Array(Vec<Option<QueryValue>>),
+}
+
+pub struct DbObjectPackedReader<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> DbObjectPackedReader<'a> {
+    pub fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, pos: 0 }
+    }
+
+    pub fn read_u8(&mut self) -> Result<u8> {
+        let value = self
+            .bytes
+            .get(self.pos)
+            .copied()
+            .ok_or(ProtocolError::TtcDecode("truncated DbObject packed data"))?;
+        self.pos += 1;
+        Ok(value)
+    }
+
+    fn read_raw(&mut self, len: usize) -> Result<&'a [u8]> {
+        let end = self.pos.checked_add(len).ok_or(ProtocolError::TtcDecode(
+            "DbObject packed data offset overflow",
+        ))?;
+        let bytes = self
+            .bytes
+            .get(self.pos..end)
+            .ok_or(ProtocolError::TtcDecode("truncated DbObject packed data"))?;
+        self.pos = end;
+        Ok(bytes)
+    }
+
+    fn skip(&mut self, len: usize) -> Result<()> {
+        self.read_raw(len).map(|_| ())
+    }
+
+    fn read_u32be(&mut self) -> Result<u32> {
+        let bytes = self.read_raw(4)?;
+        Ok(u32::from_be_bytes(bytes.try_into().map_err(|_| {
+            ProtocolError::TtcDecode("invalid DbObject u32")
+        })?))
+    }
+
+    pub fn read_i32be(&mut self) -> Result<i32> {
+        let bytes = self.read_raw(4)?;
+        Ok(i32::from_be_bytes(bytes.try_into().map_err(|_| {
+            ProtocolError::TtcDecode("invalid DbObject i32")
+        })?))
+    }
+
+    pub fn read_length(&mut self) -> Result<usize> {
+        match self.read_u8()? {
+            TNS_LONG_LENGTH_INDICATOR => usize::try_from(self.read_u32be()?)
+                .map_err(|_| ProtocolError::TtcDecode("DbObject length overflow")),
+            length => Ok(usize::from(length)),
+        }
+    }
+
+    fn skip_length(&mut self) -> Result<()> {
+        match self.read_u8()? {
+            TNS_LONG_LENGTH_INDICATOR => self.skip(4)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub fn read_value_bytes(&mut self) -> Result<Option<Vec<u8>>> {
+        let length = match self.read_u8()? {
+            0 | TNS_NULL_LENGTH_INDICATOR => return Ok(None),
+            TNS_LONG_LENGTH_INDICATOR => usize::try_from(self.read_u32be()?)
+                .map_err(|_| ProtocolError::TtcDecode("DbObject value length overflow"))?,
+            length => usize::from(length),
+        };
+        Ok(Some(self.read_raw(length)?.to_vec()))
+    }
+
+    pub fn read_header(&mut self) -> Result<()> {
+        let flags = self.read_u8()?;
+        let _version = self.read_u8()?;
+        self.skip_length()?;
+        if flags & TNS_OBJ_IS_DEGENERATE != 0 {
+            return Err(ProtocolError::UnsupportedFeature(
+                "DbObject stored in a LOB",
+            ));
+        }
+        if flags & TNS_OBJ_NO_PREFIX_SEG == 0 {
+            let prefix_len = self.read_length()?;
+            self.skip(prefix_len)?;
+        }
+        Ok(())
+    }
+
+    fn bytes_left(&self) -> usize {
+        self.bytes.len().saturating_sub(self.pos)
+    }
+
+    pub fn read_atomic_null(&mut self, is_collection_context: bool) -> Result<bool> {
+        let value = self.read_u8()?;
+        match (value, is_collection_context) {
+            (TNS_OBJ_ATOMIC_NULL, _) | (TNS_NULL_LENGTH_INDICATOR, true) => Ok(true),
+            _ => {
+                self.pos = self.pos.saturating_sub(1);
+                Ok(false)
+            }
+        }
+    }
+}
+
+pub fn decode_dbobject_text(bytes: &[u8], dbtype_name: &str) -> Result<String> {
+    if matches!(dbtype_name, "DB_TYPE_NCHAR" | "DB_TYPE_NVARCHAR") {
+        let mut chunks = bytes.chunks_exact(2);
+        let units = chunks
+            .by_ref()
+            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        if !chunks.remainder().is_empty() {
+            return Err(ProtocolError::TtcDecode("invalid DbObject UTF-16 text"));
+        }
+        return String::from_utf16(&units)
+            .map_err(|_| ProtocolError::TtcDecode("invalid DbObject UTF-16 text"));
+    }
+    String::from_utf8(bytes.to_vec())
+        .map_err(|_| ProtocolError::TtcDecode("invalid DbObject UTF-8 text"))
+}
+
+pub fn decode_dbobject_xmltype_text(bytes: &[u8]) -> Result<Option<String>> {
+    let mut reader = DbObjectPackedReader::new(bytes);
+    reader.read_header()?;
+    reader.skip(1)?;
+    let xml_flag = reader.read_u32be()?;
+    if xml_flag & TNS_XML_TYPE_FLAG_SKIP_NEXT_4 != 0 {
+        reader.skip(4)?;
+    }
+    let bytes = reader.read_raw(reader.bytes_left())?;
+    if xml_flag & TNS_XML_TYPE_STRING != 0 {
+        return decode_dbobject_text(bytes, "DB_TYPE_VARCHAR").map(Some);
+    }
+    if xml_flag & TNS_XML_TYPE_LOB != 0 {
+        return Ok(None);
+    }
+    Err(ProtocolError::TtcDecode("unexpected XMLTYPE flag"))
+}
+
+pub fn decode_dbobject_binary_float(bytes: &[u8]) -> Result<f32> {
+    let mut bytes: [u8; 4] = bytes
+        .try_into()
+        .map_err(|_| ProtocolError::TtcDecode("invalid DbObject BINARY_FLOAT"))?;
+    if bytes[0] & 0x80 != 0 {
+        bytes[0] &= 0x7f;
+    } else {
+        for byte in &mut bytes {
+            *byte = !*byte;
+        }
+    }
+    Ok(f32::from_bits(u32::from_be_bytes(bytes)))
+}
+
+pub fn decode_dbobject_binary_double(bytes: &[u8]) -> Result<f64> {
+    let mut bytes: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| ProtocolError::TtcDecode("invalid DbObject BINARY_DOUBLE"))?;
+    if bytes[0] & 0x80 != 0 {
+        bytes[0] &= 0x7f;
+    } else {
+        for byte in &mut bytes {
+            *byte = !*byte;
+        }
+    }
+    Ok(f64::from_bits(u64::from_be_bytes(bytes)))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3581,6 +3760,66 @@ mod tests {
                 csfrm: CS_FORM_NCHAR,
                 buffer_size: 4000,
             }
+        );
+    }
+
+    #[test]
+    fn dbobject_packed_reader_decodes_header_lengths_and_nulls() {
+        let bytes = [
+            TNS_OBJ_NO_PREFIX_SEG,
+            1,
+            0,
+            4,
+            b't',
+            b'e',
+            b's',
+            b't',
+            TNS_OBJ_ATOMIC_NULL,
+        ];
+        let mut reader = DbObjectPackedReader::new(&bytes);
+        reader.read_header().expect("header should decode");
+        assert_eq!(
+            reader
+                .read_value_bytes()
+                .expect("value bytes should decode"),
+            Some(b"test".to_vec())
+        );
+        assert!(reader
+            .read_atomic_null(false)
+            .expect("atomic null should decode"));
+    }
+
+    #[test]
+    fn dbobject_scalar_decoders_match_oracle_canonical_data() {
+        assert_eq!(
+            decode_dbobject_text(&[0, b'A'], "DB_TYPE_NCHAR").expect("nchar text"),
+            "A"
+        );
+        assert_eq!(
+            decode_dbobject_xmltype_text(&[
+                TNS_OBJ_NO_PREFIX_SEG,
+                1,
+                0,
+                0,
+                0,
+                0,
+                0,
+                TNS_XML_TYPE_STRING as u8,
+                b'<',
+                b'x',
+                b'/',
+                b'>',
+            ])
+            .expect("XMLTYPE text should decode"),
+            Some("<x/>".to_string())
+        );
+        assert_eq!(
+            decode_dbobject_binary_float(&[0xbf, 0x80, 0, 0]).expect("binary float"),
+            1.0
+        );
+        assert_eq!(
+            decode_dbobject_binary_double(&[0xbf, 0xf0, 0, 0, 0, 0, 0, 0]).expect("binary double"),
+            1.0
         );
     }
 
