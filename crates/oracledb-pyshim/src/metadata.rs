@@ -1,7 +1,6 @@
-
 use oracledb::protocol::thin::{
-    column_metadata_is_xmltype,
-    public_dbtype_name_from_column_metadata, ColumnMetadata, ORA_TYPE_NUM_OBJECT,
+    column_metadata_is_xmltype, public_dbtype_name_from_column_metadata, ColumnMetadata,
+    ORA_TYPE_NUM_OBJECT,
 };
 use pyo3::prelude::*;
 

@@ -1,9 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use oracledb::protocol::sql;
-use oracledb::protocol::thin::{
-    output_bind as output_only_bind, returning_output_bind, BindValue,
-};
+use oracledb::protocol::thin::{output_bind as output_only_bind, returning_output_bind, BindValue};
 use oracledb::Connection as RustConnection;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
@@ -436,7 +434,9 @@ pub(crate) fn has_bind_payload(value: Option<&Bound<'_, PyAny>>) -> PyResult<boo
     Ok(value.len()? > 0)
 }
 
-pub(crate) fn positional_bind_items<'py>(value: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+pub(crate) fn positional_bind_items<'py>(
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
     if value.cast::<PyDict>().is_ok() || value.cast::<PyString>().is_ok() {
         return Err(raise_oracledb_driver_error(
             "ERR_WRONG_EXECUTE_PARAMETERS_TYPE",
@@ -823,7 +823,10 @@ pub(crate) fn bind_value_is_output(value: &BindValue) -> bool {
 }
 
 // d49: migrate to oracledb (iterative PL/SQL executemany policy belongs on driver)
-pub(crate) fn bind_rows_need_iterative_plsql(statement: &str, bind_rows: &[Vec<BindValue>]) -> bool {
+pub(crate) fn bind_rows_need_iterative_plsql(
+    statement: &str,
+    bind_rows: &[Vec<BindValue>],
+) -> bool {
     statement_is_plsql(statement)
         && bind_rows
             .iter()

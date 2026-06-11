@@ -1,8 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use oracledb::protocol::thin::{
-    CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BLOB,
-    ORA_TYPE_NUM_CLOB,
+    CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;

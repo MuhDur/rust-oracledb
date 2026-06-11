@@ -1,4 +1,3 @@
-
 use oracledb::protocol::thin::ColumnMetadata;
 use pyo3::prelude::*;
 

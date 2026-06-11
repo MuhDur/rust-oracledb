@@ -1,10 +1,9 @@
 use std::sync::{Arc, Mutex};
 
 use oracledb::protocol::thin::{
-    bind_template_from_type_name, is_cursor_bind_template,
-    output_bind as output_only_bind, public_dbtype_name_from_bind,
-    public_dbtype_name_from_type_name, BindValue, ColumnMetadata, QueryValue, CS_FORM_IMPLICIT,
-    ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_VARCHAR,
+    bind_template_from_type_name, is_cursor_bind_template, output_bind as output_only_bind,
+    public_dbtype_name_from_bind, public_dbtype_name_from_type_name, BindValue, ColumnMetadata,
+    QueryValue, CS_FORM_IMPLICIT, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_VARCHAR,
 };
 use pyo3::exceptions::{PyIndexError, PyRuntimeError};
 use pyo3::prelude::*;
@@ -484,7 +483,10 @@ pub(crate) fn thin_var_from_value(value: &Bound<'_, PyAny>) -> PyResult<Option<P
     Ok(None)
 }
 
-pub(crate) fn bind_var_from_value(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Py<ThinVar>> {
+pub(crate) fn bind_var_from_value(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Py<ThinVar>> {
     if let Some(var) = thin_var_from_value(value)? {
         return Ok(var);
     }

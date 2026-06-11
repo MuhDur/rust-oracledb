@@ -3,9 +3,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use asupersync::Cx;
-use oracledb::protocol::thin::{
-    BindValue, ColumnMetadata, QueryResult, QueryValue,
-};
+use oracledb::protocol::thin::{BindValue, ColumnMetadata, QueryResult, QueryValue};
 use oracledb::Connection as RustConnection;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;

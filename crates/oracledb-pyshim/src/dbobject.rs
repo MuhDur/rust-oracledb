@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 use oracledb::protocol::thin::{
     decode_datetime_value, decode_dbobject_binary_double as protocol_decode_dbobject_binary_double,
     decode_dbobject_binary_float as protocol_decode_dbobject_binary_float,
-    decode_dbobject_text as protocol_decode_dbobject_text, decode_dbobject_xmltype_text, decode_number_value, BindValue, ColumnMetadata,
-    DbObjectPackedReader, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BLOB,
-    ORA_TYPE_NUM_CLOB,
+    decode_dbobject_text as protocol_decode_dbobject_text, decode_dbobject_xmltype_text,
+    decode_number_value, BindValue, ColumnMetadata, DbObjectPackedReader, QueryValue,
+    CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -313,7 +313,8 @@ pub(crate) fn validated_dbobject_value(
                 }
             }
         }
-        #[allow(clippy::collapsible_match)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
+        #[allow(clippy::collapsible_match)]
+        // pre-existing lint at pre-split HEAD 978491a; not movement-induced
         "DB_TYPE_NUMBER" => {
             if bound.cast::<PyString>().is_ok() || bound.cast::<PyBytes>().is_ok() {
                 return Err(raise_unsupported_python_type_for_db_type(
@@ -327,7 +328,10 @@ pub(crate) fn validated_dbobject_value(
     Ok(value)
 }
 
-pub(crate) fn dbobject_value_byte_size(py: Python<'_>, value: &Py<PyAny>) -> PyResult<Option<usize>> {
+pub(crate) fn dbobject_value_byte_size(
+    py: Python<'_>,
+    value: &Py<PyAny>,
+) -> PyResult<Option<usize>> {
     let bound = value.bind(py);
     if bound.is_none() {
         return Ok(None);

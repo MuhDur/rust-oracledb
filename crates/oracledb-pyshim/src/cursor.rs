@@ -2,12 +2,8 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use oracledb::protocol::thin::{
-    BindValue, ColumnMetadata, QueryResult, QueryValue,
-};
-use oracledb::{
-    BlockingConnection, Connection as RustConnection,
-};
+use oracledb::protocol::thin::{BindValue, ColumnMetadata, QueryResult, QueryValue};
+use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
@@ -183,7 +179,11 @@ impl ThinCursorImpl {
             .map(|handler| handler.clone_ref(py)))
     }
 
-    pub(crate) fn prepare_fetch_defines(&mut self, py: Python<'_>, cursor: &Bound<'_, PyAny>) -> PyResult<()> {
+    pub(crate) fn prepare_fetch_defines(
+        &mut self,
+        py: Python<'_>,
+        cursor: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
         if !self.fetch_define_columns.is_empty() || self.columns.is_empty() {
             return Ok(());
         }
@@ -411,7 +411,8 @@ impl ThinCursorImpl {
             .statement
             .as_deref()
             .ok_or_else(|| raise_oracledb_driver_error("ERR_NO_STATEMENT"))?;
-        #[allow(clippy::needless_borrow)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
+        #[allow(clippy::needless_borrow)]
+        // pre-existing lint at pre-split HEAD 978491a; not movement-induced
         validate_dml_returning_duplicate_binds(&statement)?;
         self.bind_names = unique_sql_bind_names(statement)?;
         validate_parse_bind_names(statement)?;
@@ -907,7 +908,8 @@ impl ThinCursorImpl {
             .collect::<PyResult<Vec<_>>>()?;
         let tuple = PyTuple::new(py, values)?;
         if let Some(rowfactory) = &self.rowfactory {
-            #[allow(clippy::useless_conversion)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
+            #[allow(clippy::useless_conversion)]
+            // pre-existing lint at pre-split HEAD 978491a; not movement-induced
             return rowfactory.call1(py, tuple).map(Some).map_err(Into::into);
         }
         Ok(Some(tuple.unbind().into()))
@@ -1026,7 +1028,10 @@ impl ThinCursorImpl {
             .collect()
     }
 
-    pub(crate) fn get_implicit_results(&self, _connection: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+    pub(crate) fn get_implicit_results(
+        &self,
+        _connection: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<Py<PyAny>>> {
         Err(not_implemented("ThinCursorImpl.get_implicit_results"))
     }
 

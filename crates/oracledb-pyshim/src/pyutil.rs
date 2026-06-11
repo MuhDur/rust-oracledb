@@ -1,8 +1,4 @@
-
-use oracledb::protocol::thin::{
-    ColumnMetadata, QueryValue, ORA_TYPE_NUM_BLOB,
-    ORA_TYPE_NUM_CLOB,
-};
+use oracledb::protocol::thin::{ColumnMetadata, QueryValue, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
@@ -13,7 +9,10 @@ pub(crate) fn get_string_attr(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<St
     obj.getattr(name)?.extract()
 }
 
-pub(crate) fn get_optional_string_attr(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<Option<String>> {
+pub(crate) fn get_optional_string_attr(
+    obj: &Bound<'_, PyAny>,
+    name: &str,
+) -> PyResult<Option<String>> {
     let value = obj.getattr(name)?;
     if value.is_none() {
         Ok(None)
@@ -85,7 +84,9 @@ pub(crate) fn get_connect_sdu_attr(obj: &Bound<'_, PyAny>) -> PyResult<Option<u3
     get_optional_u32_attr(&description, "sdu")
 }
 
-pub(crate) fn get_app_context_attr(obj: &Bound<'_, PyAny>) -> PyResult<Vec<(String, String, String)>> {
+pub(crate) fn get_app_context_attr(
+    obj: &Bound<'_, PyAny>,
+) -> PyResult<Vec<(String, String, String)>> {
     let value = obj.getattr("appcontext")?;
     if value.is_none() {
         return Ok(Vec::new());

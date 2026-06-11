@@ -8,8 +8,7 @@ use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
 use asupersync::Cx;
 use oracledb::protocol::ProtocolError;
 use oracledb::{
-    BlockingConnection, ConnectOptions, Connection as RustConnection,
-    Error as DriverError,
+    BlockingConnection, ConnectOptions, Connection as RustConnection, Error as DriverError,
 };
 use pyo3::prelude::*;
 

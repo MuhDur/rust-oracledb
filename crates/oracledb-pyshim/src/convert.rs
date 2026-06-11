@@ -2,17 +2,15 @@ use std::sync::{Arc, Mutex};
 
 use asupersync::Cx;
 use oracledb::protocol::thin::{
-    bind_template_from_type_name, bind_value_type_info,
-    cursor_bind_template,
+    bind_template_from_type_name, bind_value_type_info, cursor_bind_template,
     dbobject_element_bind_type_info, decode_bfile_locator_name, define_metadata_from_bind,
-    encode_lob_text as protocol_encode_lob_text, BindValue, ColumnMetadata, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR,
-    ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB,
-    ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
-    ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR,
+    encode_lob_text as protocol_encode_lob_text, BindValue, ColumnMetadata, QueryValue,
+    CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE,
+    ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_NUMBER,
+    ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ,
+    ORA_TYPE_NUM_VARCHAR,
 };
-use oracledb::{
-    BlockingConnection, Connection as RustConnection,
-};
+use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyBytesMethods, PyList, PyTuple};
@@ -155,7 +153,9 @@ pub(crate) fn py_value_to_bind_with_template(
     py_value_to_bind(value)
 }
 
-pub(crate) fn py_list_to_array_bind_values(value: &Bound<'_, PyAny>) -> PyResult<Vec<Option<BindValue>>> {
+pub(crate) fn py_list_to_array_bind_values(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Vec<Option<BindValue>>> {
     if let Ok(list) = value.cast::<PyList>() {
         return list
             .iter()
@@ -181,7 +181,9 @@ pub(crate) fn py_list_to_array_bind_values(value: &Bound<'_, PyAny>) -> PyResult
         .collect()
 }
 
-pub(crate) fn py_db_object_type_impl(value: &Bound<'_, PyAny>) -> PyResult<Option<DbObjectTypeImpl>> {
+pub(crate) fn py_db_object_type_impl(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Option<DbObjectTypeImpl>> {
     if let Ok(object_type) = value.extract::<PyRef<'_, DbObjectTypeImpl>>() {
         return Ok(Some(object_type.clone()));
     }
@@ -194,7 +196,9 @@ pub(crate) fn py_db_object_type_impl(value: &Bound<'_, PyAny>) -> PyResult<Optio
     Ok(None)
 }
 
-pub(crate) fn py_db_object_impl<'py>(value: &Bound<'py, PyAny>) -> PyResult<Option<PyRef<'py, DbObjectImpl>>> {
+pub(crate) fn py_db_object_impl<'py>(
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Option<PyRef<'py, DbObjectImpl>>> {
     if let Ok(object) = value.extract::<PyRef<'py, DbObjectImpl>>() {
         return Ok(Some(object));
     }
@@ -393,7 +397,10 @@ pub(crate) fn typed_lob_bind_hint_from_type_name(type_name: &str) -> Option<(u8,
     }
 }
 
-pub(crate) fn typed_lob_bind_hints(py: Python<'_>, bind_vars: &[Py<ThinVar>]) -> Vec<Option<(u8, u8)>> {
+pub(crate) fn typed_lob_bind_hints(
+    py: Python<'_>,
+    bind_vars: &[Py<ThinVar>],
+) -> Vec<Option<(u8, u8)>> {
     bind_vars
         .iter()
         .map(|var| typed_lob_bind_hint_from_type_name(&var.borrow(py).dbtype_name))
@@ -621,7 +628,8 @@ pub(crate) fn bind_template_from_input_size(value: &Bound<'_, PyAny>) -> PyResul
             buffer_size: size.max(1),
         });
     }
-    #[allow(clippy::match_result_ok)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
+    #[allow(clippy::match_result_ok)]
+    // pre-existing lint at pre-split HEAD 978491a; not movement-induced
     if let Ok(tuple) = value.cast::<PyTuple>() {
         if let Some(typ) = tuple.get_item(0).ok() {
             let size = tuple
@@ -632,7 +640,8 @@ pub(crate) fn bind_template_from_input_size(value: &Bound<'_, PyAny>) -> PyResul
             return Ok(bind_template_from_type(&typ, size));
         }
     }
-    #[allow(clippy::match_result_ok)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
+    #[allow(clippy::match_result_ok)]
+    // pre-existing lint at pre-split HEAD 978491a; not movement-induced
     if let Ok(list) = value.cast::<PyList>() {
         if let Some(typ) = list.get_item(0).ok() {
             let size = list
@@ -650,7 +659,10 @@ pub(crate) fn bind_type_info(value: &BindValue) -> Option<(u8, u8, u32)> {
     bind_value_type_info(value).map(|info| (info.ora_type_num, info.csfrm, info.buffer_size))
 }
 
-pub(crate) fn fetch_define_metadata_from_var(source: &ColumnMetadata, value: &BindValue) -> ColumnMetadata {
+pub(crate) fn fetch_define_metadata_from_var(
+    source: &ColumnMetadata,
+    value: &BindValue,
+) -> ColumnMetadata {
     define_metadata_from_bind(source, value)
 }
 
@@ -740,7 +752,9 @@ pub(crate) async fn supplement_json_lob_column_metadata_async(
     Ok(())
 }
 
-pub(crate) fn thin_lob_context_from_cursor(owner_cursor: &Bound<'_, PyAny>) -> PyResult<ThinLobContext> {
+pub(crate) fn thin_lob_context_from_cursor(
+    owner_cursor: &Bound<'_, PyAny>,
+) -> PyResult<ThinLobContext> {
     let impl_obj = owner_cursor.getattr("_impl")?;
     if let Ok(cursor_impl) = impl_obj.extract::<PyRef<'_, ThinCursorImpl>>() {
         return Ok(ThinLobContext {
@@ -818,7 +832,8 @@ pub(crate) fn query_value_to_py(
         None => Ok(py.None()),
         Some(QueryValue::Text(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
         Some(QueryValue::Rowid(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
-        #[allow(clippy::useless_conversion)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
+        #[allow(clippy::useless_conversion)]
+        // pre-existing lint at pre-split HEAD 978491a; not movement-induced
         Some(QueryValue::Raw(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
         Some(QueryValue::BinaryDouble(value)) => {
             let value = value.parse::<f64>().map_err(runtime_error)?;

@@ -4,14 +4,13 @@ use std::sync::{Arc, Mutex};
 
 use asupersync::Cx;
 use oracledb::protocol::thin::{
-    dbobject_attr_max_size, dbobject_attr_precision_scale, dbobject_rowtype_attr_max_size, public_dbtype_name_from_oracle_type_name, BindValue, QueryResult, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BLOB,
-    ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_NUMBER,
+    dbobject_attr_max_size, dbobject_attr_precision_scale, dbobject_rowtype_attr_max_size,
+    public_dbtype_name_from_oracle_type_name, BindValue, QueryResult, QueryValue, CS_FORM_IMPLICIT,
+    CS_FORM_NCHAR, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_NUMBER,
     ORA_TYPE_NUM_RAW,
 };
 use oracledb::protocol::ClientIdentity;
-use oracledb::{
-    BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection,
-};
+use oracledb::{BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -187,7 +186,10 @@ pub(crate) struct PreparedConnect {
 }
 
 impl ThinConnImpl {
-    pub(crate) fn prepare_connect(&mut self, params_impl: &Bound<'_, PyAny>) -> PyResult<PreparedConnect> {
+    pub(crate) fn prepare_connect(
+        &mut self,
+        params_impl: &Bound<'_, PyAny>,
+    ) -> PyResult<PreparedConnect> {
         if self
             .state
             .lock()
@@ -1125,7 +1127,11 @@ impl ThinConnImpl {
         Ok(u32::try_from(connection.sdu()).unwrap_or(u32::MAX))
     }
 
-    pub(crate) fn get_type(&self, _conn: &Bound<'_, PyAny>, name: &str) -> PyResult<DbObjectTypeImpl> {
+    pub(crate) fn get_type(
+        &self,
+        _conn: &Bound<'_, PyAny>,
+        name: &str,
+    ) -> PyResult<DbObjectTypeImpl> {
         let parts: Vec<&str> = name
             .split('.')
             .map(str::trim)
@@ -1208,7 +1214,10 @@ impl ThinConnImpl {
         Ok(())
     }
 
-    pub(crate) fn set_end_user_security_context(&self, _context: &Bound<'_, PyAny>) -> PyResult<()> {
+    pub(crate) fn set_end_user_security_context(
+        &self,
+        _context: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
         if !self.dsn.to_ascii_lowercase().contains("tcps") {
             return Err(raise_oracledb_driver_error(
                 "ERR_END_USER_SECURITY_CONTEXT_REQUIRES_TCPS",

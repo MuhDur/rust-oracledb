@@ -1,4 +1,3 @@
-
 use oracledb::protocol::thin::QueryResult;
 use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError};
 use pyo3::prelude::*;
@@ -101,7 +100,10 @@ pub(crate) fn compilation_error_warning(py: Python<'_>) -> PyResult<Py<PyAny>> {
     Ok(errors.getattr("_create_warning")?.call1((7000,))?.unbind())
 }
 
-pub(crate) fn query_result_warning(py: Python<'_>, result: &QueryResult) -> PyResult<Option<Py<PyAny>>> {
+pub(crate) fn query_result_warning(
+    py: Python<'_>,
+    result: &QueryResult,
+) -> PyResult<Option<Py<PyAny>>> {
     result
         .compilation_error_warning
         .then(|| compilation_error_warning(py))
@@ -269,7 +271,10 @@ pub(crate) fn raise_invalid_coll_index_set(index: i32, min_index: i32, max_index
     })
 }
 
-pub(crate) fn raise_wrong_object_type(actual: &DbObjectTypeImpl, expected: &DbObjectTypeImpl) -> PyErr {
+pub(crate) fn raise_wrong_object_type(
+    actual: &DbObjectTypeImpl,
+    expected: &DbObjectTypeImpl,
+) -> PyErr {
     Python::attach(|py| -> PyResult<PyErr> {
         let errors = PyModule::import(py, "oracledb.errors")?;
         let error_num = errors.getattr("ERR_WRONG_OBJECT_TYPE")?;

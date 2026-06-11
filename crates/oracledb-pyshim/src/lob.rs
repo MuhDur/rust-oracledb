@@ -6,14 +6,11 @@
 use std::sync::{Arc, Mutex};
 
 use oracledb::protocol::thin::{
-    decode_lob_text as protocol_decode_lob_text,
-    encode_lob_text as protocol_encode_lob_text, lob_locator_is_temporary, CS_FORM_NCHAR,
-    ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BLOB,
+    decode_lob_text as protocol_decode_lob_text, encode_lob_text as protocol_encode_lob_text,
+    lob_locator_is_temporary, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BLOB,
     ORA_TYPE_NUM_CLOB,
 };
-use oracledb::{
-    BlockingConnection, Connection as RustConnection,
-};
+use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyBytesMethods};
@@ -95,7 +92,12 @@ pub(crate) fn py_lob_from_impl(py: Python<'_>, lob: ThinLob) -> PyResult<Py<PyAn
 #[pymethods]
 impl ThinLob {
     #[pyo3(signature = (offset=1, amount=None))]
-    pub(crate) fn read(&self, py: Python<'_>, offset: u64, amount: Option<u64>) -> PyResult<Py<PyAny>> {
+    pub(crate) fn read(
+        &self,
+        py: Python<'_>,
+        offset: u64,
+        amount: Option<u64>,
+    ) -> PyResult<Py<PyAny>> {
         if self.ora_type_num == ORA_TYPE_NUM_BFILE {
             return Err(dpy_database_error(
                 "ORA-22285",

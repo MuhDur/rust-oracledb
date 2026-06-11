@@ -1,41 +1,40 @@
 #![forbid(unsafe_code)]
 
-
 use pyo3::prelude::*;
 
-mod errors;
 mod async_bridge;
-mod hooks;
-mod pyutil;
-mod binds;
-mod convert;
-mod lob;
-mod var;
-mod typehandler;
-mod dbobject;
-mod metadata;
-mod conn;
-mod cursor;
-mod async_cursor;
 mod async_conn;
+mod async_cursor;
+mod binds;
+mod conn;
+mod convert;
+mod cursor;
+mod dbobject;
+mod errors;
+mod hooks;
+mod lob;
+mod metadata;
 mod pool;
+mod pyutil;
+mod typehandler;
+mod var;
 
-pub(crate) use errors::*;
 pub(crate) use async_bridge::*;
-pub(crate) use hooks::*;
-pub(crate) use pyutil::*;
-pub(crate) use binds::*;
-pub(crate) use convert::*;
-pub(crate) use lob::*;
-pub(crate) use var::*;
-pub(crate) use typehandler::*;
-pub(crate) use dbobject::*;
-pub(crate) use metadata::*;
-pub(crate) use conn::*;
-pub(crate) use cursor::*;
-pub(crate) use async_cursor::*;
 pub(crate) use async_conn::*;
+pub(crate) use async_cursor::*;
+pub(crate) use binds::*;
+pub(crate) use conn::*;
+pub(crate) use convert::*;
+pub(crate) use cursor::*;
+pub(crate) use dbobject::*;
+pub(crate) use errors::*;
+pub(crate) use hooks::*;
+pub(crate) use lob::*;
+pub(crate) use metadata::*;
 pub(crate) use pool::*;
+pub(crate) use pyutil::*;
+pub(crate) use typehandler::*;
+pub(crate) use var::*;
 
 #[pyfunction]
 fn init_thin_impl(_package: &Bound<'_, PyAny>) -> PyResult<()> {
