@@ -1,40 +1,6 @@
-use std::collections::{BTreeMap, VecDeque};
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::task::{Context, Poll, Waker};
-use std::thread;
+use std::sync::{Arc, Mutex};
 
-use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
-use asupersync::Cx;
-use oracledb::protocol::sql;
-use oracledb::protocol::thin::{
-    bind_template_from_type_name, bind_value_type_info, column_metadata_is_xmltype,
-    cursor_bind_template, dbobject_attr_max_size, dbobject_attr_precision_scale,
-    dbobject_element_bind_type_info, dbobject_rowtype_attr_max_size, decode_bfile_locator_name,
-    decode_datetime_value, decode_dbobject_binary_double as protocol_decode_dbobject_binary_double,
-    decode_dbobject_binary_float as protocol_decode_dbobject_binary_float,
-    decode_dbobject_text as protocol_decode_dbobject_text, decode_dbobject_xmltype_text,
-    decode_lob_text as protocol_decode_lob_text, decode_number_value, define_metadata_from_bind,
-    encode_lob_text as protocol_encode_lob_text, is_cursor_bind_template, lob_locator_is_temporary,
-    output_bind as output_only_bind, public_dbtype_name_from_bind,
-    public_dbtype_name_from_column_metadata, public_dbtype_name_from_oracle_type_name,
-    public_dbtype_name_from_type_name, returning_output_bind, BindValue, ColumnMetadata,
-    DbObjectPackedReader, QueryResult, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR,
-    ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB,
-    ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT,
-    ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
-    ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR,
-};
-use oracledb::protocol::{ClientIdentity, ProtocolError};
-use oracledb::{
-    BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection,
-    Error as DriverError,
-};
-use pyo3::exceptions::{PyIndexError, PyNotImplementedError, PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyBytesMethods, PyDict, PyList, PyString, PyTuple};
 
 use crate::*;
 
