@@ -382,6 +382,27 @@ fn raise_unsupported_python_type_for_db_type(
     })
 }
 
+fn raise_unsupported_type_set(db_type_name: &str) -> PyErr {
+    Python::attach(|py| -> PyResult<PyErr> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        let error_num = errors.getattr("ERR_UNSUPPORTED_TYPE_SET")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("db_type_name", db_type_name.trim_start_matches("DB_TYPE_"))?;
+        match errors
+            .getattr("_raise_err")?
+            .call((error_num,), Some(&kwargs))
+        {
+            Ok(_) => Ok(PyRuntimeError::new_err(
+                "oracledb.errors._raise_err(ERR_UNSUPPORTED_TYPE_SET) returned without raising",
+            )),
+            Err(err) => Ok(err),
+        }
+    })
+    .unwrap_or_else(|_| {
+        PyRuntimeError::new_err(format!("type {db_type_name} does not support being set"))
+    })
+}
+
 fn get_string_attr(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<String> {
     obj.getattr(name)?.extract()
 }
@@ -1743,8 +1764,8 @@ fn statement_plsql_assignment_bind_names(statement: &str) -> PyResult<Vec<String
                 {
                     after_name += 1;
                 }
-                if bytes.get(after_name) == Some(&b':')
-                    && bytes.get(after_name + 1) == Some(&b'=')
+                if matches!(bytes.get(after_name), Some(b':'))
+                    && matches!(bytes.get(after_name + 1), Some(b'='))
                     && !names
                         .iter()
                         .any(|existing| bind_names_equal(existing, &name))
@@ -2191,6 +2212,11 @@ fn py_value_to_bind_with_template(
         })?;
         return Ok(BindValue::BinaryDouble(number));
     }
+    if ora_type_num == ORA_TYPE_NUM_NUMBER
+        && matches!(py_value_type_name(value).as_str(), "Decimal")
+    {
+        return Ok(BindValue::Number(value.str()?.extract::<String>()?));
+    }
     let Some((year, month, day, hour, minute, second, nanosecond)) = py_date_time_fields(value)?
     else {
         return py_value_to_bind(value);
@@ -2279,6 +2305,14 @@ fn py_type_name(typ: &Bound<'_, PyAny>) -> String {
     typ.getattr("name")
         .or_else(|_| typ.getattr("__name__"))
         .and_then(|value| value.extract::<String>())
+        .unwrap_or_default()
+}
+
+fn py_value_type_name(value: &Bound<'_, PyAny>) -> String {
+    value
+        .get_type()
+        .getattr("__name__")
+        .and_then(|name| name.extract::<String>())
         .unwrap_or_default()
 }
 
@@ -2638,6 +2672,7 @@ fn thin_var_from_type_spec(
     num_elements: u32,
     outconverter: Option<Py<PyAny>>,
     convert_nulls: bool,
+    bypass_decode: bool,
 ) -> PyResult<Py<ThinVar>> {
     let type_name = py_type_name(typ);
     let object_type = py_db_object_type_impl(typ)?;
@@ -2679,6 +2714,7 @@ fn thin_var_from_type_spec(
             object_type,
             object_return_attr,
             dbtype_name,
+            bypass_decode,
         ),
     )
 }
@@ -2717,6 +2753,7 @@ fn thin_var_from_input_size(
             None,
             None,
             dbtype_name,
+            false,
         ),
     )
 }
@@ -3047,7 +3084,7 @@ enum ThinVarReturnKind {
 
 #[pyclass(module = "oracledb.thin_impl", name = "ThinLob")]
 struct ThinLob {
-    data: Option<Vec<u8>>,
+    data: Option<Arc<Mutex<Vec<u8>>>>,
     locator: Arc<Mutex<Option<Vec<u8>>>>,
     ora_type_num: u8,
     csfrm: u8,
@@ -3090,6 +3127,17 @@ fn decode_lob_text(bytes: &[u8], csfrm: u8, locator: Option<&[u8]>) -> PyResult<
     String::from_utf16(&units).map_err(|_| PyRuntimeError::new_err("invalid LOB UTF-16 text"))
 }
 
+fn column_metadata_is_xmltype(metadata: &ColumnMetadata) -> bool {
+    metadata
+        .object_schema
+        .as_deref()
+        .is_some_and(|schema| schema.eq_ignore_ascii_case("SYS"))
+        && metadata
+            .object_type_name
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("XMLTYPE"))
+}
+
 fn lob_data_to_py(
     py: Python<'_>,
     ora_type_num: u8,
@@ -3129,13 +3177,14 @@ fn py_lob_from_impl(py: Python<'_>, lob: ThinLob) -> PyResult<Py<PyAny>> {
 impl ThinLob {
     #[pyo3(signature = (offset=1, amount=None))]
     fn read(&self, py: Python<'_>, offset: u64, amount: Option<u64>) -> PyResult<Py<PyAny>> {
-        if let Some(data) = self.data.as_deref() {
+        if let Some(data) = self.data.as_ref() {
+            let data = data.lock().map_err(runtime_error)?;
             return lob_data_to_py(
                 py,
                 self.ora_type_num,
                 self.csfrm,
                 self.locator.lock().map_err(runtime_error)?.as_deref(),
-                data,
+                &data,
                 offset,
                 amount,
             );
@@ -3175,6 +3224,33 @@ impl ThinLob {
             1,
             None,
         )
+    }
+
+    fn write(&mut self, value: &Bound<'_, PyAny>, offset: u64) -> PyResult<()> {
+        let Some(data) = self.data.as_ref() else {
+            return Err(not_implemented("ThinLob.write persistent LOB"));
+        };
+        let bytes = if matches!(self.ora_type_num, ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_BFILE) {
+            value.cast::<PyBytes>()?.as_bytes().to_vec()
+        } else {
+            value.extract::<String>()?.into_bytes()
+        };
+        let start = usize::try_from(offset.saturating_sub(1)).map_err(runtime_error)?;
+        let mut data = data.lock().map_err(runtime_error)?;
+        if start > data.len() {
+            data.resize(start, 0);
+        }
+        let end = start.saturating_add(bytes.len());
+        if end > data.len() {
+            data.resize(end, 0);
+        }
+        data[start..end].copy_from_slice(&bytes);
+        self.size = if matches!(self.ora_type_num, ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_BFILE) {
+            data.len() as u64
+        } else {
+            decode_lob_text(&data, self.csfrm, None)?.chars().count() as u64
+        };
+        Ok(())
     }
 
     fn get_max_amount(&self) -> u64 {
@@ -3230,6 +3306,7 @@ struct ThinVar {
     object_type: Option<DbObjectTypeImpl>,
     object_return_attr: Option<String>,
     dbtype_name: String,
+    bypass_decode: bool,
 }
 
 impl ThinVar {
@@ -3246,6 +3323,7 @@ impl ThinVar {
             object_type: None,
             object_return_attr: None,
             dbtype_name: "DB_TYPE_VARCHAR".to_string(),
+            bypass_decode: false,
         }
     }
 
@@ -3260,6 +3338,7 @@ impl ThinVar {
         object_type: Option<DbObjectTypeImpl>,
         object_return_attr: Option<String>,
         dbtype_name: impl Into<String>,
+        bypass_decode: bool,
     ) -> Self {
         Self {
             value: Arc::new(Mutex::new(value)),
@@ -3273,6 +3352,7 @@ impl ThinVar {
             object_type,
             object_return_attr,
             dbtype_name: dbtype_name.into(),
+            bypass_decode,
         }
     }
 
@@ -3314,8 +3394,15 @@ impl ThinVar {
     }
 
     fn set_py_value_checked(&self, py: Python<'_>, value: Py<PyAny>) -> PyResult<()> {
+        let bound = value.bind(py);
+        if matches!(
+            self.dbtype_name.as_str(),
+            "DB_TYPE_ROWID" | "DB_TYPE_UROWID"
+        ) && !bound.is_none()
+        {
+            return Err(raise_unsupported_type_set(&self.dbtype_name));
+        }
         if let Some(expected_type) = &self.object_type {
-            let bound = value.bind(py);
             if !bound.is_none() {
                 let Some(actual_object) = py_db_object_impl(bound)? else {
                     return Err(raise_unsupported_python_type_for_db_type(
@@ -3400,7 +3487,7 @@ impl ThinVar {
             (ThinVarReturnKind::ClobAsLong, Some(QueryValue::Text(value))) => py_lob_from_impl(
                 py,
                 ThinLob {
-                    data: Some(value.as_bytes().to_vec()),
+                    data: Some(Arc::new(Mutex::new(value.as_bytes().to_vec()))),
                     locator: Arc::new(Mutex::new(None)),
                     ora_type_num: ORA_TYPE_NUM_CLOB,
                     csfrm: CS_FORM_IMPLICIT,
@@ -3409,6 +3496,22 @@ impl ThinVar {
                     context: None,
                 },
             )?,
+            (ThinVarReturnKind::Plain, Some(QueryValue::Text(value))) if self.bypass_decode => {
+                PyBytes::new(py, value.as_bytes()).unbind().into()
+            }
+            (ThinVarReturnKind::Plain, Some(QueryValue::Number { text, .. }))
+                if matches!(
+                    self.dbtype_name.as_str(),
+                    "DB_TYPE_CHAR"
+                        | "DB_TYPE_LONG"
+                        | "DB_TYPE_LONG_NVARCHAR"
+                        | "DB_TYPE_NCHAR"
+                        | "DB_TYPE_NVARCHAR"
+                        | "DB_TYPE_VARCHAR"
+                ) =>
+            {
+                text.clone().into_pyobject(py)?.unbind().into()
+            }
             (ThinVarReturnKind::Plain, Some(QueryValue::Text(value)))
                 if self.object_type.is_some() =>
             {
@@ -3544,6 +3647,7 @@ fn bind_var_from_value(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Py<
                     None,
                     None,
                     public_dbtype_name_from_type_name(&type_name),
+                    false,
                 ),
             );
         }
@@ -3634,10 +3738,10 @@ impl FetchHandlerCursor {
         typ,
         size=0,
         arraysize=1,
-        _inconverter=None,
-        _outconverter=None,
-        _encoding_errors=None,
-        _bypass_decode=false,
+        inconverter=None,
+        outconverter=None,
+        encoding_errors=None,
+        bypass_decode=false,
         convert_nulls=false
     ))]
     fn var(
@@ -3646,13 +3750,15 @@ impl FetchHandlerCursor {
         typ: &Bound<'_, PyAny>,
         size: u32,
         arraysize: u32,
-        _inconverter: Option<Py<PyAny>>,
-        _outconverter: Option<Py<PyAny>>,
-        _encoding_errors: Option<String>,
-        _bypass_decode: bool,
+        inconverter: Option<Py<PyAny>>,
+        outconverter: Option<Py<PyAny>>,
+        encoding_errors: Option<String>,
+        bypass_decode: bool,
         convert_nulls: bool,
     ) -> PyResult<Py<ThinVar>> {
         let _ = arraysize;
+        let _ = inconverter;
+        let _ = encoding_errors;
         thin_var_from_type_spec(
             py,
             self.connection.bind(py),
@@ -3660,8 +3766,9 @@ impl FetchHandlerCursor {
             size,
             false,
             1,
-            _outconverter,
+            outconverter,
             convert_nulls,
+            bypass_decode,
         )
     }
 }
@@ -4827,6 +4934,30 @@ impl ThinConnImpl {
         Ok(connection.serial_num())
     }
 
+    fn create_temp_lob_impl(
+        &self,
+        py: Python<'_>,
+        lob_type: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<ThinLob>> {
+        let (ora_type_num, csfrm) = match py_type_name(lob_type).as_str() {
+            "DB_TYPE_BLOB" => (ORA_TYPE_NUM_BLOB, 0),
+            "DB_TYPE_NCLOB" => (ORA_TYPE_NUM_CLOB, CS_FORM_NCHAR),
+            _ => (ORA_TYPE_NUM_CLOB, CS_FORM_IMPLICIT),
+        };
+        Py::new(
+            py,
+            ThinLob {
+                data: Some(Arc::new(Mutex::new(Vec::new()))),
+                locator: Arc::new(Mutex::new(None)),
+                ora_type_num,
+                csfrm,
+                size: 0,
+                chunk_size: 0,
+                context: None,
+            },
+        )
+    }
+
     fn create_cursor_impl(&self, scrollable: bool) -> ThinCursorImpl {
         ThinCursorImpl::new(
             Arc::clone(&self.connection),
@@ -5916,6 +6047,9 @@ impl FetchMetadataImpl {
     #[getter]
     fn dbtype(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let module = PyModule::import(py, "oracledb")?;
+        if column_metadata_is_xmltype(&self.metadata) {
+            return Ok(module.getattr("DB_TYPE_XMLTYPE")?.unbind());
+        }
         let name = match self.metadata.ora_type_num {
             ORA_TYPE_NUM_VARCHAR | ORA_TYPE_NUM_LONG if self.metadata.csfrm == CS_FORM_NCHAR => {
                 "DB_TYPE_NVARCHAR"
@@ -6712,8 +6846,8 @@ impl ThinCursorImpl {
         if self.invalid_ref_cursor {
             return Err(raise_oracledb_driver_error("ERR_INVALID_REF_CURSOR"));
         }
+        self.prepare_fetch_defines(py, _cursor)?;
         if self.row_index >= self.rows.len() && self.more_rows && self.cursor_id != 0 {
-            self.prepare_fetch_defines(py, _cursor)?;
             let previous_row = self.rows.last().cloned();
             let requires_define = self.requires_define;
             let define_columns = self.fetch_define_columns.clone();
@@ -6766,7 +6900,13 @@ impl ThinCursorImpl {
         };
         let values = row
             .iter()
-            .map(|value| query_value_to_py(py, value, Some(_cursor), Some(&lob_context)))
+            .enumerate()
+            .map(|(index, value)| {
+                if let Some(Some(var)) = self.fetch_vars.get(index) {
+                    return var.borrow(py).output_value_to_py(py, value);
+                }
+                query_value_to_py(py, value, Some(_cursor), Some(&lob_context))
+            })
             .collect::<PyResult<Vec<_>>>()?;
         let tuple = PyTuple::new(py, values)?;
         if let Some(rowfactory) = &self.rowfactory {
@@ -6836,10 +6976,10 @@ impl ThinCursorImpl {
         typ,
         size=0,
         num_elements=1,
-        _inconverter=None,
-        _outconverter=None,
-        _encoding_errors=None,
-        _bypass_decode=false,
+        inconverter=None,
+        outconverter=None,
+        encoding_errors=None,
+        bypass_decode=false,
         convert_nulls=false,
         is_array=false
     ))]
@@ -6850,13 +6990,15 @@ impl ThinCursorImpl {
         typ: &Bound<'_, PyAny>,
         size: u32,
         num_elements: u32,
-        _inconverter: Option<Py<PyAny>>,
-        _outconverter: Option<Py<PyAny>>,
-        _encoding_errors: Option<String>,
-        _bypass_decode: bool,
+        inconverter: Option<Py<PyAny>>,
+        outconverter: Option<Py<PyAny>>,
+        encoding_errors: Option<String>,
+        bypass_decode: bool,
         convert_nulls: bool,
         is_array: bool,
     ) -> PyResult<Py<ThinVar>> {
+        let _ = inconverter;
+        let _ = encoding_errors;
         thin_var_from_type_spec(
             py,
             connection,
@@ -6864,8 +7006,9 @@ impl ThinCursorImpl {
             size,
             is_array,
             num_elements,
-            _outconverter,
+            outconverter,
             convert_nulls,
+            bypass_decode,
         )
     }
 
@@ -6988,6 +7131,12 @@ fn query_value_to_py(
             type_name,
             packed_data,
         }) => {
+            if type_name
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case("XMLTYPE"))
+            {
+                return decode_dbobject_xmltype(py, packed_data);
+            }
             let Some(owner_cursor) = owner_cursor else {
                 return Err(not_implemented("ThinCursorImpl DbObject value conversion"));
             };
