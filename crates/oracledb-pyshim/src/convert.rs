@@ -821,6 +821,45 @@ pub(crate) fn direct_lob_value_to_py(
     )
 }
 
+/// Decode character data that failed strict text decoding in the protocol
+/// layer using Python's codec machinery so the configured `encoding_errors`
+/// policy (or a genuine `UnicodeDecodeError` when none is set) is honored,
+/// exactly as the reference does (reference impl/base/converters.pyx:421-429).
+pub(crate) fn text_raw_to_py_str(
+    py: Python<'_>,
+    bytes: &[u8],
+    csfrm: u8,
+    encoding_errors: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    let encoding = if csfrm == CS_FORM_NCHAR {
+        "utf-16-be"
+    } else {
+        "utf-8"
+    };
+    let py_bytes = PyBytes::new(py, bytes);
+    let decoded = match encoding_errors {
+        Some(errors) => py_bytes.call_method1("decode", (encoding, errors))?,
+        None => py_bytes.call_method1("decode", (encoding,))?,
+    };
+    Ok(decoded.unbind())
+}
+
+pub(crate) fn interval_ds_to_py(
+    py: Python<'_>,
+    days: i32,
+    hours: i32,
+    minutes: i32,
+    seconds: i32,
+    fseconds: i32,
+) -> PyResult<Py<PyAny>> {
+    let timedelta = PyModule::import(py, "datetime")?.getattr("timedelta")?;
+    let total_seconds =
+        i64::from(hours) * 3600 + i64::from(minutes) * 60 + i64::from(seconds);
+    Ok(timedelta
+        .call1((days, total_seconds, i64::from(fseconds) / 1000))?
+        .unbind())
+}
+
 pub(crate) fn query_value_to_py(
     py: Python<'_>,
     value: &Option<QueryValue>,
@@ -831,6 +870,14 @@ pub(crate) fn query_value_to_py(
     match value {
         None => Ok(py.None()),
         Some(QueryValue::Text(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
+        Some(QueryValue::TextRaw { bytes, csfrm }) => text_raw_to_py_str(py, bytes, *csfrm, None),
+        Some(QueryValue::IntervalDS {
+            days,
+            hours,
+            minutes,
+            seconds,
+            fseconds,
+        }) => interval_ds_to_py(py, *days, *hours, *minutes, *seconds, *fseconds),
         Some(QueryValue::Rowid(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
         #[allow(clippy::useless_conversion)]
         // pre-existing lint at pre-split HEAD 978491a; not movement-induced

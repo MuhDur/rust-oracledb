@@ -64,10 +64,13 @@ pub const ORA_TYPE_NUM_CLOB: u8 = 112;
 pub const ORA_TYPE_NUM_BLOB: u8 = 113;
 pub const ORA_TYPE_NUM_BFILE: u8 = 114;
 pub const ORA_TYPE_NUM_OBJECT: u8 = 109;
+pub const ORA_TYPE_NUM_BINARY_FLOAT: u8 = 100;
 pub const ORA_TYPE_NUM_TIMESTAMP: u8 = 180;
 pub const ORA_TYPE_NUM_TIMESTAMP_TZ: u8 = 181;
+pub const ORA_TYPE_NUM_INTERVAL_DS: u8 = 183;
 pub const ORA_TYPE_NUM_UROWID: u8 = 208;
 pub const ORA_TYPE_NUM_TIMESTAMP_LTZ: u8 = 231;
+pub const ORA_TYPE_NUM_BOOLEAN: u8 = 252;
 pub const TNS_OBJ_TOP_LEVEL: u32 = 0x01;
 const TNS_LONG_LENGTH_INDICATOR: u8 = 254;
 const TNS_NULL_LENGTH_INDICATOR: u8 = 255;
@@ -139,8 +142,11 @@ const TNS_ERR_NO_DATA_FOUND: u32 = 1403;
 const TNS_UDS_FLAGS_IS_JSON: u32 = 0x01;
 const TNS_UDS_FLAGS_IS_OSON: u32 = 0x02;
 const ORA_TYPE_SIZE_BINARY_DOUBLE: u32 = 8;
+const ORA_TYPE_SIZE_BINARY_FLOAT: u32 = 4;
+const ORA_TYPE_SIZE_BOOLEAN: u32 = 4;
 const ORA_TYPE_SIZE_NUMBER: u32 = 22;
 const ORA_TYPE_SIZE_DATE: u32 = 7;
+const ORA_TYPE_SIZE_INTERVAL_DS: u32 = 11;
 const ORA_TYPE_SIZE_ROWID: u32 = 18;
 const ORA_TYPE_SIZE_TIMESTAMP: u32 = 11;
 const ORA_TYPE_SIZE_TIMESTAMP_TZ: u32 = 13;
@@ -281,9 +287,22 @@ pub struct BindTypeInfo {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QueryValue {
     Text(String),
+    /// Character data that could not be decoded as valid text; the raw bytes
+    /// are preserved so the caller can apply an `encoding_errors` policy.
+    TextRaw {
+        bytes: Vec<u8>,
+        csfrm: u8,
+    },
     Raw(Vec<u8>),
     Rowid(String),
     BinaryDouble(String),
+    IntervalDS {
+        days: i32,
+        hours: i32,
+        minutes: i32,
+        seconds: i32,
+        fseconds: i32,
+    },
     Number {
         text: String,
         is_integer: bool,
@@ -602,6 +621,12 @@ pub enum BindValue {
     Number(String),
     BinaryInteger(String),
     BinaryDouble(f64),
+    BinaryFloat(f64),
+    IntervalDS {
+        days: i32,
+        seconds: i32,
+        microseconds: i32,
+    },
     DateTime {
         year: i32,
         month: u8,
@@ -1131,6 +1156,8 @@ pub fn bind_value_type_info(value: &BindValue) -> Option<BindTypeInfo> {
         BindValue::Number(_) => (ORA_TYPE_NUM_NUMBER, 0, ORA_TYPE_SIZE_NUMBER),
         BindValue::BinaryInteger(_) => (ORA_TYPE_NUM_BINARY_INTEGER, 0, ORA_TYPE_SIZE_NUMBER),
         BindValue::BinaryDouble(_) => (ORA_TYPE_NUM_BINARY_DOUBLE, 0, ORA_TYPE_SIZE_BINARY_DOUBLE),
+        BindValue::BinaryFloat(_) => (ORA_TYPE_NUM_BINARY_FLOAT, 0, ORA_TYPE_SIZE_BINARY_FLOAT),
+        BindValue::IntervalDS { .. } => (ORA_TYPE_NUM_INTERVAL_DS, 0, ORA_TYPE_SIZE_INTERVAL_DS),
         BindValue::DateTime { .. } => (ORA_TYPE_NUM_DATE, 0, ORA_TYPE_SIZE_DATE),
         BindValue::Timestamp { ora_type_num, .. } => (
             *ora_type_num,
@@ -1268,9 +1295,14 @@ pub fn is_cursor_bind_template(value: &BindValue) -> bool {
 
 pub fn public_dbtype_name_from_type_name(type_name: &str) -> &'static str {
     match type_name {
-        "NUMBER" | "DB_TYPE_NUMBER" | "int" | "float" => "DB_TYPE_NUMBER",
+        "NUMBER" | "DB_TYPE_NUMBER" | "int" | "float" | "Decimal" => "DB_TYPE_NUMBER",
         "NATIVE_INT" | "DB_TYPE_BINARY_INTEGER" => "DB_TYPE_BINARY_INTEGER",
         "NATIVE_FLOAT" | "DB_TYPE_BINARY_DOUBLE" => "DB_TYPE_BINARY_DOUBLE",
+        "DB_TYPE_BINARY_FLOAT" | "BINARY_FLOAT" => "DB_TYPE_BINARY_FLOAT",
+        "DB_TYPE_BOOLEAN" | "BOOLEAN" | "bool" => "DB_TYPE_BOOLEAN",
+        "DB_TYPE_INTERVAL_DS" | "INTERVAL DAY TO SECOND" | "timedelta" => "DB_TYPE_INTERVAL_DS",
+        "DB_TYPE_BFILE" | "BFILE" => "DB_TYPE_BFILE",
+        "DB_TYPE_JSON" | "JSON" => "DB_TYPE_JSON",
         "STRING" | "DB_TYPE_VARCHAR" | "str" => "DB_TYPE_VARCHAR",
         "DB_TYPE_CHAR" => "DB_TYPE_CHAR",
         "DB_TYPE_NCHAR" => "DB_TYPE_NCHAR",
@@ -1320,6 +1352,7 @@ pub fn public_dbtype_name_from_column_metadata(metadata: &ColumnMetadata) -> &'s
         (ORA_TYPE_NUM_ROWID, _) => "DB_TYPE_ROWID",
         (ORA_TYPE_NUM_UROWID, _) => "DB_TYPE_UROWID",
         (ORA_TYPE_NUM_BINARY_DOUBLE, _) => "DB_TYPE_BINARY_DOUBLE",
+        (ORA_TYPE_NUM_BINARY_FLOAT, _) => "DB_TYPE_BINARY_FLOAT",
         (ORA_TYPE_NUM_BINARY_INTEGER, _) => "DB_TYPE_BINARY_INTEGER",
         (ORA_TYPE_NUM_NUMBER, _) => "DB_TYPE_NUMBER",
         (ORA_TYPE_NUM_CURSOR, _) => "DB_TYPE_CURSOR",
@@ -1332,7 +1365,116 @@ pub fn public_dbtype_name_from_column_metadata(metadata: &ColumnMetadata) -> &'s
         (ORA_TYPE_NUM_TIMESTAMP, _) => "DB_TYPE_TIMESTAMP",
         (ORA_TYPE_NUM_TIMESTAMP_LTZ, _) => "DB_TYPE_TIMESTAMP_LTZ",
         (ORA_TYPE_NUM_TIMESTAMP_TZ, _) => "DB_TYPE_TIMESTAMP_TZ",
+        (ORA_TYPE_NUM_INTERVAL_DS, _) => "DB_TYPE_INTERVAL_DS",
+        (ORA_TYPE_NUM_BOOLEAN, _) => "DB_TYPE_BOOLEAN",
         _ => "DB_TYPE_VARCHAR",
+    }
+}
+
+/// Mirrors the reference `DbType.default_size` / `_buffer_size_factor` table
+/// (reference impl/base/types.pyx:120-440). Returns
+/// `(default_size, buffer_size_factor)` for a public database type name.
+pub fn public_dbtype_size_info(dbtype_name: &str) -> (u32, u32) {
+    match dbtype_name {
+        "DB_TYPE_BFILE" => (0, 4000),
+        "DB_TYPE_BINARY_DOUBLE" => (0, ORA_TYPE_SIZE_BINARY_DOUBLE),
+        "DB_TYPE_BINARY_FLOAT" => (0, ORA_TYPE_SIZE_BINARY_FLOAT),
+        "DB_TYPE_BINARY_INTEGER" | "DB_TYPE_NUMBER" => (0, ORA_TYPE_SIZE_NUMBER),
+        "DB_TYPE_BLOB" | "DB_TYPE_CLOB" | "DB_TYPE_NCLOB" => (0, 112),
+        "DB_TYPE_BOOLEAN" => (0, ORA_TYPE_SIZE_BOOLEAN),
+        "DB_TYPE_CHAR" | "DB_TYPE_NCHAR" => (2000, 4),
+        "DB_TYPE_CURSOR" => (0, 4),
+        "DB_TYPE_DATE" => (0, ORA_TYPE_SIZE_DATE),
+        "DB_TYPE_INTERVAL_DS" => (0, ORA_TYPE_SIZE_INTERVAL_DS),
+        "DB_TYPE_INTERVAL_YM" => (0, 5),
+        "DB_TYPE_LONG" | "DB_TYPE_LONG_NVARCHAR" | "DB_TYPE_LONG_RAW" => (0, TNS_MAX_LONG_LENGTH),
+        "DB_TYPE_NVARCHAR" | "DB_TYPE_VARCHAR" => (4000, 4),
+        "DB_TYPE_RAW" => (4000, 1),
+        "DB_TYPE_ROWID" => (0, ORA_TYPE_SIZE_ROWID),
+        "DB_TYPE_TIMESTAMP" | "DB_TYPE_TIMESTAMP_LTZ" => (0, ORA_TYPE_SIZE_TIMESTAMP),
+        "DB_TYPE_TIMESTAMP_TZ" => (0, ORA_TYPE_SIZE_TIMESTAMP_TZ),
+        _ => (0, 0),
+    }
+}
+
+/// Mirrors the reference fetch-conversion legality matrix
+/// (reference impl/base/var.pyx:113-248 `_check_fetch_conversion`). Given the
+/// metadata of the column being fetched and the Oracle type requested by an
+/// output type handler variable, returns the metadata that should be used for
+/// the wire define. Conversions that only affect the Python materialization
+/// keep the original wire metadata; LOB and JSON sources adjust the define so
+/// the server sends inline data. Unsupported pairs return `Err(())` and the
+/// caller is expected to raise `DPY-4007`.
+pub fn check_fetch_conversion(
+    source: &ColumnMetadata,
+    to_ora_type_num: u8,
+    to_csfrm: u8,
+) -> std::result::Result<ColumnMetadata, ()> {
+    const CHAR_TYPES: [u8; 3] = [ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_VARCHAR];
+    let from = source.ora_type_num;
+    let to = to_ora_type_num;
+    if from == to {
+        return Ok(source.clone());
+    }
+    let supported = match from {
+        ORA_TYPE_NUM_BINARY_DOUBLE | ORA_TYPE_NUM_BINARY_FLOAT => matches!(
+            to,
+            ORA_TYPE_NUM_BINARY_INTEGER
+                | ORA_TYPE_NUM_BINARY_DOUBLE
+                | ORA_TYPE_NUM_BINARY_FLOAT
+                | ORA_TYPE_NUM_NUMBER
+        ) || CHAR_TYPES.contains(&to),
+        ORA_TYPE_NUM_BINARY_INTEGER => to == ORA_TYPE_NUM_NUMBER || CHAR_TYPES.contains(&to),
+        ORA_TYPE_NUM_BLOB => {
+            if matches!(to, ORA_TYPE_NUM_RAW | ORA_TYPE_NUM_LONG_RAW) {
+                let mut metadata = source.clone();
+                metadata.ora_type_num = ORA_TYPE_NUM_LONG_RAW;
+                metadata.csfrm = 0;
+                metadata.buffer_size = TNS_MAX_LONG_LENGTH;
+                metadata.max_size = 0;
+                return Ok(metadata);
+            }
+            false
+        }
+        ORA_TYPE_NUM_CHAR | ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_VARCHAR => matches!(
+            to,
+            ORA_TYPE_NUM_BINARY_DOUBLE
+                | ORA_TYPE_NUM_BINARY_FLOAT
+                | ORA_TYPE_NUM_NUMBER
+                | ORA_TYPE_NUM_BINARY_INTEGER
+        ) || CHAR_TYPES.contains(&to),
+        ORA_TYPE_NUM_CLOB => {
+            if CHAR_TYPES.contains(&to) {
+                let mut metadata = source.clone();
+                metadata.ora_type_num = ORA_TYPE_NUM_LONG;
+                metadata.buffer_size = TNS_MAX_LONG_LENGTH;
+                metadata.max_size = 0;
+                return Ok(metadata);
+            }
+            false
+        }
+        ORA_TYPE_NUM_DATE
+        | ORA_TYPE_NUM_TIMESTAMP
+        | ORA_TYPE_NUM_TIMESTAMP_LTZ
+        | ORA_TYPE_NUM_TIMESTAMP_TZ => matches!(
+            to,
+            ORA_TYPE_NUM_DATE
+                | ORA_TYPE_NUM_TIMESTAMP
+                | ORA_TYPE_NUM_TIMESTAMP_LTZ
+                | ORA_TYPE_NUM_TIMESTAMP_TZ
+        ) || CHAR_TYPES.contains(&to),
+        ORA_TYPE_NUM_INTERVAL_DS | ORA_TYPE_NUM_ROWID => CHAR_TYPES.contains(&to),
+        ORA_TYPE_NUM_NUMBER => matches!(
+            to,
+            ORA_TYPE_NUM_BINARY_INTEGER | ORA_TYPE_NUM_BINARY_DOUBLE | ORA_TYPE_NUM_BINARY_FLOAT
+        ) || CHAR_TYPES.contains(&to),
+        _ => false,
+    };
+    let _ = to_csfrm;
+    if supported {
+        Ok(source.clone())
+    } else {
+        Err(())
     }
 }
 
@@ -1448,6 +1590,8 @@ pub fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
         BindValue::Number(_) => "DB_TYPE_NUMBER",
         BindValue::BinaryInteger(_) => "DB_TYPE_BINARY_INTEGER",
         BindValue::BinaryDouble(_) => "DB_TYPE_BINARY_DOUBLE",
+        BindValue::BinaryFloat(_) => "DB_TYPE_BINARY_FLOAT",
+        BindValue::IntervalDS { .. } => "DB_TYPE_INTERVAL_DS",
         BindValue::DateTime { .. } => "DB_TYPE_DATE",
         BindValue::Timestamp { ora_type_num, .. } => match *ora_type_num {
             ORA_TYPE_NUM_TIMESTAMP_LTZ => "DB_TYPE_TIMESTAMP_LTZ",
@@ -1463,7 +1607,7 @@ pub fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
     let text_buffer_size = if size == 0 { 4000 } else { size.max(1) };
     let nchar_buffer_size = text_buffer_size.saturating_mul(4);
     match type_name {
-        "NUMBER" | "DB_TYPE_NUMBER" | "int" | "float" => BindValue::TypedNull {
+        "NUMBER" | "DB_TYPE_NUMBER" | "int" | "float" | "Decimal" => BindValue::TypedNull {
             ora_type_num: ORA_TYPE_NUM_NUMBER,
             csfrm: 0,
             buffer_size: ORA_TYPE_SIZE_NUMBER,
@@ -1477,6 +1621,21 @@ pub fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
             ora_type_num: ORA_TYPE_NUM_BINARY_DOUBLE,
             csfrm: 0,
             buffer_size: ORA_TYPE_SIZE_BINARY_DOUBLE,
+        },
+        "DB_TYPE_BINARY_FLOAT" | "BINARY_FLOAT" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_BINARY_FLOAT,
+            csfrm: 0,
+            buffer_size: ORA_TYPE_SIZE_BINARY_FLOAT,
+        },
+        "DB_TYPE_BOOLEAN" | "BOOLEAN" | "bool" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_BOOLEAN,
+            csfrm: 0,
+            buffer_size: ORA_TYPE_SIZE_BOOLEAN,
+        },
+        "DB_TYPE_INTERVAL_DS" | "INTERVAL DAY TO SECOND" | "timedelta" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_INTERVAL_DS,
+            csfrm: 0,
+            buffer_size: ORA_TYPE_SIZE_INTERVAL_DS,
         },
         "STRING" | "DB_TYPE_VARCHAR" | "DB_TYPE_CHAR" | "str" => BindValue::TypedNull {
             ora_type_num: ORA_TYPE_NUM_VARCHAR,
@@ -1581,6 +1740,9 @@ pub fn dbobject_element_bind_type_info(dbtype_name: &str, max_size: u32) -> Bind
 fn public_dbtype_name_from_type_info(ora_type_num: u8, csfrm: u8) -> &'static str {
     match (ora_type_num, csfrm) {
         (ORA_TYPE_NUM_BINARY_DOUBLE, _) => "DB_TYPE_BINARY_DOUBLE",
+        (ORA_TYPE_NUM_BINARY_FLOAT, _) => "DB_TYPE_BINARY_FLOAT",
+        (ORA_TYPE_NUM_INTERVAL_DS, _) => "DB_TYPE_INTERVAL_DS",
+        (ORA_TYPE_NUM_BOOLEAN, _) => "DB_TYPE_BOOLEAN",
         (ORA_TYPE_NUM_BINARY_INTEGER, _) => "DB_TYPE_BINARY_INTEGER",
         (ORA_TYPE_NUM_NUMBER, _) => "DB_TYPE_NUMBER",
         (ORA_TYPE_NUM_CHAR, CS_FORM_NCHAR) | (ORA_TYPE_NUM_VARCHAR, CS_FORM_NCHAR) => {
@@ -1647,6 +1809,18 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm: u8) -> Res
         }
         BindValue::BinaryDouble(value) => {
             let bytes = encode_binary_double(*value);
+            writer.write_bytes_with_length(&bytes)
+        }
+        BindValue::BinaryFloat(value) => {
+            let bytes = encode_binary_float(*value);
+            writer.write_bytes_with_length(&bytes)
+        }
+        BindValue::IntervalDS {
+            days,
+            seconds,
+            microseconds,
+        } => {
+            let bytes = encode_interval_ds(*days, *seconds, *microseconds)?;
             writer.write_bytes_with_length(&bytes)
         }
         BindValue::DateTime {
@@ -2815,7 +2989,17 @@ fn parse_column_value(
             let Some(bytes) = reader.read_bytes()? else {
                 return Ok(None);
             };
-            decode_text_value(&bytes, metadata.csfrm).map(|value| Some(QueryValue::Text(value)))
+            match decode_text_value(&bytes, metadata.csfrm) {
+                Ok(value) => Ok(Some(QueryValue::Text(value))),
+                // preserve the raw bytes so the caller can honor the
+                // configured encoding_errors policy (or raise a Python
+                // UnicodeDecodeError as the reference does)
+                Err(ProtocolError::TtcDecode(_)) => Ok(Some(QueryValue::TextRaw {
+                    bytes,
+                    csfrm: metadata.csfrm,
+                })),
+                Err(err) => Err(err),
+            }
         }
         ORA_TYPE_NUM_RAW | ORA_TYPE_NUM_LONG_RAW => Ok(reader.read_bytes()?.map(QueryValue::Raw)),
         ORA_TYPE_NUM_ROWID => parse_rowid_value(reader).map(|value| value.map(QueryValue::Rowid)),
@@ -2832,6 +3016,19 @@ fn parse_column_value(
             };
             decode_binary_double(&bytes)
                 .map(|value| Some(QueryValue::BinaryDouble(value.to_string())))
+        }
+        ORA_TYPE_NUM_BINARY_FLOAT => {
+            let Some(bytes) = reader.read_bytes()? else {
+                return Ok(None);
+            };
+            decode_binary_float(&bytes)
+                .map(|value| Some(QueryValue::BinaryDouble(f64::from(value).to_string())))
+        }
+        ORA_TYPE_NUM_INTERVAL_DS => {
+            let Some(bytes) = reader.read_bytes()? else {
+                return Ok(None);
+            };
+            decode_interval_ds(&bytes).map(Some)
         }
         ORA_TYPE_NUM_DATE
         | ORA_TYPE_NUM_TIMESTAMP
@@ -3323,6 +3520,73 @@ fn encode_binary_double(value: f64) -> [u8; 8] {
         }
     }
     bytes
+}
+
+fn encode_binary_float(value: f64) -> [u8; 4] {
+    let mut bytes = (value as f32).to_bits().to_be_bytes();
+    if bytes[0] & 0x80 == 0 {
+        bytes[0] |= 0x80;
+    } else {
+        for byte in &mut bytes {
+            *byte = !*byte;
+        }
+    }
+    bytes
+}
+
+fn decode_binary_float(bytes: &[u8]) -> Result<f32> {
+    let bytes: [u8; 4] = bytes
+        .try_into()
+        .map_err(|_| ProtocolError::TtcDecode("invalid BINARY_FLOAT length"))?;
+    let mut decoded = bytes;
+    if decoded[0] & 0x80 != 0 {
+        decoded[0] &= 0x7f;
+    } else {
+        for byte in &mut decoded {
+            *byte = !*byte;
+        }
+    }
+    Ok(f32::from_bits(u32::from_be_bytes(decoded)))
+}
+
+const TNS_DURATION_MID: i64 = 0x8000_0000;
+const TNS_DURATION_OFFSET: i32 = 60;
+
+fn encode_interval_ds(days: i32, seconds: i32, microseconds: i32) -> Result<[u8; 11]> {
+    let mut bytes = [0u8; 11];
+    let wire_days = u32::try_from(i64::from(days) + TNS_DURATION_MID)
+        .map_err(|_| ProtocolError::TtcDecode("INTERVAL DS days out of range"))?;
+    bytes[..4].copy_from_slice(&wire_days.to_be_bytes());
+    let to_offset_byte = |value: i32| -> Result<u8> {
+        u8::try_from(value + TNS_DURATION_OFFSET)
+            .map_err(|_| ProtocolError::TtcDecode("INTERVAL DS component out of range"))
+    };
+    bytes[4] = to_offset_byte(seconds / 3600)?;
+    bytes[5] = to_offset_byte((seconds % 3600) / 60)?;
+    bytes[6] = to_offset_byte(seconds % 60)?;
+    let fseconds = i64::from(microseconds) * 1000;
+    let wire_fseconds = u32::try_from(fseconds + TNS_DURATION_MID)
+        .map_err(|_| ProtocolError::TtcDecode("INTERVAL DS fractional seconds out of range"))?;
+    bytes[7..].copy_from_slice(&wire_fseconds.to_be_bytes());
+    Ok(bytes)
+}
+
+fn decode_interval_ds(bytes: &[u8]) -> Result<QueryValue> {
+    if bytes.len() < 11 {
+        return Err(ProtocolError::TtcDecode("invalid INTERVAL DS length"));
+    }
+    let days_wire = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let fseconds_wire = u32::from_be_bytes([bytes[7], bytes[8], bytes[9], bytes[10]]);
+    let to_component = |value: i64| -> Result<i32> {
+        i32::try_from(value).map_err(|_| ProtocolError::TtcDecode("INTERVAL DS out of range"))
+    };
+    Ok(QueryValue::IntervalDS {
+        days: to_component(i64::from(days_wire) - TNS_DURATION_MID)?,
+        hours: i32::from(bytes[4]) - TNS_DURATION_OFFSET,
+        minutes: i32::from(bytes[5]) - TNS_DURATION_OFFSET,
+        seconds: i32::from(bytes[6]) - TNS_DURATION_OFFSET,
+        fseconds: to_component(i64::from(fseconds_wire) - TNS_DURATION_MID)?,
+    })
 }
 
 fn decode_binary_double(bytes: &[u8]) -> Result<f64> {

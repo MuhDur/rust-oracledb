@@ -998,8 +998,6 @@ impl ThinCursorImpl {
         convert_nulls: bool,
         is_array: bool,
     ) -> PyResult<Py<ThinVar>> {
-        let _ = inconverter;
-        let _ = encoding_errors;
         thin_var_from_type_spec(
             py,
             connection,
@@ -1007,7 +1005,9 @@ impl ThinCursorImpl {
             size,
             is_array,
             num_elements,
+            inconverter,
             outconverter,
+            encoding_errors,
             convert_nulls,
             bypass_decode,
         )

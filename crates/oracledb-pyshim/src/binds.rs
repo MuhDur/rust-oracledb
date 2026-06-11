@@ -530,7 +530,7 @@ pub(crate) fn extract_positional_bind_values_for_execute(
             positional_input_size_value(py, named_input_sizes, position)
         {
             if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
-                var.set_py_value(Some(value.clone().unbind()))?;
+                var.set_py_value(py, Some(value.clone().unbind()))?;
                 var.to_bind_value(py)?
             } else {
                 py_value_to_execute_bind(&value)?
@@ -677,7 +677,7 @@ pub(crate) fn extract_named_bind_values(
                             {
                                 bind_recording_executemany_input_value(py, &var, &value)?
                             } else {
-                                var.set_py_value(Some(value.clone().unbind()))?;
+                                var.set_py_value(py, Some(value.clone().unbind()))?;
                                 var.to_bind_value(py)?
                             }
                         } else {
@@ -850,7 +850,7 @@ pub(crate) fn bind_recording_executemany_input_value(
     var: &PyRef<'_, ThinVar>,
     value: &Bound<'_, PyAny>,
 ) -> PyResult<BindValue> {
-    var.set_bind_py_value(Some(value.clone().unbind()))?;
+    var.set_bind_py_value(py, Some(value.clone().unbind()))?;
     let bind = var.to_bind_value(py)?;
     var.push_returned_py_value(value.clone().unbind())?;
     Ok(bind)
@@ -1015,7 +1015,7 @@ pub(crate) fn extract_positional_bind_var_objects_for_execute(
         };
         if let Some(input_size_var) = positional_input_size_value(py, named_input_sizes, position) {
             if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
-                var.set_py_value(Some(value.clone().unbind()))?;
+                var.set_py_value(py, Some(value.clone().unbind()))?;
             }
             values.push(bind_var_from_value(py, input_size_var.bind(py))?);
         } else {
@@ -1048,7 +1048,7 @@ pub(crate) fn extract_named_bind_var_objects(
             if let Some(value) = get_named_bind_value(parameters, &name)? {
                 if let Some(input_size_var) = input_size_var {
                     if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
-                        var.set_py_value(Some(value.clone().unbind()))?;
+                        var.set_py_value(py, Some(value.clone().unbind()))?;
                     }
                     values.push(bind_var_from_value(py, input_size_var.bind(py))?);
                 } else {

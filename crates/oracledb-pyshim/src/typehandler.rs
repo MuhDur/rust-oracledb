@@ -44,17 +44,16 @@ impl FetchHandlerCursor {
         bypass_decode: bool,
         convert_nulls: bool,
     ) -> PyResult<Py<ThinVar>> {
-        let _ = arraysize;
-        let _ = inconverter;
-        let _ = encoding_errors;
         thin_var_from_type_spec(
             py,
             self.connection.bind(py),
             typ,
             size,
             false,
-            1,
+            arraysize,
+            inconverter,
             outconverter,
+            encoding_errors,
             convert_nulls,
             bypass_decode,
         )
