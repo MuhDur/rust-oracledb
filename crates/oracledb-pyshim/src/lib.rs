@@ -1666,6 +1666,23 @@ fn bind_name_matches_key(bind_name: &str, key: &str) -> bool {
 fn output_only_bind(value: BindValue) -> BindValue {
     let (ora_type_num, csfrm, buffer_size) = match value {
         BindValue::Null => (ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 1),
+        BindValue::ObjectOutput {
+            schema,
+            type_name,
+            oid,
+            version,
+            buffer_size,
+            ..
+        } => {
+            return BindValue::ObjectOutput {
+                schema,
+                type_name,
+                oid,
+                version,
+                buffer_size: buffer_size.max(1),
+                is_return: false,
+            };
+        }
         BindValue::TypedNull {
             ora_type_num,
             csfrm,
@@ -1721,6 +1738,24 @@ fn output_only_bind(value: BindValue) -> BindValue {
 }
 
 fn returning_output_bind(value: BindValue) -> BindValue {
+    if let BindValue::ObjectOutput {
+        schema,
+        type_name,
+        oid,
+        version,
+        buffer_size,
+        ..
+    } = value
+    {
+        return BindValue::ObjectOutput {
+            schema,
+            type_name,
+            oid,
+            version,
+            buffer_size: buffer_size.max(1),
+            is_return: true,
+        };
+    }
     let BindValue::Output {
         ora_type_num,
         csfrm,
@@ -2279,12 +2314,14 @@ fn thin_var_from_type_spec(
 ) -> PyResult<Py<ThinVar>> {
     let type_name = py_type_name(typ);
     let object_type = py_db_object_type_impl(typ)?;
-    let default_bind = if object_type.is_some() {
-        BindValue::TypedNull {
-            ora_type_num: ORA_TYPE_NUM_VARCHAR,
-            csfrm: CS_FORM_IMPLICIT,
-            buffer_size: size.max(4000),
-        }
+    let default_bind = if let Some(object_type) = object_type.as_ref() {
+        object_type
+            .collection_output_bind()
+            .unwrap_or(BindValue::TypedNull {
+                ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                csfrm: CS_FORM_IMPLICIT,
+                buffer_size: size.max(4000),
+            })
     } else {
         bind_template_from_type_name(&type_name, size)
     };
@@ -2376,6 +2413,9 @@ fn bind_type_info(value: &BindValue) -> Option<(u8, u8, u32)> {
             csfrm,
             buffer_size,
         } => Some((*ora_type_num, *csfrm, (*buffer_size).max(1))),
+        BindValue::ObjectOutput { buffer_size, .. } => {
+            Some((ORA_TYPE_NUM_OBJECT, 0, (*buffer_size).max(1)))
+        }
         BindValue::Text(value) => Some((
             ORA_TYPE_NUM_VARCHAR,
             CS_FORM_IMPLICIT,
@@ -3009,6 +3049,23 @@ impl ThinVar {
                 let object = DbObjectImpl::with_attr(py, object_type, &attr_name, value.clone())?;
                 py_db_object_from_impl(py, object)?
             }
+            (
+                ThinVarReturnKind::Plain,
+                Some(QueryValue::Object {
+                    packed_data,
+                    schema: _,
+                    type_name: _,
+                }),
+            ) if self.object_type.is_some() => {
+                let object_type = self
+                    .object_type
+                    .clone()
+                    .ok_or_else(|| PyRuntimeError::new_err("missing object type"))?;
+                py_db_object_from_impl(
+                    py,
+                    DbObjectImpl::with_packed_data(object_type, packed_data.clone(), None),
+                )?
+            }
             _ => query_value_to_py(py, value, None, None)?,
         };
         if let Some(outconverter) = self.outconverter.as_ref() {
@@ -3244,18 +3301,7 @@ struct ThinConnImpl {
 }
 
 impl ThinConnImpl {
-    fn execute_statement(&self, sql: &str) -> PyResult<()> {
-        let call_timeout = self.call_timeout()?;
-        let mut guard = self.connection.lock().map_err(runtime_error)?;
-        let connection = guard
-            .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-        BlockingConnection::execute_query_with_timeout(connection, sql, 1, call_timeout)
-            .map_err(runtime_error)?;
-        Ok(())
-    }
-
-    fn execute_statement_with_binds(&self, sql: &str, binds: &[BindValue]) -> PyResult<()> {
+    fn execute_with_binds(&self, sql: &str, binds: &[BindValue]) -> PyResult<QueryResult> {
         let call_timeout = self.call_timeout()?;
         let mut guard = self.connection.lock().map_err(runtime_error)?;
         let connection = guard
@@ -3268,7 +3314,22 @@ impl ThinConnImpl {
             binds,
             call_timeout,
         )
-        .map_err(runtime_error)?;
+        .map_err(runtime_error)
+    }
+
+    fn execute_statement(&self, sql: &str) -> PyResult<()> {
+        let call_timeout = self.call_timeout()?;
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        BlockingConnection::execute_query_with_timeout(connection, sql, 1, call_timeout)
+            .map_err(runtime_error)?;
+        Ok(())
+    }
+
+    fn execute_statement_with_binds(&self, sql: &str, binds: &[BindValue]) -> PyResult<()> {
+        self.execute_with_binds(sql, binds)?;
         Ok(())
     }
 
@@ -3294,19 +3355,7 @@ impl ThinConnImpl {
         sql: &str,
         binds: &[BindValue],
     ) -> PyResult<Option<Vec<Option<QueryValue>>>> {
-        let call_timeout = self.call_timeout()?;
-        let mut guard = self.connection.lock().map_err(runtime_error)?;
-        let connection = guard
-            .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-        let result = BlockingConnection::execute_query_with_binds_and_timeout(
-            connection,
-            sql,
-            1,
-            binds,
-            call_timeout,
-        )
-        .map_err(runtime_error)?;
+        let result = self.execute_with_binds(sql, binds)?;
         Ok(result.rows.into_iter().next())
     }
 
@@ -3602,6 +3651,89 @@ impl ThinConnImpl {
         Ok((Some(element_metadata), max_num_elements, is_assoc_array))
     }
 
+    fn object_type_identity(
+        &self,
+        schema: &str,
+        type_name: &str,
+    ) -> PyResult<(Option<Vec<u8>>, u32)> {
+        let schema = schema.to_ascii_uppercase();
+        let type_name = type_name.to_ascii_uppercase();
+        let oid_from_catalog = self
+            .query_first_row_with_binds(
+                "select type_oid from all_types where owner = :1 and type_name = :2",
+                &[
+                    BindValue::Text(schema.clone()),
+                    BindValue::Text(type_name.clone()),
+                ],
+            )?
+            .and_then(|row| match row.first() {
+                Some(Some(QueryValue::Raw(bytes))) => Some(bytes.clone()),
+                _ => None,
+            });
+        let result = self.execute_with_binds(
+            "declare \
+                 t_instantiable varchar2(3); \
+                 t_super_type_owner varchar2(128); \
+                 t_super_type_name varchar2(128); \
+                 t_subtype_ref_cursor sys_refcursor; \
+             begin \
+                 :1 := dbms_pickler.get_type_shape(:2, :3, :4, :5, \
+                     t_instantiable, t_super_type_owner, t_super_type_name, \
+                     :6, t_subtype_ref_cursor); \
+             end;",
+            &[
+                BindValue::Output {
+                    ora_type_num: ORA_TYPE_NUM_NUMBER,
+                    csfrm: 0,
+                    buffer_size: 22,
+                },
+                BindValue::Text(format!("{schema}.{type_name}")),
+                BindValue::Output {
+                    ora_type_num: ORA_TYPE_NUM_RAW,
+                    csfrm: 0,
+                    buffer_size: 64,
+                },
+                BindValue::Output {
+                    ora_type_num: ORA_TYPE_NUM_NUMBER,
+                    csfrm: 0,
+                    buffer_size: 22,
+                },
+                BindValue::Output {
+                    ora_type_num: ORA_TYPE_NUM_RAW,
+                    csfrm: 0,
+                    buffer_size: 32767,
+                },
+                BindValue::Output {
+                    ora_type_num: ORA_TYPE_NUM_CURSOR,
+                    csfrm: 0,
+                    buffer_size: 4,
+                },
+            ],
+        )?;
+        let oid = result
+            .out_values
+            .iter()
+            .find_map(|(index, value)| match (index, value) {
+                (2, Some(QueryValue::Raw(bytes))) => Some(bytes.clone()),
+                _ => None,
+            })
+            .or(oid_from_catalog);
+        let version = result
+            .out_values
+            .iter()
+            .find_map(|(index, value)| {
+                (*index == 3)
+                    .then(|| {
+                        query_value_to_i64(value)
+                            .ok()
+                            .and_then(|value| u32::try_from(value).ok())
+                    })
+                    .flatten()
+            })
+            .unwrap_or(0);
+        Ok((oid, version))
+    }
+
     fn object_type_shallow(&self, schema: &str, type_name: &str) -> PyResult<DbObjectTypeImpl> {
         let typecode = self
             .query_first_row_with_binds(
@@ -3620,6 +3752,7 @@ impl ThinConnImpl {
         } else {
             self.object_type_attrs(schema, type_name)?
         };
+        let (oid, version) = self.object_type_identity(schema, type_name)?;
         Ok(DbObjectTypeImpl::new(
             schema.to_ascii_uppercase(),
             None,
@@ -3629,7 +3762,8 @@ impl ThinConnImpl {
             element_metadata,
             max_num_elements,
             is_assoc_array,
-        ))
+        )
+        .with_type_identity(oid, version))
     }
 
     fn plsql_type_shallow(
@@ -4044,6 +4178,7 @@ impl ThinConnImpl {
         let attrs = self.object_type_attrs(&schema, &type_name)?;
         let (element_metadata, max_num_elements, is_assoc_array) =
             self.object_type_collection_metadata(&schema, &type_name)?;
+        let (oid, version) = self.object_type_identity(&schema, &type_name)?;
         Ok(DbObjectTypeImpl::new(
             schema.to_ascii_uppercase(),
             None,
@@ -4053,7 +4188,8 @@ impl ThinConnImpl {
             element_metadata,
             max_num_elements,
             is_assoc_array,
-        ))
+        )
+        .with_type_identity(oid, version))
     }
 
     fn get_call_timeout(&self) -> PyResult<u32> {
@@ -4295,6 +4431,8 @@ struct DbObjectTypeImpl {
     schema: String,
     package_name: Option<String>,
     name: String,
+    oid: Option<Vec<u8>>,
+    version: u32,
     is_collection: bool,
     attrs: Vec<DbObjectAttrImpl>,
     element_metadata: Option<Box<DbObjectAttrImpl>>,
@@ -4317,6 +4455,8 @@ impl DbObjectTypeImpl {
             schema,
             package_name,
             name,
+            oid: None,
+            version: 0,
             is_collection: typecode.eq_ignore_ascii_case("COLLECTION"),
             attrs,
             element_metadata: element_metadata.map(Box::new),
@@ -4342,6 +4482,27 @@ impl DbObjectTypeImpl {
             0,
             false,
         ))
+    }
+
+    fn with_type_identity(mut self, oid: Option<Vec<u8>>, version: u32) -> Self {
+        self.oid = oid;
+        self.version = version;
+        self
+    }
+
+    fn collection_output_bind(&self) -> Option<BindValue> {
+        if !self.is_collection {
+            return None;
+        }
+        let oid = self.oid.clone()?;
+        Some(BindValue::ObjectOutput {
+            schema: self.schema.clone(),
+            type_name: self.name.clone(),
+            oid,
+            version: self.version.max(1),
+            buffer_size: 1,
+            is_return: false,
+        })
     }
 
     fn default_scalar_return_attr(&self) -> Option<&str> {

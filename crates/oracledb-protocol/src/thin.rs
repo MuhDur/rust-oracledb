@@ -63,6 +63,7 @@ pub const ORA_TYPE_NUM_OBJECT: u8 = 109;
 pub const ORA_TYPE_NUM_TIMESTAMP: u8 = 180;
 pub const ORA_TYPE_NUM_TIMESTAMP_TZ: u8 = 181;
 pub const ORA_TYPE_NUM_TIMESTAMP_LTZ: u8 = 231;
+pub const TNS_OBJ_TOP_LEVEL: u32 = 0x01;
 
 pub const CS_FORM_IMPLICIT: u8 = 1;
 pub const CS_FORM_NCHAR: u8 = 2;
@@ -293,6 +294,14 @@ pub enum BindValue {
         ora_type_num: u8,
         csfrm: u8,
         buffer_size: u32,
+    },
+    ObjectOutput {
+        schema: String,
+        type_name: String,
+        oid: Vec<u8>,
+        version: u32,
+        buffer_size: u32,
+        is_return: bool,
     },
     Text(String),
     Raw(Vec<u8>),
@@ -619,7 +628,7 @@ fn write_bind_params(
         return Ok(());
     };
     for value in first_row {
-        write_bind_metadata(writer, value);
+        write_bind_metadata(writer, value)?;
     }
     for row in bind_rows {
         if !is_plsql && row.iter().all(BindValue::is_output_only) {
@@ -640,15 +649,23 @@ impl BindValue {
     fn is_output_only(&self) -> bool {
         matches!(self, BindValue::Output { .. })
             || matches!(self, BindValue::ReturnOutput { .. })
+            || matches!(self, BindValue::ObjectOutput { .. })
             || matches!(self, BindValue::Array { values, .. } if values.is_empty())
     }
 
     fn is_return_output(&self) -> bool {
         matches!(self, BindValue::ReturnOutput { .. })
+            || matches!(
+                self,
+                BindValue::ObjectOutput {
+                    is_return: true,
+                    ..
+                }
+            )
     }
 }
 
-fn write_bind_metadata(writer: &mut TtcWriter, value: &BindValue) {
+fn write_bind_metadata(writer: &mut TtcWriter, value: &BindValue) -> Result<()> {
     let (ora_type_num, csfrm, buffer_size) = bind_metadata(value);
     let (flags, max_elements) = match value {
         BindValue::Array { max_elements, .. } => {
@@ -663,8 +680,13 @@ fn write_bind_metadata(writer: &mut TtcWriter, value: &BindValue) {
     writer.write_ub4(buffer_size);
     writer.write_ub4(max_elements);
     writer.write_ub8(0);
-    writer.write_ub4(0);
-    writer.write_ub2(0);
+    if let BindValue::ObjectOutput { oid, version, .. } = value {
+        writer.write_bytes_with_two_lengths(Some(oid))?;
+        writer.write_ub4(*version);
+    } else {
+        writer.write_ub4(0);
+        writer.write_ub2(0);
+    }
     if csfrm != 0 {
         writer.write_ub2(TNS_CHARSET_UTF8);
     } else {
@@ -673,6 +695,7 @@ fn write_bind_metadata(writer: &mut TtcWriter, value: &BindValue) {
     writer.write_u8(csfrm);
     writer.write_ub4(0);
     writer.write_ub4(0);
+    Ok(())
 }
 
 fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
@@ -693,6 +716,9 @@ fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
             csfrm,
             buffer_size,
         } => (*ora_type_num, *csfrm, (*buffer_size).max(1)),
+        BindValue::ObjectOutput { buffer_size, .. } => {
+            (ORA_TYPE_NUM_OBJECT, 0, (*buffer_size).max(1))
+        }
         BindValue::Text(value) => (
             ORA_TYPE_NUM_VARCHAR,
             CS_FORM_IMPLICIT,
@@ -743,6 +769,15 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue) -> Result<()> {
         }
         BindValue::Output { .. } | BindValue::ReturnOutput { .. } => {
             writer.write_u8(0);
+            Ok(())
+        }
+        BindValue::ObjectOutput { .. } => {
+            writer.write_ub4(0);
+            writer.write_ub4(0);
+            writer.write_ub4(0);
+            writer.write_ub2(0);
+            writer.write_ub4(0);
+            writer.write_ub4(TNS_OBJ_TOP_LEVEL);
             Ok(())
         }
         BindValue::Text(value) => writer.write_bytes_with_length(value.as_bytes()),
@@ -1117,6 +1152,14 @@ fn parse_query_response_with_context_and_binds(
 
 fn bind_column_metadata(value: &BindValue) -> ColumnMetadata {
     let (ora_type_num, csfrm, buffer_size) = bind_metadata(value);
+    let object_schema = match value {
+        BindValue::ObjectOutput { schema, .. } => Some(schema.clone()),
+        _ => None,
+    };
+    let object_type_name = match value {
+        BindValue::ObjectOutput { type_name, .. } => Some(type_name.clone()),
+        _ => None,
+    };
     ColumnMetadata {
         name: String::new(),
         ora_type_num,
@@ -1128,8 +1171,8 @@ fn bind_column_metadata(value: &BindValue) -> ColumnMetadata {
         nulls_allowed: true,
         is_json: false,
         is_oson: false,
-        object_schema: None,
-        object_type_name: None,
+        object_schema,
+        object_type_name,
         is_array: matches!(value, BindValue::Array { .. }),
     }
 }
