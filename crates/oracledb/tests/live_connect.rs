@@ -1,11 +1,14 @@
-use asupersync::{runtime::RuntimeBuilder, Cx};
+use asupersync::runtime::{reactor, RuntimeBuilder};
+use asupersync::Cx;
 use oracledb::{ConnectOptions, Connection};
 use oracledb_protocol::{thin::QueryValue, ClientIdentity};
 
 #[test]
 #[ignore = "requires local Oracle listener from scripts/container.sh up"]
 fn live_connect_ping_and_close() {
+    let reactor = reactor::create_reactor().expect("native reactor should build for live I/O");
     let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
         .build()
         .expect("current-thread Asupersync runtime should build");
 

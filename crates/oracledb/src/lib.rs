@@ -1,12 +1,14 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::Shutdown;
 use std::process;
 use std::time::Duration;
 
-use asupersync::{runtime::RuntimeBuilder, Cx};
+use asupersync::io::{AsyncReadExt, AsyncWriteExt};
+use asupersync::net::TcpStream;
+use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
+use asupersync::{time, Cx};
 use oracledb_protocol::thin::{
     build_auth_phase_two_payload_with_context_with_seq, build_connect_packet_payload,
     build_define_fetch_payload_with_seq, build_execute_payload_with_bind_rows_with_seq,
@@ -107,9 +109,7 @@ pub struct Connection {
 }
 
 #[derive(Debug)]
-pub struct CancelHandle {
-    stream: TcpStream,
-}
+pub struct CancelHandle {}
 
 impl Connection {
     pub async fn connect(cx: &Cx, options: ConnectOptions) -> Result<Self> {
@@ -118,10 +118,12 @@ impl Connection {
         let descriptor = EasyConnect::parse(&options.connect_string)?;
         let identity = options.identity;
         trace_connect_step("tcp connect");
-        let mut stream = TcpStream::connect((descriptor.host.as_str(), descriptor.port))?;
+        let mut stream = TcpStream::connect_timeout(
+            (descriptor.host.clone(), descriptor.port),
+            Duration::from_secs(20),
+        )
+        .await?;
         stream.set_nodelay(true)?;
-        stream.set_read_timeout(Some(Duration::from_secs(20)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(20)))?;
         trace_connect_step("tcp connected");
 
         let connect_descriptor = listener_connect_descriptor(&descriptor, &identity);
@@ -136,11 +138,11 @@ impl Connection {
         )?;
         trace_connect_bytes("CONNECT packet", &packet);
         trace_connect_step("send CONNECT");
-        stream.write_all(&packet)?;
-        stream.flush()?;
+        stream.write_all(&packet).await?;
+        stream.flush().await?;
 
         trace_connect_step("read ACCEPT");
-        let accept = read_packet(&mut stream, PacketLengthWidth::Legacy16)?;
+        let accept = read_packet(&mut stream, PacketLengthWidth::Legacy16).await?;
         match accept.packet_type {
             TNS_PACKET_TYPE_ACCEPT => {}
             TNS_PACKET_TYPE_REDIRECT => return Err(Error::RedirectUnsupported),
@@ -176,9 +178,9 @@ impl Connection {
         )?;
         trace_connect_bytes("AUTH phase one payload", &auth_one);
         trace_connect_step("send AUTH phase one");
-        send_data_packet(&mut stream, &auth_one, sdu)?;
+        send_data_packet(&mut stream, &auth_one, sdu).await?;
         trace_connect_step("read AUTH phase one");
-        let auth_one_response = read_data_response(&mut stream)?;
+        let auth_one_response = read_data_response(&mut stream).await?;
         trace_connect_bytes("AUTH phase one response", &auth_one_response);
         let auth_one = parse_auth_response(&auth_one_response)?;
         let capabilities = auth_one.capabilities.unwrap_or_default();
@@ -203,9 +205,9 @@ impl Connection {
         )?;
         trace_connect_bytes("AUTH phase two payload", &auth_two);
         trace_connect_step("send AUTH phase two");
-        send_data_packet(&mut stream, &auth_two, sdu)?;
+        send_data_packet(&mut stream, &auth_two, sdu).await?;
         trace_connect_step("read AUTH phase two");
-        let auth_two_response = read_data_response(&mut stream)?;
+        let auth_two_response = read_data_response(&mut stream).await?;
         trace_connect_bytes("AUTH phase two response", &auth_two_response);
         let auth_two = parse_auth_response(&auth_two_response)?;
         oracledb_protocol::crypto::verify_server_response(
@@ -256,9 +258,7 @@ impl Connection {
     }
 
     pub fn cancel_handle(&self) -> Result<CancelHandle> {
-        Ok(CancelHandle {
-            stream: self.stream.try_clone()?,
-        })
+        Ok(CancelHandle {})
     }
 
     pub async fn ping(&mut self, cx: &Cx) -> Result<()> {
@@ -269,8 +269,9 @@ impl Connection {
             &mut self.stream,
             &build_function_payload_with_seq(TNS_FUNC_PING, seq_num),
             self.sdu,
-        )?;
-        let _ = read_data_response(&mut self.stream)?;
+        )
+        .await?;
+        let _ = read_data_response(&mut self.stream).await?;
         Ok(())
     }
 
@@ -294,8 +295,8 @@ impl Connection {
         let payload =
             build_execute_payload_with_seq(sql, prefetch_rows, seq_num, statement_is_query(sql))?;
         trace_query_bytes("EXECUTE query payload", &payload);
-        send_data_packet(&mut self.stream, &payload, self.sdu)?;
-        let response = read_data_response(&mut self.stream)?;
+        send_data_packet(&mut self.stream, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.stream).await?;
         trace_query_bytes("EXECUTE query response", &response);
         let result = parse_query_response(&response, self.capabilities).map_err(Error::from)?;
         self.remember_cursor_columns(&result);
@@ -333,8 +334,8 @@ impl Connection {
             binds,
         )?;
         trace_query_bytes("EXECUTE query payload", &payload);
-        send_data_packet(&mut self.stream, &payload, self.sdu)?;
-        let response = read_data_response_flushing_out_binds(&mut self.stream, self.sdu)?;
+        send_data_packet(&mut self.stream, &payload, self.sdu).await?;
+        let response = read_data_response_flushing_out_binds(&mut self.stream, self.sdu).await?;
         trace_query_bytes("EXECUTE query response", &response);
         let result = parse_query_response_with_binds(&response, self.capabilities, binds)
             .map_err(Error::from)?;
@@ -360,8 +361,8 @@ impl Connection {
             bind_rows,
         )?;
         trace_query_bytes("EXECUTE query payload", &payload);
-        send_data_packet(&mut self.stream, &payload, self.sdu)?;
-        let response = read_data_response_flushing_out_binds(&mut self.stream, self.sdu)?;
+        send_data_packet(&mut self.stream, &payload, self.sdu).await?;
+        let response = read_data_response_flushing_out_binds(&mut self.stream, self.sdu).await?;
         trace_query_bytes("EXECUTE query response", &response);
         let result = parse_query_response_with_binds(
             &response,
@@ -397,8 +398,8 @@ impl Connection {
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
         trace_query_bytes("FETCH payload", &payload);
-        send_data_packet(&mut self.stream, &payload, self.sdu)?;
-        let response = read_data_response(&mut self.stream)?;
+        send_data_packet(&mut self.stream, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.stream).await?;
         trace_query_bytes("FETCH response", &response);
         let columns = self
             .cursor_columns
@@ -426,8 +427,8 @@ impl Connection {
         let payload =
             build_define_fetch_payload_with_seq(cursor_id, arraysize, seq_num, define_columns)?;
         trace_query_bytes("DEFINE FETCH payload", &payload);
-        send_data_packet(&mut self.stream, &payload, self.sdu)?;
-        let response = read_data_response(&mut self.stream)?;
+        send_data_packet(&mut self.stream, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.stream).await?;
         trace_query_bytes("DEFINE FETCH response", &response);
         let result = parse_fetch_response_with_context(
             &response,
@@ -460,8 +461,8 @@ impl Connection {
             self.capabilities.ttc_field_version,
         )?;
         trace_query_bytes("LOB READ payload", &payload);
-        send_data_packet(&mut self.stream, &payload, self.sdu)?;
-        let response = read_data_response(&mut self.stream)?;
+        send_data_packet(&mut self.stream, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.stream).await?;
         trace_query_bytes("LOB READ response", &response);
         parse_lob_read_response(&response, self.capabilities, locator).map_err(Error::from)
     }
@@ -482,8 +483,8 @@ impl Connection {
             self.capabilities.ttc_field_version,
         )?;
         trace_query_bytes("LOB CREATE TEMP payload", &payload);
-        send_data_packet(&mut self.stream, &payload, self.sdu)?;
-        let response = read_data_response(&mut self.stream)?;
+        send_data_packet(&mut self.stream, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.stream).await?;
         trace_query_bytes("LOB CREATE TEMP response", &response);
         parse_lob_create_temp_response(&response, self.capabilities).map_err(Error::from)
     }
@@ -506,10 +507,143 @@ impl Connection {
             self.capabilities.ttc_field_version,
         )?;
         trace_query_bytes("LOB WRITE payload", &payload);
-        send_data_packet(&mut self.stream, &payload, self.sdu)?;
-        let response = read_data_response(&mut self.stream)?;
+        send_data_packet(&mut self.stream, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.stream).await?;
         trace_query_bytes("LOB WRITE response", &response);
         parse_lob_write_response(&response, self.capabilities, locator).map_err(Error::from)
+    }
+
+    async fn execute_query_call_timeout(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+        timeout_ms: Option<u32>,
+    ) -> Result<QueryResult> {
+        let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
+            return self.execute_query(cx, sql, prefetch_rows).await;
+        };
+        match time::timeout(
+            time::wall_now(),
+            Duration::from_millis(u64::from(timeout_ms)),
+            self.execute_query(cx, sql, prefetch_rows),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                let _ = self.stream.shutdown(Shutdown::Both);
+                Err(Error::CallTimeout(timeout_ms))
+            }
+        }
+    }
+
+    async fn execute_query_with_binds_call_timeout(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+        binds: &[BindValue],
+        timeout_ms: Option<u32>,
+    ) -> Result<QueryResult> {
+        let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
+            return self
+                .execute_query_with_binds(cx, sql, prefetch_rows, binds)
+                .await;
+        };
+        match time::timeout(
+            time::wall_now(),
+            Duration::from_millis(u64::from(timeout_ms)),
+            self.execute_query_with_binds(cx, sql, prefetch_rows, binds),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                let _ = self.stream.shutdown(Shutdown::Both);
+                Err(Error::CallTimeout(timeout_ms))
+            }
+        }
+    }
+
+    async fn execute_query_with_bind_rows_call_timeout(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+        bind_rows: &[Vec<BindValue>],
+        timeout_ms: Option<u32>,
+    ) -> Result<QueryResult> {
+        let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
+            return self
+                .execute_query_with_bind_rows(cx, sql, prefetch_rows, bind_rows)
+                .await;
+        };
+        match time::timeout(
+            time::wall_now(),
+            Duration::from_millis(u64::from(timeout_ms)),
+            self.execute_query_with_bind_rows(cx, sql, prefetch_rows, bind_rows),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                let _ = self.stream.shutdown(Shutdown::Both);
+                Err(Error::CallTimeout(timeout_ms))
+            }
+        }
+    }
+
+    async fn read_lob_call_timeout(
+        &mut self,
+        cx: &Cx,
+        locator: &[u8],
+        offset: u64,
+        amount: u64,
+        timeout_ms: Option<u32>,
+    ) -> Result<LobReadResult> {
+        let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
+            return self.read_lob(cx, locator, offset, amount).await;
+        };
+        match time::timeout(
+            time::wall_now(),
+            Duration::from_millis(u64::from(timeout_ms)),
+            self.read_lob(cx, locator, offset, amount),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                let _ = self.stream.shutdown(Shutdown::Both);
+                Err(Error::CallTimeout(timeout_ms))
+            }
+        }
+    }
+
+    async fn write_lob_call_timeout(
+        &mut self,
+        cx: &Cx,
+        locator: &[u8],
+        offset: u64,
+        data: &[u8],
+        timeout_ms: Option<u32>,
+    ) -> Result<LobReadResult> {
+        let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
+            return self.write_lob(cx, locator, offset, data).await;
+        };
+        match time::timeout(
+            time::wall_now(),
+            Duration::from_millis(u64::from(timeout_ms)),
+            self.write_lob(cx, locator, offset, data),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                let _ = self.stream.shutdown(Shutdown::Both);
+                Err(Error::CallTimeout(timeout_ms))
+            }
+        }
     }
 
     fn remember_cursor_columns(&mut self, result: &QueryResult) {
@@ -528,8 +662,9 @@ impl Connection {
             &mut self.stream,
             &build_function_payload_with_seq(TNS_FUNC_LOGOFF, seq_num),
             self.sdu,
-        )?;
-        let _ = read_data_response(&mut self.stream)?;
+        )
+        .await?;
+        let _ = read_data_response(&mut self.stream).await?;
         let eof = encode_packet(
             TNS_PACKET_TYPE_DATA,
             0,
@@ -537,8 +672,8 @@ impl Connection {
             &[],
             PacketLengthWidth::Large32,
         )?;
-        self.stream.write_all(&eof)?;
-        self.stream.flush()?;
+        self.stream.write_all(&eof).await?;
+        self.stream.flush().await?;
         let _ = self.stream.shutdown(Shutdown::Both);
         Ok(())
     }
@@ -551,15 +686,18 @@ impl Connection {
             &mut self.stream,
             &build_function_payload_with_seq(function_code, seq_num),
             self.sdu,
-        )?;
-        let _ = read_data_response(&mut self.stream)?;
+        )
+        .await?;
+        let _ = read_data_response(&mut self.stream).await?;
         Ok(())
     }
 }
 
 impl CancelHandle {
     pub fn cancel(&mut self) -> Result<()> {
-        send_marker(&mut self.stream, TNS_MARKER_TYPE_BREAK)
+        Err(Error::Runtime(
+            "out-of-band cancel requires an async split transport".into(),
+        ))
     }
 }
 
@@ -567,9 +705,7 @@ pub struct BlockingConnection;
 
 impl BlockingConnection {
     pub fn connect(options: ConnectOptions) -> Result<Connection> {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
@@ -578,9 +714,7 @@ impl BlockingConnection {
     }
 
     pub fn ping(connection: &mut Connection) -> Result<()> {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
@@ -589,9 +723,7 @@ impl BlockingConnection {
     }
 
     pub fn commit(connection: &mut Connection) -> Result<()> {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
@@ -600,9 +732,7 @@ impl BlockingConnection {
     }
 
     pub fn rollback(connection: &mut Connection) -> Result<()> {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
@@ -615,9 +745,7 @@ impl BlockingConnection {
         sql: &str,
         prefetch_rows: u32,
     ) -> Result<QueryResult> {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
@@ -631,8 +759,13 @@ impl BlockingConnection {
         prefetch_rows: u32,
         timeout_ms: Option<u32>,
     ) -> Result<QueryResult> {
-        with_call_timeout(connection, timeout_ms, |connection| {
-            Self::execute_query(connection, sql, prefetch_rows)
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .execute_query_call_timeout(&cx, sql, prefetch_rows, timeout_ms)
+                .await
         })
     }
 
@@ -642,9 +775,7 @@ impl BlockingConnection {
         prefetch_rows: u32,
         binds: &[BindValue],
     ) -> Result<QueryResult> {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
@@ -661,8 +792,13 @@ impl BlockingConnection {
         binds: &[BindValue],
         timeout_ms: Option<u32>,
     ) -> Result<QueryResult> {
-        with_call_timeout(connection, timeout_ms, |connection| {
-            Self::execute_query_with_binds(connection, sql, prefetch_rows, binds)
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .execute_query_with_binds_call_timeout(&cx, sql, prefetch_rows, binds, timeout_ms)
+                .await
         })
     }
 
@@ -672,9 +808,7 @@ impl BlockingConnection {
         prefetch_rows: u32,
         bind_rows: &[Vec<BindValue>],
     ) -> Result<QueryResult> {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
@@ -691,8 +825,19 @@ impl BlockingConnection {
         bind_rows: &[Vec<BindValue>],
         timeout_ms: Option<u32>,
     ) -> Result<QueryResult> {
-        with_call_timeout(connection, timeout_ms, |connection| {
-            Self::execute_query_with_bind_rows(connection, sql, prefetch_rows, bind_rows)
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .execute_query_with_bind_rows_call_timeout(
+                    &cx,
+                    sql,
+                    prefetch_rows,
+                    bind_rows,
+                    timeout_ms,
+                )
+                .await
         })
     }
 
@@ -702,9 +847,7 @@ impl BlockingConnection {
         arraysize: u32,
         previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
     ) -> Result<QueryResult> {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
@@ -721,9 +864,7 @@ impl BlockingConnection {
         known_columns: &[ColumnMetadata],
         previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
     ) -> Result<QueryResult> {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
@@ -740,9 +881,7 @@ impl BlockingConnection {
         define_columns: &[ColumnMetadata],
         previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
     ) -> Result<QueryResult> {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
@@ -764,9 +903,7 @@ impl BlockingConnection {
         offset: u64,
         amount: u64,
     ) -> Result<LobReadResult> {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
@@ -781,8 +918,13 @@ impl BlockingConnection {
         amount: u64,
         timeout_ms: Option<u32>,
     ) -> Result<LobReadResult> {
-        with_call_timeout(connection, timeout_ms, |connection| {
-            Self::read_lob(connection, locator, offset, amount)
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .read_lob_call_timeout(&cx, locator, offset, amount, timeout_ms)
+                .await
         })
     }
 
@@ -791,9 +933,7 @@ impl BlockingConnection {
         ora_type_num: u8,
         csfrm: u8,
     ) -> Result<LobReadResult> {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
@@ -807,9 +947,7 @@ impl BlockingConnection {
         offset: u64,
         data: &[u8],
     ) -> Result<LobReadResult> {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
@@ -824,15 +962,18 @@ impl BlockingConnection {
         data: &[u8],
         timeout_ms: Option<u32>,
     ) -> Result<LobReadResult> {
-        with_call_timeout(connection, timeout_ms, |connection| {
-            Self::write_lob(connection, locator, offset, data)
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .write_lob_call_timeout(&cx, locator, offset, data, timeout_ms)
+                .await
         })
     }
 
     pub fn close(connection: Connection) -> Result<()> {
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
@@ -841,43 +982,12 @@ impl BlockingConnection {
     }
 }
 
-fn with_call_timeout<T>(
-    connection: &mut Connection,
-    timeout_ms: Option<u32>,
-    f: impl FnOnce(&mut Connection) -> Result<T>,
-) -> Result<T> {
-    let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
-        return f(connection);
-    };
-    let old_read_timeout = connection.stream.read_timeout()?;
-    let old_write_timeout = connection.stream.write_timeout()?;
-    let timeout = Duration::from_millis(u64::from(timeout_ms));
-    connection.stream.set_read_timeout(Some(timeout))?;
-    connection.stream.set_write_timeout(Some(timeout))?;
-    let result = f(connection);
-    let restore_result = connection
-        .stream
-        .set_read_timeout(old_read_timeout)
-        .and_then(|()| connection.stream.set_write_timeout(old_write_timeout));
-    match result {
-        Ok(value) => {
-            restore_result?;
-            Ok(value)
-        }
-        Err(Error::Io(err))
-            if matches!(
-                err.kind(),
-                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-            ) =>
-        {
-            let _ = connection.stream.shutdown(Shutdown::Both);
-            Err(Error::CallTimeout(timeout_ms))
-        }
-        Err(err) => {
-            restore_result?;
-            Err(err)
-        }
-    }
+fn build_io_runtime() -> Result<Runtime> {
+    let reactor = reactor::create_reactor()?;
+    RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .map_err(|err| Error::Runtime(err.to_string()))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -886,7 +996,7 @@ struct IncomingPacket {
     payload: Vec<u8>,
 }
 
-fn send_data_packet(stream: &mut TcpStream, payload: &[u8], sdu: usize) -> Result<()> {
+async fn send_data_packet(stream: &mut TcpStream, payload: &[u8], sdu: usize) -> Result<()> {
     let max_payload = sdu.saturating_sub(TNS_DATA_PACKET_OVERHEAD).max(1);
     for chunk in payload.chunks(max_payload) {
         let packet = encode_packet(
@@ -896,9 +1006,9 @@ fn send_data_packet(stream: &mut TcpStream, payload: &[u8], sdu: usize) -> Resul
             chunk,
             PacketLengthWidth::Large32,
         )?;
-        stream.write_all(&packet)?;
+        stream.write_all(&packet).await?;
     }
-    stream.flush()?;
+    stream.flush().await?;
     Ok(())
 }
 
@@ -907,31 +1017,34 @@ struct DataResponse {
     flush_out_binds: bool,
 }
 
-fn read_data_response(stream: &mut TcpStream) -> Result<Vec<u8>> {
-    Ok(read_data_response_boundary(stream)?.payload)
+async fn read_data_response(stream: &mut TcpStream) -> Result<Vec<u8>> {
+    Ok(read_data_response_boundary(stream).await?.payload)
 }
 
-fn read_data_response_flushing_out_binds(stream: &mut TcpStream, sdu: usize) -> Result<Vec<u8>> {
-    let mut response = read_data_response_boundary(stream)?;
+async fn read_data_response_flushing_out_binds(
+    stream: &mut TcpStream,
+    sdu: usize,
+) -> Result<Vec<u8>> {
+    let mut response = read_data_response_boundary(stream).await?;
     let mut payload = response.payload;
     while response.flush_out_binds {
         if matches!(payload.last(), Some(&TNS_MSG_TYPE_FLUSH_OUT_BINDS)) {
             payload.pop();
         }
-        send_data_packet(stream, &[TNS_MSG_TYPE_FLUSH_OUT_BINDS], sdu)?;
-        response = read_data_response_boundary(stream)?;
+        send_data_packet(stream, &[TNS_MSG_TYPE_FLUSH_OUT_BINDS], sdu).await?;
+        response = read_data_response_boundary(stream).await?;
         payload.extend_from_slice(&response.payload);
     }
     Ok(payload)
 }
 
-fn read_data_response_boundary(stream: &mut TcpStream) -> Result<DataResponse> {
+async fn read_data_response_boundary(stream: &mut TcpStream) -> Result<DataResponse> {
     let mut response = Vec::new();
     let mut flush_out_binds = false;
     loop {
-        let packet = read_packet(stream, PacketLengthWidth::Large32)?;
+        let packet = read_packet(stream, PacketLengthWidth::Large32).await?;
         if packet.packet_type == TNS_PACKET_TYPE_MARKER {
-            reset_after_marker(stream, &packet)?;
+            reset_after_marker(stream, &packet).await?;
             continue;
         }
         if packet.packet_type != TNS_PACKET_TYPE_DATA {
@@ -968,14 +1081,13 @@ fn read_data_response_boundary(stream: &mut TcpStream) -> Result<DataResponse> {
 }
 
 const TNS_PACKET_TYPE_MARKER: u8 = 12;
-const TNS_MARKER_TYPE_BREAK: u8 = 1;
 const TNS_MARKER_TYPE_RESET: u8 = 2;
 
-fn reset_after_marker(stream: &mut TcpStream, initial_marker: &IncomingPacket) -> Result<()> {
+async fn reset_after_marker(stream: &mut TcpStream, initial_marker: &IncomingPacket) -> Result<()> {
     trace_connect_bytes("MARKER packet", &initial_marker.payload);
-    send_marker(stream, TNS_MARKER_TYPE_RESET)?;
+    send_marker(stream, TNS_MARKER_TYPE_RESET).await?;
     loop {
-        let packet = read_packet(stream, PacketLengthWidth::Large32)?;
+        let packet = read_packet(stream, PacketLengthWidth::Large32).await?;
         if packet.packet_type != TNS_PACKET_TYPE_MARKER {
             return Err(oracledb_protocol::ProtocolError::UnknownMessageType {
                 message_type: packet.packet_type,
@@ -990,7 +1102,7 @@ fn reset_after_marker(stream: &mut TcpStream, initial_marker: &IncomingPacket) -
     }
 }
 
-fn send_marker(stream: &mut TcpStream, marker_type: u8) -> Result<()> {
+async fn send_marker(stream: &mut TcpStream, marker_type: u8) -> Result<()> {
     let packet = encode_packet(
         TNS_PACKET_TYPE_MARKER,
         0,
@@ -999,14 +1111,14 @@ fn send_marker(stream: &mut TcpStream, marker_type: u8) -> Result<()> {
         PacketLengthWidth::Large32,
     )?;
     trace_connect_bytes("send MARKER", &packet);
-    stream.write_all(&packet)?;
-    stream.flush()?;
+    stream.write_all(&packet).await?;
+    stream.flush().await?;
     Ok(())
 }
 
-fn read_packet(stream: &mut TcpStream, width: PacketLengthWidth) -> Result<IncomingPacket> {
+async fn read_packet(stream: &mut TcpStream, width: PacketLengthWidth) -> Result<IncomingPacket> {
     let mut header = [0u8; 8];
-    stream.read_exact(&mut header)?;
+    stream.read_exact(&mut header).await?;
     let [len0, len1, len2, len3, packet_type, _, _, _] = header;
     let declared = match width {
         PacketLengthWidth::Legacy16 => usize::from(u16::from_be_bytes([len0, len1])),
@@ -1022,7 +1134,7 @@ fn read_packet(stream: &mut TcpStream, width: PacketLengthWidth) -> Result<Incom
         .into());
     }
     let mut payload = vec![0u8; declared - header.len()];
-    stream.read_exact(&mut payload)?;
+    stream.read_exact(&mut payload).await?;
     Ok(IncomingPacket {
         packet_type,
         payload,
