@@ -77,8 +77,11 @@ const TNS_OBJ_NO_PREFIX_SEG: u8 = 0x04;
 const TNS_XML_TYPE_LOB: u32 = 0x0001;
 const TNS_XML_TYPE_STRING: u32 = 0x0004;
 const TNS_XML_TYPE_FLAG_SKIP_NEXT_4: u32 = 0x100000;
+const TNS_LOB_LOC_OFFSET_FLAG_1: usize = 4;
 const TNS_LOB_LOC_OFFSET_FLAG_3: usize = 6;
 const TNS_LOB_LOC_OFFSET_FLAG_4: usize = 7;
+const TNS_LOB_LOC_FLAGS_ABSTRACT: u8 = 0x40;
+const TNS_LOB_LOC_FLAGS_TEMP: u8 = 0x01;
 const TNS_LOB_LOC_FLAGS_VAR_LENGTH_CHARSET: u8 = 0x80;
 const TNS_LOB_LOC_FLAGS_LITTLE_ENDIAN: u8 = 0x40;
 
@@ -123,6 +126,8 @@ const TNS_LOB_OP_READ: u32 = 0x0002;
 const TNS_LOB_OP_TRIM: u32 = 0x0020;
 const TNS_LOB_OP_WRITE: u32 = 0x0040;
 const TNS_LOB_OP_CREATE_TEMP: u32 = 0x0110;
+const TNS_LOB_OP_FREE_TEMP: u32 = 0x0111;
+const TNS_LOB_OP_ARRAY: u32 = 0x80000;
 const TNS_LOB_PREFETCH_FLAG: u64 = 0x0200_0000;
 const TNS_EXEC_FLAGS_IMPLICIT_RESULTSET: u32 = 0x8000;
 const TNS_BIND_USE_INDICATORS: u8 = 0x01;
@@ -917,10 +922,8 @@ fn write_bind_params(
             continue;
         }
         writer.write_u8(TNS_MSG_TYPE_ROW_DATA);
-        for (index, value) in row.iter().enumerate() {
-            if !is_plsql && value.is_output_only() {
-                continue;
-            }
+        for index in bind_row_value_order(row, &bind_metadata, is_plsql) {
+            let value = &row[index];
             let (_ora_type_num, csfrm) = bind_metadata
                 .get(index)
                 .copied()
@@ -929,6 +932,31 @@ fn write_bind_params(
         }
     }
     Ok(())
+}
+
+fn bind_row_value_order(
+    row: &[BindValue],
+    bind_metadata: &[(u8, u8)],
+    is_plsql: bool,
+) -> Vec<usize> {
+    let mut non_long = Vec::with_capacity(row.len());
+    let mut long = Vec::new();
+    for (index, value) in row.iter().enumerate() {
+        if !is_plsql && value.is_output_only() {
+            continue;
+        }
+        if !is_plsql
+            && bind_metadata.get(index).is_some_and(|(ora_type_num, _)| {
+                matches!(*ora_type_num, ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_LONG_RAW)
+            })
+        {
+            long.push(index);
+        } else {
+            non_long.push(index);
+        }
+    }
+    non_long.extend(long);
+    non_long
 }
 
 fn write_bind_metadata_for_rows(
@@ -1020,7 +1048,12 @@ fn write_bind_metadata_with_type(
     writer.write_u8(0);
     writer.write_ub4(buffer_size);
     writer.write_ub4(max_elements);
-    writer.write_ub8(0);
+    let cont_flags = if matches!(ora_type_num, ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB) {
+        TNS_LOB_PREFETCH_FLAG
+    } else {
+        0
+    };
+    writer.write_ub8(cont_flags);
     if let BindValue::ObjectOutput { oid, version, .. } = value {
         writer.write_bytes_with_two_lengths(Some(oid))?;
         writer.write_ub4(*version);
@@ -1949,6 +1982,62 @@ pub fn build_lob_trim_payload_with_seq(
         true,
     )?;
     writer.write_ub8(new_size);
+    Ok(writer.into_bytes())
+}
+
+pub fn lob_locator_is_temporary(locator: &[u8]) -> bool {
+    locator
+        .get(TNS_LOB_LOC_OFFSET_FLAG_1)
+        .is_some_and(|flags| flags & TNS_LOB_LOC_FLAGS_ABSTRACT != 0)
+        || locator
+            .get(TNS_LOB_LOC_OFFSET_FLAG_4)
+            .is_some_and(|flags| flags & TNS_LOB_LOC_FLAGS_TEMP != 0)
+}
+
+pub fn build_lob_free_temp_payload_with_seq(
+    locators: &[Vec<u8>],
+    seq_num: u8,
+    ttc_field_version: u8,
+) -> Result<Vec<u8>> {
+    let total_size = locators.iter().try_fold(0u32, |total, locator| {
+        let locator_len =
+            u32::try_from(locator.len()).map_err(|_| ProtocolError::InvalidPacketLength {
+                length: locator.len(),
+                minimum: 0,
+            })?;
+        total
+            .checked_add(locator_len)
+            .ok_or(ProtocolError::PacketTooLarge { length: usize::MAX })
+    })?;
+    let mut writer = TtcWriter::new();
+    writer.write_function_code_with_seq(TNS_FUNC_LOB_OP, seq_num);
+    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
+        writer.write_ub8(0);
+    }
+    writer.write_u8(1);
+    writer.write_ub4(total_size);
+    writer.write_u8(0);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_ub4(0);
+    writer.write_u8(0);
+    writer.write_u8(0);
+    writer.write_u8(0);
+    writer.write_ub4(TNS_LOB_OP_FREE_TEMP | TNS_LOB_OP_ARRAY);
+    writer.write_u8(0);
+    writer.write_ub4(0);
+    writer.write_ub8(0);
+    writer.write_ub8(0);
+    writer.write_u8(0);
+    writer.write_u8(0);
+    writer.write_ub4(0);
+    writer.write_u8(0);
+    writer.write_ub4(0);
+    writer.write_u8(0);
+    writer.write_ub4(0);
+    for locator in locators {
+        writer.write_raw(locator);
+    }
     Ok(writer.into_bytes())
 }
 
@@ -2936,6 +3025,40 @@ pub fn parse_lob_trim_response(
     parse_lob_op_response(payload, capabilities, locator, false, true)
 }
 
+pub fn parse_lob_free_temp_response(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    returned_parameter_len: usize,
+) -> Result<()> {
+    let mut reader = TtcReader::new(payload);
+    while reader.remaining() > 0 {
+        let message_type = reader.read_u8()?;
+        match message_type {
+            0 => {}
+            TNS_MSG_TYPE_STATUS => {
+                let _call_status = reader.read_ub4()?;
+                let _seq = reader.read_ub2()?;
+            }
+            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => skip_server_side_piggyback(&mut reader)?,
+            TNS_MSG_TYPE_END_OF_RESPONSE => break,
+            TNS_MSG_TYPE_ERROR => {
+                let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
+                if info.number != 0 {
+                    return Err(ProtocolError::ServerError(info.message));
+                }
+            }
+            TNS_MSG_TYPE_PARAMETER => reader.skip(returned_parameter_len)?,
+            _ => {
+                return Err(ProtocolError::UnknownMessageType {
+                    message_type,
+                    position: reader.position().saturating_sub(1),
+                })
+            }
+        }
+    }
+    Ok(())
+}
+
 fn parse_lob_op_response(
     payload: &[u8],
     capabilities: ClientCapabilities,
@@ -3870,6 +3993,69 @@ mod tests {
     }
 
     #[test]
+    fn lob_locator_temporary_flags_match_reference_offsets() {
+        let mut locator = vec![0; 40];
+        assert!(!lob_locator_is_temporary(&locator));
+
+        locator[TNS_LOB_LOC_OFFSET_FLAG_1] = TNS_LOB_LOC_FLAGS_ABSTRACT;
+        assert!(lob_locator_is_temporary(&locator));
+
+        locator[TNS_LOB_LOC_OFFSET_FLAG_1] = 0;
+        locator[TNS_LOB_LOC_OFFSET_FLAG_4] = TNS_LOB_LOC_FLAGS_TEMP;
+        assert!(lob_locator_is_temporary(&locator));
+    }
+
+    #[test]
+    fn lob_free_temp_payload_writes_array_free_operation() {
+        let locator = vec![0xaa; 40];
+        let payload = build_lob_free_temp_payload_with_seq(
+            std::slice::from_ref(&locator),
+            9,
+            TNS_CCAP_FIELD_VERSION_23_1_EXT_1,
+        )
+        .expect("LOB free-temp payload should encode");
+
+        assert_eq!(
+            &payload[..19],
+            &[
+                TNS_MSG_TYPE_FUNCTION,
+                TNS_FUNC_LOB_OP,
+                9,
+                0,
+                1,
+                1,
+                40,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                4,
+                0,
+                8,
+                1,
+                0x11,
+            ]
+        );
+        assert!(payload.ends_with(&locator));
+    }
+
+    #[test]
+    fn lob_free_temp_response_skips_returned_locator_parameter() {
+        let payload = Vec::from_hex(concat!(
+            "0800260000020080000002ee5500000044000000030369000a000000000002",
+            "5295f656000000010000040101021a390000000000000000000000000000",
+            "00000000000a000000000000000000001d",
+        ))
+        .expect("fixture response should be valid hex");
+
+        parse_lob_free_temp_response(&payload, ClientCapabilities::default(), 40)
+            .expect("free-temp response should consume returned locator");
+    }
+
+    #[test]
     fn rowid_value_decodes_physical_rowid() {
         let mut reader = TtcReader::new(&[
             13, // non-null rowid marker
@@ -3965,6 +4151,58 @@ mod tests {
 
         assert_eq!(ora_type_num, ORA_TYPE_NUM_LONG_RAW);
         assert_eq!(csfrm, 0);
+    }
+
+    #[test]
+    fn non_plsql_bind_rows_emit_long_values_last() {
+        let row = vec![
+            BindValue::Number("1".into()),
+            BindValue::Raw(vec![0; 40_000]),
+            BindValue::Number("8".into()),
+            BindValue::Text("A".repeat(40_000)),
+        ];
+        let metadata = row
+            .iter()
+            .map(bind_metadata)
+            .map(|(ora_type_num, csfrm, _)| (ora_type_num, csfrm))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            bind_row_value_order(&row, &metadata, false),
+            vec![0, 2, 1, 3]
+        );
+        assert_eq!(
+            bind_row_value_order(&row, &metadata, true),
+            vec![0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn lob_bind_metadata_sets_prefetch_continuation_flag() {
+        let mut writer = TtcWriter::new();
+        write_bind_metadata_with_type(
+            &mut writer,
+            &BindValue::Lob {
+                ora_type_num: ORA_TYPE_NUM_CLOB,
+                csfrm: CS_FORM_IMPLICIT,
+                locator: vec![0; 40],
+            },
+            ORA_TYPE_NUM_CLOB,
+            CS_FORM_IMPLICIT,
+            1,
+        )
+        .expect("CLOB bind metadata should encode");
+        let encoded = writer.into_bytes();
+        let mut reader = TtcReader::new(&encoded);
+
+        assert_eq!(reader.read_u8().expect("type"), ORA_TYPE_NUM_CLOB);
+        reader.skip(3).expect("flags, precision, scale");
+        assert_eq!(reader.read_ub4().expect("buffer size"), 1);
+        assert_eq!(reader.read_ub4().expect("max elements"), 0);
+        assert_eq!(
+            reader.read_ub8().expect("cont flags"),
+            TNS_LOB_PREFETCH_FLAG
+        );
     }
 
     #[test]

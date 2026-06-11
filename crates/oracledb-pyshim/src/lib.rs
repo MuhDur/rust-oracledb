@@ -17,7 +17,7 @@ use oracledb::protocol::thin::{
     decode_dbobject_binary_float as protocol_decode_dbobject_binary_float,
     decode_dbobject_text as protocol_decode_dbobject_text, decode_dbobject_xmltype_text,
     decode_lob_text as protocol_decode_lob_text, decode_number_value, define_metadata_from_bind,
-    encode_lob_text as protocol_encode_lob_text, is_cursor_bind_template,
+    encode_lob_text as protocol_encode_lob_text, is_cursor_bind_template, lob_locator_is_temporary,
     output_bind as output_only_bind, public_dbtype_name_from_bind,
     public_dbtype_name_from_column_metadata, public_dbtype_name_from_oracle_type_name,
     public_dbtype_name_from_type_name, returning_output_bind, BindValue, ColumnMetadata,
@@ -2535,6 +2535,45 @@ fn bind_optional_text(value: Option<&str>) -> BindValue {
         .unwrap_or(BindValue::Null)
 }
 
+fn supplement_json_lob_column_metadata(
+    connection: &Arc<Mutex<Option<RustConnection>>>,
+    columns: &mut [ColumnMetadata],
+    call_timeout: Option<u32>,
+) -> PyResult<()> {
+    let candidates = columns
+        .iter()
+        .enumerate()
+        .filter(|(_, metadata)| {
+            !metadata.is_json
+                && matches!(metadata.ora_type_num, ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB)
+                && !metadata.name.is_empty()
+        })
+        .map(|(index, metadata)| (index, metadata.name.to_ascii_uppercase()))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let mut guard = connection.lock().map_err(runtime_error)?;
+    let connection = guard.as_mut().ok_or_else(connection_closed_error)?;
+    for (index, column_name) in candidates {
+        let result = BlockingConnection::execute_query_with_binds_and_timeout(
+            connection,
+            "select 1 \
+             from all_json_columns \
+             where owner = sys_context('USERENV', 'CURRENT_SCHEMA') \
+               and column_name = :1",
+            1,
+            &[BindValue::Text(column_name)],
+            call_timeout,
+        )
+        .map_err(runtime_error)?;
+        if !result.rows.is_empty() {
+            columns[index].is_json = true;
+        }
+    }
+    Ok(())
+}
+
 fn quoted_oracle_string(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
@@ -2932,7 +2971,28 @@ impl ThinLob {
         Ok(module.getattr(name)?.unbind())
     }
 
-    fn free_lob(&self) {}
+    fn free_lob(&self) -> PyResult<()> {
+        let Some(context) = self.context.as_ref() else {
+            return Ok(());
+        };
+        let locator = self.locator.lock().map_err(runtime_error)?.clone();
+        let Some(locator) = locator.filter(|locator| lob_locator_is_temporary(locator)) else {
+            return Ok(());
+        };
+        let call_timeout = {
+            let value = context.state.lock().map_err(runtime_error)?.call_timeout;
+            (value > 0).then_some(value)
+        };
+        let mut guard = context.connection.lock().map_err(runtime_error)?;
+        let Some(connection) = guard.as_mut() else {
+            *self.locator.lock().map_err(runtime_error)? = None;
+            return Ok(());
+        };
+        BlockingConnection::free_temp_lobs_with_timeout(connection, &[locator], call_timeout)
+            .map_err(runtime_error)?;
+        *self.locator.lock().map_err(runtime_error)? = None;
+        Ok(())
+    }
 
     fn get_file_name(&self) -> PyResult<(String, String)> {
         Ok(self.bfile_name.clone().unwrap_or_default())
@@ -3079,7 +3139,7 @@ impl AsyncThinLob {
         self.inner.trim(new_size)
     }
 
-    fn free_lob(&self) {
+    fn free_lob(&self) -> PyResult<()> {
         self.inner.free_lob()
     }
 }
@@ -3277,6 +3337,7 @@ impl ThinVar {
         &self,
         py: Python<'_>,
         value: &Option<QueryValue>,
+        lob_context: Option<&ThinLobContext>,
     ) -> PyResult<Py<PyAny>> {
         let value = match (self.return_kind, value) {
             (ThinVarReturnKind::ClobAsLong, Some(QueryValue::Text(value))) => py_lob_from_impl(
@@ -3353,7 +3414,7 @@ impl ThinVar {
                     DbObjectImpl::with_packed_data(object_type, packed_data.clone(), None),
                 )?
             }
-            _ => query_value_to_py(py, value, None, None, true)?,
+            _ => query_value_to_py(py, value, None, lob_context, true)?,
         };
         if let Some(outconverter) = self.outconverter.as_ref() {
             if !value.bind(py).is_none() || self.convert_nulls {
@@ -3478,6 +3539,7 @@ fn apply_out_bind_values(
     bind_vars: &[Py<ThinVar>],
     out_values: &[(usize, Option<QueryValue>)],
     return_values: &[(usize, Vec<Option<QueryValue>>)],
+    lob_context: Option<&ThinLobContext>,
 ) -> PyResult<()> {
     for (index, value) in out_values {
         let Some(var) = bind_vars.get(*index) else {
@@ -3487,7 +3549,7 @@ fn apply_out_bind_values(
             apply_cursor_out_bind(py, var, columns, *cursor_id)?;
             continue;
         }
-        let value = var.borrow(py).output_value_to_py(py, value)?;
+        let value = var.borrow(py).output_value_to_py(py, value, lob_context)?;
         var.borrow(py).set_py_value(Some(value))?;
     }
     for (index, _) in return_values {
@@ -3503,7 +3565,7 @@ fn apply_out_bind_values(
         let var_ref = var.borrow(py);
         let values = values
             .iter()
-            .map(|value| var_ref.output_value_to_py(py, value))
+            .map(|value| var_ref.output_value_to_py(py, value, lob_context))
             .collect::<PyResult<Vec<_>>>()?;
         drop(var_ref);
         let values = PyList::new(py, values)?.unbind().into();
@@ -6544,7 +6606,7 @@ impl ThinCursorImpl {
             let value = self.state.lock().map_err(runtime_error)?.call_timeout;
             (value > 0).then_some(value)
         };
-        let result = match cursor.py().detach({
+        let mut result = match cursor.py().detach({
             let connection = Arc::clone(&self.connection);
             let state = Arc::clone(&self.state);
             let statement = statement.to_string();
@@ -6593,13 +6655,20 @@ impl ThinCursorImpl {
             self.drain_cancel_response()?;
             return Err(ora_cancel_error());
         }
+        supplement_json_lob_column_metadata(&self.connection, &mut result.columns, call_timeout)?;
         self.warning = Python::attach(|py| query_result_warning(py, &result))?;
+        let lob_context = ThinLobContext {
+            connection: Arc::clone(&self.connection),
+            state: Arc::clone(&self.state),
+            async_mode: false,
+        };
         Python::attach(|py| {
             apply_out_bind_values(
                 py,
                 &self.bind_vars,
                 &result.out_values,
                 &result.return_values,
+                Some(&lob_context),
             )
         })?;
         self.state.lock().map_err(runtime_error)?.record_statement(
@@ -6636,7 +6705,7 @@ impl ThinCursorImpl {
             (value > 0).then_some(value)
         };
         let typed_lob_hints = typed_lob_bind_hints(cursor.py(), &self.bind_vars);
-        let result = match cursor.py().detach({
+        let mut result = match cursor.py().detach({
             let connection = Arc::clone(&self.connection);
             let state = Arc::clone(&self.state);
             let statement = statement.to_string();
@@ -6676,13 +6745,20 @@ impl ThinCursorImpl {
             self.drain_cancel_response()?;
             return Err(ora_cancel_error());
         }
+        supplement_json_lob_column_metadata(&self.connection, &mut result.columns, call_timeout)?;
         self.warning = Python::attach(|py| query_result_warning(py, &result))?;
+        let lob_context = ThinLobContext {
+            connection: Arc::clone(&self.connection),
+            state: Arc::clone(&self.state),
+            async_mode: false,
+        };
         Python::attach(|py| {
             apply_out_bind_values(
                 py,
                 &self.bind_vars,
                 &result.out_values,
                 &result.return_values,
+                Some(&lob_context),
             )
         })?;
         let is_query = !result.columns.is_empty();
@@ -6787,7 +6863,16 @@ impl ThinCursorImpl {
             .enumerate()
             .map(|(index, value)| {
                 if let Some(Some(var)) = self.fetch_vars.get(index) {
-                    return var.borrow(py).output_value_to_py(py, value);
+                    return var
+                        .borrow(py)
+                        .output_value_to_py(py, value, Some(&lob_context));
+                }
+                if self
+                    .columns
+                    .get(index)
+                    .is_some_and(|metadata| metadata.is_json)
+                {
+                    return json_query_value_to_py(py, value, Some(_cursor), Some(&lob_context));
                 }
                 query_value_to_py(
                     py,
@@ -7054,12 +7139,10 @@ fn query_value_to_py(
             size,
             chunk_size,
         }) => {
-            let Some(owner_cursor) = owner_cursor else {
-                return Err(not_implemented("ThinCursorImpl LOB value conversion"));
-            };
-            let context = match lob_context {
-                Some(context) => context.clone(),
-                None => thin_lob_context_from_cursor(owner_cursor)?,
+            let context = match (lob_context, owner_cursor) {
+                (Some(context), _) => context.clone(),
+                (None, Some(owner_cursor)) => thin_lob_context_from_cursor(owner_cursor)?,
+                (None, None) => return Err(not_implemented("ThinCursorImpl LOB value conversion")),
             };
             if !fetch_lobs {
                 return direct_lob_value_to_py(py, *ora_type_num, *csfrm, locator, &context);
@@ -7116,6 +7199,22 @@ fn query_value_to_py(
             )
         }
     }
+}
+
+fn json_query_value_to_py(
+    py: Python<'_>,
+    value: &Option<QueryValue>,
+    owner_cursor: Option<&Bound<'_, PyAny>>,
+    lob_context: Option<&ThinLobContext>,
+) -> PyResult<Py<PyAny>> {
+    let value = query_value_to_py(py, value, owner_cursor, lob_context, false)?;
+    if value.bind(py).is_none() {
+        return Ok(value);
+    }
+    Ok(PyModule::import(py, "json")?
+        .getattr("loads")?
+        .call1((value.bind(py),))?
+        .unbind())
 }
 
 #[pyclass(module = "oracledb.thin_impl", name = "AsyncThinCursorImpl")]
@@ -7361,7 +7460,7 @@ impl AsyncThinCursorImpl {
                 .map_err(|err| err.to_string())
             }
         });
-        let result = match query.await {
+        let mut result = match query.await {
             Ok(result) => result,
             Err(_) if self.inner.cancel_requested.swap(false, Ordering::SeqCst) => {
                 return Err(ora_cancel_error());
@@ -7372,13 +7471,24 @@ impl AsyncThinCursorImpl {
             self.inner.drain_cancel_response()?;
             return Err(ora_cancel_error());
         }
+        supplement_json_lob_column_metadata(
+            &self.inner.connection,
+            &mut result.columns,
+            call_timeout,
+        )?;
         self.inner.warning = Python::attach(|py| query_result_warning(py, &result))?;
+        let lob_context = ThinLobContext {
+            connection: Arc::clone(&self.inner.connection),
+            state: Arc::clone(&self.inner.state),
+            async_mode: true,
+        };
         Python::attach(|py| {
             apply_out_bind_values(
                 py,
                 &self.inner.bind_vars,
                 &result.out_values,
                 &result.return_values,
+                Some(&lob_context),
             )
         })?;
         let is_query = !result.columns.is_empty();
