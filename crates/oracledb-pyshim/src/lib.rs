@@ -1,8 +1,12 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::task::{Context, Poll, Waker};
+use std::thread;
 
 use oracledb::protocol::sql;
 use oracledb::protocol::thin::{
@@ -75,6 +79,74 @@ fn runtime_error(err: impl std::fmt::Display) -> PyErr {
         }
     }
     PyRuntimeError::new_err(message)
+}
+
+struct BlockingTaskState<T> {
+    result: Option<Result<T, String>>,
+    waker: Option<Waker>,
+}
+
+struct BlockingTask<T> {
+    shared: Arc<Mutex<BlockingTaskState<T>>>,
+}
+
+impl<T> BlockingTask<T> {
+    fn ready(result: Result<T, String>) -> Self {
+        Self {
+            shared: Arc::new(Mutex::new(BlockingTaskState {
+                result: Some(result),
+                waker: None,
+            })),
+        }
+    }
+}
+
+impl<T> Future for BlockingTask<T> {
+    type Output = Result<T, String>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut shared = match self.shared.lock() {
+            Ok(shared) => shared,
+            Err(err) => return Poll::Ready(Err(err.to_string())),
+        };
+        if let Some(result) = shared.result.take() {
+            Poll::Ready(result)
+        } else {
+            shared.waker = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
+fn spawn_blocking_task<T, F>(name: &'static str, task: F) -> BlockingTask<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let shared = Arc::new(Mutex::new(BlockingTaskState {
+        result: None,
+        waker: None,
+    }));
+    let thread_shared = Arc::clone(&shared);
+    let spawn_result = thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            let result = task();
+            let waker = match thread_shared.lock() {
+                Ok(mut shared) => {
+                    shared.result = Some(result);
+                    shared.waker.take()
+                }
+                Err(_) => None,
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        });
+    match spawn_result {
+        Ok(_) => BlockingTask { shared },
+        Err(err) => BlockingTask::ready(Err(format!("failed to spawn blocking task: {err}"))),
+    }
 }
 
 fn parse_ora_code(message: &str) -> Option<i32> {
@@ -2340,6 +2412,7 @@ fn parse_alter_session_value(statement: &str, key: &str) -> Option<String> {
 #[derive(Debug)]
 struct ThinConnState {
     current_schema: Option<String>,
+    current_schema_modified: bool,
     edition: Option<String>,
     edition_probe_started: bool,
     external_name: Option<String>,
@@ -2355,6 +2428,7 @@ impl ThinConnState {
     fn new(stmt_cache_size: u32, edition: Option<String>, invalid_connect_string: bool) -> Self {
         Self {
             current_schema: None,
+            current_schema_modified: false,
             edition_probe_started: edition.is_some(),
             edition,
             external_name: None,
@@ -2370,6 +2444,7 @@ impl ThinConnState {
     fn record_statement(&mut self, statement: &str, is_query: bool, committed: bool) {
         if let Some(schema) = parse_alter_session_value(statement, "current_schema") {
             self.current_schema = Some(schema);
+            self.current_schema_modified = false;
             self.transaction_in_progress = false;
             return;
         }
@@ -3145,6 +3220,37 @@ fn init_thin_impl(_package: &Bound<'_, PyAny>) -> PyResult<()> {
     Ok(())
 }
 
+fn apply_pending_current_schema_from_state(
+    state: &Arc<Mutex<ThinConnState>>,
+    connection: &mut RustConnection,
+    call_timeout: Option<u32>,
+) -> PyResult<()> {
+    let pending_schema = {
+        let mut state = state.lock().map_err(runtime_error)?;
+        if !state.current_schema_modified {
+            None
+        } else {
+            state.current_schema_modified = false;
+            state.current_schema.clone()
+        }
+    };
+    let Some(schema) = pending_schema else {
+        return Ok(());
+    };
+    let identifier = sql_identifier(&schema)?;
+    let result = BlockingConnection::execute_query_with_timeout(
+        connection,
+        &format!("alter session set current_schema = {identifier}"),
+        1,
+        call_timeout,
+    )
+    .map_err(runtime_error);
+    if result.is_err() {
+        state.lock().map_err(runtime_error)?.current_schema_modified = true;
+    }
+    result.map(|_| ())
+}
+
 #[pyclass(module = "oracledb.thin_impl", name = "ThinConnImpl")]
 struct ThinConnImpl {
     connection: Arc<Mutex<Option<RustConnection>>>,
@@ -3168,12 +3274,21 @@ struct ThinConnImpl {
 }
 
 impl ThinConnImpl {
+    fn apply_pending_current_schema(
+        &self,
+        connection: &mut RustConnection,
+        call_timeout: Option<u32>,
+    ) -> PyResult<()> {
+        apply_pending_current_schema_from_state(&self.state, connection, call_timeout)
+    }
+
     fn execute_with_binds(&self, sql: &str, binds: &[BindValue]) -> PyResult<QueryResult> {
         let call_timeout = self.call_timeout()?;
         let mut guard = self.connection.lock().map_err(runtime_error)?;
         let connection = guard
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        self.apply_pending_current_schema(connection, call_timeout)?;
         BlockingConnection::execute_query_with_binds_and_timeout(
             connection,
             sql,
@@ -3190,6 +3305,7 @@ impl ThinConnImpl {
         let connection = guard
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        self.apply_pending_current_schema(connection, call_timeout)?;
         BlockingConnection::execute_query_with_timeout(connection, sql, 1, call_timeout)
             .map_err(runtime_error)?;
         Ok(())
@@ -3206,6 +3322,7 @@ impl ThinConnImpl {
         let connection = guard
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        self.apply_pending_current_schema(connection, call_timeout)?;
         let result =
             BlockingConnection::execute_query_with_timeout(connection, sql, 1, call_timeout)
                 .map_err(runtime_error)?;
@@ -3236,6 +3353,7 @@ impl ThinConnImpl {
         let connection = guard
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        self.apply_pending_current_schema(connection, call_timeout)?;
         let result = BlockingConnection::execute_query_with_binds_and_timeout(
             connection,
             sql,
@@ -4090,11 +4208,14 @@ impl ThinConnImpl {
 
     fn set_current_schema(&self, value: Option<String>) -> PyResult<()> {
         if let Some(value) = value {
-            let identifier = sql_identifier(&value)?;
-            self.execute_statement(&format!("alter session set current_schema = {identifier}"))?;
-            self.state.lock().map_err(runtime_error)?.current_schema = Some(value);
+            sql_identifier(&value)?;
+            let mut state = self.state.lock().map_err(runtime_error)?;
+            state.current_schema = Some(value);
+            state.current_schema_modified = true;
         } else {
-            self.state.lock().map_err(runtime_error)?.current_schema = None;
+            let mut state = self.state.lock().map_err(runtime_error)?;
+            state.current_schema = None;
+            state.current_schema_modified = false;
         }
         Ok(())
     }
@@ -5497,8 +5618,15 @@ impl ThinCursorImpl {
         }
         let connection = cursor.getattr("connection")?;
         let conn_impl = connection.getattr("_impl")?;
-        let conn_impl = conn_impl.extract::<PyRef<'_, ThinConnImpl>>()?;
+        if let Ok(conn_impl) = conn_impl.extract::<PyRef<'_, ThinConnImpl>>() {
+            return Ok(conn_impl
+                .outputtypehandler
+                .as_ref()
+                .map(|handler| handler.clone_ref(py)));
+        }
+        let conn_impl = conn_impl.extract::<PyRef<'_, AsyncThinConnImpl>>()?;
         Ok(conn_impl
+            .inner
             .outputtypehandler
             .as_ref()
             .map(|handler| handler.clone_ref(py)))
@@ -5891,6 +6019,7 @@ impl ThinCursorImpl {
         };
         let result = match cursor.py().detach({
             let connection = Arc::clone(&self.connection);
+            let state = Arc::clone(&self.state);
             let statement = statement.to_string();
             let bind_rows = bind_rows.clone();
             let prefetchrows = self.prefetchrows;
@@ -5899,6 +6028,8 @@ impl ThinCursorImpl {
                 let connection = guard
                     .as_mut()
                     .ok_or_else(|| "connection is closed".to_string())?;
+                apply_pending_current_schema_from_state(&state, connection, call_timeout)
+                    .map_err(|err| err.to_string())?;
                 BlockingConnection::execute_query_with_bind_rows_and_timeout(
                     connection,
                     &statement,
@@ -5969,6 +6100,7 @@ impl ThinCursorImpl {
         };
         let result = match cursor.py().detach({
             let connection = Arc::clone(&self.connection);
+            let state = Arc::clone(&self.state);
             let statement = statement.to_string();
             let bind_values = self.bind_values.clone();
             let prefetchrows = self.prefetchrows;
@@ -5977,6 +6109,8 @@ impl ThinCursorImpl {
                 let connection = guard
                     .as_mut()
                     .ok_or_else(|| "connection is closed".to_string())?;
+                apply_pending_current_schema_from_state(&state, connection, call_timeout)
+                    .map_err(|err| err.to_string())?;
                 BlockingConnection::execute_query_with_binds_and_timeout(
                     connection,
                     &statement,
@@ -6370,19 +6504,645 @@ fn query_value_to_py(
     }
 }
 
+#[pyclass(module = "oracledb.thin_impl", name = "AsyncThinCursorImpl")]
+struct AsyncThinCursorImpl {
+    inner: ThinCursorImpl,
+}
+
+#[pymethods]
+impl AsyncThinCursorImpl {
+    #[getter]
+    fn arraysize(&self) -> u32 {
+        self.inner.arraysize
+    }
+
+    #[setter]
+    fn set_arraysize(&mut self, value: u32) {
+        self.inner.arraysize = value;
+    }
+
+    #[getter]
+    fn prefetchrows(&self) -> u32 {
+        self.inner.prefetchrows
+    }
+
+    #[setter]
+    fn set_prefetchrows(&mut self, value: u32) {
+        self.inner.prefetchrows = value;
+    }
+
+    #[getter]
+    fn scrollable(&self) -> bool {
+        self.inner.scrollable
+    }
+
+    #[setter]
+    fn set_scrollable(&mut self, value: bool) {
+        self.inner.scrollable = value;
+    }
+
+    #[getter]
+    fn rowcount(&self) -> i64 {
+        self.inner.rowcount
+    }
+
+    #[getter]
+    fn statement(&self) -> Option<&str> {
+        self.inner.statement.as_deref()
+    }
+
+    #[getter]
+    #[pyo3(name = "fetch_vars")]
+    fn fetch_vars_attr(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.fetch_vars_attr(py)
+    }
+
+    #[getter]
+    fn fetch_metadata(&self) -> Vec<FetchMetadataImpl> {
+        self.inner.fetch_metadata()
+    }
+
+    #[getter]
+    fn fetch_lobs(&self) -> bool {
+        self.inner.fetch_lobs
+    }
+
+    #[setter]
+    fn set_fetch_lobs(&mut self, value: bool) {
+        self.inner.fetch_lobs = value;
+    }
+
+    #[getter]
+    fn fetch_decimals(&self) -> bool {
+        self.inner.fetch_decimals
+    }
+
+    #[setter]
+    fn set_fetch_decimals(&mut self, value: bool) {
+        self.inner.fetch_decimals = value;
+    }
+
+    #[getter]
+    fn suspend_on_success(&self) -> bool {
+        self.inner.suspend_on_success
+    }
+
+    #[setter]
+    fn set_suspend_on_success(&mut self, value: bool) {
+        self.inner.suspend_on_success = value;
+    }
+
+    #[getter]
+    fn rowfactory(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.inner
+            .rowfactory
+            .as_ref()
+            .map(|value| value.clone_ref(py))
+    }
+
+    #[setter]
+    fn set_rowfactory(&mut self, value: Option<Py<PyAny>>) {
+        self.inner.rowfactory = value;
+    }
+
+    #[getter]
+    fn inputtypehandler(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.inner
+            .inputtypehandler
+            .as_ref()
+            .map(|value| value.clone_ref(py))
+    }
+
+    #[setter]
+    fn set_inputtypehandler(&mut self, value: Option<Py<PyAny>>) {
+        self.inner.inputtypehandler = value;
+    }
+
+    #[getter]
+    fn outputtypehandler(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.inner
+            .outputtypehandler
+            .as_ref()
+            .map(|value| value.clone_ref(py))
+    }
+
+    #[setter]
+    fn set_outputtypehandler(&mut self, value: Option<Py<PyAny>>) {
+        self.inner.outputtypehandler = value;
+    }
+
+    #[getter]
+    fn warning(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.inner.warning.as_ref().map(|value| value.clone_ref(py))
+    }
+
+    #[getter(bind_vars)]
+    fn bind_vars_attr(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.bind_vars_attr(py)
+    }
+
+    fn get_bind_vars(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.get_bind_vars(py)
+    }
+
+    #[pyo3(name = "get_fetch_vars")]
+    fn get_fetch_vars_method(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.fetch_vars_attr(py)
+    }
+
+    #[pyo3(signature = (in_del=None))]
+    fn close(&mut self, in_del: Option<bool>) {
+        self.inner.close(in_del)
+    }
+
+    fn prepare(
+        &mut self,
+        statement: Option<String>,
+        tag: Option<String>,
+        cache_statement: Option<bool>,
+    ) -> PyResult<()> {
+        self.inner.prepare(statement, tag, cache_statement)
+    }
+
+    async fn parse(&mut self, cursor: Py<PyAny>) -> PyResult<()> {
+        Python::attach(|py| self.inner.parse(cursor.bind(py)))
+    }
+
+    fn _prepare_for_execute(
+        &mut self,
+        cursor: &Bound<'_, PyAny>,
+        statement: Option<String>,
+        parameters: Option<&Bound<'_, PyAny>>,
+        keyword_parameters: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        self.inner
+            ._prepare_for_execute(cursor, statement, parameters, keyword_parameters)
+    }
+
+    fn _prepare_for_executemany(
+        &mut self,
+        cursor: &Bound<'_, PyAny>,
+        statement: Option<String>,
+        parameters: &Bound<'_, PyAny>,
+        batch_size: u32,
+    ) -> PyResult<ExecutemanyManager> {
+        self.inner
+            ._prepare_for_executemany(cursor, statement, parameters, batch_size)
+    }
+
+    async fn executemany(
+        &mut self,
+        cursor: Py<PyAny>,
+        num_execs: u32,
+        batcherrors: bool,
+        arraydmlrowcounts: bool,
+        offset: u32,
+    ) -> PyResult<()> {
+        Python::attach(|py| {
+            self.inner.executemany(
+                cursor.bind(py),
+                num_execs,
+                batcherrors,
+                arraydmlrowcounts,
+                offset,
+            )
+        })
+    }
+
+    async fn execute(&mut self, _cursor: Py<PyAny>) -> PyResult<()> {
+        if self.inner.statement_changed {
+            self.inner.rowfactory = None;
+        }
+        let statement = self
+            .inner
+            .statement
+            .as_deref()
+            .ok_or_else(|| PyRuntimeError::new_err("no statement prepared"))?
+            .to_string();
+        let call_timeout = {
+            let value = self.inner.state.lock().map_err(runtime_error)?.call_timeout;
+            (value > 0).then_some(value)
+        };
+        let query_statement = statement.clone();
+        let query = spawn_blocking_task("oracledb-pyshim-async-execute", {
+            let connection = Arc::clone(&self.inner.connection);
+            let state = Arc::clone(&self.inner.state);
+            let bind_values = self.inner.bind_values.clone();
+            let prefetchrows = self.inner.prefetchrows;
+            move || -> Result<QueryResult, String> {
+                let mut guard = connection.lock().map_err(|err| err.to_string())?;
+                let connection = guard
+                    .as_mut()
+                    .ok_or_else(|| "connection is closed".to_string())?;
+                apply_pending_current_schema_from_state(&state, connection, call_timeout)
+                    .map_err(|err| err.to_string())?;
+                BlockingConnection::execute_query_with_binds_and_timeout(
+                    connection,
+                    &query_statement,
+                    prefetchrows,
+                    &bind_values,
+                    call_timeout,
+                )
+                .map_err(|err| err.to_string())
+            }
+        });
+        let result = match query.await {
+            Ok(result) => result,
+            Err(_) if self.inner.cancel_requested.swap(false, Ordering::SeqCst) => {
+                return Err(ora_cancel_error());
+            }
+            Err(err) => return Err(runtime_error(err)),
+        };
+        if self.inner.cancel_requested.swap(false, Ordering::SeqCst) {
+            self.inner.drain_cancel_response()?;
+            return Err(ora_cancel_error());
+        }
+        self.inner.warning = Python::attach(|py| query_result_warning(py, &result))?;
+        Python::attach(|py| {
+            apply_out_bind_values(
+                py,
+                &self.inner.bind_vars,
+                &result.out_values,
+                &result.return_values,
+            )
+        })?;
+        let is_query = !result.columns.is_empty();
+        let is_plsql = statement_is_plsql(&statement);
+        let should_commit = !is_query && *self.inner.autocommit.lock().map_err(runtime_error)?;
+        if should_commit {
+            let mut guard = self.inner.connection.lock().map_err(runtime_error)?;
+            let connection = guard
+                .as_mut()
+                .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+            BlockingConnection::commit(connection).map_err(runtime_error)?;
+        }
+        self.inner
+            .state
+            .lock()
+            .map_err(runtime_error)?
+            .record_statement(&statement, is_query, should_commit);
+        self.inner.columns = result.columns;
+        self.inner.reset_fetch_define_state();
+        self.inner.requires_define = columns_require_define(&self.inner.columns);
+        self.inner.rows = result.rows;
+        self.inner.row_index = 0;
+        self.inner.cursor_id = result.cursor_id;
+        self.inner.more_rows = result.more_rows;
+        self.inner.invalid_ref_cursor = false;
+        self.inner.rowcount = if is_query || is_plsql {
+            0
+        } else {
+            i64::try_from(result.row_count).unwrap_or(i64::MAX)
+        };
+        self.inner.is_query = is_query;
+        Ok(())
+    }
+
+    fn is_query(&self, connection: &Bound<'_, PyAny>) -> bool {
+        self.inner.is_query(connection)
+    }
+
+    async fn fetch_next_row(&mut self, cursor: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
+        Python::attach(|py| self.inner.fetch_next_row(py, cursor.bind(py)))
+    }
+
+    fn setinputsizes(
+        &mut self,
+        py: Python<'_>,
+        connection: &Bound<'_, PyAny>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        self.inner.setinputsizes(py, connection, args, kwargs)
+    }
+
+    #[pyo3(signature = (
+        connection,
+        typ,
+        size=0,
+        num_elements=1,
+        inconverter=None,
+        outconverter=None,
+        encoding_errors=None,
+        bypass_decode=false,
+        convert_nulls=false,
+        is_array=false
+    ))]
+    fn create_var(
+        &self,
+        py: Python<'_>,
+        connection: &Bound<'_, PyAny>,
+        typ: &Bound<'_, PyAny>,
+        size: u32,
+        num_elements: u32,
+        inconverter: Option<Py<PyAny>>,
+        outconverter: Option<Py<PyAny>>,
+        encoding_errors: Option<String>,
+        bypass_decode: bool,
+        convert_nulls: bool,
+        is_array: bool,
+    ) -> PyResult<Py<ThinVar>> {
+        self.inner.create_var(
+            py,
+            connection,
+            typ,
+            size,
+            num_elements,
+            inconverter,
+            outconverter,
+            encoding_errors,
+            bypass_decode,
+            convert_nulls,
+            is_array,
+        )
+    }
+
+    fn get_array_dml_row_counts(&self) -> PyResult<Vec<u64>> {
+        self.inner.get_array_dml_row_counts()
+    }
+
+    fn get_batch_errors(&self) -> PyResult<Vec<Py<PyAny>>> {
+        self.inner.get_batch_errors()
+    }
+
+    fn get_bind_names(&self) -> Vec<String> {
+        self.inner.get_bind_names()
+    }
+
+    fn get_implicit_results(&self, connection: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+        self.inner.get_implicit_results(connection)
+    }
+
+    fn get_lastrowid(&self) -> Option<String> {
+        self.inner.get_lastrowid()
+    }
+
+    async fn scroll(&mut self, _cursor: Py<PyAny>, _value: i32, _mode: String) -> PyResult<()> {
+        Err(not_implemented("AsyncThinCursorImpl.scroll"))
+    }
+}
+
 #[pyclass(module = "oracledb.thin_impl", name = "AsyncThinConnImpl")]
-#[derive(Default)]
-struct AsyncThinConnImpl;
+struct AsyncThinConnImpl {
+    inner: ThinConnImpl,
+}
 
 #[pymethods]
 impl AsyncThinConnImpl {
     #[new]
-    fn new(_dsn: &Bound<'_, PyAny>, _params_impl: &Bound<'_, PyAny>) -> Self {
-        Self
+    fn new(dsn: &Bound<'_, PyAny>, params_impl: &Bound<'_, PyAny>) -> PyResult<Self> {
+        Ok(Self {
+            inner: ThinConnImpl::new(dsn, params_impl)?,
+        })
     }
 
-    fn connect(&self, _params_impl: &Bound<'_, PyAny>) -> PyResult<()> {
-        Err(not_implemented("AsyncThinConnImpl.connect"))
+    #[getter]
+    fn dsn(&self) -> &str {
+        &self.inner.dsn
+    }
+
+    #[getter]
+    fn username(&self) -> &str {
+        &self.inner.username
+    }
+
+    #[getter]
+    fn proxy_user(&self) -> Option<&str> {
+        self.inner.proxy_user.as_deref()
+    }
+
+    #[getter]
+    fn thin(&self) -> bool {
+        self.inner.thin
+    }
+
+    #[getter]
+    fn server_version(&self) -> (u8, u8, u8, u8, u8) {
+        self.inner.server_version
+    }
+
+    #[getter]
+    fn warning(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.inner.warning.as_ref().map(|value| value.clone_ref(py))
+    }
+
+    #[getter]
+    fn autocommit(&self) -> bool {
+        self.inner.autocommit
+    }
+
+    #[setter]
+    fn set_autocommit(&mut self, value: bool) -> PyResult<()> {
+        self.inner.set_autocommit(value)
+    }
+
+    #[getter]
+    fn inputtypehandler(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.inner
+            .inputtypehandler
+            .as_ref()
+            .map(|value| value.clone_ref(py))
+    }
+
+    #[setter]
+    fn set_inputtypehandler(&mut self, value: Option<Py<PyAny>>) {
+        self.inner.inputtypehandler = value;
+    }
+
+    #[getter]
+    fn outputtypehandler(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.inner
+            .outputtypehandler
+            .as_ref()
+            .map(|value| value.clone_ref(py))
+    }
+
+    #[setter]
+    fn set_outputtypehandler(&mut self, value: Option<Py<PyAny>>) {
+        self.inner.outputtypehandler = value;
+    }
+
+    #[getter]
+    fn tag(&self) -> Option<&str> {
+        self.inner.tag.as_deref()
+    }
+
+    #[setter]
+    fn set_tag(&mut self, value: Option<String>) {
+        self.inner.tag = value;
+    }
+
+    #[getter]
+    fn invoke_session_callback(&self) -> bool {
+        self.inner.invoke_session_callback
+    }
+
+    #[setter]
+    fn set_invoke_session_callback(&mut self, value: bool) {
+        self.inner.invoke_session_callback = value;
+    }
+
+    async fn connect(&mut self, params_impl: Py<PyAny>) -> PyResult<()> {
+        Python::attach(|py| self.inner.connect(params_impl.bind(py)))
+    }
+
+    #[pyo3(signature = (in_del=None))]
+    async fn close(&self, in_del: Option<bool>) -> PyResult<()> {
+        self.inner.close(in_del)
+    }
+
+    async fn ping(&self) -> PyResult<()> {
+        self.inner.ping()
+    }
+
+    async fn commit(&self) -> PyResult<()> {
+        self.inner.commit()
+    }
+
+    async fn rollback(&self) -> PyResult<()> {
+        self.inner.rollback()
+    }
+
+    async fn change_password(&self, old_password: String, new_password: String) -> PyResult<()> {
+        self.inner.change_password(&old_password, &new_password)
+    }
+
+    fn get_is_healthy(&self) -> PyResult<bool> {
+        self.inner.get_is_healthy()
+    }
+
+    fn get_sdu(&self) -> PyResult<u32> {
+        self.inner.get_sdu()
+    }
+
+    async fn get_type(&self, conn: Py<PyAny>, name: String) -> PyResult<DbObjectTypeImpl> {
+        Python::attach(|py| self.inner.get_type(conn.bind(py), &name))
+    }
+
+    fn get_call_timeout(&self) -> PyResult<u32> {
+        self.inner.get_call_timeout()
+    }
+
+    fn set_call_timeout(&self, value: u32) -> PyResult<()> {
+        self.inner.set_call_timeout(value)
+    }
+
+    fn clear_end_user_security_context(&self) -> PyResult<()> {
+        self.inner.clear_end_user_security_context()
+    }
+
+    fn set_end_user_security_context(&self, context: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.inner.set_end_user_security_context(context)
+    }
+
+    fn cancel(&self) -> PyResult<()> {
+        self.inner.cancel()
+    }
+
+    fn get_ltxid<'py>(&self, py: Python<'py>) -> Py<PyBytes> {
+        self.inner.get_ltxid(py)
+    }
+
+    fn get_current_schema(&self) -> PyResult<Option<String>> {
+        self.inner.get_current_schema()
+    }
+
+    fn set_current_schema(&self, value: Option<String>) -> PyResult<()> {
+        self.inner.set_current_schema(value)
+    }
+
+    fn get_edition(&self) -> PyResult<Option<String>> {
+        self.inner.get_edition()
+    }
+
+    fn get_external_name(&self) -> PyResult<Option<String>> {
+        self.inner.get_external_name()
+    }
+
+    fn set_external_name(&self, value: Option<String>) -> PyResult<()> {
+        self.inner.set_external_name(value)
+    }
+
+    fn get_internal_name(&self) -> PyResult<Option<String>> {
+        self.inner.get_internal_name()
+    }
+
+    fn set_internal_name(&self, value: Option<String>) -> PyResult<()> {
+        self.inner.set_internal_name(value)
+    }
+
+    fn get_max_identifier_length(&self) -> Option<u8> {
+        self.inner.get_max_identifier_length()
+    }
+
+    fn get_instance_name(&self) -> PyResult<String> {
+        self.inner.get_instance_name()
+    }
+
+    fn get_db_name(&self) -> PyResult<String> {
+        self.inner.get_db_name()
+    }
+
+    fn get_max_open_cursors(&self) -> PyResult<i64> {
+        self.inner.get_max_open_cursors()
+    }
+
+    fn get_service_name(&self) -> PyResult<String> {
+        self.inner.get_service_name()
+    }
+
+    fn get_db_domain(&self) -> PyResult<Option<String>> {
+        self.inner.get_db_domain()
+    }
+
+    fn get_stmt_cache_size(&self) -> PyResult<u32> {
+        self.inner.get_stmt_cache_size()
+    }
+
+    fn set_stmt_cache_size(&self, value: u32) -> PyResult<()> {
+        self.inner.set_stmt_cache_size(value)
+    }
+
+    fn get_transaction_in_progress(&self) -> PyResult<bool> {
+        self.inner.get_transaction_in_progress()
+    }
+
+    fn set_action(&self, value: Option<String>) -> PyResult<()> {
+        self.inner.set_action(value)
+    }
+
+    fn set_client_identifier(&self, value: Option<String>) -> PyResult<()> {
+        self.inner.set_client_identifier(value)
+    }
+
+    fn set_client_info(&self, value: Option<String>) -> PyResult<()> {
+        self.inner.set_client_info(value)
+    }
+
+    fn set_dbop(&self, value: Option<String>) -> PyResult<()> {
+        self.inner.set_dbop(value)
+    }
+
+    fn set_module(&self, value: Option<String>) -> PyResult<()> {
+        self.inner.set_module(value)
+    }
+
+    fn get_session_id(&self) -> PyResult<u32> {
+        self.inner.get_session_id()
+    }
+
+    fn get_serial_num(&self) -> PyResult<u16> {
+        self.inner.get_serial_num()
+    }
+
+    async fn create_temp_lob_impl(&self, lob_type: Py<PyAny>) -> PyResult<Py<ThinLob>> {
+        Python::attach(|py| self.inner.create_temp_lob_impl(py, lob_type.bind(py)))
+    }
+
+    fn create_cursor_impl(&self, scrollable: bool) -> AsyncThinCursorImpl {
+        AsyncThinCursorImpl {
+            inner: self.inner.create_cursor_impl(scrollable),
+        }
     }
 }
 
@@ -6567,18 +7327,43 @@ impl ThinPoolImpl {
 }
 
 #[pyclass(module = "oracledb.thin_impl", name = "AsyncThinPoolImpl")]
-#[derive(Default)]
-struct AsyncThinPoolImpl;
+struct AsyncThinPoolImpl {
+    opened: Arc<Mutex<bool>>,
+}
 
 #[pymethods]
 impl AsyncThinPoolImpl {
     #[new]
-    fn new(_dsn: &Bound<'_, PyAny>, _params_impl: &Bound<'_, PyAny>) -> PyResult<Self> {
-        Err(not_implemented("AsyncThinPoolImpl.__new__"))
+    fn new(_dsn: &Bound<'_, PyAny>, _params_impl: &Bound<'_, PyAny>) -> Self {
+        Self {
+            opened: Arc::new(Mutex::new(true)),
+        }
     }
 
-    fn acquire(&self, _params_impl: &Bound<'_, PyAny>) -> PyResult<()> {
+    async fn acquire(&self, _params_impl: Py<PyAny>) -> PyResult<()> {
+        if !*self.opened.lock().map_err(runtime_error)? {
+            return Err(raise_oracledb_driver_error("ERR_POOL_NOT_OPEN"));
+        }
         Err(not_implemented("AsyncThinPoolImpl.acquire"))
+    }
+
+    async fn close(&self, _force: bool) -> PyResult<()> {
+        *self.opened.lock().map_err(runtime_error)? = false;
+        Ok(())
+    }
+
+    async fn drop(&self, _conn_impl: Py<PyAny>) -> PyResult<()> {
+        if !*self.opened.lock().map_err(runtime_error)? {
+            return Err(raise_oracledb_driver_error("ERR_POOL_NOT_OPEN"));
+        }
+        Err(not_implemented("AsyncThinPoolImpl.drop"))
+    }
+
+    async fn return_connection(&self, _conn_impl: Py<PyAny>, _in_del: bool) -> PyResult<()> {
+        if !*self.opened.lock().map_err(runtime_error)? {
+            return Err(raise_oracledb_driver_error("ERR_POOL_NOT_OPEN"));
+        }
+        Err(not_implemented("AsyncThinPoolImpl.return_connection"))
     }
 }
 
@@ -6649,6 +7434,7 @@ fn oracledb_pyshim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DbObjectAttrImpl>()?;
     m.add_class::<DbObjectImpl>()?;
     m.add_class::<ThinCursorImpl>()?;
+    m.add_class::<AsyncThinCursorImpl>()?;
     m.add_class::<FetchMetadataImpl>()?;
     m.add_class::<ExecutemanyManager>()?;
     m.add_class::<AsyncThinConnImpl>()?;
