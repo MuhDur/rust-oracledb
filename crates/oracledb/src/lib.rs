@@ -35,6 +35,9 @@ const TNS_DATA_PACKET_OVERHEAD: usize = 10;
 
 pub use oracledb_protocol as protocol;
 
+#[cfg(feature = "arrow")]
+pub mod arrow;
+
 type SharedWriteHalf = Arc<AsyncMutex<OwnedWriteHalf>>;
 
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +58,9 @@ pub enum Error {
     MissingSessionField(&'static str),
     #[error("call timeout of {0} ms exceeded")]
     CallTimeout(u32),
+    #[cfg(feature = "arrow")]
+    #[error(transparent)]
+    ArrowConversion(#[from] arrow::ArrowConversionError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -840,6 +846,140 @@ impl Connection {
         }
     }
 
+    /// Sends a direct path prepare (TTC function 128) for the given table and
+    /// returns the server column metadata plus the direct path cursor id.
+    pub async fn direct_path_prepare(
+        &mut self,
+        cx: &Cx,
+        schema_name: &str,
+        table_name: &str,
+        column_names: &[String],
+    ) -> Result<oracledb_protocol::dpl::DirectPathPrepareResult> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = oracledb_protocol::dpl::build_direct_path_prepare_payload(
+            schema_name,
+            table_name,
+            column_names,
+            seq_num,
+        )?;
+        trace_query_bytes("DIRECT PATH PREPARE payload", &payload);
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        trace_query_bytes("DIRECT PATH PREPARE response", &response);
+        oracledb_protocol::dpl::parse_direct_path_prepare_response(&response, self.capabilities)
+            .map_err(Error::from)
+    }
+
+    /// Sends one direct path load stream message (TTC function 129).
+    pub async fn direct_path_load_stream(
+        &mut self,
+        cx: &Cx,
+        cursor_id: u16,
+        stream: &oracledb_protocol::dpl::DirectPathStream,
+    ) -> Result<()> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = oracledb_protocol::dpl::build_direct_path_load_stream_payload(
+            cursor_id, stream, seq_num,
+        )?;
+        trace_query_bytes("DIRECT PATH LOAD STREAM payload", &payload);
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        trace_query_bytes("DIRECT PATH LOAD STREAM response", &response);
+        oracledb_protocol::dpl::parse_direct_path_simple_response(&response, self.capabilities)
+            .map_err(Error::from)
+    }
+
+    /// Sends a direct path op message (TTC function 130).
+    /// [`oracledb_protocol::dpl::TNS_DP_OP_FINISH`] commits the load
+    /// server-side; [`oracledb_protocol::dpl::TNS_DP_OP_ABORT`] discards it.
+    pub async fn direct_path_op(&mut self, cx: &Cx, cursor_id: u16, op_code: u32) -> Result<()> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload =
+            oracledb_protocol::dpl::build_direct_path_op_payload(cursor_id, op_code, seq_num);
+        trace_query_bytes("DIRECT PATH OP payload", &payload);
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        trace_query_bytes("DIRECT PATH OP response", &response);
+        oracledb_protocol::dpl::parse_direct_path_simple_response(&response, self.capabilities)
+            .map_err(Error::from)
+    }
+
+    /// Loads `rows` into `schema_name.table_name` via the direct path load
+    /// interface, mirroring the reference driver loop
+    /// (impl/thin/connection.pyx `direct_path_load`): prepare, stream batches
+    /// of `batch_size` rows, then FINISH (which commits) or ABORT on error.
+    /// The op message is always sent, even when streaming fails, so the
+    /// session is never left wedged.
+    pub async fn direct_path_load(
+        &mut self,
+        cx: &Cx,
+        schema_name: &str,
+        table_name: &str,
+        column_names: &[String],
+        rows: &[Vec<oracledb_protocol::dpl::DirectPathColumnValue>],
+        batch_size: u32,
+    ) -> Result<()> {
+        let prepare = self
+            .direct_path_prepare(cx, schema_name, table_name, column_names)
+            .await?;
+        let load_result = self
+            .direct_path_load_batches(cx, &prepare, rows, batch_size)
+            .await;
+        let op_code = if load_result.is_ok() {
+            oracledb_protocol::dpl::TNS_DP_OP_FINISH
+        } else {
+            oracledb_protocol::dpl::TNS_DP_OP_ABORT
+        };
+        let op_result = self.direct_path_op(cx, prepare.cursor_id, op_code).await;
+        load_result?;
+        op_result
+    }
+
+    async fn direct_path_load_batches(
+        &mut self,
+        cx: &Cx,
+        prepare: &oracledb_protocol::dpl::DirectPathPrepareResult,
+        rows: &[Vec<oracledb_protocol::dpl::DirectPathColumnValue>],
+        batch_size: u32,
+    ) -> Result<()> {
+        // verify all row widths before sending anything (reference
+        // _verify_metadata raises DPY-4009 before the first stream message)
+        for row in rows {
+            if row.len() != prepare.column_metadata.len() {
+                return Err(oracledb_protocol::ProtocolError::TtcDecode(
+                    "direct path row width does not match column metadata",
+                )
+                .into());
+            }
+        }
+        let mut state =
+            oracledb_protocol::dpl::BatchLoadState::for_rows(rows.len() as u64, batch_size)?;
+        // 1-based running row counter across batches for error messages
+        let mut row_num: u64 = 1;
+        while !state.is_done() {
+            let start = usize::try_from(state.offset()).map_err(|_| {
+                oracledb_protocol::ProtocolError::TtcDecode("direct path offset overflow")
+            })?;
+            let end = start + state.num_rows() as usize;
+            let stream = oracledb_protocol::dpl::encode_direct_path_rows(
+                &prepare.column_metadata,
+                &rows[start..end],
+                row_num,
+            )?;
+            row_num += (end - start) as u64;
+            self.direct_path_load_stream(cx, prepare.cursor_id, &stream)
+                .await?;
+            state.next_batch();
+        }
+        Ok(())
+    }
+
     async fn drain_cancel_response(&mut self, cx: &Cx) -> Result<()> {
         match time::timeout(
             time::wall_now(),
@@ -1241,6 +1381,24 @@ impl BlockingConnection {
         })
     }
 
+    pub fn direct_path_load(
+        connection: &mut Connection,
+        schema_name: &str,
+        table_name: &str,
+        column_names: &[String],
+        rows: &[Vec<oracledb_protocol::dpl::DirectPathColumnValue>],
+        batch_size: u32,
+    ) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .direct_path_load(&cx, schema_name, table_name, column_names, rows, batch_size)
+                .await
+        })
+    }
+
     pub fn drain_cancel_response(connection: &mut Connection) -> Result<()> {
         let runtime = build_io_runtime()?;
         runtime.block_on(async {
@@ -1266,6 +1424,22 @@ fn build_io_runtime() -> Result<Runtime> {
         .with_reactor(reactor)
         .build()
         .map_err(|err| Error::Runtime(err.to_string()))
+}
+
+/// Runs a connection future to completion on a fresh blocking runtime,
+/// passing it the ambient [`Cx`] (shared shape of the `BlockingConnection`
+/// wrappers).
+pub(crate) fn block_on_connection<F, Fut, T>(operation: F) -> Result<T>
+where
+    F: FnOnce(Cx) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let runtime = build_io_runtime()?;
+    runtime.block_on(async {
+        let cx = Cx::current()
+            .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+        operation(cx).await
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
