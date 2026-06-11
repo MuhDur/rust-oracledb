@@ -406,6 +406,277 @@ fn extract_bind_values(
     extract_positional_bind_values_for_execute(py, statement, value, named_input_sizes)
 }
 
+enum BindSourceKind {
+    Parameters,
+    Keywords,
+}
+
+fn prepare_object_execute_inputs(
+    py: Python<'_>,
+    statement: &str,
+    parameters: Option<&Bound<'_, PyAny>>,
+    keyword_parameters: Option<&Bound<'_, PyAny>>,
+) -> PyResult<(String, Option<Py<PyAny>>, Option<Py<PyAny>>)> {
+    let original_parameters = parameters.map(|value| value.clone().unbind());
+    let original_keywords = keyword_parameters.map(|value| value.clone().unbind());
+    let has_parameters = has_bind_payload(parameters)?;
+    let has_keywords = has_bind_payload(keyword_parameters)?;
+    if has_parameters && has_keywords {
+        return Ok((
+            statement.to_string(),
+            original_parameters,
+            original_keywords,
+        ));
+    }
+    let (source_kind, source_dict) = if has_keywords {
+        let Some(value) = keyword_parameters else {
+            return Ok((
+                statement.to_string(),
+                original_parameters,
+                original_keywords,
+            ));
+        };
+        let Ok(dict) = value.cast::<PyDict>() else {
+            return Ok((
+                statement.to_string(),
+                original_parameters,
+                original_keywords,
+            ));
+        };
+        (BindSourceKind::Keywords, dict)
+    } else if has_parameters {
+        let Some(value) = parameters else {
+            return Ok((
+                statement.to_string(),
+                original_parameters,
+                original_keywords,
+            ));
+        };
+        let Ok(dict) = value.cast::<PyDict>() else {
+            return Ok((
+                statement.to_string(),
+                original_parameters,
+                original_keywords,
+            ));
+        };
+        (BindSourceKind::Parameters, dict)
+    } else {
+        return Ok((
+            statement.to_string(),
+            original_parameters,
+            original_keywords,
+        ));
+    };
+
+    let effective_dict = PyDict::new(py);
+    for (key, value) in source_dict.iter() {
+        effective_dict.set_item(&key, &value)?;
+    }
+
+    let mut effective_statement = statement.to_string();
+    let mut changed = false;
+    for (key, value) in source_dict.iter() {
+        let key = key.extract::<String>()?;
+        let Some(object) = py_db_object_impl(&value)? else {
+            continue;
+        };
+        let object_type = object.object_type.clone();
+        if object_type.is_collection || object_type.attrs.is_empty() {
+            continue;
+        }
+        let mut constructor_args = Vec::with_capacity(object_type.attrs.len());
+        for attr in &object_type.attrs {
+            let attr_value = object.attr_bind_value(py, &attr.name)?;
+            if attr_value.bind(py).is_none() {
+                constructor_args.push("null".to_string());
+            } else {
+                let generated_name = generated_object_attr_bind_name(&key, &attr.name);
+                constructor_args.push(format!(":{generated_name}"));
+                effective_dict.set_item(&generated_name, attr_value)?;
+            }
+        }
+        let constructor = format!(
+            "{}({})",
+            object_type._get_fqn(),
+            constructor_args.join(", ")
+        );
+        effective_statement =
+            replace_input_bind_placeholder(&effective_statement, &key, &constructor);
+        let _ = effective_dict.del_item(&key);
+        changed = true;
+    }
+
+    if let Some(statement) =
+        rewrite_object_return_projection(&effective_statement, &effective_dict)?
+    {
+        effective_statement = statement;
+        changed = true;
+    }
+
+    if !changed {
+        return Ok((
+            statement.to_string(),
+            original_parameters,
+            original_keywords,
+        ));
+    }
+    match source_kind {
+        BindSourceKind::Parameters => Ok((
+            effective_statement,
+            Some(effective_dict.unbind().into()),
+            None,
+        )),
+        BindSourceKind::Keywords => Ok((
+            effective_statement,
+            None,
+            Some(effective_dict.unbind().into()),
+        )),
+    }
+}
+
+fn generated_object_attr_bind_name(bind_name: &str, attr_name: &str) -> String {
+    let bind = bind_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("ORADB_OBJ_{bind}_{}", attr_name.to_ascii_uppercase())
+}
+
+fn replace_input_bind_placeholder(statement: &str, bind_name: &str, replacement: &str) -> String {
+    let lower = statement.to_ascii_lowercase();
+    let split = lower.find("returning").unwrap_or(statement.len());
+    let (prefix, suffix) = statement.split_at(split);
+    format!(
+        "{}{}",
+        replace_bind_placeholder(prefix, bind_name, replacement),
+        suffix
+    )
+}
+
+fn replace_bind_placeholder(statement: &str, bind_name: &str, replacement: &str) -> String {
+    let mut result = String::with_capacity(statement.len() + replacement.len());
+    let mut index = 0;
+    while index < statement.len() {
+        let rest = &statement[index..];
+        if rest.starts_with('\'') {
+            let end = sql_single_quote_end(statement, index);
+            result.push_str(&statement[index..end]);
+            index = end;
+            continue;
+        }
+        if rest.starts_with(':') {
+            let name_start = index + 1;
+            let mut name_end = name_start;
+            for (offset, ch) in statement[name_start..].char_indices() {
+                if is_bind_name_char(ch) {
+                    name_end = name_start + offset + ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            if name_end > name_start {
+                let found_name = &statement[name_start..name_end];
+                if bind_names_equal(found_name, bind_name) {
+                    result.push_str(replacement);
+                } else {
+                    result.push_str(&statement[index..name_end]);
+                }
+                index = name_end;
+                continue;
+            }
+        }
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        result.push(ch);
+        index += ch.len_utf8();
+    }
+    result
+}
+
+fn sql_single_quote_end(statement: &str, start: usize) -> usize {
+    let bytes = statement.as_bytes();
+    let mut index = start + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            if bytes.get(index + 1) == Some(&b'\'') {
+                index += 2;
+            } else {
+                return index + 1;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    statement.len()
+}
+
+fn rewrite_object_return_projection(
+    statement: &str,
+    parameters: &Bound<'_, PyDict>,
+) -> PyResult<Option<String>> {
+    if statement_is_plsql(statement) {
+        return Ok(None);
+    }
+    let lower = statement.to_ascii_lowercase();
+    let Some(returning_pos) = lower.find("returning") else {
+        return Ok(None);
+    };
+    let Some(into_relative_pos) = lower[returning_pos..].find("into") else {
+        return Ok(None);
+    };
+    let expr_start = returning_pos + "returning".len();
+    let into_start = returning_pos + into_relative_pos;
+    let binds_start = into_start + "into".len();
+    let return_expr = statement[expr_start..into_start].trim();
+    if return_expr.contains(',') || return_expr.is_empty() {
+        return Ok(None);
+    }
+    let return_names = scan_sql_bind_names(&statement[binds_start..])?;
+    if return_names.len() != 1 {
+        return Ok(None);
+    }
+    let Some(value) = get_named_bind_value(parameters, &return_names[0])? else {
+        return Ok(None);
+    };
+    let Some((_object_type, attr_name)) = thin_var_object_return_projection(value.py(), &value)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(format!(
+        "{}returning ({return_expr}).{attr_name} into{}",
+        &statement[..returning_pos],
+        &statement[binds_start..]
+    )))
+}
+
+fn thin_var_object_return_projection(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Option<(DbObjectTypeImpl, String)>> {
+    let Some(var) = thin_var_from_value(value)? else {
+        return Ok(None);
+    };
+    let var = var.borrow(py);
+    let Some(object_type) = var.object_type.clone() else {
+        return Ok(None);
+    };
+    let Some(attr_name) = var
+        .object_return_attr
+        .clone()
+        .or_else(|| object_type.default_scalar_return_attr().map(str::to_string))
+    else {
+        return Ok(None);
+    };
+    Ok(Some((object_type, attr_name)))
+}
+
 fn has_bind_payload(value: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
     let Some(value) = value else {
         return Ok(false);
@@ -1373,6 +1644,32 @@ fn py_type_name(typ: &Bound<'_, PyAny>) -> String {
         .unwrap_or_default()
 }
 
+fn py_db_object_type_impl(value: &Bound<'_, PyAny>) -> PyResult<Option<DbObjectTypeImpl>> {
+    if let Ok(object_type) = value.extract::<PyRef<'_, DbObjectTypeImpl>>() {
+        return Ok(Some(object_type.clone()));
+    }
+    if value.hasattr("_impl")? {
+        let impl_obj = value.getattr("_impl")?;
+        if let Ok(object_type) = impl_obj.extract::<PyRef<'_, DbObjectTypeImpl>>() {
+            return Ok(Some(object_type.clone()));
+        }
+    }
+    Ok(None)
+}
+
+fn py_db_object_impl<'py>(value: &Bound<'py, PyAny>) -> PyResult<Option<PyRef<'py, DbObjectImpl>>> {
+    if let Ok(object) = value.extract::<PyRef<'py, DbObjectImpl>>() {
+        return Ok(Some(object));
+    }
+    if value.hasattr("_impl")? {
+        let impl_obj = value.getattr("_impl")?;
+        if let Ok(object) = impl_obj.extract::<PyRef<'py, DbObjectImpl>>() {
+            return Ok(Some(object));
+        }
+    }
+    Ok(None)
+}
+
 fn bind_template_from_type(typ: &Bound<'_, PyAny>, size: u32) -> BindValue {
     bind_template_from_type_name(&py_type_name(typ), size)
 }
@@ -1509,8 +1806,21 @@ fn thin_var_from_type_spec(
     convert_nulls: bool,
 ) -> PyResult<Py<ThinVar>> {
     let type_name = py_type_name(typ);
-    let default_bind = bind_template_from_type_name(&type_name, size);
+    let object_type = py_db_object_type_impl(typ)?;
+    let default_bind = if object_type.is_some() {
+        BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_VARCHAR,
+            csfrm: CS_FORM_IMPLICIT,
+            buffer_size: size.max(4000),
+        }
+    } else {
+        bind_template_from_type_name(&type_name, size)
+    };
     let return_kind = return_kind_from_type_name(&type_name);
+    let object_return_attr = object_type
+        .as_ref()
+        .and_then(DbObjectTypeImpl::default_scalar_return_attr)
+        .map(str::to_string);
     let value = if is_cursor_bind_template(&default_bind) {
         Some(connection.call_method0("cursor")?.unbind())
     } else {
@@ -1526,6 +1836,8 @@ fn thin_var_from_type_spec(
             outconverter,
             convert_nulls,
             return_kind,
+            object_type,
+            object_return_attr,
         ),
     )
 }
@@ -1555,6 +1867,8 @@ fn thin_var_from_input_size(
             None,
             false,
             ThinVarReturnKind::Plain,
+            None,
+            None,
         ),
     )
 }
@@ -1693,6 +2007,37 @@ fn query_value_to_i64(value: &Option<QueryValue>) -> PyResult<i64> {
         .ok_or_else(|| PyRuntimeError::new_err("query returned NULL where integer was expected"))?
         .parse()
         .map_err(runtime_error)
+}
+
+fn query_value_to_u32(value: &Option<QueryValue>) -> Option<u32> {
+    query_value_to_string(value)?.parse().ok()
+}
+
+fn query_value_to_i8(value: &Option<QueryValue>) -> Option<i8> {
+    query_value_to_string(value)?.parse().ok()
+}
+
+fn dbtype_name_from_oracle_attr_type(type_name: &str) -> &'static str {
+    match type_name.to_ascii_uppercase().as_str() {
+        "CHAR" => "DB_TYPE_CHAR",
+        "NCHAR" => "DB_TYPE_NCHAR",
+        "VARCHAR2" | "VARCHAR" => "DB_TYPE_VARCHAR",
+        "NVARCHAR2" | "NVARCHAR" => "DB_TYPE_NVARCHAR",
+        "RAW" => "DB_TYPE_RAW",
+        "DATE" => "DB_TYPE_DATE",
+        "TIMESTAMP" => "DB_TYPE_TIMESTAMP",
+        "TIMESTAMP WITH TIME ZONE" | "TIMESTAMP WITH TZ" => "DB_TYPE_TIMESTAMP_TZ",
+        "TIMESTAMP WITH LOCAL TIME ZONE" | "TIMESTAMP WITH LOCAL TZ" => "DB_TYPE_TIMESTAMP_LTZ",
+        "CLOB" => "DB_TYPE_CLOB",
+        "NCLOB" => "DB_TYPE_NCLOB",
+        "BLOB" => "DB_TYPE_BLOB",
+        "BINARY_FLOAT" => "DB_TYPE_BINARY_FLOAT",
+        "BINARY_DOUBLE" => "DB_TYPE_BINARY_DOUBLE",
+        "NUMBER" | "INTEGER" | "SMALLINT" | "REAL" | "DOUBLE PRECISION" | "FLOAT" => {
+            "DB_TYPE_NUMBER"
+        }
+        _ => "DB_TYPE_OBJECT",
+    }
 }
 
 fn sql_identifier(value: &str) -> PyResult<String> {
@@ -1860,6 +2205,8 @@ struct ThinVar {
     is_array: bool,
     num_elements: u32,
     return_kind: ThinVarReturnKind,
+    object_type: Option<DbObjectTypeImpl>,
+    object_return_attr: Option<String>,
 }
 
 impl ThinVar {
@@ -1873,6 +2220,8 @@ impl ThinVar {
             is_array: false,
             num_elements: 1,
             return_kind: ThinVarReturnKind::Plain,
+            object_type: None,
+            object_return_attr: None,
         }
     }
 
@@ -1884,6 +2233,8 @@ impl ThinVar {
         outconverter: Option<Py<PyAny>>,
         convert_nulls: bool,
         return_kind: ThinVarReturnKind,
+        object_type: Option<DbObjectTypeImpl>,
+        object_return_attr: Option<String>,
     ) -> Self {
         Self {
             value: Arc::new(Mutex::new(value)),
@@ -1894,6 +2245,8 @@ impl ThinVar {
             is_array,
             num_elements: num_elements.max(1),
             return_kind,
+            object_type,
+            object_return_attr,
         }
     }
 
@@ -1975,6 +2328,23 @@ impl ThinVar {
                 },
             )?
             .into_any(),
+            (ThinVarReturnKind::Plain, Some(QueryValue::Text(value)))
+                if self.object_type.is_some() =>
+            {
+                let object_type = self
+                    .object_type
+                    .clone()
+                    .ok_or_else(|| PyRuntimeError::new_err("missing object type"))?;
+                let attr_name = self
+                    .object_return_attr
+                    .clone()
+                    .or_else(|| object_type.default_scalar_return_attr().map(str::to_string))
+                    .ok_or_else(|| {
+                        not_implemented("ThinVar object DML RETURNING projection metadata")
+                    })?;
+                let object = DbObjectImpl::with_attr(py, object_type, &attr_name, value.clone())?;
+                py_db_object_from_impl(py, object)?
+            }
             _ => query_value_to_py(py, value, None)?,
         };
         if let Some(outconverter) = self.outconverter.as_ref() {
@@ -2343,6 +2713,27 @@ impl ThinConnImpl {
         Ok(result.rows.into_iter().next())
     }
 
+    fn query_rows_with_binds(
+        &self,
+        sql: &str,
+        binds: &[BindValue],
+    ) -> PyResult<Vec<Vec<Option<QueryValue>>>> {
+        let call_timeout = self.call_timeout()?;
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        let result = BlockingConnection::execute_query_with_binds_and_timeout(
+            connection,
+            sql,
+            100,
+            binds,
+            call_timeout,
+        )
+        .map_err(runtime_error)?;
+        Ok(result.rows)
+    }
+
     fn query_first_text(&self, sql: &str) -> PyResult<Option<String>> {
         self.query_first_value(sql)
             .map(|value| query_value_to_string(&value))
@@ -2351,6 +2742,39 @@ impl ThinConnImpl {
     fn query_first_i64(&self, sql: &str) -> PyResult<i64> {
         let value = self.query_first_value(sql)?;
         query_value_to_i64(&value)
+    }
+
+    fn object_type_attrs(&self, schema: &str, type_name: &str) -> PyResult<Vec<DbObjectAttrImpl>> {
+        let rows = self.query_rows_with_binds(
+            "select attr_name, attr_type_name, length, precision, scale \
+             from all_type_attrs \
+             where owner = :1 and type_name = :2 \
+             order by attr_no",
+            &[
+                BindValue::Text(schema.to_ascii_uppercase()),
+                BindValue::Text(type_name.to_ascii_uppercase()),
+            ],
+        )?;
+        rows.into_iter()
+            .map(|row| {
+                let name = row
+                    .first()
+                    .and_then(query_value_to_string)
+                    .unwrap_or_default()
+                    .to_ascii_uppercase();
+                let attr_type_name = row
+                    .get(1)
+                    .and_then(query_value_to_string)
+                    .unwrap_or_else(|| "VARCHAR2".to_string());
+                Ok(DbObjectAttrImpl {
+                    name,
+                    dbtype_name: dbtype_name_from_oracle_attr_type(&attr_type_name).to_string(),
+                    max_size: row.get(2).and_then(query_value_to_u32).unwrap_or(0),
+                    precision: row.get(3).and_then(query_value_to_i8).unwrap_or(0),
+                    scale: row.get(4).and_then(query_value_to_i8).unwrap_or(0),
+                })
+            })
+            .collect()
     }
 
     fn call_timeout(&self) -> PyResult<Option<u32>> {
@@ -2663,11 +3087,13 @@ impl ThinConnImpl {
             .get(2)
             .and_then(query_value_to_string)
             .unwrap_or_else(|| "OBJECT".to_string());
+        let attrs = self.object_type_attrs(&schema, &type_name)?;
         Ok(DbObjectTypeImpl::new(
             schema.to_ascii_uppercase(),
             None,
             type_name.to_ascii_uppercase(),
             &typecode,
+            attrs,
         ))
     }
 
@@ -2878,21 +3304,29 @@ impl ThinConnImpl {
 }
 
 #[pyclass(module = "oracledb.thin_impl", name = "ThinDbObjectTypeImpl")]
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 struct DbObjectTypeImpl {
     schema: String,
     package_name: Option<String>,
     name: String,
     is_collection: bool,
+    attrs: Vec<DbObjectAttrImpl>,
 }
 
 impl DbObjectTypeImpl {
-    fn new(schema: String, package_name: Option<String>, name: String, typecode: &str) -> Self {
+    fn new(
+        schema: String,
+        package_name: Option<String>,
+        name: String,
+        typecode: &str,
+        attrs: Vec<DbObjectAttrImpl>,
+    ) -> Self {
         Self {
             schema,
             package_name,
             name,
             is_collection: typecode.eq_ignore_ascii_case("COLLECTION"),
+            attrs,
         }
     }
 
@@ -2903,9 +3337,34 @@ impl DbObjectTypeImpl {
             .as_deref()
             .unwrap_or_default()
             .to_ascii_uppercase();
-        Some(Self::new(schema, None, name, "OBJECT"))
+        Some(Self::new(schema, None, name, "OBJECT", Vec::new()))
+    }
+
+    fn default_scalar_return_attr(&self) -> Option<&str> {
+        self.attrs
+            .iter()
+            .find(|attr| attr.name.eq_ignore_ascii_case("STRINGVALUE"))
+            .or_else(|| {
+                self.attrs.iter().find(|attr| {
+                    matches!(
+                        attr.dbtype_name.as_str(),
+                        "DB_TYPE_VARCHAR" | "DB_TYPE_CHAR" | "DB_TYPE_NVARCHAR" | "DB_TYPE_NCHAR"
+                    )
+                })
+            })
+            .map(|attr| attr.name.as_str())
     }
 }
+
+impl PartialEq for DbObjectTypeImpl {
+    fn eq(&self, other: &Self) -> bool {
+        self.schema == other.schema
+            && self.package_name == other.package_name
+            && self.name == other.name
+    }
+}
+
+impl Eq for DbObjectTypeImpl {}
 
 #[pymethods]
 impl DbObjectTypeImpl {
@@ -2930,8 +3389,23 @@ impl DbObjectTypeImpl {
     }
 
     #[getter]
-    fn attrs(&self, py: Python<'_>) -> Py<PyAny> {
-        PyList::empty(py).unbind().into()
+    fn attrs(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let attrs = self
+            .attrs
+            .iter()
+            .cloned()
+            .map(|attr| Py::new(py, attr))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyList::new(py, attrs)?.unbind().into())
+    }
+
+    #[getter]
+    fn attrs_by_name(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let dict = PyDict::new(py);
+        for attr in &self.attrs {
+            dict.set_item(&attr.name, Py::new(py, attr.clone())?)?;
+        }
+        Ok(dict.unbind().into())
     }
 
     #[getter]
@@ -2947,8 +3421,8 @@ impl DbObjectTypeImpl {
         }
     }
 
-    fn create_new_object(&self) -> PyResult<()> {
-        Err(not_implemented("ThinDbObjectTypeImpl.create_new_object"))
+    fn create_new_object(&self, py: Python<'_>) -> PyResult<DbObjectImpl> {
+        DbObjectImpl::new(py, self.clone())
     }
 
     fn __eq__(&self, other: &Self) -> bool {
@@ -2957,6 +3431,159 @@ impl DbObjectTypeImpl {
 
     fn __ne__(&self, other: &Self) -> bool {
         self != other
+    }
+}
+
+#[pyclass(module = "oracledb.thin_impl", name = "ThinDbObjectAttrImpl")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DbObjectAttrImpl {
+    name: String,
+    dbtype_name: String,
+    max_size: u32,
+    precision: i8,
+    scale: i8,
+}
+
+#[pymethods]
+impl DbObjectAttrImpl {
+    #[getter]
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[getter]
+    fn dbtype(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(PyModule::import(py, "oracledb")?
+            .getattr(&self.dbtype_name)?
+            .unbind())
+    }
+
+    #[getter]
+    fn objtype(&self) -> Option<DbObjectTypeImpl> {
+        None
+    }
+
+    #[getter]
+    fn max_size(&self) -> u32 {
+        self.max_size
+    }
+
+    #[getter]
+    fn precision(&self) -> i8 {
+        self.precision
+    }
+
+    #[getter]
+    fn scale(&self) -> i8 {
+        self.scale
+    }
+}
+
+#[pyclass(module = "oracledb.thin_impl", name = "ThinDbObjectImpl")]
+struct DbObjectImpl {
+    object_type: DbObjectTypeImpl,
+    attr_values: Arc<Mutex<BTreeMap<String, Py<PyAny>>>>,
+}
+
+impl DbObjectImpl {
+    fn new(py: Python<'_>, object_type: DbObjectTypeImpl) -> PyResult<Self> {
+        let mut attr_values = BTreeMap::new();
+        for attr in &object_type.attrs {
+            attr_values.insert(attr.name.clone(), py.None());
+        }
+        Ok(Self {
+            object_type,
+            attr_values: Arc::new(Mutex::new(attr_values)),
+        })
+    }
+
+    fn with_attr(
+        py: Python<'_>,
+        object_type: DbObjectTypeImpl,
+        attr_name: &str,
+        value: String,
+    ) -> PyResult<Self> {
+        let object = Self::new(py, object_type)?;
+        object.set_attr_by_name(py, attr_name, value.into_pyobject(py)?.unbind().into())?;
+        Ok(object)
+    }
+
+    fn set_attr_by_name(&self, py: Python<'_>, attr_name: &str, value: Py<PyAny>) -> PyResult<()> {
+        let key = attr_name.to_ascii_uppercase();
+        let value = if value.bind(py).is_none() {
+            py.None()
+        } else {
+            value
+        };
+        self.attr_values
+            .lock()
+            .map_err(runtime_error)?
+            .insert(key, value);
+        Ok(())
+    }
+
+    fn attr_value(&self, py: Python<'_>, attr_name: &str) -> PyResult<Py<PyAny>> {
+        Ok(self
+            .attr_values
+            .lock()
+            .map_err(runtime_error)?
+            .get(&attr_name.to_ascii_uppercase())
+            .map(|value| value.clone_ref(py))
+            .unwrap_or_else(|| py.None()))
+    }
+
+    fn attr_bind_value(&self, py: Python<'_>, attr_name: &str) -> PyResult<Py<PyAny>> {
+        self.attr_value(py, attr_name)
+    }
+}
+
+fn py_db_object_from_impl(py: Python<'_>, object: DbObjectImpl) -> PyResult<Py<PyAny>> {
+    let impl_obj = Py::new(py, object)?;
+    Ok(PyModule::import(py, "oracledb")?
+        .getattr("DbObject")?
+        .call_method1("_from_impl", (impl_obj,))?
+        .unbind())
+}
+
+#[pymethods]
+impl DbObjectImpl {
+    #[getter]
+    #[pyo3(name = "type")]
+    fn object_type(&self) -> DbObjectTypeImpl {
+        self.object_type.clone()
+    }
+
+    fn get_attr_value(&self, py: Python<'_>, attr: &DbObjectAttrImpl) -> PyResult<Py<PyAny>> {
+        self.attr_value(py, &attr.name)
+    }
+
+    fn set_attr_value(
+        &self,
+        py: Python<'_>,
+        attr: &DbObjectAttrImpl,
+        value: Py<PyAny>,
+    ) -> PyResult<()> {
+        self.set_attr_by_name(py, &attr.name, value)
+    }
+
+    fn set_attr_value_checked(
+        &self,
+        py: Python<'_>,
+        attr: &DbObjectAttrImpl,
+        value: Py<PyAny>,
+    ) -> PyResult<()> {
+        self.set_attr_by_name(py, &attr.name, value)
+    }
+
+    fn copy(&self, py: Python<'_>) -> PyResult<Self> {
+        let mut attr_values = BTreeMap::new();
+        for (name, value) in self.attr_values.lock().map_err(runtime_error)?.iter() {
+            attr_values.insert(name.clone(), value.clone_ref(py));
+        }
+        Ok(Self {
+            object_type: self.object_type.clone(),
+            attr_values: Arc::new(Mutex::new(attr_values)),
+        })
     }
 }
 
@@ -3453,7 +4080,7 @@ impl ThinCursorImpl {
             .statement
             .as_deref()
             .ok_or_else(|| raise_oracledb_driver_error("ERR_NO_STATEMENT"))?;
-        validate_dml_returning_duplicate_binds(statement)?;
+        validate_dml_returning_duplicate_binds(&statement)?;
         self.bind_names = unique_sql_bind_names(statement)?;
         validate_parse_bind_names(statement)?;
         Ok(())
@@ -3476,7 +4103,8 @@ impl ThinCursorImpl {
             .statement
             .as_deref()
             .ok_or_else(|| raise_oracledb_driver_error("ERR_NO_STATEMENT"))?;
-        validate_dml_returning_duplicate_binds(statement)?;
+        let statement = statement.to_string();
+        validate_dml_returning_duplicate_binds(&statement)?;
         if self.has_positional_input_sizes
             && parameters.is_some_and(|value| value.cast::<PyDict>().is_ok())
         {
@@ -3494,25 +4122,33 @@ impl ThinCursorImpl {
             ));
         }
         validate_cursor_bind_parameters(_cursor, &self.connection, parameters, keyword_parameters)?;
-        self.bind_names = unique_sql_bind_names(statement)?;
-        self.bind_values = Python::attach(|py| {
-            extract_bind_values(
+        let (effective_statement, bind_values, bind_vars) = Python::attach(|py| {
+            let (effective_statement, effective_parameters, effective_keyword_parameters) =
+                prepare_object_execute_inputs(py, &statement, parameters, keyword_parameters)?;
+            let effective_parameters = effective_parameters.as_ref().map(|value| value.bind(py));
+            let effective_keyword_parameters = effective_keyword_parameters
+                .as_ref()
+                .map(|value| value.bind(py));
+            let bind_values = extract_bind_values(
                 py,
-                statement,
-                parameters,
-                keyword_parameters,
+                &effective_statement,
+                effective_parameters,
+                effective_keyword_parameters,
                 &self.named_input_sizes,
-            )
-        })?;
-        self.bind_vars = Python::attach(|py| {
-            extract_bind_var_objects(
+            )?;
+            let bind_vars = extract_bind_var_objects(
                 py,
-                statement,
-                parameters,
-                keyword_parameters,
+                &effective_statement,
+                effective_parameters,
+                effective_keyword_parameters,
                 &self.named_input_sizes,
-            )
+            )?;
+            Ok::<_, PyErr>((effective_statement, bind_values, bind_vars))
         })?;
+        self.bind_names = unique_sql_bind_names(&effective_statement)?;
+        self.bind_values = bind_values;
+        self.bind_vars = bind_vars;
+        self.statement = Some(effective_statement);
         self.many_bind_rows.clear();
         Ok(())
     }
@@ -4272,6 +4908,8 @@ fn oracledb_pyshim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ThinConnImpl>()?;
     m.add_class::<ThinLob>()?;
     m.add_class::<DbObjectTypeImpl>()?;
+    m.add_class::<DbObjectAttrImpl>()?;
+    m.add_class::<DbObjectImpl>()?;
     m.add_class::<ThinCursorImpl>()?;
     m.add_class::<FetchMetadataImpl>()?;
     m.add_class::<ExecutemanyManager>()?;
