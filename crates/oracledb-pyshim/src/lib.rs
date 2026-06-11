@@ -659,7 +659,11 @@ fn object_bind_sql_expr(
             {
                 constructor_args.push(expr);
             } else {
-                constructor_args.push(format!(":{generated_name}"));
+                constructor_args.push(object_attr_bind_sql_expr(
+                    attr,
+                    attr_value_bound,
+                    &generated_name,
+                )?);
                 effective_dict.set_item(&generated_name, attr_value)?;
             }
         }
@@ -679,6 +683,17 @@ fn object_bind_sql_expr(
     }
 
     Ok(None)
+}
+
+fn object_attr_bind_sql_expr(
+    attr: &DbObjectAttrImpl,
+    value: &Bound<'_, PyAny>,
+    bind_name: &str,
+) -> PyResult<String> {
+    if attr.dbtype_name == "DB_TYPE_BLOB" && value.cast::<PyString>().is_ok() {
+        return Ok(format!("utl_raw.cast_to_raw(:{bind_name})"));
+    }
+    Ok(format!(":{bind_name}"))
 }
 
 fn plsql_function_return_bind_name(statement: &str) -> Option<String> {
@@ -1841,6 +1856,14 @@ fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> {
             });
         }
     }
+    if let Some(bind) = py_lob_value_to_bind(value)? {
+        return Ok(bind);
+    }
+    if let Some(object) = py_db_object_impl(value)? {
+        if let Some(bind) = dbobject_collection_to_array_bind(value.py(), &object)? {
+            return Ok(bind);
+        }
+    }
     if let Ok(bytes) = value.cast::<PyBytes>() {
         return Ok(BindValue::Raw(bytes.as_bytes().to_vec()));
     }
@@ -2003,6 +2026,120 @@ fn py_db_object_impl<'py>(value: &Bound<'py, PyAny>) -> PyResult<Option<PyRef<'p
         }
     }
     Ok(None)
+}
+
+fn py_lob_impl<'py>(value: &Bound<'py, PyAny>) -> PyResult<Option<PyRef<'py, ThinLob>>> {
+    if let Ok(lob) = value.extract::<PyRef<'py, ThinLob>>() {
+        return Ok(Some(lob));
+    }
+    if value.hasattr("_impl")? {
+        let impl_obj = value.getattr("_impl")?;
+        if let Ok(lob) = impl_obj.extract::<PyRef<'py, ThinLob>>() {
+            return Ok(Some(lob));
+        }
+    }
+    Ok(None)
+}
+
+fn py_lob_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<Option<BindValue>> {
+    let Some(lob) = py_lob_impl(value)? else {
+        return Ok(None);
+    };
+    let py = value.py();
+    let data = lob.read(py, 1, None)?;
+    let data = data.bind(py);
+    if matches!(lob.ora_type_num, ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_BFILE) {
+        let bytes = data.cast::<PyBytes>()?;
+        return Ok(Some(BindValue::Raw(bytes.as_bytes().to_vec())));
+    }
+    Ok(Some(BindValue::Text(data.extract::<String>()?)))
+}
+
+fn dbobject_element_bind_template(metadata: &DbObjectAttrImpl) -> (u8, u8, u32) {
+    let buffer_size = metadata.max_size.max(1);
+    match metadata.dbtype_name.as_str() {
+        "DB_TYPE_NUMBER" => (ORA_TYPE_NUM_NUMBER, 0, 22),
+        "DB_TYPE_RAW" | "DB_TYPE_BLOB" => (ORA_TYPE_NUM_RAW, 0, buffer_size.max(4000)),
+        "DB_TYPE_NCHAR" | "DB_TYPE_NVARCHAR" | "DB_TYPE_NCLOB" => {
+            (ORA_TYPE_NUM_VARCHAR, CS_FORM_NCHAR, buffer_size.max(4000))
+        }
+        "DB_TYPE_DATE" => (ORA_TYPE_NUM_DATE, 0, 7),
+        "DB_TYPE_TIMESTAMP" => (ORA_TYPE_NUM_TIMESTAMP, 0, 11),
+        "DB_TYPE_TIMESTAMP_LTZ" => (ORA_TYPE_NUM_TIMESTAMP_LTZ, 0, 11),
+        "DB_TYPE_TIMESTAMP_TZ" => (ORA_TYPE_NUM_TIMESTAMP_TZ, 0, 13),
+        _ => (
+            ORA_TYPE_NUM_VARCHAR,
+            CS_FORM_IMPLICIT,
+            buffer_size.max(4000),
+        ),
+    }
+}
+
+fn py_dbobject_element_to_bind(
+    value: &Bound<'_, PyAny>,
+    metadata: &DbObjectAttrImpl,
+) -> PyResult<BindValue> {
+    if metadata.dbtype_name == "DB_TYPE_BLOB" {
+        if let Ok(text) = value.extract::<String>() {
+            return Ok(BindValue::Raw(text.into_bytes()));
+        }
+    }
+    py_value_to_bind(value)
+}
+
+fn dbobject_collection_to_array_bind(
+    py: Python<'_>,
+    object: &DbObjectImpl,
+) -> PyResult<Option<BindValue>> {
+    if !object.object_type.is_collection {
+        return Ok(None);
+    }
+    let Some(metadata) = object.object_type.element_metadata.as_deref() else {
+        return Ok(None);
+    };
+    if metadata.dbtype_name == "DB_TYPE_OBJECT" {
+        return Ok(None);
+    }
+    object.ensure_unpacked(py)?;
+    let elements = if object.object_type.is_assoc_array {
+        object
+            .assoc_values
+            .lock()
+            .map_err(runtime_error)?
+            .values()
+            .map(|value| value.clone_ref(py))
+            .collect::<Vec<_>>()
+    } else {
+        object
+            .collection_values
+            .lock()
+            .map_err(runtime_error)?
+            .iter()
+            .map(|value| value.clone_ref(py))
+            .collect::<Vec<_>>()
+    };
+    let values = elements
+        .iter()
+        .map(|value| {
+            let value = value.bind(py);
+            if value.is_none() {
+                Ok(None)
+            } else {
+                py_dbobject_element_to_bind(value, metadata).map(Some)
+            }
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let (ora_type_num, csfrm, buffer_size) = values
+        .iter()
+        .find_map(|value| value.as_ref().and_then(bind_type_info))
+        .unwrap_or_else(|| dbobject_element_bind_template(metadata));
+    Ok(Some(BindValue::Array {
+        ora_type_num,
+        csfrm,
+        buffer_size,
+        max_elements: u32::try_from(values.len()).unwrap_or(u32::MAX).max(1),
+        values,
+    }))
 }
 
 fn bind_template_from_type(typ: &Bound<'_, PyAny>, size: u32) -> BindValue {
@@ -2457,36 +2594,6 @@ fn parse_alter_session_value(statement: &str, key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn varchar_metadata(name: &str) -> ColumnMetadata {
-    ColumnMetadata {
-        name: name.to_string(),
-        ora_type_num: ORA_TYPE_NUM_VARCHAR,
-        csfrm: CS_FORM_IMPLICIT,
-        precision: 0,
-        scale: 0,
-        buffer_size: 4000,
-        max_size: 4000,
-        nulls_allowed: true,
-        is_json: false,
-        is_oson: false,
-        object_schema: None,
-        object_type_name: None,
-        is_array: false,
-    }
-}
-
-fn single_text_result(column_name: &str, value: Option<String>) -> QueryResult {
-    QueryResult {
-        columns: vec![varchar_metadata(column_name)],
-        rows: vec![vec![value.map(QueryValue::Text)]],
-        out_values: Vec::new(),
-        return_values: Vec::new(),
-        cursor_id: 0,
-        row_count: 1,
-        more_rows: false,
-    }
-}
-
 #[derive(Debug)]
 struct ThinConnState {
     current_schema: Option<String>,
@@ -2497,9 +2604,8 @@ struct ThinConnState {
     call_timeout: u32,
     stmt_cache_size: u32,
     transaction_in_progress: bool,
-    dbop: Option<String>,
     invalid_connect_string: bool,
-    dbms_output: Vec<String>,
+    dbop_operation: Option<(String, i64)>,
 }
 
 impl ThinConnState {
@@ -2513,9 +2619,8 @@ impl ThinConnState {
             call_timeout: 0,
             stmt_cache_size,
             transaction_in_progress: false,
-            dbop: None,
             invalid_connect_string,
-            dbms_output: Vec::new(),
+            dbop_operation: None,
         }
     }
 
@@ -3109,73 +3214,6 @@ fn hydrate_cursor_impl(
     cursor_impl.rowcount = 0;
     cursor_impl.is_query = true;
     Ok(())
-}
-
-fn local_query_result(
-    state: &Arc<Mutex<ThinConnState>>,
-    statement: &str,
-) -> PyResult<Option<QueryResult>> {
-    let lower = statement.to_ascii_lowercase();
-    if lower.contains("dbop_name") && lower.contains("v$sql_monitor") {
-        let dbop = state.lock().map_err(runtime_error)?.dbop.clone();
-        return Ok(Some(single_text_result("DBOP_NAME", dbop)));
-    }
-    Ok(None)
-}
-
-fn local_plsql_result(
-    state: &Arc<Mutex<ThinConnState>>,
-    bind_vars: &[Py<ThinVar>],
-    statement: &str,
-) -> PyResult<Option<QueryResult>> {
-    let lower = statement.to_ascii_lowercase();
-    if lower.contains("dbms_output.enable") {
-        return Ok(Some(QueryResult::default()));
-    }
-    if lower.contains("dbms_output.put_line") {
-        let text = Python::attach(|py| -> PyResult<Option<String>> {
-            let Some(var) = bind_vars.first() else {
-                return Ok(None);
-            };
-            let value = var.borrow(py).get_py_value(py)?;
-            if value.bind(py).is_none() {
-                return Ok(None);
-            }
-            value.bind(py).extract::<String>().map(Some)
-        })?;
-        if let Some(text) = text {
-            state.lock().map_err(runtime_error)?.dbms_output.push(text);
-        }
-        return Ok(Some(QueryResult::default()));
-    }
-    if lower.contains("dbms_output.get_line") {
-        let line = {
-            let mut state = state.lock().map_err(runtime_error)?;
-            if state.dbms_output.is_empty() {
-                None
-            } else {
-                Some(state.dbms_output.remove(0))
-            }
-        };
-        Python::attach(|py| -> PyResult<()> {
-            if let Some(var) = bind_vars.first() {
-                let value = line
-                    .clone()
-                    .map(|line| line.into_pyobject(py))
-                    .transpose()?
-                    .map(|value| value.unbind().into());
-                var.borrow(py).set_py_value(value)?;
-            }
-            if let Some(var) = bind_vars.get(1) {
-                let status: i32 = if line.is_some() { 0 } else { 1 };
-                let status_obj: Py<PyAny> = status.into_pyobject(py)?.unbind().into();
-                var.borrow(py).set_py_value(Some(status_obj))?;
-            }
-            Ok(())
-        })?;
-        return Ok(Some(QueryResult::default()));
-    }
-    Ok(None)
 }
 
 #[pyfunction]
@@ -4186,7 +4224,34 @@ impl ThinConnImpl {
     }
 
     fn set_dbop(&self, value: Option<String>) -> PyResult<()> {
-        self.state.lock().map_err(runtime_error)?.dbop = value;
+        if let Some((name, execution_id)) = self
+            .state
+            .lock()
+            .map_err(runtime_error)?
+            .dbop_operation
+            .take()
+        {
+            self.execute_statement_with_binds(
+                "begin dbms_sql_monitor.end_operation(:1, :2); end;",
+                &[
+                    BindValue::Text(name),
+                    BindValue::Number(execution_id.to_string()),
+                ],
+            )?;
+        }
+        let Some(value) = value else {
+            return Ok(());
+        };
+        let row = self
+            .query_first_row_with_binds(
+                "select dbms_sql_monitor.begin_operation(:1, null, 'Y') from dual",
+                &[BindValue::Text(value.clone())],
+            )?
+            .ok_or_else(|| {
+                PyRuntimeError::new_err("dbms_sql_monitor.begin_operation returned no row")
+            })?;
+        let execution_id = query_value_to_i64(row.first().unwrap_or(&None))?;
+        self.state.lock().map_err(runtime_error)?.dbop_operation = Some((value, execution_id));
         Ok(())
     }
 
@@ -4905,6 +4970,12 @@ fn dbobject_unpack_value(
         "DB_TYPE_XMLTYPE" => decode_dbobject_xmltype(py, &bytes),
         "DB_TYPE_NUMBER" => {
             let value = decode_number_value(&bytes).map_err(runtime_error)?;
+            if metadata.scale == -127 && metadata.precision > 0 {
+                if let QueryValue::Number { text, .. } = value {
+                    let value = text.parse::<f64>().map_err(runtime_error)?;
+                    return Ok(value.into_pyobject(py)?.unbind().into());
+                }
+            }
             query_value_to_py(py, &Some(value), None, None)
         }
         "DB_TYPE_DATE" | "DB_TYPE_TIMESTAMP" | "DB_TYPE_TIMESTAMP_TZ" | "DB_TYPE_TIMESTAMP_LTZ" => {
@@ -5965,32 +6036,6 @@ impl ThinCursorImpl {
             .statement
             .as_deref()
             .ok_or_else(|| PyRuntimeError::new_err("no statement prepared"))?;
-        if let Some(result) = local_query_result(&self.state, statement)? {
-            self.columns = result.columns;
-            self.reset_fetch_define_state();
-            self.requires_define = columns_require_define(&self.columns);
-            self.rows = result.rows;
-            self.row_index = 0;
-            self.cursor_id = result.cursor_id;
-            self.more_rows = result.more_rows;
-            self.invalid_ref_cursor = false;
-            self.rowcount = 0;
-            self.is_query = true;
-            return Ok(());
-        }
-        if let Some(result) = local_plsql_result(&self.state, &self.bind_vars, statement)? {
-            self.columns = result.columns;
-            self.reset_fetch_define_state();
-            self.requires_define = columns_require_define(&self.columns);
-            self.rows = result.rows;
-            self.row_index = 0;
-            self.cursor_id = result.cursor_id;
-            self.more_rows = result.more_rows;
-            self.invalid_ref_cursor = false;
-            self.rowcount = 0;
-            self.is_query = false;
-            return Ok(());
-        }
         let call_timeout = {
             let value = self.state.lock().map_err(runtime_error)?.call_timeout;
             (value > 0).then_some(value)
