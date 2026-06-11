@@ -43,3 +43,6 @@ harness/.results/
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# Local analysis briefs for lane agents (untracked by design, see docs/GROUND_TRUTH.md)
+.intake/
