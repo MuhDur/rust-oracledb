@@ -494,6 +494,34 @@ pub fn encode_lob_text(value: &str, csfrm: u8, locator: Option<&[u8]>) -> Vec<u8
     bytes
 }
 
+pub fn decode_bfile_locator_name(locator: &[u8]) -> Option<(String, String)> {
+    for dir_len_pos in 0..locator.len().saturating_sub(4) {
+        let dir_len = u16::from_be_bytes([locator[dir_len_pos], locator[dir_len_pos + 1]]) as usize;
+        if dir_len == 0 {
+            continue;
+        }
+        let dir_start = dir_len_pos + 2;
+        let dir_end = dir_start.checked_add(dir_len)?;
+        let file_len_end = dir_end.checked_add(2)?;
+        if file_len_end > locator.len() {
+            continue;
+        }
+        let file_len = u16::from_be_bytes([locator[dir_end], locator[dir_end + 1]]) as usize;
+        if file_len == 0 {
+            continue;
+        }
+        let file_start = file_len_end;
+        let file_end = file_start.checked_add(file_len)?;
+        if file_end != locator.len() {
+            continue;
+        }
+        let dir = std::str::from_utf8(&locator[dir_start..dir_end]).ok()?;
+        let file = std::str::from_utf8(&locator[file_start..file_end]).ok()?;
+        return Some((dir.to_string(), file.to_string()));
+    }
+    None
+}
+
 fn lob_text_uses_utf16(csfrm: u8, locator: Option<&[u8]>) -> (bool, bool) {
     let use_utf16 = csfrm == CS_FORM_NCHAR
         || locator
@@ -914,18 +942,43 @@ fn write_bind_metadata_for_rows(
     let Some(first_value) = first_row.get(index) else {
         return Ok((ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT));
     };
-    let (ora_type_num, csfrm, mut buffer_size) = bind_metadata(first_value);
+    let (mut ora_type_num, csfrm, mut buffer_size) = bind_metadata(first_value);
     for row in bind_rows.iter().skip(1) {
         let Some(value) = row.get(index) else {
             continue;
         };
         let (row_ora_type_num, row_csfrm, row_buffer_size) = bind_metadata(value);
-        if row_ora_type_num == ora_type_num && row_csfrm == csfrm {
+        if row_csfrm == csfrm && bind_metadata_types_are_compatible(ora_type_num, row_ora_type_num)
+        {
+            ora_type_num = promoted_bind_metadata_type(ora_type_num, row_ora_type_num);
             buffer_size = buffer_size.max(row_buffer_size);
         }
     }
     write_bind_metadata_with_type(writer, first_value, ora_type_num, csfrm, buffer_size)?;
     Ok((ora_type_num, csfrm))
+}
+
+fn bind_metadata_types_are_compatible(left: u8, right: u8) -> bool {
+    left == right
+        || (matches!(
+            left,
+            ORA_TYPE_NUM_CHAR | ORA_TYPE_NUM_VARCHAR | ORA_TYPE_NUM_LONG
+        ) && matches!(
+            right,
+            ORA_TYPE_NUM_CHAR | ORA_TYPE_NUM_VARCHAR | ORA_TYPE_NUM_LONG
+        ))
+        || (matches!(left, ORA_TYPE_NUM_RAW | ORA_TYPE_NUM_LONG_RAW)
+            && matches!(right, ORA_TYPE_NUM_RAW | ORA_TYPE_NUM_LONG_RAW))
+}
+
+fn promoted_bind_metadata_type(left: u8, right: u8) -> u8 {
+    if matches!(left, ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_LONG_RAW) {
+        left
+    } else if matches!(right, ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_LONG_RAW) {
+        right
+    } else {
+        left
+    }
 }
 
 impl BindValue {
@@ -3900,6 +3953,21 @@ mod tests {
     }
 
     #[test]
+    fn row_bind_metadata_promotes_raw_batch_to_long_raw() {
+        let rows = vec![
+            vec![BindValue::Raw(vec![0; 25_000])],
+            vec![BindValue::Raw(vec![0; 40_000])],
+        ];
+        let mut writer = TtcWriter::new();
+
+        let (ora_type_num, csfrm) =
+            write_bind_metadata_for_rows(&mut writer, &rows, 0).expect("metadata writes");
+
+        assert_eq!(ora_type_num, ORA_TYPE_NUM_LONG_RAW);
+        assert_eq!(csfrm, 0);
+    }
+
+    #[test]
     fn define_metadata_from_bind_preserves_clob_long_define_semantics() {
         let mut source = number_column("VALUE");
         source.ora_type_num = ORA_TYPE_NUM_CLOB;
@@ -4173,6 +4241,23 @@ mod tests {
             decode_lob_text(&[b'A', 0, b'B', 0], CS_FORM_IMPLICIT, Some(&locator))
                 .expect("locator utf16 lob"),
             "AB"
+        );
+    }
+
+    #[test]
+    fn bfile_locator_name_decodes_directory_and_file_tail() {
+        let locator = Vec::from_hex(
+            "0808000000010000000000000015544553545f313933365f4d495353494e475f444952\
+             001a746573745f313933365f6d697373696e675f66696c652e747874",
+        )
+        .expect("BFILE locator fixture should be valid hex");
+
+        assert_eq!(
+            decode_bfile_locator_name(&locator),
+            Some((
+                "TEST_1936_MISSING_DIR".to_string(),
+                "test_1936_missing_file.txt".to_string()
+            ))
         );
     }
 

@@ -12,8 +12,8 @@ use oracledb::protocol::sql;
 use oracledb::protocol::thin::{
     bind_template_from_type_name, bind_value_type_info, column_metadata_is_xmltype,
     cursor_bind_template, dbobject_attr_max_size, dbobject_attr_precision_scale,
-    dbobject_element_bind_type_info, dbobject_rowtype_attr_max_size, decode_datetime_value,
-    decode_dbobject_binary_double as protocol_decode_dbobject_binary_double,
+    dbobject_element_bind_type_info, dbobject_rowtype_attr_max_size, decode_bfile_locator_name,
+    decode_datetime_value, decode_dbobject_binary_double as protocol_decode_dbobject_binary_double,
     decode_dbobject_binary_float as protocol_decode_dbobject_binary_float,
     decode_dbobject_text as protocol_decode_dbobject_text, decode_dbobject_xmltype_text,
     decode_lob_text as protocol_decode_lob_text, decode_number_value, define_metadata_from_bind,
@@ -46,6 +46,7 @@ fn runtime_error(err: impl std::fmt::Display) -> PyErr {
             .unwrap_or_else(|_| PyRuntimeError::new_err(message));
     }
     match message.as_str() {
+        "connection is closed" => return raise_oracledb_driver_error("ERR_NOT_CONNECTED"),
         "TTC decode failed: truncated DML RETURNING value" => return raise_column_truncated(),
         "TTC decode failed: NUMBER bind out of range" => {
             return raise_oracledb_driver_error("ERR_ORACLE_NUMBER_NO_REPR");
@@ -79,6 +80,10 @@ fn runtime_error(err: impl std::fmt::Display) -> PyErr {
         }
     }
     PyRuntimeError::new_err(message)
+}
+
+fn connection_closed_error() -> PyErr {
+    raise_oracledb_driver_error("ERR_NOT_CONNECTED")
 }
 
 struct BlockingTaskState<T> {
@@ -2124,6 +2129,59 @@ fn py_lob_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<Option<BindValue>>
     Ok(None)
 }
 
+fn scalar_value_to_memory_lob(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    dbtype_name: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    let (ora_type_num, csfrm) = match dbtype_name {
+        "DB_TYPE_BLOB" => (ORA_TYPE_NUM_BLOB, 0),
+        "DB_TYPE_CLOB" => (ORA_TYPE_NUM_CLOB, CS_FORM_IMPLICIT),
+        "DB_TYPE_NCLOB" => (ORA_TYPE_NUM_CLOB, CS_FORM_NCHAR),
+        _ => return Ok(None),
+    };
+    if value.is_none() || py_lob_impl(value)?.is_some() {
+        return Ok(None);
+    }
+    let (data, size) = if ora_type_num == ORA_TYPE_NUM_BLOB {
+        if let Ok(bytes) = value.cast::<PyBytes>() {
+            let data = bytes.as_bytes().to_vec();
+            let size = data.len() as u64;
+            (data, size)
+        } else {
+            let text = value.extract::<String>()?;
+            let data = text.into_bytes();
+            let size = data.len() as u64;
+            (data, size)
+        }
+    } else if let Ok(bytes) = value.cast::<PyBytes>() {
+        let text = std::str::from_utf8(bytes.as_bytes()).map_err(runtime_error)?;
+        (
+            protocol_encode_lob_text(text, csfrm, None),
+            text.chars().count() as u64,
+        )
+    } else {
+        let text = value.extract::<String>()?;
+        let size = text.chars().count() as u64;
+        (protocol_encode_lob_text(&text, csfrm, None), size)
+    };
+    py_lob_from_impl(
+        py,
+        ThinLob {
+            data: Some(Arc::new(Mutex::new(data))),
+            locator: Arc::new(Mutex::new(None)),
+            ora_type_num,
+            csfrm,
+            size,
+            chunk_size: 0,
+            context: None,
+            is_open: Arc::new(Mutex::new(false)),
+            bfile_name: None,
+        },
+    )
+    .map(Some)
+}
+
 fn py_dbobject_element_to_bind(
     value: &Bound<'_, PyAny>,
     metadata: &DbObjectAttrImpl,
@@ -2651,6 +2709,7 @@ struct ThinLob {
     chunk_size: u32,
     context: Option<ThinLobContext>,
     is_open: Arc<Mutex<bool>>,
+    bfile_name: Option<(String, String)>,
 }
 
 fn lob_data_to_py(
@@ -2708,6 +2767,12 @@ fn py_lob_from_impl(py: Python<'_>, lob: ThinLob) -> PyResult<Py<PyAny>> {
 impl ThinLob {
     #[pyo3(signature = (offset=1, amount=None))]
     fn read(&self, py: Python<'_>, offset: u64, amount: Option<u64>) -> PyResult<Py<PyAny>> {
+        if self.ora_type_num == ORA_TYPE_NUM_BFILE {
+            return Err(dpy_database_error(
+                "ORA-22285",
+                "non-existent directory or file for FILEOPEN operation",
+            ));
+        }
         if let Some(data) = self.data.as_ref() {
             let data = data.lock().map_err(runtime_error)?;
             return lob_data_to_py(
@@ -2734,9 +2799,7 @@ impl ThinLob {
             (value > 0).then_some(value)
         };
         let mut guard = context.connection.lock().map_err(runtime_error)?;
-        let connection = guard
-            .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        let connection = guard.as_mut().ok_or_else(connection_closed_error)?;
         let result = BlockingConnection::read_lob_with_timeout(
             connection,
             &locator,
@@ -2788,9 +2851,7 @@ impl ThinLob {
                 (value > 0).then_some(value)
             };
             let mut guard = context.connection.lock().map_err(runtime_error)?;
-            let connection = guard
-                .as_mut()
-                .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+            let connection = guard.as_mut().ok_or_else(connection_closed_error)?;
             let result = BlockingConnection::write_lob_with_timeout(
                 connection,
                 &locator,
@@ -2873,6 +2934,21 @@ impl ThinLob {
 
     fn free_lob(&self) {}
 
+    fn get_file_name(&self) -> PyResult<(String, String)> {
+        Ok(self.bfile_name.clone().unwrap_or_default())
+    }
+
+    fn set_file_name(&mut self, dir_alias: String, name: String) {
+        self.bfile_name = Some((dir_alias, name));
+    }
+
+    fn file_exists(&self) -> PyResult<bool> {
+        Err(dpy_database_error(
+            "ORA-22285",
+            "non-existent directory or file for FILEOPEN operation",
+        ))
+    }
+
     fn close(&self) -> PyResult<()> {
         let mut is_open = self.is_open.lock().map_err(runtime_error)?;
         if !*is_open {
@@ -2936,9 +3012,7 @@ impl ThinLob {
             (value > 0).then_some(value)
         };
         let mut guard = context.connection.lock().map_err(runtime_error)?;
-        let connection = guard
-            .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        let connection = guard.as_mut().ok_or_else(connection_closed_error)?;
         let result =
             BlockingConnection::trim_lob_with_timeout(connection, &locator, new_size, call_timeout)
                 .map_err(runtime_error)?;
@@ -2983,6 +3057,10 @@ impl AsyncThinLob {
     #[getter]
     fn dbtype(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.inner.dbtype(py)
+    }
+
+    async fn file_exists(&self) -> PyResult<bool> {
+        self.inner.file_exists()
     }
 
     async fn close(&self) -> PyResult<()> {
@@ -3161,6 +3239,10 @@ impl ThinVar {
                 .unwrap_or_else(|| py.None()));
         }
         if let Some(value) = self.value.lock().map_err(runtime_error)?.as_ref() {
+            let bound = value.bind(py);
+            if let Some(lob) = scalar_value_to_memory_lob(py, bound, &self.dbtype_name)? {
+                return Ok(lob);
+            }
             return Ok(value.clone_ref(py));
         }
         if self.is_array {
@@ -3208,6 +3290,7 @@ impl ThinVar {
                     chunk_size: 0,
                     context: None,
                     is_open: Arc::new(Mutex::new(false)),
+                    bfile_name: None,
                 },
             )?,
             (ThinVarReturnKind::Plain, Some(QueryValue::Text(value))) if self.bypass_decode => {
@@ -4849,6 +4932,7 @@ impl ThinConnImpl {
                 async_mode,
             }),
             is_open: Arc::new(Mutex::new(false)),
+            bfile_name: None,
         })
     }
 
@@ -5489,6 +5573,7 @@ fn dbobject_unpack_value(
                     chunk_size: 0,
                     context: lob_context.cloned(),
                     is_open: Arc::new(Mutex::new(false)),
+                    bfile_name: None,
                 },
             )
         }
@@ -6979,6 +7064,9 @@ fn query_value_to_py(
             if !fetch_lobs {
                 return direct_lob_value_to_py(py, *ora_type_num, *csfrm, locator, &context);
             }
+            let bfile_name = (*ora_type_num == ORA_TYPE_NUM_BFILE)
+                .then(|| decode_bfile_locator_name(locator))
+                .flatten();
             py_lob_from_impl(
                 py,
                 ThinLob {
@@ -6990,6 +7078,7 @@ fn query_value_to_py(
                     chunk_size: *chunk_size,
                     context: Some(context),
                     is_open: Arc::new(Mutex::new(false)),
+                    bfile_name,
                 },
             )
         }
