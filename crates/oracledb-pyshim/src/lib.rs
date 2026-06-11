@@ -758,7 +758,7 @@ fn object_bind_sql_expr(
                     continue;
                 }
                 let generated_name =
-                    generated_object_attr_bind_name(bind_name, &format!("E{index}"));
+                    sql::generated_object_attr_bind_name(bind_name, &format!("E{index}"));
                 if let Some(expr) = object_bind_sql_expr(
                     py,
                     &generated_name,
@@ -789,7 +789,7 @@ fn object_bind_sql_expr(
                 constructor_args.push("null".to_string());
                 continue;
             }
-            let generated_name = generated_object_attr_bind_name(bind_name, &attr.name);
+            let generated_name = sql::generated_object_attr_bind_name(bind_name, &attr.name);
             if let Some(expr) =
                 object_bind_sql_expr(py, &generated_name, attr_value_bound, effective_dict, true)?
             {
@@ -868,7 +868,8 @@ fn rewrite_object_bind_dict(
         else {
             continue;
         };
-        effective_statement = replace_input_bind_placeholder(&effective_statement, &key, &sql_expr);
+        effective_statement =
+            sql::replace_input_bind_placeholder(&effective_statement, &key, &sql_expr);
         let _ = effective_dict.del_item(&key);
         changed = true;
     }
@@ -992,113 +993,23 @@ fn prepare_object_execute_inputs(
     }
 }
 
-fn generated_object_attr_bind_name(bind_name: &str, attr_name: &str) -> String {
-    let bind = bind_name
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    format!("ORADB_OBJ_{bind}_{}", attr_name.to_ascii_uppercase())
-}
-
-fn replace_input_bind_placeholder(statement: &str, bind_name: &str, replacement: &str) -> String {
-    let lower = statement.to_ascii_lowercase();
-    let split = lower.find("returning").unwrap_or(statement.len());
-    let (prefix, suffix) = statement.split_at(split);
-    format!(
-        "{}{}",
-        replace_bind_placeholder(prefix, bind_name, replacement),
-        suffix
-    )
-}
-
-fn replace_bind_placeholder(statement: &str, bind_name: &str, replacement: &str) -> String {
-    let mut result = String::with_capacity(statement.len() + replacement.len());
-    let mut index = 0;
-    while index < statement.len() {
-        let rest = &statement[index..];
-        if rest.starts_with('\'') {
-            let end = sql_single_quote_end(statement, index);
-            result.push_str(&statement[index..end]);
-            index = end;
-            continue;
-        }
-        if rest.starts_with(':') {
-            let name_start = index + 1;
-            let mut name_end = name_start;
-            for (offset, ch) in statement[name_start..].char_indices() {
-                if is_bind_name_char(ch) {
-                    name_end = name_start + offset + ch.len_utf8();
-                } else {
-                    break;
-                }
-            }
-            if name_end > name_start {
-                let found_name = &statement[name_start..name_end];
-                if bind_names_equal(found_name, bind_name) {
-                    result.push_str(replacement);
-                } else {
-                    result.push_str(&statement[index..name_end]);
-                }
-                index = name_end;
-                continue;
-            }
-        }
-        let Some(ch) = rest.chars().next() else {
-            break;
-        };
-        result.push(ch);
-        index += ch.len_utf8();
-    }
-    result
-}
-
-fn sql_single_quote_end(statement: &str, start: usize) -> usize {
-    sql::single_quote_end(statement, start)
-}
-
 fn rewrite_object_return_projection(
     statement: &str,
     parameters: &Bound<'_, PyDict>,
 ) -> PyResult<Option<String>> {
-    if statement_is_plsql(statement) {
-        return Ok(None);
-    }
-    let lower = statement.to_ascii_lowercase();
-    let Some(returning_pos) = lower.find("returning") else {
+    let Some(return_name) =
+        sql::dml_returning_single_bind_name(statement).map_err(sql_parse_error)?
+    else {
         return Ok(None);
     };
-    let Some(into_relative_pos) = lower[returning_pos..].find("into") else {
-        return Ok(None);
-    };
-    let expr_start = returning_pos + "returning".len();
-    let into_start = returning_pos + into_relative_pos;
-    let binds_start = into_start + "into".len();
-    let return_expr = statement[expr_start..into_start].trim();
-    if return_expr.contains(',') || return_expr.is_empty() {
-        return Ok(None);
-    }
-    let return_names = scan_sql_bind_names(&statement[binds_start..])?;
-    if return_names.len() != 1 {
-        return Ok(None);
-    }
-    let Some(value) = get_named_bind_value(parameters, &return_names[0])? else {
+    let Some(value) = get_named_bind_value(parameters, &return_name)? else {
         return Ok(None);
     };
     let Some((_object_type, attr_name)) = thin_var_object_return_projection(value.py(), &value)?
     else {
         return Ok(None);
     };
-    Ok(Some(format!(
-        "{}returning ({return_expr}).{attr_name} into{}",
-        &statement[..returning_pos],
-        &statement[binds_start..]
-    )))
+    sql::rewrite_dml_returning_projection(statement, &attr_name).map_err(sql_parse_error)
 }
 
 fn thin_var_object_return_projection(
@@ -1681,14 +1592,6 @@ fn statement_plsql_assignment_bind_names(statement: &str) -> PyResult<Vec<String
 
 fn statement_is_plsql(statement: &str) -> bool {
     sql::statement_is_plsql(statement)
-}
-
-fn is_bind_name_char(ch: char) -> bool {
-    sql::is_bind_name_char(ch)
-}
-
-fn scan_sql_bind_names(statement: &str) -> PyResult<Vec<String>> {
-    sql::scan_bind_names(statement).map_err(sql_parse_error)
 }
 
 fn is_quoted_bind_name(name: &str) -> bool {

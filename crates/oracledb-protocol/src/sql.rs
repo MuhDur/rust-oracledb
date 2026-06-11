@@ -68,6 +68,36 @@ pub fn returning_bind_names(statement: &str) -> Result<Vec<String>> {
     scan_bind_names(&statement[into_pos..])
 }
 
+pub fn dml_returning_single_bind_name(statement: &str) -> Result<Option<String>> {
+    let Some(parts) = dml_returning_projection_parts(statement)? else {
+        return Ok(None);
+    };
+    if parts.bind_names.len() == 1 {
+        Ok(parts.bind_names.into_iter().next())
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn rewrite_dml_returning_projection(
+    statement: &str,
+    attr_name: &str,
+) -> Result<Option<String>> {
+    let Some(parts) = dml_returning_projection_parts(statement)? else {
+        return Ok(None);
+    };
+    if parts.bind_names.len() != 1 {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{}returning ({}).{} into{}",
+        &statement[..parts.returning_pos],
+        parts.return_expr,
+        attr_name,
+        &statement[parts.binds_start..]
+    )))
+}
+
 pub fn plsql_assignment_bind_names(statement: &str) -> Result<Vec<String>> {
     if !statement_is_plsql(statement) {
         return Ok(Vec::new());
@@ -253,6 +283,112 @@ pub fn single_quote_end(statement: &str, start: usize) -> usize {
     statement.len()
 }
 
+pub fn generated_object_attr_bind_name(bind_name: &str, attr_name: &str) -> String {
+    let bind = bind_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("ORADB_OBJ_{bind}_{}", attr_name.to_ascii_uppercase())
+}
+
+pub fn replace_input_bind_placeholder(
+    statement: &str,
+    bind_name: &str,
+    replacement: &str,
+) -> String {
+    let lower = statement.to_ascii_lowercase();
+    let split = lower.find("returning").unwrap_or(statement.len());
+    let (prefix, suffix) = statement.split_at(split);
+    format!(
+        "{}{}",
+        replace_bind_placeholder(prefix, bind_name, replacement),
+        suffix
+    )
+}
+
+pub fn replace_bind_placeholder(statement: &str, bind_name: &str, replacement: &str) -> String {
+    let mut result = String::with_capacity(statement.len() + replacement.len());
+    let mut index = 0;
+    while index < statement.len() {
+        let rest = &statement[index..];
+        if rest.starts_with('\'') {
+            let end = single_quote_end(statement, index);
+            result.push_str(&statement[index..end]);
+            index = end;
+            continue;
+        }
+        if rest.starts_with(':') {
+            let name_start = index + 1;
+            let mut name_end = name_start;
+            for (offset, ch) in statement[name_start..].char_indices() {
+                if is_bind_name_char(ch) {
+                    name_end = name_start + offset + ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            if name_end > name_start {
+                let found_name = &statement[name_start..name_end];
+                if bind_names_equal(found_name, bind_name) {
+                    result.push_str(replacement);
+                } else {
+                    result.push_str(&statement[index..name_end]);
+                }
+                index = name_end;
+                continue;
+            }
+        }
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        result.push(ch);
+        index += ch.len_utf8();
+    }
+    result
+}
+
+struct DmlReturningProjectionParts<'a> {
+    returning_pos: usize,
+    binds_start: usize,
+    return_expr: &'a str,
+    bind_names: Vec<String>,
+}
+
+fn dml_returning_projection_parts(
+    statement: &str,
+) -> Result<Option<DmlReturningProjectionParts<'_>>> {
+    if statement_is_plsql(statement) {
+        return Ok(None);
+    }
+    let lower = statement.to_ascii_lowercase();
+    let Some(returning_pos) = lower.find("returning") else {
+        return Ok(None);
+    };
+    let Some(into_relative_pos) = lower[returning_pos..].find("into") else {
+        return Ok(None);
+    };
+    let expr_start = returning_pos + "returning".len();
+    let into_start = returning_pos + into_relative_pos;
+    let binds_start = into_start + "into".len();
+    let return_expr = statement[expr_start..into_start].trim();
+    if return_expr.contains(',') || return_expr.is_empty() {
+        return Ok(None);
+    }
+    let bind_names = scan_bind_names(&statement[binds_start..])?;
+    Ok(Some(DmlReturningProjectionParts {
+        returning_pos,
+        binds_start,
+        return_expr,
+        bind_names,
+    }))
+}
+
 fn is_single_quote_byte(byte: Option<&u8>) -> bool {
     matches!(byte, Some(b'\''))
 }
@@ -436,6 +572,35 @@ mod tests {
     }
 
     #[test]
+    fn extracts_single_dml_returning_projection_bind_name() {
+        let name = dml_returning_single_bind_name(
+            "insert into t (value) values (:value) returning obj into :out",
+        )
+        .expect("returning statement should parse");
+        assert_eq!(name, Some("out".to_string()));
+
+        let name = dml_returning_single_bind_name(
+            "insert into t (value) values (:value) returning obj into :out, :extra",
+        )
+        .expect("returning statement should parse");
+        assert_eq!(name, None);
+    }
+
+    #[test]
+    fn rewrites_single_dml_returning_projection() {
+        let statement = "insert into t (value) values (:value) returning obj_col into :out";
+        let rewritten = rewrite_dml_returning_projection(statement, "STRINGVALUE")
+            .expect("returning statement should parse");
+        assert_eq!(
+            rewritten,
+            Some(
+                "insert into t (value) values (:value) returning (obj_col).STRINGVALUE into :out"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
     fn extracts_unique_plsql_assignment_output_binds() {
         let names = plsql_assignment_bind_names("begin :out := func(:in_value); :OUT := 1; end;")
             .expect("assignment bind names");
@@ -458,6 +623,22 @@ mod tests {
     fn converts_public_bind_names_like_python_oracledb() {
         assert_eq!(public_bind_name("abc"), "ABC");
         assert_eq!(public_bind_name("\"MiX\""), "MiX");
+    }
+
+    #[test]
+    fn rewrites_bind_placeholders_before_returning_only() {
+        assert_eq!(
+            generated_object_attr_bind_name("value-1", "attr"),
+            "ORADB_OBJ_VALUE_1_ATTR"
+        );
+        assert_eq!(
+            replace_input_bind_placeholder(
+                "insert into t values (:value, ':value') returning obj into :value",
+                "value",
+                "OBJ(:ORADB_OBJ_VALUE_ATTR)"
+            ),
+            "insert into t values (OBJ(:ORADB_OBJ_VALUE_ATTR), ':value') returning obj into :value"
+        );
     }
 
     #[test]
