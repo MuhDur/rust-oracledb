@@ -9,8 +9,8 @@ use oracledb::protocol::thin::{
     CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CHAR,
     ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_LONG,
     ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW,
-    ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ,
-    ORA_TYPE_NUM_VARCHAR,
+    ORA_TYPE_NUM_ROWID, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
+    ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_UROWID, ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection};
@@ -2551,6 +2551,7 @@ fn user_identifier(value: &str) -> PyResult<String> {
 fn query_value_to_string(value: &Option<QueryValue>) -> Option<String> {
     match value {
         Some(QueryValue::Text(value)) => Some(value.clone()),
+        Some(QueryValue::Rowid(value)) => Some(value.clone()),
         Some(QueryValue::Raw(value)) => String::from_utf8(value.clone()).ok(),
         Some(QueryValue::Number { text, .. }) => Some(text.clone()),
         Some(QueryValue::DateTime { .. }) => None,
@@ -5557,6 +5558,8 @@ impl FetchMetadataImpl {
             ORA_TYPE_NUM_CHAR => "DB_TYPE_CHAR",
             ORA_TYPE_NUM_VARCHAR | ORA_TYPE_NUM_LONG => "DB_TYPE_VARCHAR",
             ORA_TYPE_NUM_RAW | ORA_TYPE_NUM_LONG_RAW => "DB_TYPE_RAW",
+            ORA_TYPE_NUM_ROWID => "DB_TYPE_ROWID",
+            ORA_TYPE_NUM_UROWID => "DB_TYPE_UROWID",
             ORA_TYPE_NUM_NUMBER => "DB_TYPE_NUMBER",
             ORA_TYPE_NUM_CURSOR => "DB_TYPE_CURSOR",
             ORA_TYPE_NUM_OBJECT => "DB_TYPE_OBJECT",
@@ -6531,6 +6534,7 @@ fn query_value_to_py(
     match value {
         None => Ok(py.None()),
         Some(QueryValue::Text(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
+        Some(QueryValue::Rowid(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
         Some(QueryValue::Raw(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
         Some(QueryValue::Number { text, is_integer }) if *is_integer => {
             let value = text.parse::<i128>().map_err(runtime_error)?;

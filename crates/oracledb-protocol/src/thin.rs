@@ -51,6 +51,7 @@ pub const TNS_VERIFIER_TYPE_12C: u32 = 0x4815;
 pub const ORA_TYPE_NUM_VARCHAR: u8 = 1;
 pub const ORA_TYPE_NUM_NUMBER: u8 = 2;
 pub const ORA_TYPE_NUM_LONG: u8 = 8;
+pub const ORA_TYPE_NUM_ROWID: u8 = 11;
 pub const ORA_TYPE_NUM_DATE: u8 = 12;
 pub const ORA_TYPE_NUM_RAW: u8 = 23;
 pub const ORA_TYPE_NUM_CURSOR: u8 = 102;
@@ -62,6 +63,7 @@ pub const ORA_TYPE_NUM_BFILE: u8 = 114;
 pub const ORA_TYPE_NUM_OBJECT: u8 = 109;
 pub const ORA_TYPE_NUM_TIMESTAMP: u8 = 180;
 pub const ORA_TYPE_NUM_TIMESTAMP_TZ: u8 = 181;
+pub const ORA_TYPE_NUM_UROWID: u8 = 208;
 pub const ORA_TYPE_NUM_TIMESTAMP_LTZ: u8 = 231;
 pub const TNS_OBJ_TOP_LEVEL: u32 = 0x01;
 
@@ -114,8 +116,11 @@ const TNS_UDS_FLAGS_IS_JSON: u32 = 0x01;
 const TNS_UDS_FLAGS_IS_OSON: u32 = 0x02;
 const ORA_TYPE_SIZE_NUMBER: u32 = 22;
 const ORA_TYPE_SIZE_DATE: u32 = 7;
+const ORA_TYPE_SIZE_ROWID: u32 = 18;
 const ORA_TYPE_SIZE_TIMESTAMP: u32 = 11;
 const ORA_TYPE_SIZE_TIMESTAMP_TZ: u32 = 13;
+const TNS_BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const TNS_HAS_REGION_ID: u8 = 0x80;
 const TZ_HOUR_OFFSET: u8 = 20;
 const TZ_MINUTE_OFFSET: u8 = 60;
@@ -245,6 +250,7 @@ pub struct ColumnMetadata {
 pub enum QueryValue {
     Text(String),
     Raw(Vec<u8>),
+    Rowid(String),
     Number {
         text: String,
         is_integer: bool,
@@ -628,8 +634,8 @@ fn write_bind_params(
     let Some(first_row) = bind_rows.first() else {
         return Ok(());
     };
-    for value in first_row {
-        write_bind_metadata(writer, value)?;
+    for index in 0..first_row.len() {
+        write_bind_metadata_for_rows(writer, bind_rows, index)?;
     }
     for row in bind_rows {
         if !is_plsql && row.iter().all(BindValue::is_output_only) {
@@ -644,6 +650,30 @@ fn write_bind_params(
         }
     }
     Ok(())
+}
+
+fn write_bind_metadata_for_rows(
+    writer: &mut TtcWriter,
+    bind_rows: &[Vec<BindValue>],
+    index: usize,
+) -> Result<()> {
+    let Some(first_row) = bind_rows.first() else {
+        return Ok(());
+    };
+    let Some(first_value) = first_row.get(index) else {
+        return Ok(());
+    };
+    let (ora_type_num, csfrm, mut buffer_size) = bind_metadata(first_value);
+    for row in bind_rows.iter().skip(1) {
+        let Some(value) = row.get(index) else {
+            continue;
+        };
+        let (row_ora_type_num, row_csfrm, row_buffer_size) = bind_metadata(value);
+        if row_ora_type_num == ora_type_num && row_csfrm == csfrm {
+            buffer_size = buffer_size.max(row_buffer_size);
+        }
+    }
+    write_bind_metadata_with_type(writer, first_value, ora_type_num, csfrm, buffer_size)
 }
 
 impl BindValue {
@@ -666,8 +696,13 @@ impl BindValue {
     }
 }
 
-fn write_bind_metadata(writer: &mut TtcWriter, value: &BindValue) -> Result<()> {
-    let (ora_type_num, csfrm, buffer_size) = bind_metadata(value);
+fn write_bind_metadata_with_type(
+    writer: &mut TtcWriter,
+    value: &BindValue,
+    ora_type_num: u8,
+    csfrm: u8,
+    buffer_size: u32,
+) -> Result<()> {
     let (flags, max_elements) = match value {
         BindValue::Array { max_elements, .. } => {
             (TNS_BIND_USE_INDICATORS | TNS_BIND_ARRAY, *max_elements)
@@ -1732,6 +1767,8 @@ fn parse_column_value(
             decode_text_value(&bytes, metadata.csfrm).map(|value| Some(QueryValue::Text(value)))
         }
         ORA_TYPE_NUM_RAW | ORA_TYPE_NUM_LONG_RAW => Ok(reader.read_bytes()?.map(QueryValue::Raw)),
+        ORA_TYPE_NUM_ROWID => parse_rowid_value(reader).map(|value| value.map(QueryValue::Rowid)),
+        ORA_TYPE_NUM_UROWID => parse_urowid_value(reader).map(|value| value.map(QueryValue::Rowid)),
         ORA_TYPE_NUM_NUMBER => {
             let Some(bytes) = reader.read_bytes()? else {
                 return Ok(None);
@@ -1753,6 +1790,104 @@ fn parse_column_value(
         ORA_TYPE_NUM_CURSOR => parse_cursor_value(reader).map(Some),
         ORA_TYPE_NUM_OBJECT => parse_object_value(reader, metadata),
         _ => Err(ProtocolError::UnsupportedFeature("query column type")),
+    }
+}
+
+fn encode_rowid_component(mut value: u32, size: usize, output: &mut String) {
+    let mut encoded = vec![b'A'; size];
+    for index in 0..size {
+        let alphabet_index = usize::try_from(value & 0x3f).unwrap_or(0);
+        encoded[size - index - 1] = TNS_BASE64_ALPHABET[alphabet_index];
+        value >>= 6;
+    }
+    output.extend(encoded.into_iter().map(char::from));
+}
+
+fn encode_physical_rowid(rba: u32, partition_id: u16, block_num: u32, slot_num: u16) -> String {
+    let mut output = String::with_capacity(ORA_TYPE_SIZE_ROWID as usize);
+    encode_rowid_component(rba, 6, &mut output);
+    encode_rowid_component(u32::from(partition_id), 3, &mut output);
+    encode_rowid_component(block_num, 6, &mut output);
+    encode_rowid_component(u32::from(slot_num), 3, &mut output);
+    output
+}
+
+fn parse_rowid_value(reader: &mut TtcReader<'_>) -> Result<Option<String>> {
+    let len = reader.read_u8()?;
+    if len == 0 || len == crate::wire::TNS_NULL_LENGTH_INDICATOR {
+        return Ok(None);
+    }
+    let rba = reader.read_ub4()?;
+    let partition_id = reader.read_ub2()?;
+    reader.skip(1)?;
+    let block_num = reader.read_ub4()?;
+    let slot_num = reader.read_ub2()?;
+    Ok(Some(encode_physical_rowid(
+        rba,
+        partition_id,
+        block_num,
+        slot_num,
+    )))
+}
+
+fn encode_logical_urowid(bytes: &[u8]) -> String {
+    let mut input_offset = 1;
+    let mut input_len = bytes.len().saturating_sub(1);
+    let mut output = String::with_capacity((bytes.len() / 3) * 4 + 4);
+    output.push('*');
+    while input_len > 0 {
+        let mut pos = bytes[input_offset] >> 2;
+        output.push(char::from(TNS_BASE64_ALPHABET[usize::from(pos)]));
+
+        pos = (bytes[input_offset] & 0x03) << 4;
+        if input_len == 1 {
+            output.push(char::from(TNS_BASE64_ALPHABET[usize::from(pos)]));
+            break;
+        }
+        input_offset += 1;
+        pos |= (bytes[input_offset] & 0xf0) >> 4;
+        output.push(char::from(TNS_BASE64_ALPHABET[usize::from(pos)]));
+
+        pos = (bytes[input_offset] & 0x0f) << 2;
+        if input_len == 2 {
+            output.push(char::from(TNS_BASE64_ALPHABET[usize::from(pos)]));
+            break;
+        }
+        input_offset += 1;
+        pos |= (bytes[input_offset] & 0xc0) >> 6;
+        output.push(char::from(TNS_BASE64_ALPHABET[usize::from(pos)]));
+
+        pos = bytes[input_offset] & 0x3f;
+        output.push(char::from(TNS_BASE64_ALPHABET[usize::from(pos)]));
+        input_offset += 1;
+        input_len -= 3;
+    }
+    output
+}
+
+fn parse_urowid_value(reader: &mut TtcReader<'_>) -> Result<Option<String>> {
+    if reader.read_bytes()?.is_none() {
+        return Ok(None);
+    }
+    let Some(bytes) = reader.read_bytes()? else {
+        return Ok(None);
+    };
+    if bytes.len() < 13 {
+        return Err(ProtocolError::TtcDecode("encoded UROWID too short"));
+    }
+    if bytes[0] == 1 {
+        let rba = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+        let partition_id = u16::from_be_bytes([bytes[5], bytes[6]]);
+        let block_num = u32::from_be_bytes([bytes[7], bytes[8], bytes[9], bytes[10]]);
+        let slot_num = u16::from_be_bytes([bytes[11], bytes[12]]);
+        Ok(Some(encode_physical_rowid(
+            rba,
+            partition_id,
+            block_num,
+            slot_num,
+        )))
+    } else {
+        Ok(Some(encode_logical_urowid(&bytes)))
     }
 }
 
@@ -2683,6 +2818,55 @@ mod tests {
             &legacy[..6],
             &[TNS_MSG_TYPE_FUNCTION, TNS_FUNC_LOB_OP, 8, 1, 1, 3]
         );
+    }
+
+    #[test]
+    fn rowid_value_decodes_physical_rowid() {
+        let mut reader = TtcReader::new(&[
+            13, // non-null rowid marker
+            1, 1, // rba
+            1, 2, // partition id
+            0, // ignored padding byte
+            1, 3, // block number
+            1, 4, // slot number
+        ]);
+
+        let value = parse_rowid_value(&mut reader).expect("physical rowid should decode");
+
+        assert_eq!(value.as_deref(), Some("AAAAABAACAAAAADAAE"));
+        assert_eq!(reader.remaining(), 0);
+    }
+
+    #[test]
+    fn urowid_value_decodes_physical_rowid() {
+        let mut reader = TtcReader::new(&[
+            1, 13, // ignored first length buffer
+            13, // second buffer length
+            1,  // physical rowid marker
+            0, 0, 0, 1, // rba
+            0, 2, // partition id
+            0, 0, 0, 3, // block number
+            0, 4, // slot number
+        ]);
+
+        let value = parse_urowid_value(&mut reader).expect("physical urowid should decode");
+
+        assert_eq!(value.as_deref(), Some("AAAAABAACAAAAADAAE"));
+        assert_eq!(reader.remaining(), 0);
+    }
+
+    #[test]
+    fn urowid_value_decodes_logical_rowid() {
+        let mut reader = TtcReader::new(&[
+            1, 13, // ignored first length buffer
+            13, // second buffer length
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+        ]);
+
+        let value = parse_urowid_value(&mut reader).expect("logical urowid should decode");
+
+        assert_eq!(value.as_deref(), Some("*AQIDBAUGBwgJCgsM"));
+        assert_eq!(reader.remaining(), 0);
     }
 
     fn number_column(name: &str) -> ColumnMetadata {
