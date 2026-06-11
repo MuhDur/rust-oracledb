@@ -1735,7 +1735,8 @@ fn validate_public_cursor_is_open(value: &Bound<'_, PyAny>) -> PyResult<bool> {
     if impl_obj.is_none() {
         return Err(raise_oracledb_driver_error("ERR_CURSOR_NOT_OPEN"));
     }
-    Ok(impl_obj.extract::<PyRef<'_, ThinCursorImpl>>().is_ok())
+    Ok(impl_obj.extract::<PyRef<'_, ThinCursorImpl>>().is_ok()
+        || impl_obj.extract::<PyRef<'_, AsyncThinCursorImpl>>().is_ok())
 }
 
 fn validate_cursor_bind_value(
@@ -1755,6 +1756,10 @@ fn validate_cursor_bind_value(
     }
     if let Ok(cursor_impl) = impl_obj.extract::<PyRef<'_, ThinCursorImpl>>() {
         if !Arc::ptr_eq(&cursor_impl.connection, executing_connection) {
+            return Err(raise_oracledb_driver_error("ERR_CURSOR_DIFF_CONNECTION"));
+        }
+    } else if let Ok(cursor_impl) = impl_obj.extract::<PyRef<'_, AsyncThinCursorImpl>>() {
+        if !Arc::ptr_eq(&cursor_impl.inner.connection, executing_connection) {
             return Err(raise_oracledb_driver_error("ERR_CURSOR_DIFF_CONNECTION"));
         }
     }
@@ -1821,6 +1826,15 @@ fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> {
             } else {
                 BindValue::Cursor {
                     cursor_id: cursor_impl.cursor_id,
+                }
+            });
+        }
+        if let Ok(cursor_impl) = impl_obj.extract::<PyRef<'_, AsyncThinCursorImpl>>() {
+            return Ok(if cursor_impl.inner.cursor_id == 0 {
+                cursor_bind_template()
+            } else {
+                BindValue::Cursor {
+                    cursor_id: cursor_impl.inner.cursor_id,
                 }
             });
         }
@@ -3201,17 +3215,35 @@ fn hydrate_cursor_impl(
     cursor_id: u32,
     invalid_ref_cursor: bool,
 ) -> PyResult<()> {
+    fn hydrate(
+        cursor_impl: &mut ThinCursorImpl,
+        columns: &[ColumnMetadata],
+        cursor_id: u32,
+        invalid_ref_cursor: bool,
+    ) {
+        cursor_impl.columns = columns.to_vec();
+        cursor_impl.reset_fetch_define_state();
+        cursor_impl.rows.clear();
+        cursor_impl.row_index = 0;
+        cursor_impl.cursor_id = cursor_id;
+        cursor_impl.more_rows = cursor_id != 0;
+        cursor_impl.invalid_ref_cursor = invalid_ref_cursor;
+        cursor_impl.rowcount = 0;
+        cursor_impl.is_query = true;
+    }
+
     let impl_obj = cursor.getattr("_impl")?;
-    let mut cursor_impl = impl_obj.extract::<PyRefMut<'_, ThinCursorImpl>>()?;
-    cursor_impl.columns = columns.to_vec();
-    cursor_impl.reset_fetch_define_state();
-    cursor_impl.rows.clear();
-    cursor_impl.row_index = 0;
-    cursor_impl.cursor_id = cursor_id;
-    cursor_impl.more_rows = cursor_id != 0;
-    cursor_impl.invalid_ref_cursor = invalid_ref_cursor;
-    cursor_impl.rowcount = 0;
-    cursor_impl.is_query = true;
+    if let Ok(mut cursor_impl) = impl_obj.extract::<PyRefMut<'_, ThinCursorImpl>>() {
+        hydrate(&mut cursor_impl, columns, cursor_id, invalid_ref_cursor);
+        return Ok(());
+    }
+    let mut cursor_impl = impl_obj.extract::<PyRefMut<'_, AsyncThinCursorImpl>>()?;
+    hydrate(
+        &mut cursor_impl.inner,
+        columns,
+        cursor_id,
+        invalid_ref_cursor,
+    );
     Ok(())
 }
 
@@ -6376,11 +6408,33 @@ impl ThinCursorImpl {
 
 fn thin_lob_context_from_cursor(owner_cursor: &Bound<'_, PyAny>) -> PyResult<ThinLobContext> {
     let impl_obj = owner_cursor.getattr("_impl")?;
-    let cursor_impl = impl_obj.extract::<PyRef<'_, ThinCursorImpl>>()?;
+    if let Ok(cursor_impl) = impl_obj.extract::<PyRef<'_, ThinCursorImpl>>() {
+        return Ok(ThinLobContext {
+            connection: Arc::clone(&cursor_impl.connection),
+            state: Arc::clone(&cursor_impl.state),
+        });
+    }
+    let cursor_impl = impl_obj.extract::<PyRef<'_, AsyncThinCursorImpl>>()?;
     Ok(ThinLobContext {
-        connection: Arc::clone(&cursor_impl.connection),
-        state: Arc::clone(&cursor_impl.state),
+        connection: Arc::clone(&cursor_impl.inner.connection),
+        state: Arc::clone(&cursor_impl.inner.state),
     })
+}
+
+fn connection_object_type_impl(
+    connection: &Bound<'_, PyAny>,
+    name: &str,
+) -> PyResult<DbObjectTypeImpl> {
+    let impl_obj = connection.getattr("_impl")?;
+    if let Ok(conn_impl) = impl_obj.extract::<PyRef<'_, ThinConnImpl>>() {
+        return conn_impl.get_type(connection, name);
+    }
+    if let Ok(conn_impl) = impl_obj.extract::<PyRef<'_, AsyncThinConnImpl>>() {
+        return conn_impl.inner.get_type(connection, name);
+    }
+    let public_type = connection.call_method1("gettype", (name,))?;
+    py_db_object_type_impl(&public_type)?
+        .ok_or_else(|| PyRuntimeError::new_err("gettype() did not return a DbObjectType"))
 }
 
 fn query_value_to_py(
@@ -6486,12 +6540,7 @@ fn query_value_to_py(
                 .map(|schema| format!("{schema}.{type_name}"))
                 .unwrap_or_else(|| type_name.to_string());
             let connection = owner_cursor.getattr("connection")?;
-            let public_type = connection.call_method1("gettype", (fqn,))?;
-            let Some(object_type) = py_db_object_type_impl(&public_type)? else {
-                return Err(PyRuntimeError::new_err(
-                    "gettype() did not return a DbObjectType",
-                ));
-            };
+            let object_type = connection_object_type_impl(&connection, &fqn)?;
             let lob_context = match lob_context {
                 Some(context) => Some(context.clone()),
                 None => Some(thin_lob_context_from_cursor(owner_cursor)?),
