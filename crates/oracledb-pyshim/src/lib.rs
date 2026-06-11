@@ -7,18 +7,20 @@ use std::sync::{Arc, Mutex, OnceLock};
 use oracledb::protocol::sql;
 use oracledb::protocol::thin::{
     bind_template_from_type_name, bind_value_type_info, column_metadata_is_xmltype,
-    cursor_bind_template, dbobject_element_bind_type_info, decode_datetime_value,
+    cursor_bind_template, dbobject_attr_max_size, dbobject_attr_precision_scale,
+    dbobject_element_bind_type_info, dbobject_rowtype_attr_max_size, decode_datetime_value,
     decode_dbobject_binary_double as protocol_decode_dbobject_binary_double,
     decode_dbobject_binary_float as protocol_decode_dbobject_binary_float,
     decode_dbobject_text as protocol_decode_dbobject_text, decode_dbobject_xmltype_text,
     decode_number_value, define_metadata_from_bind, is_cursor_bind_template,
     output_bind as output_only_bind, public_dbtype_name_from_bind,
-    public_dbtype_name_from_column_metadata, public_dbtype_name_from_type_name,
-    returning_output_bind, BindValue, ColumnMetadata, DbObjectPackedReader, QueryResult,
-    QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE,
-    ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR,
-    ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_TIMESTAMP,
-    ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR,
+    public_dbtype_name_from_column_metadata, public_dbtype_name_from_oracle_type_name,
+    public_dbtype_name_from_type_name, returning_output_bind, BindValue, ColumnMetadata,
+    DbObjectPackedReader, QueryResult, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR,
+    ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB,
+    ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT,
+    ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
+    ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection};
@@ -2305,65 +2307,6 @@ fn query_value_to_i8(value: &Option<QueryValue>) -> Option<i8> {
     query_value_to_string(value)?.parse().ok()
 }
 
-fn dbtype_name_from_oracle_attr_type(type_name: &str) -> &'static str {
-    let upper = type_name.to_ascii_uppercase();
-    if upper.starts_with("TIMESTAMP") {
-        if upper.contains("LOCAL TIME ZONE") || upper.contains("LOCAL TZ") {
-            return "DB_TYPE_TIMESTAMP_LTZ";
-        }
-        if upper.contains("TIME ZONE") || upper.contains("WITH TZ") {
-            return "DB_TYPE_TIMESTAMP_TZ";
-        }
-        return "DB_TYPE_TIMESTAMP";
-    }
-    match upper.as_str() {
-        "CHAR" => "DB_TYPE_CHAR",
-        "NCHAR" => "DB_TYPE_NCHAR",
-        "VARCHAR2" | "VARCHAR" => "DB_TYPE_VARCHAR",
-        "NVARCHAR2" | "NVARCHAR" => "DB_TYPE_NVARCHAR",
-        "RAW" => "DB_TYPE_RAW",
-        "DATE" => "DB_TYPE_DATE",
-        "TIMESTAMP" => "DB_TYPE_TIMESTAMP",
-        "TIMESTAMP WITH TIME ZONE" | "TIMESTAMP WITH TZ" => "DB_TYPE_TIMESTAMP_TZ",
-        "TIMESTAMP WITH LOCAL TIME ZONE" | "TIMESTAMP WITH LOCAL TZ" => "DB_TYPE_TIMESTAMP_LTZ",
-        "CLOB" => "DB_TYPE_CLOB",
-        "NCLOB" => "DB_TYPE_NCLOB",
-        "BLOB" => "DB_TYPE_BLOB",
-        "XMLTYPE" => "DB_TYPE_XMLTYPE",
-        "BINARY_FLOAT" => "DB_TYPE_BINARY_FLOAT",
-        "BINARY_DOUBLE" => "DB_TYPE_BINARY_DOUBLE",
-        "NUMBER" | "INTEGER" | "SMALLINT" | "REAL" | "DOUBLE PRECISION" | "FLOAT" => {
-            "DB_TYPE_NUMBER"
-        }
-        _ => "DB_TYPE_OBJECT",
-    }
-}
-
-fn normalized_attr_precision_scale(
-    type_name: &str,
-    precision: Option<i8>,
-    scale: Option<i8>,
-) -> (i8, i8) {
-    match type_name.to_ascii_uppercase().as_str() {
-        "NUMBER" => (
-            precision.unwrap_or(if scale == Some(0) { 38 } else { 0 }),
-            scale.unwrap_or(-127),
-        ),
-        "INTEGER" | "SMALLINT" => (precision.unwrap_or(38), scale.unwrap_or(0)),
-        "REAL" => (precision.unwrap_or(63), scale.unwrap_or(-127)),
-        "DOUBLE PRECISION" | "FLOAT" => (precision.unwrap_or(126), scale.unwrap_or(-127)),
-        _ => (0, 0),
-    }
-}
-
-fn normalized_attr_max_size(type_name: &str, length: Option<u32>) -> u32 {
-    let length = length.unwrap_or(0);
-    match type_name.to_ascii_uppercase().as_str() {
-        "NCHAR" | "NVARCHAR2" | "NVARCHAR" => length.saturating_mul(2),
-        _ => length,
-    }
-}
-
 fn sql_identifier(value: &str) -> PyResult<String> {
     if value
         .chars()
@@ -3401,8 +3344,8 @@ impl ThinConnImpl {
                     .get(5)
                     .and_then(query_value_to_string)
                     .unwrap_or_else(|| schema.to_ascii_uppercase());
-                let dbtype_name = dbtype_name_from_oracle_attr_type(&attr_type_name);
-                let (precision, scale) = normalized_attr_precision_scale(
+                let dbtype_name = public_dbtype_name_from_oracle_type_name(&attr_type_name);
+                let (precision, scale) = dbobject_attr_precision_scale(
                     &attr_type_name,
                     row.get(3).and_then(query_value_to_i8),
                     row.get(4).and_then(query_value_to_i8),
@@ -3415,7 +3358,7 @@ impl ThinConnImpl {
                     } else {
                         None
                     },
-                    max_size: normalized_attr_max_size(
+                    max_size: dbobject_attr_max_size(
                         &attr_type_name,
                         row.get(2).and_then(query_value_to_u32),
                     ),
@@ -3424,22 +3367,6 @@ impl ThinConnImpl {
                 })
             })
             .collect()
-    }
-
-    fn rowtype_attr_max_size(
-        &self,
-        type_name: &str,
-        data_length: Option<u32>,
-        char_length: Option<u32>,
-    ) -> u32 {
-        match type_name.to_ascii_uppercase().as_str() {
-            "CHAR" | "VARCHAR" | "VARCHAR2" | "RAW" => data_length.unwrap_or(0),
-            "NCHAR" | "NVARCHAR" | "NVARCHAR2" => normalized_attr_max_size(
-                type_name,
-                char_length.filter(|length| *length > 0).or(data_length),
-            ),
-            _ => 0,
-        }
     }
 
     fn rowtype_attrs(&self, schema: &str, table_name: &str) -> PyResult<Vec<DbObjectAttrImpl>> {
@@ -3473,8 +3400,8 @@ impl ThinConnImpl {
                     .get(5)
                     .and_then(query_value_to_string)
                     .unwrap_or_else(|| schema.to_ascii_uppercase());
-                let dbtype_name = dbtype_name_from_oracle_attr_type(&data_type);
-                let (precision, scale) = normalized_attr_precision_scale(
+                let dbtype_name = public_dbtype_name_from_oracle_type_name(&data_type);
+                let (precision, scale) = dbobject_attr_precision_scale(
                     &data_type,
                     row.get(3).and_then(query_value_to_i8),
                     row.get(4).and_then(query_value_to_i8),
@@ -3487,7 +3414,7 @@ impl ThinConnImpl {
                     } else {
                         None
                     },
-                    max_size: self.rowtype_attr_max_size(
+                    max_size: dbobject_rowtype_attr_max_size(
                         &data_type,
                         row.get(2).and_then(query_value_to_u32),
                         row.get(6).and_then(query_value_to_u32),
@@ -3543,8 +3470,8 @@ impl ThinConnImpl {
             .get(1)
             .and_then(query_value_to_string)
             .unwrap_or_else(|| "VARCHAR2".to_string());
-        let dbtype_name = dbtype_name_from_oracle_attr_type(&elem_type_name);
-        let (precision, scale) = normalized_attr_precision_scale(
+        let dbtype_name = public_dbtype_name_from_oracle_type_name(&elem_type_name);
+        let (precision, scale) = dbobject_attr_precision_scale(
             &elem_type_name,
             row.get(3).and_then(query_value_to_i8),
             row.get(4).and_then(query_value_to_i8),
@@ -3557,7 +3484,7 @@ impl ThinConnImpl {
             } else {
                 None
             },
-            max_size: normalized_attr_max_size(
+            max_size: dbobject_attr_max_size(
                 &elem_type_name,
                 row.get(2).and_then(query_value_to_u32),
             ),
@@ -3596,8 +3523,8 @@ impl ThinConnImpl {
             .get(2)
             .and_then(query_value_to_string)
             .unwrap_or_else(|| "VARCHAR2".to_string());
-        let dbtype_name = dbtype_name_from_oracle_attr_type(&elem_type_name);
-        let (precision, scale) = normalized_attr_precision_scale(
+        let dbtype_name = public_dbtype_name_from_oracle_type_name(&elem_type_name);
+        let (precision, scale) = dbobject_attr_precision_scale(
             &elem_type_name,
             row.get(4).and_then(query_value_to_i8),
             row.get(5).and_then(query_value_to_i8),
@@ -3619,7 +3546,7 @@ impl ThinConnImpl {
             name: String::new(),
             dbtype_name: dbtype_name.to_string(),
             objtype,
-            max_size: normalized_attr_max_size(
+            max_size: dbobject_attr_max_size(
                 &elem_type_name,
                 row.get(3).and_then(query_value_to_u32),
             ),

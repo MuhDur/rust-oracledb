@@ -1176,6 +1176,80 @@ pub fn public_dbtype_name_from_column_metadata(metadata: &ColumnMetadata) -> &'s
     }
 }
 
+pub fn public_dbtype_name_from_oracle_type_name(type_name: &str) -> &'static str {
+    let upper = type_name.to_ascii_uppercase();
+    if upper.starts_with("TIMESTAMP") {
+        if upper.contains("LOCAL TIME ZONE") || upper.contains("LOCAL TZ") {
+            return "DB_TYPE_TIMESTAMP_LTZ";
+        }
+        if upper.contains("TIME ZONE") || upper.contains("WITH TZ") {
+            return "DB_TYPE_TIMESTAMP_TZ";
+        }
+        return "DB_TYPE_TIMESTAMP";
+    }
+    match upper.as_str() {
+        "CHAR" => "DB_TYPE_CHAR",
+        "NCHAR" => "DB_TYPE_NCHAR",
+        "VARCHAR2" | "VARCHAR" => "DB_TYPE_VARCHAR",
+        "NVARCHAR2" | "NVARCHAR" => "DB_TYPE_NVARCHAR",
+        "RAW" => "DB_TYPE_RAW",
+        "DATE" => "DB_TYPE_DATE",
+        "TIMESTAMP" => "DB_TYPE_TIMESTAMP",
+        "TIMESTAMP WITH TIME ZONE" | "TIMESTAMP WITH TZ" => "DB_TYPE_TIMESTAMP_TZ",
+        "TIMESTAMP WITH LOCAL TIME ZONE" | "TIMESTAMP WITH LOCAL TZ" => "DB_TYPE_TIMESTAMP_LTZ",
+        "CLOB" => "DB_TYPE_CLOB",
+        "NCLOB" => "DB_TYPE_NCLOB",
+        "BLOB" => "DB_TYPE_BLOB",
+        "XMLTYPE" => "DB_TYPE_XMLTYPE",
+        "BINARY_FLOAT" => "DB_TYPE_BINARY_FLOAT",
+        "BINARY_DOUBLE" => "DB_TYPE_BINARY_DOUBLE",
+        "NUMBER" | "INTEGER" | "SMALLINT" | "REAL" | "DOUBLE PRECISION" | "FLOAT" => {
+            "DB_TYPE_NUMBER"
+        }
+        _ => "DB_TYPE_OBJECT",
+    }
+}
+
+pub fn dbobject_attr_precision_scale(
+    type_name: &str,
+    precision: Option<i8>,
+    scale: Option<i8>,
+) -> (i8, i8) {
+    match type_name.to_ascii_uppercase().as_str() {
+        "NUMBER" => (
+            precision.unwrap_or(if scale == Some(0) { 38 } else { 0 }),
+            scale.unwrap_or(-127),
+        ),
+        "INTEGER" | "SMALLINT" => (precision.unwrap_or(38), scale.unwrap_or(0)),
+        "REAL" => (precision.unwrap_or(63), scale.unwrap_or(-127)),
+        "DOUBLE PRECISION" | "FLOAT" => (precision.unwrap_or(126), scale.unwrap_or(-127)),
+        _ => (0, 0),
+    }
+}
+
+pub fn dbobject_attr_max_size(type_name: &str, length: Option<u32>) -> u32 {
+    let length = length.unwrap_or(0);
+    match type_name.to_ascii_uppercase().as_str() {
+        "NCHAR" | "NVARCHAR2" | "NVARCHAR" => length.saturating_mul(2),
+        _ => length,
+    }
+}
+
+pub fn dbobject_rowtype_attr_max_size(
+    type_name: &str,
+    data_length: Option<u32>,
+    char_length: Option<u32>,
+) -> u32 {
+    match type_name.to_ascii_uppercase().as_str() {
+        "CHAR" | "VARCHAR" | "VARCHAR2" | "RAW" => data_length.unwrap_or(0),
+        "NCHAR" | "NVARCHAR" | "NVARCHAR2" => dbobject_attr_max_size(
+            type_name,
+            char_length.filter(|length| *length > 0).or(data_length),
+        ),
+        _ => 0,
+    }
+}
+
 pub fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
     match value {
         BindValue::TypedNull {
@@ -3836,6 +3910,49 @@ mod tests {
             public_dbtype_name_from_column_metadata(&metadata),
             "DB_TYPE_XMLTYPE"
         );
+    }
+
+    #[test]
+    fn oracle_dictionary_type_metadata_is_protocol_owned() {
+        assert_eq!(
+            public_dbtype_name_from_oracle_type_name("timestamp with local time zone"),
+            "DB_TYPE_TIMESTAMP_LTZ"
+        );
+        assert_eq!(
+            public_dbtype_name_from_oracle_type_name("TIMESTAMP WITH TZ"),
+            "DB_TYPE_TIMESTAMP_TZ"
+        );
+        assert_eq!(
+            public_dbtype_name_from_oracle_type_name("BINARY_FLOAT"),
+            "DB_TYPE_BINARY_FLOAT"
+        );
+        assert_eq!(
+            public_dbtype_name_from_oracle_type_name("UDT_OBJECT"),
+            "DB_TYPE_OBJECT"
+        );
+
+        assert_eq!(
+            dbobject_attr_precision_scale("NUMBER", None, Some(0)),
+            (38, 0)
+        );
+        assert_eq!(
+            dbobject_attr_precision_scale("NUMBER", None, None),
+            (0, -127)
+        );
+        assert_eq!(
+            dbobject_attr_precision_scale("DOUBLE PRECISION", None, None),
+            (126, -127)
+        );
+        assert_eq!(dbobject_attr_max_size("NVARCHAR2", Some(10)), 20);
+        assert_eq!(
+            dbobject_rowtype_attr_max_size("NVARCHAR2", Some(40), Some(7)),
+            14
+        );
+        assert_eq!(
+            dbobject_rowtype_attr_max_size("NVARCHAR2", Some(40), Some(0)),
+            80
+        );
+        assert_eq!(dbobject_rowtype_attr_max_size("NUMBER", Some(22), None), 0);
     }
 
     #[test]
