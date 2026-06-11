@@ -1,13 +1,14 @@
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
-use std::net::Shutdown;
 use std::process;
+use std::sync::Arc;
 use std::time::Duration;
 
-use asupersync::io::{AsyncReadExt, AsyncWriteExt};
-use asupersync::net::TcpStream;
+use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use asupersync::net::{OwnedReadHalf, OwnedWriteHalf, TcpStream};
 use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
+use asupersync::sync::Mutex as AsyncMutex;
 use asupersync::{time, Cx};
 use oracledb_protocol::thin::{
     build_auth_phase_two_payload_with_context_with_seq, build_connect_packet_payload,
@@ -32,6 +33,8 @@ const DEFAULT_SDU: usize = 8192;
 const TNS_DATA_PACKET_OVERHEAD: usize = 10;
 
 pub use oracledb_protocol as protocol;
+
+type SharedWriteHalf = Arc<AsyncMutex<OwnedWriteHalf>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -98,7 +101,8 @@ impl ConnectOptions {
 pub struct Connection {
     descriptor: EasyConnect,
     identity: ClientIdentity,
-    stream: TcpStream,
+    read: OwnedReadHalf,
+    write: SharedWriteHalf,
     session_id: u32,
     serial_num: u16,
     server_version: Option<String>,
@@ -109,7 +113,9 @@ pub struct Connection {
 }
 
 #[derive(Debug)]
-pub struct CancelHandle {}
+pub struct CancelHandle {
+    write: SharedWriteHalf,
+}
 
 impl Connection {
     pub async fn connect(cx: &Cx, options: ConnectOptions) -> Result<Self> {
@@ -118,12 +124,14 @@ impl Connection {
         let descriptor = EasyConnect::parse(&options.connect_string)?;
         let identity = options.identity;
         trace_connect_step("tcp connect");
-        let mut stream = TcpStream::connect_timeout(
+        let stream = TcpStream::connect_timeout(
             (descriptor.host.clone(), descriptor.port),
             Duration::from_secs(20),
         )
         .await?;
         stream.set_nodelay(true)?;
+        let (mut read, write) = stream.into_split();
+        let write = Arc::new(AsyncMutex::with_name("oracle_tcp_write", write));
         trace_connect_step("tcp connected");
 
         let connect_descriptor = listener_connect_descriptor(&descriptor, &identity);
@@ -138,11 +146,10 @@ impl Connection {
         )?;
         trace_connect_bytes("CONNECT packet", &packet);
         trace_connect_step("send CONNECT");
-        stream.write_all(&packet).await?;
-        stream.flush().await?;
+        write_all_shared(cx, &write, &packet).await?;
 
         trace_connect_step("read ACCEPT");
-        let accept = read_packet(&mut stream, PacketLengthWidth::Legacy16).await?;
+        let accept = read_packet(&mut read, PacketLengthWidth::Legacy16).await?;
         match accept.packet_type {
             TNS_PACKET_TYPE_ACCEPT => {}
             TNS_PACKET_TYPE_REDIRECT => return Err(Error::RedirectUnsupported),
@@ -178,9 +185,9 @@ impl Connection {
         )?;
         trace_connect_bytes("AUTH phase one payload", &auth_one);
         trace_connect_step("send AUTH phase one");
-        send_data_packet(&mut stream, &auth_one, sdu).await?;
+        send_data_packet_shared(cx, &write, &auth_one, sdu).await?;
         trace_connect_step("read AUTH phase one");
-        let auth_one_response = read_data_response(&mut stream).await?;
+        let auth_one_response = read_data_response(&mut read, cx, &write).await?;
         trace_connect_bytes("AUTH phase one response", &auth_one_response);
         let auth_one = parse_auth_response(&auth_one_response)?;
         let capabilities = auth_one.capabilities.unwrap_or_default();
@@ -205,9 +212,9 @@ impl Connection {
         )?;
         trace_connect_bytes("AUTH phase two payload", &auth_two);
         trace_connect_step("send AUTH phase two");
-        send_data_packet(&mut stream, &auth_two, sdu).await?;
+        send_data_packet_shared(cx, &write, &auth_two, sdu).await?;
         trace_connect_step("read AUTH phase two");
-        let auth_two_response = read_data_response(&mut stream).await?;
+        let auth_two_response = read_data_response(&mut read, cx, &write).await?;
         trace_connect_bytes("AUTH phase two response", &auth_two_response);
         let auth_two = parse_auth_response(&auth_two_response)?;
         oracledb_protocol::crypto::verify_server_response(
@@ -222,7 +229,8 @@ impl Connection {
         Ok(Self {
             descriptor,
             identity,
-            stream,
+            read,
+            write,
             session_id,
             serial_num,
             server_version,
@@ -258,20 +266,23 @@ impl Connection {
     }
 
     pub fn cancel_handle(&self) -> Result<CancelHandle> {
-        Ok(CancelHandle {})
+        Ok(CancelHandle {
+            write: Arc::clone(&self.write),
+        })
     }
 
     pub async fn ping(&mut self, cx: &Cx) -> Result<()> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        send_data_packet(
-            &mut self.stream,
+        send_data_packet_shared(
+            cx,
+            &self.write,
             &build_function_payload_with_seq(TNS_FUNC_PING, seq_num),
             self.sdu,
         )
         .await?;
-        let _ = read_data_response(&mut self.stream).await?;
+        let _ = read_data_response(&mut self.read, cx, &self.write).await?;
         Ok(())
     }
 
@@ -295,8 +306,8 @@ impl Connection {
         let payload =
             build_execute_payload_with_seq(sql, prefetch_rows, seq_num, statement_is_query(sql))?;
         trace_query_bytes("EXECUTE query payload", &payload);
-        send_data_packet(&mut self.stream, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.stream).await?;
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("EXECUTE query response", &response);
         let result = parse_query_response(&response, self.capabilities).map_err(Error::from)?;
         self.remember_cursor_columns(&result);
@@ -334,8 +345,10 @@ impl Connection {
             binds,
         )?;
         trace_query_bytes("EXECUTE query payload", &payload);
-        send_data_packet(&mut self.stream, &payload, self.sdu).await?;
-        let response = read_data_response_flushing_out_binds(&mut self.stream, self.sdu).await?;
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response =
+            read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, self.sdu)
+                .await?;
         trace_query_bytes("EXECUTE query response", &response);
         let result = parse_query_response_with_binds(&response, self.capabilities, binds)
             .map_err(Error::from)?;
@@ -361,8 +374,10 @@ impl Connection {
             bind_rows,
         )?;
         trace_query_bytes("EXECUTE query payload", &payload);
-        send_data_packet(&mut self.stream, &payload, self.sdu).await?;
-        let response = read_data_response_flushing_out_binds(&mut self.stream, self.sdu).await?;
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response =
+            read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, self.sdu)
+                .await?;
         trace_query_bytes("EXECUTE query response", &response);
         let result = parse_query_response_with_binds(
             &response,
@@ -398,8 +413,8 @@ impl Connection {
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
         trace_query_bytes("FETCH payload", &payload);
-        send_data_packet(&mut self.stream, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.stream).await?;
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("FETCH response", &response);
         let columns = self
             .cursor_columns
@@ -427,8 +442,8 @@ impl Connection {
         let payload =
             build_define_fetch_payload_with_seq(cursor_id, arraysize, seq_num, define_columns)?;
         trace_query_bytes("DEFINE FETCH payload", &payload);
-        send_data_packet(&mut self.stream, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.stream).await?;
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("DEFINE FETCH response", &response);
         let result = parse_fetch_response_with_context(
             &response,
@@ -461,8 +476,8 @@ impl Connection {
             self.capabilities.ttc_field_version,
         )?;
         trace_query_bytes("LOB READ payload", &payload);
-        send_data_packet(&mut self.stream, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.stream).await?;
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("LOB READ response", &response);
         parse_lob_read_response(&response, self.capabilities, locator).map_err(Error::from)
     }
@@ -483,8 +498,8 @@ impl Connection {
             self.capabilities.ttc_field_version,
         )?;
         trace_query_bytes("LOB CREATE TEMP payload", &payload);
-        send_data_packet(&mut self.stream, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.stream).await?;
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("LOB CREATE TEMP response", &response);
         parse_lob_create_temp_response(&response, self.capabilities).map_err(Error::from)
     }
@@ -507,8 +522,8 @@ impl Connection {
             self.capabilities.ttc_field_version,
         )?;
         trace_query_bytes("LOB WRITE payload", &payload);
-        send_data_packet(&mut self.stream, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.stream).await?;
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("LOB WRITE response", &response);
         parse_lob_write_response(&response, self.capabilities, locator).map_err(Error::from)
     }
@@ -532,7 +547,7 @@ impl Connection {
         {
             Ok(result) => result,
             Err(_) => {
-                let _ = self.stream.shutdown(Shutdown::Both);
+                let _ = send_marker_shared(cx, &self.write, TNS_MARKER_TYPE_BREAK).await;
                 Err(Error::CallTimeout(timeout_ms))
             }
         }
@@ -560,7 +575,7 @@ impl Connection {
         {
             Ok(result) => result,
             Err(_) => {
-                let _ = self.stream.shutdown(Shutdown::Both);
+                let _ = send_marker_shared(cx, &self.write, TNS_MARKER_TYPE_BREAK).await;
                 Err(Error::CallTimeout(timeout_ms))
             }
         }
@@ -588,7 +603,7 @@ impl Connection {
         {
             Ok(result) => result,
             Err(_) => {
-                let _ = self.stream.shutdown(Shutdown::Both);
+                let _ = send_marker_shared(cx, &self.write, TNS_MARKER_TYPE_BREAK).await;
                 Err(Error::CallTimeout(timeout_ms))
             }
         }
@@ -614,7 +629,7 @@ impl Connection {
         {
             Ok(result) => result,
             Err(_) => {
-                let _ = self.stream.shutdown(Shutdown::Both);
+                let _ = send_marker_shared(cx, &self.write, TNS_MARKER_TYPE_BREAK).await;
                 Err(Error::CallTimeout(timeout_ms))
             }
         }
@@ -640,9 +655,26 @@ impl Connection {
         {
             Ok(result) => result,
             Err(_) => {
-                let _ = self.stream.shutdown(Shutdown::Both);
+                let _ = send_marker_shared(cx, &self.write, TNS_MARKER_TYPE_BREAK).await;
                 Err(Error::CallTimeout(timeout_ms))
             }
+        }
+    }
+
+    async fn drain_cancel_response(&mut self, cx: &Cx) -> Result<()> {
+        match time::timeout(
+            time::wall_now(),
+            Duration::from_secs(5),
+            read_data_response(&mut self.read, cx, &self.write),
+        )
+        .await
+        {
+            Ok(response) => {
+                let response = response?;
+                trace_query_bytes("CANCEL drain response", &response);
+                Ok(())
+            }
+            Err(_) => Ok(()),
         }
     }
 
@@ -658,13 +690,14 @@ impl Connection {
             .map_err(|err| Error::Runtime(err.to_string()))?;
         self.rollback(cx).await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        send_data_packet(
-            &mut self.stream,
+        send_data_packet_shared(
+            cx,
+            &self.write,
             &build_function_payload_with_seq(TNS_FUNC_LOGOFF, seq_num),
             self.sdu,
         )
         .await?;
-        let _ = read_data_response(&mut self.stream).await?;
+        let _ = read_data_response(&mut self.read, cx, &self.write).await?;
         let eof = encode_packet(
             TNS_PACKET_TYPE_DATA,
             0,
@@ -672,9 +705,8 @@ impl Connection {
             &[],
             PacketLengthWidth::Large32,
         )?;
-        self.stream.write_all(&eof).await?;
-        self.stream.flush().await?;
-        let _ = self.stream.shutdown(Shutdown::Both);
+        write_all_shared(cx, &self.write, &eof).await?;
+        let _ = shutdown_write_shared(cx, &self.write).await;
         Ok(())
     }
 
@@ -682,22 +714,27 @@ impl Connection {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        send_data_packet(
-            &mut self.stream,
+        send_data_packet_shared(
+            cx,
+            &self.write,
             &build_function_payload_with_seq(function_code, seq_num),
             self.sdu,
         )
         .await?;
-        let _ = read_data_response(&mut self.stream).await?;
+        let _ = read_data_response(&mut self.read, cx, &self.write).await?;
         Ok(())
     }
 }
 
 impl CancelHandle {
     pub fn cancel(&mut self) -> Result<()> {
-        Err(Error::Runtime(
-            "out-of-band cancel requires an async split transport".into(),
-        ))
+        let runtime = build_io_runtime()?;
+        let write = Arc::clone(&self.write);
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            send_marker_shared(&cx, &write, TNS_MARKER_TYPE_BREAK).await
+        })
     }
 }
 
@@ -972,6 +1009,15 @@ impl BlockingConnection {
         })
     }
 
+    pub fn drain_cancel_response(connection: &mut Connection) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.drain_cancel_response(&cx).await
+        })
+    }
+
     pub fn close(connection: Connection) -> Result<()> {
         let runtime = build_io_runtime()?;
         runtime.block_on(async {
@@ -996,7 +1042,48 @@ struct IncomingPacket {
     payload: Vec<u8>,
 }
 
-async fn send_data_packet(stream: &mut TcpStream, payload: &[u8], sdu: usize) -> Result<()> {
+async fn lock_write<'a>(
+    cx: &Cx,
+    write: &'a SharedWriteHalf,
+) -> Result<asupersync::sync::MutexGuard<'a, OwnedWriteHalf>> {
+    write
+        .lock(cx)
+        .await
+        .map_err(|err| Error::Runtime(err.to_string()))
+}
+
+async fn write_all_shared(cx: &Cx, write: &SharedWriteHalf, packet: &[u8]) -> Result<()> {
+    let mut guard = lock_write(cx, write).await?;
+    guard.write_all(packet).await?;
+    guard.flush().await?;
+    Ok(())
+}
+
+async fn shutdown_write_shared(cx: &Cx, write: &SharedWriteHalf) -> Result<()> {
+    let mut guard = lock_write(cx, write).await?;
+    guard.shutdown().await?;
+    Ok(())
+}
+
+async fn send_data_packet_shared(
+    cx: &Cx,
+    write: &SharedWriteHalf,
+    payload: &[u8],
+    sdu: usize,
+) -> Result<()> {
+    let mut guard = lock_write(cx, write).await?;
+    send_data_packet(&mut *guard, payload, sdu).await
+}
+
+async fn send_marker_shared(cx: &Cx, write: &SharedWriteHalf, marker_type: u8) -> Result<()> {
+    let mut guard = lock_write(cx, write).await?;
+    send_marker(&mut *guard, marker_type).await
+}
+
+async fn send_data_packet<W>(stream: &mut W, payload: &[u8], sdu: usize) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     let max_payload = sdu.saturating_sub(TNS_DATA_PACKET_OVERHEAD).max(1);
     for chunk in payload.chunks(max_payload) {
         let packet = encode_packet(
@@ -1017,34 +1104,48 @@ struct DataResponse {
     flush_out_binds: bool,
 }
 
-async fn read_data_response(stream: &mut TcpStream) -> Result<Vec<u8>> {
-    Ok(read_data_response_boundary(stream).await?.payload)
+async fn read_data_response(
+    read: &mut OwnedReadHalf,
+    cx: &Cx,
+    write: &SharedWriteHalf,
+) -> Result<Vec<u8>> {
+    Ok(read_data_response_boundary(read, cx, write).await?.payload)
 }
 
 async fn read_data_response_flushing_out_binds(
-    stream: &mut TcpStream,
+    read: &mut OwnedReadHalf,
+    cx: &Cx,
+    write: &SharedWriteHalf,
     sdu: usize,
 ) -> Result<Vec<u8>> {
-    let mut response = read_data_response_boundary(stream).await?;
+    let mut response = read_data_response_boundary(read, cx, write).await?;
     let mut payload = response.payload;
     while response.flush_out_binds {
         if matches!(payload.last(), Some(&TNS_MSG_TYPE_FLUSH_OUT_BINDS)) {
             payload.pop();
         }
-        send_data_packet(stream, &[TNS_MSG_TYPE_FLUSH_OUT_BINDS], sdu).await?;
-        response = read_data_response_boundary(stream).await?;
+        send_data_packet_shared(cx, write, &[TNS_MSG_TYPE_FLUSH_OUT_BINDS], sdu).await?;
+        response = read_data_response_boundary(read, cx, write).await?;
         payload.extend_from_slice(&response.payload);
     }
     Ok(payload)
 }
 
-async fn read_data_response_boundary(stream: &mut TcpStream) -> Result<DataResponse> {
+async fn read_data_response_boundary(
+    read: &mut OwnedReadHalf,
+    cx: &Cx,
+    write: &SharedWriteHalf,
+) -> Result<DataResponse> {
     let mut response = Vec::new();
     let mut flush_out_binds = false;
+    let mut pending_packet = None;
     loop {
-        let packet = read_packet(stream, PacketLengthWidth::Large32).await?;
+        let packet = match pending_packet.take() {
+            Some(packet) => packet,
+            None => read_packet(read, PacketLengthWidth::Large32).await?,
+        };
         if packet.packet_type == TNS_PACKET_TYPE_MARKER {
-            reset_after_marker(stream, &packet).await?;
+            pending_packet = reset_after_marker(read, cx, write, &packet).await?;
             continue;
         }
         if packet.packet_type != TNS_PACKET_TYPE_DATA {
@@ -1081,28 +1182,33 @@ async fn read_data_response_boundary(stream: &mut TcpStream) -> Result<DataRespo
 }
 
 const TNS_PACKET_TYPE_MARKER: u8 = 12;
+const TNS_MARKER_TYPE_BREAK: u8 = 1;
 const TNS_MARKER_TYPE_RESET: u8 = 2;
 
-async fn reset_after_marker(stream: &mut TcpStream, initial_marker: &IncomingPacket) -> Result<()> {
+async fn reset_after_marker(
+    read: &mut OwnedReadHalf,
+    cx: &Cx,
+    write: &SharedWriteHalf,
+    initial_marker: &IncomingPacket,
+) -> Result<Option<IncomingPacket>> {
     trace_connect_bytes("MARKER packet", &initial_marker.payload);
-    send_marker(stream, TNS_MARKER_TYPE_RESET).await?;
+    send_marker_shared(cx, write, TNS_MARKER_TYPE_RESET).await?;
     loop {
-        let packet = read_packet(stream, PacketLengthWidth::Large32).await?;
+        let packet = read_packet(read, PacketLengthWidth::Large32).await?;
         if packet.packet_type != TNS_PACKET_TYPE_MARKER {
-            return Err(oracledb_protocol::ProtocolError::UnknownMessageType {
-                message_type: packet.packet_type,
-                position: 4,
-            }
-            .into());
+            return Ok(Some(packet));
         }
         trace_connect_bytes("MARKER reset response", &packet.payload);
         if matches!(packet.payload.get(2), Some(&TNS_MARKER_TYPE_RESET)) {
-            return Ok(());
+            return Ok(None);
         }
     }
 }
 
-async fn send_marker(stream: &mut TcpStream, marker_type: u8) -> Result<()> {
+async fn send_marker<W>(stream: &mut W, marker_type: u8) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     let packet = encode_packet(
         TNS_PACKET_TYPE_MARKER,
         0,
@@ -1116,7 +1222,10 @@ async fn send_marker(stream: &mut TcpStream, marker_type: u8) -> Result<()> {
     Ok(())
 }
 
-async fn read_packet(stream: &mut TcpStream, width: PacketLengthWidth) -> Result<IncomingPacket> {
+async fn read_packet<R>(stream: &mut R, width: PacketLengthWidth) -> Result<IncomingPacket>
+where
+    R: AsyncRead + Unpin,
+{
     let mut header = [0u8; 8];
     stream.read_exact(&mut header).await?;
     let [len0, len1, len2, len3, packet_type, _, _, _] = header;
@@ -1232,6 +1341,10 @@ fn trace_query_bytes(label: &'static str, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Duration;
 
     fn identity() -> ClientIdentity {
         ClientIdentity::new("program", "machine", "osuser", "terminal", "driver")
@@ -1247,5 +1360,49 @@ mod tests {
         assert!(built.contains("(PROGRAM=program)"));
         assert!(built.contains("(HOST=machine)"));
         assert!(built.contains("(USER=osuser)"));
+    }
+
+    #[test]
+    fn cancel_handle_sends_tns_break_marker() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            let mut packet = [0u8; 11];
+            socket.read_exact(&mut packet).expect("read marker packet");
+            packet
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let mut handle = runtime.block_on(async {
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (_read, write) = stream.into_split();
+            CancelHandle {
+                write: Arc::new(AsyncMutex::with_name("oracle_tcp_write_test", write)),
+            }
+        });
+
+        handle.cancel().expect("cancel marker write");
+
+        let packet = server.join().expect("server thread joins");
+        assert_eq!(
+            packet,
+            [
+                0,
+                0,
+                0,
+                11,
+                TNS_PACKET_TYPE_MARKER,
+                0,
+                0,
+                0,
+                1,
+                0,
+                TNS_MARKER_TYPE_BREAK
+            ]
+        );
     }
 }

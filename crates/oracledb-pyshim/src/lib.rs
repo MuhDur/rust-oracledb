@@ -114,14 +114,6 @@ fn database_error(py: Python<'_>, message: &str) -> PyResult<PyErr> {
     Ok(PyErr::from_value(exc))
 }
 
-fn operational_error(py: Python<'_>, message: &str) -> PyResult<PyErr> {
-    let errors = PyModule::import(py, "oracledb.errors")?;
-    let error_obj = errors.getattr("_Error")?.call1((message,))?;
-    let exc_type = error_obj.getattr("exc_type")?;
-    let exc = exc_type.call1((error_obj,))?;
-    Ok(PyErr::from_value(exc))
-}
-
 fn compilation_error_warning(py: Python<'_>) -> PyResult<Py<PyAny>> {
     let errors = PyModule::import(py, "oracledb.errors")?;
     Ok(errors.getattr("_create_warning")?.call1((7000,))?.unbind())
@@ -144,9 +136,8 @@ fn ora_database_error(message: &str) -> PyErr {
         .unwrap_or_else(|_| PyRuntimeError::new_err(message.to_string()))
 }
 
-fn dpy_operational_error(code: &str, message: &str) -> PyErr {
-    Python::attach(|py| operational_error(py, &format!("{code}: {message}")))
-        .unwrap_or_else(|_| PyRuntimeError::new_err(format!("{code}: {message}")))
+fn ora_cancel_error() -> PyErr {
+    ora_database_error("ORA-01013: user requested cancel of current operation")
 }
 
 fn dpy_bind_error(code: &str, message: impl std::fmt::Display) -> PyErr {
@@ -4078,6 +4069,9 @@ impl ThinConnImpl {
 
     fn cancel(&self) -> PyResult<()> {
         self.cancel_requested.store(true, Ordering::SeqCst);
+        if let Some(cancel_handle) = self.cancel_handle.lock().map_err(runtime_error)?.as_mut() {
+            cancel_handle.cancel().map_err(runtime_error)?;
+        }
         Ok(())
     }
 
@@ -5434,6 +5428,14 @@ struct ThinCursorImpl {
 }
 
 impl ThinCursorImpl {
+    fn drain_cancel_response(&self) -> PyResult<()> {
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        BlockingConnection::drain_cancel_response(connection).map_err(runtime_error)
+    }
+
     fn new(
         connection: Arc<Mutex<Option<RustConnection>>>,
         autocommit: Arc<Mutex<bool>>,
@@ -5887,29 +5889,32 @@ impl ThinCursorImpl {
             let value = self.state.lock().map_err(runtime_error)?.call_timeout;
             (value > 0).then_some(value)
         };
-        let result = cursor
-            .py()
-            .detach({
-                let connection = Arc::clone(&self.connection);
-                let statement = statement.to_string();
-                let bind_rows = bind_rows.clone();
-                let prefetchrows = self.prefetchrows;
-                move || -> Result<QueryResult, String> {
-                    let mut guard = connection.lock().map_err(|err| err.to_string())?;
-                    let connection = guard
-                        .as_mut()
-                        .ok_or_else(|| "connection is closed".to_string())?;
-                    BlockingConnection::execute_query_with_bind_rows_and_timeout(
-                        connection,
-                        &statement,
-                        prefetchrows,
-                        &bind_rows,
-                        call_timeout,
-                    )
-                    .map_err(|err| err.to_string())
-                }
-            })
-            .map_err(runtime_error)?;
+        let result = match cursor.py().detach({
+            let connection = Arc::clone(&self.connection);
+            let statement = statement.to_string();
+            let bind_rows = bind_rows.clone();
+            let prefetchrows = self.prefetchrows;
+            move || -> Result<QueryResult, String> {
+                let mut guard = connection.lock().map_err(|err| err.to_string())?;
+                let connection = guard
+                    .as_mut()
+                    .ok_or_else(|| "connection is closed".to_string())?;
+                BlockingConnection::execute_query_with_bind_rows_and_timeout(
+                    connection,
+                    &statement,
+                    prefetchrows,
+                    &bind_rows,
+                    call_timeout,
+                )
+                .map_err(|err| err.to_string())
+            }
+        }) {
+            Ok(result) => result,
+            Err(_) if self.cancel_requested.swap(false, Ordering::SeqCst) => {
+                return Err(ora_cancel_error());
+            }
+            Err(err) => return Err(runtime_error(err)),
+        };
         let is_query = !result.columns.is_empty();
         let should_commit = !is_query && *self.autocommit.lock().map_err(runtime_error)?;
         if should_commit {
@@ -5920,10 +5925,8 @@ impl ThinCursorImpl {
             BlockingConnection::commit(connection).map_err(runtime_error)?;
         }
         if self.cancel_requested.swap(false, Ordering::SeqCst) {
-            return Err(dpy_operational_error(
-                "DPY-4011",
-                "the database or network closed the connection",
-            ));
+            self.drain_cancel_response()?;
+            return Err(ora_cancel_error());
         }
         self.warning = Python::attach(|py| query_result_warning(py, &result))?;
         Python::attach(|py| {
@@ -5964,34 +5967,35 @@ impl ThinCursorImpl {
             let value = self.state.lock().map_err(runtime_error)?.call_timeout;
             (value > 0).then_some(value)
         };
-        let result = cursor
-            .py()
-            .detach({
-                let connection = Arc::clone(&self.connection);
-                let statement = statement.to_string();
-                let bind_values = self.bind_values.clone();
-                let prefetchrows = self.prefetchrows;
-                move || -> Result<QueryResult, String> {
-                    let mut guard = connection.lock().map_err(|err| err.to_string())?;
-                    let connection = guard
-                        .as_mut()
-                        .ok_or_else(|| "connection is closed".to_string())?;
-                    BlockingConnection::execute_query_with_binds_and_timeout(
-                        connection,
-                        &statement,
-                        prefetchrows,
-                        &bind_values,
-                        call_timeout,
-                    )
-                    .map_err(|err| err.to_string())
-                }
-            })
-            .map_err(runtime_error)?;
+        let result = match cursor.py().detach({
+            let connection = Arc::clone(&self.connection);
+            let statement = statement.to_string();
+            let bind_values = self.bind_values.clone();
+            let prefetchrows = self.prefetchrows;
+            move || -> Result<QueryResult, String> {
+                let mut guard = connection.lock().map_err(|err| err.to_string())?;
+                let connection = guard
+                    .as_mut()
+                    .ok_or_else(|| "connection is closed".to_string())?;
+                BlockingConnection::execute_query_with_binds_and_timeout(
+                    connection,
+                    &statement,
+                    prefetchrows,
+                    &bind_values,
+                    call_timeout,
+                )
+                .map_err(|err| err.to_string())
+            }
+        }) {
+            Ok(result) => result,
+            Err(_) if self.cancel_requested.swap(false, Ordering::SeqCst) => {
+                return Err(ora_cancel_error());
+            }
+            Err(err) => return Err(runtime_error(err)),
+        };
         if self.cancel_requested.swap(false, Ordering::SeqCst) {
-            return Err(dpy_operational_error(
-                "DPY-4011",
-                "the database or network closed the connection",
-            ));
+            self.drain_cancel_response()?;
+            return Err(ora_cancel_error());
         }
         self.warning = Python::attach(|py| query_result_warning(py, &result))?;
         Python::attach(|py| {
