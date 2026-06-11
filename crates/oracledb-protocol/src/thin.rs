@@ -1268,7 +1268,7 @@ pub fn is_cursor_bind_template(value: &BindValue) -> bool {
 
 pub fn public_dbtype_name_from_type_name(type_name: &str) -> &'static str {
     match type_name {
-        "NUMBER" | "DB_TYPE_NUMBER" | "int" | "float" => "DB_TYPE_NUMBER",
+        "NUMBER" | "DB_TYPE_NUMBER" | "int" | "float" | "Decimal" => "DB_TYPE_NUMBER",
         "NATIVE_INT" | "DB_TYPE_BINARY_INTEGER" => "DB_TYPE_BINARY_INTEGER",
         "NATIVE_FLOAT" | "DB_TYPE_BINARY_DOUBLE" => "DB_TYPE_BINARY_DOUBLE",
         "STRING" | "DB_TYPE_VARCHAR" | "str" => "DB_TYPE_VARCHAR",
@@ -1463,7 +1463,7 @@ pub fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
     let text_buffer_size = if size == 0 { 4000 } else { size.max(1) };
     let nchar_buffer_size = text_buffer_size.saturating_mul(4);
     match type_name {
-        "NUMBER" | "DB_TYPE_NUMBER" | "int" | "float" => BindValue::TypedNull {
+        "NUMBER" | "DB_TYPE_NUMBER" | "int" | "float" | "Decimal" => BindValue::TypedNull {
             ora_type_num: ORA_TYPE_NUM_NUMBER,
             csfrm: 0,
             buffer_size: ORA_TYPE_SIZE_NUMBER,

@@ -189,6 +189,43 @@ pub(crate) fn raise_wrong_executemany_parameters_type() -> PyErr {
     raise_oracledb_driver_error("ERR_WRONG_EXECUTEMANY_PARAMETERS_TYPE")
 }
 
+pub(crate) fn raise_not_supported(feature: &str) -> PyErr {
+    Python::attach(|py| -> PyResult<PyErr> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        match errors.getattr("_raise_not_supported")?.call1((feature,)) {
+            Ok(_) => Ok(PyRuntimeError::new_err(
+                "oracledb.errors._raise_not_supported returned without raising",
+            )),
+            Err(err) => Ok(err),
+        }
+    })
+    .unwrap_or_else(|_| {
+        PyRuntimeError::new_err(format!(
+            "DPY-3001: {feature} is only supported in python-oracledb thick mode"
+        ))
+    })
+}
+
+pub(crate) fn raise_python_type_not_supported(typ: &Bound<'_, PyAny>) -> PyErr {
+    let py = typ.py();
+    (|| -> PyResult<PyErr> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        let error_num = errors.getattr("ERR_PYTHON_TYPE_NOT_SUPPORTED")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("typ", typ)?;
+        match errors
+            .getattr("_raise_err")?
+            .call((error_num,), Some(&kwargs))
+        {
+            Ok(_) => Ok(PyRuntimeError::new_err(
+                "oracledb.errors._raise_err(ERR_PYTHON_TYPE_NOT_SUPPORTED) returned without raising",
+            )),
+            Err(err) => Ok(err),
+        }
+    })()
+    .unwrap_or_else(|_| PyRuntimeError::new_err("DPY-3003: Python type is not supported"))
+}
+
 pub(crate) fn raise_call_timeout_exceeded(timeout: u32) -> PyErr {
     Python::attach(|py| -> PyResult<PyErr> {
         let errors = PyModule::import(py, "oracledb.errors")?;

@@ -31,6 +31,9 @@ pub(crate) fn thin_var_from_type_spec(
 ) -> PyResult<Py<ThinVar>> {
     let type_name = py_type_name(typ);
     let object_type = py_db_object_type_impl(typ)?;
+    if object_type.is_none() {
+        validate_var_type_spec(py, typ)?;
+    }
     let default_bind = if let Some(object_type) = object_type.as_ref() {
         object_type
             .object_output_bind()
@@ -72,6 +75,28 @@ pub(crate) fn thin_var_from_type_spec(
             bypass_decode,
         ),
     )
+}
+
+/// Mirrors reference impl/base/metadata.pyx `OracleMetadata.from_type`
+/// validation: DbType/ApiType/DbObjectType instances pass through, non-types
+/// raise DPY-2007 (ERR_EXPECTING_TYPE) and unsupported Python types raise
+/// DPY-3003 (ERR_PYTHON_TYPE_NOT_SUPPORTED).
+pub(crate) fn validate_var_type_spec(py: Python<'_>, typ: &Bound<'_, PyAny>) -> PyResult<()> {
+    let oracledb = PyModule::import(py, "oracledb")?;
+    if typ.is_instance(&oracledb.getattr("DbType")?)?
+        || typ.is_instance(&oracledb.getattr("ApiType")?)?
+    {
+        return Ok(());
+    }
+    if !typ.is_instance_of::<pyo3::types::PyType>() {
+        return Err(raise_oracledb_driver_error("ERR_EXPECTING_TYPE"));
+    }
+    let name = py_type_name(typ);
+    match name.as_str() {
+        "int" | "float" | "str" | "bytes" | "Decimal" | "bool" | "date" | "datetime"
+        | "timedelta" => Ok(()),
+        _ => Err(raise_python_type_not_supported(typ)),
+    }
 }
 
 pub(crate) fn thin_var_from_input_size(
@@ -507,6 +532,34 @@ pub(crate) fn bind_var_from_value(
                     None,
                     None,
                     public_dbtype_name_from_type_name(&type_name),
+                    false,
+                ),
+            );
+        }
+    }
+    // Plain values (int/float/str/...) take their bind metadata from the
+    // value's Python type so OUT data decodes with the right converter
+    // (reference impl/base/metadata.pyx `OracleMetadata.from_value`).
+    let value_type_name = match py_value_type_name(value).as_str() {
+        "bool" => "int".to_string(),
+        other => other.to_string(),
+    };
+    if !value_type_name.is_empty() {
+        let default_bind = bind_template_from_type_name(&value_type_name, 0);
+        if !matches!(default_bind, BindValue::Null) {
+            return Py::new(
+                py,
+                ThinVar::typed_with_options(
+                    default_bind,
+                    Some(value.clone().unbind()),
+                    false,
+                    1,
+                    None,
+                    false,
+                    ThinVarReturnKind::Plain,
+                    None,
+                    None,
+                    public_dbtype_name_from_type_name(&value_type_name),
                     false,
                 ),
             );

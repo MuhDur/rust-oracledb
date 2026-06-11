@@ -301,7 +301,6 @@ impl AsyncThinCursorImpl {
     #[setter]
     fn set_fetch_lobs(&mut self, value: bool) {
         self.inner.fetch_lobs = value;
-        self.inner.fetch_lobs_overridden = true;
     }
 
     #[getter]
@@ -533,9 +532,6 @@ impl AsyncThinCursorImpl {
         if self.inner.statement_changed {
             self.inner.rowfactory = None;
         }
-        if !self.inner.fetch_lobs_overridden {
-            self.inner.fetch_lobs = Python::attach(default_fetch_lobs)?;
-        }
         let statement = self
             .inner
             .statement
@@ -546,7 +542,13 @@ impl AsyncThinCursorImpl {
             let value = self.inner.state.lock().map_err(runtime_error)?.call_timeout;
             (value > 0).then_some(value)
         };
-        let typed_lob_hints = Python::attach(|py| typed_lob_bind_hints(py, &self.inner.bind_vars));
+        let mut typed_lob_hints =
+            Python::attach(|py| typed_lob_bind_hints(py, &self.inner.bind_vars));
+        promote_oversized_plsql_bind_hints(
+            &statement,
+            &self.inner.bind_values,
+            &mut typed_lob_hints,
+        );
         let autocommit = *self.inner.autocommit.lock().map_err(runtime_error)?;
         let query = spawn_async_execute_task(
             Arc::clone(&self.inner.connection),
@@ -731,6 +733,18 @@ impl AsyncThinCursorImpl {
 
     fn get_lastrowid(&self) -> Option<String> {
         self.inner.get_lastrowid()
+    }
+
+    fn get_handle(&self) -> PyResult<Py<PyAny>> {
+        self.inner.get_handle()
+    }
+
+    #[pyo3(signature = (external_handle_capsule=None))]
+    fn attach_external_handle(
+        &self,
+        external_handle_capsule: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        self.inner.attach_external_handle(external_handle_capsule)
     }
 
     async fn scroll(&mut self, _cursor: Py<PyAny>, _value: i32, _mode: String) -> PyResult<()> {

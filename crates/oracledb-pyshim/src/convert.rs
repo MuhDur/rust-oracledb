@@ -414,6 +414,51 @@ pub(crate) fn default_fetch_lobs(py: Python<'_>) -> PyResult<bool> {
         .extract()
 }
 
+pub(crate) fn default_fetch_decimals(py: Python<'_>) -> PyResult<bool> {
+    PyModule::import(py, "oracledb")?
+        .getattr("defaults")?
+        .getattr("fetch_decimals")?
+        .extract()
+}
+
+pub(crate) fn python_decimal_from_text(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
+    Ok(PyModule::import(py, "decimal")?
+        .getattr("Decimal")?
+        .call1((text,))?
+        .unbind())
+}
+
+/// PL/SQL statements cannot bind VARCHAR/RAW values longer than 32767 bytes;
+/// the reference driver promotes them to temporary LOBs
+/// (impl/thin/var.pyx:53-90). Marking the bind with a LOB hint reuses the
+/// existing temp-LOB materialization machinery.
+pub(crate) fn promote_oversized_plsql_bind_hints(
+    statement: &str,
+    bind_values: &[BindValue],
+    hints: &mut Vec<Option<(u8, u8)>>,
+) {
+    if !statement_is_plsql(statement) {
+        return;
+    }
+    if hints.len() < bind_values.len() {
+        hints.resize(bind_values.len(), None);
+    }
+    for (index, value) in bind_values.iter().enumerate() {
+        if hints[index].is_some() {
+            continue;
+        }
+        match value {
+            BindValue::Text(text) if text.len() > 32_767 => {
+                hints[index] = Some((ORA_TYPE_NUM_CLOB, CS_FORM_IMPLICIT));
+            }
+            BindValue::Raw(bytes) if bytes.len() > 32_767 => {
+                hints[index] = Some((ORA_TYPE_NUM_BLOB, 0));
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(crate) fn materialize_typed_lob_text_bind(
     connection: &mut RustConnection,
     value: &mut BindValue,

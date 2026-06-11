@@ -78,7 +78,6 @@ pub(crate) struct ThinCursorImpl {
     pub(crate) prefetchrows: u32,
     pub(crate) scrollable: bool,
     pub(crate) fetch_lobs: bool,
-    pub(crate) fetch_lobs_overridden: bool,
     pub(crate) fetch_async_lobs: bool,
     pub(crate) fetch_decimals: bool,
     pub(crate) suspend_on_success: bool,
@@ -133,7 +132,6 @@ impl ThinCursorImpl {
             prefetchrows: 2,
             scrollable,
             fetch_lobs: true,
-            fetch_lobs_overridden: false,
             fetch_async_lobs: false,
             fetch_decimals: false,
             suspend_on_success: false,
@@ -308,7 +306,6 @@ impl ThinCursorImpl {
     #[setter]
     fn set_fetch_lobs(&mut self, value: bool) {
         self.fetch_lobs = value;
-        self.fetch_lobs_overridden = true;
     }
 
     #[getter]
@@ -433,6 +430,11 @@ impl ThinCursorImpl {
             self.statement_changed = false;
         }
         self.warning = None;
+        // Reference resets fetch options from oracledb.defaults on every
+        // prepare (impl/base/cursor.pyx:420-421); per-call overrides are
+        // applied by cursor.py after prepare, before execute.
+        self.fetch_lobs = default_fetch_lobs(_cursor.py())?;
+        self.fetch_decimals = default_fetch_decimals(_cursor.py())?;
         let statement = self
             .statement
             .as_deref()
@@ -512,6 +514,8 @@ impl ThinCursorImpl {
             self.statement_changed = false;
         }
         self.warning = None;
+        self.fetch_lobs = default_fetch_lobs(_cursor.py())?;
+        self.fetch_decimals = default_fetch_decimals(_cursor.py())?;
         if self.statement.is_none() {
             return Err(raise_oracledb_driver_error("ERR_NO_STATEMENT"));
         }
@@ -708,9 +712,6 @@ impl ThinCursorImpl {
         if self.statement_changed {
             self.rowfactory = None;
         }
-        if !self.fetch_lobs_overridden {
-            self.fetch_lobs = default_fetch_lobs(cursor.py())?;
-        }
         let statement = self
             .statement
             .as_deref()
@@ -719,7 +720,8 @@ impl ThinCursorImpl {
             let value = self.state.lock().map_err(runtime_error)?.call_timeout;
             (value > 0).then_some(value)
         };
-        let typed_lob_hints = typed_lob_bind_hints(cursor.py(), &self.bind_vars);
+        let mut typed_lob_hints = typed_lob_bind_hints(cursor.py(), &self.bind_vars);
+        promote_oversized_plsql_bind_hints(statement, &self.bind_values, &mut typed_lob_hints);
         let mut result = match cursor.py().detach({
             let connection = Arc::clone(&self.connection);
             let state = Arc::clone(&self.state);
@@ -897,6 +899,18 @@ impl ThinCursorImpl {
                 {
                     return json_query_value_to_py(py, value, Some(_cursor), Some(&lob_context));
                 }
+                // Reference: NUMBER columns convert to decimal.Decimal when
+                // fetch_decimals is in effect (impl/base/cursor.pyx:211-214).
+                if self.fetch_decimals
+                    && self.columns.get(index).is_some_and(|metadata| {
+                        metadata.ora_type_num
+                            == oracledb::protocol::thin::ORA_TYPE_NUM_NUMBER
+                    })
+                {
+                    if let Some(QueryValue::Number { text, .. }) = value {
+                        return python_decimal_from_text(py, text);
+                    }
+                }
                 query_value_to_py(
                     py,
                     value,
@@ -1037,5 +1051,18 @@ impl ThinCursorImpl {
 
     pub(crate) fn get_lastrowid(&self) -> Option<String> {
         None
+    }
+
+    pub(crate) fn get_handle(&self) -> PyResult<Py<PyAny>> {
+        Err(raise_not_supported("getting an OCIStmt handle"))
+    }
+
+    #[pyo3(signature = (external_handle_capsule=None))]
+    pub(crate) fn attach_external_handle(
+        &self,
+        external_handle_capsule: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let _ = external_handle_capsule;
+        Err(raise_not_supported("attaching an external OCIStmt handle"))
     }
 }

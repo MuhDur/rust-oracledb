@@ -23,12 +23,10 @@ pub(crate) struct ThinPoolImpl {
     name: String,
     getmode: u32,
     max_lifetime_session: u32,
-    max_sessions_per_shard: u32,
     opened: Arc<Mutex<bool>>,
     open_count: Arc<Mutex<u32>>,
     busy_count: Arc<Mutex<u32>>,
     ping_interval: u32,
-    soda_metadata_cache: bool,
     stmt_cache_size: u32,
     timeout: u32,
     wait_timeout: u32,
@@ -47,11 +45,7 @@ impl ThinPoolImpl {
         let getmode = get_optional_u32_attr(params_impl, "getmode")?.unwrap_or(0);
         let max_lifetime_session =
             get_optional_u32_attr(params_impl, "max_lifetime_session")?.unwrap_or(0);
-        let max_sessions_per_shard =
-            get_optional_u32_attr(params_impl, "max_sessions_per_shard")?.unwrap_or(0);
         let ping_interval = get_optional_u32_attr(params_impl, "ping_interval")?.unwrap_or(60);
-        let soda_metadata_cache =
-            get_optional_bool_attr(params_impl, "soda_metadata_cache")?.unwrap_or(false);
         let stmt_cache_size = get_optional_u32_attr(params_impl, "stmtcachesize")?.unwrap_or(20);
         let timeout = get_optional_u32_attr(params_impl, "timeout")?.unwrap_or(0);
         let wait_timeout = get_optional_u32_attr(params_impl, "wait_timeout")?.unwrap_or(0);
@@ -65,12 +59,10 @@ impl ThinPoolImpl {
             name: String::new(),
             getmode,
             max_lifetime_session,
-            max_sessions_per_shard,
             opened: Arc::new(Mutex::new(true)),
             open_count: Arc::new(Mutex::new(0)),
             busy_count: Arc::new(Mutex::new(0)),
             ping_interval,
-            soda_metadata_cache,
             stmt_cache_size,
             timeout,
             wait_timeout,
@@ -107,8 +99,12 @@ impl ThinPoolImpl {
         self.max_lifetime_session
     }
 
-    fn get_max_sessions_per_shard(&self) -> u32 {
-        self.max_sessions_per_shard
+    // Thick-mode-only attributes: reference impl/base/pool.pyx:58-111 raises
+    // DPY-3001 and impl/thin/pool.pyx does not override these four methods.
+    fn get_max_sessions_per_shard(&self) -> PyResult<u32> {
+        Err(raise_not_supported(
+            "getting the maximum sessions per shard in a pool",
+        ))
     }
 
     fn get_open_count(&self) -> PyResult<u32> {
@@ -119,8 +115,10 @@ impl ThinPoolImpl {
         self.ping_interval
     }
 
-    fn get_soda_metadata_cache(&self) -> bool {
-        self.soda_metadata_cache
+    fn get_soda_metadata_cache(&self) -> PyResult<bool> {
+        Err(raise_not_supported(
+            "getting whether the SODA metadata cache is enabled",
+        ))
     }
 
     fn get_stmt_cache_size(&self) -> u32 {
@@ -160,16 +158,20 @@ impl ThinPoolImpl {
         self.max_lifetime_session = value;
     }
 
-    fn set_max_sessions_per_shard(&mut self, value: u32) {
-        self.max_sessions_per_shard = value;
+    fn set_max_sessions_per_shard(&mut self, value: u32) -> PyResult<()> {
+        let _ = value;
+        Err(raise_not_supported("setting the maximum sessions per shard"))
     }
 
     fn set_ping_interval(&mut self, value: u32) {
         self.ping_interval = value;
     }
 
-    fn set_soda_metadata_cache(&mut self, value: bool) {
-        self.soda_metadata_cache = value;
+    fn set_soda_metadata_cache(&mut self, value: bool) -> PyResult<()> {
+        let _ = value;
+        Err(raise_not_supported(
+            "setting whether the SODA metadata cache is enabled",
+        ))
     }
 
     fn set_stmt_cache_size(&mut self, value: u32) {

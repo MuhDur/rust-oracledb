@@ -201,6 +201,9 @@ impl ThinConnImpl {
                 "cannot connect with a username but no password in the connect string",
             ));
         }
+        if self.dsn.trim().is_empty() {
+            return Err(raise_not_supported("bequeath"));
+        }
         let program = get_string_attr(params_impl, "program")?;
         let machine = get_string_attr(params_impl, "machine")?;
         let terminal = get_string_attr(params_impl, "terminal")?;
@@ -912,8 +915,11 @@ impl ThinConnImpl {
 impl ThinConnImpl {
     #[new]
     pub(crate) fn new(dsn: &Bound<'_, PyAny>, params_impl: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let dsn = if dsn.is_none() {
-            std::env::var("PYO_TEST_CONNECT_STRING").unwrap_or_default()
+        // dsn is None when no connect string could be resolved (bequeath);
+        // prepare_connect raises DPY-3001 like the reference
+        // (impl/thin/connection.pyx:450-454).
+        let dsn: String = if dsn.is_none() {
+            String::new()
         } else {
             dsn.extract()?
         };
