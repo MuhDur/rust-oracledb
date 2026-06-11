@@ -4,6 +4,7 @@ pub mod capabilities;
 pub mod crypto;
 pub mod net;
 pub mod packet;
+pub mod sql;
 pub mod thin;
 pub mod wire;
 

@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use oracledb::protocol::sql;
 use oracledb::protocol::thin::{
     decode_datetime_value, decode_number_value, BindValue, ColumnMetadata, QueryResult, QueryValue,
     CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE,
@@ -628,6 +629,7 @@ fn extract_bind_values(
     parameters: Option<&Bound<'_, PyAny>>,
     keyword_parameters: Option<&Bound<'_, PyAny>>,
     named_input_sizes: &[(String, Py<PyAny>)],
+    has_positional_input_sizes: bool,
     previous_bind_names: &[String],
     previous_bind_vars: &[Py<ThinVar>],
 ) -> PyResult<Vec<BindValue>> {
@@ -661,6 +663,26 @@ fn extract_bind_values(
         return Ok(Vec::new());
     };
     if !has_parameters {
+        if has_positional_input_sizes {
+            let row_values = positional_bind_items(value)?;
+            if row_values.is_empty() {
+                if let Some(name) = unique_sql_bind_names(statement)?.first() {
+                    return Err(dpy_bind_error(
+                        "DPY-4010",
+                        format!(
+                            "a bind variable replacement value for placeholder \":{name}\" was not provided"
+                        ),
+                    ));
+                }
+                return Ok(Vec::new());
+            }
+            return extract_positional_bind_values_for_execute(
+                py,
+                statement,
+                value,
+                named_input_sizes,
+            );
+        }
         if !named_input_sizes.is_empty() {
             return extract_named_bind_values(
                 py,
@@ -811,27 +833,7 @@ fn object_attr_bind_sql_expr(
 }
 
 fn plsql_function_return_bind_name(statement: &str) -> Option<String> {
-    let rest = statement.trim_start();
-    if !rest.get(.."begin".len())?.eq_ignore_ascii_case("begin") {
-        return None;
-    }
-    let rest = rest.get("begin".len()..)?.trim_start();
-    let rest = rest.strip_prefix(':')?;
-    let mut name_end = 0;
-    for (offset, ch) in rest.char_indices() {
-        if is_bind_name_char(ch) {
-            name_end = offset + ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-    if name_end == 0 {
-        return None;
-    }
-    let (name, rest) = rest.split_at(name_end);
-    rest.trim_start()
-        .starts_with(":=")
-        .then(|| name.to_string())
+    sql::plsql_function_return_bind_name(statement)
 }
 
 fn rewrite_object_bind_dict(
@@ -1056,29 +1058,8 @@ fn replace_bind_placeholder(statement: &str, bind_name: &str, replacement: &str)
     result
 }
 
-fn is_single_quote_byte(byte: Option<&u8>) -> bool {
-    matches!(byte, Some(b'\''))
-}
-
-fn is_double_quote_byte(byte: Option<&u8>) -> bool {
-    matches!(byte, Some(b'"'))
-}
-
 fn sql_single_quote_end(statement: &str, start: usize) -> usize {
-    let bytes = statement.as_bytes();
-    let mut index = start + 1;
-    while index < bytes.len() {
-        if is_single_quote_byte(bytes.get(index)) {
-            if is_single_quote_byte(bytes.get(index + 1)) {
-                index += 2;
-            } else {
-                return index + 1;
-            }
-        } else {
-            index += 1;
-        }
-    }
-    statement.len()
+    sql::single_quote_end(statement, start)
 }
 
 fn rewrite_object_return_projection(
@@ -1683,208 +1664,35 @@ fn get_named_bind_value<'py>(
 }
 
 fn unique_sql_bind_names(statement: &str) -> PyResult<Vec<String>> {
-    let mut names: Vec<String> = Vec::new();
-    for name in scan_sql_bind_names(statement)? {
-        if !names
-            .iter()
-            .any(|existing| bind_names_equal(existing, &name))
-        {
-            names.push(name);
-        }
-    }
-    Ok(names)
+    sql::unique_bind_names(statement).map_err(sql_parse_error)
 }
 
 fn public_bind_name(name: &str) -> String {
-    if is_quoted_bind_name(name) {
-        name[1..name.len() - 1].to_string()
-    } else {
-        name.to_uppercase()
-    }
+    sql::public_bind_name(name)
 }
 
 fn statement_return_bind_names(statement: &str) -> PyResult<Vec<String>> {
-    if statement_is_plsql(statement) {
-        return Ok(Vec::new());
-    }
-    let lower = statement.to_ascii_lowercase();
-    let Some(returning_pos) = lower.find("returning") else {
-        return Ok(Vec::new());
-    };
-    let Some(into_relative_pos) = lower[returning_pos..].find("into") else {
-        return Ok(Vec::new());
-    };
-    let into_pos = returning_pos + into_relative_pos + "into".len();
-    scan_sql_bind_names(&statement[into_pos..])
+    sql::returning_bind_names(statement).map_err(sql_parse_error)
 }
 
 fn statement_plsql_assignment_bind_names(statement: &str) -> PyResult<Vec<String>> {
-    if !statement_is_plsql(statement) {
-        return Ok(Vec::new());
-    }
-    let bytes = statement.as_bytes();
-    let mut names: Vec<String> = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\'' => {
-                index += 1;
-                while index < bytes.len() {
-                    if is_single_quote_byte(bytes.get(index)) {
-                        if is_single_quote_byte(bytes.get(index + 1)) {
-                            index += 2;
-                        } else {
-                            index += 1;
-                            break;
-                        }
-                    } else {
-                        index += 1;
-                    }
-                }
-                if index >= bytes.len() && !is_single_quote_byte(bytes.last()) {
-                    return Err(raise_oracledb_driver_error(
-                        "ERR_MISSING_ENDING_SINGLE_QUOTE",
-                    ));
-                }
-            }
-            b':' => {
-                let start = index + 1;
-                let Some(&next) = bytes.get(start) else {
-                    index += 1;
-                    continue;
-                };
-                let (name, end) = if is_double_quote_byte(Some(&next)) {
-                    let mut end = start + 1;
-                    while end < bytes.len() && !is_double_quote_byte(bytes.get(end)) {
-                        end += 1;
-                    }
-                    if end >= bytes.len() {
-                        index = start;
-                        continue;
-                    }
-                    (statement[start..=end].to_string(), end + 1)
-                } else {
-                    let mut end = start;
-                    for (offset, ch) in statement[start..].char_indices() {
-                        if is_bind_name_char(ch) {
-                            end = start + offset + ch.len_utf8();
-                        } else {
-                            break;
-                        }
-                    }
-                    if end <= start {
-                        index += 1;
-                        continue;
-                    }
-                    (statement[start..end].to_string(), end)
-                };
-                let mut after_name = end;
-                while bytes
-                    .get(after_name)
-                    .is_some_and(|byte| byte.is_ascii_whitespace())
-                {
-                    after_name += 1;
-                }
-                if matches!(bytes.get(after_name), Some(b':'))
-                    && matches!(bytes.get(after_name + 1), Some(b'='))
-                    && !names
-                        .iter()
-                        .any(|existing| bind_names_equal(existing, &name))
-                {
-                    names.push(name);
-                }
-                index = end;
-            }
-            _ => index += 1,
-        }
-    }
-    Ok(names)
+    sql::plsql_assignment_bind_names(statement).map_err(sql_parse_error)
 }
 
 fn statement_is_plsql(statement: &str) -> bool {
-    statement
-        .trim_start()
-        .split(|ch: char| !ch.is_ascii_alphabetic())
-        .next()
-        .is_some_and(|keyword| {
-            keyword.eq_ignore_ascii_case("begin")
-                || keyword.eq_ignore_ascii_case("declare")
-                || keyword.eq_ignore_ascii_case("call")
-        })
+    sql::statement_is_plsql(statement)
 }
 
 fn is_bind_name_char(ch: char) -> bool {
-    ch.is_alphanumeric() || matches!(ch, '_' | '$' | '#')
+    sql::is_bind_name_char(ch)
 }
 
 fn scan_sql_bind_names(statement: &str) -> PyResult<Vec<String>> {
-    let bytes = statement.as_bytes();
-    let mut names = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\'' => {
-                index += 1;
-                while index < bytes.len() {
-                    if is_single_quote_byte(bytes.get(index)) {
-                        if is_single_quote_byte(bytes.get(index + 1)) {
-                            index += 2;
-                        } else {
-                            index += 1;
-                            break;
-                        }
-                    } else {
-                        index += 1;
-                    }
-                }
-                if index >= bytes.len() && !is_single_quote_byte(bytes.last()) {
-                    return Err(raise_oracledb_driver_error(
-                        "ERR_MISSING_ENDING_SINGLE_QUOTE",
-                    ));
-                }
-            }
-            b':' => {
-                let start = index + 1;
-                let Some(&next) = bytes.get(start) else {
-                    index += 1;
-                    continue;
-                };
-                if is_double_quote_byte(Some(&next)) {
-                    let mut end = start + 1;
-                    while end < bytes.len() && !is_double_quote_byte(bytes.get(end)) {
-                        end += 1;
-                    }
-                    if end < bytes.len() {
-                        names.push(statement[start..=end].to_string());
-                        index = end + 1;
-                    } else {
-                        index = start;
-                    }
-                } else {
-                    let mut end = start;
-                    for (offset, ch) in statement[start..].char_indices() {
-                        if is_bind_name_char(ch) {
-                            end = start + offset + ch.len_utf8();
-                        } else {
-                            break;
-                        }
-                    }
-                    if end > start {
-                        names.push(statement[start..end].to_string());
-                        index = end;
-                    } else {
-                        index += 1;
-                    }
-                }
-            }
-            _ => index += 1,
-        }
-    }
-    Ok(names)
+    sql::scan_bind_names(statement).map_err(sql_parse_error)
 }
 
 fn is_quoted_bind_name(name: &str) -> bool {
-    name.starts_with('"') && name.ends_with('"')
+    sql::is_quoted_bind_name(name)
 }
 
 fn validate_parse_bind_names(statement: &str) -> PyResult<()> {
@@ -1922,18 +1730,21 @@ fn validate_dml_returning_duplicate_binds(statement: &str) -> PyResult<()> {
 }
 
 fn bind_names_equal(left: &str, right: &str) -> bool {
-    if is_quoted_bind_name(left) || is_quoted_bind_name(right) {
-        left == right
-    } else {
-        left.eq_ignore_ascii_case(right)
-    }
+    sql::bind_names_equal(left, right)
 }
 
 fn bind_name_matches_key(bind_name: &str, key: &str) -> bool {
-    if is_quoted_bind_name(bind_name) || is_quoted_bind_name(key) {
-        bind_name == key
-    } else {
-        bind_name.eq_ignore_ascii_case(key)
+    sql::bind_name_matches_key(bind_name, key)
+}
+
+fn sql_parse_error(err: sql::SqlError) -> PyErr {
+    match err {
+        sql::SqlError::MissingEndingSingleQuote => {
+            raise_oracledb_driver_error("ERR_MISSING_ENDING_SINGLE_QUOTE")
+        }
+        sql::SqlError::MissingEndingDoubleQuote => {
+            raise_oracledb_driver_error("ERR_MISSING_ENDING_DOUBLE_QUOTE")
+        }
     }
 }
 
@@ -6777,6 +6588,7 @@ impl ThinCursorImpl {
                 effective_parameters,
                 effective_keyword_parameters,
                 &self.named_input_sizes,
+                self.has_positional_input_sizes,
                 &previous_bind_names,
                 &previous_bind_vars,
             )?;

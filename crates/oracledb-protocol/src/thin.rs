@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::sql::statement_is_plsql;
 use crate::wire::{TtcReader, TtcWriter};
 use crate::{ProtocolError, Result, TNS_VERSION_DESIRED, TNS_VERSION_MIN};
 use hex::FromHex;
@@ -627,17 +628,6 @@ pub fn build_execute_payload_with_bind_rows_with_seq(
         write_bind_params(&mut writer, bind_rows, is_plsql)?;
     }
     Ok(writer.into_bytes())
-}
-
-fn statement_is_plsql(sql: &str) -> bool {
-    sql.trim_start()
-        .split(|ch: char| !ch.is_ascii_alphabetic())
-        .next()
-        .is_some_and(|keyword| {
-            keyword.eq_ignore_ascii_case("begin")
-                || keyword.eq_ignore_ascii_case("declare")
-                || keyword.eq_ignore_ascii_case("call")
-        })
 }
 
 fn write_bind_params(
