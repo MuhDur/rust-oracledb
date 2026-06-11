@@ -524,6 +524,18 @@ impl Connection {
         parse_lob_read_response(&response, self.capabilities, locator).map_err(Error::from)
     }
 
+    pub async fn read_lob_with_timeout(
+        &mut self,
+        cx: &Cx,
+        locator: &[u8],
+        offset: u64,
+        amount: u64,
+        timeout_ms: Option<u32>,
+    ) -> Result<LobReadResult> {
+        self.read_lob_call_timeout(cx, locator, offset, amount, timeout_ms)
+            .await
+    }
+
     pub async fn create_temp_lob(
         &mut self,
         cx: &Cx,
@@ -604,6 +616,17 @@ impl Connection {
         parse_lob_trim_response(&response, self.capabilities, locator).map_err(Error::from)
     }
 
+    pub async fn trim_lob_with_timeout(
+        &mut self,
+        cx: &Cx,
+        locator: &[u8],
+        new_size: u64,
+        timeout_ms: Option<u32>,
+    ) -> Result<LobReadResult> {
+        self.trim_lob_call_timeout(cx, locator, new_size, timeout_ms)
+            .await
+    }
+
     pub async fn free_temp_lobs(&mut self, cx: &Cx, locators: &[Vec<u8>]) -> Result<()> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
@@ -623,6 +646,16 @@ impl Connection {
         trace_query_bytes("LOB FREE TEMP response", &response);
         parse_lob_free_temp_response(&response, self.capabilities, returned_parameter_len)
             .map_err(Error::from)
+    }
+
+    pub async fn free_temp_lobs_with_timeout(
+        &mut self,
+        cx: &Cx,
+        locators: &[Vec<u8>],
+        timeout_ms: Option<u32>,
+    ) -> Result<()> {
+        self.free_temp_lobs_call_timeout(cx, locators, timeout_ms)
+            .await
     }
 
     async fn execute_query_call_timeout(

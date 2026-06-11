@@ -164,6 +164,58 @@ fn build_pyshim_io_runtime() -> Result<Runtime, String> {
         .map_err(|err| err.to_string())
 }
 
+fn spawn_async_connection_task<T, F>(
+    name: &'static str,
+    connection: Arc<Mutex<Option<RustConnection>>>,
+    task: F,
+) -> BlockingTask<T>
+where
+    T: Send + 'static,
+    F: for<'a> FnOnce(
+            &'a Cx,
+            &'a mut RustConnection,
+        ) -> Pin<Box<dyn Future<Output = Result<T, String>> + 'a>>
+        + Send
+        + 'static,
+{
+    spawn_blocking_task(name, move || {
+        let mut guard = connection.lock().map_err(|err| err.to_string())?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| "connection is closed".to_string())?;
+        let runtime = build_pyshim_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| "asupersync did not install an ambient Cx".to_string())?;
+            task(&cx, connection).await
+        })
+    })
+}
+
+fn spawn_async_connect_task(options: ConnectOptions) -> BlockingTask<RustConnection> {
+    spawn_blocking_task("oracledb-pyshim-async-connect", move || {
+        let runtime = build_pyshim_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| "asupersync did not install an ambient Cx".to_string())?;
+            RustConnection::connect(&cx, options)
+                .await
+                .map_err(|err| err.to_string())
+        })
+    })
+}
+
+fn spawn_async_close_task(connection: RustConnection) -> BlockingTask<()> {
+    spawn_blocking_task("oracledb-pyshim-async-close", move || {
+        let runtime = build_pyshim_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| "asupersync did not install an ambient Cx".to_string())?;
+            connection.close(&cx).await.map_err(|err| err.to_string())
+        })
+    })
+}
+
 fn close_connection_result(connection: RustConnection) -> Result<(), String> {
     BlockingConnection::close(connection).map_err(|err| err.to_string())
 }
@@ -2489,6 +2541,19 @@ async fn materialize_typed_lob_bind_values_async(
     Ok(())
 }
 
+async fn materialize_typed_lob_bind_rows_async(
+    cx: &Cx,
+    connection: &mut RustConnection,
+    rows: &mut [Vec<BindValue>],
+    hints: &[Option<(u8, u8)>],
+    call_timeout: Option<u32>,
+) -> Result<(), String> {
+    for row in rows {
+        materialize_typed_lob_bind_values_async(cx, connection, row, hints, call_timeout).await?;
+    }
+    Ok(())
+}
+
 fn bind_template_from_input_size(value: &Bound<'_, PyAny>) -> PyResult<BindValue> {
     if let Ok(size) = value.extract::<u32>() {
         return Ok(BindValue::TypedNull {
@@ -3230,6 +3295,160 @@ impl ThinLob {
     }
 }
 
+impl ThinLob {
+    async fn read_async(&self, offset: u64, amount: Option<u64>) -> PyResult<Py<PyAny>> {
+        if self.ora_type_num == ORA_TYPE_NUM_BFILE || self.data.is_some() || self.context.is_none()
+        {
+            return Python::attach(|py| self.read(py, offset, amount));
+        }
+        let context = self.context.clone().ok_or_else(|| {
+            PyRuntimeError::new_err("LOB has neither local data nor connection context")
+        })?;
+        let locator = self
+            .locator
+            .lock()
+            .map_err(runtime_error)?
+            .clone()
+            .unwrap_or_default();
+        let call_timeout = {
+            let value = context.state.lock().map_err(runtime_error)?.call_timeout;
+            (value > 0).then_some(value)
+        };
+        let task = spawn_async_connection_task(
+            "oracledb-pyshim-async-lob-read",
+            Arc::clone(&context.connection),
+            move |cx, connection| {
+                Box::pin(async move {
+                    connection
+                        .read_lob_with_timeout(
+                            cx,
+                            &locator,
+                            offset,
+                            amount.unwrap_or(u64::from(u32::MAX)),
+                            call_timeout,
+                        )
+                        .await
+                        .map_err(|err| err.to_string())
+                })
+            },
+        );
+        let result = task.await.map_err(runtime_error)?;
+        *self.locator.lock().map_err(runtime_error)? = Some(result.locator.clone());
+        Python::attach(|py| {
+            lob_data_to_py(
+                py,
+                self.ora_type_num,
+                self.csfrm,
+                Some(&result.locator),
+                result.data.as_deref().unwrap_or_default(),
+                1,
+                None,
+            )
+        })
+    }
+
+    async fn write_async(&mut self, value: Py<PyAny>, offset: u64) -> PyResult<()> {
+        if self.context.is_none() {
+            return Python::attach(|py| self.write(value.bind(py), offset));
+        }
+        let is_binary = matches!(self.ora_type_num, ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_BFILE);
+        let (raw_bytes, text): (Option<Vec<u8>>, Option<String>) = Python::attach(|py| {
+            if is_binary {
+                Ok::<(Option<Vec<u8>>, Option<String>), PyErr>((
+                    Some(value.bind(py).cast::<PyBytes>()?.as_bytes().to_vec()),
+                    None,
+                ))
+            } else {
+                Ok::<(Option<Vec<u8>>, Option<String>), PyErr>((
+                    None,
+                    Some(value.bind(py).extract::<String>()?),
+                ))
+            }
+        })?;
+        let context = self.context.clone().ok_or_else(|| {
+            PyRuntimeError::new_err("LOB has neither local data nor connection context")
+        })?;
+        let locator = self
+            .locator
+            .lock()
+            .map_err(runtime_error)?
+            .clone()
+            .unwrap_or_default();
+        let bytes = raw_bytes.as_ref().cloned().unwrap_or_else(|| {
+            protocol_encode_lob_text(
+                text.as_deref().unwrap_or_default(),
+                self.csfrm,
+                Some(&locator),
+            )
+        });
+        let call_timeout = {
+            let value = context.state.lock().map_err(runtime_error)?.call_timeout;
+            (value > 0).then_some(value)
+        };
+        let task = spawn_async_connection_task(
+            "oracledb-pyshim-async-lob-write",
+            Arc::clone(&context.connection),
+            move |cx, connection| {
+                Box::pin(async move {
+                    connection
+                        .write_lob_with_timeout(cx, &locator, offset, &bytes, call_timeout)
+                        .await
+                        .map_err(|err| err.to_string())
+                })
+            },
+        );
+        let result = task.await.map_err(runtime_error)?;
+        *self.locator.lock().map_err(runtime_error)? = Some(result.locator);
+        self.size = if is_binary {
+            self.size.max(
+                offset.saturating_sub(1)
+                    + raw_bytes.as_ref().map(Vec::len).unwrap_or_default() as u64,
+            )
+        } else {
+            self.size.max(
+                offset.saturating_sub(1)
+                    + text.as_deref().unwrap_or_default().chars().count() as u64,
+            )
+        };
+        Ok(())
+    }
+
+    async fn trim_async(&mut self, new_size: u64) -> PyResult<()> {
+        if self.data.is_some() || self.context.is_none() {
+            return self.trim(new_size);
+        }
+        let context = self.context.clone().ok_or_else(|| {
+            PyRuntimeError::new_err("LOB has neither local data nor connection context")
+        })?;
+        let locator = self
+            .locator
+            .lock()
+            .map_err(runtime_error)?
+            .clone()
+            .unwrap_or_default();
+        let call_timeout = {
+            let value = context.state.lock().map_err(runtime_error)?.call_timeout;
+            (value > 0).then_some(value)
+        };
+        let task = spawn_async_connection_task(
+            "oracledb-pyshim-async-lob-trim",
+            Arc::clone(&context.connection),
+            move |cx, connection| {
+                Box::pin(async move {
+                    connection
+                        .trim_lob_with_timeout(cx, &locator, new_size, call_timeout)
+                        .await
+                        .map_err(|err| err.to_string())
+                })
+            },
+        );
+        let result = task.await.map_err(runtime_error)?;
+        *self.locator.lock().map_err(runtime_error)? = Some(result.locator);
+        self.size = new_size;
+        Ok(())
+    }
+}
+
 #[pyclass(module = "oracledb.thin_impl", name = "AsyncThinLob")]
 struct AsyncThinLob {
     inner: ThinLob,
@@ -3239,11 +3458,11 @@ struct AsyncThinLob {
 impl AsyncThinLob {
     #[pyo3(signature = (offset=1, amount=None))]
     async fn read(&self, offset: u64, amount: Option<u64>) -> PyResult<Py<PyAny>> {
-        Python::attach(|py| self.inner.read(py, offset, amount))
+        self.inner.read_async(offset, amount).await
     }
 
     async fn write(&mut self, value: Py<PyAny>, offset: u64) -> PyResult<()> {
-        Python::attach(|py| self.inner.write(value.bind(py), offset))
+        self.inner.write_async(value, offset).await
     }
 
     fn get_max_amount(&self) -> u64 {
@@ -3271,6 +3490,14 @@ impl AsyncThinLob {
         self.inner.file_exists()
     }
 
+    fn get_file_name(&self) -> PyResult<(String, String)> {
+        self.inner.get_file_name()
+    }
+
+    fn set_file_name(&mut self, dir_alias: String, name: String) {
+        self.inner.set_file_name(dir_alias, name)
+    }
+
     async fn close(&self) -> PyResult<()> {
         self.inner.close()
     }
@@ -3284,7 +3511,7 @@ impl AsyncThinLob {
     }
 
     async fn trim(&mut self, new_size: u64) -> PyResult<()> {
-        self.inner.trim(new_size)
+        self.inner.trim_async(new_size).await
     }
 
     fn free_lob(&self) -> PyResult<()> {
@@ -3932,7 +4159,61 @@ struct ThinConnImpl {
     new_password: Option<String>,
 }
 
+struct PreparedConnect {
+    options: ConnectOptions,
+    password: String,
+    new_password: Option<String>,
+    edition: Option<String>,
+}
+
 impl ThinConnImpl {
+    fn prepare_connect(&mut self, params_impl: &Bound<'_, PyAny>) -> PyResult<PreparedConnect> {
+        if self
+            .state
+            .lock()
+            .map_err(runtime_error)?
+            .invalid_connect_string
+        {
+            return Err(dpy_database_error(
+                "DPY-4000",
+                "cannot connect with a username but no password in the connect string",
+            ));
+        }
+        let program = get_string_attr(params_impl, "program")?;
+        let machine = get_string_attr(params_impl, "machine")?;
+        let terminal = get_string_attr(params_impl, "terminal")?;
+        let osuser = get_string_attr(params_impl, "osuser")?;
+        let driver_name = get_optional_string_attr(params_impl, "driver_name")?
+            .unwrap_or_else(|| "rust-oracledb thn : 0.0.0".into());
+        let password = self
+            .connect_password
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| env_password_for_user(&self.username))?;
+        let app_context = get_app_context_attr(params_impl)?;
+        let edition = get_optional_string_attr(params_impl, "edition")?;
+        let sdu = get_connect_sdu_attr(params_impl)?.unwrap_or(8192);
+        if let Some(stmt_cache_size) = get_optional_u32_attr(params_impl, "stmtcachesize")? {
+            self.state.lock().map_err(runtime_error)?.stmt_cache_size = stmt_cache_size;
+        }
+        let identity = ClientIdentity::new(program, machine, osuser, terminal, driver_name)
+            .map_err(runtime_error)?;
+        let options = ConnectOptions::new(
+            self.dsn.clone(),
+            self.username.clone(),
+            password.clone(),
+            identity,
+        )
+        .with_app_context(app_context)
+        .with_sdu(sdu);
+        Ok(PreparedConnect {
+            options,
+            password,
+            new_password: self.new_password.clone(),
+            edition,
+        })
+    }
+
     fn apply_pending_current_schema(
         &self,
         connection: &mut RustConnection,
@@ -4733,53 +5014,16 @@ impl ThinConnImpl {
     }
 
     fn connect(&mut self, params_impl: &Bound<'_, PyAny>) -> PyResult<()> {
-        if self
-            .state
-            .lock()
-            .map_err(runtime_error)?
-            .invalid_connect_string
-        {
-            return Err(dpy_database_error(
-                "DPY-4000",
-                "cannot connect with a username but no password in the connect string",
-            ));
-        }
-        let program = get_string_attr(params_impl, "program")?;
-        let machine = get_string_attr(params_impl, "machine")?;
-        let terminal = get_string_attr(params_impl, "terminal")?;
-        let osuser = get_string_attr(params_impl, "osuser")?;
-        let driver_name = get_optional_string_attr(params_impl, "driver_name")?
-            .unwrap_or_else(|| "rust-oracledb thn : 0.0.0".into());
-        let password = self
-            .connect_password
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(|| env_password_for_user(&self.username))?;
-        let app_context = get_app_context_attr(params_impl)?;
-        let edition = get_optional_string_attr(params_impl, "edition")?;
-        let sdu = get_connect_sdu_attr(params_impl)?.unwrap_or(8192);
-        if let Some(stmt_cache_size) = get_optional_u32_attr(params_impl, "stmtcachesize")? {
-            self.state.lock().map_err(runtime_error)?.stmt_cache_size = stmt_cache_size;
-        }
-        let identity = ClientIdentity::new(program, machine, osuser, terminal, driver_name)
-            .map_err(runtime_error)?;
-        let options = ConnectOptions::new(
-            self.dsn.clone(),
-            self.username.clone(),
-            password.clone(),
-            identity,
-        )
-        .with_app_context(app_context)
-        .with_sdu(sdu);
-        let connection = BlockingConnection::connect(options).map_err(runtime_error)?;
+        let prepared = self.prepare_connect(params_impl)?;
+        let connection = BlockingConnection::connect(prepared.options).map_err(runtime_error)?;
         let cancel_handle = connection.cancel_handle().map_err(runtime_error)?;
         self.server_version = (0, 0, 0, 0, 0);
         *self.cancel_handle.lock().map_err(runtime_error)? = Some(cancel_handle);
         *self.connection.lock().map_err(runtime_error)? = Some(connection);
-        if let Some(new_password) = &self.new_password {
-            self.change_password(&password, new_password)?;
+        if let Some(new_password) = &prepared.new_password {
+            self.change_password(&prepared.password, new_password)?;
         }
-        if let Some(edition) = edition {
+        if let Some(edition) = prepared.edition {
             let identifier = sql_identifier(&edition)?;
             self.execute_statement(&format!("alter session set edition = {identifier}"))?;
             let mut state = self.state.lock().map_err(runtime_error)?;
@@ -7424,6 +7668,61 @@ struct AsyncExecuteOutcome {
     should_commit: bool,
 }
 
+fn spawn_async_executemany_task(
+    connection: Arc<Mutex<Option<RustConnection>>>,
+    state: Arc<Mutex<ThinConnState>>,
+    statement: String,
+    mut bind_rows: Vec<Vec<BindValue>>,
+    typed_lob_hints: Vec<Option<(u8, u8)>>,
+    prefetchrows: u32,
+    call_timeout: Option<u32>,
+    autocommit: bool,
+) -> BlockingTask<AsyncExecuteOutcome> {
+    spawn_async_connection_task(
+        "oracledb-pyshim-async-executemany",
+        connection,
+        move |cx, connection| {
+            Box::pin(async move {
+                apply_pending_current_schema_from_state_async(cx, &state, connection, call_timeout)
+                    .await?;
+                materialize_typed_lob_bind_rows_async(
+                    cx,
+                    connection,
+                    &mut bind_rows,
+                    &typed_lob_hints,
+                    call_timeout,
+                )
+                .await?;
+                let mut result = connection
+                    .execute_query_with_bind_rows_and_timeout(
+                        cx,
+                        &statement,
+                        prefetchrows,
+                        &bind_rows,
+                        call_timeout,
+                    )
+                    .await
+                    .map_err(|err| err.to_string())?;
+                supplement_json_lob_column_metadata_async(
+                    cx,
+                    connection,
+                    &mut result.columns,
+                    call_timeout,
+                )
+                .await?;
+                let should_commit = result.columns.is_empty() && autocommit;
+                if should_commit {
+                    connection.commit(cx).await.map_err(|err| err.to_string())?;
+                }
+                Ok(AsyncExecuteOutcome {
+                    result,
+                    should_commit,
+                })
+            })
+        },
+    )
+}
+
 fn spawn_async_execute_task(
     connection: Arc<Mutex<Option<RustConnection>>>,
     state: Arc<Mutex<ThinConnState>>,
@@ -7720,21 +8019,100 @@ impl AsyncThinCursorImpl {
 
     async fn executemany(
         &mut self,
-        cursor: Py<PyAny>,
+        _cursor: Py<PyAny>,
         num_execs: u32,
         batcherrors: bool,
         arraydmlrowcounts: bool,
         offset: u32,
     ) -> PyResult<()> {
+        if batcherrors {
+            return Err(not_implemented(
+                "AsyncThinCursorImpl executemany batcherrors",
+            ));
+        }
+        if arraydmlrowcounts {
+            return Err(not_implemented(
+                "AsyncThinCursorImpl executemany array DML rowcounts",
+            ));
+        }
+        let statement = self
+            .inner
+            .statement
+            .as_deref()
+            .ok_or_else(|| PyRuntimeError::new_err("no statement prepared"))?
+            .to_string();
+        let start = usize::try_from(offset).map_err(runtime_error)?;
+        let count = usize::try_from(num_execs).map_err(runtime_error)?;
+        let end = start
+            .checked_add(count)
+            .ok_or_else(|| PyRuntimeError::new_err("executemany offset overflow"))?;
+        let bind_rows = self
+            .inner
+            .many_bind_rows
+            .get(start..end)
+            .ok_or_else(|| PyRuntimeError::new_err("executemany batch is out of range"))?
+            .to_vec();
+        let typed_lob_hints = Python::attach(|py| typed_lob_bind_hints(py, &self.inner.bind_vars));
+        let call_timeout = {
+            let value = self.inner.state.lock().map_err(runtime_error)?.call_timeout;
+            (value > 0).then_some(value)
+        };
+        let autocommit = *self.inner.autocommit.lock().map_err(runtime_error)?;
+        let query = spawn_async_executemany_task(
+            Arc::clone(&self.inner.connection),
+            Arc::clone(&self.inner.state),
+            statement.clone(),
+            bind_rows,
+            typed_lob_hints,
+            self.inner.prefetchrows,
+            call_timeout,
+            autocommit,
+        );
+        let outcome = match query.await {
+            Ok(outcome) => outcome,
+            Err(_) if self.inner.cancel_requested.swap(false, Ordering::SeqCst) => {
+                return Err(ora_cancel_error());
+            }
+            Err(err) => return Err(runtime_error(err)),
+        };
+        if self.inner.cancel_requested.swap(false, Ordering::SeqCst) {
+            self.inner.drain_cancel_response()?;
+            return Err(ora_cancel_error());
+        }
+        let result = outcome.result;
+        let should_commit = outcome.should_commit;
+        let is_query = !result.columns.is_empty();
+        self.inner.warning = Python::attach(|py| query_result_warning(py, &result))?;
+        let lob_context = ThinLobContext {
+            connection: Arc::clone(&self.inner.connection),
+            state: Arc::clone(&self.inner.state),
+            async_mode: true,
+        };
         Python::attach(|py| {
-            self.inner.executemany(
-                cursor.bind(py),
-                num_execs,
-                batcherrors,
-                arraydmlrowcounts,
-                offset,
+            apply_out_bind_values(
+                py,
+                &self.inner.bind_vars,
+                &result.out_values,
+                &result.return_values,
+                Some(&lob_context),
             )
-        })
+        })?;
+        self.inner
+            .state
+            .lock()
+            .map_err(runtime_error)?
+            .record_statement(&statement, is_query, should_commit);
+        self.inner.columns = result.columns;
+        self.inner.reset_fetch_define_state();
+        self.inner.requires_define = columns_require_define(&self.inner.columns);
+        self.inner.rows = result.rows;
+        self.inner.row_index = 0;
+        self.inner.cursor_id = result.cursor_id;
+        self.inner.more_rows = result.more_rows;
+        self.inner.invalid_ref_cursor = false;
+        self.inner.rowcount = i64::from(num_execs);
+        self.inner.is_query = is_query;
+        Ok(())
     }
 
     async fn execute(&mut self, _cursor: Py<PyAny>) -> PyResult<()> {
@@ -8046,7 +8424,41 @@ impl AsyncThinConnImpl {
     }
 
     async fn connect(&mut self, params_impl: Py<PyAny>) -> PyResult<()> {
-        Python::attach(|py| self.inner.connect(params_impl.bind(py)))
+        let prepared = Python::attach(|py| self.inner.prepare_connect(params_impl.bind(py)))?;
+        let connection = spawn_async_connect_task(prepared.options)
+            .await
+            .map_err(runtime_error)?;
+        let cancel_handle = connection.cancel_handle().map_err(runtime_error)?;
+        self.inner.server_version = (0, 0, 0, 0, 0);
+        *self.inner.cancel_handle.lock().map_err(runtime_error)? = Some(cancel_handle);
+        *self.inner.connection.lock().map_err(runtime_error)? = Some(connection);
+        if let Some(new_password) = prepared.new_password {
+            self.change_password(prepared.password, new_password)
+                .await?;
+        }
+        if let Some(edition) = prepared.edition {
+            let identifier = sql_identifier(&edition)?;
+            let sql = format!("alter session set edition = {identifier}");
+            let call_timeout = self.inner.call_timeout()?;
+            let task = spawn_async_connection_task(
+                "oracledb-pyshim-async-set-edition",
+                Arc::clone(&self.inner.connection),
+                move |cx, connection| {
+                    Box::pin(async move {
+                        connection
+                            .execute_query_with_timeout(cx, &sql, 1, call_timeout)
+                            .await
+                            .map(|_| ())
+                            .map_err(|err| err.to_string())
+                    })
+                },
+            );
+            task.await.map_err(runtime_error)?;
+            let mut state = self.inner.state.lock().map_err(runtime_error)?;
+            state.edition = Some(edition);
+            state.edition_probe_started = true;
+        }
+        Ok(())
     }
 
     #[pyo3(signature = (in_del=None))]
@@ -8055,26 +8467,90 @@ impl AsyncThinConnImpl {
         let Some(connection) = self.inner.take_connection_for_close()? else {
             return Ok(());
         };
-        let close = spawn_blocking_task("oracledb-pyshim-async-close", move || {
-            close_connection_result(connection)
-        });
+        let close = spawn_async_close_task(connection);
         close_result_to_py(close.await)
     }
 
     async fn ping(&self) -> PyResult<()> {
-        self.inner.ping()
+        let task = spawn_async_connection_task(
+            "oracledb-pyshim-async-ping",
+            Arc::clone(&self.inner.connection),
+            |cx, connection| {
+                Box::pin(async move { connection.ping(cx).await.map_err(|err| err.to_string()) })
+            },
+        );
+        task.await.map_err(runtime_error)
     }
 
     async fn commit(&self) -> PyResult<()> {
-        self.inner.commit()
+        let task = spawn_async_connection_task(
+            "oracledb-pyshim-async-commit",
+            Arc::clone(&self.inner.connection),
+            |cx, connection| {
+                Box::pin(async move { connection.commit(cx).await.map_err(|err| err.to_string()) })
+            },
+        );
+        task.await.map_err(runtime_error)?;
+        self.inner
+            .state
+            .lock()
+            .map_err(runtime_error)?
+            .transaction_in_progress = false;
+        Ok(())
     }
 
     async fn rollback(&self) -> PyResult<()> {
-        self.inner.rollback()
+        let task = spawn_async_connection_task(
+            "oracledb-pyshim-async-rollback",
+            Arc::clone(&self.inner.connection),
+            |cx, connection| {
+                Box::pin(
+                    async move { connection.rollback(cx).await.map_err(|err| err.to_string()) },
+                )
+            },
+        );
+        task.await.map_err(runtime_error)?;
+        self.inner
+            .state
+            .lock()
+            .map_err(runtime_error)?
+            .transaction_in_progress = false;
+        Ok(())
     }
 
     async fn change_password(&self, old_password: String, new_password: String) -> PyResult<()> {
-        self.inner.change_password(&old_password, &new_password)
+        if new_password.len() > 1024 {
+            return Err(dpy_database_error(
+                "ORA-00988",
+                "missing or invalid password(s)",
+            ));
+        }
+        let user = user_identifier(&self.inner.username)?;
+        let sql = format!(
+            "alter user {user} identified by {} replace {}",
+            quoted_oracle_string(&new_password),
+            quoted_oracle_string(&old_password)
+        );
+        let call_timeout = {
+            let value = self.inner.state.lock().map_err(runtime_error)?.call_timeout;
+            (value > 0).then_some(value)
+        };
+        let task = spawn_async_connection_task(
+            "oracledb-pyshim-async-change-password",
+            Arc::clone(&self.inner.connection),
+            move |cx, connection| {
+                Box::pin(async move {
+                    connection
+                        .execute_query_with_timeout(cx, &sql, 1, call_timeout)
+                        .await
+                        .map(|_| ())
+                        .map_err(|err| err.to_string())
+                })
+            },
+        );
+        task.await
+            .map_err(runtime_error)
+            .and_then(|()| set_password_override_for_user(&self.inner.username, &new_password))
     }
 
     fn get_is_healthy(&self) -> PyResult<bool> {
@@ -8206,11 +8682,44 @@ impl AsyncThinConnImpl {
     }
 
     async fn create_temp_lob_impl(&self, lob_type: Py<PyAny>) -> PyResult<Py<AsyncThinLob>> {
+        let (ora_type_num, csfrm) =
+            Python::attach(|py| match py_type_name(lob_type.bind(py)).as_str() {
+                "DB_TYPE_BLOB" => (ORA_TYPE_NUM_BLOB, 0),
+                "DB_TYPE_NCLOB" => (ORA_TYPE_NUM_CLOB, CS_FORM_NCHAR),
+                _ => (ORA_TYPE_NUM_CLOB, CS_FORM_IMPLICIT),
+            });
+        let task = spawn_async_connection_task(
+            "oracledb-pyshim-async-create-temp-lob",
+            Arc::clone(&self.inner.connection),
+            move |cx, connection| {
+                Box::pin(async move {
+                    connection
+                        .create_temp_lob(cx, ora_type_num, csfrm)
+                        .await
+                        .map_err(|err| err.to_string())
+                })
+            },
+        );
+        let result = task.await.map_err(runtime_error)?;
         Python::attach(|py| {
             Py::new(
                 py,
                 AsyncThinLob {
-                    inner: self.inner.create_temp_lob_value(lob_type.bind(py), true)?,
+                    inner: ThinLob {
+                        data: None,
+                        locator: Arc::new(Mutex::new(Some(result.locator))),
+                        ora_type_num,
+                        csfrm,
+                        size: 0,
+                        chunk_size: 0,
+                        context: Some(ThinLobContext {
+                            connection: Arc::clone(&self.inner.connection),
+                            state: Arc::clone(&self.inner.state),
+                            async_mode: true,
+                        }),
+                        is_open: Arc::new(Mutex::new(false)),
+                        bfile_name: None,
+                    },
                 },
             )
         })
