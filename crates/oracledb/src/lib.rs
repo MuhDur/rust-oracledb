@@ -16,9 +16,10 @@ use oracledb_protocol::thin::{
     build_execute_payload_with_binds_with_seq, build_execute_payload_with_seq,
     build_fast_auth_phase_one_payload, build_fetch_payload_with_seq,
     build_function_payload_with_seq, build_lob_create_temp_payload_with_seq,
-    build_lob_read_payload_with_seq, build_lob_write_payload_with_seq, parse_accept_payload,
-    parse_auth_response, parse_fetch_response_with_context, parse_lob_create_temp_response,
-    parse_lob_read_response, parse_lob_write_response, parse_query_response,
+    build_lob_read_payload_with_seq, build_lob_trim_payload_with_seq,
+    build_lob_write_payload_with_seq, parse_accept_payload, parse_auth_response,
+    parse_fetch_response_with_context, parse_lob_create_temp_response, parse_lob_read_response,
+    parse_lob_trim_response, parse_lob_write_response, parse_query_response,
     parse_query_response_with_binds, BindValue, ClientCapabilities, ColumnMetadata, LobReadResult,
     QueryResult, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK,
     TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT,
@@ -528,6 +529,28 @@ impl Connection {
         parse_lob_write_response(&response, self.capabilities, locator).map_err(Error::from)
     }
 
+    pub async fn trim_lob(
+        &mut self,
+        cx: &Cx,
+        locator: &[u8],
+        new_size: u64,
+    ) -> Result<LobReadResult> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = build_lob_trim_payload_with_seq(
+            locator,
+            new_size,
+            seq_num,
+            self.capabilities.ttc_field_version,
+        )?;
+        trace_query_bytes("LOB TRIM payload", &payload);
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        trace_query_bytes("LOB TRIM response", &response);
+        parse_lob_trim_response(&response, self.capabilities, locator).map_err(Error::from)
+    }
+
     async fn execute_query_call_timeout(
         &mut self,
         cx: &Cx,
@@ -650,6 +673,31 @@ impl Connection {
             time::wall_now(),
             Duration::from_millis(u64::from(timeout_ms)),
             self.write_lob(cx, locator, offset, data),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                let _ = send_marker_shared(cx, &self.write, TNS_MARKER_TYPE_BREAK).await;
+                Err(Error::CallTimeout(timeout_ms))
+            }
+        }
+    }
+
+    async fn trim_lob_call_timeout(
+        &mut self,
+        cx: &Cx,
+        locator: &[u8],
+        new_size: u64,
+        timeout_ms: Option<u32>,
+    ) -> Result<LobReadResult> {
+        let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
+            return self.trim_lob(cx, locator, new_size).await;
+        };
+        match time::timeout(
+            time::wall_now(),
+            Duration::from_millis(u64::from(timeout_ms)),
+            self.trim_lob(cx, locator, new_size),
         )
         .await
         {
@@ -1027,6 +1075,22 @@ impl BlockingConnection {
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection
                 .write_lob_call_timeout(&cx, locator, offset, data, timeout_ms)
+                .await
+        })
+    }
+
+    pub fn trim_lob_with_timeout(
+        connection: &mut Connection,
+        locator: &[u8],
+        new_size: u64,
+        timeout_ms: Option<u32>,
+    ) -> Result<LobReadResult> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .trim_lob_call_timeout(&cx, locator, new_size, timeout_ms)
                 .await
         })
     }

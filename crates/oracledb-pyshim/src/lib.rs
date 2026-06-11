@@ -2205,6 +2205,124 @@ fn return_kind_from_type_name(type_name: &str) -> ThinVarReturnKind {
     }
 }
 
+fn typed_lob_bind_hint_from_type_name(type_name: &str) -> Option<(u8, u8)> {
+    match type_name {
+        "DB_TYPE_CLOB" | "CLOB" => Some((ORA_TYPE_NUM_CLOB, CS_FORM_IMPLICIT)),
+        "DB_TYPE_NCLOB" | "NCLOB" => Some((ORA_TYPE_NUM_CLOB, CS_FORM_NCHAR)),
+        "DB_TYPE_BLOB" | "BLOB" => Some((ORA_TYPE_NUM_BLOB, 0)),
+        _ => None,
+    }
+}
+
+fn typed_lob_bind_hints(py: Python<'_>, bind_vars: &[Py<ThinVar>]) -> Vec<Option<(u8, u8)>> {
+    bind_vars
+        .iter()
+        .map(|var| typed_lob_bind_hint_from_type_name(&var.borrow(py).dbtype_name))
+        .collect()
+}
+
+fn default_fetch_lobs(py: Python<'_>) -> PyResult<bool> {
+    PyModule::import(py, "oracledb")?
+        .getattr("defaults")?
+        .getattr("fetch_lobs")?
+        .extract()
+}
+
+fn materialize_typed_lob_text_bind(
+    connection: &mut RustConnection,
+    value: &mut BindValue,
+    ora_type_num: u8,
+    csfrm: u8,
+    call_timeout: Option<u32>,
+) -> Result<(), String> {
+    let BindValue::Text(text) = value else {
+        return Ok(());
+    };
+    let text = std::mem::take(text);
+    let mut locator = BlockingConnection::create_temp_lob(connection, ora_type_num, csfrm)
+        .map_err(|err| err.to_string())?
+        .locator;
+    if !text.is_empty() {
+        let bytes = protocol_encode_lob_text(&text, csfrm, Some(&locator));
+        locator = BlockingConnection::write_lob_with_timeout(
+            connection,
+            &locator,
+            1,
+            &bytes,
+            call_timeout,
+        )
+        .map_err(|err| err.to_string())?
+        .locator;
+    }
+    *value = BindValue::Lob {
+        ora_type_num,
+        csfrm,
+        locator,
+    };
+    Ok(())
+}
+
+fn materialize_typed_lob_raw_bind(
+    connection: &mut RustConnection,
+    value: &mut BindValue,
+    ora_type_num: u8,
+    csfrm: u8,
+    call_timeout: Option<u32>,
+) -> Result<(), String> {
+    let BindValue::Raw(bytes) = value else {
+        return Ok(());
+    };
+    let bytes = std::mem::take(bytes);
+    let mut locator = BlockingConnection::create_temp_lob(connection, ora_type_num, csfrm)
+        .map_err(|err| err.to_string())?
+        .locator;
+    if !bytes.is_empty() {
+        locator = BlockingConnection::write_lob_with_timeout(
+            connection,
+            &locator,
+            1,
+            &bytes,
+            call_timeout,
+        )
+        .map_err(|err| err.to_string())?
+        .locator;
+    }
+    *value = BindValue::Lob {
+        ora_type_num,
+        csfrm,
+        locator,
+    };
+    Ok(())
+}
+
+fn materialize_typed_lob_bind_values(
+    connection: &mut RustConnection,
+    values: &mut [BindValue],
+    hints: &[Option<(u8, u8)>],
+    call_timeout: Option<u32>,
+) -> Result<(), String> {
+    for (index, value) in values.iter_mut().enumerate() {
+        let Some((ora_type_num, csfrm)) = hints.get(index).copied().flatten() else {
+            continue;
+        };
+        materialize_typed_lob_text_bind(connection, value, ora_type_num, csfrm, call_timeout)?;
+        materialize_typed_lob_raw_bind(connection, value, ora_type_num, csfrm, call_timeout)?;
+    }
+    Ok(())
+}
+
+fn materialize_typed_lob_bind_rows(
+    connection: &mut RustConnection,
+    rows: &mut [Vec<BindValue>],
+    hints: &[Option<(u8, u8)>],
+    call_timeout: Option<u32>,
+) -> Result<(), String> {
+    for row in rows {
+        materialize_typed_lob_bind_values(connection, row, hints, call_timeout)?;
+    }
+    Ok(())
+}
+
 fn bind_template_from_input_size(value: &Bound<'_, PyAny>) -> PyResult<BindValue> {
     if let Ok(size) = value.extract::<u32>() {
         return Ok(BindValue::TypedNull {
@@ -2532,6 +2650,7 @@ struct ThinLob {
     size: u64,
     chunk_size: u32,
     context: Option<ThinLobContext>,
+    is_open: Arc<Mutex<bool>>,
 }
 
 fn lob_data_to_py(
@@ -2754,12 +2873,78 @@ impl ThinLob {
 
     fn free_lob(&self) {}
 
-    fn close(&self) {}
+    fn close(&self) -> PyResult<()> {
+        let mut is_open = self.is_open.lock().map_err(runtime_error)?;
+        if !*is_open {
+            return Err(runtime_error(
+                "server returned Oracle error: ORA-22289: LOB is not open",
+            ));
+        }
+        *is_open = false;
+        Ok(())
+    }
 
-    fn open(&self) {}
+    fn open(&self) -> PyResult<()> {
+        let mut is_open = self.is_open.lock().map_err(runtime_error)?;
+        if *is_open {
+            return Err(runtime_error(
+                "server returned Oracle error: ORA-22293: LOB already open",
+            ));
+        }
+        *is_open = true;
+        Ok(())
+    }
 
-    fn get_is_open(&self) -> bool {
-        false
+    fn get_is_open(&self) -> PyResult<bool> {
+        Ok(*self.is_open.lock().map_err(runtime_error)?)
+    }
+
+    fn trim(&mut self, new_size: u64) -> PyResult<()> {
+        if let Some(data) = self.data.as_ref() {
+            let mut data = data.lock().map_err(runtime_error)?;
+            if matches!(self.ora_type_num, ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_BFILE) {
+                data.truncate(usize::try_from(new_size).unwrap_or(usize::MAX));
+            } else {
+                let text = protocol_decode_lob_text(
+                    &data,
+                    self.csfrm,
+                    self.locator.lock().map_err(runtime_error)?.as_deref(),
+                )
+                .map_err(runtime_error)?;
+                let text = text
+                    .chars()
+                    .take(usize::try_from(new_size).unwrap_or(usize::MAX))
+                    .collect::<String>();
+                let locator = self.locator.lock().map_err(runtime_error)?.clone();
+                *data = protocol_encode_lob_text(&text, self.csfrm, locator.as_deref());
+            }
+            self.size = new_size;
+            return Ok(());
+        }
+        let Some(context) = self.context.as_ref() else {
+            self.size = new_size;
+            return Ok(());
+        };
+        let locator = self
+            .locator
+            .lock()
+            .map_err(runtime_error)?
+            .clone()
+            .unwrap_or_default();
+        let call_timeout = {
+            let value = context.state.lock().map_err(runtime_error)?.call_timeout;
+            (value > 0).then_some(value)
+        };
+        let mut guard = context.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        let result =
+            BlockingConnection::trim_lob_with_timeout(connection, &locator, new_size, call_timeout)
+                .map_err(runtime_error)?;
+        *self.locator.lock().map_err(runtime_error)? = Some(result.locator);
+        self.size = new_size;
+        Ok(())
     }
 }
 
@@ -2800,15 +2985,21 @@ impl AsyncThinLob {
         self.inner.dbtype(py)
     }
 
-    async fn close(&self) {}
+    async fn close(&self) -> PyResult<()> {
+        self.inner.close()
+    }
 
-    async fn open(&self) {}
+    async fn open(&self) -> PyResult<()> {
+        self.inner.open()
+    }
 
-    async fn get_is_open(&self) -> bool {
+    async fn get_is_open(&self) -> PyResult<bool> {
         self.inner.get_is_open()
     }
 
-    async fn trim(&self, _new_size: u64) {}
+    async fn trim(&mut self, new_size: u64) -> PyResult<()> {
+        self.inner.trim(new_size)
+    }
 
     fn free_lob(&self) {
         self.inner.free_lob()
@@ -3016,6 +3207,7 @@ impl ThinVar {
                     size: value.chars().count() as u64,
                     chunk_size: 0,
                     context: None,
+                    is_open: Arc::new(Mutex::new(false)),
                 },
             )?,
             (ThinVarReturnKind::Plain, Some(QueryValue::Text(value))) if self.bypass_decode => {
@@ -3078,7 +3270,7 @@ impl ThinVar {
                     DbObjectImpl::with_packed_data(object_type, packed_data.clone(), None),
                 )?
             }
-            _ => query_value_to_py(py, value, None, None)?,
+            _ => query_value_to_py(py, value, None, None, true)?,
         };
         if let Some(outconverter) = self.outconverter.as_ref() {
             if !value.bind(py).is_none() || self.convert_nulls {
@@ -4656,6 +4848,7 @@ impl ThinConnImpl {
                 state: Arc::clone(&self.state),
                 async_mode,
             }),
+            is_open: Arc::new(Mutex::new(false)),
         })
     }
 
@@ -5260,11 +5453,11 @@ fn dbobject_unpack_value(
                     return Ok(value.into_pyobject(py)?.unbind().into());
                 }
             }
-            query_value_to_py(py, &Some(value), None, None)
+            query_value_to_py(py, &Some(value), None, None, true)
         }
         "DB_TYPE_DATE" | "DB_TYPE_TIMESTAMP" | "DB_TYPE_TIMESTAMP_TZ" | "DB_TYPE_TIMESTAMP_LTZ" => {
             let value = decode_datetime_value(&bytes).map_err(runtime_error)?;
-            query_value_to_py(py, &Some(value), None, None)
+            query_value_to_py(py, &Some(value), None, None, true)
         }
         "DB_TYPE_BINARY_FLOAT" => Ok(f64::from(decode_dbobject_binary_float(&bytes)?)
             .into_pyobject(py)?
@@ -5295,6 +5488,7 @@ fn dbobject_unpack_value(
                     size: 0,
                     chunk_size: 0,
                     context: lob_context.cloned(),
+                    is_open: Arc::new(Mutex::new(false)),
                 },
             )
         }
@@ -5777,6 +5971,7 @@ struct ThinCursorImpl {
     prefetchrows: u32,
     scrollable: bool,
     fetch_lobs: bool,
+    fetch_lobs_overridden: bool,
     fetch_async_lobs: bool,
     fetch_decimals: bool,
     suspend_on_success: bool,
@@ -5831,6 +6026,7 @@ impl ThinCursorImpl {
             prefetchrows: 2,
             scrollable,
             fetch_lobs: true,
+            fetch_lobs_overridden: false,
             fetch_async_lobs: false,
             fetch_decimals: false,
             suspend_on_success: false,
@@ -6001,6 +6197,7 @@ impl ThinCursorImpl {
     #[setter]
     fn set_fetch_lobs(&mut self, value: bool) {
         self.fetch_lobs = value;
+        self.fetch_lobs_overridden = true;
     }
 
     #[getter]
@@ -6257,6 +6454,7 @@ impl ThinCursorImpl {
             .get(start..end)
             .ok_or_else(|| PyRuntimeError::new_err("executemany batch is out of range"))?
             .to_vec();
+        let typed_lob_hints = typed_lob_bind_hints(cursor.py(), &self.bind_vars);
         let call_timeout = {
             let value = self.state.lock().map_err(runtime_error)?.call_timeout;
             (value > 0).then_some(value)
@@ -6265,7 +6463,8 @@ impl ThinCursorImpl {
             let connection = Arc::clone(&self.connection);
             let state = Arc::clone(&self.state);
             let statement = statement.to_string();
-            let bind_rows = bind_rows.clone();
+            let mut bind_rows = bind_rows.clone();
+            let typed_lob_hints = typed_lob_hints.clone();
             let prefetchrows = self.prefetchrows;
             move || -> Result<QueryResult, String> {
                 let mut guard = connection.lock().map_err(|err| err.to_string())?;
@@ -6274,6 +6473,12 @@ impl ThinCursorImpl {
                     .ok_or_else(|| "connection is closed".to_string())?;
                 apply_pending_current_schema_from_state(&state, connection, call_timeout)
                     .map_err(|err| err.to_string())?;
+                materialize_typed_lob_bind_rows(
+                    connection,
+                    &mut bind_rows,
+                    &typed_lob_hints,
+                    call_timeout,
+                )?;
                 BlockingConnection::execute_query_with_bind_rows_and_timeout(
                     connection,
                     &statement,
@@ -6334,6 +6539,9 @@ impl ThinCursorImpl {
         if self.statement_changed {
             self.rowfactory = None;
         }
+        if !self.fetch_lobs_overridden {
+            self.fetch_lobs = default_fetch_lobs(cursor.py())?;
+        }
         let statement = self
             .statement
             .as_deref()
@@ -6342,11 +6550,13 @@ impl ThinCursorImpl {
             let value = self.state.lock().map_err(runtime_error)?.call_timeout;
             (value > 0).then_some(value)
         };
+        let typed_lob_hints = typed_lob_bind_hints(cursor.py(), &self.bind_vars);
         let result = match cursor.py().detach({
             let connection = Arc::clone(&self.connection);
             let state = Arc::clone(&self.state);
             let statement = statement.to_string();
-            let bind_values = self.bind_values.clone();
+            let mut bind_values = self.bind_values.clone();
+            let typed_lob_hints = typed_lob_hints.clone();
             let prefetchrows = self.prefetchrows;
             move || -> Result<QueryResult, String> {
                 let mut guard = connection.lock().map_err(|err| err.to_string())?;
@@ -6355,6 +6565,12 @@ impl ThinCursorImpl {
                     .ok_or_else(|| "connection is closed".to_string())?;
                 apply_pending_current_schema_from_state(&state, connection, call_timeout)
                     .map_err(|err| err.to_string())?;
+                materialize_typed_lob_bind_values(
+                    connection,
+                    &mut bind_values,
+                    &typed_lob_hints,
+                    call_timeout,
+                )?;
                 BlockingConnection::execute_query_with_binds_and_timeout(
                     connection,
                     &statement,
@@ -6488,7 +6704,13 @@ impl ThinCursorImpl {
                 if let Some(Some(var)) = self.fetch_vars.get(index) {
                     return var.borrow(py).output_value_to_py(py, value);
                 }
-                query_value_to_py(py, value, Some(_cursor), Some(&lob_context))
+                query_value_to_py(
+                    py,
+                    value,
+                    Some(_cursor),
+                    Some(&lob_context),
+                    self.fetch_lobs,
+                )
             })
             .collect::<PyResult<Vec<_>>>()?;
         let tuple = PyTuple::new(py, values)?;
@@ -6652,11 +6874,46 @@ fn connection_object_type_impl(
         .ok_or_else(|| PyRuntimeError::new_err("gettype() did not return a DbObjectType"))
 }
 
+fn direct_lob_value_to_py(
+    py: Python<'_>,
+    ora_type_num: u8,
+    csfrm: u8,
+    locator: &[u8],
+    context: &ThinLobContext,
+) -> PyResult<Py<PyAny>> {
+    let call_timeout = {
+        let value = context.state.lock().map_err(runtime_error)?.call_timeout;
+        (value > 0).then_some(value)
+    };
+    let mut guard = context.connection.lock().map_err(runtime_error)?;
+    let connection = guard
+        .as_mut()
+        .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+    let result = BlockingConnection::read_lob_with_timeout(
+        connection,
+        locator,
+        1,
+        u64::from(u32::MAX),
+        call_timeout,
+    )
+    .map_err(runtime_error)?;
+    lob_data_to_py(
+        py,
+        ora_type_num,
+        csfrm,
+        Some(&result.locator),
+        result.data.as_deref().unwrap_or_default(),
+        1,
+        None,
+    )
+}
+
 fn query_value_to_py(
     py: Python<'_>,
     value: &Option<QueryValue>,
     owner_cursor: Option<&Bound<'_, PyAny>>,
     lob_context: Option<&ThinLobContext>,
+    fetch_lobs: bool,
 ) -> PyResult<Py<PyAny>> {
     match value {
         None => Ok(py.None()),
@@ -6692,7 +6949,7 @@ fn query_value_to_py(
         Some(QueryValue::Array(values)) => {
             let values = values
                 .iter()
-                .map(|value| query_value_to_py(py, value, owner_cursor, lob_context))
+                .map(|value| query_value_to_py(py, value, owner_cursor, lob_context, fetch_lobs))
                 .collect::<PyResult<Vec<_>>>()?;
             Ok(PyList::new(py, values)?.unbind().into())
         }
@@ -6719,6 +6976,9 @@ fn query_value_to_py(
                 Some(context) => context.clone(),
                 None => thin_lob_context_from_cursor(owner_cursor)?,
             };
+            if !fetch_lobs {
+                return direct_lob_value_to_py(py, *ora_type_num, *csfrm, locator, &context);
+            }
             py_lob_from_impl(
                 py,
                 ThinLob {
@@ -6729,6 +6989,7 @@ fn query_value_to_py(
                     size: *size,
                     chunk_size: *chunk_size,
                     context: Some(context),
+                    is_open: Arc::new(Mutex::new(false)),
                 },
             )
         }
@@ -6834,6 +7095,7 @@ impl AsyncThinCursorImpl {
     #[setter]
     fn set_fetch_lobs(&mut self, value: bool) {
         self.inner.fetch_lobs = value;
+        self.inner.fetch_lobs_overridden = true;
     }
 
     #[getter]

@@ -120,6 +120,7 @@ const TNS_EXEC_OPTION_PLSQL_BIND: u32 = 0x400;
 const TNS_EXEC_OPTION_NOT_PLSQL: u32 = 0x8000;
 const TNS_DURATION_SESSION: u32 = 10;
 const TNS_LOB_OP_READ: u32 = 0x0002;
+const TNS_LOB_OP_TRIM: u32 = 0x0020;
 const TNS_LOB_OP_WRITE: u32 = 0x0040;
 const TNS_LOB_OP_CREATE_TEMP: u32 = 0x0110;
 const TNS_LOB_PREFETCH_FLAG: u64 = 0x0200_0000;
@@ -1006,19 +1007,25 @@ pub fn bind_value_type_info(value: &BindValue) -> Option<BindTypeInfo> {
         BindValue::ObjectOutput { buffer_size, .. } => {
             (ORA_TYPE_NUM_OBJECT, 0, (*buffer_size).max(1))
         }
-        BindValue::Text(value) => (
-            ORA_TYPE_NUM_VARCHAR,
-            CS_FORM_IMPLICIT,
-            u32::try_from(value.chars().count())
+        BindValue::Text(value) => {
+            let buffer_size = u32::try_from(value.chars().count())
                 .unwrap_or(u32::MAX)
                 .saturating_mul(4)
-                .max(1),
-        ),
-        BindValue::Raw(value) => (
-            ORA_TYPE_NUM_RAW,
-            0,
-            u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
-        ),
+                .max(1);
+            if buffer_size > 32_767 {
+                (ORA_TYPE_NUM_LONG, CS_FORM_IMPLICIT, TNS_MAX_LONG_LENGTH)
+            } else {
+                (ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, buffer_size)
+            }
+        }
+        BindValue::Raw(value) => {
+            let buffer_size = u32::try_from(value.len()).unwrap_or(u32::MAX).max(1);
+            if buffer_size > 32_767 {
+                (ORA_TYPE_NUM_LONG_RAW, 0, TNS_MAX_LONG_LENGTH)
+            } else {
+                (ORA_TYPE_NUM_RAW, 0, buffer_size)
+            }
+        }
         BindValue::Lob {
             ora_type_num,
             csfrm,
@@ -1173,6 +1180,7 @@ pub fn public_dbtype_name_from_type_name(type_name: &str) -> &'static str {
         "DB_TYPE_NVARCHAR" => "DB_TYPE_NVARCHAR",
         "DB_TYPE_CLOB" | "CLOB" => "DB_TYPE_CLOB",
         "DB_TYPE_NCLOB" | "NCLOB" => "DB_TYPE_NCLOB",
+        "DB_TYPE_BLOB" | "BLOB" => "DB_TYPE_BLOB",
         "DB_TYPE_LONG" | "LONG" | "LONG_STRING" => "DB_TYPE_LONG",
         "DB_TYPE_LONG_NVARCHAR" | "LONG NVARCHAR" => "DB_TYPE_LONG_NVARCHAR",
         "DB_TYPE_LONG_RAW" | "LONG RAW" | "LONG_BINARY" => "DB_TYPE_LONG_RAW",
@@ -1391,6 +1399,11 @@ pub fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
         "DB_TYPE_NCLOB" | "NCLOB" => BindValue::TypedNull {
             ora_type_num: ORA_TYPE_NUM_LONG,
             csfrm: CS_FORM_NCHAR,
+            buffer_size: TNS_MAX_LONG_LENGTH,
+        },
+        "DB_TYPE_BLOB" | "BLOB" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_LONG_RAW,
+            csfrm: 0,
             buffer_size: TNS_MAX_LONG_LENGTH,
         },
         "DB_TYPE_LONG" | "LONG" | "LONG_STRING" => BindValue::TypedNull {
@@ -1859,6 +1872,30 @@ pub fn build_lob_write_payload_with_seq(
     )?;
     writer.write_u8(TNS_MSG_TYPE_LOB_DATA);
     writer.write_bytes_with_length(data)?;
+    Ok(writer.into_bytes())
+}
+
+pub fn build_lob_trim_payload_with_seq(
+    locator: &[u8],
+    new_size: u64,
+    seq_num: u8,
+    ttc_field_version: u8,
+) -> Result<Vec<u8>> {
+    let mut writer = TtcWriter::new();
+    write_lob_op_header(
+        &mut writer,
+        locator,
+        seq_num,
+        ttc_field_version,
+        TNS_LOB_OP_TRIM,
+        0,
+        0,
+        0,
+        false,
+        false,
+        true,
+    )?;
+    writer.write_ub8(new_size);
     Ok(writer.into_bytes())
 }
 
@@ -2836,6 +2873,14 @@ pub fn parse_lob_write_response(
     locator: &[u8],
 ) -> Result<LobReadResult> {
     parse_lob_op_response(payload, capabilities, locator, false, false)
+}
+
+pub fn parse_lob_trim_response(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    locator: &[u8],
+) -> Result<LobReadResult> {
+    parse_lob_op_response(payload, capabilities, locator, false, true)
 }
 
 fn parse_lob_op_response(
@@ -4017,6 +4062,14 @@ mod tests {
             BindValue::TypedNull {
                 ora_type_num: ORA_TYPE_NUM_LONG,
                 csfrm: CS_FORM_NCHAR,
+                buffer_size: TNS_MAX_LONG_LENGTH,
+            }
+        );
+        assert_eq!(
+            bind_template_from_type_name("DB_TYPE_BLOB", 0),
+            BindValue::TypedNull {
+                ora_type_num: ORA_TYPE_NUM_LONG_RAW,
+                csfrm: 0,
                 buffer_size: TNS_MAX_LONG_LENGTH,
             }
         );
