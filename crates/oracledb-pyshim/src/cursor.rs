@@ -39,6 +39,7 @@ use pyo3::types::{PyBytes, PyBytesMethods, PyDict, PyList, PyString, PyTuple};
 use crate::*;
 
 #[pyclass(module = "oracledb.thin_impl", name = "ExecutemanyManager")]
+// d49: migrate to oracledb (executemany manager belongs on driver)
 pub(crate) struct ExecutemanyManager {
     total_rows: u32,
     batch_size: u32,

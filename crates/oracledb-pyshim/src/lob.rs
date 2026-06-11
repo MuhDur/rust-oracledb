@@ -390,6 +390,7 @@ impl ThinLob {
     }
 }
 
+// d49: migrate to oracledb (LOB op orchestration belongs on driver Lob)
 impl ThinLob {
     async fn read_async(&self, offset: u64, amount: Option<u64>) -> PyResult<Py<PyAny>> {
         if self.ora_type_num == ORA_TYPE_NUM_BFILE || self.data.is_some() || self.context.is_none()

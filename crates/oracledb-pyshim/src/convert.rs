@@ -677,6 +677,7 @@ pub(crate) fn bind_optional_text(value: Option<&str>) -> BindValue {
         .unwrap_or(BindValue::Null)
 }
 
+// d49: migrate to oracledb-protocol (fetch metadata supplement)
 pub(crate) fn supplement_json_lob_column_metadata(
     connection: &Arc<Mutex<Option<RustConnection>>>,
     columns: &mut [ColumnMetadata],

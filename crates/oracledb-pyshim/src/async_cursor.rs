@@ -43,6 +43,7 @@ pub(crate) struct AsyncExecuteOutcome {
     should_commit: bool,
 }
 
+// d49: migrate to oracledb (driver async futures)
 pub(crate) fn spawn_async_executemany_task(
     connection: Arc<Mutex<Option<RustConnection>>>,
     state: Arc<Mutex<ThinConnState>>,
@@ -152,6 +153,7 @@ pub(crate) fn spawn_async_executemany_task(
     )
 }
 
+// d49: migrate to oracledb (driver async futures)
 pub(crate) fn spawn_async_execute_task(
     connection: Arc<Mutex<Option<RustConnection>>>,
     state: Arc<Mutex<ThinConnState>>,
@@ -210,6 +212,7 @@ pub(crate) fn spawn_async_execute_task(
     })
 }
 
+// d49: migrate to oracledb (driver async futures)
 pub(crate) fn spawn_async_fetch_task(
     connection: Arc<Mutex<Option<RustConnection>>>,
     cursor_id: u32,

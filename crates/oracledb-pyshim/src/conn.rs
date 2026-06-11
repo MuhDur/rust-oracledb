@@ -39,6 +39,7 @@ use pyo3::types::{PyBytes, PyBytesMethods, PyDict, PyList, PyString, PyTuple};
 use crate::*;
 
 #[derive(Debug)]
+// d49: migrate to oracledb (session state belongs on driver Connection)
 pub(crate) struct ThinConnState {
     current_schema: Option<String>,
     current_schema_modified: bool,
@@ -98,6 +99,7 @@ impl ThinConnState {
     }
 }
 
+// d49: migrate to oracledb (session state belongs on driver Connection)
 pub(crate) fn apply_pending_current_schema_from_state(
     state: &Arc<Mutex<ThinConnState>>,
     connection: &mut RustConnection,

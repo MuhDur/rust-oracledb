@@ -848,6 +848,7 @@ pub(crate) fn bind_value_is_output(value: &BindValue) -> bool {
     )
 }
 
+// d49: migrate to oracledb (iterative PL/SQL executemany policy belongs on driver)
 pub(crate) fn bind_rows_need_iterative_plsql(statement: &str, bind_rows: &[Vec<BindValue>]) -> bool {
     statement_is_plsql(statement)
         && bind_rows
@@ -1217,6 +1218,7 @@ pub(crate) fn get_named_bind_value<'py>(
     Ok(None)
 }
 
+// d49: migrate to oracledb-protocol (sql.rs statement analytics)
 pub(crate) fn unique_sql_bind_names(statement: &str) -> PyResult<Vec<String>> {
     sql::unique_bind_names(statement).map_err(sql_parse_error)
 }
@@ -1229,6 +1231,7 @@ pub(crate) fn statement_return_bind_names(statement: &str) -> PyResult<Vec<Strin
     sql::returning_bind_names(statement).map_err(sql_parse_error)
 }
 
+// d49: migrate to oracledb-protocol (sql.rs statement analytics)
 pub(crate) fn statement_plsql_assignment_bind_names(statement: &str) -> PyResult<Vec<String>> {
     sql::plsql_assignment_bind_names(statement).map_err(sql_parse_error)
 }
@@ -1302,6 +1305,7 @@ pub(crate) fn is_quoted_bind_name(name: &str) -> bool {
     sql::is_quoted_bind_name(name)
 }
 
+// d49: migrate to oracledb-protocol (sql.rs statement analytics)
 pub(crate) fn validate_parse_bind_names(statement: &str) -> PyResult<()> {
     for name in unique_sql_bind_names(statement)? {
         if !is_quoted_bind_name(&name) && name.eq_ignore_ascii_case("ROWID") {

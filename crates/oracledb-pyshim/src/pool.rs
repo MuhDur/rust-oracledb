@@ -39,6 +39,7 @@ use pyo3::types::{PyBytes, PyBytesMethods, PyDict, PyList, PyString, PyTuple};
 use crate::*;
 
 #[pyclass(module = "oracledb.thin_impl", name = "ThinPoolImpl")]
+// d49: migrate to oracledb (driver pool module); shim keeps marshalling only
 pub(crate) struct ThinPoolImpl {
     #[pyo3(get)]
     dsn: String,
