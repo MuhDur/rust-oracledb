@@ -648,19 +648,24 @@ fn write_bind_params(
     let Some(first_row) = bind_rows.first() else {
         return Ok(());
     };
+    let mut bind_metadata = Vec::with_capacity(first_row.len());
     for index in 0..first_row.len() {
-        write_bind_metadata_for_rows(writer, bind_rows, index)?;
+        bind_metadata.push(write_bind_metadata_for_rows(writer, bind_rows, index)?);
     }
     for row in bind_rows {
         if !is_plsql && row.iter().all(BindValue::is_output_only) {
             continue;
         }
         writer.write_u8(TNS_MSG_TYPE_ROW_DATA);
-        for value in row {
+        for (index, value) in row.iter().enumerate() {
             if !is_plsql && value.is_output_only() {
                 continue;
             }
-            write_bind_value(writer, value)?;
+            let (_ora_type_num, csfrm) = bind_metadata
+                .get(index)
+                .copied()
+                .unwrap_or((ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT));
+            write_bind_value(writer, value, csfrm)?;
         }
     }
     Ok(())
@@ -670,12 +675,12 @@ fn write_bind_metadata_for_rows(
     writer: &mut TtcWriter,
     bind_rows: &[Vec<BindValue>],
     index: usize,
-) -> Result<()> {
+) -> Result<(u8, u8)> {
     let Some(first_row) = bind_rows.first() else {
-        return Ok(());
+        return Ok((ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT));
     };
     let Some(first_value) = first_row.get(index) else {
-        return Ok(());
+        return Ok((ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT));
     };
     let (ora_type_num, csfrm, mut buffer_size) = bind_metadata(first_value);
     for row in bind_rows.iter().skip(1) {
@@ -687,7 +692,8 @@ fn write_bind_metadata_for_rows(
             buffer_size = buffer_size.max(row_buffer_size);
         }
     }
-    write_bind_metadata_with_type(writer, first_value, ora_type_num, csfrm, buffer_size)
+    write_bind_metadata_with_type(writer, first_value, ora_type_num, csfrm, buffer_size)?;
+    Ok((ora_type_num, csfrm))
 }
 
 impl BindValue {
@@ -810,7 +816,7 @@ fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
     }
 }
 
-fn write_bind_value(writer: &mut TtcWriter, value: &BindValue) -> Result<()> {
+fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm: u8) -> Result<()> {
     match value {
         BindValue::TypedNull {
             ora_type_num: ORA_TYPE_NUM_CURSOR,
@@ -837,7 +843,10 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue) -> Result<()> {
             writer.write_ub4(TNS_OBJ_TOP_LEVEL);
             Ok(())
         }
-        BindValue::Text(value) => writer.write_bytes_with_length(value.as_bytes()),
+        BindValue::Text(value) => {
+            let bytes = encode_text_value(value, csfrm);
+            writer.write_bytes_with_length(&bytes)
+        }
         BindValue::Raw(value) => writer.write_bytes_with_length(value),
         BindValue::Lob { locator, .. } => writer.write_bytes_with_two_lengths(Some(locator)),
         BindValue::Number(value) | BindValue::BinaryInteger(value) => {
@@ -884,7 +893,11 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue) -> Result<()> {
             };
             writer.write_bytes_with_length(&bytes)
         }
-        BindValue::Array { values, .. } => {
+        BindValue::Array {
+            values,
+            csfrm: array_csfrm,
+            ..
+        } => {
             writer.write_ub4(u32::try_from(values.len()).map_err(|_| {
                 ProtocolError::InvalidPacketLength {
                     length: values.len(),
@@ -893,7 +906,7 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue) -> Result<()> {
             })?);
             for value in values {
                 match value {
-                    Some(value) => write_bind_value(writer, value)?,
+                    Some(value) => write_bind_value(writer, value, *array_csfrm)?,
                     None => writer.write_u8(0),
                 }
             }
@@ -909,6 +922,18 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+fn encode_text_value(value: &str, csfrm: u8) -> Vec<u8> {
+    if csfrm == CS_FORM_NCHAR {
+        let mut bytes = Vec::with_capacity(value.len().saturating_mul(2));
+        for unit in value.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_be_bytes());
+        }
+        bytes
+    } else {
+        value.as_bytes().to_vec()
     }
 }
 
@@ -2886,6 +2911,15 @@ mod tests {
         assert!(text.contains("AUTH_PROGRAM_NM"));
         assert!(text.contains("AUTH_MACHINE"));
         assert!(text.contains("AUTH_SID"));
+    }
+
+    #[test]
+    fn nchar_bind_text_uses_utf16be() {
+        assert_eq!(encode_text_value("Aあ", CS_FORM_IMPLICIT), b"A\xE3\x81\x82");
+        assert_eq!(
+            encode_text_value("Aあ", CS_FORM_NCHAR),
+            vec![0x00, 0x41, 0x30, 0x42]
+        );
     }
 
     #[test]

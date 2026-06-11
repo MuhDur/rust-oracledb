@@ -2619,6 +2619,7 @@ fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
 
 fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
     let text_buffer_size = if size == 0 { 4000 } else { size.max(1) };
+    let nchar_buffer_size = text_buffer_size.saturating_mul(4);
     match type_name {
         "NUMBER" | "DB_TYPE_NUMBER" | "int" | "float" => BindValue::TypedNull {
             ora_type_num: ORA_TYPE_NUM_NUMBER,
@@ -2643,7 +2644,7 @@ fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
         "DB_TYPE_NCHAR" | "DB_TYPE_NVARCHAR" => BindValue::TypedNull {
             ora_type_num: ORA_TYPE_NUM_VARCHAR,
             csfrm: CS_FORM_NCHAR,
-            buffer_size: text_buffer_size,
+            buffer_size: nchar_buffer_size,
         },
         "DB_TYPE_CLOB" | "CLOB" => BindValue::TypedNull {
             ora_type_num: ORA_TYPE_NUM_LONG,
