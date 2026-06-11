@@ -12,7 +12,8 @@ use oracledb::protocol::thin::{
     decode_dbobject_binary_double as protocol_decode_dbobject_binary_double,
     decode_dbobject_binary_float as protocol_decode_dbobject_binary_float,
     decode_dbobject_text as protocol_decode_dbobject_text, decode_dbobject_xmltype_text,
-    decode_number_value, define_metadata_from_bind, is_cursor_bind_template,
+    decode_lob_text as protocol_decode_lob_text, decode_number_value, define_metadata_from_bind,
+    encode_lob_text as protocol_encode_lob_text, is_cursor_bind_template,
     output_bind as output_only_bind, public_dbtype_name_from_bind,
     public_dbtype_name_from_column_metadata, public_dbtype_name_from_oracle_type_name,
     public_dbtype_name_from_type_name, returning_output_bind, BindValue, ColumnMetadata,
@@ -2425,62 +2426,6 @@ struct ThinLob {
     context: Option<ThinLobContext>,
 }
 
-const TNS_LOB_LOC_OFFSET_FLAG_3: usize = 6;
-const TNS_LOB_LOC_OFFSET_FLAG_4: usize = 7;
-const TNS_LOB_LOC_FLAGS_VAR_LENGTH_CHARSET: u8 = 0x80;
-const TNS_LOB_LOC_FLAGS_LITTLE_ENDIAN: u8 = 0x40;
-
-fn decode_lob_text(bytes: &[u8], csfrm: u8, locator: Option<&[u8]>) -> PyResult<String> {
-    let (use_utf16, little_endian) = lob_text_uses_utf16(csfrm, locator);
-    if !use_utf16 {
-        return String::from_utf8(bytes.to_vec())
-            .map_err(|_| PyRuntimeError::new_err("invalid LOB UTF-8 text"));
-    }
-    let mut chunks = bytes.chunks_exact(2);
-    let units = chunks
-        .by_ref()
-        .map(|chunk| {
-            if little_endian {
-                u16::from_le_bytes([chunk[0], chunk[1]])
-            } else {
-                u16::from_be_bytes([chunk[0], chunk[1]])
-            }
-        })
-        .collect::<Vec<_>>();
-    if !chunks.remainder().is_empty() {
-        return Err(PyRuntimeError::new_err("invalid LOB UTF-16 text"));
-    }
-    String::from_utf16(&units).map_err(|_| PyRuntimeError::new_err("invalid LOB UTF-16 text"))
-}
-
-fn lob_text_uses_utf16(csfrm: u8, locator: Option<&[u8]>) -> (bool, bool) {
-    let use_utf16 = csfrm == CS_FORM_NCHAR
-        || locator
-            .and_then(|locator| locator.get(TNS_LOB_LOC_OFFSET_FLAG_3))
-            .is_some_and(|flags| flags & TNS_LOB_LOC_FLAGS_VAR_LENGTH_CHARSET != 0);
-    let little_endian = locator
-        .and_then(|locator| locator.get(TNS_LOB_LOC_OFFSET_FLAG_4))
-        .is_some_and(|flags| flags & TNS_LOB_LOC_FLAGS_LITTLE_ENDIAN != 0);
-    (use_utf16, little_endian)
-}
-
-fn encode_lob_text(value: &str, csfrm: u8, locator: Option<&[u8]>) -> Vec<u8> {
-    let (use_utf16, little_endian) = lob_text_uses_utf16(csfrm, locator);
-    if !use_utf16 {
-        return value.as_bytes().to_vec();
-    }
-    let mut bytes = Vec::with_capacity(value.len() * 2);
-    for unit in value.encode_utf16() {
-        let encoded = if little_endian {
-            unit.to_le_bytes()
-        } else {
-            unit.to_be_bytes()
-        };
-        bytes.extend_from_slice(&encoded);
-    }
-    bytes
-}
-
 fn lob_data_to_py(
     py: Python<'_>,
     ora_type_num: u8,
@@ -2499,7 +2444,7 @@ fn lob_data_to_py(
             .unwrap_or(bytes);
         return Ok(PyBytes::new(py, bytes).unbind().into());
     }
-    let text = decode_lob_text(data, csfrm, locator)?;
+    let text = protocol_decode_lob_text(data, csfrm, locator).map_err(runtime_error)?;
     let start = offset.saturating_sub(1) as usize;
     let chars = text.chars().skip(start);
     let value = match amount.and_then(|amount| usize::try_from(amount).ok()) {
@@ -2589,7 +2534,7 @@ impl ThinLob {
                 .clone()
                 .unwrap_or_default();
             let bytes = raw_bytes.as_ref().cloned().unwrap_or_else(|| {
-                encode_lob_text(
+                protocol_encode_lob_text(
                     text.as_deref().unwrap_or_default(),
                     self.csfrm,
                     Some(&locator),
@@ -2627,7 +2572,7 @@ impl ThinLob {
         };
         let locator = self.locator.lock().map_err(runtime_error)?.clone();
         let bytes = raw_bytes.as_ref().cloned().unwrap_or_else(|| {
-            encode_lob_text(
+            protocol_encode_lob_text(
                 text.as_deref().unwrap_or_default(),
                 self.csfrm,
                 locator.as_deref(),
@@ -2646,7 +2591,10 @@ impl ThinLob {
         self.size = if matches!(self.ora_type_num, ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_BFILE) {
             data.len() as u64
         } else {
-            decode_lob_text(&data, self.csfrm, None)?.chars().count() as u64
+            protocol_decode_lob_text(&data, self.csfrm, None)
+                .map_err(runtime_error)?
+                .chars()
+                .count() as u64
         };
         Ok(())
     }

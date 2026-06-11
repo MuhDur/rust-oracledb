@@ -77,6 +77,10 @@ const TNS_OBJ_NO_PREFIX_SEG: u8 = 0x04;
 const TNS_XML_TYPE_LOB: u32 = 0x0001;
 const TNS_XML_TYPE_STRING: u32 = 0x0004;
 const TNS_XML_TYPE_FLAG_SKIP_NEXT_4: u32 = 0x100000;
+const TNS_LOB_LOC_OFFSET_FLAG_3: usize = 6;
+const TNS_LOB_LOC_OFFSET_FLAG_4: usize = 7;
+const TNS_LOB_LOC_FLAGS_VAR_LENGTH_CHARSET: u8 = 0x80;
+const TNS_LOB_LOC_FLAGS_LITTLE_ENDIAN: u8 = 0x40;
 
 pub const CS_FORM_IMPLICIT: u8 = 1;
 pub const CS_FORM_NCHAR: u8 = 2;
@@ -447,6 +451,57 @@ pub fn decode_dbobject_xmltype_text(bytes: &[u8]) -> Result<Option<String>> {
         return Ok(None);
     }
     Err(ProtocolError::TtcDecode("unexpected XMLTYPE flag"))
+}
+
+pub fn decode_lob_text(bytes: &[u8], csfrm: u8, locator: Option<&[u8]>) -> Result<String> {
+    let (use_utf16, little_endian) = lob_text_uses_utf16(csfrm, locator);
+    if !use_utf16 {
+        return String::from_utf8(bytes.to_vec())
+            .map_err(|_| ProtocolError::TtcDecode("invalid LOB UTF-8 text"));
+    }
+    let mut chunks = bytes.chunks_exact(2);
+    let units = chunks
+        .by_ref()
+        .map(|chunk| {
+            if little_endian {
+                u16::from_le_bytes([chunk[0], chunk[1]])
+            } else {
+                u16::from_be_bytes([chunk[0], chunk[1]])
+            }
+        })
+        .collect::<Vec<_>>();
+    if !chunks.remainder().is_empty() {
+        return Err(ProtocolError::TtcDecode("invalid LOB UTF-16 text"));
+    }
+    String::from_utf16(&units).map_err(|_| ProtocolError::TtcDecode("invalid LOB UTF-16 text"))
+}
+
+pub fn encode_lob_text(value: &str, csfrm: u8, locator: Option<&[u8]>) -> Vec<u8> {
+    let (use_utf16, little_endian) = lob_text_uses_utf16(csfrm, locator);
+    if !use_utf16 {
+        return value.as_bytes().to_vec();
+    }
+    let mut bytes = Vec::with_capacity(value.len() * 2);
+    for unit in value.encode_utf16() {
+        let encoded = if little_endian {
+            unit.to_le_bytes()
+        } else {
+            unit.to_be_bytes()
+        };
+        bytes.extend_from_slice(&encoded);
+    }
+    bytes
+}
+
+fn lob_text_uses_utf16(csfrm: u8, locator: Option<&[u8]>) -> (bool, bool) {
+    let use_utf16 = csfrm == CS_FORM_NCHAR
+        || locator
+            .and_then(|locator| locator.get(TNS_LOB_LOC_OFFSET_FLAG_3))
+            .is_some_and(|flags| flags & TNS_LOB_LOC_FLAGS_VAR_LENGTH_CHARSET != 0);
+    let little_endian = locator
+        .and_then(|locator| locator.get(TNS_LOB_LOC_OFFSET_FLAG_4))
+        .is_some_and(|flags| flags & TNS_LOB_LOC_FLAGS_LITTLE_ENDIAN != 0);
+    (use_utf16, little_endian)
 }
 
 pub fn decode_dbobject_binary_float(bytes: &[u8]) -> Result<f32> {
@@ -4032,6 +4087,39 @@ mod tests {
         assert_eq!(
             decode_dbobject_binary_double(&[0xbf, 0xf0, 0, 0, 0, 0, 0, 0]).expect("binary double"),
             1.0
+        );
+    }
+
+    #[test]
+    fn lob_text_encoding_uses_csfrm_and_locator_flags() {
+        assert_eq!(
+            decode_lob_text(b"Plain", CS_FORM_IMPLICIT, None).expect("utf8 lob"),
+            "Plain"
+        );
+        assert_eq!(
+            encode_lob_text("Text", CS_FORM_IMPLICIT, None),
+            b"Text".to_vec()
+        );
+        assert_eq!(
+            encode_lob_text("AB", CS_FORM_NCHAR, None),
+            vec![0, b'A', 0, b'B']
+        );
+        assert_eq!(
+            decode_lob_text(&[0, b'A', 0, b'B'], CS_FORM_NCHAR, None).expect("nchar lob"),
+            "AB"
+        );
+
+        let mut locator = vec![0; 8];
+        locator[TNS_LOB_LOC_OFFSET_FLAG_3] = TNS_LOB_LOC_FLAGS_VAR_LENGTH_CHARSET;
+        locator[TNS_LOB_LOC_OFFSET_FLAG_4] = TNS_LOB_LOC_FLAGS_LITTLE_ENDIAN;
+        assert_eq!(
+            encode_lob_text("AB", CS_FORM_IMPLICIT, Some(&locator)),
+            vec![b'A', 0, b'B', 0]
+        );
+        assert_eq!(
+            decode_lob_text(&[b'A', 0, b'B', 0], CS_FORM_IMPLICIT, Some(&locator))
+                .expect("locator utf16 lob"),
+            "AB"
         );
     }
 
