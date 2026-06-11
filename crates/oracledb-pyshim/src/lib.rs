@@ -29,9 +29,12 @@ use oracledb::protocol::thin::{
     ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
     ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR,
 };
-use oracledb::protocol::ClientIdentity;
-use oracledb::{BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection};
-use pyo3::exceptions::{PyIndexError, PyNotImplementedError, PyRuntimeError};
+use oracledb::protocol::{ClientIdentity, ProtocolError};
+use oracledb::{
+    BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection,
+    Error as DriverError,
+};
+use pyo3::exceptions::{PyIndexError, PyNotImplementedError, PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyBytesMethods, PyDict, PyList, PyString, PyTuple};
 
@@ -88,8 +91,60 @@ fn connection_closed_error() -> PyErr {
     raise_oracledb_driver_error("ERR_NOT_CONNECTED")
 }
 
+#[derive(Debug)]
+struct TaskError {
+    message: String,
+    server_row_count: Option<u64>,
+}
+
+impl TaskError {
+    fn from_driver_error(err: DriverError) -> Self {
+        let server_row_count = match &err {
+            DriverError::Protocol(ProtocolError::ServerErrorWithRowCount { row_count, .. }) => {
+                Some(*row_count)
+            }
+            _ => None,
+        };
+        Self {
+            message: err.to_string(),
+            server_row_count,
+        }
+    }
+
+    fn server_row_count(&self) -> Option<u64> {
+        self.server_row_count
+    }
+}
+
+impl std::fmt::Display for TaskError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(f)
+    }
+}
+
+impl From<String> for TaskError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            server_row_count: None,
+        }
+    }
+}
+
+impl From<&str> for TaskError {
+    fn from(message: &str) -> Self {
+        message.to_string().into()
+    }
+}
+
+impl From<DriverError> for TaskError {
+    fn from(err: DriverError) -> Self {
+        Self::from_driver_error(err)
+    }
+}
+
 struct BlockingTaskState<T> {
-    result: Option<Result<T, String>>,
+    result: Option<Result<T, TaskError>>,
     waker: Option<Waker>,
 }
 
@@ -98,7 +153,7 @@ struct BlockingTask<T> {
 }
 
 impl<T> BlockingTask<T> {
-    fn ready(result: Result<T, String>) -> Self {
+    fn ready(result: Result<T, TaskError>) -> Self {
         Self {
             shared: Arc::new(Mutex::new(BlockingTaskState {
                 result: Some(result),
@@ -109,12 +164,12 @@ impl<T> BlockingTask<T> {
 }
 
 impl<T> Future for BlockingTask<T> {
-    type Output = Result<T, String>;
+    type Output = Result<T, TaskError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut shared = match self.shared.lock() {
             Ok(shared) => shared,
-            Err(err) => return Poll::Ready(Err(err.to_string())),
+            Err(err) => return Poll::Ready(Err(err.to_string().into())),
         };
         if let Some(result) = shared.result.take() {
             Poll::Ready(result)
@@ -128,7 +183,7 @@ impl<T> Future for BlockingTask<T> {
 fn spawn_blocking_task<T, F>(name: &'static str, task: F) -> BlockingTask<T>
 where
     T: Send + 'static,
-    F: FnOnce() -> Result<T, String> + Send + 'static,
+    F: FnOnce() -> Result<T, TaskError> + Send + 'static,
 {
     let shared = Arc::new(Mutex::new(BlockingTaskState {
         result: None,
@@ -152,7 +207,9 @@ where
         });
     match spawn_result {
         Ok(_) => BlockingTask { shared },
-        Err(err) => BlockingTask::ready(Err(format!("failed to spawn blocking task: {err}"))),
+        Err(err) => {
+            BlockingTask::ready(Err(format!("failed to spawn blocking task: {err}").into()))
+        }
     }
 }
 
@@ -174,7 +231,7 @@ where
     F: for<'a> FnOnce(
             &'a Cx,
             &'a mut RustConnection,
-        ) -> Pin<Box<dyn Future<Output = Result<T, String>> + 'a>>
+        ) -> Pin<Box<dyn Future<Output = Result<T, TaskError>> + 'a>>
         + Send
         + 'static,
 {
@@ -200,7 +257,7 @@ fn spawn_async_connect_task(options: ConnectOptions) -> BlockingTask<RustConnect
                 .ok_or_else(|| "asupersync did not install an ambient Cx".to_string())?;
             RustConnection::connect(&cx, options)
                 .await
-                .map_err(|err| err.to_string())
+                .map_err(TaskError::from)
         })
     })
 }
@@ -211,7 +268,7 @@ fn spawn_async_close_task(connection: RustConnection) -> BlockingTask<()> {
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| "asupersync did not install an ambient Cx".to_string())?;
-            connection.close(&cx).await.map_err(|err| err.to_string())
+            connection.close(&cx).await.map_err(TaskError::from)
         })
     })
 }
@@ -220,16 +277,19 @@ fn close_connection_result(connection: RustConnection) -> Result<(), String> {
     BlockingConnection::close(connection).map_err(|err| err.to_string())
 }
 
-fn close_result_to_py(result: Result<(), String>) -> PyResult<()> {
+fn close_result_to_py<E: std::fmt::Display>(result: Result<(), E>) -> PyResult<()> {
     match result {
         Ok(()) => Ok(()),
-        Err(err)
-            if err.contains("Broken pipe")
-                || err.contains("Transport endpoint is not connected") =>
-        {
-            Ok(())
+        Err(err) => {
+            let message = err.to_string();
+            if message.contains("Broken pipe")
+                || message.contains("Transport endpoint is not connected")
+            {
+                Ok(())
+            } else {
+                Err(runtime_error(message))
+            }
         }
-        Err(err) => Err(runtime_error(err)),
     }
 }
 
@@ -355,6 +415,10 @@ fn raise_oracledb_driver_error(error_name: &str) -> PyErr {
         }
     })
     .unwrap_or_else(|_| PyRuntimeError::new_err(error_name.to_string()))
+}
+
+fn raise_wrong_executemany_parameters_type() -> PyErr {
+    raise_oracledb_driver_error("ERR_WRONG_EXECUTEMANY_PARAMETERS_TYPE")
 }
 
 fn raise_call_timeout_exceeded(timeout: u32) -> PyErr {
@@ -803,6 +867,7 @@ fn extract_bind_values(
             named_input_sizes,
             previous_bind_names,
             previous_bind_vars,
+            false,
         );
     }
     let Some(value) = parameters else {
@@ -814,6 +879,7 @@ fn extract_bind_values(
                 named_input_sizes,
                 previous_bind_names,
                 previous_bind_vars,
+                false,
             );
         }
         return Ok(Vec::new());
@@ -847,6 +913,7 @@ fn extract_bind_values(
                 named_input_sizes,
                 previous_bind_names,
                 previous_bind_vars,
+                false,
             );
         }
         return Ok(Vec::new());
@@ -859,6 +926,7 @@ fn extract_bind_values(
             named_input_sizes,
             previous_bind_names,
             previous_bind_vars,
+            false,
         );
     }
     extract_positional_bind_values_for_execute(py, statement, value, named_input_sizes)
@@ -1226,12 +1294,16 @@ fn extract_positional_bind_values_for_execute(
     let row_values = positional_bind_items(value)?;
     let names = unique_sql_bind_names(statement)?;
     let return_names = statement_return_bind_names(statement)?;
+    let plsql_output_names = statement_plsql_output_bind_names(statement)?;
     let input_count = names
         .iter()
         .filter(|name| {
             !return_names
                 .iter()
                 .any(|return_name| bind_names_equal(return_name, name))
+                && !plsql_output_names
+                    .iter()
+                    .any(|output_name| bind_names_equal(output_name, name))
         })
         .count();
     let has_all_bind_values = row_values.len() == names.len();
@@ -1251,7 +1323,10 @@ fn extract_positional_bind_values_for_execute(
         let is_return_bind = return_names
             .iter()
             .any(|return_name| bind_names_equal(return_name, name));
-        if is_return_bind {
+        let is_plsql_output_bind = plsql_output_names
+            .iter()
+            .any(|output_name| bind_names_equal(output_name, name));
+        if is_return_bind || is_plsql_output_bind {
             let bind = if has_all_bind_values {
                 py_value_to_bind(&row_values[position])?
             } else {
@@ -1267,7 +1342,11 @@ fn extract_positional_bind_values_for_execute(
                 };
                 py_value_to_bind(input_size_var.bind(py))?
             };
-            values.push(returning_output_bind(bind));
+            values.push(if is_return_bind {
+                returning_output_bind(bind)
+            } else {
+                output_only_bind(bind)
+            });
             continue;
         }
 
@@ -1309,15 +1388,21 @@ fn extract_positional_bind_values_with_input_sizes(
     let row_values = positional_bind_items(value)?;
     let names = unique_sql_bind_names(statement)?;
     let return_names = statement_return_bind_names(statement)?;
+    let plsql_output_names = statement_plsql_output_bind_names(statement)?;
     let input_count = names
         .iter()
         .filter(|name| {
             !return_names
                 .iter()
                 .any(|return_name| bind_names_equal(return_name, name))
+                && !plsql_output_names
+                    .iter()
+                    .any(|output_name| bind_names_equal(output_name, name))
         })
         .count();
-    if input_count != row_values.len() {
+    let has_all_bind_values = row_values.len() == names.len();
+    let has_input_only_values = row_values.len() == input_count;
+    if !has_all_bind_values && !has_input_only_values {
         return Err(dpy_bind_error(
             "DPY-4009",
             format!(
@@ -1332,28 +1417,44 @@ fn extract_positional_bind_values_with_input_sizes(
         let is_return_bind = return_names
             .iter()
             .any(|return_name| bind_names_equal(return_name, name));
-        if is_return_bind {
-            let Some(input_size_var) = positional_input_size_value(py, named_input_sizes, position)
-            else {
-                return Err(dpy_bind_error(
-                    "DPY-4010",
-                    format!(
-                        "a bind variable replacement value for placeholder \":{name}\" was not provided"
-                    ),
-                ));
+        let is_plsql_output_bind = plsql_output_names
+            .iter()
+            .any(|output_name| bind_names_equal(output_name, name));
+        if is_return_bind || is_plsql_output_bind {
+            let value = if has_all_bind_values {
+                py_value_to_bind(&row_values[position])?
+            } else {
+                let Some(input_size_var) =
+                    positional_input_size_value(py, named_input_sizes, position)
+                else {
+                    return Err(dpy_bind_error(
+                        "DPY-4010",
+                        format!(
+                            "a bind variable replacement value for placeholder \":{name}\" was not provided"
+                        ),
+                    ));
+                };
+                py_value_to_bind(input_size_var.bind(py))?
             };
-            let value = py_value_to_bind(input_size_var.bind(py))?;
-            values.push(returning_output_bind(value));
+            values.push(if is_return_bind {
+                returning_output_bind(value)
+            } else {
+                output_only_bind(value)
+            });
             continue;
         }
-        let value = row_values[input_index].clone();
-        input_index += 1;
+        let value = if has_all_bind_values {
+            row_values[position].clone()
+        } else {
+            let value = row_values[input_index].clone();
+            input_index += 1;
+            value
+        };
         let bind = if let Some(input_size_var) =
             positional_input_size_value(py, named_input_sizes, position)
         {
             if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
-                var.set_py_value(Some(value.clone().unbind()))?;
-                var.to_bind_value(py)?
+                bind_recording_executemany_input_value(py, &var, &value)?
             } else {
                 py_value_to_execute_bind(&value)?
             }
@@ -1372,10 +1473,11 @@ fn extract_named_bind_values(
     named_input_sizes: &[(String, Py<PyAny>)],
     previous_bind_names: &[String],
     previous_bind_vars: &[Py<ThinVar>],
+    record_input_size_values: bool,
 ) -> PyResult<Vec<BindValue>> {
     let names = unique_sql_bind_names(statement)?;
     let return_names = statement_return_bind_names(statement)?;
-    let assignment_output_names = statement_plsql_assignment_bind_names(statement)?;
+    let plsql_output_names = statement_plsql_output_bind_names(statement)?;
     if let Some(parameters) = parameters {
         for (key, _) in parameters.iter() {
             let key = key.extract::<String>()?;
@@ -1393,17 +1495,22 @@ fn extract_named_bind_values(
             let is_return_bind = return_names
                 .iter()
                 .any(|return_name| bind_names_equal(return_name, name));
-            let is_assignment_output_bind = assignment_output_names
+            let is_plsql_output_bind = plsql_output_names
                 .iter()
-                .any(|return_name| bind_names_equal(return_name, name));
+                .any(|output_name| bind_names_equal(output_name, name));
             if let Some(parameters) = parameters {
                 if let Some(value) = get_named_bind_value(parameters, name)? {
                     let value = if let Some(input_size_var) =
                         named_input_size_value(py, named_input_sizes, name)
                     {
                         if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
-                            var.set_py_value(Some(value.clone().unbind()))?;
-                            var.to_bind_value(py)?
+                            if record_input_size_values && !is_return_bind && !is_plsql_output_bind
+                            {
+                                bind_recording_executemany_input_value(py, &var, &value)?
+                            } else {
+                                var.set_py_value(Some(value.clone().unbind()))?;
+                                var.to_bind_value(py)?
+                            }
                         } else {
                             py_value_to_execute_bind(&value)?
                         }
@@ -1412,6 +1519,8 @@ fn extract_named_bind_values(
                     };
                     return Ok(if is_return_bind {
                         returning_output_bind(value)
+                    } else if is_plsql_output_bind {
+                        output_only_bind(value)
                     } else {
                         value
                     });
@@ -1421,11 +1530,13 @@ fn extract_named_bind_values(
                 let value = py_value_to_bind(value.bind(py))?;
                 return Ok(if is_return_bind {
                     returning_output_bind(value)
+                } else if is_plsql_output_bind {
+                    output_only_bind(value)
                 } else {
                     value
                 });
             }
-            if is_return_bind || is_assignment_output_bind {
+            if is_return_bind || is_plsql_output_bind {
                 if let Some(var) =
                     previous_bind_var_by_name(py, previous_bind_names, previous_bind_vars, name)
                 {
@@ -1460,22 +1571,154 @@ fn extract_bind_rows(
         if unique_sql_bind_names(statement)?.is_empty() {
             return Ok(vec![Vec::new(); num_iters]);
         }
-    }
-    let list = parameters
-        .cast::<PyList>()
-        .map_err(|_| not_implemented("ThinCursorImpl executemany parameters"))?;
-    list.iter()
-        .map(|row| {
-            if let Ok(dict) = row.cast::<PyDict>() {
-                extract_named_bind_values(py, statement, Some(dict), named_input_sizes, &[], &[])
-            } else {
-                extract_positional_bind_values_with_input_sizes(
+        if !named_input_sizes.is_empty() {
+            let mut rows = Vec::with_capacity(num_iters);
+            for _ in 0..num_iters {
+                rows.push(extract_input_size_bind_values(
                     py,
                     statement,
-                    &row,
                     named_input_sizes,
-                )
+                )?);
             }
+            return Ok(rows);
+        }
+    }
+    if parameters.cast::<PyString>().is_ok() {
+        return Err(raise_wrong_executemany_parameters_type());
+    }
+    clear_input_size_var_values(py, named_input_sizes)?;
+    let rows = if let Ok(list) = parameters.cast::<PyList>() {
+        list.iter().collect::<Vec<_>>()
+    } else if let Ok(tuple) = parameters.cast::<PyTuple>() {
+        tuple.iter().collect::<Vec<_>>()
+    } else {
+        return Err(raise_wrong_executemany_parameters_type());
+    };
+    let mut row_style = None;
+    let mut bind_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        let current_style = if row.cast::<PyDict>().is_ok() {
+            ExecutemanyRowStyle::Named
+        } else if row.cast::<PyString>().is_ok() {
+            return Err(raise_wrong_executemany_parameters_type());
+        } else if row.cast::<PyList>().is_ok()
+            || row.cast::<PyTuple>().is_ok()
+            || row.try_iter().is_ok()
+        {
+            ExecutemanyRowStyle::Positional
+        } else {
+            return Err(raise_wrong_executemany_parameters_type());
+        };
+        if row_style
+            .replace(current_style)
+            .is_some_and(|style| style != current_style)
+        {
+            return Err(raise_oracledb_driver_error(
+                "ERR_MIXED_POSITIONAL_AND_NAMED_BINDS",
+            ));
+        }
+        if current_style == ExecutemanyRowStyle::Named {
+            let dict = row.cast::<PyDict>()?;
+            bind_rows.push(extract_named_bind_values(
+                py,
+                statement,
+                Some(dict),
+                named_input_sizes,
+                &[],
+                &[],
+                true,
+            )?);
+        } else {
+            bind_rows.push(extract_positional_bind_values_with_input_sizes(
+                py,
+                statement,
+                &row,
+                named_input_sizes,
+            )?);
+        }
+    }
+    Ok(bind_rows)
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ExecutemanyRowStyle {
+    Named,
+    Positional,
+}
+
+fn bind_value_is_output(value: &BindValue) -> bool {
+    matches!(
+        value,
+        BindValue::Output { .. } | BindValue::ReturnOutput { .. } | BindValue::ObjectOutput { .. }
+    )
+}
+
+fn bind_rows_need_iterative_plsql(statement: &str, bind_rows: &[Vec<BindValue>]) -> bool {
+    statement_is_plsql(statement)
+        && bind_rows
+            .iter()
+            .any(|row| row.iter().any(bind_value_is_output))
+}
+
+fn clear_input_size_var_values(
+    py: Python<'_>,
+    named_input_sizes: &[(String, Py<PyAny>)],
+) -> PyResult<()> {
+    for (_, input_size_var) in named_input_sizes {
+        if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
+            var.clear_returned_values()?;
+        }
+    }
+    Ok(())
+}
+
+fn bind_recording_executemany_input_value(
+    py: Python<'_>,
+    var: &PyRef<'_, ThinVar>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<BindValue> {
+    var.set_bind_py_value(Some(value.clone().unbind()))?;
+    let bind = var.to_bind_value(py)?;
+    var.push_returned_py_value(value.clone().unbind())?;
+    Ok(bind)
+}
+
+fn extract_input_size_bind_values(
+    py: Python<'_>,
+    statement: &str,
+    named_input_sizes: &[(String, Py<PyAny>)],
+) -> PyResult<Vec<BindValue>> {
+    let names = unique_sql_bind_names(statement)?;
+    let return_names = statement_return_bind_names(statement)?;
+    let plsql_output_names = statement_plsql_output_bind_names(statement)?;
+    names
+        .iter()
+        .enumerate()
+        .map(|(position, name)| {
+            let Some(input_size_var) =
+                input_size_value_for_bind(py, named_input_sizes, name, position)
+            else {
+                return Err(dpy_bind_error(
+                    "DPY-4010",
+                    format!(
+                        "a bind variable replacement value for placeholder \":{name}\" was not provided"
+                    ),
+                ));
+            };
+            let value = py_value_to_bind(input_size_var.bind(py))?;
+            let is_return_bind = return_names
+                .iter()
+                .any(|return_name| bind_names_equal(return_name, name));
+            let is_plsql_output_bind = plsql_output_names
+                .iter()
+                .any(|output_name| bind_names_equal(output_name, name));
+            Ok(if is_return_bind {
+                returning_output_bind(value)
+            } else if is_plsql_output_bind {
+                output_only_bind(value)
+            } else {
+                value
+            })
         })
         .collect()
 }
@@ -1552,12 +1795,16 @@ fn extract_positional_bind_var_objects_for_execute(
     let row_values = positional_bind_items(value)?;
     let names = unique_sql_bind_names(statement)?;
     let return_names = statement_return_bind_names(statement)?;
+    let plsql_output_names = statement_plsql_output_bind_names(statement)?;
     let input_count = names
         .iter()
         .filter(|name| {
             !return_names
                 .iter()
                 .any(|return_name| bind_names_equal(return_name, name))
+                && !plsql_output_names
+                    .iter()
+                    .any(|output_name| bind_names_equal(output_name, name))
         })
         .count();
     let has_all_bind_values = row_values.len() == names.len();
@@ -1572,7 +1819,10 @@ fn extract_positional_bind_var_objects_for_execute(
         let is_return_bind = return_names
             .iter()
             .any(|return_name| bind_names_equal(return_name, name));
-        if is_return_bind {
+        let is_plsql_output_bind = plsql_output_names
+            .iter()
+            .any(|output_name| bind_names_equal(output_name, name));
+        if is_return_bind || is_plsql_output_bind {
             if has_all_bind_values {
                 values.push(bind_var_from_value(py, &row_values[position])?);
             } else if let Some(input_size_var) =
@@ -1612,15 +1862,15 @@ fn extract_named_bind_var_objects(
 ) -> PyResult<Vec<Py<ThinVar>>> {
     let mut values = Vec::new();
     let return_names = statement_return_bind_names(statement)?;
-    let assignment_output_names = statement_plsql_assignment_bind_names(statement)?;
+    let plsql_output_names = statement_plsql_output_bind_names(statement)?;
     for name in unique_sql_bind_names(statement)? {
         let input_size_var = named_input_size_value(py, named_input_sizes, &name);
         let is_return_bind = return_names
             .iter()
             .any(|return_name| bind_names_equal(return_name, &name));
-        let is_assignment_output_bind = assignment_output_names
+        let is_plsql_output_bind = plsql_output_names
             .iter()
-            .any(|return_name| bind_names_equal(return_name, &name));
+            .any(|output_name| bind_names_equal(output_name, &name));
         if let Some(parameters) = parameters {
             if let Some(value) = get_named_bind_value(parameters, &name)? {
                 if let Some(input_size_var) = input_size_var {
@@ -1636,7 +1886,7 @@ fn extract_named_bind_var_objects(
         }
         if let Some(input_size_var) = input_size_var {
             values.push(bind_var_from_value(py, input_size_var.bind(py))?);
-        } else if is_return_bind || is_assignment_output_bind {
+        } else if is_return_bind || is_plsql_output_bind {
             if let Some(var) =
                 previous_bind_var_by_name(py, previous_bind_names, previous_bind_vars, &name)
             {
@@ -1696,8 +1946,50 @@ fn input_size_value_for_bind(
 fn extract_executemany_bind_var_objects(
     py: Python<'_>,
     statement: &str,
+    parameters: &Bound<'_, PyAny>,
     named_input_sizes: &[(String, Py<PyAny>)],
 ) -> PyResult<Vec<Py<ThinVar>>> {
+    if !parameters.is_none() && parameters.extract::<usize>().is_err() {
+        let first_row = if let Ok(list) = parameters.cast::<PyList>() {
+            if list.is_empty() {
+                None
+            } else {
+                Some(list.get_item(0)?)
+            }
+        } else if let Ok(tuple) = parameters.cast::<PyTuple>() {
+            if tuple.is_empty() {
+                None
+            } else {
+                Some(tuple.get_item(0)?)
+            }
+        } else {
+            None
+        };
+        if let Some(row) = first_row {
+            if let Ok(dict) = row.cast::<PyDict>() {
+                return extract_named_bind_var_objects(
+                    py,
+                    statement,
+                    Some(dict),
+                    named_input_sizes,
+                    &[],
+                    &[],
+                );
+            }
+            if row.cast::<PyString>().is_err()
+                && (row.cast::<PyList>().is_ok()
+                    || row.cast::<PyTuple>().is_ok()
+                    || row.try_iter().is_ok())
+            {
+                return extract_positional_bind_var_objects_for_execute(
+                    py,
+                    statement,
+                    &row,
+                    named_input_sizes,
+                );
+            }
+        }
+    }
     unique_sql_bind_names(statement)?
         .iter()
         .enumerate()
@@ -1744,6 +2036,67 @@ fn statement_return_bind_names(statement: &str) -> PyResult<Vec<String>> {
 
 fn statement_plsql_assignment_bind_names(statement: &str) -> PyResult<Vec<String>> {
     sql::plsql_assignment_bind_names(statement).map_err(sql_parse_error)
+}
+
+fn statement_plsql_output_bind_names(statement: &str) -> PyResult<Vec<String>> {
+    let mut names = statement_plsql_assignment_bind_names(statement)?;
+    if !statement_is_plsql(statement) {
+        return Ok(names);
+    }
+    let lower = statement.to_ascii_lowercase();
+    let bytes = statement.as_bytes();
+    let mut into_search_start = 0;
+    while let Some(into_relative_pos) = lower[into_search_start..].find("into") {
+        let into_pos = into_search_start + into_relative_pos;
+        let mut bind_start = into_pos + "into".len();
+        while bytes
+            .get(bind_start)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            bind_start += 1;
+        }
+        if matches!(bytes.get(bind_start), Some(b':')) {
+            let tail = &lower[bind_start..];
+            let end = tail
+                .find(" from ")
+                .map(|relative| bind_start + relative)
+                .or_else(|| tail.find(';').map(|relative| bind_start + relative))
+                .unwrap_or(statement.len());
+            for name in
+                sql::scan_bind_names(&statement[bind_start..end]).map_err(sql_parse_error)?
+            {
+                if !names
+                    .iter()
+                    .any(|existing| bind_names_equal(existing, &name))
+                {
+                    names.push(name);
+                }
+            }
+        }
+        into_search_start = bind_start.saturating_add(1);
+    }
+    let mut search_start = 0;
+    while let Some(returning_relative_pos) = lower[search_start..].find("returning") {
+        let returning_pos = search_start + returning_relative_pos;
+        let Some(into_relative_pos) = lower[returning_pos..].find("into") else {
+            break;
+        };
+        let into_pos = returning_pos + into_relative_pos + "into".len();
+        let end = statement[into_pos..]
+            .find(';')
+            .map(|relative| into_pos + relative)
+            .unwrap_or(statement.len());
+        for name in sql::scan_bind_names(&statement[into_pos..end]).map_err(sql_parse_error)? {
+            if !names
+                .iter()
+                .any(|existing| bind_names_equal(existing, &name))
+            {
+                names.push(name);
+            }
+        }
+        search_start = end;
+    }
+    Ok(names)
 }
 
 fn statement_is_plsql(statement: &str) -> bool {
@@ -3328,7 +3681,7 @@ impl ThinLob {
                             call_timeout,
                         )
                         .await
-                        .map_err(|err| err.to_string())
+                        .map_err(TaskError::from)
                 })
             },
         );
@@ -3393,7 +3746,7 @@ impl ThinLob {
                     connection
                         .write_lob_with_timeout(cx, &locator, offset, &bytes, call_timeout)
                         .await
-                        .map_err(|err| err.to_string())
+                        .map_err(TaskError::from)
                 })
             },
         );
@@ -3438,7 +3791,7 @@ impl ThinLob {
                     connection
                         .trim_lob_with_timeout(cx, &locator, new_size, call_timeout)
                         .await
-                        .map_err(|err| err.to_string())
+                        .map_err(TaskError::from)
                 })
             },
         );
@@ -3616,6 +3969,11 @@ impl ThinVar {
     fn set_py_value(&self, value: Option<Py<PyAny>>) -> PyResult<()> {
         *self.value.lock().map_err(runtime_error)? = value;
         *self.returned_values.lock().map_err(runtime_error)? = None;
+        Ok(())
+    }
+
+    fn set_bind_py_value(&self, value: Option<Py<PyAny>>) -> PyResult<()> {
+        *self.value.lock().map_err(runtime_error)? = value;
         Ok(())
     }
 
@@ -3922,6 +4280,19 @@ fn apply_out_bind_values(
         };
         if let Some(QueryValue::Cursor { columns, cursor_id }) = value {
             apply_cursor_out_bind(py, var, columns, *cursor_id)?;
+            continue;
+        }
+        if let Some(QueryValue::Array(values)) = value {
+            let var_ref = var.borrow(py);
+            let values = values
+                .iter()
+                .map(|value| var_ref.output_value_to_py(py, value, lob_context))
+                .collect::<PyResult<Vec<_>>>()?;
+            drop(var_ref);
+            var.borrow(py).clear_returned_values()?;
+            for value in values {
+                var.borrow(py).push_returned_py_value(value)?;
+            }
             continue;
         }
         let value = var.borrow(py).output_value_to_py(py, value, lob_context)?;
@@ -6502,7 +6873,9 @@ struct ExecutemanyManager {
 impl ExecutemanyManager {
     fn new(total_rows: usize, batch_size: u32) -> PyResult<Self> {
         let total_rows = u32::try_from(total_rows).map_err(runtime_error)?;
-        let batch_size = batch_size.max(1);
+        if batch_size == 0 {
+            return Err(PyTypeError::new_err("batch_size must be greater than zero"));
+        }
         Ok(Self {
             total_rows,
             batch_size,
@@ -6985,7 +7358,7 @@ impl ThinCursorImpl {
         }
         self.warning = None;
         if self.statement.is_none() {
-            return Err(PyRuntimeError::new_err("no statement prepared"));
+            return Err(raise_oracledb_driver_error("ERR_NO_STATEMENT"));
         }
         self.bind_values.clear();
         self.bind_vars.clear();
@@ -6998,6 +7371,7 @@ impl ThinCursorImpl {
         self.bind_vars = extract_executemany_bind_var_objects(
             parameters.py(),
             statement,
+            parameters,
             &self.named_input_sizes,
         )?;
         self.many_bind_rows = extract_bind_rows(
@@ -7064,6 +7438,49 @@ impl ThinCursorImpl {
                     &typed_lob_hints,
                     call_timeout,
                 )?;
+                if bind_rows.iter().all(Vec::is_empty)
+                    || bind_rows_need_iterative_plsql(&statement, &bind_rows)
+                {
+                    let mut result = QueryResult::default();
+                    let mut out_values: BTreeMap<usize, Vec<Option<QueryValue>>> = BTreeMap::new();
+                    let mut return_values: BTreeMap<usize, Vec<Option<QueryValue>>> =
+                        BTreeMap::new();
+                    for row in &bind_rows {
+                        let row_result = if row.is_empty() {
+                            BlockingConnection::execute_query_with_timeout(
+                                connection,
+                                &statement,
+                                prefetchrows,
+                                call_timeout,
+                            )
+                            .map_err(|err| err.to_string())?
+                        } else {
+                            let one_row = vec![row.clone()];
+                            BlockingConnection::execute_query_with_bind_rows_and_timeout(
+                                connection,
+                                &statement,
+                                prefetchrows,
+                                &one_row,
+                                call_timeout,
+                            )
+                            .map_err(|err| err.to_string())?
+                        };
+                        result.row_count = result.row_count.saturating_add(row_result.row_count);
+                        result.compilation_error_warning |= row_result.compilation_error_warning;
+                        for (index, value) in row_result.out_values {
+                            out_values.entry(index).or_default().push(value);
+                        }
+                        for (index, values) in row_result.return_values {
+                            return_values.entry(index).or_default().extend(values);
+                        }
+                    }
+                    result.out_values = out_values
+                        .into_iter()
+                        .map(|(index, values)| (index, Some(QueryValue::Array(values))))
+                        .collect();
+                    result.return_values = return_values.into_iter().collect();
+                    return Ok(result);
+                }
                 BlockingConnection::execute_query_with_bind_rows_and_timeout(
                     connection,
                     &statement,
@@ -7109,6 +7526,7 @@ impl ThinCursorImpl {
                 Some(&lob_context),
             )
         })?;
+        let is_plsql_statement = statement_is_plsql(statement);
         self.state.lock().map_err(runtime_error)?.record_statement(
             statement,
             is_query,
@@ -7122,7 +7540,11 @@ impl ThinCursorImpl {
         self.cursor_id = result.cursor_id;
         self.more_rows = result.more_rows;
         self.invalid_ref_cursor = false;
-        self.rowcount = i64::from(num_execs);
+        self.rowcount = if is_plsql_statement {
+            0
+        } else {
+            i64::from(num_execs)
+        };
         self.is_query = is_query;
         Ok(())
     }
@@ -7693,6 +8115,60 @@ fn spawn_async_executemany_task(
                     call_timeout,
                 )
                 .await?;
+                if bind_rows.iter().all(Vec::is_empty)
+                    || bind_rows_need_iterative_plsql(&statement, &bind_rows)
+                {
+                    let mut result = QueryResult::default();
+                    let mut out_values: BTreeMap<usize, Vec<Option<QueryValue>>> = BTreeMap::new();
+                    let mut return_values: BTreeMap<usize, Vec<Option<QueryValue>>> =
+                        BTreeMap::new();
+                    for row in &bind_rows {
+                        let row_result = if row.is_empty() {
+                            connection
+                                .execute_query_with_timeout(
+                                    cx,
+                                    &statement,
+                                    prefetchrows,
+                                    call_timeout,
+                                )
+                                .await
+                                .map_err(TaskError::from)?
+                        } else {
+                            let one_row = vec![row.clone()];
+                            connection
+                                .execute_query_with_bind_rows_and_timeout(
+                                    cx,
+                                    &statement,
+                                    prefetchrows,
+                                    &one_row,
+                                    call_timeout,
+                                )
+                                .await
+                                .map_err(TaskError::from)?
+                        };
+                        result.row_count = result.row_count.saturating_add(row_result.row_count);
+                        result.compilation_error_warning |= row_result.compilation_error_warning;
+                        for (index, value) in row_result.out_values {
+                            out_values.entry(index).or_default().push(value);
+                        }
+                        for (index, values) in row_result.return_values {
+                            return_values.entry(index).or_default().extend(values);
+                        }
+                    }
+                    result.out_values = out_values
+                        .into_iter()
+                        .map(|(index, values)| (index, Some(QueryValue::Array(values))))
+                        .collect();
+                    result.return_values = return_values.into_iter().collect();
+                    let should_commit = result.columns.is_empty() && autocommit;
+                    if should_commit {
+                        connection.commit(cx).await.map_err(TaskError::from)?;
+                    }
+                    return Ok(AsyncExecuteOutcome {
+                        result,
+                        should_commit,
+                    });
+                }
                 let mut result = connection
                     .execute_query_with_bind_rows_and_timeout(
                         cx,
@@ -7702,7 +8178,7 @@ fn spawn_async_executemany_task(
                         call_timeout,
                     )
                     .await
-                    .map_err(|err| err.to_string())?;
+                    .map_err(TaskError::from)?;
                 supplement_json_lob_column_metadata_async(
                     cx,
                     connection,
@@ -7712,7 +8188,7 @@ fn spawn_async_executemany_task(
                 .await?;
                 let should_commit = result.columns.is_empty() && autocommit;
                 if should_commit {
-                    connection.commit(cx).await.map_err(|err| err.to_string())?;
+                    connection.commit(cx).await.map_err(TaskError::from)?;
                 }
                 Ok(AsyncExecuteOutcome {
                     result,
@@ -7761,7 +8237,7 @@ fn spawn_async_execute_task(
                     call_timeout,
                 )
                 .await
-                .map_err(|err| err.to_string())?;
+                .map_err(TaskError::from)?;
             supplement_json_lob_column_metadata_async(
                 &cx,
                 connection,
@@ -7771,10 +8247,7 @@ fn spawn_async_execute_task(
             .await?;
             let should_commit = result.columns.is_empty() && autocommit;
             if should_commit {
-                connection
-                    .commit(&cx)
-                    .await
-                    .map_err(|err| err.to_string())?;
+                connection.commit(&cx).await.map_err(TaskError::from)?;
             }
             Ok(AsyncExecuteOutcome {
                 result,
@@ -7813,7 +8286,7 @@ fn spawn_async_fetch_task(
                         previous_row.as_deref(),
                     )
                     .await
-                    .map_err(|err| err.to_string())
+                    .map_err(TaskError::from)
             } else {
                 connection
                     .fetch_rows_with_columns(
@@ -7824,7 +8297,7 @@ fn spawn_async_fetch_task(
                         previous_row.as_deref(),
                     )
                     .await
-                    .map_err(|err| err.to_string())
+                    .map_err(TaskError::from)
             }
         })
     })
@@ -8073,7 +8546,12 @@ impl AsyncThinCursorImpl {
             Err(_) if self.inner.cancel_requested.swap(false, Ordering::SeqCst) => {
                 return Err(ora_cancel_error());
             }
-            Err(err) => return Err(runtime_error(err)),
+            Err(err) => {
+                if let Some(row_count) = err.server_row_count() {
+                    self.inner.rowcount = i64::try_from(row_count).unwrap_or(i64::MAX);
+                }
+                return Err(runtime_error(err));
+            }
         };
         if self.inner.cancel_requested.swap(false, Ordering::SeqCst) {
             self.inner.drain_cancel_response()?;
@@ -8110,7 +8588,11 @@ impl AsyncThinCursorImpl {
         self.inner.cursor_id = result.cursor_id;
         self.inner.more_rows = result.more_rows;
         self.inner.invalid_ref_cursor = false;
-        self.inner.rowcount = i64::from(num_execs);
+        self.inner.rowcount = if statement_is_plsql(&statement) {
+            0
+        } else {
+            i64::from(num_execs)
+        };
         self.inner.is_query = is_query;
         Ok(())
     }
@@ -8449,7 +8931,7 @@ impl AsyncThinConnImpl {
                             .execute_query_with_timeout(cx, &sql, 1, call_timeout)
                             .await
                             .map(|_| ())
-                            .map_err(|err| err.to_string())
+                            .map_err(TaskError::from)
                     })
                 },
             );
@@ -8476,7 +8958,7 @@ impl AsyncThinConnImpl {
             "oracledb-pyshim-async-ping",
             Arc::clone(&self.inner.connection),
             |cx, connection| {
-                Box::pin(async move { connection.ping(cx).await.map_err(|err| err.to_string()) })
+                Box::pin(async move { connection.ping(cx).await.map_err(TaskError::from) })
             },
         );
         task.await.map_err(runtime_error)
@@ -8487,7 +8969,7 @@ impl AsyncThinConnImpl {
             "oracledb-pyshim-async-commit",
             Arc::clone(&self.inner.connection),
             |cx, connection| {
-                Box::pin(async move { connection.commit(cx).await.map_err(|err| err.to_string()) })
+                Box::pin(async move { connection.commit(cx).await.map_err(TaskError::from) })
             },
         );
         task.await.map_err(runtime_error)?;
@@ -8504,9 +8986,7 @@ impl AsyncThinConnImpl {
             "oracledb-pyshim-async-rollback",
             Arc::clone(&self.inner.connection),
             |cx, connection| {
-                Box::pin(
-                    async move { connection.rollback(cx).await.map_err(|err| err.to_string()) },
-                )
+                Box::pin(async move { connection.rollback(cx).await.map_err(TaskError::from) })
             },
         );
         task.await.map_err(runtime_error)?;
@@ -8544,7 +9024,7 @@ impl AsyncThinConnImpl {
                         .execute_query_with_timeout(cx, &sql, 1, call_timeout)
                         .await
                         .map(|_| ())
-                        .map_err(|err| err.to_string())
+                        .map_err(TaskError::from)
                 })
             },
         );
@@ -8696,7 +9176,7 @@ impl AsyncThinConnImpl {
                     connection
                         .create_temp_lob(cx, ora_type_num, csfrm)
                         .await
-                        .map_err(|err| err.to_string())
+                        .map_err(TaskError::from)
                 })
             },
         );

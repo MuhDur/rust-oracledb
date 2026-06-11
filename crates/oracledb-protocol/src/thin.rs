@@ -970,11 +970,22 @@ fn write_bind_metadata_for_rows(
     let Some(first_value) = first_row.get(index) else {
         return Ok((ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT));
     };
-    let (mut ora_type_num, csfrm, mut buffer_size) = bind_metadata(first_value);
+    let mut metadata_value = first_value;
+    let (mut ora_type_num, mut csfrm, mut buffer_size) = bind_metadata(first_value);
+    let mut needs_type_inference = matches!(first_value, BindValue::Null);
     for row in bind_rows.iter().skip(1) {
         let Some(value) = row.get(index) else {
             continue;
         };
+        if needs_type_inference {
+            if matches!(value, BindValue::Null) {
+                continue;
+            }
+            metadata_value = value;
+            (ora_type_num, csfrm, buffer_size) = bind_metadata(value);
+            needs_type_inference = false;
+            continue;
+        }
         let (row_ora_type_num, row_csfrm, row_buffer_size) = bind_metadata(value);
         if row_csfrm == csfrm && bind_metadata_types_are_compatible(ora_type_num, row_ora_type_num)
         {
@@ -982,7 +993,7 @@ fn write_bind_metadata_for_rows(
             buffer_size = buffer_size.max(row_buffer_size);
         }
     }
-    write_bind_metadata_with_type(writer, first_value, ora_type_num, csfrm, buffer_size)?;
+    write_bind_metadata_with_type(writer, metadata_value, ora_type_num, csfrm, buffer_size)?;
     Ok((ora_type_num, csfrm))
 }
 
@@ -2194,7 +2205,10 @@ fn parse_query_response_with_context_and_binds(
                 if info.number == TNS_ERR_NO_DATA_FOUND && !result.columns.is_empty() {
                     result.more_rows = false;
                 } else if info.number != 0 {
-                    return Err(ProtocolError::ServerError(info.message));
+                    return Err(ProtocolError::ServerErrorWithRowCount {
+                        message: info.message,
+                        row_count: info.row_count,
+                    });
                 }
             }
             _ => {

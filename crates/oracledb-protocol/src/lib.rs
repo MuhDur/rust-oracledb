@@ -40,6 +40,8 @@ pub enum ProtocolError {
     UnknownMessageType { message_type: u8, position: usize },
     #[error("server returned Oracle error: {0}")]
     ServerError(String),
+    #[error("server returned Oracle error: {message}")]
+    ServerErrorWithRowCount { message: String, row_count: u64 },
     #[error("unsupported feature: {0}")]
     UnsupportedFeature(&'static str),
     #[error("missing authentication parameter {key}")]
