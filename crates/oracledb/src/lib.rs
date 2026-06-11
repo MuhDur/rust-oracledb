@@ -15,8 +15,9 @@ use oracledb_protocol::thin::{
     build_function_payload_with_seq, parse_accept_payload, parse_auth_response,
     parse_query_response, parse_query_response_with_binds, parse_query_response_with_context,
     BindValue, ClientCapabilities, ColumnMetadata, QueryResult, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF,
-    TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT,
-    TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE,
+    TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS,
+    TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA,
+    TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE,
 };
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};
@@ -330,7 +331,7 @@ impl Connection {
         )?;
         trace_query_bytes("EXECUTE query payload", &payload);
         send_data_packet(&mut self.stream, &payload, self.sdu)?;
-        let response = read_data_response(&mut self.stream)?;
+        let response = read_data_response_flushing_out_binds(&mut self.stream, self.sdu)?;
         trace_query_bytes("EXECUTE query response", &response);
         let result = parse_query_response_with_binds(&response, self.capabilities, binds)
             .map_err(Error::from)?;
@@ -357,7 +358,7 @@ impl Connection {
         )?;
         trace_query_bytes("EXECUTE query payload", &payload);
         send_data_packet(&mut self.stream, &payload, self.sdu)?;
-        let response = read_data_response(&mut self.stream)?;
+        let response = read_data_response_flushing_out_binds(&mut self.stream, self.sdu)?;
         trace_query_bytes("EXECUTE query response", &response);
         let result = parse_query_response_with_binds(
             &response,
@@ -757,8 +758,32 @@ fn send_data_packet(stream: &mut TcpStream, payload: &[u8], sdu: usize) -> Resul
     Ok(())
 }
 
+struct DataResponse {
+    payload: Vec<u8>,
+    flush_out_binds: bool,
+}
+
 fn read_data_response(stream: &mut TcpStream) -> Result<Vec<u8>> {
+    Ok(read_data_response_boundary(stream)?.payload)
+}
+
+fn read_data_response_flushing_out_binds(stream: &mut TcpStream, sdu: usize) -> Result<Vec<u8>> {
+    let mut response = read_data_response_boundary(stream)?;
+    let mut payload = response.payload;
+    while response.flush_out_binds {
+        if payload.last() == Some(&TNS_MSG_TYPE_FLUSH_OUT_BINDS) {
+            payload.pop();
+        }
+        send_data_packet(stream, &[TNS_MSG_TYPE_FLUSH_OUT_BINDS], sdu)?;
+        response = read_data_response_boundary(stream)?;
+        payload.extend_from_slice(&response.payload);
+    }
+    Ok(payload)
+}
+
+fn read_data_response_boundary(stream: &mut TcpStream) -> Result<DataResponse> {
     let mut response = Vec::new();
+    let mut flush_out_binds = false;
     loop {
         let packet = read_packet(stream, PacketLengthWidth::Large32)?;
         if packet.packet_type == TNS_PACKET_TYPE_MARKER {
@@ -781,14 +806,21 @@ fn read_data_response(stream: &mut TcpStream) -> Result<Vec<u8>> {
                 .map_err(|_| oracledb_protocol::ProtocolError::TtcDecode("invalid flags"))?,
         );
         response.extend_from_slice(payload);
+        if payload.last() == Some(&TNS_MSG_TYPE_FLUSH_OUT_BINDS) {
+            flush_out_binds = true;
+            break;
+        }
         if flags & oracledb_protocol::thin::TNS_DATA_FLAGS_END_OF_RESPONSE != 0 {
             break;
         }
-        if payload.last() == Some(&oracledb_protocol::thin::TNS_MSG_TYPE_END_OF_RESPONSE) {
+        if payload.last() == Some(&TNS_MSG_TYPE_END_OF_RESPONSE) {
             break;
         }
     }
-    Ok(response)
+    Ok(DataResponse {
+        payload: response,
+        flush_out_binds,
+    })
 }
 
 const TNS_PACKET_TYPE_MARKER: u8 = 12;
