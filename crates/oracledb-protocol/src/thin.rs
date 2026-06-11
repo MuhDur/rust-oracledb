@@ -54,6 +54,7 @@ pub const ORA_TYPE_NUM_LONG: u8 = 8;
 pub const ORA_TYPE_NUM_ROWID: u8 = 11;
 pub const ORA_TYPE_NUM_DATE: u8 = 12;
 pub const ORA_TYPE_NUM_RAW: u8 = 23;
+pub const ORA_TYPE_NUM_BINARY_DOUBLE: u8 = 101;
 pub const ORA_TYPE_NUM_CURSOR: u8 = 102;
 pub const ORA_TYPE_NUM_LONG_RAW: u8 = 24;
 pub const ORA_TYPE_NUM_CHAR: u8 = 96;
@@ -114,6 +115,7 @@ const TNS_MAX_LONG_LENGTH: u32 = 0x7fff_ffff;
 const TNS_ERR_NO_DATA_FOUND: u32 = 1403;
 const TNS_UDS_FLAGS_IS_JSON: u32 = 0x01;
 const TNS_UDS_FLAGS_IS_OSON: u32 = 0x02;
+const ORA_TYPE_SIZE_BINARY_DOUBLE: u32 = 8;
 const ORA_TYPE_SIZE_NUMBER: u32 = 22;
 const ORA_TYPE_SIZE_DATE: u32 = 7;
 const ORA_TYPE_SIZE_ROWID: u32 = 18;
@@ -251,6 +253,7 @@ pub enum QueryValue {
     Text(String),
     Raw(Vec<u8>),
     Rowid(String),
+    BinaryDouble(String),
     Number {
         text: String,
         is_integer: bool,
@@ -312,6 +315,7 @@ pub enum BindValue {
     Text(String),
     Raw(Vec<u8>),
     Number(String),
+    BinaryDouble(f64),
     DateTime {
         year: i32,
         month: u8,
@@ -769,6 +773,7 @@ fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
             u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
         ),
         BindValue::Number(_) => (ORA_TYPE_NUM_NUMBER, 0, ORA_TYPE_SIZE_NUMBER),
+        BindValue::BinaryDouble(_) => (ORA_TYPE_NUM_BINARY_DOUBLE, 0, ORA_TYPE_SIZE_BINARY_DOUBLE),
         BindValue::DateTime { .. } => (ORA_TYPE_NUM_DATE, 0, ORA_TYPE_SIZE_DATE),
         BindValue::Timestamp { ora_type_num, .. } => (
             *ora_type_num,
@@ -822,6 +827,10 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue) -> Result<()> {
             let bytes = encode_number_text(value)?;
             writer.write_bytes_with_length(&bytes)
         }
+        BindValue::BinaryDouble(value) => {
+            let bytes = encode_binary_double(*value);
+            writer.write_bytes_with_length(&bytes)
+        }
         BindValue::DateTime {
             year,
             month,
@@ -843,7 +852,7 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue) -> Result<()> {
             nanosecond,
             ora_type_num,
         } => {
-            let bytes = if *ora_type_num == ORA_TYPE_NUM_TIMESTAMP_TZ {
+            let bytes = if matches!(*ora_type_num, ORA_TYPE_NUM_TIMESTAMP_TZ) {
                 encode_oracle_timestamp_tz(
                     *year,
                     *month,
@@ -1775,6 +1784,13 @@ fn parse_column_value(
             };
             decode_number_value(&bytes).map(Some)
         }
+        ORA_TYPE_NUM_BINARY_DOUBLE => {
+            let Some(bytes) = reader.read_bytes()? else {
+                return Ok(None);
+            };
+            decode_binary_double(&bytes)
+                .map(|value| Some(QueryValue::BinaryDouble(value.to_string())))
+        }
         ORA_TYPE_NUM_DATE
         | ORA_TYPE_NUM_TIMESTAMP
         | ORA_TYPE_NUM_TIMESTAMP_LTZ
@@ -2181,6 +2197,33 @@ fn civil_from_days(days: i64) -> Result<(i32, u8, u8)> {
         u8::try_from(day)
             .map_err(|_| ProtocolError::TtcDecode("invalid adjusted TIMESTAMP day"))?,
     ))
+}
+
+fn encode_binary_double(value: f64) -> [u8; 8] {
+    let mut bytes = value.to_bits().to_be_bytes();
+    if bytes[0] & 0x80 == 0 {
+        bytes[0] |= 0x80;
+    } else {
+        for byte in &mut bytes {
+            *byte = !*byte;
+        }
+    }
+    bytes
+}
+
+fn decode_binary_double(bytes: &[u8]) -> Result<f64> {
+    let bytes: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| ProtocolError::TtcDecode("invalid BINARY_DOUBLE length"))?;
+    let mut decoded = bytes;
+    if decoded[0] & 0x80 != 0 {
+        decoded[0] &= 0x7f;
+    } else {
+        for byte in &mut decoded {
+            *byte = !*byte;
+        }
+    }
+    Ok(f64::from_bits(u64::from_be_bytes(decoded)))
 }
 
 fn encode_number_text(value: &str) -> Result<Vec<u8>> {
@@ -2867,6 +2910,19 @@ mod tests {
 
         assert_eq!(value.as_deref(), Some("*AQIDBAUGBwgJCgsM"));
         assert_eq!(reader.remaining(), 0);
+    }
+
+    #[test]
+    fn binary_double_round_trips_oracle_canonical_bytes() {
+        for value in [0.0, -0.0, 1.5, -2.25, f64::INFINITY, f64::NEG_INFINITY] {
+            let decoded = decode_binary_double(&encode_binary_double(value))
+                .expect("BINARY_DOUBLE should round trip");
+            assert_eq!(decoded.to_bits(), value.to_bits());
+        }
+
+        let decoded =
+            decode_binary_double(&encode_binary_double(f64::NAN)).expect("NaN should decode");
+        assert!(decoded.is_nan());
     }
 
     fn number_column(name: &str) -> ColumnMetadata {

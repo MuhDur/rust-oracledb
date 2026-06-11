@@ -6,15 +6,16 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use oracledb::protocol::thin::{
     decode_datetime_value, decode_number_value, BindValue, ColumnMetadata, QueryResult, QueryValue,
-    CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CHAR,
-    ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_LONG,
-    ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW,
-    ORA_TYPE_NUM_ROWID, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
-    ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_UROWID, ORA_TYPE_NUM_VARCHAR,
+    CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE,
+    ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR,
+    ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER,
+    ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_ROWID, ORA_TYPE_NUM_TIMESTAMP,
+    ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_UROWID,
+    ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection};
-use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError};
+use pyo3::exceptions::{PyIndexError, PyNotImplementedError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyBytesMethods, PyDict, PyList, PyString, PyTuple};
 
@@ -1758,6 +1759,7 @@ fn output_only_bind(value: BindValue) -> BindValue {
             u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
         ),
         BindValue::Number(_) => (ORA_TYPE_NUM_NUMBER, 0, 22),
+        BindValue::BinaryDouble(_) => (ORA_TYPE_NUM_BINARY_DOUBLE, 0, 8),
         BindValue::DateTime { .. } => (ORA_TYPE_NUM_DATE, 0, 7),
         BindValue::Timestamp { ora_type_num, .. } => (
             ora_type_num,
@@ -1989,11 +1991,23 @@ fn py_value_to_bind_with_template(
     value: &Bound<'_, PyAny>,
     template: &BindValue,
 ) -> PyResult<BindValue> {
-    let Some((year, month, day, hour, minute, second, nanosecond)) = py_date_time_fields(value)?
-    else {
+    let Some((ora_type_num, _csfrm, _buffer_size)) = bind_type_info(template) else {
         return py_value_to_bind(value);
     };
-    let Some((ora_type_num, _csfrm, _buffer_size)) = bind_type_info(template) else {
+    if ora_type_num == ORA_TYPE_NUM_BINARY_DOUBLE {
+        if value.is_none() {
+            return Ok(BindValue::Null);
+        }
+        let number = value.extract::<f64>().or_else(|_| {
+            PyModule::import(value.py(), "builtins")?
+                .getattr("float")?
+                .call1((value,))?
+                .extract::<f64>()
+        })?;
+        return Ok(BindValue::BinaryDouble(number));
+    }
+    let Some((year, month, day, hour, minute, second, nanosecond)) = py_date_time_fields(value)?
+    else {
         return py_value_to_bind(value);
     };
     if matches!(
@@ -2227,18 +2241,100 @@ fn bind_template_from_type(typ: &Bound<'_, PyAny>, size: u32) -> BindValue {
     bind_template_from_type_name(&py_type_name(typ), size)
 }
 
+fn public_dbtype_name_from_type_name(type_name: &str) -> &'static str {
+    match type_name {
+        "NUMBER" | "DB_TYPE_NUMBER" | "int" | "float" => "DB_TYPE_NUMBER",
+        "NATIVE_FLOAT" | "DB_TYPE_BINARY_DOUBLE" => "DB_TYPE_BINARY_DOUBLE",
+        "STRING" | "DB_TYPE_VARCHAR" | "str" => "DB_TYPE_VARCHAR",
+        "DB_TYPE_CHAR" => "DB_TYPE_CHAR",
+        "DB_TYPE_NCHAR" => "DB_TYPE_NCHAR",
+        "DB_TYPE_NVARCHAR" => "DB_TYPE_NVARCHAR",
+        "DB_TYPE_CLOB" | "CLOB" => "DB_TYPE_CLOB",
+        "DB_TYPE_NCLOB" | "NCLOB" => "DB_TYPE_NCLOB",
+        "DB_TYPE_LONG" | "LONG" | "LONG_STRING" => "DB_TYPE_LONG",
+        "DB_TYPE_LONG_NVARCHAR" | "LONG NVARCHAR" => "DB_TYPE_LONG_NVARCHAR",
+        "DB_TYPE_LONG_RAW" | "LONG RAW" | "LONG_BINARY" => "DB_TYPE_LONG_RAW",
+        "DB_TYPE_RAW" | "bytes" => "DB_TYPE_RAW",
+        "ROWID" | "DB_TYPE_ROWID" => "DB_TYPE_ROWID",
+        "DB_TYPE_UROWID" => "DB_TYPE_UROWID",
+        "DATETIME" | "DB_TYPE_DATE" | "date" | "datetime" => "DB_TYPE_DATE",
+        "DB_TYPE_TIMESTAMP" | "TIMESTAMP" => "DB_TYPE_TIMESTAMP",
+        "DB_TYPE_TIMESTAMP_LTZ" | "TIMESTAMP WITH LOCAL TIME ZONE" => "DB_TYPE_TIMESTAMP_LTZ",
+        "DB_TYPE_TIMESTAMP_TZ" | "TIMESTAMP WITH TIME ZONE" => "DB_TYPE_TIMESTAMP_TZ",
+        "DB_TYPE_CURSOR" | "CURSOR" => "DB_TYPE_CURSOR",
+        _ => "DB_TYPE_VARCHAR",
+    }
+}
+
+fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
+    match value {
+        BindValue::TypedNull {
+            ora_type_num,
+            csfrm,
+            ..
+        }
+        | BindValue::Output {
+            ora_type_num,
+            csfrm,
+            ..
+        }
+        | BindValue::ReturnOutput {
+            ora_type_num,
+            csfrm,
+            ..
+        }
+        | BindValue::Array {
+            ora_type_num,
+            csfrm,
+            ..
+        } => match (*ora_type_num, *csfrm) {
+            (ORA_TYPE_NUM_BINARY_DOUBLE, _) => "DB_TYPE_BINARY_DOUBLE",
+            (ORA_TYPE_NUM_NUMBER, _) => "DB_TYPE_NUMBER",
+            (ORA_TYPE_NUM_CHAR, CS_FORM_NCHAR) | (ORA_TYPE_NUM_VARCHAR, CS_FORM_NCHAR) => {
+                "DB_TYPE_NVARCHAR"
+            }
+            (ORA_TYPE_NUM_CHAR, _) => "DB_TYPE_CHAR",
+            (ORA_TYPE_NUM_VARCHAR, _) => "DB_TYPE_VARCHAR",
+            (ORA_TYPE_NUM_LONG, CS_FORM_NCHAR) => "DB_TYPE_LONG_NVARCHAR",
+            (ORA_TYPE_NUM_LONG, _) => "DB_TYPE_LONG",
+            (ORA_TYPE_NUM_LONG_RAW, _) => "DB_TYPE_LONG_RAW",
+            (ORA_TYPE_NUM_RAW, _) => "DB_TYPE_RAW",
+            (ORA_TYPE_NUM_DATE, _) => "DB_TYPE_DATE",
+            (ORA_TYPE_NUM_TIMESTAMP, _) => "DB_TYPE_TIMESTAMP",
+            (ORA_TYPE_NUM_TIMESTAMP_LTZ, _) => "DB_TYPE_TIMESTAMP_LTZ",
+            (ORA_TYPE_NUM_TIMESTAMP_TZ, _) => "DB_TYPE_TIMESTAMP_TZ",
+            (ORA_TYPE_NUM_CURSOR, _) => "DB_TYPE_CURSOR",
+            (ORA_TYPE_NUM_OBJECT, _) => "DB_TYPE_OBJECT",
+            _ => "DB_TYPE_VARCHAR",
+        },
+        BindValue::ObjectOutput { .. } => "DB_TYPE_OBJECT",
+        BindValue::Text(_) => "DB_TYPE_VARCHAR",
+        BindValue::Raw(_) => "DB_TYPE_RAW",
+        BindValue::Number(_) => "DB_TYPE_NUMBER",
+        BindValue::BinaryDouble(_) => "DB_TYPE_BINARY_DOUBLE",
+        BindValue::DateTime { .. } => "DB_TYPE_DATE",
+        BindValue::Timestamp { ora_type_num, .. } => match *ora_type_num {
+            ORA_TYPE_NUM_TIMESTAMP_LTZ => "DB_TYPE_TIMESTAMP_LTZ",
+            ORA_TYPE_NUM_TIMESTAMP_TZ => "DB_TYPE_TIMESTAMP_TZ",
+            _ => "DB_TYPE_TIMESTAMP",
+        },
+        BindValue::Cursor { .. } => "DB_TYPE_CURSOR",
+        BindValue::Null => "DB_TYPE_VARCHAR",
+    }
+}
+
 fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
     let text_buffer_size = if size == 0 { 4000 } else { size.max(1) };
     match type_name {
-        "NUMBER"
-        | "DB_TYPE_NUMBER"
-        | "NATIVE_FLOAT"
-        | "DB_TYPE_BINARY_DOUBLE"
-        | "int"
-        | "float" => BindValue::TypedNull {
+        "NUMBER" | "DB_TYPE_NUMBER" | "int" | "float" => BindValue::TypedNull {
             ora_type_num: ORA_TYPE_NUM_NUMBER,
             csfrm: 0,
             buffer_size: 22,
+        },
+        "NATIVE_FLOAT" | "DB_TYPE_BINARY_DOUBLE" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_BINARY_DOUBLE,
+            csfrm: 0,
+            buffer_size: 8,
         },
         "STRING" | "DB_TYPE_VARCHAR" | "DB_TYPE_CHAR" | "str" => BindValue::TypedNull {
             ora_type_num: ORA_TYPE_NUM_VARCHAR,
@@ -2376,6 +2472,10 @@ fn thin_var_from_type_spec(
         .as_ref()
         .and_then(DbObjectTypeImpl::default_scalar_return_attr)
         .map(str::to_string);
+    let dbtype_name = object_type
+        .as_ref()
+        .map(|_| "DB_TYPE_OBJECT")
+        .unwrap_or_else(|| public_dbtype_name_from_type_name(&type_name));
     let value = if is_cursor_bind_template(&default_bind) {
         Some(connection.call_method0("cursor")?.unbind())
     } else {
@@ -2393,6 +2493,7 @@ fn thin_var_from_type_spec(
             return_kind,
             object_type,
             object_return_attr,
+            dbtype_name,
         ),
     )
 }
@@ -2407,6 +2508,12 @@ fn thin_var_from_input_size(
     }
     let default_bind = bind_template_from_input_size(value)?;
     let (is_array, num_elements) = input_size_array_info(value)?;
+    let type_name = py_type_name(value);
+    let dbtype_name = if type_name.is_empty() {
+        public_dbtype_name_from_bind(&default_bind)
+    } else {
+        public_dbtype_name_from_type_name(&type_name)
+    };
     let value = if is_cursor_bind_template(&default_bind) {
         Some(connection.call_method0("cursor")?.unbind())
     } else {
@@ -2424,6 +2531,7 @@ fn thin_var_from_input_size(
             ThinVarReturnKind::Plain,
             None,
             None,
+            dbtype_name,
         ),
     )
 }
@@ -2476,6 +2584,7 @@ fn bind_type_info(value: &BindValue) -> Option<(u8, u8, u32)> {
             u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
         )),
         BindValue::Number(_) => Some((ORA_TYPE_NUM_NUMBER, 0, 22)),
+        BindValue::BinaryDouble(_) => Some((ORA_TYPE_NUM_BINARY_DOUBLE, 0, 8)),
         BindValue::DateTime { .. } => Some((ORA_TYPE_NUM_DATE, 0, 7)),
         BindValue::Timestamp { ora_type_num, .. } => Some((
             *ora_type_num,
@@ -2553,6 +2662,7 @@ fn query_value_to_string(value: &Option<QueryValue>) -> Option<String> {
         Some(QueryValue::Text(value)) => Some(value.clone()),
         Some(QueryValue::Rowid(value)) => Some(value.clone()),
         Some(QueryValue::Raw(value)) => String::from_utf8(value.clone()).ok(),
+        Some(QueryValue::BinaryDouble(value)) => Some(value.clone()),
         Some(QueryValue::Number { text, .. }) => Some(text.clone()),
         Some(QueryValue::DateTime { .. }) => None,
         Some(QueryValue::Array(_)) => None,
@@ -2934,6 +3044,7 @@ struct ThinVar {
     return_kind: ThinVarReturnKind,
     object_type: Option<DbObjectTypeImpl>,
     object_return_attr: Option<String>,
+    dbtype_name: String,
 }
 
 impl ThinVar {
@@ -2949,6 +3060,7 @@ impl ThinVar {
             return_kind: ThinVarReturnKind::Plain,
             object_type: None,
             object_return_attr: None,
+            dbtype_name: "DB_TYPE_VARCHAR".to_string(),
         }
     }
 
@@ -2962,6 +3074,7 @@ impl ThinVar {
         return_kind: ThinVarReturnKind,
         object_type: Option<DbObjectTypeImpl>,
         object_return_attr: Option<String>,
+        dbtype_name: impl Into<String>,
     ) -> Self {
         Self {
             value: Arc::new(Mutex::new(value)),
@@ -2974,6 +3087,7 @@ impl ThinVar {
             return_kind,
             object_type,
             object_return_attr,
+            dbtype_name: dbtype_name.into(),
         }
     }
 
@@ -3045,20 +3159,51 @@ impl ThinVar {
         Ok(())
     }
 
-    fn get_py_value(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn check_position(&self, pos: u32) -> PyResult<()> {
+        if pos >= self.num_elements {
+            return Err(PyIndexError::new_err("variable position out of range"));
+        }
+        Ok(())
+    }
+
+    fn get_py_value_at(&self, py: Python<'_>, pos: u32) -> PyResult<Py<PyAny>> {
+        self.check_position(pos)?;
         if let Some(values) = self.returned_values.lock().map_err(runtime_error)?.as_ref() {
+            let index = usize::try_from(pos).map_err(runtime_error)?;
             return Ok(values
-                .first()
+                .get(index)
                 .map(|value| value.clone_ref(py))
                 .unwrap_or_else(|| py.None()));
         }
-        Ok(self
-            .value
-            .lock()
-            .map_err(runtime_error)?
-            .as_ref()
-            .map(|value| value.clone_ref(py))
-            .unwrap_or_else(|| py.None()))
+        if let Some(value) = self.value.lock().map_err(runtime_error)?.as_ref() {
+            return Ok(value.clone_ref(py));
+        }
+        if self.is_array {
+            return Ok(PyList::empty(py).unbind().into());
+        }
+        Ok(py.None())
+    }
+
+    fn get_py_value(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.get_py_value_at(py, 0)
+    }
+
+    fn dbtype(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let module = PyModule::import(py, "oracledb")?;
+        Ok(module.getattr(&self.dbtype_name)?.unbind())
+    }
+
+    fn repr_value(&self, py: Python<'_>) -> PyResult<String> {
+        let values = self.get_all_values(py)?;
+        let value = if !self.is_array && values.len() == 1 {
+            values
+                .first()
+                .map(|value| value.clone_ref(py))
+                .unwrap_or_else(|| py.None())
+        } else {
+            PyList::new(py, values)?.unbind().into()
+        };
+        value.bind(py).repr()?.extract()
     }
 
     fn output_value_to_py(
@@ -3133,13 +3278,11 @@ impl ThinVar {
 
     #[pyo3(signature = (pos=None))]
     fn getvalue(&self, py: Python<'_>, pos: Option<u32>) -> PyResult<Py<PyAny>> {
-        let _ = pos;
-        self.get_py_value(py)
+        self.get_py_value_at(py, pos.unwrap_or(0))
     }
 
     fn get_value(&self, py: Python<'_>, pos: u32) -> PyResult<Py<PyAny>> {
-        let _ = pos;
-        self.get_py_value(py)
+        self.get_py_value_at(py, pos)
     }
 
     fn get_all_values(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
@@ -3155,13 +3298,30 @@ impl ThinVar {
     }
 
     fn setvalue(&self, py: Python<'_>, pos: u32, value: Py<PyAny>) -> PyResult<()> {
-        let _ = pos;
+        self.check_position(pos)?;
         self.set_py_value_checked(py, value)
     }
 
     fn set_value(&self, py: Python<'_>, pos: u32, value: Py<PyAny>) -> PyResult<()> {
-        let _ = pos;
+        self.check_position(pos)?;
         self.set_py_value_checked(py, value)
+    }
+
+    #[getter]
+    fn r#type(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.dbtype(py)
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(format!(
+            "<oracledb.Var of type {} with value {}>",
+            self.dbtype_name,
+            self.repr_value(py)?
+        ))
+    }
+
+    fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+        self.__repr__(py)
     }
 }
 
@@ -3181,6 +3341,27 @@ fn thin_var_from_value(value: &Bound<'_, PyAny>) -> PyResult<Option<Py<ThinVar>>
 fn bind_var_from_value(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Py<ThinVar>> {
     if let Some(var) = thin_var_from_value(value)? {
         return Ok(var);
+    }
+    let type_name = py_type_name(value);
+    if !type_name.is_empty() {
+        let default_bind = bind_template_from_type_name(&type_name, 0);
+        if !matches!(default_bind, BindValue::Null) {
+            return Py::new(
+                py,
+                ThinVar::typed_with_options(
+                    default_bind,
+                    None,
+                    false,
+                    1,
+                    None,
+                    false,
+                    ThinVarReturnKind::Plain,
+                    None,
+                    None,
+                    public_dbtype_name_from_type_name(&type_name),
+                ),
+            );
+        }
     }
     Py::new(py, ThinVar::from_py_value(Some(value.clone().unbind())))
 }
@@ -5560,6 +5741,7 @@ impl FetchMetadataImpl {
             ORA_TYPE_NUM_RAW | ORA_TYPE_NUM_LONG_RAW => "DB_TYPE_RAW",
             ORA_TYPE_NUM_ROWID => "DB_TYPE_ROWID",
             ORA_TYPE_NUM_UROWID => "DB_TYPE_UROWID",
+            ORA_TYPE_NUM_BINARY_DOUBLE => "DB_TYPE_BINARY_DOUBLE",
             ORA_TYPE_NUM_NUMBER => "DB_TYPE_NUMBER",
             ORA_TYPE_NUM_CURSOR => "DB_TYPE_CURSOR",
             ORA_TYPE_NUM_OBJECT => "DB_TYPE_OBJECT",
@@ -5838,7 +6020,7 @@ impl ThinCursorImpl {
             };
             let default_bind = var.borrow(py).default_bind.clone();
             let define_metadata = fetch_define_metadata_from_var(metadata, &default_bind);
-            if define_metadata != *metadata {
+            if !define_metadata.eq(metadata) {
                 self.requires_define = true;
             }
             self.fetch_define_columns[index] = define_metadata;
@@ -6536,6 +6718,10 @@ fn query_value_to_py(
         Some(QueryValue::Text(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
         Some(QueryValue::Rowid(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
         Some(QueryValue::Raw(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
+        Some(QueryValue::BinaryDouble(value)) => {
+            let value = value.parse::<f64>().map_err(runtime_error)?;
+            Ok(value.into_pyobject(py)?.unbind().into())
+        }
         Some(QueryValue::Number { text, is_integer }) if *is_integer => {
             let value = text.parse::<i128>().map_err(runtime_error)?;
             Ok(value.into_pyobject(py)?.unbind().into())
