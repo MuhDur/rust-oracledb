@@ -174,6 +174,171 @@ fn raise_invalid_object_type_name(name: &str) -> PyErr {
     .unwrap_or_else(|_| PyRuntimeError::new_err(format!("invalid object type name: {name}")))
 }
 
+fn raise_invalid_coll_index_get(index: i32) -> PyErr {
+    Python::attach(|py| -> PyResult<PyErr> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        let error_num = errors.getattr("ERR_INVALID_COLL_INDEX_GET")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("index", index)?;
+        match errors
+            .getattr("_raise_err")?
+            .call((error_num,), Some(&kwargs))
+        {
+            Ok(_) => Ok(PyRuntimeError::new_err(
+                "oracledb.errors._raise_err(ERR_INVALID_COLL_INDEX_GET) returned without raising",
+            )),
+            Err(err) => Ok(err),
+        }
+    })
+    .unwrap_or_else(|_| PyRuntimeError::new_err(format!("invalid collection index: {index}")))
+}
+
+fn raise_invalid_coll_index_set(index: i32, min_index: i32, max_index: i32) -> PyErr {
+    Python::attach(|py| -> PyResult<PyErr> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        let error_num = errors.getattr("ERR_INVALID_COLL_INDEX_SET")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("index", index)?;
+        kwargs.set_item("min_index", min_index)?;
+        kwargs.set_item("max_index", max_index)?;
+        match errors
+            .getattr("_raise_err")?
+            .call((error_num,), Some(&kwargs))
+        {
+            Ok(_) => Ok(PyRuntimeError::new_err(
+                "oracledb.errors._raise_err(ERR_INVALID_COLL_INDEX_SET) returned without raising",
+            )),
+            Err(err) => Ok(err),
+        }
+    })
+    .unwrap_or_else(|_| {
+        PyRuntimeError::new_err(format!(
+            "invalid collection index: {index}; expected {min_index} to {max_index}"
+        ))
+    })
+}
+
+fn raise_wrong_object_type(actual: &DbObjectTypeImpl, expected: &DbObjectTypeImpl) -> PyErr {
+    Python::attach(|py| -> PyResult<PyErr> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        let error_num = errors.getattr("ERR_WRONG_OBJECT_TYPE")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("actual_schema", &actual.schema)?;
+        kwargs.set_item("actual_name", &actual.name)?;
+        kwargs.set_item("expected_schema", &expected.schema)?;
+        kwargs.set_item("expected_name", &expected.name)?;
+        match errors
+            .getattr("_raise_err")?
+            .call((error_num,), Some(&kwargs))
+        {
+            Ok(_) => Ok(PyRuntimeError::new_err(
+                "oracledb.errors._raise_err(ERR_WRONG_OBJECT_TYPE) returned without raising",
+            )),
+            Err(err) => Ok(err),
+        }
+    })
+    .unwrap_or_else(|_| {
+        PyRuntimeError::new_err(format!(
+            "found object of type \"{}.{}\" when expecting object of type \"{}.{}\"",
+            actual.schema, actual.name, expected.schema, expected.name
+        ))
+    })
+}
+
+fn raise_dbobject_attr_max_size(
+    attr_name: &str,
+    type_name: &str,
+    actual_size: usize,
+    max_size: u32,
+) -> PyErr {
+    Python::attach(|py| -> PyResult<PyErr> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        let error_num = errors.getattr("ERR_DBOBJECT_ATTR_MAX_SIZE_VIOLATED")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("attr_name", attr_name)?;
+        kwargs.set_item("type_name", type_name)?;
+        kwargs.set_item("actual_size", actual_size)?;
+        kwargs.set_item("max_size", max_size)?;
+        match errors
+            .getattr("_raise_err")?
+            .call((error_num,), Some(&kwargs))
+        {
+            Ok(_) => Ok(PyRuntimeError::new_err(
+                "oracledb.errors._raise_err(ERR_DBOBJECT_ATTR_MAX_SIZE_VIOLATED) returned without raising",
+            )),
+            Err(err) => Ok(err),
+        }
+    })
+    .unwrap_or_else(|_| {
+        PyRuntimeError::new_err(format!(
+            "attribute {attr_name} of type {type_name} exceeds its maximum size (actual: {actual_size}, maximum: {max_size})"
+        ))
+    })
+}
+
+fn raise_dbobject_element_max_size(
+    index: i32,
+    type_name: &str,
+    actual_size: usize,
+    max_size: u32,
+) -> PyErr {
+    Python::attach(|py| -> PyResult<PyErr> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        let error_num = errors.getattr("ERR_DBOBJECT_ELEMENT_MAX_SIZE_VIOLATED")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("index", index)?;
+        kwargs.set_item("type_name", type_name)?;
+        kwargs.set_item("actual_size", actual_size)?;
+        kwargs.set_item("max_size", max_size)?;
+        match errors
+            .getattr("_raise_err")?
+            .call((error_num,), Some(&kwargs))
+        {
+            Ok(_) => Ok(PyRuntimeError::new_err(
+                "oracledb.errors._raise_err(ERR_DBOBJECT_ELEMENT_MAX_SIZE_VIOLATED) returned without raising",
+            )),
+            Err(err) => Ok(err),
+        }
+    })
+    .unwrap_or_else(|_| {
+        PyRuntimeError::new_err(format!(
+            "element {index} of type {type_name} exceeds its maximum size (actual: {actual_size}, maximum: {max_size})"
+        ))
+    })
+}
+
+fn raise_unsupported_python_type_for_db_type(
+    value: &Bound<'_, PyAny>,
+    db_type_name: &str,
+) -> PyErr {
+    let py_type_name = value
+        .get_type()
+        .getattr("__name__")
+        .and_then(|name| name.extract::<String>())
+        .unwrap_or_else(|_| "object".to_string());
+    Python::attach(|py| -> PyResult<PyErr> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        let error_num = errors.getattr("ERR_UNSUPPORTED_PYTHON_TYPE_FOR_DB_TYPE")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("py_type_name", &py_type_name)?;
+        kwargs.set_item("db_type_name", db_type_name.trim_start_matches("DB_TYPE_"))?;
+        match errors
+            .getattr("_raise_err")?
+            .call((error_num,), Some(&kwargs))
+        {
+            Ok(_) => Ok(PyRuntimeError::new_err(
+                "oracledb.errors._raise_err(ERR_UNSUPPORTED_PYTHON_TYPE_FOR_DB_TYPE) returned without raising",
+            )),
+            Err(err) => Ok(err),
+        }
+    })
+    .unwrap_or_else(|_| {
+        PyRuntimeError::new_err(format!(
+            "unsupported Python type {py_type_name} for database type {db_type_name}"
+        ))
+    })
+}
+
 fn get_string_attr(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<String> {
     obj.getattr(name)?.extract()
 }
@@ -600,12 +765,20 @@ fn replace_bind_placeholder(statement: &str, bind_name: &str, replacement: &str)
     result
 }
 
+fn is_single_quote_byte(byte: Option<&u8>) -> bool {
+    matches!(byte, Some(b'\''))
+}
+
+fn is_double_quote_byte(byte: Option<&u8>) -> bool {
+    matches!(byte, Some(b'"'))
+}
+
 fn sql_single_quote_end(statement: &str, start: usize) -> usize {
     let bytes = statement.as_bytes();
     let mut index = start + 1;
     while index < bytes.len() {
-        if bytes[index] == b'\'' {
-            if bytes.get(index + 1) == Some(&b'\'') {
+        if is_single_quote_byte(bytes.get(index)) {
+            if is_single_quote_byte(bytes.get(index + 1)) {
                 index += 2;
             } else {
                 return index + 1;
@@ -1202,8 +1375,8 @@ fn scan_sql_bind_names(statement: &str) -> PyResult<Vec<String>> {
             b'\'' => {
                 index += 1;
                 while index < bytes.len() {
-                    if bytes[index] == b'\'' {
-                        if bytes.get(index + 1) == Some(&b'\'') {
+                    if is_single_quote_byte(bytes.get(index)) {
+                        if is_single_quote_byte(bytes.get(index + 1)) {
                             index += 2;
                         } else {
                             index += 1;
@@ -1213,7 +1386,7 @@ fn scan_sql_bind_names(statement: &str) -> PyResult<Vec<String>> {
                         index += 1;
                     }
                 }
-                if index >= bytes.len() && bytes.last() != Some(&b'\'') {
+                if index >= bytes.len() && !is_single_quote_byte(bytes.last()) {
                     return Err(raise_oracledb_driver_error(
                         "ERR_MISSING_ENDING_SINGLE_QUOTE",
                     ));
@@ -1225,9 +1398,9 @@ fn scan_sql_bind_names(statement: &str) -> PyResult<Vec<String>> {
                     index += 1;
                     continue;
                 };
-                if next == b'"' {
+                if is_double_quote_byte(Some(&next)) {
                     let mut end = start + 1;
-                    while end < bytes.len() && bytes[end] != b'"' {
+                    while end < bytes.len() && !is_double_quote_byte(bytes.get(end)) {
                         end += 1;
                     }
                     if end < bytes.len() {
@@ -2018,7 +2191,17 @@ fn query_value_to_i8(value: &Option<QueryValue>) -> Option<i8> {
 }
 
 fn dbtype_name_from_oracle_attr_type(type_name: &str) -> &'static str {
-    match type_name.to_ascii_uppercase().as_str() {
+    let upper = type_name.to_ascii_uppercase();
+    if upper.starts_with("TIMESTAMP") {
+        if upper.contains("LOCAL TIME ZONE") || upper.contains("LOCAL TZ") {
+            return "DB_TYPE_TIMESTAMP_LTZ";
+        }
+        if upper.contains("TIME ZONE") || upper.contains("WITH TZ") {
+            return "DB_TYPE_TIMESTAMP_TZ";
+        }
+        return "DB_TYPE_TIMESTAMP";
+    }
+    match upper.as_str() {
         "CHAR" => "DB_TYPE_CHAR",
         "NCHAR" => "DB_TYPE_NCHAR",
         "VARCHAR2" | "VARCHAR" => "DB_TYPE_VARCHAR",
@@ -2046,7 +2229,10 @@ fn normalized_attr_precision_scale(
     scale: Option<i8>,
 ) -> (i8, i8) {
     match type_name.to_ascii_uppercase().as_str() {
-        "NUMBER" => (precision.unwrap_or(0), scale.unwrap_or(-127)),
+        "NUMBER" => (
+            precision.unwrap_or(if scale == Some(0) { 38 } else { 0 }),
+            scale.unwrap_or(-127),
+        ),
         "INTEGER" | "SMALLINT" => (precision.unwrap_or(38), scale.unwrap_or(0)),
         "REAL" => (precision.unwrap_or(63), scale.unwrap_or(-127)),
         "DOUBLE PRECISION" | "FLOAT" => (precision.unwrap_or(126), scale.unwrap_or(-127)),
@@ -2309,6 +2495,25 @@ impl ThinVar {
         Ok(())
     }
 
+    fn set_py_value_checked(&self, py: Python<'_>, value: Py<PyAny>) -> PyResult<()> {
+        if let Some(expected_type) = &self.object_type {
+            let bound = value.bind(py);
+            if !bound.is_none() {
+                let Some(actual_object) = py_db_object_impl(bound)? else {
+                    return Err(raise_unsupported_python_type_for_db_type(
+                        bound,
+                        "DB_TYPE_OBJECT",
+                    ));
+                };
+                let actual_type = actual_object.object_type.clone();
+                if &actual_type != expected_type {
+                    return Err(raise_wrong_object_type(&actual_type, expected_type));
+                }
+            }
+        }
+        self.set_py_value(Some(value))
+    }
+
     fn clear_returned_values(&self) -> PyResult<()> {
         *self.returned_values.lock().map_err(runtime_error)? = None;
         Ok(())
@@ -2408,14 +2613,14 @@ impl ThinVar {
         self.get_all_values(py)
     }
 
-    fn setvalue(&self, pos: u32, value: Py<PyAny>) -> PyResult<()> {
+    fn setvalue(&self, py: Python<'_>, pos: u32, value: Py<PyAny>) -> PyResult<()> {
         let _ = pos;
-        self.set_py_value(Some(value))
+        self.set_py_value_checked(py, value)
     }
 
-    fn set_value(&self, pos: u32, value: Py<PyAny>) -> PyResult<()> {
+    fn set_value(&self, py: Python<'_>, pos: u32, value: Py<PyAny>) -> PyResult<()> {
         let _ = pos;
-        self.set_py_value(Some(value))
+        self.set_py_value_checked(py, value)
     }
 }
 
@@ -2817,6 +3022,216 @@ impl ThinConnImpl {
             .collect()
     }
 
+    fn rowtype_attr_max_size(
+        &self,
+        type_name: &str,
+        data_length: Option<u32>,
+        char_length: Option<u32>,
+    ) -> u32 {
+        match type_name.to_ascii_uppercase().as_str() {
+            "CHAR" | "VARCHAR" | "VARCHAR2" | "RAW" => data_length.unwrap_or(0),
+            "NCHAR" | "NVARCHAR" | "NVARCHAR2" => normalized_attr_max_size(
+                type_name,
+                char_length.filter(|length| *length > 0).or(data_length),
+            ),
+            _ => 0,
+        }
+    }
+
+    fn rowtype_attrs(&self, schema: &str, table_name: &str) -> PyResult<Vec<DbObjectAttrImpl>> {
+        let rows = self.query_rows_with_binds(
+            "select column_name, data_type, data_length, data_precision, data_scale, data_type_owner, char_length \
+             from all_tab_cols \
+             where owner = :1 and table_name = :2 and hidden_column = 'NO' \
+             order by internal_column_id",
+            &[
+                BindValue::Text(schema.to_ascii_uppercase()),
+                BindValue::Text(table_name.to_ascii_uppercase()),
+            ],
+        )?;
+        if rows.is_empty() {
+            return Err(raise_invalid_object_type_name(&format!(
+                "{table_name}%ROWTYPE"
+            )));
+        }
+        rows.into_iter()
+            .map(|row| {
+                let name = row
+                    .first()
+                    .and_then(query_value_to_string)
+                    .unwrap_or_default()
+                    .to_ascii_uppercase();
+                let data_type = row
+                    .get(1)
+                    .and_then(query_value_to_string)
+                    .unwrap_or_else(|| "VARCHAR2".to_string());
+                let data_type_owner = row
+                    .get(5)
+                    .and_then(query_value_to_string)
+                    .unwrap_or_else(|| schema.to_ascii_uppercase());
+                let dbtype_name = dbtype_name_from_oracle_attr_type(&data_type);
+                let (precision, scale) = normalized_attr_precision_scale(
+                    &data_type,
+                    row.get(3).and_then(query_value_to_i8),
+                    row.get(4).and_then(query_value_to_i8),
+                );
+                Ok(DbObjectAttrImpl {
+                    name,
+                    dbtype_name: dbtype_name.to_string(),
+                    objtype: if dbtype_name == "DB_TYPE_OBJECT" {
+                        Some(self.object_type_shallow(&data_type_owner, &data_type)?)
+                    } else {
+                        None
+                    },
+                    max_size: self.rowtype_attr_max_size(
+                        &data_type,
+                        row.get(2).and_then(query_value_to_u32),
+                        row.get(6).and_then(query_value_to_u32),
+                    ),
+                    precision,
+                    scale,
+                })
+            })
+            .collect()
+    }
+
+    fn rowtype(
+        &self,
+        schema: &str,
+        table_name: &str,
+        original_name: &str,
+    ) -> PyResult<DbObjectTypeImpl> {
+        let attrs = self.rowtype_attrs(schema, table_name)?;
+        Ok(DbObjectTypeImpl::new(
+            schema.to_ascii_uppercase(),
+            None,
+            original_name.to_ascii_uppercase(),
+            "OBJECT",
+            attrs,
+            None,
+            0,
+            false,
+        ))
+    }
+
+    fn object_type_collection_metadata(
+        &self,
+        schema: &str,
+        type_name: &str,
+    ) -> PyResult<(Option<DbObjectAttrImpl>, u32, bool)> {
+        let Some(row) = self.query_first_row_with_binds(
+            "select elem_type_owner, elem_type_name, length, precision, scale, upper_bound \
+             from all_coll_types \
+             where owner = :1 and type_name = :2",
+            &[
+                BindValue::Text(schema.to_ascii_uppercase()),
+                BindValue::Text(type_name.to_ascii_uppercase()),
+            ],
+        )?
+        else {
+            return Ok((None, 0, false));
+        };
+        let elem_type_owner = row
+            .first()
+            .and_then(query_value_to_string)
+            .unwrap_or_else(|| schema.to_ascii_uppercase());
+        let elem_type_name = row
+            .get(1)
+            .and_then(query_value_to_string)
+            .unwrap_or_else(|| "VARCHAR2".to_string());
+        let dbtype_name = dbtype_name_from_oracle_attr_type(&elem_type_name);
+        let (precision, scale) = normalized_attr_precision_scale(
+            &elem_type_name,
+            row.get(3).and_then(query_value_to_i8),
+            row.get(4).and_then(query_value_to_i8),
+        );
+        let element_metadata = DbObjectAttrImpl {
+            name: String::new(),
+            dbtype_name: dbtype_name.to_string(),
+            objtype: if dbtype_name == "DB_TYPE_OBJECT" {
+                Some(self.object_type_shallow(&elem_type_owner, &elem_type_name)?)
+            } else {
+                None
+            },
+            max_size: normalized_attr_max_size(
+                &elem_type_name,
+                row.get(2).and_then(query_value_to_u32),
+            ),
+            precision,
+            scale,
+        };
+        let max_num_elements = row.get(5).and_then(query_value_to_u32).unwrap_or(0);
+        Ok((Some(element_metadata), max_num_elements, false))
+    }
+
+    fn plsql_type_collection_metadata(
+        &self,
+        schema: &str,
+        package_name: &str,
+        type_name: &str,
+    ) -> PyResult<(Option<DbObjectAttrImpl>, u32, bool)> {
+        let Some(row) = self.query_first_row_with_binds(
+            "select elem_type_owner, elem_type_package, elem_type_name, length, precision, scale, upper_bound, coll_type, index_by \
+             from all_plsql_coll_types \
+             where owner = :1 and package_name = :2 and type_name = :3",
+            &[
+                BindValue::Text(schema.to_ascii_uppercase()),
+                BindValue::Text(package_name.to_ascii_uppercase()),
+                BindValue::Text(type_name.to_ascii_uppercase()),
+            ],
+        )?
+        else {
+            return Ok((None, 0, false));
+        };
+        let elem_type_owner = row
+            .first()
+            .and_then(query_value_to_string)
+            .unwrap_or_else(|| schema.to_ascii_uppercase());
+        let elem_type_package = row.get(1).and_then(query_value_to_string);
+        let elem_type_name = row
+            .get(2)
+            .and_then(query_value_to_string)
+            .unwrap_or_else(|| "VARCHAR2".to_string());
+        let dbtype_name = dbtype_name_from_oracle_attr_type(&elem_type_name);
+        let (precision, scale) = normalized_attr_precision_scale(
+            &elem_type_name,
+            row.get(4).and_then(query_value_to_i8),
+            row.get(5).and_then(query_value_to_i8),
+        );
+        let objtype = if dbtype_name == "DB_TYPE_OBJECT" {
+            if let Some(elem_type_package) = elem_type_package {
+                Some(self.plsql_type_shallow(
+                    &elem_type_owner,
+                    &elem_type_package,
+                    &elem_type_name,
+                )?)
+            } else {
+                Some(self.object_type_shallow(&elem_type_owner, &elem_type_name)?)
+            }
+        } else {
+            None
+        };
+        let element_metadata = DbObjectAttrImpl {
+            name: String::new(),
+            dbtype_name: dbtype_name.to_string(),
+            objtype,
+            max_size: normalized_attr_max_size(
+                &elem_type_name,
+                row.get(3).and_then(query_value_to_u32),
+            ),
+            precision,
+            scale,
+        };
+        let max_num_elements = row.get(6).and_then(query_value_to_u32).unwrap_or(0);
+        let coll_type = row
+            .get(7)
+            .and_then(query_value_to_string)
+            .unwrap_or_default();
+        let is_assoc_array = coll_type.eq_ignore_ascii_case("PL/SQL INDEX TABLE")
+            || row.get(8).and_then(query_value_to_string).is_some();
+        Ok((Some(element_metadata), max_num_elements, is_assoc_array))
+    }
+
     fn object_type_shallow(&self, schema: &str, type_name: &str) -> PyResult<DbObjectTypeImpl> {
         let typecode = self
             .query_first_row_with_binds(
@@ -2828,12 +3243,99 @@ impl ThinConnImpl {
             )?
             .and_then(|row| row.first().and_then(query_value_to_string))
             .unwrap_or_else(|| "OBJECT".to_string());
+        let (element_metadata, max_num_elements, is_assoc_array) =
+            self.object_type_collection_metadata(schema, type_name)?;
         Ok(DbObjectTypeImpl::new(
             schema.to_ascii_uppercase(),
             None,
             type_name.to_ascii_uppercase(),
             &typecode,
             Vec::new(),
+            element_metadata,
+            max_num_elements,
+            is_assoc_array,
+        ))
+    }
+
+    fn plsql_type_shallow(
+        &self,
+        schema: &str,
+        package_name: &str,
+        type_name: &str,
+    ) -> PyResult<DbObjectTypeImpl> {
+        let typecode = self
+            .query_first_row_with_binds(
+                "select typecode from all_plsql_types \
+                 where owner = :1 and package_name = :2 and type_name = :3",
+                &[
+                    BindValue::Text(schema.to_ascii_uppercase()),
+                    BindValue::Text(package_name.to_ascii_uppercase()),
+                    BindValue::Text(type_name.to_ascii_uppercase()),
+                ],
+            )?
+            .and_then(|row| row.first().and_then(query_value_to_string))
+            .unwrap_or_else(|| "OBJECT".to_string());
+        let (element_metadata, max_num_elements, is_assoc_array) =
+            self.plsql_type_collection_metadata(schema, package_name, type_name)?;
+        Ok(DbObjectTypeImpl::new(
+            schema.to_ascii_uppercase(),
+            Some(package_name.to_ascii_uppercase()),
+            type_name.to_ascii_uppercase(),
+            &typecode,
+            Vec::new(),
+            element_metadata,
+            max_num_elements,
+            is_assoc_array,
+        ))
+    }
+
+    fn plsql_type(
+        &self,
+        schema: &str,
+        package_name: &str,
+        type_name: &str,
+        original_name: &str,
+    ) -> PyResult<DbObjectTypeImpl> {
+        let Some(row) = self.query_first_row_with_binds(
+            "select owner, package_name, type_name, typecode \
+             from all_plsql_types \
+             where owner = :1 and package_name = :2 and type_name = :3",
+            &[
+                BindValue::Text(schema.to_ascii_uppercase()),
+                BindValue::Text(package_name.to_ascii_uppercase()),
+                BindValue::Text(type_name.to_ascii_uppercase()),
+            ],
+        )?
+        else {
+            return Err(raise_invalid_object_type_name(original_name));
+        };
+        let schema = row
+            .first()
+            .and_then(query_value_to_string)
+            .unwrap_or_else(|| schema.to_ascii_uppercase());
+        let package_name = row
+            .get(1)
+            .and_then(query_value_to_string)
+            .unwrap_or_else(|| package_name.to_ascii_uppercase());
+        let type_name = row
+            .get(2)
+            .and_then(query_value_to_string)
+            .unwrap_or_else(|| type_name.to_ascii_uppercase());
+        let typecode = row
+            .get(3)
+            .and_then(query_value_to_string)
+            .unwrap_or_else(|| "OBJECT".to_string());
+        let (element_metadata, max_num_elements, is_assoc_array) =
+            self.plsql_type_collection_metadata(&schema, &package_name, &type_name)?;
+        Ok(DbObjectTypeImpl::new(
+            schema.to_ascii_uppercase(),
+            Some(package_name.to_ascii_uppercase()),
+            type_name.to_ascii_uppercase(),
+            &typecode,
+            Vec::new(),
+            element_metadata,
+            max_num_elements,
+            is_assoc_array,
         ))
     }
 
@@ -3119,6 +3621,12 @@ impl ThinConnImpl {
             .collect();
         let requested_type_name = parts.last().copied().unwrap_or(name).to_ascii_uppercase();
         let requested_owner = (parts.len() == 2).then(|| parts[0].to_ascii_uppercase());
+        if let Some(table_name) = requested_type_name.strip_suffix("%ROWTYPE") {
+            let schema = requested_owner
+                .clone()
+                .unwrap_or_else(|| self.username.to_ascii_uppercase());
+            return self.rowtype(&schema, table_name, name);
+        }
         let mut sql = String::from(
             "select owner, type_name, typecode \
              from all_types \
@@ -3133,7 +3641,18 @@ impl ThinConnImpl {
         }
         sql.push_str(" order by owner");
         let Some(row) = self.query_first_row_with_binds(&sql, &binds)? else {
-            return Err(raise_invalid_object_type_name(name));
+            return match parts.as_slice() {
+                [package_name, type_name] => self.plsql_type(
+                    &self.username.to_ascii_uppercase(),
+                    package_name,
+                    type_name,
+                    name,
+                ),
+                [schema, package_name, type_name] => {
+                    self.plsql_type(schema, package_name, type_name, name)
+                }
+                _ => Err(raise_invalid_object_type_name(name)),
+            };
         };
         let schema = row
             .first()
@@ -3148,12 +3667,17 @@ impl ThinConnImpl {
             .and_then(query_value_to_string)
             .unwrap_or_else(|| "OBJECT".to_string());
         let attrs = self.object_type_attrs(&schema, &type_name)?;
+        let (element_metadata, max_num_elements, is_assoc_array) =
+            self.object_type_collection_metadata(&schema, &type_name)?;
         Ok(DbObjectTypeImpl::new(
             schema.to_ascii_uppercase(),
             None,
             type_name.to_ascii_uppercase(),
             &typecode,
             attrs,
+            element_metadata,
+            max_num_elements,
+            is_assoc_array,
         ))
     }
 
@@ -3371,6 +3895,9 @@ struct DbObjectTypeImpl {
     name: String,
     is_collection: bool,
     attrs: Vec<DbObjectAttrImpl>,
+    element_metadata: Option<Box<DbObjectAttrImpl>>,
+    max_num_elements: u32,
+    is_assoc_array: bool,
 }
 
 impl DbObjectTypeImpl {
@@ -3380,6 +3907,9 @@ impl DbObjectTypeImpl {
         name: String,
         typecode: &str,
         attrs: Vec<DbObjectAttrImpl>,
+        element_metadata: Option<DbObjectAttrImpl>,
+        max_num_elements: u32,
+        is_assoc_array: bool,
     ) -> Self {
         Self {
             schema,
@@ -3387,6 +3917,9 @@ impl DbObjectTypeImpl {
             name,
             is_collection: typecode.eq_ignore_ascii_case("COLLECTION"),
             attrs,
+            element_metadata: element_metadata.map(Box::new),
+            max_num_elements,
+            is_assoc_array,
         }
     }
 
@@ -3397,7 +3930,16 @@ impl DbObjectTypeImpl {
             .as_deref()
             .unwrap_or_default()
             .to_ascii_uppercase();
-        Some(Self::new(schema, None, name, "OBJECT", Vec::new()))
+        Some(Self::new(
+            schema,
+            None,
+            name,
+            "OBJECT",
+            Vec::new(),
+            None,
+            0,
+            false,
+        ))
     }
 
     fn default_scalar_return_attr(&self) -> Option<&str> {
@@ -3469,8 +4011,12 @@ impl DbObjectTypeImpl {
     }
 
     #[getter]
-    fn element_metadata(&self, py: Python<'_>) -> Py<PyAny> {
-        py.None()
+    fn element_metadata(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.element_metadata
+            .as_deref()
+            .cloned()
+            .map(|metadata| Py::new(py, metadata).map(Py::into_any))
+            .unwrap_or_else(|| Ok(py.None()))
     }
 
     fn _get_fqn(&self) -> String {
@@ -3544,6 +4090,59 @@ impl DbObjectAttrImpl {
 struct DbObjectImpl {
     object_type: DbObjectTypeImpl,
     attr_values: Arc<Mutex<BTreeMap<String, Py<PyAny>>>>,
+    collection_values: Arc<Mutex<Vec<Py<PyAny>>>>,
+    assoc_values: Arc<Mutex<BTreeMap<i32, Py<PyAny>>>>,
+}
+
+fn validated_dbobject_value(
+    py: Python<'_>,
+    metadata: &DbObjectAttrImpl,
+    value: Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let bound = value.bind(py);
+    if bound.is_none() {
+        return Ok(py.None());
+    }
+    match metadata.dbtype_name.as_str() {
+        "DB_TYPE_OBJECT" => {
+            if let Some(expected_type) = &metadata.objtype {
+                let Some(actual_object) = py_db_object_impl(bound)? else {
+                    return Err(raise_unsupported_python_type_for_db_type(
+                        bound,
+                        &metadata.dbtype_name,
+                    ));
+                };
+                let actual_type = actual_object.object_type.clone();
+                if &actual_type != expected_type {
+                    return Err(raise_wrong_object_type(&actual_type, expected_type));
+                }
+            }
+        }
+        "DB_TYPE_NUMBER" => {
+            if bound.cast::<PyString>().is_ok() || bound.cast::<PyBytes>().is_ok() {
+                return Err(raise_unsupported_python_type_for_db_type(
+                    bound,
+                    &metadata.dbtype_name,
+                ));
+            }
+        }
+        _ => {}
+    }
+    Ok(value)
+}
+
+fn dbobject_value_byte_size(py: Python<'_>, value: &Py<PyAny>) -> PyResult<Option<usize>> {
+    let bound = value.bind(py);
+    if bound.is_none() {
+        return Ok(None);
+    }
+    if let Ok(text) = bound.extract::<String>() {
+        return Ok(Some(text.len()));
+    }
+    if let Ok(bytes) = bound.cast::<PyBytes>() {
+        return Ok(Some(bytes.as_bytes().len()));
+    }
+    Ok(None)
 }
 
 impl DbObjectImpl {
@@ -3555,6 +4154,8 @@ impl DbObjectImpl {
         Ok(Self {
             object_type,
             attr_values: Arc::new(Mutex::new(attr_values)),
+            collection_values: Arc::new(Mutex::new(Vec::new())),
+            assoc_values: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 
@@ -3596,6 +4197,55 @@ impl DbObjectImpl {
     fn attr_bind_value(&self, py: Python<'_>, attr_name: &str) -> PyResult<Py<PyAny>> {
         self.attr_value(py, attr_name)
     }
+
+    fn next_collection_append_index(&self) -> PyResult<i32> {
+        if self.object_type.is_assoc_array {
+            let values = self.assoc_values.lock().map_err(runtime_error)?;
+            Ok(values
+                .keys()
+                .next_back()
+                .copied()
+                .map(|index| index.saturating_add(1))
+                .unwrap_or(0))
+        } else {
+            Ok(
+                i32::try_from(self.collection_values.lock().map_err(runtime_error)?.len())
+                    .unwrap_or(i32::MAX),
+            )
+        }
+    }
+
+    fn append_collection_value(&self, py: Python<'_>, value: Py<PyAny>) -> PyResult<()> {
+        let value = if value.bind(py).is_none() {
+            py.None()
+        } else {
+            value
+        };
+        if self.object_type.is_assoc_array {
+            let mut values = self.assoc_values.lock().map_err(runtime_error)?;
+            let index = values
+                .keys()
+                .next_back()
+                .copied()
+                .map(|index| index.saturating_add(1))
+                .unwrap_or(0);
+            values.insert(index, value);
+            return Ok(());
+        }
+        let mut values = self.collection_values.lock().map_err(runtime_error)?;
+        if self.object_type.max_num_elements > 0
+            && values.len() >= self.object_type.max_num_elements as usize
+        {
+            return Err(raise_invalid_coll_index_set(
+                i32::try_from(values.len()).unwrap_or(i32::MAX),
+                0,
+                i32::try_from(self.object_type.max_num_elements.saturating_sub(1))
+                    .unwrap_or(i32::MAX),
+            ));
+        }
+        values.push(value);
+        Ok(())
+    }
 }
 
 fn py_db_object_from_impl(py: Python<'_>, object: DbObjectImpl) -> PyResult<Py<PyAny>> {
@@ -3624,6 +4274,19 @@ impl DbObjectImpl {
         attr: &DbObjectAttrImpl,
         value: Py<PyAny>,
     ) -> PyResult<()> {
+        let value = validated_dbobject_value(py, attr, value)?;
+        if attr.max_size > 0 {
+            if let Some(actual_size) = dbobject_value_byte_size(py, &value)? {
+                if actual_size > attr.max_size as usize {
+                    return Err(raise_dbobject_attr_max_size(
+                        &attr.name,
+                        &self.object_type._get_fqn(),
+                        actual_size,
+                        attr.max_size,
+                    ));
+                }
+            }
+        }
         self.set_attr_by_name(py, &attr.name, value)
     }
 
@@ -3641,10 +4304,232 @@ impl DbObjectImpl {
         for (name, value) in self.attr_values.lock().map_err(runtime_error)?.iter() {
             attr_values.insert(name.clone(), value.clone_ref(py));
         }
+        let collection_values = self
+            .collection_values
+            .lock()
+            .map_err(runtime_error)?
+            .iter()
+            .map(|value| value.clone_ref(py))
+            .collect();
         Ok(Self {
             object_type: self.object_type.clone(),
             attr_values: Arc::new(Mutex::new(attr_values)),
+            collection_values: Arc::new(Mutex::new(collection_values)),
+            assoc_values: Arc::new(Mutex::new(
+                self.assoc_values
+                    .lock()
+                    .map_err(runtime_error)?
+                    .iter()
+                    .map(|(index, value)| (*index, value.clone_ref(py)))
+                    .collect(),
+            )),
         })
+    }
+
+    fn append(&self, py: Python<'_>, value: Py<PyAny>) -> PyResult<()> {
+        let Some(metadata) = self.object_type.element_metadata.as_deref() else {
+            return Err(raise_oracledb_driver_error(
+                "ERR_OBJECT_IS_NOT_A_COLLECTION",
+            ));
+        };
+        let value = validated_dbobject_value(py, metadata, value)?;
+        if metadata.max_size > 0 {
+            if let Some(actual_size) = dbobject_value_byte_size(py, &value)? {
+                if actual_size > metadata.max_size as usize {
+                    return Err(raise_dbobject_element_max_size(
+                        self.next_collection_append_index()?,
+                        &self.object_type._get_fqn(),
+                        actual_size,
+                        metadata.max_size,
+                    ));
+                }
+            }
+        }
+        self.append_collection_value(py, value)
+    }
+
+    fn append_checked(&self, py: Python<'_>, value: Py<PyAny>) -> PyResult<()> {
+        self.append_collection_value(py, value)
+    }
+
+    fn delete_by_index(&self, index: i32) -> PyResult<()> {
+        if self.object_type.is_assoc_array {
+            let mut values = self.assoc_values.lock().map_err(runtime_error)?;
+            if values.remove(&index).is_none() {
+                return Err(raise_invalid_coll_index_get(index));
+            }
+            return Ok(());
+        }
+        let mut values = self.collection_values.lock().map_err(runtime_error)?;
+        let Ok(index) = usize::try_from(index) else {
+            return Err(raise_invalid_coll_index_get(index));
+        };
+        if index >= values.len() {
+            return Err(raise_invalid_coll_index_get(
+                i32::try_from(index).unwrap_or(i32::MAX),
+            ));
+        }
+        values.remove(index);
+        Ok(())
+    }
+
+    fn exists_by_index(&self, index: i32) -> PyResult<bool> {
+        if self.object_type.is_assoc_array {
+            return Ok(self
+                .assoc_values
+                .lock()
+                .map_err(runtime_error)?
+                .contains_key(&index));
+        }
+        let values = self.collection_values.lock().map_err(runtime_error)?;
+        Ok(usize::try_from(index)
+            .map(|index| index < values.len())
+            .unwrap_or(false))
+    }
+
+    fn get_element_by_index(&self, py: Python<'_>, index: i32) -> PyResult<Py<PyAny>> {
+        if self.object_type.is_assoc_array {
+            return self
+                .assoc_values
+                .lock()
+                .map_err(runtime_error)?
+                .get(&index)
+                .map(|value| value.clone_ref(py))
+                .ok_or_else(|| raise_invalid_coll_index_get(index));
+        }
+        let values = self.collection_values.lock().map_err(runtime_error)?;
+        let Ok(index) = usize::try_from(index) else {
+            return Err(raise_invalid_coll_index_get(index));
+        };
+        values
+            .get(index)
+            .map(|value| value.clone_ref(py))
+            .ok_or_else(|| raise_invalid_coll_index_get(i32::try_from(index).unwrap_or(i32::MAX)))
+    }
+
+    fn get_first_index(&self) -> PyResult<Option<i32>> {
+        if self.object_type.is_assoc_array {
+            return Ok(self
+                .assoc_values
+                .lock()
+                .map_err(runtime_error)?
+                .keys()
+                .next()
+                .copied());
+        }
+        let values = self.collection_values.lock().map_err(runtime_error)?;
+        Ok((!values.is_empty()).then_some(0))
+    }
+
+    fn get_last_index(&self) -> PyResult<Option<i32>> {
+        if self.object_type.is_assoc_array {
+            return Ok(self
+                .assoc_values
+                .lock()
+                .map_err(runtime_error)?
+                .keys()
+                .next_back()
+                .copied());
+        }
+        let values = self.collection_values.lock().map_err(runtime_error)?;
+        Ok(values
+            .len()
+            .checked_sub(1)
+            .map(|index| i32::try_from(index).unwrap_or(i32::MAX)))
+    }
+
+    fn get_next_index(&self, index: i32) -> PyResult<Option<i32>> {
+        if self.object_type.is_assoc_array {
+            return Ok(self
+                .assoc_values
+                .lock()
+                .map_err(runtime_error)?
+                .range((index.saturating_add(1))..)
+                .next()
+                .map(|(index, _)| *index));
+        }
+        let values = self.collection_values.lock().map_err(runtime_error)?;
+        let next = index.saturating_add(1);
+        Ok(usize::try_from(next)
+            .ok()
+            .filter(|next_index| *next_index < values.len())
+            .map(|_| next))
+    }
+
+    fn get_prev_index(&self, index: i32) -> PyResult<Option<i32>> {
+        if self.object_type.is_assoc_array {
+            return Ok(self
+                .assoc_values
+                .lock()
+                .map_err(runtime_error)?
+                .range(..index)
+                .next_back()
+                .map(|(index, _)| *index));
+        }
+        Ok((index > 0).then_some(index - 1))
+    }
+
+    fn get_size(&self) -> PyResult<usize> {
+        if self.object_type.is_assoc_array {
+            return Ok(self.assoc_values.lock().map_err(runtime_error)?.len());
+        }
+        Ok(self.collection_values.lock().map_err(runtime_error)?.len())
+    }
+
+    fn set_element_by_index(&self, py: Python<'_>, index: i32, value: Py<PyAny>) -> PyResult<()> {
+        let Some(metadata) = self.object_type.element_metadata.as_deref() else {
+            return Err(raise_oracledb_driver_error(
+                "ERR_OBJECT_IS_NOT_A_COLLECTION",
+            ));
+        };
+        let value = validated_dbobject_value(py, metadata, value)?;
+        if metadata.max_size > 0 {
+            if let Some(actual_size) = dbobject_value_byte_size(py, &value)? {
+                if actual_size > metadata.max_size as usize {
+                    return Err(raise_dbobject_element_max_size(
+                        index,
+                        &self.object_type._get_fqn(),
+                        actual_size,
+                        metadata.max_size,
+                    ));
+                }
+            }
+        }
+        self.set_element_by_index_checked(index, value)
+    }
+
+    fn set_element_by_index_checked(&self, index: i32, value: Py<PyAny>) -> PyResult<()> {
+        if self.object_type.is_assoc_array {
+            self.assoc_values
+                .lock()
+                .map_err(runtime_error)?
+                .insert(index, value);
+            return Ok(());
+        }
+        let mut values = self.collection_values.lock().map_err(runtime_error)?;
+        let max_index = values
+            .len()
+            .checked_sub(1)
+            .map(|index| i32::try_from(index).unwrap_or(i32::MAX))
+            .unwrap_or(0);
+        let Ok(index_usize) = usize::try_from(index) else {
+            return Err(raise_invalid_coll_index_set(index, 0, max_index));
+        };
+        let Some(slot) = values.get_mut(index_usize) else {
+            return Err(raise_invalid_coll_index_set(index, 0, max_index));
+        };
+        *slot = value;
+        Ok(())
+    }
+
+    fn trim(&self, num_to_trim: i32) -> PyResult<()> {
+        if num_to_trim <= 0 {
+            return Ok(());
+        }
+        let mut values = self.collection_values.lock().map_err(runtime_error)?;
+        let new_len = values.len().saturating_sub(num_to_trim as usize);
+        values.truncate(new_len);
+        Ok(())
     }
 }
 
