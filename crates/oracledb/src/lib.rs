@@ -35,7 +35,35 @@ const TNS_DATA_PACKET_OVERHEAD: usize = 10;
 
 pub use oracledb_protocol as protocol;
 
+pub mod pool;
+
 type SharedWriteHalf = Arc<AsyncMutex<OwnedWriteHalf>>;
+
+/// Oracle error codes that python-oracledb maps to DPY-4011 (connection
+/// closed); seeing one of these marks the connection as dead so pools can
+/// discard it on release (reference `errors.ERR_ORACLE_ERROR_XREF`).
+const SESSION_DEAD_ORA_CODES: &[u32] = &[
+    22, 28, 31, 45, 378, 600, 602, 603, 609, 1012, 1041, 1043, 1089, 1092, 2396, 3113, 3114, 3122,
+    3135, 12153, 12537, 12547, 12570, 12583, 27146, 28511, 56600,
+];
+
+fn protocol_error_is_session_dead(err: &oracledb_protocol::ProtocolError) -> bool {
+    let message = match err {
+        oracledb_protocol::ProtocolError::ServerError(message) => message,
+        oracledb_protocol::ProtocolError::ServerErrorWithRowCount { message, .. } => message,
+        _ => return false,
+    };
+    let Some(start) = message.find("ORA-") else {
+        return false;
+    };
+    let digits = message[start + 4..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    digits
+        .parse::<u32>()
+        .is_ok_and(|code| SESSION_DEAD_ORA_CODES.contains(&code))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -111,6 +139,7 @@ pub struct Connection {
     ttc_seq_num: u8,
     sdu: usize,
     cursor_columns: BTreeMap<u32, Vec<ColumnMetadata>>,
+    dead: bool,
 }
 
 #[derive(Debug)]
@@ -239,6 +268,7 @@ impl Connection {
             ttc_seq_num,
             sdu,
             cursor_columns: BTreeMap::new(),
+            dead: false,
         })
     }
 
@@ -272,6 +302,28 @@ impl Connection {
         })
     }
 
+    /// Whether a session-dead Oracle error (mapped to DPY-4011 by the Python
+    /// layer) has been observed on this connection.
+    pub fn is_dead(&self) -> bool {
+        self.dead
+    }
+
+    /// Wrap a protocol parse result, recording session-dead errors.
+    fn note_parse<T>(
+        &mut self,
+        result: std::result::Result<T, oracledb_protocol::ProtocolError>,
+    ) -> Result<T> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                if protocol_error_is_session_dead(&err) {
+                    self.dead = true;
+                }
+                Err(Error::Protocol(err))
+            }
+        }
+    }
+
     pub async fn ping(&mut self, cx: &Cx) -> Result<()> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
@@ -285,6 +337,24 @@ impl Connection {
         .await?;
         let _ = read_data_response(&mut self.read, cx, &self.write).await?;
         Ok(())
+    }
+
+    /// Ping with an upper bound on the round trip, used by pool health
+    /// checks (reference pings under `ping_timeout`).
+    pub async fn ping_with_timeout(&mut self, cx: &Cx, timeout_ms: u32) -> Result<()> {
+        if timeout_ms == 0 {
+            return self.ping(cx).await;
+        }
+        match time::timeout(
+            time::wall_now(),
+            Duration::from_millis(u64::from(timeout_ms)),
+            self.ping(cx),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(Error::CallTimeout(timeout_ms)),
+        }
     }
 
     pub async fn commit(&mut self, cx: &Cx) -> Result<()> {
@@ -310,7 +380,8 @@ impl Connection {
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
         let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("EXECUTE query response", &response);
-        let result = parse_query_response(&response, self.capabilities).map_err(Error::from)?;
+        let parsed = parse_query_response(&response, self.capabilities);
+        let result = self.note_parse(parsed)?;
         self.remember_cursor_columns(&result);
         Ok(result)
     }
@@ -362,8 +433,8 @@ impl Connection {
             read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, self.sdu)
                 .await?;
         trace_query_bytes("EXECUTE query response", &response);
-        let result = parse_query_response_with_binds(&response, self.capabilities, binds)
-            .map_err(Error::from)?;
+        let parsed = parse_query_response_with_binds(&response, self.capabilities, binds);
+        let result = self.note_parse(parsed)?;
         self.remember_cursor_columns(&result);
         Ok(result)
     }
@@ -403,12 +474,12 @@ impl Connection {
             read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, self.sdu)
                 .await?;
         trace_query_bytes("EXECUTE query response", &response);
-        let result = parse_query_response_with_binds(
+        let parsed = parse_query_response_with_binds(
             &response,
             self.capabilities,
             bind_rows.first().map(Vec::as_slice).unwrap_or(&[]),
-        )
-        .map_err(Error::from)?;
+        );
+        let result = self.note_parse(parsed)?;
         self.remember_cursor_columns(&result);
         Ok(result)
     }
@@ -463,9 +534,9 @@ impl Connection {
             .get(&cursor_id)
             .cloned()
             .unwrap_or_else(|| known_columns.to_vec());
-        let result =
-            parse_fetch_response_with_context(&response, self.capabilities, &columns, previous_row)
-                .map_err(Error::from)?;
+        let parsed =
+            parse_fetch_response_with_context(&response, self.capabilities, &columns, previous_row);
+        let result = self.note_parse(parsed)?;
         self.remember_cursor_columns(&result);
         Ok(result)
     }
@@ -521,7 +592,11 @@ impl Connection {
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
         let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("LOB READ response", &response);
-        parse_lob_read_response(&response, self.capabilities, locator).map_err(Error::from)
+        self.note_parse(parse_lob_read_response(
+            &response,
+            self.capabilities,
+            locator,
+        ))
     }
 
     pub async fn read_lob_with_timeout(
@@ -555,7 +630,7 @@ impl Connection {
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
         let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("LOB CREATE TEMP response", &response);
-        parse_lob_create_temp_response(&response, self.capabilities).map_err(Error::from)
+        self.note_parse(parse_lob_create_temp_response(&response, self.capabilities))
     }
 
     pub async fn write_lob(
@@ -579,7 +654,11 @@ impl Connection {
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
         let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("LOB WRITE response", &response);
-        parse_lob_write_response(&response, self.capabilities, locator).map_err(Error::from)
+        self.note_parse(parse_lob_write_response(
+            &response,
+            self.capabilities,
+            locator,
+        ))
     }
 
     pub async fn write_lob_with_timeout(
@@ -613,7 +692,11 @@ impl Connection {
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
         let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("LOB TRIM response", &response);
-        parse_lob_trim_response(&response, self.capabilities, locator).map_err(Error::from)
+        self.note_parse(parse_lob_trim_response(
+            &response,
+            self.capabilities,
+            locator,
+        ))
     }
 
     pub async fn trim_lob_with_timeout(
@@ -644,8 +727,11 @@ impl Connection {
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
         let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("LOB FREE TEMP response", &response);
-        parse_lob_free_temp_response(&response, self.capabilities, returned_parameter_len)
-            .map_err(Error::from)
+        self.note_parse(parse_lob_free_temp_response(
+            &response,
+            self.capabilities,
+            returned_parameter_len,
+        ))
     }
 
     pub async fn free_temp_lobs_with_timeout(
@@ -957,6 +1043,15 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection.ping(&cx).await
+        })
+    }
+
+    pub fn ping_with_timeout(connection: &mut Connection, timeout_ms: u32) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.ping_with_timeout(&cx, timeout_ms).await
         })
     }
 
