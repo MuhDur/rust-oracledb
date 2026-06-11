@@ -6,7 +6,7 @@ use oracledb::protocol::thin::{
 };
 use oracledb::Connection as RustConnection;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytesMethods, PyDict, PyList, PyString, PyTuple};
+use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 
 use crate::*;
 

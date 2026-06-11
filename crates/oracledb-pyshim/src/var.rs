@@ -8,7 +8,7 @@ use oracledb::protocol::thin::{
 };
 use pyo3::exceptions::{PyIndexError, PyRuntimeError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyBytesMethods, PyList, PyTuple};
+use pyo3::types::{PyBytes, PyList, PyTuple};
 
 use crate::*;
 
