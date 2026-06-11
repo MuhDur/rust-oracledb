@@ -149,6 +149,23 @@ where
     }
 }
 
+fn close_connection_result(connection: RustConnection) -> Result<(), String> {
+    BlockingConnection::close(connection).map_err(|err| err.to_string())
+}
+
+fn close_result_to_py(result: Result<(), String>) -> PyResult<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(err)
+            if err.contains("Broken pipe")
+                || err.contains("Transport endpoint is not connected") =>
+        {
+            Ok(())
+        }
+        Err(err) => Err(runtime_error(err)),
+    }
+}
+
 fn parse_ora_code(message: &str) -> Option<i32> {
     let start = message.find("ORA-")? + "ORA-".len();
     let digits = message.get(start..start + 5)?;
@@ -3853,6 +3870,11 @@ impl ThinConnImpl {
         let call_timeout = self.state.lock().map_err(runtime_error)?.call_timeout;
         Ok((call_timeout > 0).then_some(call_timeout))
     }
+
+    fn take_connection_for_close(&self) -> PyResult<Option<RustConnection>> {
+        *self.cancel_handle.lock().map_err(runtime_error)? = None;
+        Ok(self.connection.lock().map_err(runtime_error)?.take())
+    }
 }
 
 #[pymethods]
@@ -4042,22 +4064,10 @@ impl ThinConnImpl {
     #[pyo3(signature = (in_del=None))]
     fn close(&self, in_del: Option<bool>) -> PyResult<()> {
         let _ = in_del;
-        *self.cancel_handle.lock().map_err(runtime_error)? = None;
-        let Some(connection) = self.connection.lock().map_err(runtime_error)?.take() else {
+        let Some(connection) = self.take_connection_for_close()? else {
             return Ok(());
         };
-        match BlockingConnection::close(connection) {
-            Ok(()) => Ok(()),
-            Err(err)
-                if err.to_string().contains("Broken pipe")
-                    || err
-                        .to_string()
-                        .contains("Transport endpoint is not connected") =>
-            {
-                Ok(())
-            }
-            Err(err) => Err(runtime_error(err)),
-        }
+        close_result_to_py(close_connection_result(connection))
     }
 
     fn ping(&self) -> PyResult<()> {
@@ -7037,7 +7047,14 @@ impl AsyncThinConnImpl {
 
     #[pyo3(signature = (in_del=None))]
     async fn close(&self, in_del: Option<bool>) -> PyResult<()> {
-        self.inner.close(in_del)
+        let _ = in_del;
+        let Some(connection) = self.inner.take_connection_for_close()? else {
+            return Ok(());
+        };
+        let close = spawn_blocking_task("oracledb-pyshim-async-close", move || {
+            close_connection_result(connection)
+        });
+        close_result_to_py(close.await)
     }
 
     async fn ping(&self) -> PyResult<()> {

@@ -688,7 +688,21 @@ impl Connection {
     pub async fn close(mut self, cx: &Cx) -> Result<()> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
-        self.rollback(cx).await?;
+        match time::timeout(time::wall_now(), Duration::from_secs(5), self.rollback(cx)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                let eof = encode_packet(
+                    TNS_PACKET_TYPE_DATA,
+                    0,
+                    Some(oracledb_protocol::thin::TNS_DATA_FLAGS_EOF),
+                    &[],
+                    PacketLengthWidth::Large32,
+                )?;
+                let _ = write_all_shared(cx, &self.write, &eof).await;
+                let _ = shutdown_write_shared(cx, &self.write).await;
+                return Ok(());
+            }
+        }
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         send_data_packet_shared(
             cx,
@@ -697,7 +711,15 @@ impl Connection {
             self.sdu,
         )
         .await?;
-        let _ = read_data_response(&mut self.read, cx, &self.write).await?;
+        if let Ok(response) = time::timeout(
+            time::wall_now(),
+            Duration::from_secs(5),
+            read_data_response(&mut self.read, cx, &self.write),
+        )
+        .await
+        {
+            let _ = response?;
+        }
         let eof = encode_packet(
             TNS_PACKET_TYPE_DATA,
             0,

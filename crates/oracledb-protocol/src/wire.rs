@@ -343,11 +343,22 @@ impl<'a> TtcReader<'a> {
     }
 
     pub fn read_bytes_with_length(&mut self) -> Result<Option<Vec<u8>>> {
-        let len = self.read_ub4()?;
+        let len =
+            usize::try_from(self.read_ub4()?).map_err(|_| ProtocolError::InvalidPacketLength {
+                length: usize::MAX,
+                minimum: 0,
+            })?;
         if len == 0 {
             return Ok(None);
         }
-        self.read_bytes()
+        let value_start = self.pos;
+        match self.read_bytes() {
+            Ok(Some(bytes)) if bytes.len() == len => Ok(Some(bytes)),
+            Ok(_) | Err(_) => {
+                self.pos = value_start;
+                Ok(Some(self.read_raw(len)?.to_vec()))
+            }
+        }
     }
 
     pub fn read_string_with_length(&mut self) -> Result<Option<String>> {
@@ -416,6 +427,36 @@ mod tests {
             assert_eq!(reader.read_ub4().expect("ub4 should decode"), value);
             assert_eq!(reader.remaining(), 0);
         }
+    }
+
+    #[test]
+    fn bytes_with_length_accepts_nested_ttc_bytes() {
+        let mut writer = TtcWriter::new();
+        writer
+            .write_bytes_with_two_lengths(Some(b"abc"))
+            .expect("bytes should encode");
+        let bytes = writer.into_bytes();
+        let mut reader = TtcReader::new(&bytes);
+        assert_eq!(
+            reader
+                .read_bytes_with_length()
+                .expect("bytes should decode"),
+            Some(b"abc".to_vec())
+        );
+        assert_eq!(reader.remaining(), 0);
+    }
+
+    #[test]
+    fn bytes_with_length_accepts_direct_payload_bytes() {
+        let bytes = [1, 3, b'a', b'b', b'c'];
+        let mut reader = TtcReader::new(&bytes);
+        assert_eq!(
+            reader
+                .read_bytes_with_length()
+                .expect("bytes should decode"),
+            Some(b"abc".to_vec())
+        );
+        assert_eq!(reader.remaining(), 0);
     }
 
     #[test]
