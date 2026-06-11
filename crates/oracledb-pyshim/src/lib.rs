@@ -6,13 +6,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use oracledb::protocol::sql;
 use oracledb::protocol::thin::{
-    decode_datetime_value, decode_number_value, BindValue, ColumnMetadata, QueryResult, QueryValue,
-    CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE,
-    ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB,
-    ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW,
-    ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_ROWID,
-    ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ,
-    ORA_TYPE_NUM_UROWID, ORA_TYPE_NUM_VARCHAR,
+    bind_value_type_info, decode_datetime_value, decode_number_value, define_metadata_from_bind,
+    BindValue, ColumnMetadata, QueryResult, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR,
+    ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB,
+    ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_DATE,
+    ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_OBJECT,
+    ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_ROWID, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
+    ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_UROWID, ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection};
@@ -2665,95 +2665,11 @@ fn input_size_array_info(value: &Bound<'_, PyAny>) -> PyResult<(bool, u32)> {
 }
 
 fn bind_type_info(value: &BindValue) -> Option<(u8, u8, u32)> {
-    match value {
-        BindValue::TypedNull {
-            ora_type_num,
-            csfrm,
-            buffer_size,
-        }
-        | BindValue::Output {
-            ora_type_num,
-            csfrm,
-            buffer_size,
-        }
-        | BindValue::ReturnOutput {
-            ora_type_num,
-            csfrm,
-            buffer_size,
-        } => Some((*ora_type_num, *csfrm, (*buffer_size).max(1))),
-        BindValue::ObjectOutput { buffer_size, .. } => {
-            Some((ORA_TYPE_NUM_OBJECT, 0, (*buffer_size).max(1)))
-        }
-        BindValue::Text(value) => Some((
-            ORA_TYPE_NUM_VARCHAR,
-            CS_FORM_IMPLICIT,
-            u32::try_from(value.chars().count())
-                .unwrap_or(u32::MAX)
-                .saturating_mul(4)
-                .max(1),
-        )),
-        BindValue::Raw(value) => Some((
-            ORA_TYPE_NUM_RAW,
-            0,
-            u32::try_from(value.len()).unwrap_or(u32::MAX).max(1),
-        )),
-        BindValue::Lob {
-            ora_type_num,
-            csfrm,
-            ..
-        } => Some((*ora_type_num, *csfrm, 1)),
-        BindValue::Number(_) => Some((ORA_TYPE_NUM_NUMBER, 0, 22)),
-        BindValue::BinaryInteger(_) => Some((ORA_TYPE_NUM_BINARY_INTEGER, 0, 22)),
-        BindValue::BinaryDouble(_) => Some((ORA_TYPE_NUM_BINARY_DOUBLE, 0, 8)),
-        BindValue::DateTime { .. } => Some((ORA_TYPE_NUM_DATE, 0, 7)),
-        BindValue::Timestamp { ora_type_num, .. } => Some((
-            *ora_type_num,
-            0,
-            if matches!(*ora_type_num, ORA_TYPE_NUM_TIMESTAMP_TZ) {
-                13
-            } else {
-                11
-            },
-        )),
-        BindValue::Array {
-            ora_type_num,
-            csfrm,
-            buffer_size,
-            ..
-        } => Some((*ora_type_num, *csfrm, (*buffer_size).max(1))),
-        BindValue::Cursor { .. } => Some((ORA_TYPE_NUM_CURSOR, 0, 4)),
-        BindValue::Null => None,
-    }
+    bind_value_type_info(value).map(|info| (info.ora_type_num, info.csfrm, info.buffer_size))
 }
 
 fn fetch_define_metadata_from_var(source: &ColumnMetadata, value: &BindValue) -> ColumnMetadata {
-    let Some((mut ora_type_num, mut csfrm, buffer_size)) = bind_type_info(value) else {
-        return source.clone();
-    };
-    if source.ora_type_num == ORA_TYPE_NUM_CLOB
-        && matches!(
-            ora_type_num,
-            ORA_TYPE_NUM_CHAR | ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_VARCHAR
-        )
-    {
-        ora_type_num = ORA_TYPE_NUM_LONG;
-        csfrm = if source.csfrm != 0 {
-            source.csfrm
-        } else {
-            csfrm
-        };
-    }
-    let mut metadata = source.clone();
-    metadata.ora_type_num = ora_type_num;
-    metadata.csfrm = csfrm;
-    if ora_type_num == ORA_TYPE_NUM_LONG {
-        metadata.buffer_size = i32::MAX as u32;
-        metadata.max_size = 0;
-    } else {
-        metadata.buffer_size = buffer_size.max(1);
-        metadata.max_size = buffer_size.max(1);
-    }
-    metadata
+    define_metadata_from_bind(source, value)
 }
 
 fn bind_optional_text(value: Option<&str>) -> BindValue {

@@ -253,6 +253,13 @@ pub struct ColumnMetadata {
     pub is_array: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BindTypeInfo {
+    pub ora_type_num: u8,
+    pub csfrm: u8,
+    pub buffer_size: u32,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QueryValue {
     Text(String),
@@ -744,9 +751,9 @@ fn write_bind_metadata_with_type(
     Ok(())
 }
 
-fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
-    match value {
-        BindValue::Null => (ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 1),
+pub fn bind_value_type_info(value: &BindValue) -> Option<BindTypeInfo> {
+    let (ora_type_num, csfrm, buffer_size) = match value {
+        BindValue::Null => return None,
         BindValue::TypedNull {
             ora_type_num,
             csfrm,
@@ -803,7 +810,46 @@ fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
             ..
         } => (*ora_type_num, *csfrm, (*buffer_size).max(1)),
         BindValue::Cursor { .. } => (ORA_TYPE_NUM_CURSOR, 0, 4),
+    };
+    Some(BindTypeInfo {
+        ora_type_num,
+        csfrm,
+        buffer_size,
+    })
+}
+
+pub fn define_metadata_from_bind(source: &ColumnMetadata, value: &BindValue) -> ColumnMetadata {
+    let Some(mut info) = bind_value_type_info(value) else {
+        return source.clone();
+    };
+    if source.ora_type_num == ORA_TYPE_NUM_CLOB
+        && matches!(
+            info.ora_type_num,
+            ORA_TYPE_NUM_CHAR | ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_VARCHAR
+        )
+    {
+        info.ora_type_num = ORA_TYPE_NUM_LONG;
+        if source.csfrm != 0 {
+            info.csfrm = source.csfrm;
+        }
     }
+    let mut metadata = source.clone();
+    metadata.ora_type_num = info.ora_type_num;
+    metadata.csfrm = info.csfrm;
+    if info.ora_type_num == ORA_TYPE_NUM_LONG {
+        metadata.buffer_size = i32::MAX as u32;
+        metadata.max_size = 0;
+    } else {
+        metadata.buffer_size = info.buffer_size.max(1);
+        metadata.max_size = info.buffer_size.max(1);
+    }
+    metadata
+}
+
+fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
+    bind_value_type_info(value)
+        .map(|info| (info.ora_type_num, info.csfrm, info.buffer_size))
+        .unwrap_or((ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 1))
 }
 
 fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm: u8) -> Result<()> {
@@ -3139,6 +3185,47 @@ mod tests {
         let decoded =
             decode_binary_double(&encode_binary_double(f64::NAN)).expect("NaN should decode");
         assert!(decoded.is_nan());
+    }
+
+    #[test]
+    fn bind_value_type_info_reports_protocol_metadata() {
+        assert_eq!(bind_value_type_info(&BindValue::Null), None);
+        assert_eq!(
+            bind_value_type_info(&BindValue::Text("abc".into())),
+            Some(BindTypeInfo {
+                ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                csfrm: CS_FORM_IMPLICIT,
+                buffer_size: 12,
+            })
+        );
+        assert_eq!(
+            bind_value_type_info(&BindValue::BinaryDouble(1.25)),
+            Some(BindTypeInfo {
+                ora_type_num: ORA_TYPE_NUM_BINARY_DOUBLE,
+                csfrm: 0,
+                buffer_size: ORA_TYPE_SIZE_BINARY_DOUBLE,
+            })
+        );
+    }
+
+    #[test]
+    fn define_metadata_from_bind_preserves_clob_long_define_semantics() {
+        let mut source = number_column("VALUE");
+        source.ora_type_num = ORA_TYPE_NUM_CLOB;
+        source.csfrm = CS_FORM_NCHAR;
+        let metadata = define_metadata_from_bind(
+            &source,
+            &BindValue::TypedNull {
+                ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                csfrm: CS_FORM_IMPLICIT,
+                buffer_size: 128,
+            },
+        );
+
+        assert_eq!(metadata.ora_type_num, ORA_TYPE_NUM_LONG);
+        assert_eq!(metadata.csfrm, CS_FORM_NCHAR);
+        assert_eq!(metadata.buffer_size, i32::MAX as u32);
+        assert_eq!(metadata.max_size, 0);
     }
 
     fn number_column(name: &str) -> ColumnMetadata {
