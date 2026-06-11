@@ -2094,25 +2094,34 @@ fn py_lob_impl<'py>(value: &Bound<'py, PyAny>) -> PyResult<Option<PyRef<'py, Thi
     Ok(None)
 }
 
-fn py_lob_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<Option<BindValue>> {
-    let Some(lob) = py_lob_impl(value)? else {
-        return Ok(None);
-    };
+fn thin_lob_value_to_bind(py: Python<'_>, lob: &ThinLob) -> PyResult<BindValue> {
     if let Some(locator) = lob.locator.lock().map_err(runtime_error)?.as_ref() {
-        return Ok(Some(BindValue::Lob {
+        return Ok(BindValue::Lob {
             ora_type_num: lob.ora_type_num,
             csfrm: lob.csfrm,
             locator: locator.clone(),
-        }));
+        });
     }
-    let py = value.py();
     let data = lob.read(py, 1, None)?;
     let data = data.bind(py);
     if matches!(lob.ora_type_num, ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_BFILE) {
         let bytes = data.cast::<PyBytes>()?;
-        return Ok(Some(BindValue::Raw(bytes.as_bytes().to_vec())));
+        return Ok(BindValue::Raw(bytes.as_bytes().to_vec()));
     }
-    Ok(Some(BindValue::Text(data.extract::<String>()?)))
+    Ok(BindValue::Text(data.extract::<String>()?))
+}
+
+fn py_lob_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<Option<BindValue>> {
+    if let Some(lob) = py_lob_impl(value)? {
+        return thin_lob_value_to_bind(value.py(), &lob).map(Some);
+    }
+    if value.hasattr("_impl")? {
+        let impl_obj = value.getattr("_impl")?;
+        if let Ok(lob) = impl_obj.extract::<PyRef<'_, AsyncThinLob>>() {
+            return thin_lob_value_to_bind(value.py(), &lob.inner).map(Some);
+        }
+    }
+    Ok(None)
 }
 
 fn py_dbobject_element_to_bind(
@@ -2242,7 +2251,7 @@ fn thin_var_from_type_spec(
     let object_type = py_db_object_type_impl(typ)?;
     let default_bind = if let Some(object_type) = object_type.as_ref() {
         object_type
-            .collection_output_bind()
+            .object_output_bind()
             .unwrap_or(BindValue::TypedNull {
                 ora_type_num: ORA_TYPE_NUM_VARCHAR,
                 csfrm: CS_FORM_IMPLICIT,
@@ -2504,6 +2513,7 @@ impl ThinConnState {
 struct ThinLobContext {
     connection: Arc<Mutex<Option<RustConnection>>>,
     state: Arc<Mutex<ThinConnState>>,
+    async_mode: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2512,6 +2522,7 @@ enum ThinVarReturnKind {
     ClobAsLong,
 }
 
+#[derive(Clone)]
 #[pyclass(module = "oracledb.thin_impl", name = "ThinLob")]
 struct ThinLob {
     data: Option<Arc<Mutex<Vec<u8>>>>,
@@ -2552,9 +2563,25 @@ fn lob_data_to_py(
 }
 
 fn py_lob_from_impl(py: Python<'_>, lob: ThinLob) -> PyResult<Py<PyAny>> {
-    let impl_obj = Py::new(py, lob)?;
     let module = PyModule::import(py, "oracledb")?;
-    let cls = module.getattr("LOB")?;
+    let cls = if lob
+        .context
+        .as_ref()
+        .is_some_and(|context| context.async_mode)
+    {
+        module.getattr("AsyncLOB")?
+    } else {
+        module.getattr("LOB")?
+    };
+    let impl_obj: Py<PyAny> = if lob
+        .context
+        .as_ref()
+        .is_some_and(|context| context.async_mode)
+    {
+        Py::new(py, AsyncThinLob { inner: lob })?.into()
+    } else {
+        Py::new(py, lob)?.into()
+    };
     Ok(cls.call_method1("_from_impl", (impl_obj,))?.unbind())
 }
 
@@ -2733,6 +2760,58 @@ impl ThinLob {
 
     fn get_is_open(&self) -> bool {
         false
+    }
+}
+
+#[pyclass(module = "oracledb.thin_impl", name = "AsyncThinLob")]
+struct AsyncThinLob {
+    inner: ThinLob,
+}
+
+#[pymethods]
+impl AsyncThinLob {
+    #[pyo3(signature = (offset=1, amount=None))]
+    async fn read(&self, offset: u64, amount: Option<u64>) -> PyResult<Py<PyAny>> {
+        Python::attach(|py| self.inner.read(py, offset, amount))
+    }
+
+    async fn write(&mut self, value: Py<PyAny>, offset: u64) -> PyResult<()> {
+        Python::attach(|py| self.inner.write(value.bind(py), offset))
+    }
+
+    fn get_max_amount(&self) -> u64 {
+        self.inner.get_max_amount()
+    }
+
+    async fn get_size(&self) -> u64 {
+        self.inner.get_size()
+    }
+
+    async fn size(&self) -> u64 {
+        self.inner.get_size()
+    }
+
+    async fn get_chunk_size(&self) -> u32 {
+        self.inner.get_chunk_size()
+    }
+
+    #[getter]
+    fn dbtype(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.inner.dbtype(py)
+    }
+
+    async fn close(&self) {}
+
+    async fn open(&self) {}
+
+    async fn get_is_open(&self) -> bool {
+        self.inner.get_is_open()
+    }
+
+    async fn trim(&self, _new_size: u64) {}
+
+    fn free_lob(&self) {
+        self.inner.free_lob()
     }
 }
 
@@ -3475,6 +3554,73 @@ impl ThinConnImpl {
             .collect()
     }
 
+    fn plsql_type_attrs(
+        &self,
+        schema: &str,
+        package_name: &str,
+        type_name: &str,
+    ) -> PyResult<Vec<DbObjectAttrImpl>> {
+        let rows = self.query_rows_with_binds(
+            "select attr_name, attr_type_owner, attr_type_package, attr_type_name, length, precision, scale \
+             from all_plsql_type_attrs \
+             where owner = :1 and package_name = :2 and type_name = :3 \
+             order by attr_no",
+            &[
+                BindValue::Text(schema.to_ascii_uppercase()),
+                BindValue::Text(package_name.to_ascii_uppercase()),
+                BindValue::Text(type_name.to_ascii_uppercase()),
+            ],
+        )?;
+        rows.into_iter()
+            .map(|row| {
+                let name = row
+                    .first()
+                    .and_then(query_value_to_string)
+                    .unwrap_or_default()
+                    .to_ascii_uppercase();
+                let attr_type_owner = row
+                    .get(1)
+                    .and_then(query_value_to_string)
+                    .unwrap_or_else(|| schema.to_ascii_uppercase());
+                let attr_type_package = row.get(2).and_then(query_value_to_string);
+                let attr_type_name = row
+                    .get(3)
+                    .and_then(query_value_to_string)
+                    .unwrap_or_else(|| "VARCHAR2".to_string());
+                let dbtype_name = public_dbtype_name_from_oracle_type_name(&attr_type_name);
+                let (precision, scale) = dbobject_attr_precision_scale(
+                    &attr_type_name,
+                    row.get(5).and_then(query_value_to_i8),
+                    row.get(6).and_then(query_value_to_i8),
+                );
+                let objtype = if dbtype_name == "DB_TYPE_OBJECT" {
+                    if let Some(attr_type_package) = attr_type_package {
+                        Some(self.plsql_type_shallow(
+                            &attr_type_owner,
+                            &attr_type_package,
+                            &attr_type_name,
+                        )?)
+                    } else {
+                        Some(self.object_type_shallow(&attr_type_owner, &attr_type_name)?)
+                    }
+                } else {
+                    None
+                };
+                Ok(DbObjectAttrImpl {
+                    name,
+                    dbtype_name: dbtype_name.to_string(),
+                    objtype,
+                    max_size: dbobject_attr_max_size(
+                        &attr_type_name,
+                        row.get(4).and_then(query_value_to_u32),
+                    ),
+                    precision,
+                    scale,
+                })
+            })
+            .collect()
+    }
+
     fn rowtype_attrs(&self, schema: &str, table_name: &str) -> PyResult<Vec<DbObjectAttrImpl>> {
         let rows = self.query_rows_with_binds(
             "select column_name, data_type, data_length, data_precision, data_scale, data_type_owner, char_length \
@@ -3669,25 +3815,11 @@ impl ThinConnImpl {
         Ok((Some(element_metadata), max_num_elements, is_assoc_array))
     }
 
-    fn object_type_identity(
+    fn type_shape_identity(
         &self,
-        schema: &str,
-        type_name: &str,
+        full_name: &str,
+        oid_from_catalog: Option<Vec<u8>>,
     ) -> PyResult<(Option<Vec<u8>>, u32)> {
-        let schema = schema.to_ascii_uppercase();
-        let type_name = type_name.to_ascii_uppercase();
-        let oid_from_catalog = self
-            .query_first_row_with_binds(
-                "select type_oid from all_types where owner = :1 and type_name = :2",
-                &[
-                    BindValue::Text(schema.clone()),
-                    BindValue::Text(type_name.clone()),
-                ],
-            )?
-            .and_then(|row| match row.first() {
-                Some(Some(QueryValue::Raw(bytes))) => Some(bytes.clone()),
-                _ => None,
-            });
         let result = self.execute_with_binds(
             "declare \
                  t_instantiable varchar2(3); \
@@ -3705,7 +3837,7 @@ impl ThinConnImpl {
                     csfrm: 0,
                     buffer_size: 22,
                 },
-                BindValue::Text(format!("{schema}.{type_name}")),
+                BindValue::Text(full_name.to_string()),
                 BindValue::Output {
                     ora_type_num: ORA_TYPE_NUM_RAW,
                     csfrm: 0,
@@ -3750,6 +3882,57 @@ impl ThinConnImpl {
             })
             .unwrap_or(0);
         Ok((oid, version))
+    }
+
+    fn object_type_identity(
+        &self,
+        schema: &str,
+        type_name: &str,
+    ) -> PyResult<(Option<Vec<u8>>, u32)> {
+        let schema = schema.to_ascii_uppercase();
+        let type_name = type_name.to_ascii_uppercase();
+        let oid_from_catalog = self
+            .query_first_row_with_binds(
+                "select type_oid from all_types where owner = :1 and type_name = :2",
+                &[
+                    BindValue::Text(schema.clone()),
+                    BindValue::Text(type_name.clone()),
+                ],
+            )?
+            .and_then(|row| match row.first() {
+                Some(Some(QueryValue::Raw(bytes))) => Some(bytes.clone()),
+                _ => None,
+            });
+        self.type_shape_identity(&format!("{schema}.{type_name}"), oid_from_catalog)
+    }
+
+    fn plsql_type_identity(
+        &self,
+        schema: &str,
+        package_name: &str,
+        type_name: &str,
+    ) -> PyResult<(Option<Vec<u8>>, u32)> {
+        let schema = schema.to_ascii_uppercase();
+        let package_name = package_name.to_ascii_uppercase();
+        let type_name = type_name.to_ascii_uppercase();
+        let oid_from_catalog = self
+            .query_first_row_with_binds(
+                "select type_oid from all_plsql_types \
+                 where owner = :1 and package_name = :2 and type_name = :3",
+                &[
+                    BindValue::Text(schema.clone()),
+                    BindValue::Text(package_name.clone()),
+                    BindValue::Text(type_name.clone()),
+                ],
+            )?
+            .and_then(|row| match row.first() {
+                Some(Some(QueryValue::Raw(bytes))) => Some(bytes.clone()),
+                _ => None,
+            });
+        self.type_shape_identity(
+            &format!("{schema}.{package_name}.{type_name}"),
+            oid_from_catalog,
+        )
     }
 
     fn object_type_shallow(&self, schema: &str, type_name: &str) -> PyResult<DbObjectTypeImpl> {
@@ -3804,16 +3987,23 @@ impl ThinConnImpl {
             .unwrap_or_else(|| "OBJECT".to_string());
         let (element_metadata, max_num_elements, is_assoc_array) =
             self.plsql_type_collection_metadata(schema, package_name, type_name)?;
+        let attrs = if element_metadata.is_some() {
+            Vec::new()
+        } else {
+            self.plsql_type_attrs(schema, package_name, type_name)?
+        };
+        let (oid, version) = self.plsql_type_identity(schema, package_name, type_name)?;
         Ok(DbObjectTypeImpl::new(
             schema.to_ascii_uppercase(),
             Some(package_name.to_ascii_uppercase()),
             type_name.to_ascii_uppercase(),
             &typecode,
-            Vec::new(),
+            attrs,
             element_metadata,
             max_num_elements,
             is_assoc_array,
-        ))
+        )
+        .with_type_identity(oid, version))
     }
 
     fn plsql_type(
@@ -3854,16 +4044,23 @@ impl ThinConnImpl {
             .unwrap_or_else(|| "OBJECT".to_string());
         let (element_metadata, max_num_elements, is_assoc_array) =
             self.plsql_type_collection_metadata(&schema, &package_name, &type_name)?;
+        let attrs = if element_metadata.is_some() {
+            Vec::new()
+        } else {
+            self.plsql_type_attrs(&schema, &package_name, &type_name)?
+        };
+        let (oid, version) = self.plsql_type_identity(&schema, &package_name, &type_name)?;
         Ok(DbObjectTypeImpl::new(
             schema.to_ascii_uppercase(),
             Some(package_name.to_ascii_uppercase()),
             type_name.to_ascii_uppercase(),
             &typecode,
-            Vec::new(),
+            attrs,
             element_metadata,
             max_num_elements,
             is_assoc_array,
-        ))
+        )
+        .with_type_identity(oid, version))
     }
 
     fn call_timeout(&self) -> PyResult<Option<u32>> {
@@ -4431,11 +4628,11 @@ impl ThinConnImpl {
         Ok(connection.serial_num())
     }
 
-    fn create_temp_lob_impl(
+    fn create_temp_lob_value(
         &self,
-        py: Python<'_>,
         lob_type: &Bound<'_, PyAny>,
-    ) -> PyResult<Py<ThinLob>> {
+        async_mode: bool,
+    ) -> PyResult<ThinLob> {
         let (ora_type_num, csfrm) = match py_type_name(lob_type).as_str() {
             "DB_TYPE_BLOB" => (ORA_TYPE_NUM_BLOB, 0),
             "DB_TYPE_NCLOB" => (ORA_TYPE_NUM_CLOB, CS_FORM_NCHAR),
@@ -4447,21 +4644,27 @@ impl ThinConnImpl {
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
         let result = BlockingConnection::create_temp_lob(connection, ora_type_num, csfrm)
             .map_err(runtime_error)?;
-        Py::new(
-            py,
-            ThinLob {
-                data: None,
-                locator: Arc::new(Mutex::new(Some(result.locator))),
-                ora_type_num,
-                csfrm,
-                size: 0,
-                chunk_size: 0,
-                context: Some(ThinLobContext {
-                    connection: Arc::clone(&self.connection),
-                    state: Arc::clone(&self.state),
-                }),
-            },
-        )
+        Ok(ThinLob {
+            data: None,
+            locator: Arc::new(Mutex::new(Some(result.locator))),
+            ora_type_num,
+            csfrm,
+            size: 0,
+            chunk_size: 0,
+            context: Some(ThinLobContext {
+                connection: Arc::clone(&self.connection),
+                state: Arc::clone(&self.state),
+                async_mode,
+            }),
+        })
+    }
+
+    fn create_temp_lob_impl(
+        &self,
+        py: Python<'_>,
+        lob_type: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<ThinLob>> {
+        Py::new(py, self.create_temp_lob_value(lob_type, false)?)
     }
 
     fn create_cursor_impl(&self, scrollable: bool) -> ThinCursorImpl {
@@ -4540,10 +4743,7 @@ impl DbObjectTypeImpl {
         self
     }
 
-    fn collection_output_bind(&self) -> Option<BindValue> {
-        if !self.is_collection {
-            return None;
-        }
+    fn object_output_bind(&self) -> Option<BindValue> {
         let oid = self.oid.clone()?;
         Some(BindValue::ObjectOutput {
             schema: self.schema.clone(),
@@ -5577,6 +5777,7 @@ struct ThinCursorImpl {
     prefetchrows: u32,
     scrollable: bool,
     fetch_lobs: bool,
+    fetch_async_lobs: bool,
     fetch_decimals: bool,
     suspend_on_success: bool,
     rowfactory: Option<Py<PyAny>>,
@@ -5630,6 +5831,7 @@ impl ThinCursorImpl {
             prefetchrows: 2,
             scrollable,
             fetch_lobs: true,
+            fetch_async_lobs: false,
             fetch_decimals: false,
             suspend_on_success: false,
             rowfactory: None,
@@ -6277,6 +6479,7 @@ impl ThinCursorImpl {
         let lob_context = ThinLobContext {
             connection: Arc::clone(&self.connection),
             state: Arc::clone(&self.state),
+            async_mode: self.fetch_async_lobs,
         };
         let values = row
             .iter()
@@ -6422,12 +6625,14 @@ fn thin_lob_context_from_cursor(owner_cursor: &Bound<'_, PyAny>) -> PyResult<Thi
         return Ok(ThinLobContext {
             connection: Arc::clone(&cursor_impl.connection),
             state: Arc::clone(&cursor_impl.state),
+            async_mode: false,
         });
     }
     let cursor_impl = impl_obj.extract::<PyRef<'_, AsyncThinCursorImpl>>()?;
     Ok(ThinLobContext {
         connection: Arc::clone(&cursor_impl.inner.connection),
         state: Arc::clone(&cursor_impl.inner.state),
+        async_mode: true,
     })
 }
 
@@ -6862,7 +7067,12 @@ impl AsyncThinCursorImpl {
     }
 
     async fn fetch_next_row(&mut self, cursor: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
-        Python::attach(|py| self.inner.fetch_next_row(py, cursor.bind(py)))
+        Python::attach(|py| {
+            self.inner.fetch_async_lobs = true;
+            let result = self.inner.fetch_next_row(py, cursor.bind(py));
+            self.inner.fetch_async_lobs = false;
+            result
+        })
     }
 
     fn setinputsizes(
@@ -7201,8 +7411,15 @@ impl AsyncThinConnImpl {
         self.inner.get_serial_num()
     }
 
-    async fn create_temp_lob_impl(&self, lob_type: Py<PyAny>) -> PyResult<Py<ThinLob>> {
-        Python::attach(|py| self.inner.create_temp_lob_impl(py, lob_type.bind(py)))
+    async fn create_temp_lob_impl(&self, lob_type: Py<PyAny>) -> PyResult<Py<AsyncThinLob>> {
+        Python::attach(|py| {
+            Py::new(
+                py,
+                AsyncThinLob {
+                    inner: self.inner.create_temp_lob_value(lob_type.bind(py), true)?,
+                },
+            )
+        })
     }
 
     fn create_cursor_impl(&self, scrollable: bool) -> AsyncThinCursorImpl {
@@ -7496,6 +7713,7 @@ fn oracledb_pyshim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(discard_pending_connect_args, m)?)?;
     m.add_class::<ThinConnImpl>()?;
     m.add_class::<ThinLob>()?;
+    m.add_class::<AsyncThinLob>()?;
     m.add_class::<DbObjectTypeImpl>()?;
     m.add_class::<DbObjectAttrImpl>()?;
     m.add_class::<DbObjectImpl>()?;
