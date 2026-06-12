@@ -1,0 +1,11 @@
+connected 23.26.1.0.0
+supports_pipelining: True
+table ready
+=== capture A: abort-on-error pipeline ===
+capture A rows: [(1, 'one'), (2, 'two')]
+=== capture B: continue-on-error pipeline ===
+capture B error: ORA-00942
+capture B rows: [(3,)]
+=== capture C: bound execute pipeline ===
+capture C rows: [(1,), (2,), (3,), (4,)]
+done
