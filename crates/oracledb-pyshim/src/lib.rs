@@ -46,6 +46,8 @@ fn oracledb_pyshim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(init_thin_impl, m)?)?;
     m.add_function(wrap_pyfunction!(record_next_connect_args, m)?)?;
     m.add_function(wrap_pyfunction!(discard_pending_connect_args, m)?)?;
+    m.add_function(wrap_pyfunction!(record_next_pool_args, m)?)?;
+    m.add_function(wrap_pyfunction!(discard_pending_pool_args, m)?)?;
     m.add_class::<ThinConnImpl>()?;
     m.add_class::<ThinLob>()?;
     m.add_class::<AsyncThinLob>()?;

@@ -11,20 +11,22 @@ use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
 use asupersync::sync::Mutex as AsyncMutex;
 use asupersync::{time, Cx};
 use oracledb_protocol::thin::{
-    build_auth_phase_two_payload_with_context_with_seq, build_connect_packet_payload,
-    build_define_fetch_payload_with_seq, build_execute_payload_with_bind_rows_with_seq,
-    build_execute_payload_with_binds_with_seq, build_execute_payload_with_seq,
-    build_fast_auth_phase_one_payload, build_fetch_payload_with_seq,
-    build_function_payload_with_seq, build_lob_create_temp_payload_with_seq,
-    build_lob_free_temp_payload_with_seq, build_lob_read_payload_with_seq,
-    build_lob_trim_payload_with_seq, build_lob_write_payload_with_seq, parse_accept_payload,
-    parse_auth_response, parse_fetch_response_with_context, parse_lob_create_temp_response,
+    build_auth_phase_two_payload_with_proxy_with_seq, build_change_password_payload_with_seq,
+    build_connect_packet_payload, build_define_fetch_payload_with_seq,
+    build_execute_payload_with_bind_rows_with_seq, build_execute_payload_with_binds_with_seq,
+    build_execute_payload_with_seq, build_fast_auth_phase_one_payload,
+    build_fetch_payload_with_seq, build_function_payload_with_seq,
+    build_lob_create_temp_payload_with_seq, build_lob_free_temp_payload_with_seq,
+    build_lob_read_payload_with_seq, build_lob_trim_payload_with_seq,
+    build_lob_write_payload_with_seq, parse_accept_payload, parse_auth_response,
+    parse_fetch_response_with_context, parse_lob_create_temp_response,
     parse_lob_free_temp_response, parse_lob_read_response, parse_lob_trim_response,
-    parse_lob_write_response, parse_query_response, parse_query_response_with_binds, BindValue,
-    ClientCapabilities, ColumnMetadata, LobReadResult, QueryResult, TNS_FUNC_COMMIT,
-    TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE,
-    TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT,
-    TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE,
+    parse_lob_write_response, parse_plain_function_response, parse_query_response,
+    parse_query_response_with_binds, BindValue, ClientCapabilities, ColumnMetadata, LobReadResult,
+    QueryResult, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK,
+    TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT,
+    TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT,
+    TNS_PACKET_TYPE_REFUSE,
 };
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};
@@ -37,8 +39,62 @@ pub use oracledb_protocol as protocol;
 
 #[cfg(feature = "arrow")]
 pub mod arrow;
+pub mod pool;
 
 type SharedWriteHalf = Arc<AsyncMutex<OwnedWriteHalf>>;
+
+/// Oracle error codes that python-oracledb maps to DPY-4011 (connection
+/// closed); seeing one of these marks the connection as dead so pools can
+/// discard it on release (reference `errors.ERR_ORACLE_ERROR_XREF`).
+const SESSION_DEAD_ORA_CODES: &[u32] = &[
+    22, 28, 31, 45, 378, 600, 602, 603, 609, 1012, 1041, 1043, 1089, 1092, 2396, 3113, 3114, 3122,
+    3135, 12153, 12537, 12547, 12570, 12583, 27146, 28511, 56600,
+];
+
+/// TTC field-version threshold where the database version number encoding
+/// changed (reference thin/constants.pxi `TNS_CCAP_FIELD_VERSION_18_1_EXT_1`).
+const TNS_CCAP_FIELD_VERSION_18_1_EXT_1: u8 = 11;
+
+/// Decode the packed `AUTH_VERSION_NO` value into the database version
+/// 5-tuple. The bit layout changed with Oracle Database 18
+/// (reference messages/auth.pyx `_get_version_tuple`).
+fn decode_server_version_number(full: u32, new_format: bool) -> (u8, u8, u8, u8, u8) {
+    if new_format {
+        (
+            ((full >> 24) & 0xFF) as u8,
+            ((full >> 16) & 0xFF) as u8,
+            ((full >> 12) & 0x0F) as u8,
+            ((full >> 4) & 0xFF) as u8,
+            (full & 0x0F) as u8,
+        )
+    } else {
+        (
+            ((full >> 24) & 0xFF) as u8,
+            ((full >> 20) & 0x0F) as u8,
+            ((full >> 12) & 0x0F) as u8,
+            ((full >> 8) & 0x0F) as u8,
+            (full & 0x0F) as u8,
+        )
+    }
+}
+
+fn protocol_error_is_session_dead(err: &oracledb_protocol::ProtocolError) -> bool {
+    let message = match err {
+        oracledb_protocol::ProtocolError::ServerError(message) => message,
+        oracledb_protocol::ProtocolError::ServerErrorWithRowCount { message, .. } => message,
+        _ => return false,
+    };
+    let Some(start) = message.find("ORA-") else {
+        return false;
+    };
+    let digits = message[start + 4..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    digits
+        .parse::<u32>()
+        .is_ok_and(|code| SESSION_DEAD_ORA_CODES.contains(&code))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -73,6 +129,7 @@ pub struct ConnectOptions {
     pub identity: ClientIdentity,
     pub app_context: Vec<(String, String, String)>,
     pub sdu: u16,
+    pub proxy_user: Option<String>,
 }
 
 impl ConnectOptions {
@@ -89,11 +146,17 @@ impl ConnectOptions {
             identity,
             app_context: Vec::new(),
             sdu: 8192,
+            proxy_user: None,
         }
     }
 
     pub fn with_app_context(mut self, app_context: Vec<(String, String, String)>) -> Self {
         self.app_context = app_context;
+        self
+    }
+
+    pub fn with_proxy_user(mut self, proxy_user: Option<String>) -> Self {
+        self.proxy_user = proxy_user;
         self
     }
 
@@ -113,10 +176,17 @@ pub struct Connection {
     session_id: u32,
     serial_num: u16,
     server_version: Option<String>,
+    server_version_tuple: Option<(u8, u8, u8, u8, u8)>,
     capabilities: ClientCapabilities,
     ttc_seq_num: u8,
     sdu: usize,
     cursor_columns: BTreeMap<u32, Vec<ColumnMetadata>>,
+    dead: bool,
+    /// Logon user, retained for the change-password call.
+    user: String,
+    /// Session combo key from verifier generation, retained for the
+    /// change-password call (reference keeps `conn_impl._combo_key`).
+    combo_key: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -208,7 +278,7 @@ impl Connection {
             verifier_type,
         )?;
         let auth_connect_string = auth_connect_descriptor(&descriptor);
-        let auth_two = build_auth_phase_two_payload_with_context_with_seq(
+        let auth_two = build_auth_phase_two_payload_with_proxy_with_seq(
             &options.user,
             &encrypted,
             &identity.driver_name,
@@ -216,6 +286,7 @@ impl Connection {
             &auth_connect_string,
             next_ttc_sequence(&mut ttc_seq_num),
             &options.app_context,
+            options.proxy_user.as_deref(),
         )?;
         trace_connect_bytes("AUTH phase two payload", &auth_two);
         trace_connect_step("send AUTH phase two");
@@ -232,6 +303,16 @@ impl Connection {
         let session_id = parse_session_u32(&auth_two.session_data, "AUTH_SESSION_ID")?;
         let serial_num = parse_session_u16(&auth_two.session_data, "AUTH_SERIAL_NUM")?;
         let server_version = auth_two.session_data.get("AUTH_VERSION_STRING").cloned();
+        let server_version_tuple = auth_two
+            .session_data
+            .get("AUTH_VERSION_NO")
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .map(|num| {
+                decode_server_version_number(
+                    num,
+                    capabilities.ttc_field_version >= TNS_CCAP_FIELD_VERSION_18_1_EXT_1,
+                )
+            });
 
         Ok(Self {
             descriptor,
@@ -241,10 +322,14 @@ impl Connection {
             session_id,
             serial_num,
             server_version,
+            server_version_tuple,
             capabilities,
             ttc_seq_num,
             sdu,
             cursor_columns: BTreeMap::new(),
+            dead: false,
+            user: options.user,
+            combo_key: encrypted.combo_key,
         })
     }
 
@@ -268,6 +353,12 @@ impl Connection {
         self.server_version.as_deref()
     }
 
+    /// Database version 5-tuple decoded from `AUTH_VERSION_NO`
+    /// (reference messages/auth.pyx `_get_version_tuple`).
+    pub fn server_version_tuple(&self) -> Option<(u8, u8, u8, u8, u8)> {
+        self.server_version_tuple
+    }
+
     pub fn sdu(&self) -> usize {
         self.sdu
     }
@@ -278,19 +369,79 @@ impl Connection {
         })
     }
 
+    /// Whether a session-dead Oracle error (mapped to DPY-4011 by the Python
+    /// layer) has been observed on this connection.
+    pub fn is_dead(&self) -> bool {
+        self.dead
+    }
+
+    /// Wrap a protocol parse result, recording session-dead errors.
+    fn note_parse<T>(
+        &mut self,
+        result: std::result::Result<T, oracledb_protocol::ProtocolError>,
+    ) -> Result<T> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                if protocol_error_is_session_dead(&err) {
+                    self.dead = true;
+                }
+                Err(Error::Protocol(err))
+            }
+        }
+    }
+
     pub async fn ping(&mut self, cx: &Cx) -> Result<()> {
+        self.send_function(cx, TNS_FUNC_PING).await
+    }
+
+    /// Change the session password via the dedicated auth round trip
+    /// (reference `ThinConnImpl.change_password`): an AUTH_PHASE_TWO message
+    /// carrying the combo-key-encrypted old/new passwords. Server errors
+    /// (ORA-28218, ORA-01017, ...) surface unchanged.
+    pub async fn change_password(
+        &mut self,
+        cx: &Cx,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<()> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
+        let (encoded_password, encoded_newpassword) =
+            oracledb_protocol::crypto::encrypt_change_password_pair(
+                &self.combo_key,
+                old_password.as_bytes(),
+                new_password.as_bytes(),
+            )?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        send_data_packet_shared(
-            cx,
-            &self.write,
-            &build_function_payload_with_seq(TNS_FUNC_PING, seq_num),
-            self.sdu,
-        )
-        .await?;
-        let _ = read_data_response(&mut self.read, cx, &self.write).await?;
+        let payload = build_change_password_payload_with_seq(
+            &self.user,
+            &encoded_password,
+            &encoded_newpassword,
+            seq_num,
+        )?;
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.note_parse(parse_auth_response(&response).map(|_| ()))?;
         Ok(())
+    }
+
+    /// Ping with an upper bound on the round trip, used by pool health
+    /// checks (reference pings under `ping_timeout`).
+    pub async fn ping_with_timeout(&mut self, cx: &Cx, timeout_ms: u32) -> Result<()> {
+        if timeout_ms == 0 {
+            return self.ping(cx).await;
+        }
+        match time::timeout(
+            time::wall_now(),
+            Duration::from_millis(u64::from(timeout_ms)),
+            self.ping(cx),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(Error::CallTimeout(timeout_ms)),
+        }
     }
 
     pub async fn commit(&mut self, cx: &Cx) -> Result<()> {
@@ -316,7 +467,8 @@ impl Connection {
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
         let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("EXECUTE query response", &response);
-        let result = parse_query_response(&response, self.capabilities).map_err(Error::from)?;
+        let parsed = parse_query_response(&response, self.capabilities);
+        let result = self.note_parse(parsed)?;
         self.remember_cursor_columns(&result);
         Ok(result)
     }
@@ -368,8 +520,8 @@ impl Connection {
             read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, self.sdu)
                 .await?;
         trace_query_bytes("EXECUTE query response", &response);
-        let result = parse_query_response_with_binds(&response, self.capabilities, binds)
-            .map_err(Error::from)?;
+        let parsed = parse_query_response_with_binds(&response, self.capabilities, binds);
+        let result = self.note_parse(parsed)?;
         self.remember_cursor_columns(&result);
         Ok(result)
     }
@@ -409,12 +561,12 @@ impl Connection {
             read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, self.sdu)
                 .await?;
         trace_query_bytes("EXECUTE query response", &response);
-        let result = parse_query_response_with_binds(
+        let parsed = parse_query_response_with_binds(
             &response,
             self.capabilities,
             bind_rows.first().map(Vec::as_slice).unwrap_or(&[]),
-        )
-        .map_err(Error::from)?;
+        );
+        let result = self.note_parse(parsed)?;
         self.remember_cursor_columns(&result);
         Ok(result)
     }
@@ -469,9 +621,9 @@ impl Connection {
             .get(&cursor_id)
             .cloned()
             .unwrap_or_else(|| known_columns.to_vec());
-        let result =
-            parse_fetch_response_with_context(&response, self.capabilities, &columns, previous_row)
-                .map_err(Error::from)?;
+        let parsed =
+            parse_fetch_response_with_context(&response, self.capabilities, &columns, previous_row);
+        let result = self.note_parse(parsed)?;
         self.remember_cursor_columns(&result);
         Ok(result)
     }
@@ -527,7 +679,11 @@ impl Connection {
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
         let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("LOB READ response", &response);
-        parse_lob_read_response(&response, self.capabilities, locator).map_err(Error::from)
+        self.note_parse(parse_lob_read_response(
+            &response,
+            self.capabilities,
+            locator,
+        ))
     }
 
     pub async fn read_lob_with_timeout(
@@ -561,7 +717,7 @@ impl Connection {
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
         let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("LOB CREATE TEMP response", &response);
-        parse_lob_create_temp_response(&response, self.capabilities).map_err(Error::from)
+        self.note_parse(parse_lob_create_temp_response(&response, self.capabilities))
     }
 
     pub async fn write_lob(
@@ -585,7 +741,11 @@ impl Connection {
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
         let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("LOB WRITE response", &response);
-        parse_lob_write_response(&response, self.capabilities, locator).map_err(Error::from)
+        self.note_parse(parse_lob_write_response(
+            &response,
+            self.capabilities,
+            locator,
+        ))
     }
 
     pub async fn write_lob_with_timeout(
@@ -619,7 +779,11 @@ impl Connection {
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
         let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("LOB TRIM response", &response);
-        parse_lob_trim_response(&response, self.capabilities, locator).map_err(Error::from)
+        self.note_parse(parse_lob_trim_response(
+            &response,
+            self.capabilities,
+            locator,
+        ))
     }
 
     pub async fn trim_lob_with_timeout(
@@ -650,8 +814,11 @@ impl Connection {
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
         let response = read_data_response(&mut self.read, cx, &self.write).await?;
         trace_query_bytes("LOB FREE TEMP response", &response);
-        parse_lob_free_temp_response(&response, self.capabilities, returned_parameter_len)
-            .map_err(Error::from)
+        self.note_parse(parse_lob_free_temp_response(
+            &response,
+            self.capabilities,
+            returned_parameter_len,
+        ))
     }
 
     pub async fn free_temp_lobs_with_timeout(
@@ -1062,7 +1229,11 @@ impl Connection {
             self.sdu,
         )
         .await?;
-        let _ = read_data_response(&mut self.read, cx, &self.write).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        // Surface server errors (e.g. ORA-01012 after a killed session) that
+        // arrive on plain function round trips; pool ping health checks and
+        // commit/rollback depend on these not being silently swallowed.
+        self.note_parse(parse_plain_function_response(&response, self.capabilities))?;
         Ok(())
     }
 }
@@ -1097,6 +1268,30 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection.ping(&cx).await
+        })
+    }
+
+    pub fn ping_with_timeout(connection: &mut Connection, timeout_ms: u32) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.ping_with_timeout(&cx, timeout_ms).await
+        })
+    }
+
+    pub fn change_password(
+        connection: &mut Connection,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .change_password(&cx, old_password, new_password)
+                .await
         })
     }
 

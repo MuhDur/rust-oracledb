@@ -120,6 +120,25 @@ pub fn generate_verifier(
     })
 }
 
+/// Encrypt the old/new password pair with the session combo key for the
+/// change-password call (reference messages/auth.pyx `_encrypt_passwords`:
+/// one shared random salt, AES-CBC under `_combo_key`, upper-hex encoding).
+pub fn encrypt_change_password_pair(
+    combo_key: &[u8],
+    old_password: &[u8],
+    new_password: &[u8],
+) -> Result<(String, String)> {
+    let mut salt = [0u8; 16];
+    OsRng.fill_bytes(&mut salt);
+    let mut old_with_salt = salt.to_vec();
+    old_with_salt.extend_from_slice(old_password);
+    let encrypted_old = encrypt_cbc(combo_key, &old_with_salt, false)?;
+    let mut new_with_salt = salt.to_vec();
+    new_with_salt.extend_from_slice(new_password);
+    let encrypted_new = encrypt_cbc(combo_key, &new_with_salt, false)?;
+    Ok((hex_upper(&encrypted_old), hex_upper(&encrypted_new)))
+}
+
 pub fn verify_server_response(
     combo_key: &[u8],
     session_data: &std::collections::BTreeMap<String, String>,

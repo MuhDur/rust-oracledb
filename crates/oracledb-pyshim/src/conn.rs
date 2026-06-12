@@ -176,6 +176,8 @@ pub(crate) struct ThinConnImpl {
     pub(crate) thin: bool,
     connect_password: Option<String>,
     new_password: Option<String>,
+    /// Engine identity when this connection is owned by a pool.
+    pub(crate) pool_conn_id: Option<u64>,
 }
 
 pub(crate) struct PreparedConnect {
@@ -227,6 +229,7 @@ impl ThinConnImpl {
             identity,
         )
         .with_app_context(app_context)
+        .with_proxy_user(self.proxy_user.clone())
         .with_sdu(sdu);
         Ok(PreparedConnect {
             options,
@@ -906,6 +909,46 @@ impl ThinConnImpl {
         *self.cancel_handle.lock().map_err(runtime_error)? = None;
         Ok(self.connection.lock().map_err(runtime_error)?.take())
     }
+
+    /// Construct a connection implementation owned by a pool. Unlike
+    /// [`ThinConnImpl::new`], this does not consume the global
+    /// next-connect-args queue (which belongs to standalone connects); the
+    /// pool supplies its captured password explicitly.
+    pub(crate) fn new_for_pool(
+        dsn: &str,
+        params_impl: &Bound<'_, PyAny>,
+        password: Option<String>,
+        pool_conn_id: u64,
+    ) -> PyResult<Self> {
+        let username = get_string_attr(params_impl, "user")?;
+        let stmt_cache_size = get_optional_u32_attr(params_impl, "stmtcachesize")?.unwrap_or(20);
+        let edition = get_optional_string_attr(params_impl, "edition")?;
+        Ok(Self {
+            connection: Arc::new(Mutex::new(None)),
+            cancel_handle: Arc::new(Mutex::new(None)),
+            cancel_requested: Arc::new(AtomicBool::new(false)),
+            state: Arc::new(Mutex::new(ThinConnState::new(
+                stmt_cache_size,
+                edition,
+                false,
+            ))),
+            dsn: normalize_connect_string(dsn.to_string()),
+            username,
+            proxy_user: get_optional_string_attr(params_impl, "proxy_user")?,
+            server_version: (0, 0, 0, 0, 0),
+            autocommit: false,
+            autocommit_state: Arc::new(Mutex::new(false)),
+            tag: None,
+            warning: None,
+            inputtypehandler: None,
+            outputtypehandler: None,
+            invoke_session_callback: false,
+            thin: true,
+            connect_password: password,
+            new_password: None,
+            pool_conn_id: Some(pool_conn_id),
+        })
+    }
 }
 
 #[pymethods]
@@ -946,6 +989,7 @@ impl ThinConnImpl {
             thin: true,
             connect_password: connect_args.password,
             new_password: connect_args.new_password,
+            pool_conn_id: None,
         })
     }
 
@@ -1039,7 +1083,7 @@ impl ThinConnImpl {
         let prepared = self.prepare_connect(params_impl)?;
         let connection = BlockingConnection::connect(prepared.options).map_err(runtime_error)?;
         let cancel_handle = connection.cancel_handle().map_err(runtime_error)?;
-        self.server_version = (0, 0, 0, 0, 0);
+        self.server_version = connection.server_version_tuple().unwrap_or_default();
         *self.cancel_handle.lock().map_err(runtime_error)? = Some(cancel_handle);
         *self.connection.lock().map_err(runtime_error)? = Some(connection);
         if let Some(new_password) = &prepared.new_password {
@@ -1052,6 +1096,10 @@ impl ThinConnImpl {
             state.edition = Some(edition);
             state.edition_probe_started = true;
         }
+        // Reference impl/thin/connection.pyx sets this flag at the end of
+        // every connect; the Python layer only consults it for pooled
+        // connections.
+        self.invoke_session_callback = true;
         Ok(())
     }
 
@@ -1099,20 +1147,14 @@ impl ThinConnImpl {
     }
 
     fn change_password(&self, old_password: &str, new_password: &str) -> PyResult<()> {
-        if new_password.len() > 1024 {
-            return Err(dpy_database_error(
-                "ORA-00988",
-                "missing or invalid password(s)",
-            ));
-        }
-        let user = user_identifier(&self.username)?;
-        let sql = format!(
-            "alter user {user} identified by {} replace {}",
-            quoted_oracle_string(new_password),
-            quoted_oracle_string(old_password)
-        );
-        self.execute_statement(&sql)
-            .and_then(|()| set_password_override_for_user(&self.username, new_password))
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        BlockingConnection::change_password(connection, old_password, new_password)
+            .map_err(runtime_error)?;
+        drop(guard);
+        set_password_override_for_user(&self.username, new_password)
     }
 
     pub(crate) fn get_is_healthy(&self) -> PyResult<bool> {
@@ -1473,14 +1515,24 @@ impl ThinConnImpl {
         Py::new(py, self.create_temp_lob_value(lob_type, false)?)
     }
 
-    pub(crate) fn create_cursor_impl(&self, scrollable: bool) -> ThinCursorImpl {
-        ThinCursorImpl::new(
+    pub(crate) fn create_cursor_impl(
+        &self,
+        py: Python<'_>,
+        scrollable: bool,
+    ) -> PyResult<ThinCursorImpl> {
+        let mut cursor_impl = ThinCursorImpl::new(
             Arc::clone(&self.connection),
             Arc::clone(&self.autocommit_state),
             Arc::clone(&self.cancel_requested),
             Arc::clone(&self.state),
             scrollable,
-        )
+        );
+        // base/connection.pyx:223-224 sources arraysize/prefetchrows from the
+        // live oracledb.defaults singleton at cursor creation.
+        let (arraysize, prefetchrows) = default_cursor_sizes(py)?;
+        cursor_impl.arraysize = arraysize;
+        cursor_impl.prefetchrows = prefetchrows;
+        Ok(cursor_impl)
     }
 }
 

@@ -312,6 +312,7 @@ impl AsyncThinCursorImpl {
     #[setter]
     fn set_fetch_decimals(&mut self, value: bool) {
         self.inner.fetch_decimals = value;
+        self.inner.fetch_decimals_overridden = true;
     }
 
     #[getter]
@@ -538,6 +539,9 @@ impl AsyncThinCursorImpl {
         }
         if !self.inner.fetch_lobs_overridden {
             self.inner.fetch_lobs = Python::attach(default_fetch_lobs)?;
+        }
+        if !self.inner.fetch_decimals_overridden {
+            self.inner.fetch_decimals = Python::attach(default_fetch_decimals)?;
         }
         let statement = self
             .inner
