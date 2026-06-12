@@ -523,6 +523,31 @@ impl ThinCursorImpl {
                 .iter()
                 .map(|var| var.clone_ref(py))
                 .collect::<Vec<_>>();
+            // input type handler runs before any other bind processing
+            // (reference impl/base/cursor.pyx bind_one: num_elements is 1
+            // for single-row execution)
+            let input_type_handler =
+                active_input_type_handler(py, _cursor, self.inputtypehandler.as_ref())?;
+            let (handled_parameters, handled_keyword_parameters) = if let Some(handler) =
+                &input_type_handler
+            {
+                let handler = handler.bind(py);
+                (
+                    apply_input_type_handler(py, _cursor, handler, self.arraysize, parameters, 1)?,
+                    apply_input_type_handler(
+                        py,
+                        _cursor,
+                        handler,
+                        self.arraysize,
+                        keyword_parameters,
+                        1,
+                    )?,
+                )
+            } else {
+                (None, None)
+            };
+            let parameters = handled_parameters.as_ref().or(parameters);
+            let keyword_parameters = handled_keyword_parameters.as_ref().or(keyword_parameters);
             let (effective_statement, effective_parameters, effective_keyword_parameters) =
                 prepare_object_execute_inputs(py, &statement, parameters, keyword_parameters)?;
             let effective_parameters = effective_parameters.as_ref().map(|value| value.bind(py));
