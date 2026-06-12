@@ -927,7 +927,11 @@ impl ThinConnImpl {
             connection: Arc::new(Mutex::new(None)),
             cancel_handle: Arc::new(Mutex::new(None)),
             cancel_requested: Arc::new(AtomicBool::new(false)),
-            state: Arc::new(Mutex::new(ThinConnState::new(stmt_cache_size, edition, false))),
+            state: Arc::new(Mutex::new(ThinConnState::new(
+                stmt_cache_size,
+                edition,
+                false,
+            ))),
             dsn: normalize_connect_string(dsn.to_string()),
             username,
             proxy_user: get_optional_string_attr(params_impl, "proxy_user")?,

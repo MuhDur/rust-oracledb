@@ -375,9 +375,8 @@ impl<'a> DbObjectPackedReader<'a> {
     }
 
     fn skip_length(&mut self) -> Result<()> {
-        match self.read_u8()? {
-            TNS_LONG_LENGTH_INDICATOR => self.skip(4)?,
-            _ => {}
+        if self.read_u8()? == TNS_LONG_LENGTH_INDICATOR {
+            self.skip(4)?;
         }
         Ok(())
     }
@@ -1878,6 +1877,7 @@ pub fn build_lob_read_payload_with_seq(
     Ok(writer.into_bytes())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_lob_op_header(
     writer: &mut TtcWriter,
     locator: &[u8],
@@ -3493,7 +3493,7 @@ fn encode_number_text(value: &str) -> Result<Vec<u8>> {
     while digits.last().is_some_and(|digit| *digit == 0) {
         digits.pop();
     }
-    if digits.len() > NUMBER_MAX_DIGITS || decimal_point_index > 126 || decimal_point_index < -129 {
+    if digits.len() > NUMBER_MAX_DIGITS || !(-129..=126).contains(&decimal_point_index) {
         return Err(ProtocolError::TtcDecode("NUMBER bind out of range"));
     }
 

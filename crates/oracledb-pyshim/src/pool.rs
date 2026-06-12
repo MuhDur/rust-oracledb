@@ -8,9 +8,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use oracledb::pool::{
-    AcquireOptions, PoolBackend, PoolConfig, PoolEngine, PoolError, PURITY_NEW,
-};
+use oracledb::pool::{AcquireOptions, PoolBackend, PoolConfig, PoolEngine, PoolError, PURITY_NEW};
 use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -122,9 +120,7 @@ impl PoolBackend for ShimPoolBackend {
         // Phase 2 (no GIL): connect and apply the creation edition.
         let mut connection =
             BlockingConnection::connect(prepared.options).map_err(|err| err.to_string())?;
-        let cancel_handle = connection
-            .cancel_handle()
-            .map_err(|err| err.to_string())?;
+        let cancel_handle = connection.cancel_handle().map_err(|err| err.to_string())?;
         if let Some(edition) = &prepared.edition {
             let identifier = plain_identifier(edition)?;
             BlockingConnection::execute_query_with_timeout(
@@ -154,10 +150,7 @@ impl PoolBackend for ShimPoolBackend {
             } else {
                 Py::new(py, conn_impl)?.into_any()
             };
-            self.registry
-                .lock()
-                .map_err(runtime_error)?
-                .insert(id, obj);
+            self.registry.lock().map_err(runtime_error)?.insert(id, obj);
             Ok::<_, PyErr>(handle)
         })
         .map_err(pyerr_to_message)
@@ -174,7 +167,11 @@ impl PoolBackend for ShimPoolBackend {
     }
 
     fn close_connection(&self, id: u64, conn: ConnHandle) {
-        let taken = conn.connection.lock().ok().and_then(|mut guard| guard.take());
+        let taken = conn
+            .connection
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
         if let Some(connection) = taken {
             let _ = close_connection_result(connection);
         }
@@ -262,7 +259,11 @@ fn extract_acquire_options(params_impl: &Bound<'_, PyAny>) -> PyResult<AcquireOp
     })
 }
 
-type PoolConnRefs = (u64, Arc<Mutex<Option<RustConnection>>>, Arc<Mutex<ThinConnState>>);
+type PoolConnRefs = (
+    u64,
+    Arc<Mutex<Option<RustConnection>>>,
+    Arc<Mutex<ThinConnState>>,
+);
 
 fn extract_pool_conn_refs(obj: &Bound<'_, PyAny>) -> PyResult<PoolConnRefs> {
     if let Ok(conn) = obj.extract::<PyRef<'_, ThinConnImpl>>() {
@@ -363,10 +364,7 @@ impl ShimPool {
     /// the connection busy) unless called from `__del__`.
     fn release_blocking(&self, refs: &PoolConnRefs, in_del: bool) -> PyResult<()> {
         let (id, connection, state) = refs;
-        let in_txn = state
-            .lock()
-            .map_err(runtime_error)?
-            .transaction_in_progress;
+        let in_txn = state.lock().map_err(runtime_error)?.transaction_in_progress;
         if in_txn {
             let rollback_result = {
                 let mut guard = connection.lock().map_err(runtime_error)?;
@@ -377,10 +375,7 @@ impl ShimPool {
             };
             match rollback_result {
                 Ok(()) => {
-                    state
-                        .lock()
-                        .map_err(runtime_error)?
-                        .transaction_in_progress = false;
+                    state.lock().map_err(runtime_error)?.transaction_in_progress = false;
                 }
                 Err(err) => {
                     if !in_del {
@@ -605,11 +600,19 @@ impl ThinPoolImpl {
     }
 
     fn get_soda_metadata_cache(&self) -> PyResult<bool> {
-        Ok(*self.pool.soda_metadata_cache.lock().map_err(runtime_error)?)
+        Ok(*self
+            .pool
+            .soda_metadata_cache
+            .lock()
+            .map_err(runtime_error)?)
     }
 
     fn set_soda_metadata_cache(&self, value: bool) -> PyResult<()> {
-        *self.pool.soda_metadata_cache.lock().map_err(runtime_error)? = value;
+        *self
+            .pool
+            .soda_metadata_cache
+            .lock()
+            .map_err(runtime_error)? = value;
         Ok(())
     }
 
@@ -673,8 +676,7 @@ impl AsyncThinPoolImpl {
     }
 
     async fn acquire(&self, params_impl: Py<PyAny>) -> PyResult<Py<PyAny>> {
-        let opts =
-            Python::attach(|py| extract_acquire_options(params_impl.bind(py)))?;
+        let opts = Python::attach(|py| extract_acquire_options(params_impl.bind(py)))?;
         let pool = Arc::clone(&self.pool);
         let task = spawn_blocking_task("oracledb-pyshim-pool-acquire", move || {
             Ok::<_, TaskError>(pool.acquire_blocking(opts))
@@ -813,11 +815,19 @@ impl AsyncThinPoolImpl {
     }
 
     fn get_soda_metadata_cache(&self) -> PyResult<bool> {
-        Ok(*self.pool.soda_metadata_cache.lock().map_err(runtime_error)?)
+        Ok(*self
+            .pool
+            .soda_metadata_cache
+            .lock()
+            .map_err(runtime_error)?)
     }
 
     fn set_soda_metadata_cache(&self, value: bool) -> PyResult<()> {
-        *self.pool.soda_metadata_cache.lock().map_err(runtime_error)? = value;
+        *self
+            .pool
+            .soda_metadata_cache
+            .lock()
+            .map_err(runtime_error)? = value;
         Ok(())
     }
 

@@ -529,14 +529,9 @@ fn drop_conn<B: PoolBackend>(
     inner.bg.notify_all();
 }
 
-fn ensure_min_connections<B: PoolBackend>(
-    state: &mut PoolState<B::Conn>,
-    inner: &EngineInner<B>,
-) {
+fn ensure_min_connections<B: PoolBackend>(state: &mut PoolState<B::Conn>, inner: &EngineInner<B>) {
     if state.open_count < state.config.min {
-        state.num_to_create = state
-            .num_to_create
-            .max(state.config.min - state.open_count);
+        state.num_to_create = state.num_to_create.max(state.config.min - state.open_count);
         inner.bg.notify_all();
     }
 }
@@ -556,7 +551,8 @@ fn check_connection<B: PoolBackend>(
         return;
     }
     let max_lifetime = state.config.max_lifetime_session_secs;
-    if max_lifetime > 0 && conn.time_created.elapsed() > Duration::from_secs(u64::from(max_lifetime))
+    if max_lifetime > 0
+        && conn.time_created.elapsed() > Duration::from_secs(u64::from(max_lifetime))
     {
         state.open_count = state.open_count.saturating_sub(1);
         drop_conn(state, inner, conn);
@@ -1250,9 +1246,11 @@ mod tests {
     #[test]
     fn grows_to_min_and_reuses_lifo() {
         let backend = Arc::new(FakeBackend::new());
-        let engine =
-            PoolEngine::start(Arc::clone(&backend), test_config(2, 4, 1, POOL_GETMODE_WAIT))
-                .unwrap();
+        let engine = PoolEngine::start(
+            Arc::clone(&backend),
+            test_config(2, 4, 1, POOL_GETMODE_WAIT),
+        )
+        .unwrap();
         wait_for_open_count(&engine, 2);
         let first = engine.acquire(AcquireOptions::default()).unwrap();
         assert_eq!(engine.busy_count().unwrap(), 1);
