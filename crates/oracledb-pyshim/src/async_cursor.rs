@@ -48,6 +48,12 @@ pub(crate) fn spawn_async_executemany_task(
                 )
                 .await?;
                 let is_plsql = statement_is_plsql(&statement);
+                if is_plsql {
+                    for row in bind_rows.iter_mut() {
+                        materialize_plsql_long_binds_async(cx, connection, row, call_timeout)
+                            .await?;
+                    }
+                }
                 if bind_rows.iter().all(Vec::is_empty)
                     || bind_rows_need_iterative_plsql(&statement, &bind_rows)
                 {
@@ -180,6 +186,10 @@ pub(crate) fn spawn_async_execute_task(
                 call_timeout,
             )
             .await?;
+            if statement_is_plsql(&statement) {
+                materialize_plsql_long_binds_async(&cx, connection, &mut bind_values, call_timeout)
+                    .await?;
+            }
             let mut result = connection
                 .execute_query_with_binds_and_timeout(
                     &cx,

@@ -71,6 +71,7 @@ pub const ORA_TYPE_NUM_OBJECT: u8 = 109;
 pub const ORA_TYPE_NUM_TIMESTAMP: u8 = 180;
 pub const ORA_TYPE_NUM_TIMESTAMP_TZ: u8 = 181;
 pub const ORA_TYPE_NUM_INTERVAL_DS: u8 = 183;
+pub const ORA_TYPE_NUM_INTERVAL_YM: u8 = 182;
 pub const ORA_TYPE_NUM_UROWID: u8 = 208;
 pub const ORA_TYPE_NUM_TIMESTAMP_LTZ: u8 = 231;
 pub const TNS_OBJ_TOP_LEVEL: u32 = 0x01;
@@ -154,6 +155,7 @@ const ORA_TYPE_SIZE_BOOLEAN: u32 = 4;
 const ORA_TYPE_SIZE_NUMBER: u32 = 22;
 const ORA_TYPE_SIZE_DATE: u32 = 7;
 const ORA_TYPE_SIZE_INTERVAL_DS: u32 = 11;
+const ORA_TYPE_SIZE_INTERVAL_YM: u32 = 5;
 const ORA_TYPE_SIZE_ROWID: u32 = 18;
 const ORA_TYPE_SIZE_TIMESTAMP: u32 = 11;
 const ORA_TYPE_SIZE_TIMESTAMP_TZ: u32 = 13;
@@ -314,6 +316,10 @@ pub enum QueryValue {
         minutes: i32,
         seconds: i32,
         fseconds: i32,
+    },
+    IntervalYM {
+        years: i32,
+        months: i32,
     },
     Number {
         text: String,
@@ -633,10 +639,15 @@ pub enum BindValue {
     BinaryInteger(String),
     BinaryDouble(f64),
     BinaryFloat(f64),
+    Boolean(bool),
     IntervalDS {
         days: i32,
         seconds: i32,
         microseconds: i32,
+    },
+    IntervalYM {
+        years: i32,
+        months: i32,
     },
     DateTime {
         year: i32,
@@ -1017,10 +1028,10 @@ fn write_bind_params(
         writer.write_u8(TNS_MSG_TYPE_ROW_DATA);
         for index in bind_row_value_order(row, &bind_metadata, is_plsql) {
             let value = &row[index];
-            let (_ora_type_num, csfrm) = bind_metadata
+            let (_ora_type_num, csfrm, _buffer_size) = bind_metadata
                 .get(index)
                 .copied()
-                .unwrap_or((ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT));
+                .unwrap_or((ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 1));
             write_bind_value(writer, value, csfrm)?;
         }
     }
@@ -1029,7 +1040,7 @@ fn write_bind_params(
 
 fn bind_row_value_order(
     row: &[BindValue],
-    bind_metadata: &[(u8, u8)],
+    bind_metadata: &[(u8, u8, u32)],
     is_plsql: bool,
 ) -> Vec<usize> {
     let mut non_long = Vec::with_capacity(row.len());
@@ -1038,10 +1049,17 @@ fn bind_row_value_order(
         if !is_plsql && value.is_output_only() {
             continue;
         }
+        // non-LONG values are written first followed by any LONG values; a
+        // value is "long" when its buffer size exceeds the maximum string
+        // size (reference messages/base.pyx:1529-1565 keys this off
+        // `metadata.buffer_size > buf._caps.max_string_size`)
         if !is_plsql
-            && bind_metadata.get(index).is_some_and(|(ora_type_num, _)| {
-                matches!(*ora_type_num, ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_LONG_RAW)
-            })
+            && bind_metadata
+                .get(index)
+                .is_some_and(|(ora_type_num, _, buffer_size)| {
+                    matches!(*ora_type_num, ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_LONG_RAW)
+                        || *buffer_size > 32_767
+                })
         {
             long.push(index);
         } else {
@@ -1056,12 +1074,12 @@ fn write_bind_metadata_for_rows(
     writer: &mut TtcWriter,
     bind_rows: &[Vec<BindValue>],
     index: usize,
-) -> Result<(u8, u8)> {
+) -> Result<(u8, u8, u32)> {
     let Some(first_row) = bind_rows.first() else {
-        return Ok((ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT));
+        return Ok((ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 1));
     };
     let Some(first_value) = first_row.get(index) else {
-        return Ok((ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT));
+        return Ok((ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 1));
     };
     let mut metadata_value = first_value;
     let (mut ora_type_num, mut csfrm, mut buffer_size) = bind_metadata(first_value);
@@ -1087,7 +1105,7 @@ fn write_bind_metadata_for_rows(
         }
     }
     write_bind_metadata_with_type(writer, metadata_value, ora_type_num, csfrm, buffer_size)?;
-    Ok((ora_type_num, csfrm))
+    Ok((ora_type_num, csfrm, buffer_size))
 }
 
 fn bind_metadata_types_are_compatible(left: u8, right: u8) -> bool {
@@ -1197,24 +1215,21 @@ pub fn bind_value_type_info(value: &BindValue) -> Option<BindTypeInfo> {
         BindValue::ObjectOutput { buffer_size, .. } => {
             (ORA_TYPE_NUM_OBJECT, 0, (*buffer_size).max(1))
         }
+        // values larger than 32767 bytes keep the VARCHAR/RAW bind type with
+        // a large buffer size; the chunked length encoding carries the data
+        // (reference always derives VARCHAR/RAW from str/bytes values —
+        // metadata.pyx from_value — and never switches the bind type to LONG,
+        // which the server rejects for PL/SQL LOB parameters with ORA-01460)
         BindValue::Text(value) => {
             let buffer_size = u32::try_from(value.chars().count())
                 .unwrap_or(u32::MAX)
                 .saturating_mul(4)
                 .max(1);
-            if buffer_size > 32_767 {
-                (ORA_TYPE_NUM_LONG, CS_FORM_IMPLICIT, TNS_MAX_LONG_LENGTH)
-            } else {
-                (ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, buffer_size)
-            }
+            (ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, buffer_size)
         }
         BindValue::Raw(value) => {
             let buffer_size = u32::try_from(value.len()).unwrap_or(u32::MAX).max(1);
-            if buffer_size > 32_767 {
-                (ORA_TYPE_NUM_LONG_RAW, 0, TNS_MAX_LONG_LENGTH)
-            } else {
-                (ORA_TYPE_NUM_RAW, 0, buffer_size)
-            }
+            (ORA_TYPE_NUM_RAW, 0, buffer_size)
         }
         BindValue::Lob {
             ora_type_num,
@@ -1223,9 +1238,11 @@ pub fn bind_value_type_info(value: &BindValue) -> Option<BindTypeInfo> {
         } => (*ora_type_num, *csfrm, 1),
         BindValue::Number(_) => (ORA_TYPE_NUM_NUMBER, 0, ORA_TYPE_SIZE_NUMBER),
         BindValue::BinaryInteger(_) => (ORA_TYPE_NUM_BINARY_INTEGER, 0, ORA_TYPE_SIZE_NUMBER),
+        BindValue::Boolean(_) => (ORA_TYPE_NUM_BOOLEAN, 0, ORA_TYPE_SIZE_BOOLEAN),
         BindValue::BinaryDouble(_) => (ORA_TYPE_NUM_BINARY_DOUBLE, 0, ORA_TYPE_SIZE_BINARY_DOUBLE),
         BindValue::BinaryFloat(_) => (ORA_TYPE_NUM_BINARY_FLOAT, 0, ORA_TYPE_SIZE_BINARY_FLOAT),
         BindValue::IntervalDS { .. } => (ORA_TYPE_NUM_INTERVAL_DS, 0, ORA_TYPE_SIZE_INTERVAL_DS),
+        BindValue::IntervalYM { .. } => (ORA_TYPE_NUM_INTERVAL_YM, 0, ORA_TYPE_SIZE_INTERVAL_YM),
         BindValue::DateTime { .. } => (ORA_TYPE_NUM_DATE, 0, ORA_TYPE_SIZE_DATE),
         BindValue::Timestamp { ora_type_num, .. } => (
             *ora_type_num,
@@ -1277,6 +1294,40 @@ pub fn define_metadata_from_bind(source: &ColumnMetadata, value: &BindValue) -> 
         metadata.max_size = info.buffer_size.max(1);
     }
     metadata
+}
+
+/// When the same query is re-executed after a column's data type changed to
+/// CLOB/BLOB but the previous execution fetched the column as a char/raw
+/// type, the server streams the data as LONG/LONG RAW (same as a define of
+/// CLOB/BLOB as string/bytes); the fetch metadata must follow (reference
+/// impl/thin/messages/base.pyx:820-845 `_adjust_metadata`). Returns `true`
+/// when the metadata was adjusted.
+pub fn adjust_refetch_metadata(previous: &ColumnMetadata, current: &mut ColumnMetadata) -> bool {
+    if current.ora_type_num == ORA_TYPE_NUM_CLOB
+        && matches!(
+            previous.ora_type_num,
+            ORA_TYPE_NUM_CHAR | ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_VARCHAR
+        )
+    {
+        current.ora_type_num = ORA_TYPE_NUM_LONG;
+        current.csfrm = previous.csfrm;
+        current.buffer_size = TNS_MAX_LONG_LENGTH;
+        current.max_size = 0;
+        return true;
+    }
+    if current.ora_type_num == ORA_TYPE_NUM_BLOB
+        && matches!(
+            previous.ora_type_num,
+            ORA_TYPE_NUM_RAW | ORA_TYPE_NUM_LONG_RAW
+        )
+    {
+        current.ora_type_num = ORA_TYPE_NUM_LONG_RAW;
+        current.csfrm = 0;
+        current.buffer_size = TNS_MAX_LONG_LENGTH;
+        current.max_size = 0;
+        return true;
+    }
+    false
 }
 
 pub fn output_bind(value: BindValue) -> BindValue {
@@ -1369,6 +1420,7 @@ pub fn public_dbtype_name_from_type_name(type_name: &str) -> &'static str {
         "DB_TYPE_BINARY_FLOAT" | "BINARY_FLOAT" => "DB_TYPE_BINARY_FLOAT",
         "DB_TYPE_BOOLEAN" | "BOOLEAN" | "bool" => "DB_TYPE_BOOLEAN",
         "DB_TYPE_INTERVAL_DS" | "INTERVAL DAY TO SECOND" | "timedelta" => "DB_TYPE_INTERVAL_DS",
+        "DB_TYPE_INTERVAL_YM" | "INTERVAL YEAR TO MONTH" | "IntervalYM" => "DB_TYPE_INTERVAL_YM",
         "DB_TYPE_BFILE" | "BFILE" => "DB_TYPE_BFILE",
         "DB_TYPE_JSON" | "JSON" => "DB_TYPE_JSON",
         "STRING" | "DB_TYPE_VARCHAR" | "str" => "DB_TYPE_VARCHAR",
@@ -1381,7 +1433,7 @@ pub fn public_dbtype_name_from_type_name(type_name: &str) -> &'static str {
         "DB_TYPE_LONG" | "LONG" | "LONG_STRING" => "DB_TYPE_LONG",
         "DB_TYPE_LONG_NVARCHAR" | "LONG NVARCHAR" => "DB_TYPE_LONG_NVARCHAR",
         "DB_TYPE_LONG_RAW" | "LONG RAW" | "LONG_BINARY" => "DB_TYPE_LONG_RAW",
-        "DB_TYPE_RAW" | "bytes" => "DB_TYPE_RAW",
+        "DB_TYPE_RAW" | "BINARY" | "bytes" => "DB_TYPE_RAW",
         "ROWID" | "DB_TYPE_ROWID" => "DB_TYPE_ROWID",
         "DB_TYPE_UROWID" => "DB_TYPE_UROWID",
         "DATETIME" | "DB_TYPE_DATE" | "date" | "datetime" => "DB_TYPE_DATE",
@@ -1434,6 +1486,7 @@ pub fn public_dbtype_name_from_column_metadata(metadata: &ColumnMetadata) -> &'s
         (ORA_TYPE_NUM_TIMESTAMP_LTZ, _) => "DB_TYPE_TIMESTAMP_LTZ",
         (ORA_TYPE_NUM_TIMESTAMP_TZ, _) => "DB_TYPE_TIMESTAMP_TZ",
         (ORA_TYPE_NUM_INTERVAL_DS, _) => "DB_TYPE_INTERVAL_DS",
+        (ORA_TYPE_NUM_INTERVAL_YM, _) => "DB_TYPE_INTERVAL_YM",
         (ORA_TYPE_NUM_BOOLEAN, _) => "DB_TYPE_BOOLEAN",
         _ => "DB_TYPE_VARCHAR",
     }
@@ -1537,7 +1590,9 @@ pub fn check_fetch_conversion(
                     | ORA_TYPE_NUM_TIMESTAMP_TZ
             ) || CHAR_TYPES.contains(&to)
         }
-        ORA_TYPE_NUM_INTERVAL_DS | ORA_TYPE_NUM_ROWID => CHAR_TYPES.contains(&to),
+        ORA_TYPE_NUM_INTERVAL_DS | ORA_TYPE_NUM_INTERVAL_YM | ORA_TYPE_NUM_ROWID => {
+            CHAR_TYPES.contains(&to)
+        }
         ORA_TYPE_NUM_NUMBER => {
             matches!(
                 to,
@@ -1669,7 +1724,9 @@ pub fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
         BindValue::BinaryInteger(_) => "DB_TYPE_BINARY_INTEGER",
         BindValue::BinaryDouble(_) => "DB_TYPE_BINARY_DOUBLE",
         BindValue::BinaryFloat(_) => "DB_TYPE_BINARY_FLOAT",
+        BindValue::Boolean(_) => "DB_TYPE_BOOLEAN",
         BindValue::IntervalDS { .. } => "DB_TYPE_INTERVAL_DS",
+        BindValue::IntervalYM { .. } => "DB_TYPE_INTERVAL_YM",
         BindValue::DateTime { .. } => "DB_TYPE_DATE",
         BindValue::Timestamp { ora_type_num, .. } => match *ora_type_num {
             ORA_TYPE_NUM_TIMESTAMP_LTZ => "DB_TYPE_TIMESTAMP_LTZ",
@@ -1715,6 +1772,11 @@ pub fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
             csfrm: 0,
             buffer_size: ORA_TYPE_SIZE_INTERVAL_DS,
         },
+        "DB_TYPE_INTERVAL_YM" | "INTERVAL YEAR TO MONTH" | "IntervalYM" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_INTERVAL_YM,
+            csfrm: 0,
+            buffer_size: ORA_TYPE_SIZE_INTERVAL_YM,
+        },
         "STRING" | "DB_TYPE_VARCHAR" | "DB_TYPE_CHAR" | "str" => BindValue::TypedNull {
             ora_type_num: ORA_TYPE_NUM_VARCHAR,
             csfrm: CS_FORM_IMPLICIT,
@@ -1755,7 +1817,7 @@ pub fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
             csfrm: 0,
             buffer_size: TNS_MAX_LONG_LENGTH,
         },
-        "DB_TYPE_RAW" | "bytes" => BindValue::TypedNull {
+        "DB_TYPE_RAW" | "BINARY" | "bytes" => BindValue::TypedNull {
             ora_type_num: ORA_TYPE_NUM_RAW,
             csfrm: 0,
             buffer_size: size.max(1).max(4000),
@@ -1820,6 +1882,7 @@ fn public_dbtype_name_from_type_info(ora_type_num: u8, csfrm: u8) -> &'static st
         (ORA_TYPE_NUM_BINARY_DOUBLE, _) => "DB_TYPE_BINARY_DOUBLE",
         (ORA_TYPE_NUM_BINARY_FLOAT, _) => "DB_TYPE_BINARY_FLOAT",
         (ORA_TYPE_NUM_INTERVAL_DS, _) => "DB_TYPE_INTERVAL_DS",
+        (ORA_TYPE_NUM_INTERVAL_YM, _) => "DB_TYPE_INTERVAL_YM",
         (ORA_TYPE_NUM_BOOLEAN, _) => "DB_TYPE_BOOLEAN",
         (ORA_TYPE_NUM_BINARY_INTEGER, _) => "DB_TYPE_BINARY_INTEGER",
         (ORA_TYPE_NUM_NUMBER, _) => "DB_TYPE_NUMBER",
@@ -1885,6 +1948,12 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm: u8) -> Res
             let bytes = encode_number_text(value)?;
             writer.write_bytes_with_length(&bytes)
         }
+        // reference encode_boolean (impl/base/encoders.pyx:99-111): true is
+        // the two bytes [1, 1]; false is the single byte [0]
+        BindValue::Boolean(value) => {
+            let bytes: &[u8] = if *value { &[1, 1] } else { &[0] };
+            writer.write_bytes_with_length(bytes)
+        }
         BindValue::BinaryDouble(value) => {
             let bytes = encode_binary_double(*value);
             writer.write_bytes_with_length(&bytes)
@@ -1899,6 +1968,10 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm: u8) -> Res
             microseconds,
         } => {
             let bytes = encode_interval_ds(*days, *seconds, *microseconds)?;
+            writer.write_bytes_with_length(&bytes)
+        }
+        BindValue::IntervalYM { years, months } => {
+            let bytes = encode_interval_ym(*years, *months)?;
             writer.write_bytes_with_length(&bytes)
         }
         BindValue::DateTime {
@@ -3245,6 +3318,12 @@ fn parse_column_value(
             };
             decode_interval_ds(&bytes).map(Some)
         }
+        ORA_TYPE_NUM_INTERVAL_YM => {
+            let Some(bytes) = reader.read_bytes()? else {
+                return Ok(None);
+            };
+            decode_interval_ym(&bytes).map(Some)
+        }
         ORA_TYPE_NUM_DATE
         | ORA_TYPE_NUM_TIMESTAMP
         | ORA_TYPE_NUM_TIMESTAMP_LTZ
@@ -3831,6 +3910,35 @@ fn decode_interval_ds(bytes: &[u8]) -> Result<QueryValue> {
         minutes: i32::from(bytes[5]) - TNS_DURATION_OFFSET,
         seconds: i32::from(bytes[6]) - TNS_DURATION_OFFSET,
         fseconds: to_component(i64::from(fseconds_wire) - TNS_DURATION_MID)?,
+    })
+}
+
+/// Encodes an INTERVAL YEAR TO MONTH value (reference
+/// impl/base/encoders.pyx:151-161): big-endian years offset by
+/// TNS_DURATION_MID followed by months offset by TNS_DURATION_OFFSET.
+fn encode_interval_ym(years: i32, months: i32) -> Result<[u8; 5]> {
+    let mut bytes = [0u8; 5];
+    let wire_years = u32::try_from(i64::from(years) + TNS_DURATION_MID)
+        .map_err(|_| ProtocolError::TtcDecode("INTERVAL YM years out of range"))?;
+    bytes[..4].copy_from_slice(&wire_years.to_be_bytes());
+    bytes[4] = u8::try_from(months + TNS_DURATION_OFFSET)
+        .map_err(|_| ProtocolError::TtcDecode("INTERVAL YM months out of range"))?;
+    Ok(bytes)
+}
+
+/// Decodes an INTERVAL YEAR TO MONTH value (reference
+/// impl/base/decoders.pyx:147-155). Components are signed: negative
+/// intervals subtract below the offsets.
+fn decode_interval_ym(bytes: &[u8]) -> Result<QueryValue> {
+    if bytes.len() < 5 {
+        return Err(ProtocolError::TtcDecode("invalid INTERVAL YM length"));
+    }
+    let years_wire = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let years = i32::try_from(i64::from(years_wire) - TNS_DURATION_MID)
+        .map_err(|_| ProtocolError::TtcDecode("INTERVAL YM out of range"))?;
+    Ok(QueryValue::IntervalYM {
+        years,
+        months: i32::from(bytes[4]) - TNS_DURATION_OFFSET,
     })
 }
 
@@ -4723,18 +4831,84 @@ mod tests {
     }
 
     #[test]
-    fn row_bind_metadata_promotes_raw_batch_to_long_raw() {
+    fn adjust_refetch_metadata_follows_reference_rules() {
+        let column = |ora_type_num: u8, csfrm: u8| ColumnMetadata {
+            name: "VALUE".to_string(),
+            ora_type_num,
+            csfrm,
+            precision: 0,
+            scale: 0,
+            buffer_size: 4000,
+            max_size: 1000,
+            nulls_allowed: true,
+            is_json: false,
+            is_oson: false,
+            object_schema: None,
+            object_type_name: None,
+            is_array: false,
+        };
+
+        // VARCHAR -> CLOB fetches as LONG keeping the previous csfrm
+        let mut current = column(ORA_TYPE_NUM_CLOB, CS_FORM_IMPLICIT);
+        assert!(adjust_refetch_metadata(
+            &column(ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT),
+            &mut current
+        ));
+        assert_eq!(current.ora_type_num, ORA_TYPE_NUM_LONG);
+        assert_eq!(current.csfrm, CS_FORM_IMPLICIT);
+        assert_eq!(current.buffer_size, TNS_MAX_LONG_LENGTH);
+        assert_eq!(current.max_size, 0);
+
+        // NVARCHAR -> NCLOB keeps the NCHAR character set form
+        let mut current = column(ORA_TYPE_NUM_CLOB, CS_FORM_NCHAR);
+        assert!(adjust_refetch_metadata(
+            &column(ORA_TYPE_NUM_VARCHAR, CS_FORM_NCHAR),
+            &mut current
+        ));
+        assert_eq!(current.ora_type_num, ORA_TYPE_NUM_LONG);
+        assert_eq!(current.csfrm, CS_FORM_NCHAR);
+
+        // RAW -> BLOB fetches as LONG RAW
+        let mut current = column(ORA_TYPE_NUM_BLOB, 0);
+        assert!(adjust_refetch_metadata(
+            &column(ORA_TYPE_NUM_RAW, 0),
+            &mut current
+        ));
+        assert_eq!(current.ora_type_num, ORA_TYPE_NUM_LONG_RAW);
+        assert_eq!(current.csfrm, 0);
+
+        // unrelated type changes are untouched
+        let mut current = column(ORA_TYPE_NUM_CLOB, CS_FORM_IMPLICIT);
+        assert!(!adjust_refetch_metadata(
+            &column(ORA_TYPE_NUM_NUMBER, 0),
+            &mut current
+        ));
+        assert_eq!(current.ora_type_num, ORA_TYPE_NUM_CLOB);
+        let mut current = column(ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT);
+        assert!(!adjust_refetch_metadata(
+            &column(ORA_TYPE_NUM_CLOB, CS_FORM_IMPLICIT),
+            &mut current
+        ));
+        assert_eq!(current.ora_type_num, ORA_TYPE_NUM_VARCHAR);
+    }
+
+    #[test]
+    fn row_bind_metadata_keeps_raw_type_with_promoted_buffer_size() {
+        // bytes values stay RAW regardless of size (reference
+        // OracleMetadata.from_value never switches str/bytes binds to
+        // LONG/LONG_RAW); only the buffer size grows to the largest row
         let rows = vec![
             vec![BindValue::Raw(vec![0; 25_000])],
             vec![BindValue::Raw(vec![0; 40_000])],
         ];
         let mut writer = TtcWriter::new();
 
-        let (ora_type_num, csfrm) =
+        let (ora_type_num, csfrm, buffer_size) =
             write_bind_metadata_for_rows(&mut writer, &rows, 0).expect("metadata writes");
 
-        assert_eq!(ora_type_num, ORA_TYPE_NUM_LONG_RAW);
+        assert_eq!(ora_type_num, ORA_TYPE_NUM_RAW);
         assert_eq!(csfrm, 0);
+        assert_eq!(buffer_size, 40_000);
     }
 
     #[test]
@@ -4745,11 +4919,7 @@ mod tests {
             BindValue::Number("8".into()),
             BindValue::Text("A".repeat(40_000)),
         ];
-        let metadata = row
-            .iter()
-            .map(bind_metadata)
-            .map(|(ora_type_num, csfrm, _)| (ora_type_num, csfrm))
-            .collect::<Vec<_>>();
+        let metadata = row.iter().map(bind_metadata).collect::<Vec<_>>();
 
         assert_eq!(
             bind_row_value_order(&row, &metadata, false),

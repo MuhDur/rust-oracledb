@@ -179,6 +179,7 @@ pub(crate) fn query_value_to_string(value: &Option<QueryValue>) -> Option<String
         Some(QueryValue::Number { text, .. }) => Some(text.clone()),
         Some(QueryValue::DateTime { .. }) => None,
         Some(QueryValue::IntervalDS { .. }) => None,
+        Some(QueryValue::IntervalYM { .. }) => None,
         Some(QueryValue::Array(_)) => None,
         Some(QueryValue::Cursor { .. }) => None,
         Some(QueryValue::Object { .. }) => None,

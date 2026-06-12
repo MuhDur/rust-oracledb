@@ -871,6 +871,11 @@ impl ThinCursorImpl {
                     call_timeout,
                 )?;
                 let is_plsql = statement_is_plsql(&statement);
+                if is_plsql {
+                    for row in bind_rows.iter_mut() {
+                        materialize_plsql_long_binds(connection, row, call_timeout)?;
+                    }
+                }
                 if bind_rows.iter().all(Vec::is_empty)
                     || bind_rows_need_iterative_plsql(&statement, &bind_rows)
                 {
@@ -1058,6 +1063,9 @@ impl ThinCursorImpl {
                     &typed_lob_hints,
                     call_timeout,
                 )?;
+                if statement_is_plsql(&statement) {
+                    materialize_plsql_long_binds(connection, &mut bind_values, call_timeout)?;
+                }
                 BlockingConnection::execute_query_with_binds_and_timeout(
                     connection,
                     &statement,
@@ -1320,6 +1328,11 @@ impl ThinCursorImpl {
         for (index, value) in args.iter().enumerate() {
             if value.is_none() {
                 result.append(py.None())?;
+                // a None placeholder still occupies a bind position so the
+                // reference DPY-4009 count includes it (impl/thin/var.pyx
+                // :101-106); lookups treat the None value as absent
+                self.named_input_sizes
+                    .push(((index + 1).to_string(), py.None()));
                 continue;
             }
             let var = thin_var_from_input_size(py, connection, &value)?;

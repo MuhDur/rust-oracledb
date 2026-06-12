@@ -435,6 +435,13 @@ pub(crate) fn thin_var_object_return_projection(
     let Some(object_type) = var.object_type.clone() else {
         return Ok(None);
     };
+    // a variable that can bind as a real ADT out bind (oid known) needs no
+    // scalar projection rewrite: the RETURNING value comes back as packed
+    // object data; rewriting the projection while binding ADT pairs a CHAR
+    // expression with an ADT bind and the server raises ORA-00932
+    if object_type.object_output_bind().is_some() {
+        return Ok(None);
+    }
     let Some(attr_name) = var
         .object_return_attr
         .clone()
@@ -496,6 +503,26 @@ pub(crate) fn extract_positional_bind_values_for_execute(
                     .any(|output_name| bind_names_equal(output_name, name))
         })
         .count();
+    // setinputsizes() by position creates one bind variable per entry and the
+    // reference raises DPY-4009 whenever the total number of bind variables
+    // (max of input sizes and supplied values) differs from the number of
+    // statement placeholders (impl/thin/var.pyx:101-106)
+    let positional_input_sizes = !named_input_sizes.is_empty()
+        && named_input_sizes
+            .iter()
+            .all(|(key, _)| key.parse::<usize>().is_ok());
+    if positional_input_sizes {
+        let provided = named_input_sizes.len().max(row_values.len());
+        if provided != names.len() {
+            return Err(dpy_bind_error(
+                "DPY-4009",
+                format!(
+                    "{} positional bind values are required but {provided} were provided",
+                    names.len()
+                ),
+            ));
+        }
+    }
     let has_all_bind_values = row_values.len() == names.len();
     let has_input_only_values = row_values.len() == input_count;
     if !has_all_bind_values && !has_input_only_values {
@@ -550,9 +577,19 @@ pub(crate) fn extract_positional_bind_values_for_execute(
         let bind = if let Some(input_size_var) =
             positional_input_size_value(py, named_input_sizes, position)
         {
-            if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
-                var.set_py_value(py, Some(value.clone().unbind()))?;
-                var.to_bind_value(py)?
+            if thin_var_from_value(&value)?.is_some() {
+                // a variable supplied as the bind value replaces the
+                // setinputsizes variable (reference bind_var.pyx
+                // _set_by_value: `isinstance(value, PY_TYPE_VAR)` short
+                // circuit); storing it inside the input-size variable used
+                // to self-deadlock when both were the same object
+                py_value_to_execute_bind(&value)?
+            } else if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
+                if set_input_size_var_value(py, &var, &value)? {
+                    var.to_bind_value(py)?
+                } else {
+                    py_value_to_execute_bind(&value)?
+                }
             } else {
                 py_value_to_execute_bind(&value)?
             }
@@ -562,6 +599,30 @@ pub(crate) fn extract_positional_bind_values_for_execute(
         values.push(bind);
     }
     Ok(values)
+}
+
+/// Stores a non-Var value into a setinputsizes variable, mirroring the
+/// reference `bind_var.pyx _set_by_value`: array variables consume lists
+/// element-wise through the raw set path; scalar values coerce through the
+/// `_check_value` matrix. Returns `Ok(false)` when the variable cannot hold
+/// the value — the caller must then discard the setinputsizes variable and
+/// derive the bind from the value itself (the reference `was_set` handling).
+pub(crate) fn set_input_size_var_value(
+    py: Python<'_>,
+    var: &PyRef<'_, ThinVar>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    if var.is_array_variable() {
+        var.set_py_value(py, Some(value.clone().unbind()))?;
+        return Ok(true);
+    }
+    match var.check_value(py, value) {
+        Ok(coerced) => {
+            var.set_py_value(py, Some(coerced))?;
+            Ok(true)
+        }
+        Err(_) => Ok(false),
+    }
 }
 
 pub(crate) fn extract_positional_bind_values_with_input_sizes(
@@ -643,7 +704,12 @@ pub(crate) fn extract_positional_bind_values_with_input_sizes(
         let bind = if let Some(input_size_var) =
             positional_input_size_value(py, named_input_sizes, position)
         {
-            if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
+            if thin_var_from_value(&value)?.is_some() {
+                // a variable supplied as the bind value replaces the
+                // setinputsizes variable (reference bind_var.pyx
+                // _set_by_value)
+                py_value_to_execute_bind(&value)?
+            } else if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
                 bind_recording_executemany_input_value(py, &var, &value)?
             } else {
                 py_value_to_execute_bind(&value)?
@@ -693,13 +759,21 @@ pub(crate) fn extract_named_bind_values(
                     let value = if let Some(input_size_var) =
                         named_input_size_value(py, named_input_sizes, name)
                     {
-                        if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
+                        if thin_var_from_value(&value)?.is_some() {
+                            // a variable supplied as the bind value replaces
+                            // the setinputsizes variable (reference
+                            // bind_var.pyx _set_by_value)
+                            py_value_to_execute_bind(&value)?
+                        } else if let Ok(var) =
+                            input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>()
+                        {
                             if record_input_size_values && !is_return_bind && !is_plsql_output_bind
                             {
                                 bind_recording_executemany_input_value(py, &var, &value)?
-                            } else {
-                                var.set_py_value(py, Some(value.clone().unbind()))?;
+                            } else if set_input_size_var_value(py, &var, &value)? {
                                 var.to_bind_value(py)?
+                            } else {
+                                py_value_to_execute_bind(&value)?
                             }
                         } else {
                             py_value_to_execute_bind(&value)?
@@ -1035,10 +1109,20 @@ pub(crate) fn extract_positional_bind_var_objects_for_execute(
             value
         };
         if let Some(input_size_var) = positional_input_size_value(py, named_input_sizes, position) {
-            if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
-                var.set_py_value(py, Some(value.clone().unbind()))?;
+            if thin_var_from_value(&value)?.is_some() {
+                // a variable supplied as the bind value replaces the
+                // setinputsizes variable (reference bind_var.pyx
+                // _set_by_value)
+                values.push(bind_var_from_value(py, &value)?);
+            } else if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
+                if set_input_size_var_value(py, &var, &value)? {
+                    values.push(bind_var_from_value(py, input_size_var.bind(py))?);
+                } else {
+                    values.push(bind_var_from_value(py, &value)?);
+                }
+            } else {
+                values.push(bind_var_from_value(py, input_size_var.bind(py))?);
             }
-            values.push(bind_var_from_value(py, input_size_var.bind(py))?);
         } else {
             values.push(bind_var_from_value(py, &value)?);
         }
@@ -1068,10 +1152,21 @@ pub(crate) fn extract_named_bind_var_objects(
         if let Some(parameters) = parameters {
             if let Some(value) = get_named_bind_value(parameters, &name)? {
                 if let Some(input_size_var) = input_size_var {
-                    if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
-                        var.set_py_value(py, Some(value.clone().unbind()))?;
+                    if thin_var_from_value(&value)?.is_some() {
+                        // a variable supplied as the bind value replaces the
+                        // setinputsizes variable (reference bind_var.pyx
+                        // _set_by_value)
+                        values.push(bind_var_from_value(py, &value)?);
+                    } else if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>()
+                    {
+                        if set_input_size_var_value(py, &var, &value)? {
+                            values.push(bind_var_from_value(py, input_size_var.bind(py))?);
+                        } else {
+                            values.push(bind_var_from_value(py, &value)?);
+                        }
+                    } else {
+                        values.push(bind_var_from_value(py, input_size_var.bind(py))?);
                     }
-                    values.push(bind_var_from_value(py, input_size_var.bind(py))?);
                 } else {
                     values.push(bind_var_from_value(py, &value)?);
                 }
@@ -1100,6 +1195,7 @@ pub(crate) fn named_input_size_value(
         .iter()
         .find(|(key, _)| bind_name_matches_key(name, key))
         .map(|(_, value)| value.clone_ref(py))
+        .filter(|value| !value.is_none(py))
 }
 
 pub(crate) fn previous_bind_var_by_name(
