@@ -107,6 +107,19 @@ pub(crate) fn thin_var_from_input_size(
     if let Some(var) = thin_var_from_value(value)? {
         return Ok(var);
     }
+    // Reference impl/base/bind_var.pyx `_create_var_from_type`: a list must
+    // be exactly [type, numelems] (DPY-2011); an int means a string of that
+    // length; anything else must be a supported type spec.
+    if let Ok(list) = value.cast::<PyList>() {
+        if list.len() != 2 {
+            return Err(raise_oracledb_driver_error("ERR_WRONG_ARRAY_DEFINITION"));
+        }
+    } else if value.cast::<PyTuple>().is_err()
+        && value.extract::<u32>().is_err()
+        && py_db_object_type_impl(value)?.is_none()
+    {
+        validate_var_type_spec(py, value)?;
+    }
     let default_bind = bind_template_from_input_size(value)?;
     let (is_array, num_elements) = input_size_array_info(value)?;
     let type_name = py_type_name(value);
@@ -169,6 +182,12 @@ pub(crate) struct ThinVar {
 }
 
 impl ThinVar {
+    pub(crate) fn for_fetch_value(dbtype_name: &str) -> Self {
+        let mut var = Self::from_py_value(None);
+        var.dbtype_name = dbtype_name.to_string();
+        var
+    }
+
     pub(crate) fn from_py_value(value: Option<Py<PyAny>>) -> Self {
         Self {
             value: Arc::new(Mutex::new(value)),
@@ -256,6 +275,34 @@ impl ThinVar {
     pub(crate) fn set_bind_py_value(&self, value: Option<Py<PyAny>>) -> PyResult<()> {
         *self.value.lock().map_err(runtime_error)? = value;
         Ok(())
+    }
+
+    /// Mirrors reference impl/base/var.pyx `set_value` (lines 388-396) and
+    /// `_check_and_set_value` (lines 85-104) array validation.
+    fn set_py_value_at_checked(&self, py: Python<'_>, pos: u32, value: Py<PyAny>) -> PyResult<()> {
+        if self.is_array {
+            if pos > 0 {
+                return Err(raise_oracledb_driver_error("ERR_ARRAYS_OF_ARRAYS"));
+            }
+            let bound = value.bind(py);
+            if !bound.is_none() {
+                let Ok(list) = bound.cast::<PyList>() else {
+                    return Err(raise_oracledb_driver_error(
+                        "ERR_EXPECTING_LIST_FOR_ARRAY_VAR",
+                    ));
+                };
+                let required = list.len();
+                if required > usize::try_from(self.num_elements).map_err(runtime_error)? {
+                    return Err(raise_incorrect_var_arraysize(
+                        usize::try_from(self.num_elements).map_err(runtime_error)?,
+                        required,
+                    ));
+                }
+            }
+            return self.set_py_value_checked(py, value);
+        }
+        self.check_position(pos)?;
+        self.set_py_value_checked(py, value)
     }
 
     fn set_py_value_checked(&self, py: Python<'_>, value: Py<PyAny>) -> PyResult<()> {
@@ -468,18 +515,39 @@ impl ThinVar {
     }
 
     fn setvalue(&self, py: Python<'_>, pos: u32, value: Py<PyAny>) -> PyResult<()> {
-        self.check_position(pos)?;
-        self.set_py_value_checked(py, value)
+        self.set_py_value_at_checked(py, pos, value)
     }
 
     fn set_value(&self, py: Python<'_>, pos: u32, value: Py<PyAny>) -> PyResult<()> {
-        self.check_position(pos)?;
-        self.set_py_value_checked(py, value)
+        self.set_py_value_at_checked(py, pos, value)
     }
 
     #[getter]
     fn r#type(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         self.dbtype(py)
+    }
+
+    #[getter(is_array)]
+    fn is_array_attr(&self) -> bool {
+        self.is_array
+    }
+
+    #[getter(num_elements)]
+    fn num_elements_attr(&self) -> u32 {
+        self.num_elements
+    }
+
+    #[getter(num_elements_in_array)]
+    fn num_elements_in_array_attr(&self, py: Python<'_>) -> PyResult<u32> {
+        if !self.is_array {
+            return Ok(0);
+        }
+        if let Some(value) = self.value.lock().map_err(runtime_error)?.as_ref() {
+            if let Ok(list) = value.bind(py).cast::<PyList>() {
+                return Ok(u32::try_from(list.len()).unwrap_or(u32::MAX));
+            }
+        }
+        Ok(0)
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -493,6 +561,17 @@ impl ThinVar {
     fn __str__(&self, py: Python<'_>) -> PyResult<String> {
         self.__repr__(py)
     }
+}
+
+/// Wraps a ThinVar impl in the public `oracledb.Var` object (reference
+/// `Var._from_impl`); the wrapper is what `setinputsizes`/`bindvars` expose.
+pub(crate) fn py_public_var_from_impl(py: Python<'_>, var: &Py<ThinVar>) -> PyResult<Py<PyAny>> {
+    let var_cls = PyModule::import(py, "oracledb")?.getattr("Var")?;
+    let public = var_cls.call_method1("__new__", (&var_cls,))?;
+    let dbtype = var.borrow(py).dbtype(py)?;
+    public.setattr("_impl", var.clone_ref(py))?;
+    public.setattr("_type", dbtype)?;
+    Ok(public.unbind())
 }
 
 pub(crate) fn thin_var_from_value(value: &Bound<'_, PyAny>) -> PyResult<Option<Py<ThinVar>>> {

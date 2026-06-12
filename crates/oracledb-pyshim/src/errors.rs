@@ -189,6 +189,30 @@ pub(crate) fn raise_wrong_executemany_parameters_type() -> PyErr {
     raise_oracledb_driver_error("ERR_WRONG_EXECUTEMANY_PARAMETERS_TYPE")
 }
 
+pub(crate) fn raise_incorrect_var_arraysize(var_arraysize: usize, required_arraysize: usize) -> PyErr {
+    Python::attach(|py| -> PyResult<PyErr> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        let error_num = errors.getattr("ERR_INCORRECT_VAR_ARRAYSIZE")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("var_arraysize", var_arraysize)?;
+        kwargs.set_item("required_arraysize", required_arraysize)?;
+        match errors
+            .getattr("_raise_err")?
+            .call((error_num,), Some(&kwargs))
+        {
+            Ok(_) => Ok(PyRuntimeError::new_err(
+                "oracledb.errors._raise_err(ERR_INCORRECT_VAR_ARRAYSIZE) returned without raising",
+            )),
+            Err(err) => Ok(err),
+        }
+    })
+    .unwrap_or_else(|_| {
+        PyRuntimeError::new_err(format!(
+            "DPY-2016: variable array size of {var_arraysize} is too small (should be at least {required_arraysize})"
+        ))
+    })
+}
+
 pub(crate) fn raise_not_supported(feature: &str) -> PyErr {
     Python::attach(|py| -> PyResult<PyErr> {
         let errors = PyModule::import(py, "oracledb.errors")?;

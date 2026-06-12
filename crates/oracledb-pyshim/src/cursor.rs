@@ -66,6 +66,7 @@ pub(crate) struct ThinCursorImpl {
     pub(crate) many_bind_rows: Vec<Vec<BindValue>>,
     pub(crate) columns: Vec<ColumnMetadata>,
     fetch_vars: Vec<Option<Py<ThinVar>>>,
+    fetch_value_vars: Vec<Option<Py<ThinVar>>>,
     pub(crate) fetch_define_columns: Vec<ColumnMetadata>,
     pub(crate) requires_define: bool,
     pub(crate) rows: Vec<Vec<Option<QueryValue>>>,
@@ -88,6 +89,7 @@ pub(crate) struct ThinCursorImpl {
     has_positional_input_sizes: bool,
     has_named_input_sizes: bool,
     named_input_sizes: Vec<(String, Py<PyAny>)>,
+    input_size_bind_surface: Option<Py<PyAny>>,
     pub(crate) statement_changed: bool,
     pub(crate) is_query: bool,
 }
@@ -120,6 +122,7 @@ impl ThinCursorImpl {
             many_bind_rows: Vec::new(),
             columns: Vec::new(),
             fetch_vars: Vec::new(),
+            fetch_value_vars: Vec::new(),
             fetch_define_columns: Vec::new(),
             requires_define: false,
             rows: Vec::new(),
@@ -142,6 +145,7 @@ impl ThinCursorImpl {
             has_positional_input_sizes: false,
             has_named_input_sizes: false,
             named_input_sizes: Vec::new(),
+            input_size_bind_surface: None,
             statement_changed: false,
             is_query: false,
         }
@@ -149,8 +153,15 @@ impl ThinCursorImpl {
 
     pub(crate) fn reset_fetch_define_state(&mut self) {
         self.fetch_vars.clear();
+        self.fetch_value_vars.clear();
         self.fetch_define_columns.clear();
         self.requires_define = false;
+    }
+
+    pub(crate) fn clear_input_sizes_state(&mut self) {
+        self.has_positional_input_sizes = false;
+        self.has_named_input_sizes = false;
+        self.named_input_sizes.clear();
     }
 
     fn active_output_type_handler(
@@ -175,6 +186,32 @@ impl ThinCursorImpl {
             .outputtypehandler
             .as_ref()
             .map(|handler| handler.clone_ref(py)))
+    }
+
+    /// Maintains per-column fetch vars holding the most recently fetched
+    /// values so `cursor.fetchvars` exposes a Var per column (reference
+    /// creates fetch var impls for every fetched column,
+    /// impl/base/cursor.pyx `_create_fetch_var`).
+    fn record_fetch_value_vars(&mut self, py: Python<'_>, values: &[Py<PyAny>]) -> PyResult<()> {
+        if self.fetch_value_vars.len() < values.len() {
+            self.fetch_value_vars
+                .resize_with(values.len(), Default::default);
+        }
+        for (index, value) in values.iter().enumerate() {
+            if let Some(Some(var)) = self.fetch_value_vars.get(index) {
+                var.borrow(py).set_bind_py_value(Some(value.clone_ref(py)))?;
+                continue;
+            }
+            let dbtype_name = self
+                .columns
+                .get(index)
+                .map(oracledb::protocol::thin::public_dbtype_name_from_column_metadata)
+                .unwrap_or("DB_TYPE_VARCHAR");
+            let var = Py::new(py, ThinVar::for_fetch_value(dbtype_name))?;
+            var.borrow(py).set_bind_py_value(Some(value.clone_ref(py)))?;
+            self.fetch_value_vars[index] = Some(var);
+        }
+        Ok(())
     }
 
     pub(crate) fn prepare_fetch_defines(
@@ -273,12 +310,17 @@ impl ThinCursorImpl {
     #[pyo3(name = "fetch_vars")]
     pub(crate) fn fetch_vars_attr(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if self.is_query {
-            let values = self
-                .fetch_vars
-                .iter()
-                .map(|value| {
-                    value
-                        .as_ref()
+            let count = self.fetch_vars.len().max(self.fetch_value_vars.len());
+            let values = (0..count)
+                .map(|index| {
+                    self.fetch_vars
+                        .get(index)
+                        .and_then(|var| var.as_ref())
+                        .or_else(|| {
+                            self.fetch_value_vars
+                                .get(index)
+                                .and_then(|var| var.as_ref())
+                        })
                         .map(|var| var.clone_ref(py).into_any())
                         .unwrap_or_else(|| py.None())
                 })
@@ -375,6 +417,7 @@ impl ThinCursorImpl {
         self.bind_vars.clear();
         self.bind_names.clear();
         self.named_input_sizes.clear();
+        self.input_size_bind_surface = None;
         self.many_bind_rows.clear();
         self.columns.clear();
         self.reset_fetch_define_state();
@@ -444,6 +487,9 @@ impl ThinCursorImpl {
         if self.has_positional_input_sizes
             && parameters.is_some_and(|value| value.cast::<PyDict>().is_ok())
         {
+            // Reference clears the input-size state when this error fires so
+            // a subsequent execute succeeds (impl/base/cursor.pyx:400-417).
+            self.clear_input_sizes_state();
             return Err(raise_oracledb_driver_error(
                 "ERR_MIXED_POSITIONAL_AND_NAMED_BINDS",
             ));
@@ -453,6 +499,7 @@ impl ThinCursorImpl {
                 !value.is_none() && value.len().unwrap_or(0) > 0 && value.cast::<PyDict>().is_err()
             })
         {
+            self.clear_input_sizes_state();
             return Err(raise_oracledb_driver_error(
                 "ERR_MIXED_POSITIONAL_AND_NAMED_BINDS",
             ));
@@ -507,6 +554,7 @@ impl ThinCursorImpl {
         parameters: &Bound<'_, PyAny>,
         batch_size: u32,
     ) -> PyResult<ExecutemanyManager> {
+        let statement_supplied = statement.is_some();
         if let Some(statement) = statement {
             self.statement_changed = self.statement.as_ref() != Some(&statement);
             self.statement = Some(statement);
@@ -518,6 +566,29 @@ impl ThinCursorImpl {
         self.fetch_decimals = default_fetch_decimals(_cursor.py())?;
         if self.statement.is_none() {
             return Err(raise_oracledb_driver_error("ERR_NO_STATEMENT"));
+        }
+        // executemany(None, N) re-uses the previous call's bind rows/vars
+        // (reference PrePopulatedBatchLoadManager,
+        // impl/base/batch_load_manager.pyx:358-389) and raises DPY-2016 when
+        // fewer rows were previously bound than iterations requested.
+        if !statement_supplied && !self.many_bind_rows.is_empty() {
+            if let Ok(num_iters) = parameters.extract::<usize>() {
+                let statement = self
+                    .statement
+                    .as_deref()
+                    .ok_or_else(|| raise_oracledb_driver_error("ERR_NO_STATEMENT"))?;
+                if !unique_sql_bind_names(statement)?.is_empty()
+                    && self.named_input_sizes.is_empty()
+                {
+                    if num_iters > self.many_bind_rows.len() {
+                        return Err(raise_incorrect_var_arraysize(
+                            self.many_bind_rows.len(),
+                            num_iters,
+                        ));
+                    }
+                    return ExecutemanyManager::new(num_iters, batch_size);
+                }
+            }
         }
         self.bind_values.clear();
         self.bind_vars.clear();
@@ -920,6 +991,7 @@ impl ThinCursorImpl {
                 )
             })
             .collect::<PyResult<Vec<_>>>()?;
+        self.record_fetch_value_vars(py, &values)?;
         let tuple = PyTuple::new(py, values)?;
         if let Some(rowfactory) = &self.rowfactory {
             #[allow(clippy::useless_conversion)]
@@ -936,6 +1008,14 @@ impl ThinCursorImpl {
 
     #[getter(bind_vars)]
     pub(crate) fn bind_vars_attr(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        // After setinputsizes() and before any bind, the surface created by
+        // setinputsizes (list with None placeholders or dict by name) is the
+        // bindvars value (impl/base/cursor.pyx get_bind_vars).
+        if self.bind_vars.is_empty() {
+            if let Some(surface) = &self.input_size_bind_surface {
+                return Ok(surface.clone_ref(py));
+            }
+        }
         let values = self
             .bind_vars
             .iter()
@@ -963,26 +1043,41 @@ impl ThinCursorImpl {
         self.has_positional_input_sizes = has_args;
         self.has_named_input_sizes = has_kwargs;
         self.named_input_sizes.clear();
+        // None entries stay as placeholders (the bind value determines the
+        // type later) but are still part of the bindvars surface
+        // (impl/base/cursor.pyx setinputsizes + get_bind_vars).
         if has_kwargs {
             let kwargs = kwargs.expect("has_kwargs implies kwargs is present");
             let result = PyDict::new(py);
             for (key, value) in kwargs.iter() {
                 let key = key.extract::<String>()?;
+                if value.is_none() {
+                    result.set_item(key, py.None())?;
+                    continue;
+                }
                 let var = thin_var_from_input_size(py, connection, &value)?;
                 self.named_input_sizes
                     .push((key.clone(), var.clone_ref(py).into_any()));
-                result.set_item(key, var)?;
+                result.set_item(key, py_public_var_from_impl(py, &var)?)?;
             }
-            return Ok(result.unbind().into());
+            let result: Py<PyAny> = result.unbind().into();
+            self.input_size_bind_surface = Some(result.clone_ref(py));
+            return Ok(result);
         }
         let result = PyList::empty(py);
-        for value in args.iter() {
+        for (index, value) in args.iter().enumerate() {
+            if value.is_none() {
+                result.append(py.None())?;
+                continue;
+            }
             let var = thin_var_from_input_size(py, connection, &value)?;
-            result.append(var.clone_ref(py))?;
+            result.append(py_public_var_from_impl(py, &var)?)?;
             self.named_input_sizes
-                .push((result.len().to_string(), var.into_any()));
+                .push(((index + 1).to_string(), var.into_any()));
         }
-        Ok(result.unbind().into())
+        let result: Py<PyAny> = result.unbind().into();
+        self.input_size_bind_surface = Some(result.clone_ref(py));
+        Ok(result)
     }
 
     #[pyo3(signature = (

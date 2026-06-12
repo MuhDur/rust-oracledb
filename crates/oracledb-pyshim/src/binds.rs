@@ -8,6 +8,25 @@ use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 
 use crate::*;
 
+/// PL/SQL assignment-target binds are in/out when a concrete value was
+/// supplied (e.g. `begin :v := :v + 5; end;` with `:v` pre-set). The
+/// reference always writes the var's current value for PL/SQL binds; the
+/// server's io vector reports the out direction regardless. Only valueless
+/// binds degrade to typed output placeholders.
+pub(crate) fn plsql_output_bind(value: BindValue) -> BindValue {
+    match value {
+        BindValue::Text(_)
+        | BindValue::Raw(_)
+        | BindValue::Number(_)
+        | BindValue::BinaryInteger(_)
+        | BindValue::BinaryDouble(_)
+        | BindValue::DateTime { .. }
+        | BindValue::Timestamp { .. }
+        | BindValue::Lob { .. } => value,
+        other => output_only_bind(other),
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
 pub(crate) fn extract_bind_values(
     py: Python<'_>,
@@ -514,7 +533,7 @@ pub(crate) fn extract_positional_bind_values_for_execute(
             values.push(if is_return_bind {
                 returning_output_bind(bind)
             } else {
-                output_only_bind(bind)
+                plsql_output_bind(bind)
             });
             continue;
         }
@@ -608,7 +627,7 @@ pub(crate) fn extract_positional_bind_values_with_input_sizes(
             values.push(if is_return_bind {
                 returning_output_bind(value)
             } else {
-                output_only_bind(value)
+                plsql_output_bind(value)
             });
             continue;
         }
@@ -689,7 +708,7 @@ pub(crate) fn extract_named_bind_values(
                     return Ok(if is_return_bind {
                         returning_output_bind(value)
                     } else if is_plsql_output_bind {
-                        output_only_bind(value)
+                        plsql_output_bind(value)
                     } else {
                         value
                     });
@@ -700,7 +719,7 @@ pub(crate) fn extract_named_bind_values(
                 return Ok(if is_return_bind {
                     returning_output_bind(value)
                 } else if is_plsql_output_bind {
-                    output_only_bind(value)
+                    plsql_output_bind(value)
                 } else {
                     value
                 });
@@ -888,7 +907,7 @@ pub(crate) fn extract_input_size_bind_values(
             Ok(if is_return_bind {
                 returning_output_bind(value)
             } else if is_plsql_output_bind {
-                output_only_bind(value)
+                plsql_output_bind(value)
             } else {
                 value
             })
@@ -1188,6 +1207,8 @@ pub(crate) fn get_named_bind_value<'py>(
     }
     for (key, value) in parameters.iter() {
         let key = key.extract::<String>()?;
+        // Reference strips a leading ':' from keys (impl/thin/var.pyx:88-94).
+        let key = key.strip_prefix(':').unwrap_or(&key);
         if key.eq_ignore_ascii_case(name) {
             return Ok(Some(value));
         }

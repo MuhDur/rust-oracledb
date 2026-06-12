@@ -259,6 +259,9 @@ pub fn bind_names_equal(left: &str, right: &str) -> bool {
 }
 
 pub fn bind_name_matches_key(bind_name: &str, key: &str) -> bool {
+    // python-oracledb strips a leading ':' from bind keys before lookup
+    // (impl/thin/var.pyx:88-94).
+    let key = key.strip_prefix(':').unwrap_or(key);
     if is_quoted_bind_name(bind_name) || is_quoted_bind_name(key) {
         bind_name == key
     } else {
