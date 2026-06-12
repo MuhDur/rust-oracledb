@@ -143,6 +143,8 @@ impl AsyncThinConnImpl {
             state.edition = Some(edition);
             state.edition_probe_started = true;
         }
+        // Mirror reference connection.pyx: set at the end of every connect.
+        self.inner.invoke_session_callback = true;
         Ok(())
     }
 

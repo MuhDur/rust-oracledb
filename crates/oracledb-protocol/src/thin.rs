@@ -2375,11 +2375,40 @@ pub fn build_auth_phase_two_payload_with_context_with_seq(
     seq_num: u8,
     app_context: &[(String, String, String)],
 ) -> Result<Vec<u8>> {
+    build_auth_phase_two_payload_with_proxy_with_seq(
+        user,
+        encrypted,
+        driver_name,
+        version_num,
+        connect_string,
+        seq_num,
+        app_context,
+        None,
+    )
+}
+
+/// Phase-two auth payload with optional proxy authentication: the reference
+/// writes `PROXY_CLIENT_NAME` as the first key/value pair when the connect
+/// user is of the form `user[proxy_user]` (messages/auth.pyx).
+#[allow(clippy::too_many_arguments)]
+pub fn build_auth_phase_two_payload_with_proxy_with_seq(
+    user: &str,
+    encrypted: &crate::crypto::EncryptedPassword,
+    driver_name: &str,
+    version_num: u32,
+    connect_string: &str,
+    seq_num: u8,
+    app_context: &[(String, String, String)],
+    proxy_user: Option<&str>,
+) -> Result<Vec<u8>> {
     let mut writer = TtcWriter::new();
     writer.write_function_code_with_seq(TNS_FUNC_AUTH_PHASE_TWO, seq_num);
     writer.write_ub8(0);
     let mut num_pairs = 6u32;
     if encrypted.speedy_key.is_some() {
+        num_pairs += 1;
+    }
+    if proxy_user.is_some() {
         num_pairs += 1;
     }
     if !connect_string.is_empty() {
@@ -2404,6 +2433,9 @@ pub fn build_auth_phase_two_payload_with_context_with_seq(
         TNS_AUTH_MODE_LOGON | TNS_AUTH_MODE_WITH_PASSWORD,
         num_pairs,
     )?;
+    if let Some(proxy_user) = proxy_user {
+        write_key_value(&mut writer, "PROXY_CLIENT_NAME", proxy_user, 0)?;
+    }
     write_key_value(&mut writer, "AUTH_SESSKEY", &encrypted.session_key, 1)?;
     if let Some(speedy_key) = &encrypted.speedy_key {
         write_key_value(&mut writer, "AUTH_PBKDF2_SPEEDY_KEY", speedy_key, 0)?;
@@ -3068,6 +3100,36 @@ pub fn parse_lob_free_temp_response(
                     position: reader.position().saturating_sub(1),
                 })
             }
+        }
+    }
+    Ok(())
+}
+
+/// Scan a plain function response (ping/commit/rollback) for a server error.
+/// Unknown message types end the scan without error so payload shapes that
+/// were previously tolerated (responses used to go unparsed) keep working.
+pub fn parse_plain_function_response(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+) -> Result<()> {
+    let mut reader = TtcReader::new(payload);
+    while reader.remaining() > 0 {
+        let message_type = reader.read_u8()?;
+        match message_type {
+            0 => {}
+            TNS_MSG_TYPE_STATUS => {
+                let _call_status = reader.read_ub4()?;
+                let _seq = reader.read_ub2()?;
+            }
+            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => skip_server_side_piggyback(&mut reader)?,
+            TNS_MSG_TYPE_END_OF_RESPONSE => break,
+            TNS_MSG_TYPE_ERROR => {
+                let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
+                if info.number != 0 {
+                    return Err(ProtocolError::ServerError(info.message));
+                }
+            }
+            _ => break,
         }
     }
     Ok(())

@@ -11,7 +11,7 @@ use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
 use asupersync::sync::Mutex as AsyncMutex;
 use asupersync::{time, Cx};
 use oracledb_protocol::thin::{
-    build_auth_phase_two_payload_with_context_with_seq, build_connect_packet_payload,
+    build_auth_phase_two_payload_with_proxy_with_seq, build_connect_packet_payload,
     build_define_fetch_payload_with_seq, build_execute_payload_with_bind_rows_with_seq,
     build_execute_payload_with_binds_with_seq, build_execute_payload_with_seq,
     build_fast_auth_phase_one_payload, build_fetch_payload_with_seq,
@@ -95,6 +95,7 @@ pub struct ConnectOptions {
     pub identity: ClientIdentity,
     pub app_context: Vec<(String, String, String)>,
     pub sdu: u16,
+    pub proxy_user: Option<String>,
 }
 
 impl ConnectOptions {
@@ -111,11 +112,17 @@ impl ConnectOptions {
             identity,
             app_context: Vec::new(),
             sdu: 8192,
+            proxy_user: None,
         }
     }
 
     pub fn with_app_context(mut self, app_context: Vec<(String, String, String)>) -> Self {
         self.app_context = app_context;
+        self
+    }
+
+    pub fn with_proxy_user(mut self, proxy_user: Option<String>) -> Self {
+        self.proxy_user = proxy_user;
         self
     }
 
@@ -231,7 +238,7 @@ impl Connection {
             verifier_type,
         )?;
         let auth_connect_string = auth_connect_descriptor(&descriptor);
-        let auth_two = build_auth_phase_two_payload_with_context_with_seq(
+        let auth_two = build_auth_phase_two_payload_with_proxy_with_seq(
             &options.user,
             &encrypted,
             &identity.driver_name,
@@ -239,6 +246,7 @@ impl Connection {
             &auth_connect_string,
             next_ttc_sequence(&mut ttc_seq_num),
             &options.app_context,
+            options.proxy_user.as_deref(),
         )?;
         trace_connect_bytes("AUTH phase two payload", &auth_two);
         trace_connect_step("send AUTH phase two");
