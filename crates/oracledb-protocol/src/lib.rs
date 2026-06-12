@@ -71,6 +71,9 @@ pub struct ServerErrorDetails {
     pub row_count: u64,
     /// Encoded rowid of the last affected row, if any.
     pub rowid: Option<String>,
+    /// Row counts received before the error when
+    /// `executemany(arraydmlrowcounts=True)` was requested.
+    pub array_dml_row_counts: Option<Vec<u64>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -121,6 +121,8 @@ const TNS_EXEC_OPTION_EXECUTE: u32 = 0x20;
 const TNS_EXEC_OPTION_FETCH: u32 = 0x40;
 const TNS_EXEC_OPTION_PLSQL_BIND: u32 = 0x400;
 const TNS_EXEC_OPTION_NOT_PLSQL: u32 = 0x8000;
+const TNS_EXEC_OPTION_BATCH_ERRORS: u32 = 0x80000;
+const TNS_EXEC_FLAGS_DML_ROWCOUNTS: u32 = 0x4000;
 const TNS_DURATION_SESSION: u32 = 10;
 const TNS_LOB_OP_READ: u32 = 0x0002;
 const TNS_LOB_OP_TRIM: u32 = 0x0020;
@@ -647,6 +649,8 @@ pub struct QueryResult {
     pub last_rowid: Option<String>,
     /// Batch errors collected with `executemany(batcherrors=True)`.
     pub batch_errors: Vec<BatchServerError>,
+    /// Per-iteration row counts from `executemany(arraydmlrowcounts=True)`.
+    pub array_dml_row_counts: Option<Vec<u64>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -780,12 +784,37 @@ pub fn build_execute_payload_with_binds_with_seq(
     build_execute_payload_with_bind_rows_with_seq(sql, prefetch_rows, seq_num, is_query, &bind_rows)
 }
 
+/// Optional execute modes (reference ExecuteMessage attributes).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExecuteOptions {
+    pub batcherrors: bool,
+    pub arraydmlrowcounts: bool,
+}
+
 pub fn build_execute_payload_with_bind_rows_with_seq(
     sql: &str,
     prefetch_rows: u32,
     seq_num: u8,
     is_query: bool,
     bind_rows: &[Vec<BindValue>],
+) -> Result<Vec<u8>> {
+    build_execute_payload_with_bind_rows_and_options_with_seq(
+        sql,
+        prefetch_rows,
+        seq_num,
+        is_query,
+        bind_rows,
+        ExecuteOptions::default(),
+    )
+}
+
+pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
+    sql: &str,
+    prefetch_rows: u32,
+    seq_num: u8,
+    is_query: bool,
+    bind_rows: &[Vec<BindValue>],
+    exec_options: ExecuteOptions,
 ) -> Result<Vec<u8>> {
     let sql_bytes = sql.as_bytes();
     let sql_len =
@@ -838,14 +867,20 @@ pub fn build_execute_payload_with_bind_rows_with_seq(
     } else {
         options |= TNS_EXEC_OPTION_NOT_PLSQL;
     }
+    if exec_options.batcherrors {
+        options |= TNS_EXEC_OPTION_BATCH_ERRORS;
+    }
     let num_iters = if is_query { prefetch_rows } else { 1 };
     let exec_count = if is_query { 0 } else { bind_row_count.max(1) };
     let query_flag = u32::from(is_query);
-    let exec_flags = if is_query || has_ref_cursor_output {
+    let mut exec_flags = if is_query || has_ref_cursor_output {
         TNS_EXEC_FLAGS_IMPLICIT_RESULTSET
     } else {
         0
     };
+    if exec_options.arraydmlrowcounts {
+        exec_flags |= TNS_EXEC_FLAGS_DML_ROWCOUNTS;
+    }
     writer.write_ub4(options);
     writer.write_ub4(0);
     writer.write_u8(1);
@@ -872,23 +907,29 @@ pub fn build_execute_payload_with_bind_rows_with_seq(
     writer.write_u8(0);
     writer.write_ub4(0);
     writer.write_ub4(0);
-    writer.write_u8(0);
-    writer.write_u8(1);
-    writer.write_u8(0);
-    writer.write_ub4(0);
-    writer.write_u8(0);
-    writer.write_ub4(0);
-    writer.write_ub4(0);
-    writer.write_u8(0);
-    writer.write_ub4(0);
-    writer.write_u8(0);
-    writer.write_u8(0);
-    writer.write_ub4(0);
-    writer.write_u8(0);
-    writer.write_ub4(0);
-    writer.write_u8(0);
-    writer.write_u8(0);
-    writer.write_ub4(0);
+    writer.write_u8(0); // pointer (al8objlist)
+    writer.write_u8(1); // pointer (al8objlen)
+    writer.write_u8(0); // pointer (al8blv)
+    writer.write_ub4(0); // al8blvl
+    writer.write_u8(0); // pointer (al8dnam)
+    writer.write_ub4(0); // al8dnaml
+    writer.write_ub4(0); // registration id (msb)
+    if exec_options.arraydmlrowcounts {
+        writer.write_u8(1); // pointer (al8pidmlrc)
+        writer.write_ub4(exec_count); // al8pidmlrcbl
+        writer.write_u8(1); // pointer (al8pidmlrcl)
+    } else {
+        writer.write_u8(0); // pointer (al8pidmlrc)
+        writer.write_ub4(0); // al8pidmlrcbl
+        writer.write_u8(0); // pointer (al8pidmlrcl)
+    }
+    writer.write_u8(0); // pointer (al8sqlsig)
+    writer.write_ub4(0); // SQL signature length
+    writer.write_u8(0); // pointer (SQL ID)
+    writer.write_ub4(0); // allocated size of SQL ID
+    writer.write_u8(0); // pointer (length of SQL ID)
+    writer.write_u8(0); // pointer (chunk ids)
+    writer.write_ub4(0); // number of chunk ids
 
     writer.write_bytes_with_length(sql_bytes)?;
     writer.write_ub4(1);
@@ -2069,13 +2110,27 @@ pub fn parse_query_response_with_binds(
     capabilities: ClientCapabilities,
     binds: &[BindValue],
 ) -> Result<QueryResult> {
+    parse_query_response_with_binds_and_options(
+        payload,
+        capabilities,
+        binds,
+        ExecuteOptions::default(),
+    )
+}
+
+pub fn parse_query_response_with_binds_and_options(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    binds: &[BindValue],
+    exec_options: ExecuteOptions,
+) -> Result<QueryResult> {
     let bind_columns = binds.iter().map(bind_column_metadata).collect::<Vec<_>>();
     let output_bind_indexes = binds
         .iter()
         .enumerate()
         .filter_map(|(index, value)| value.is_return_output().then_some(index))
         .collect::<Vec<_>>();
-    parse_query_response_with_context_and_binds(
+    parse_query_response_with_context_binds_and_options(
         payload,
         capabilities,
         &[],
@@ -2083,6 +2138,7 @@ pub fn parse_query_response_with_binds(
         &bind_columns,
         &output_bind_indexes,
         false,
+        exec_options,
     )
 }
 
@@ -2137,6 +2193,29 @@ fn parse_query_response_with_context_and_binds(
     output_bind_indexes: &[usize],
     fetch_long_status: bool,
 ) -> Result<QueryResult> {
+    parse_query_response_with_context_binds_and_options(
+        payload,
+        capabilities,
+        previous_columns,
+        previous_row,
+        bind_columns,
+        output_bind_indexes,
+        fetch_long_status,
+        ExecuteOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // mirrors the reference message attribute set
+fn parse_query_response_with_context_binds_and_options(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    previous_columns: &[ColumnMetadata],
+    previous_row: Option<&[Option<QueryValue>]>,
+    bind_columns: &[ColumnMetadata],
+    output_bind_indexes: &[usize],
+    fetch_long_status: bool,
+    exec_options: ExecuteOptions,
+) -> Result<QueryResult> {
     let mut reader = TtcReader::new(payload);
     let mut result = QueryResult {
         columns: previous_columns.to_vec(),
@@ -2186,7 +2265,13 @@ fn parse_query_response_with_context_and_binds(
             TNS_MSG_TYPE_BIT_VECTOR => {
                 bit_vector = Some(parse_bit_vector(&mut reader, result.columns.len())?);
             }
-            TNS_MSG_TYPE_PARAMETER => skip_query_return_parameters(&mut reader)?,
+            TNS_MSG_TYPE_PARAMETER => {
+                let row_counts =
+                    parse_query_return_parameters(&mut reader, exec_options.arraydmlrowcounts)?;
+                if exec_options.arraydmlrowcounts {
+                    result.array_dml_row_counts = Some(row_counts.unwrap_or_default());
+                }
+            }
             TNS_MSG_TYPE_STATUS => {
                 let _call_status = reader.read_ub4()?;
                 let _seq = reader.read_ub2()?;
@@ -2216,9 +2301,9 @@ fn parse_query_response_with_context_and_binds(
                     // (reference messages/base.pyx `_process_error_info`).
                     result.batch_errors = info.batch_errors;
                 } else if info.number != 0 {
-                    return Err(ProtocolError::ServerErrorInfo(Box::new(
-                        info.into_details(),
-                    )));
+                    let mut details = info.into_details();
+                    details.array_dml_row_counts = result.array_dml_row_counts.take();
+                    return Err(ProtocolError::ServerErrorInfo(Box::new(details)));
                 }
             }
             _ => {
@@ -3606,7 +3691,10 @@ fn decode_text_value(bytes: &[u8], csfrm: u8) -> Result<String> {
     }
 }
 
-fn skip_query_return_parameters(reader: &mut TtcReader<'_>) -> Result<()> {
+fn parse_query_return_parameters(
+    reader: &mut TtcReader<'_>,
+    arraydmlrowcounts: bool,
+) -> Result<Option<Vec<u64>>> {
     let num_params = reader.read_ub2()?;
     for _ in 0..num_params {
         let _value = reader.read_ub4()?;
@@ -3621,7 +3709,16 @@ fn skip_query_return_parameters(reader: &mut TtcReader<'_>) -> Result<()> {
     if num_bytes > 0 {
         reader.skip(usize::from(num_bytes))?;
     }
-    Ok(())
+    if arraydmlrowcounts {
+        // reference messages/base.pyx `_process_return_parameters` tail
+        let num_rows = reader.read_ub4()?;
+        let mut row_counts = Vec::with_capacity(num_rows as usize);
+        for _ in 0..num_rows {
+            row_counts.push(reader.read_ub8()?);
+        }
+        return Ok(Some(row_counts));
+    }
+    Ok(None)
 }
 
 /// One batch error entry from `executemany(batcherrors=True)` (reference
@@ -3653,6 +3750,7 @@ impl ServerErrorInfo {
             pos: self.pos,
             row_count: self.row_count,
             rowid: self.rowid,
+            array_dml_row_counts: None,
         }
     }
 }

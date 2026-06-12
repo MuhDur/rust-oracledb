@@ -1299,6 +1299,10 @@ pub(crate) fn statement_is_plsql(statement: &str) -> bool {
     sql::statement_is_plsql(statement)
 }
 
+pub(crate) fn statement_is_dml(statement: &str) -> bool {
+    sql::statement_is_dml(statement)
+}
+
 pub(crate) fn is_quoted_bind_name(name: &str) -> bool {
     sql::is_quoted_bind_name(name)
 }

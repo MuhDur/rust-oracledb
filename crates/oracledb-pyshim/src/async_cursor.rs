@@ -3,7 +3,9 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use asupersync::Cx;
-use oracledb::protocol::thin::{BindValue, ColumnMetadata, QueryResult, QueryValue};
+use oracledb::protocol::thin::{
+    BindValue, ColumnMetadata, ExecuteOptions, QueryResult, QueryValue,
+};
 use oracledb::Connection as RustConnection;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -28,6 +30,7 @@ pub(crate) fn spawn_async_executemany_task(
     call_timeout: Option<u32>,
     autocommit: bool,
     row_offset: usize,
+    exec_options: ExecuteOptions,
 ) -> BlockingTask<AsyncExecuteOutcome> {
     spawn_async_connection_task(
         "oracledb-pyshim-async-executemany",
@@ -109,11 +112,12 @@ pub(crate) fn spawn_async_executemany_task(
                     });
                 }
                 let mut result = connection
-                    .execute_query_with_bind_rows_and_timeout(
+                    .execute_query_with_bind_rows_options_and_timeout(
                         cx,
                         &statement,
                         prefetchrows,
                         &bind_rows,
+                        exec_options,
                         call_timeout,
                     )
                     .await
@@ -447,22 +451,21 @@ impl AsyncThinCursorImpl {
         arraydmlrowcounts: bool,
         offset: u32,
     ) -> PyResult<()> {
-        if batcherrors {
-            return Err(not_implemented(
-                "AsyncThinCursorImpl executemany batcherrors",
-            ));
-        }
-        if arraydmlrowcounts {
-            return Err(not_implemented(
-                "AsyncThinCursorImpl executemany array DML rowcounts",
-            ));
-        }
         let statement = self
             .inner
             .statement
             .as_deref()
             .ok_or_else(|| PyRuntimeError::new_err("no statement prepared"))?
             .to_string();
+        // only DML statements may use the batch errors or array DML row
+        // counts flags (reference thin/cursor.pyx:418-422)
+        if (batcherrors || arraydmlrowcounts) && !statement_is_dml(&statement) {
+            return Err(raise_oracledb_driver_error("ERR_EXECUTE_MODE_ONLY_FOR_DML"));
+        }
+        let exec_options = ExecuteOptions {
+            batcherrors,
+            arraydmlrowcounts,
+        };
         let start = usize::try_from(offset).map_err(runtime_error)?;
         let count = usize::try_from(num_execs).map_err(runtime_error)?;
         let end = start
@@ -491,6 +494,7 @@ impl AsyncThinCursorImpl {
             call_timeout,
             autocommit,
             start,
+            exec_options,
         );
         let outcome = match query.await {
             Ok(outcome) => outcome,
@@ -498,6 +502,8 @@ impl AsyncThinCursorImpl {
                 return Err(ora_cancel_error());
             }
             Err(err) => {
+                self.inner
+                    .record_executemany_error_modes(&err, batcherrors, arraydmlrowcounts);
                 return Err(self
                     .inner
                     .raise_execute_task_error(&err, is_plsql_statement));
@@ -507,8 +513,14 @@ impl AsyncThinCursorImpl {
             self.inner.drain_cancel_response()?;
             return Err(ora_cancel_error());
         }
-        let result = outcome.result;
+        let mut result = outcome.result;
         let should_commit = outcome.should_commit;
+        self.inner.batch_errors_state =
+            batcherrors.then(|| std::mem::take(&mut result.batch_errors));
+        if arraydmlrowcounts {
+            self.inner.dml_row_counts =
+                Some(result.array_dml_row_counts.take().unwrap_or_default());
+        }
         let is_query = !result.columns.is_empty();
         self.inner.warning = Python::attach(|py| query_result_warning(py, &result))?;
         let lob_context = ThinLobContext {
@@ -554,6 +566,9 @@ impl AsyncThinCursorImpl {
         if self.inner.statement_changed {
             self.inner.rowfactory = None;
         }
+        // reference resets _batcherrors via _process_error_info on every
+        // execute round trip
+        self.inner.batch_errors_state = None;
         let statement = self
             .inner
             .statement
@@ -742,8 +757,8 @@ impl AsyncThinCursorImpl {
         self.inner.get_array_dml_row_counts()
     }
 
-    fn get_batch_errors(&self) -> PyResult<Vec<Py<PyAny>>> {
-        self.inner.get_batch_errors()
+    fn get_batch_errors(&self, py: Python<'_>) -> PyResult<Option<Vec<Py<PyAny>>>> {
+        self.inner.get_batch_errors(py)
     }
 
     fn get_bind_names(&self) -> Vec<String> {

@@ -12,7 +12,7 @@ use asupersync::sync::Mutex as AsyncMutex;
 use asupersync::{time, Cx};
 use oracledb_protocol::thin::{
     build_auth_phase_two_payload_with_context_with_seq, build_connect_packet_payload,
-    build_define_fetch_payload_with_seq, build_execute_payload_with_bind_rows_with_seq,
+    build_define_fetch_payload_with_seq, build_execute_payload_with_bind_rows_and_options_with_seq,
     build_execute_payload_with_binds_with_seq, build_execute_payload_with_seq,
     build_fast_auth_phase_one_payload, build_fetch_payload_with_seq,
     build_function_payload_with_seq, build_lob_create_temp_payload_with_seq,
@@ -20,11 +20,12 @@ use oracledb_protocol::thin::{
     build_lob_trim_payload_with_seq, build_lob_write_payload_with_seq, parse_accept_payload,
     parse_auth_response, parse_fetch_response_with_context, parse_lob_create_temp_response,
     parse_lob_free_temp_response, parse_lob_read_response, parse_lob_trim_response,
-    parse_lob_write_response, parse_query_response, parse_query_response_with_binds, BindValue,
-    ClientCapabilities, ColumnMetadata, LobReadResult, QueryResult, TNS_FUNC_COMMIT,
-    TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE,
-    TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT,
-    TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE,
+    parse_lob_write_response, parse_query_response, parse_query_response_with_binds,
+    parse_query_response_with_binds_and_options, BindValue, ClientCapabilities, ColumnMetadata,
+    ExecuteOptions, LobReadResult, QueryResult, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING,
+    TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS,
+    TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA,
+    TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE,
 };
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};
@@ -387,15 +388,34 @@ impl Connection {
         prefetch_rows: u32,
         bind_rows: &[Vec<BindValue>],
     ) -> Result<QueryResult> {
+        self.execute_query_with_bind_rows_and_options(
+            cx,
+            sql,
+            prefetch_rows,
+            bind_rows,
+            ExecuteOptions::default(),
+        )
+        .await
+    }
+
+    pub async fn execute_query_with_bind_rows_and_options(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+        bind_rows: &[Vec<BindValue>],
+        exec_options: ExecuteOptions,
+    ) -> Result<QueryResult> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let payload = build_execute_payload_with_bind_rows_with_seq(
+        let payload = build_execute_payload_with_bind_rows_and_options_with_seq(
             sql,
             prefetch_rows,
             seq_num,
             statement_is_query(sql),
             bind_rows,
+            exec_options,
         )?;
         trace_query_bytes("EXECUTE query payload", &payload);
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
@@ -403,10 +423,11 @@ impl Connection {
             read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, self.sdu)
                 .await?;
         trace_query_bytes("EXECUTE query response", &response);
-        let result = parse_query_response_with_binds(
+        let result = parse_query_response_with_binds_and_options(
             &response,
             self.capabilities,
             bind_rows.first().map(Vec::as_slice).unwrap_or(&[]),
+            exec_options,
         )
         .map_err(Error::from)?;
         self.remember_cursor_columns(&result);
@@ -429,6 +450,47 @@ impl Connection {
             timeout_ms,
         )
         .await
+    }
+
+    pub async fn execute_query_with_bind_rows_options_and_timeout(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+        bind_rows: &[Vec<BindValue>],
+        exec_options: ExecuteOptions,
+        timeout_ms: Option<u32>,
+    ) -> Result<QueryResult> {
+        let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
+            return self
+                .execute_query_with_bind_rows_and_options(
+                    cx,
+                    sql,
+                    prefetch_rows,
+                    bind_rows,
+                    exec_options,
+                )
+                .await;
+        };
+        match time::timeout(
+            time::wall_now(),
+            Duration::from_millis(u64::from(timeout_ms)),
+            self.execute_query_with_bind_rows_and_options(
+                cx,
+                sql,
+                prefetch_rows,
+                bind_rows,
+                exec_options,
+            ),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                let _ = send_marker_shared(cx, &self.write, TNS_MARKER_TYPE_BREAK).await;
+                Err(Error::CallTimeout(timeout_ms))
+            }
+        }
     }
 
     pub async fn fetch_rows(
@@ -1073,6 +1135,31 @@ impl BlockingConnection {
                     sql,
                     prefetch_rows,
                     bind_rows,
+                    timeout_ms,
+                )
+                .await
+        })
+    }
+
+    pub fn execute_query_with_bind_rows_options_and_timeout(
+        connection: &mut Connection,
+        sql: &str,
+        prefetch_rows: u32,
+        bind_rows: &[Vec<BindValue>],
+        exec_options: ExecuteOptions,
+        timeout_ms: Option<u32>,
+    ) -> Result<QueryResult> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .execute_query_with_bind_rows_options_and_timeout(
+                    &cx,
+                    sql,
+                    prefetch_rows,
+                    bind_rows,
+                    exec_options,
                     timeout_ms,
                 )
                 .await

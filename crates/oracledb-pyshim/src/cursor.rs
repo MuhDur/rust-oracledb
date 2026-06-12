@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use oracledb::protocol::thin::{BindValue, ColumnMetadata, QueryResult, QueryValue};
+use oracledb::protocol::thin::{
+    BatchServerError, BindValue, ColumnMetadata, ExecuteOptions, QueryResult, QueryValue,
+};
 use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
@@ -93,6 +95,12 @@ pub(crate) struct ThinCursorImpl {
     pub(crate) statement_changed: bool,
     pub(crate) is_query: bool,
     pub(crate) last_rowid: Option<String>,
+    /// `Some` after `executemany(batcherrors=True)`; `None` otherwise
+    /// (reference `_batcherrors`).
+    pub(crate) batch_errors_state: Option<Vec<BatchServerError>>,
+    /// `Some` after `executemany(arraydmlrowcounts=True)` (reference
+    /// `_dmlrowcounts`).
+    pub(crate) dml_row_counts: Option<Vec<u64>>,
 }
 
 impl ThinCursorImpl {
@@ -150,6 +158,27 @@ impl ThinCursorImpl {
             statement_changed: false,
             is_query: false,
             last_rowid: None,
+            batch_errors_state: None,
+            dml_row_counts: None,
+        }
+    }
+
+    /// Mirrors reference `_process_error_info` mode bookkeeping when an
+    /// executemany fails outright: batcherrors yields an empty list and the
+    /// DML row counts gathered before the error are preserved.
+    pub(crate) fn record_executemany_error_modes(
+        &mut self,
+        err: &TaskError,
+        batcherrors: bool,
+        arraydmlrowcounts: bool,
+    ) {
+        self.batch_errors_state = batcherrors.then(Vec::new);
+        if arraydmlrowcounts {
+            let counts = err
+                .server_error_details()
+                .and_then(|details| details.array_dml_row_counts.clone())
+                .unwrap_or_default();
+            self.dml_row_counts = Some(counts);
         }
     }
 
@@ -638,18 +667,19 @@ impl ThinCursorImpl {
         arraydmlrowcounts: bool,
         offset: u32,
     ) -> PyResult<()> {
-        if batcherrors {
-            return Err(not_implemented("ThinCursorImpl executemany batcherrors"));
-        }
-        if arraydmlrowcounts {
-            return Err(not_implemented(
-                "ThinCursorImpl executemany array DML rowcounts",
-            ));
-        }
         let statement = self
             .statement
             .as_deref()
             .ok_or_else(|| PyRuntimeError::new_err("no statement prepared"))?;
+        // only DML statements may use the batch errors or array DML row
+        // counts flags (reference thin/cursor.pyx:302-305)
+        if (batcherrors || arraydmlrowcounts) && !statement_is_dml(statement) {
+            return Err(raise_oracledb_driver_error("ERR_EXECUTE_MODE_ONLY_FOR_DML"));
+        }
+        let exec_options = ExecuteOptions {
+            batcherrors,
+            arraydmlrowcounts,
+        };
         let start = usize::try_from(offset).map_err(runtime_error)?;
         let count = usize::try_from(num_execs).map_err(runtime_error)?;
         let end = start
@@ -741,11 +771,12 @@ impl ThinCursorImpl {
                     result.return_values = return_values.into_iter().collect();
                     return Ok(result);
                 }
-                BlockingConnection::execute_query_with_bind_rows_and_timeout(
+                BlockingConnection::execute_query_with_bind_rows_options_and_timeout(
                     connection,
                     &statement,
                     prefetchrows,
                     &bind_rows,
+                    exec_options,
                     call_timeout,
                 )
                 .map_err(|err| {
@@ -762,8 +793,15 @@ impl ThinCursorImpl {
             Err(_) if self.cancel_requested.swap(false, Ordering::SeqCst) => {
                 return Err(ora_cancel_error());
             }
-            Err(err) => return Err(self.raise_execute_task_error(&err, is_plsql_statement)),
+            Err(err) => {
+                self.record_executemany_error_modes(&err, batcherrors, arraydmlrowcounts);
+                return Err(self.raise_execute_task_error(&err, is_plsql_statement));
+            }
         };
+        self.batch_errors_state = batcherrors.then(|| std::mem::take(&mut result.batch_errors));
+        if arraydmlrowcounts {
+            self.dml_row_counts = Some(result.array_dml_row_counts.take().unwrap_or_default());
+        }
         let is_query = !result.columns.is_empty();
         let should_commit = !is_query && *self.autocommit.lock().map_err(runtime_error)?;
         if should_commit {
@@ -822,6 +860,9 @@ impl ThinCursorImpl {
         if self.statement_changed {
             self.rowfactory = None;
         }
+        // reference resets _batcherrors via _process_error_info on every
+        // execute round trip
+        self.batch_errors_state = None;
         let statement = self
             .statement
             .as_deref()
@@ -1164,11 +1205,30 @@ impl ThinCursorImpl {
     }
 
     pub(crate) fn get_array_dml_row_counts(&self) -> PyResult<Vec<u64>> {
-        Err(not_implemented("ThinCursorImpl.get_array_dml_row_counts"))
+        // reference thin/cursor.pyx get_array_dml_row_counts: DPY-4006 when
+        // the last executemany did not enable arraydmlrowcounts
+        self.dml_row_counts
+            .clone()
+            .ok_or_else(|| raise_oracledb_driver_error("ERR_ARRAY_DML_ROW_COUNTS_NOT_ENABLED"))
     }
 
-    pub(crate) fn get_batch_errors(&self) -> PyResult<Vec<Py<PyAny>>> {
-        Err(not_implemented("ThinCursorImpl.get_batch_errors"))
+    pub(crate) fn get_batch_errors(&self, py: Python<'_>) -> PyResult<Option<Vec<Py<PyAny>>>> {
+        let Some(batch_errors) = &self.batch_errors_state else {
+            return Ok(None);
+        };
+        let errors_mod = PyModule::import(py, "oracledb.errors")?;
+        let error_type = errors_mod.getattr("_Error")?;
+        let mut result = Vec::with_capacity(batch_errors.len());
+        for batch_error in batch_errors {
+            let kwargs = PyDict::new(py);
+            if !batch_error.message.is_empty() {
+                kwargs.set_item("message", &batch_error.message)?;
+            }
+            kwargs.set_item("code", batch_error.code)?;
+            kwargs.set_item("offset", batch_error.offset)?;
+            result.push(error_type.call((), Some(&kwargs))?.unbind());
+        }
+        Ok(Some(result))
     }
 
     pub(crate) fn get_bind_names(&self) -> Vec<String> {
