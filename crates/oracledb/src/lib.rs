@@ -20,11 +20,12 @@ use oracledb_protocol::thin::{
     build_lob_trim_payload_with_seq, build_lob_write_payload_with_seq, parse_accept_payload,
     parse_auth_response, parse_fetch_response_with_context, parse_lob_create_temp_response,
     parse_lob_free_temp_response, parse_lob_read_response, parse_lob_trim_response,
-    parse_lob_write_response, parse_query_response, parse_query_response_with_binds, BindValue,
-    ClientCapabilities, ColumnMetadata, LobReadResult, QueryResult, TNS_FUNC_COMMIT,
-    TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE,
-    TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT,
-    TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE,
+    parse_lob_write_response, parse_plain_function_response, parse_query_response,
+    parse_query_response_with_binds, BindValue, ClientCapabilities, ColumnMetadata, LobReadResult,
+    QueryResult, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK,
+    TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT,
+    TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT,
+    TNS_PACKET_TYPE_REFUSE,
 };
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};
@@ -333,18 +334,7 @@ impl Connection {
     }
 
     pub async fn ping(&mut self, cx: &Cx) -> Result<()> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
-        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        send_data_packet_shared(
-            cx,
-            &self.write,
-            &build_function_payload_with_seq(TNS_FUNC_PING, seq_num),
-            self.sdu,
-        )
-        .await?;
-        let _ = read_data_response(&mut self.read, cx, &self.write).await?;
-        Ok(())
+        self.send_function(cx, TNS_FUNC_PING).await
     }
 
     /// Ping with an upper bound on the round trip, used by pool health
@@ -1016,7 +1006,11 @@ impl Connection {
             self.sdu,
         )
         .await?;
-        let _ = read_data_response(&mut self.read, cx, &self.write).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        // Surface server errors (e.g. ORA-01012 after a killed session) that
+        // arrive on plain function round trips; pool ping health checks and
+        // commit/rollback depend on these not being silently swallowed.
+        self.note_parse(parse_plain_function_response(&response, self.capabilities))?;
         Ok(())
     }
 }
