@@ -8,6 +8,27 @@ use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 
 use crate::*;
 
+/// Wraps a PL/SQL "output" placeholder bind. The reference always sends the
+/// bind variable's current value for PL/SQL (the server's IO vector decides
+/// which binds come back as OUT), so a placeholder that is both an
+/// assignment target and an input operand (e.g. `:v := :v + 5`) must keep
+/// its input value. Only valueless binds are sent as pure OUT (typed NULL
+/// with type metadata).
+pub(crate) fn plsql_output_bind(value: BindValue) -> BindValue {
+    if matches!(
+        value,
+        BindValue::Null
+            | BindValue::TypedNull { .. }
+            | BindValue::Output { .. }
+            | BindValue::ReturnOutput { .. }
+            | BindValue::ObjectOutput { .. }
+    ) {
+        output_only_bind(value)
+    } else {
+        value
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
 pub(crate) fn extract_bind_values(
     py: Python<'_>,
@@ -514,7 +535,7 @@ pub(crate) fn extract_positional_bind_values_for_execute(
             values.push(if is_return_bind {
                 returning_output_bind(bind)
             } else {
-                output_only_bind(bind)
+                plsql_output_bind(bind)
             });
             continue;
         }
@@ -608,7 +629,7 @@ pub(crate) fn extract_positional_bind_values_with_input_sizes(
             values.push(if is_return_bind {
                 returning_output_bind(value)
             } else {
-                output_only_bind(value)
+                plsql_output_bind(value)
             });
             continue;
         }
@@ -689,7 +710,7 @@ pub(crate) fn extract_named_bind_values(
                     return Ok(if is_return_bind {
                         returning_output_bind(value)
                     } else if is_plsql_output_bind {
-                        output_only_bind(value)
+                        plsql_output_bind(value)
                     } else {
                         value
                     });
@@ -700,7 +721,7 @@ pub(crate) fn extract_named_bind_values(
                 return Ok(if is_return_bind {
                     returning_output_bind(value)
                 } else if is_plsql_output_bind {
-                    output_only_bind(value)
+                    plsql_output_bind(value)
                 } else {
                     value
                 });
@@ -713,7 +734,7 @@ pub(crate) fn extract_named_bind_values(
                     return Ok(if is_return_bind {
                         returning_output_bind(value)
                     } else {
-                        output_only_bind(value)
+                        plsql_output_bind(value)
                     });
                 }
             }
@@ -888,7 +909,7 @@ pub(crate) fn extract_input_size_bind_values(
             Ok(if is_return_bind {
                 returning_output_bind(value)
             } else if is_plsql_output_bind {
-                output_only_bind(value)
+                plsql_output_bind(value)
             } else {
                 value
             })
