@@ -92,6 +92,11 @@ pub(crate) fn thin_var_from_type_spec(
 ) -> PyResult<Py<ThinVar>> {
     let type_name = py_type_name(typ);
     let object_type = py_db_object_type_impl(typ)?;
+    // anything that is not a DbType/ApiType/DbObjectType/Python type raises
+    // DPY-2007 (reference OracleMetadata.from_type, metadata.pyx:385-386)
+    if object_type.is_none() && type_name.is_empty() {
+        return Err(raise_oracledb_driver_error("ERR_EXPECTING_TYPE"));
+    }
     let default_bind = if let Some(object_type) = object_type.as_ref() {
         object_type
             .object_output_bind()
@@ -257,12 +262,23 @@ impl ThinVar {
     }
 
     pub(crate) fn to_bind_value(&self, py: Python<'_>) -> PyResult<BindValue> {
+        // NOTE: the `values` mutex must never be held while converting a
+        // stored value: conversion re-enters arbitrary Python code and other
+        // ThinVar methods (a variable stored as a bind value used to
+        // self-deadlock here — test_4116). Clone the references out of the
+        // guard first.
         if self.is_array {
             let count = *self.num_elements_in_array.lock().map_err(runtime_error)?;
-            let guard = self.values.lock().map_err(runtime_error)?;
-            let values = guard
+            let cloned = {
+                let guard = self.values.lock().map_err(runtime_error)?;
+                guard
+                    .iter()
+                    .take(count as usize)
+                    .map(|value| value.as_ref().map(|value| value.clone_ref(py)))
+                    .collect::<Vec<_>>()
+            };
+            let values = cloned
                 .iter()
-                .take(count as usize)
                 .map(|value| match value {
                     Some(value) if !value.bind(py).is_none() => {
                         py_value_to_bind_with_template(value.bind(py), &self.default_bind).map(Some)
@@ -280,17 +296,32 @@ impl ThinVar {
                 values,
             });
         }
-        if is_cursor_bind_template(&self.default_bind) {
+        let value = {
             let guard = self.values.lock().map_err(runtime_error)?;
-            if let Some(value) = guard.first().and_then(Option::as_ref) {
+            guard
+                .first()
+                .and_then(Option::as_ref)
+                .map(|value| value.clone_ref(py))
+        };
+        if is_cursor_bind_template(&self.default_bind) {
+            if let Some(value) = value {
                 validate_public_cursor_is_open(value.bind(py))?;
             }
             return Ok(self.default_bind.clone());
         }
-        let guard = self.values.lock().map_err(runtime_error)?;
-        let Some(value) = guard.first().and_then(Option::as_ref) else {
+        let Some(value) = value else {
             return Ok(self.default_bind.clone());
         };
+        // A variable stored as its own value must not recurse into this
+        // conversion (the reference never stores Var objects as values;
+        // bind_var.pyx _set_by_value uses the variable directly instead).
+        if let Some(stored) = thin_var_from_value(value.bind(py))? {
+            if let Ok(stored) = stored.try_borrow(py) {
+                if std::ptr::eq(&*stored as *const ThinVar, self as *const ThinVar) {
+                    return Ok(self.default_bind.clone());
+                }
+            }
+        }
         py_value_to_bind_with_template(value.bind(py), &self.default_bind)
     }
 
@@ -418,7 +449,11 @@ impl ThinVar {
 
     /// Port of the reference `_check_value` coercion matrix
     /// (impl/base/connection.pyx:39-171).
-    fn check_value(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    pub(crate) fn check_value(
+        &self,
+        py: Python<'_>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
         if value.is_none() {
             return Ok(py.None());
         }
@@ -710,6 +745,37 @@ impl ThinVar {
                     .call1((value.as_str(),))?
                     .unbind())
             }
+            // BOOLEAN wire values surface as NUMBER 0/1; materialize bool
+            // (reference converters.pyx DB_TYPE_NUM_BOOLEAN)
+            (ThinVarReturnKind::Plain, Some(QueryValue::Number { text, .. }))
+                if self.dbtype_name == "DB_TYPE_BOOLEAN" =>
+            {
+                Ok(PyBool::new(py, text != "0").to_owned().unbind().into())
+            }
+            // a string/bytes bind larger than 32767 bytes is auto-converted
+            // to a temporary LOB for PL/SQL; its out value reads back as
+            // str/bytes so outconverters see the original Python type
+            // (reference impl/thin/var.pyx:53-71 wraps the outconverter with
+            // a LOB .read())
+            (
+                ThinVarReturnKind::Plain,
+                Some(QueryValue::Lob {
+                    ora_type_num,
+                    csfrm,
+                    locator,
+                    ..
+                }),
+            ) if (target_is_char
+                || matches!(
+                    self.dbtype_name.as_str(),
+                    "DB_TYPE_RAW" | "DB_TYPE_LONG_RAW"
+                ))
+                && lob_context.is_some() =>
+            {
+                let context =
+                    lob_context.ok_or_else(|| PyRuntimeError::new_err("missing LOB context"))?;
+                direct_lob_value_to_py(py, *ora_type_num, *csfrm, locator, context)
+            }
             (ThinVarReturnKind::Plain, Some(QueryValue::Number { text, .. }))
                 if self.dbtype_name == "DB_TYPE_BINARY_INTEGER" =>
             {
@@ -999,7 +1065,16 @@ pub(crate) fn bind_var_from_value(
     if let Some(var) = thin_var_from_value(value)? {
         return Ok(var);
     }
-    let type_name = py_type_name(value);
+    // derive the variable type from the value's Python class, mirroring
+    // OracleMetadata.from_value (impl/base/metadata.pyx:413-458); this keeps
+    // out-bind materialization faithful (an in/out NUMBER bound from an int
+    // must come back as int, not str)
+    let class_name = py_value_type_name(value);
+    let type_name = match class_name.as_str() {
+        "bool" | "int" | "float" | "Decimal" | "str" | "bytes" | "date" | "datetime"
+        | "timedelta" => class_name,
+        _ => String::new(),
+    };
     if !type_name.is_empty() {
         let default_bind = bind_template_from_type_name(&type_name, 0);
         if !matches!(default_bind, BindValue::Null) {
@@ -1007,6 +1082,8 @@ pub(crate) fn bind_var_from_value(
                 py,
                 ThinVar::with_options(ThinVarOptions {
                     default_bind,
+                    value: Some(value.clone().unbind()),
+                    py_kind: py_kind_from_type_name(&type_name),
                     dbtype_name: public_dbtype_name_from_type_name(&type_name).to_string(),
                     ..ThinVarOptions::default()
                 }),

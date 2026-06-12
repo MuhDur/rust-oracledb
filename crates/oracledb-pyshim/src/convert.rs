@@ -6,14 +6,14 @@ use oracledb::protocol::thin::{
     dbobject_element_bind_type_info, decode_bfile_locator_name,
     encode_lob_text as protocol_encode_lob_text, BindValue, ColumnMetadata, QueryValue,
     CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE,
-    ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_NUMBER,
-    ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ,
-    ORA_TYPE_NUM_VARCHAR,
+    ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_BOOLEAN, ORA_TYPE_NUM_CLOB,
+    ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
+    ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyBytesMethods, PyList, PyTuple};
+use pyo3::types::{PyBool, PyBytes, PyBytesMethods, PyList, PyTuple};
 
 use crate::*;
 
@@ -23,6 +23,12 @@ pub(crate) fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> 
     }
     if let Ok(var) = value.extract::<PyRef<'_, ThinVar>>() {
         return var.to_bind_value(value.py());
+    }
+    // bool precedes the numeric extracts (it is an int subclass); reference
+    // OracleMetadata.from_value maps bool to DB_TYPE_BOOLEAN
+    // (impl/base/metadata.pyx:422-423)
+    if value.is_instance_of::<PyBool>() {
+        return Ok(BindValue::Boolean(value.extract::<bool>()?));
     }
     if is_public_cursor_value(value)? {
         let impl_obj = value.getattr("_impl")?;
@@ -142,6 +148,21 @@ pub(crate) fn py_value_to_bind_with_template(
                 .extract::<f64>()
         })?;
         return Ok(BindValue::BinaryDouble(number));
+    }
+    // reference _check_value coerces any value bound through a BOOLEAN
+    // variable with bool() (impl/base/connection.pyx:139-140)
+    if ora_type_num == ORA_TYPE_NUM_BOOLEAN {
+        if value.is_none() {
+            return Ok(BindValue::Null);
+        }
+        return Ok(BindValue::Boolean(value.is_truthy()?));
+    }
+    if ora_type_num == ORA_TYPE_NUM_NUMBER && value.is_instance_of::<PyBool>() {
+        // bool bound through a NUMBER variable becomes int
+        // (impl/base/connection.pyx:64-68)
+        return Ok(BindValue::Number(
+            if value.is_truthy()? { "1" } else { "0" }.to_string(),
+        ));
     }
     if ora_type_num == ORA_TYPE_NUM_NUMBER
         && matches!(py_value_type_name(value).as_str(), "Decimal")
@@ -531,6 +552,41 @@ pub(crate) fn materialize_typed_lob_bind_values(
     Ok(())
 }
 
+/// For PL/SQL blocks a string or bytes bind larger than 32767 bytes must be
+/// converted to a temporary CLOB/BLOB before execution (reference
+/// impl/thin/var.pyx:53-71); the server rejects oversized character binds in
+/// PL/SQL with ORA-01460.
+pub(crate) fn materialize_plsql_long_binds(
+    connection: &mut RustConnection,
+    values: &mut [BindValue],
+    call_timeout: Option<u32>,
+) -> Result<(), String> {
+    for value in values.iter_mut() {
+        match value {
+            BindValue::Text(text) if text.len() > 32_767 => {
+                materialize_typed_lob_text_bind(
+                    connection,
+                    value,
+                    ORA_TYPE_NUM_CLOB,
+                    CS_FORM_IMPLICIT,
+                    call_timeout,
+                )?;
+            }
+            BindValue::Raw(bytes) if bytes.len() > 32_767 => {
+                materialize_typed_lob_raw_bind(
+                    connection,
+                    value,
+                    ORA_TYPE_NUM_BLOB,
+                    0,
+                    call_timeout,
+                )?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn materialize_typed_lob_bind_rows(
     connection: &mut RustConnection,
     rows: &mut [Vec<BindValue>],
@@ -650,6 +706,43 @@ pub(crate) async fn materialize_typed_lob_bind_rows_async(
 ) -> Result<(), String> {
     for row in rows {
         materialize_typed_lob_bind_values_async(cx, connection, row, hints, call_timeout).await?;
+    }
+    Ok(())
+}
+
+/// Async twin of [`materialize_plsql_long_binds`].
+pub(crate) async fn materialize_plsql_long_binds_async(
+    cx: &Cx,
+    connection: &mut RustConnection,
+    values: &mut [BindValue],
+    call_timeout: Option<u32>,
+) -> Result<(), String> {
+    for value in values.iter_mut() {
+        match value {
+            BindValue::Text(text) if text.len() > 32_767 => {
+                materialize_typed_lob_text_bind_async(
+                    cx,
+                    connection,
+                    value,
+                    ORA_TYPE_NUM_CLOB,
+                    CS_FORM_IMPLICIT,
+                    call_timeout,
+                )
+                .await?;
+            }
+            BindValue::Raw(bytes) if bytes.len() > 32_767 => {
+                materialize_typed_lob_raw_bind_async(
+                    cx,
+                    connection,
+                    value,
+                    ORA_TYPE_NUM_BLOB,
+                    0,
+                    call_timeout,
+                )
+                .await?;
+            }
+            _ => {}
+        }
     }
     Ok(())
 }

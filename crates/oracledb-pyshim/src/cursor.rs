@@ -681,6 +681,11 @@ impl ThinCursorImpl {
                     &typed_lob_hints,
                     call_timeout,
                 )?;
+                if statement_is_plsql(&statement) {
+                    for row in bind_rows.iter_mut() {
+                        materialize_plsql_long_binds(connection, row, call_timeout)?;
+                    }
+                }
                 if bind_rows.iter().all(Vec::is_empty)
                     || bind_rows_need_iterative_plsql(&statement, &bind_rows)
                 {
@@ -834,6 +839,9 @@ impl ThinCursorImpl {
                     &typed_lob_hints,
                     call_timeout,
                 )?;
+                if statement_is_plsql(&statement) {
+                    materialize_plsql_long_binds(connection, &mut bind_values, call_timeout)?;
+                }
                 BlockingConnection::execute_query_with_binds_and_timeout(
                     connection,
                     &statement,
