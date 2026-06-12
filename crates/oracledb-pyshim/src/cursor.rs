@@ -509,7 +509,7 @@ impl ThinCursorImpl {
         Ok(())
     }
 
-    pub(crate) fn parse(&mut self, _cursor: &Bound<'_, PyAny>) -> PyResult<()> {
+    pub(crate) fn parse(&mut self, cursor: &Bound<'_, PyAny>) -> PyResult<()> {
         let statement = self
             .statement
             .as_deref()
@@ -519,6 +519,50 @@ impl ThinCursorImpl {
         validate_dml_returning_duplicate_binds(&statement)?;
         self.bind_names = unique_sql_bind_names(statement)?;
         validate_parse_bind_names(statement)?;
+        // reference sends a parse-only ExecuteMessage so queries are
+        // described and the cursor exposes fetch metadata
+        // (thin/cursor.pyx:324-330, execute.pyx:89-92)
+        let is_plsql = statement_is_plsql(statement);
+        let call_timeout = {
+            let value = self.state.lock().map_err(runtime_error)?.call_timeout;
+            (value > 0).then_some(value)
+        };
+        let result = match cursor.py().detach({
+            let connection = Arc::clone(&self.connection);
+            let statement = statement.to_string();
+            move || -> Result<QueryResult, TaskError> {
+                let mut guard = connection
+                    .lock()
+                    .map_err(|err| TaskError::from(err.to_string()))?;
+                let connection = guard
+                    .as_mut()
+                    .ok_or_else(|| TaskError::from("connection is closed"))?;
+                BlockingConnection::execute_query_with_bind_rows_options_and_timeout(
+                    connection,
+                    &statement,
+                    1,
+                    &[],
+                    ExecuteOptions {
+                        parse_only: true,
+                        ..ExecuteOptions::default()
+                    },
+                    call_timeout,
+                )
+                .map_err(TaskError::from)
+            }
+        }) {
+            Ok(result) => result,
+            Err(err) => return Err(self.raise_execute_task_error(&err, is_plsql)),
+        };
+        if !result.columns.is_empty() {
+            self.columns = result.columns;
+            self.reset_fetch_define_state();
+            self.requires_define = columns_require_define(&self.columns);
+            self.rows.clear();
+            self.row_index = 0;
+            self.more_rows = false;
+            self.is_query = true;
+        }
         Ok(())
     }
 
@@ -696,6 +740,7 @@ impl ThinCursorImpl {
         let exec_options = ExecuteOptions {
             batcherrors,
             arraydmlrowcounts,
+            ..ExecuteOptions::default()
         };
         let start = usize::try_from(offset).map_err(runtime_error)?;
         let count = usize::try_from(num_execs).map_err(runtime_error)?;

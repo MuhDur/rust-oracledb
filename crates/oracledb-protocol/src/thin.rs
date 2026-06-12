@@ -122,6 +122,7 @@ const TNS_EXEC_OPTION_EXECUTE: u32 = 0x20;
 const TNS_EXEC_OPTION_FETCH: u32 = 0x40;
 const TNS_EXEC_OPTION_PLSQL_BIND: u32 = 0x400;
 const TNS_EXEC_OPTION_NOT_PLSQL: u32 = 0x8000;
+const TNS_EXEC_OPTION_DESCRIBE: u32 = 0x20000;
 const TNS_EXEC_OPTION_BATCH_ERRORS: u32 = 0x80000;
 const TNS_EXEC_FLAGS_DML_ROWCOUNTS: u32 = 0x4000;
 const TNS_DURATION_SESSION: u32 = 10;
@@ -794,6 +795,8 @@ pub fn build_execute_payload_with_binds_with_seq(
 pub struct ExecuteOptions {
     pub batcherrors: bool,
     pub arraydmlrowcounts: bool,
+    /// Parse/describe without executing (reference `parse_only`).
+    pub parse_only: bool,
 }
 
 pub fn build_execute_payload_with_bind_rows_with_seq(
@@ -847,9 +850,17 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     writer.write_ub8(0);
 
     let is_plsql = statement_is_plsql(sql);
-    let mut options = TNS_EXEC_OPTION_PARSE | TNS_EXEC_OPTION_EXECUTE;
+    let parse_only = exec_options.parse_only;
+    let mut options = TNS_EXEC_OPTION_PARSE;
+    if !parse_only {
+        options |= TNS_EXEC_OPTION_EXECUTE;
+    }
     if is_query {
-        options |= TNS_EXEC_OPTION_FETCH;
+        if parse_only {
+            options |= TNS_EXEC_OPTION_DESCRIBE;
+        } else {
+            options |= TNS_EXEC_OPTION_FETCH;
+        }
     }
     if bind_count > 0 {
         options |= TNS_EXEC_OPTION_BIND;
@@ -858,19 +869,31 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
         if bind_count > 0 {
             options |= TNS_EXEC_OPTION_PLSQL_BIND;
         }
-    } else {
+    } else if !parse_only {
         options |= TNS_EXEC_OPTION_NOT_PLSQL;
     }
     if exec_options.batcherrors {
         options |= TNS_EXEC_OPTION_BATCH_ERRORS;
     }
-    let num_iters = if is_query { prefetch_rows } else { 1 };
-    let exec_count = if is_query { 0 } else { bind_row_count.max(1) };
+    let num_iters = if is_query && !parse_only {
+        prefetch_rows
+    } else {
+        1
+    };
+    let exec_count = if is_query || parse_only {
+        0
+    } else {
+        bind_row_count.max(1)
+    };
     let query_flag = u32::from(is_query);
     // reference sets the implicit-resultset flag on every full execute with
     // SQL (execute.pyx:81-82); anonymous PL/SQL blocks need it for
     // dbms_sql.return_result (ORA-29481 otherwise)
-    let mut exec_flags = TNS_EXEC_FLAGS_IMPLICIT_RESULTSET;
+    let mut exec_flags = if parse_only {
+        0
+    } else {
+        TNS_EXEC_FLAGS_IMPLICIT_RESULTSET
+    };
     if exec_options.arraydmlrowcounts {
         exec_flags |= TNS_EXEC_FLAGS_DML_ROWCOUNTS;
     }
