@@ -81,6 +81,7 @@ pub(crate) struct ThinCursorImpl {
     pub(crate) fetch_lobs_overridden: bool,
     pub(crate) fetch_async_lobs: bool,
     pub(crate) fetch_decimals: bool,
+    pub(crate) fetch_decimals_overridden: bool,
     pub(crate) suspend_on_success: bool,
     pub(crate) rowfactory: Option<Py<PyAny>>,
     pub(crate) inputtypehandler: Option<Py<PyAny>>,
@@ -136,6 +137,7 @@ impl ThinCursorImpl {
             fetch_lobs_overridden: false,
             fetch_async_lobs: false,
             fetch_decimals: false,
+            fetch_decimals_overridden: false,
             suspend_on_success: false,
             rowfactory: None,
             inputtypehandler: None,
@@ -319,6 +321,7 @@ impl ThinCursorImpl {
     #[setter]
     fn set_fetch_decimals(&mut self, value: bool) {
         self.fetch_decimals = value;
+        self.fetch_decimals_overridden = true;
     }
 
     #[getter]
@@ -711,6 +714,9 @@ impl ThinCursorImpl {
         if !self.fetch_lobs_overridden {
             self.fetch_lobs = default_fetch_lobs(cursor.py())?;
         }
+        if !self.fetch_decimals_overridden {
+            self.fetch_decimals = default_fetch_decimals(cursor.py())?;
+        }
         let statement = self
             .statement
             .as_deref()
@@ -903,6 +909,7 @@ impl ThinCursorImpl {
                     Some(_cursor),
                     Some(&lob_context),
                     self.fetch_lobs,
+                    self.fetch_decimals,
                 )
             })
             .collect::<PyResult<Vec<_>>>()?;

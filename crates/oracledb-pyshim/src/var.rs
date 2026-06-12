@@ -403,7 +403,7 @@ impl ThinVar {
                     DbObjectImpl::with_packed_data(object_type, packed_data.clone(), None),
                 )?
             }
-            _ => query_value_to_py(py, value, None, lob_context, true)?,
+            _ => query_value_to_py(py, value, None, lob_context, true, false)?,
         };
         if let Some(outconverter) = self.outconverter.as_ref() {
             if !value.bind(py).is_none() || self.convert_nulls {

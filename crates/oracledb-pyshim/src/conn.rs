@@ -1521,14 +1521,24 @@ impl ThinConnImpl {
         Py::new(py, self.create_temp_lob_value(lob_type, false)?)
     }
 
-    pub(crate) fn create_cursor_impl(&self, scrollable: bool) -> ThinCursorImpl {
-        ThinCursorImpl::new(
+    pub(crate) fn create_cursor_impl(
+        &self,
+        py: Python<'_>,
+        scrollable: bool,
+    ) -> PyResult<ThinCursorImpl> {
+        let mut cursor_impl = ThinCursorImpl::new(
             Arc::clone(&self.connection),
             Arc::clone(&self.autocommit_state),
             Arc::clone(&self.cancel_requested),
             Arc::clone(&self.state),
             scrollable,
-        )
+        );
+        // base/connection.pyx:223-224 sources arraysize/prefetchrows from the
+        // live oracledb.defaults singleton at cursor creation.
+        let (arraysize, prefetchrows) = default_cursor_sizes(py)?;
+        cursor_impl.arraysize = arraysize;
+        cursor_impl.prefetchrows = prefetchrows;
+        Ok(cursor_impl)
     }
 }
 

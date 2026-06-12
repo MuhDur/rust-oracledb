@@ -407,11 +407,28 @@ pub(crate) fn typed_lob_bind_hints(
         .collect()
 }
 
-pub(crate) fn default_fetch_lobs(py: Python<'_>) -> PyResult<bool> {
+fn defaults_attr<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny>> {
     PyModule::import(py, "oracledb")?
         .getattr("defaults")?
-        .getattr("fetch_lobs")?
-        .extract()
+        .getattr(name)
+}
+
+pub(crate) fn default_fetch_lobs(py: Python<'_>) -> PyResult<bool> {
+    defaults_attr(py, "fetch_lobs")?.extract()
+}
+
+pub(crate) fn default_fetch_decimals(py: Python<'_>) -> PyResult<bool> {
+    defaults_attr(py, "fetch_decimals")?.extract()
+}
+
+/// (arraysize, prefetchrows) read from the live ``oracledb.defaults``
+/// singleton, mirroring base/connection.pyx:223-224 which copies
+/// ``C_DEFAULTS.arraysize/prefetchrows`` onto every new cursor impl.
+pub(crate) fn default_cursor_sizes(py: Python<'_>) -> PyResult<(u32, u32)> {
+    Ok((
+        defaults_attr(py, "arraysize")?.extract()?,
+        defaults_attr(py, "prefetchrows")?.extract()?,
+    ))
 }
 
 pub(crate) fn materialize_typed_lob_text_bind(
@@ -827,6 +844,7 @@ pub(crate) fn query_value_to_py(
     owner_cursor: Option<&Bound<'_, PyAny>>,
     lob_context: Option<&ThinLobContext>,
     fetch_lobs: bool,
+    fetch_decimals: bool,
 ) -> PyResult<Py<PyAny>> {
     match value {
         None => Ok(py.None()),
@@ -839,12 +857,20 @@ pub(crate) fn query_value_to_py(
             let value = value.parse::<f64>().map_err(runtime_error)?;
             Ok(value.into_pyobject(py)?.unbind().into())
         }
-        Some(QueryValue::Number { text, is_integer }) if *is_integer => {
-            python_int_from_decimal_text(py, text)
-        }
-        Some(QueryValue::Number { text, .. }) => {
-            let value = text.parse::<f64>().map_err(runtime_error)?;
-            Ok(value.into_pyobject(py)?.unbind().into())
+        Some(QueryValue::Number { text, is_integer }) => {
+            // base/cursor.pyx:212-214: NUMBER columns fetch as decimal.Decimal
+            // when defaults.fetch_decimals (or the per-cursor flag) is set.
+            if fetch_decimals {
+                Ok(PyModule::import(py, "decimal")?
+                    .getattr("Decimal")?
+                    .call1((text.as_str(),))?
+                    .unbind())
+            } else if *is_integer {
+                python_int_from_decimal_text(py, text)
+            } else {
+                let value = text.parse::<f64>().map_err(runtime_error)?;
+                Ok(value.into_pyobject(py)?.unbind().into())
+            }
         }
         Some(QueryValue::DateTime {
             year,
@@ -864,7 +890,16 @@ pub(crate) fn query_value_to_py(
         Some(QueryValue::Array(values)) => {
             let values = values
                 .iter()
-                .map(|value| query_value_to_py(py, value, owner_cursor, lob_context, fetch_lobs))
+                .map(|value| {
+                    query_value_to_py(
+                        py,
+                        value,
+                        owner_cursor,
+                        lob_context,
+                        fetch_lobs,
+                        fetch_decimals,
+                    )
+                })
                 .collect::<PyResult<Vec<_>>>()?;
             Ok(PyList::new(py, values)?.unbind().into())
         }
@@ -952,7 +987,7 @@ pub(crate) fn json_query_value_to_py(
     owner_cursor: Option<&Bound<'_, PyAny>>,
     lob_context: Option<&ThinLobContext>,
 ) -> PyResult<Py<PyAny>> {
-    let value = query_value_to_py(py, value, owner_cursor, lob_context, false)?;
+    let value = query_value_to_py(py, value, owner_cursor, lob_context, false, false)?;
     if value.bind(py).is_none() {
         return Ok(value);
     }

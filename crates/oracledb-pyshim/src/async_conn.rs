@@ -410,9 +410,13 @@ impl AsyncThinConnImpl {
         })
     }
 
-    fn create_cursor_impl(&self, scrollable: bool) -> AsyncThinCursorImpl {
-        AsyncThinCursorImpl {
-            inner: self.inner.create_cursor_impl(scrollable),
-        }
+    fn create_cursor_impl(
+        &self,
+        py: Python<'_>,
+        scrollable: bool,
+    ) -> PyResult<AsyncThinCursorImpl> {
+        Ok(AsyncThinCursorImpl {
+            inner: self.inner.create_cursor_impl(py, scrollable)?,
+        })
     }
 }
