@@ -30,6 +30,7 @@ pub const TNS_MSG_TYPE_FLUSH_OUT_BINDS: u8 = 19;
 pub const TNS_MSG_TYPE_BIT_VECTOR: u8 = 21;
 pub const TNS_MSG_TYPE_DESCRIBE_INFO: u8 = 16;
 pub const TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK: u8 = 23;
+pub const TNS_MSG_TYPE_IMPLICIT_RESULTSET: u8 = 27;
 pub const TNS_MSG_TYPE_END_OF_RESPONSE: u8 = 29;
 
 pub const TNS_FUNC_AUTH_PHASE_ONE: u8 = 118;
@@ -125,6 +126,9 @@ const TNS_EXEC_OPTION_EXECUTE: u32 = 0x20;
 const TNS_EXEC_OPTION_FETCH: u32 = 0x40;
 const TNS_EXEC_OPTION_PLSQL_BIND: u32 = 0x400;
 const TNS_EXEC_OPTION_NOT_PLSQL: u32 = 0x8000;
+const TNS_EXEC_OPTION_DESCRIBE: u32 = 0x20000;
+const TNS_EXEC_OPTION_BATCH_ERRORS: u32 = 0x80000;
+const TNS_EXEC_FLAGS_DML_ROWCOUNTS: u32 = 0x4000;
 const TNS_DURATION_SESSION: u32 = 10;
 const TNS_LOB_OP_READ: u32 = 0x0002;
 const TNS_LOB_OP_TRIM: u32 = 0x0020;
@@ -140,8 +144,10 @@ const TNS_BIND_DIR_INPUT: u8 = 32;
 const TNS_CHARSET_UTF8: u16 = 873;
 pub const TNS_MAX_LONG_LENGTH: u32 = 0x7fff_ffff;
 const TNS_ERR_NO_DATA_FOUND: u32 = 1403;
-const TNS_UDS_FLAGS_IS_JSON: u32 = 0x01;
-const TNS_UDS_FLAGS_IS_OSON: u32 = 0x02;
+const TNS_ERR_ARRAY_DML_ERRORS: u32 = 24381;
+// reference thin/constants.pxi:581-582
+const TNS_UDS_FLAGS_IS_JSON: u32 = 0x0000_0100;
+const TNS_UDS_FLAGS_IS_OSON: u32 = 0x0000_0800;
 const ORA_TYPE_SIZE_BINARY_DOUBLE: u32 = 8;
 const ORA_TYPE_SIZE_BINARY_FLOAT: u32 = 4;
 const ORA_TYPE_SIZE_BOOLEAN: u32 = 4;
@@ -672,6 +678,16 @@ pub struct QueryResult {
     pub row_count: u64,
     pub more_rows: bool,
     pub compilation_error_warning: bool,
+    /// Encoded rowid of the last affected row (reference cursor `lastrowid`).
+    pub last_rowid: Option<String>,
+    /// Batch errors collected with `executemany(batcherrors=True)`.
+    pub batch_errors: Vec<BatchServerError>,
+    /// Per-iteration row counts from `executemany(arraydmlrowcounts=True)`.
+    pub array_dml_row_counts: Option<Vec<u64>>,
+    /// Child cursors returned via `dbms_sql.return_result`
+    /// (`QueryValue::Cursor` entries); `Some` only when the response carried
+    /// a TNS_MSG_TYPE_IMPLICIT_RESULTSET message.
+    pub implicit_resultsets: Option<Vec<QueryValue>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -805,12 +821,39 @@ pub fn build_execute_payload_with_binds_with_seq(
     build_execute_payload_with_bind_rows_with_seq(sql, prefetch_rows, seq_num, is_query, &bind_rows)
 }
 
+/// Optional execute modes (reference ExecuteMessage attributes).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExecuteOptions {
+    pub batcherrors: bool,
+    pub arraydmlrowcounts: bool,
+    /// Parse/describe without executing (reference `parse_only`).
+    pub parse_only: bool,
+}
+
 pub fn build_execute_payload_with_bind_rows_with_seq(
     sql: &str,
     prefetch_rows: u32,
     seq_num: u8,
     is_query: bool,
     bind_rows: &[Vec<BindValue>],
+) -> Result<Vec<u8>> {
+    build_execute_payload_with_bind_rows_and_options_with_seq(
+        sql,
+        prefetch_rows,
+        seq_num,
+        is_query,
+        bind_rows,
+        ExecuteOptions::default(),
+    )
+}
+
+pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
+    sql: &str,
+    prefetch_rows: u32,
+    seq_num: u8,
+    is_query: bool,
+    bind_rows: &[Vec<BindValue>],
+    exec_options: ExecuteOptions,
 ) -> Result<Vec<u8>> {
     let sql_bytes = sql.as_bytes();
     let sql_len =
@@ -833,25 +876,22 @@ pub fn build_execute_payload_with_bind_rows_with_seq(
             length: bind_rows.len(),
             minimum: 0,
         })?;
-    let has_ref_cursor_output = bind_rows.iter().any(|row| {
-        row.iter().any(|value| {
-            matches!(
-                value,
-                BindValue::Output {
-                    ora_type_num: ORA_TYPE_NUM_CURSOR,
-                    ..
-                }
-            )
-        })
-    });
     let mut writer = TtcWriter::new();
     writer.write_function_code_with_seq(TNS_FUNC_EXECUTE, seq_num);
     writer.write_ub8(0);
 
     let is_plsql = statement_is_plsql(sql);
-    let mut options = TNS_EXEC_OPTION_PARSE | TNS_EXEC_OPTION_EXECUTE;
+    let parse_only = exec_options.parse_only;
+    let mut options = TNS_EXEC_OPTION_PARSE;
+    if !parse_only {
+        options |= TNS_EXEC_OPTION_EXECUTE;
+    }
     if is_query {
-        options |= TNS_EXEC_OPTION_FETCH;
+        if parse_only {
+            options |= TNS_EXEC_OPTION_DESCRIBE;
+        } else {
+            options |= TNS_EXEC_OPTION_FETCH;
+        }
     }
     if bind_count > 0 {
         options |= TNS_EXEC_OPTION_BIND;
@@ -860,17 +900,34 @@ pub fn build_execute_payload_with_bind_rows_with_seq(
         if bind_count > 0 {
             options |= TNS_EXEC_OPTION_PLSQL_BIND;
         }
-    } else {
+    } else if !parse_only {
         options |= TNS_EXEC_OPTION_NOT_PLSQL;
     }
-    let num_iters = if is_query { prefetch_rows } else { 1 };
-    let exec_count = if is_query { 0 } else { bind_row_count.max(1) };
-    let query_flag = u32::from(is_query);
-    let exec_flags = if is_query || has_ref_cursor_output {
-        TNS_EXEC_FLAGS_IMPLICIT_RESULTSET
+    if exec_options.batcherrors {
+        options |= TNS_EXEC_OPTION_BATCH_ERRORS;
+    }
+    let num_iters = if is_query && !parse_only {
+        prefetch_rows
     } else {
-        0
+        1
     };
+    let exec_count = if is_query || parse_only {
+        0
+    } else {
+        bind_row_count.max(1)
+    };
+    let query_flag = u32::from(is_query);
+    // reference sets the implicit-resultset flag on every full execute with
+    // SQL (execute.pyx:81-82); anonymous PL/SQL blocks need it for
+    // dbms_sql.return_result (ORA-29481 otherwise)
+    let mut exec_flags = if parse_only {
+        0
+    } else {
+        TNS_EXEC_FLAGS_IMPLICIT_RESULTSET
+    };
+    if exec_options.arraydmlrowcounts {
+        exec_flags |= TNS_EXEC_FLAGS_DML_ROWCOUNTS;
+    }
     writer.write_ub4(options);
     writer.write_ub4(0);
     writer.write_u8(1);
@@ -897,23 +954,29 @@ pub fn build_execute_payload_with_bind_rows_with_seq(
     writer.write_u8(0);
     writer.write_ub4(0);
     writer.write_ub4(0);
-    writer.write_u8(0);
-    writer.write_u8(1);
-    writer.write_u8(0);
-    writer.write_ub4(0);
-    writer.write_u8(0);
-    writer.write_ub4(0);
-    writer.write_ub4(0);
-    writer.write_u8(0);
-    writer.write_ub4(0);
-    writer.write_u8(0);
-    writer.write_u8(0);
-    writer.write_ub4(0);
-    writer.write_u8(0);
-    writer.write_ub4(0);
-    writer.write_u8(0);
-    writer.write_u8(0);
-    writer.write_ub4(0);
+    writer.write_u8(0); // pointer (al8objlist)
+    writer.write_u8(1); // pointer (al8objlen)
+    writer.write_u8(0); // pointer (al8blv)
+    writer.write_ub4(0); // al8blvl
+    writer.write_u8(0); // pointer (al8dnam)
+    writer.write_ub4(0); // al8dnaml
+    writer.write_ub4(0); // registration id (msb)
+    if exec_options.arraydmlrowcounts {
+        writer.write_u8(1); // pointer (al8pidmlrc)
+        writer.write_ub4(exec_count); // al8pidmlrcbl
+        writer.write_u8(1); // pointer (al8pidmlrcl)
+    } else {
+        writer.write_u8(0); // pointer (al8pidmlrc)
+        writer.write_ub4(0); // al8pidmlrcbl
+        writer.write_u8(0); // pointer (al8pidmlrcl)
+    }
+    writer.write_u8(0); // pointer (al8sqlsig)
+    writer.write_ub4(0); // SQL signature length
+    writer.write_u8(0); // pointer (SQL ID)
+    writer.write_ub4(0); // allocated size of SQL ID
+    writer.write_u8(0); // pointer (length of SQL ID)
+    writer.write_u8(0); // pointer (chunk ids)
+    writer.write_ub4(0); // number of chunk ids
 
     writer.write_bytes_with_length(sql_bytes)?;
     writer.write_ub4(1);
@@ -2254,13 +2317,27 @@ pub fn parse_query_response_with_binds(
     capabilities: ClientCapabilities,
     binds: &[BindValue],
 ) -> Result<QueryResult> {
+    parse_query_response_with_binds_and_options(
+        payload,
+        capabilities,
+        binds,
+        ExecuteOptions::default(),
+    )
+}
+
+pub fn parse_query_response_with_binds_and_options(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    binds: &[BindValue],
+    exec_options: ExecuteOptions,
+) -> Result<QueryResult> {
     let bind_columns = binds.iter().map(bind_column_metadata).collect::<Vec<_>>();
     let output_bind_indexes = binds
         .iter()
         .enumerate()
         .filter_map(|(index, value)| value.is_return_output().then_some(index))
         .collect::<Vec<_>>();
-    parse_query_response_with_context_and_binds(
+    parse_query_response_with_context_binds_and_options(
         payload,
         capabilities,
         &[],
@@ -2268,6 +2345,7 @@ pub fn parse_query_response_with_binds(
         &bind_columns,
         &output_bind_indexes,
         false,
+        exec_options,
     )
 }
 
@@ -2322,6 +2400,29 @@ fn parse_query_response_with_context_and_binds(
     output_bind_indexes: &[usize],
     fetch_long_status: bool,
 ) -> Result<QueryResult> {
+    parse_query_response_with_context_binds_and_options(
+        payload,
+        capabilities,
+        previous_columns,
+        previous_row,
+        bind_columns,
+        output_bind_indexes,
+        fetch_long_status,
+        ExecuteOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // mirrors the reference message attribute set
+fn parse_query_response_with_context_binds_and_options(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    previous_columns: &[ColumnMetadata],
+    previous_row: Option<&[Option<QueryValue>]>,
+    bind_columns: &[ColumnMetadata],
+    output_bind_indexes: &[usize],
+    fetch_long_status: bool,
+    exec_options: ExecuteOptions,
+) -> Result<QueryResult> {
     let mut reader = TtcReader::new(payload);
     let mut result = QueryResult {
         columns: previous_columns.to_vec(),
@@ -2371,7 +2472,13 @@ fn parse_query_response_with_context_and_binds(
             TNS_MSG_TYPE_BIT_VECTOR => {
                 bit_vector = Some(parse_bit_vector(&mut reader, result.columns.len())?);
             }
-            TNS_MSG_TYPE_PARAMETER => skip_query_return_parameters(&mut reader)?,
+            TNS_MSG_TYPE_PARAMETER => {
+                let row_counts =
+                    parse_query_return_parameters(&mut reader, exec_options.arraydmlrowcounts)?;
+                if exec_options.arraydmlrowcounts {
+                    result.array_dml_row_counts = Some(row_counts.unwrap_or_default());
+                }
+            }
             TNS_MSG_TYPE_STATUS => {
                 let _call_status = reader.read_ub4()?;
                 let _seq = reader.read_ub2()?;
@@ -2384,6 +2491,23 @@ fn parse_query_response_with_context_and_binds(
             }
             TNS_MSG_TYPE_FLUSH_OUT_BINDS => break,
             TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => skip_server_side_piggyback(&mut reader)?,
+            TNS_MSG_TYPE_IMPLICIT_RESULTSET => {
+                // reference messages/base.pyx `_process_implicit_result`
+                let num_results = reader.read_ub4()?;
+                let mut resultsets = Vec::with_capacity(num_results as usize);
+                for _ in 0..num_results {
+                    let num_bytes = reader.read_u8()?;
+                    reader.skip(usize::from(num_bytes))?;
+                    let mut child = QueryResult::default();
+                    parse_describe_info(&mut reader, capabilities, &mut child)?;
+                    let child_cursor_id = u32::from(reader.read_ub2()?);
+                    resultsets.push(QueryValue::Cursor {
+                        columns: child.columns,
+                        cursor_id: child_cursor_id,
+                    });
+                }
+                result.implicit_resultsets = Some(resultsets);
+            }
             TNS_MSG_TYPE_END_OF_RESPONSE => break,
             TNS_MSG_TYPE_ERROR => {
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
@@ -2392,13 +2516,18 @@ fn parse_query_response_with_context_and_binds(
                 }
                 result.row_count = info.row_count;
                 result.compilation_error_warning |= info.compilation_error_warning;
+                result.last_rowid = info.rowid.clone();
                 if info.number == TNS_ERR_NO_DATA_FOUND && !result.columns.is_empty() {
                     result.more_rows = false;
+                } else if info.number == TNS_ERR_ARRAY_DML_ERRORS {
+                    // executemany(batcherrors=True): errors are reported via
+                    // the batch error arrays instead of raising ORA-24381
+                    // (reference messages/base.pyx `_process_error_info`).
+                    result.batch_errors = info.batch_errors;
                 } else if info.number != 0 {
-                    return Err(ProtocolError::ServerErrorWithRowCount {
-                        message: info.message,
-                        row_count: info.row_count,
-                    });
+                    let mut details = info.into_details();
+                    details.array_dml_row_counts = result.array_dml_row_counts.take();
+                    return Err(ProtocolError::ServerErrorInfo(Box::new(details)));
                 }
             }
             _ => {
@@ -3976,7 +4105,10 @@ fn decode_text_value(bytes: &[u8], csfrm: u8) -> Result<String> {
     }
 }
 
-fn skip_query_return_parameters(reader: &mut TtcReader<'_>) -> Result<()> {
+fn parse_query_return_parameters(
+    reader: &mut TtcReader<'_>,
+    arraydmlrowcounts: bool,
+) -> Result<Option<Vec<u64>>> {
     let num_params = reader.read_ub2()?;
     for _ in 0..num_params {
         let _value = reader.read_ub4()?;
@@ -3991,7 +4123,25 @@ fn skip_query_return_parameters(reader: &mut TtcReader<'_>) -> Result<()> {
     if num_bytes > 0 {
         reader.skip(usize::from(num_bytes))?;
     }
-    Ok(())
+    if arraydmlrowcounts {
+        // reference messages/base.pyx `_process_return_parameters` tail
+        let num_rows = reader.read_ub4()?;
+        let mut row_counts = Vec::with_capacity(num_rows as usize);
+        for _ in 0..num_rows {
+            row_counts.push(reader.read_ub8()?);
+        }
+        return Ok(Some(row_counts));
+    }
+    Ok(None)
+}
+
+/// One batch error entry from `executemany(batcherrors=True)` (reference
+/// impl/thin/messages/base.pyx batch error codes/offsets/messages arrays).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BatchServerError {
+    pub code: u32,
+    pub offset: u32,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3999,8 +4149,38 @@ pub(crate) struct ServerErrorInfo {
     pub(crate) number: u32,
     pub(crate) message: String,
     cursor_id: u16,
+    pos: i32,
     row_count: u64,
+    rowid: Option<String>,
+    batch_errors: Vec<BatchServerError>,
     compilation_error_warning: bool,
+}
+
+impl ServerErrorInfo {
+    fn into_details(self) -> crate::ServerErrorDetails {
+        crate::ServerErrorDetails {
+            message: self.message,
+            code: self.number,
+            pos: self.pos,
+            row_count: self.row_count,
+            rowid: self.rowid,
+            array_dml_row_counts: None,
+        }
+    }
+}
+
+/// Encodes a physical rowid the way the reference driver does
+/// (impl/thin/utils.pyx `_encode_rowid`/`_convert_base64`).
+fn encode_rowid(rba: u32, partition_id: u16, block_num: u32, slot_num: u16) -> Option<String> {
+    if rba == 0 && partition_id == 0 && block_num == 0 && slot_num == 0 {
+        return None;
+    }
+    let mut out = String::with_capacity(18);
+    encode_rowid_component(rba, 6, &mut out);
+    encode_rowid_component(u32::from(partition_id), 3, &mut out);
+    encode_rowid_component(block_num, 6, &mut out);
+    encode_rowid_component(u32::from(slot_num), 3, &mut out);
+    Some(out)
 }
 
 fn parse_server_error(reader: &mut TtcReader<'_>, ttc_field_version: u8) -> Result<Option<String>> {
@@ -4025,33 +4205,65 @@ pub(crate) fn parse_server_error_info(
     let _array_elem_error_1 = reader.read_ub2()?;
     let _array_elem_error_2 = reader.read_ub2()?;
     let cursor_id = reader.read_ub2()?;
-    skip_sb2(reader)?;
+    let error_pos = reader.read_sb4()?; // sb2 error position (same wire shape)
     reader.skip(5)?;
     let warning_flags = reader.read_u8()?;
-    skip_rowid(reader)?;
+    let rowid = read_rowid(reader)?;
     let _os_error = reader.read_ub4()?;
     reader.skip(2)?;
     let _padding = reader.read_ub2()?;
     let _success_iters = reader.read_ub4()?;
     reader.read_bytes_with_length()?;
 
+    let mut batch_errors: Vec<BatchServerError> = Vec::new();
     let batch_error_count = reader.read_ub2()?;
     if batch_error_count > 0 {
-        skip_packed_ub2_array(reader, batch_error_count)?;
+        let first_byte = reader.read_u8()?;
+        for _ in 0..batch_error_count {
+            if first_byte == crate::wire::TNS_LONG_LENGTH_INDICATOR {
+                let _chunk_len = reader.read_ub4()?;
+            }
+            let code = reader.read_ub2()?;
+            batch_errors.push(BatchServerError {
+                code: u32::from(code),
+                ..BatchServerError::default()
+            });
+        }
+        if first_byte == crate::wire::TNS_LONG_LENGTH_INDICATOR {
+            reader.skip(1)?;
+        }
     }
 
     let batch_offset_count = reader.read_ub4()?;
     if batch_offset_count > 0 {
-        skip_packed_ub4_array(reader, batch_offset_count)?;
+        let first_byte = reader.read_u8()?;
+        for index in 0..batch_offset_count {
+            if first_byte == crate::wire::TNS_LONG_LENGTH_INDICATOR {
+                let _chunk_len = reader.read_ub4()?;
+            }
+            let offset = reader.read_ub4()?;
+            if let Some(entry) = batch_errors.get_mut(index as usize) {
+                entry.offset = offset;
+            }
+        }
+        if first_byte == crate::wire::TNS_LONG_LENGTH_INDICATOR {
+            reader.skip(1)?;
+        }
     }
 
     let batch_message_count = reader.read_ub2()?;
     if batch_message_count > 0 {
-        reader.skip(1)?;
-        for _ in 0..batch_message_count {
-            let chunk_len = reader.read_ub2()?;
-            reader.skip(usize::from(chunk_len))?;
-            reader.skip(2)?;
+        reader.skip(1)?; // packed size
+        for index in 0..batch_message_count {
+            let _chunk_len = reader.read_ub2()?;
+            let message = reader
+                .read_bytes()?
+                .map(|bytes| String::from_utf8_lossy(&bytes).trim_end().to_string())
+                .unwrap_or_default();
+            if let Some(entry) = batch_errors.get_mut(usize::from(index)) {
+                entry.message = message;
+            }
+            reader.skip(2)?; // end marker
         }
     }
 
@@ -4076,51 +4288,21 @@ pub(crate) fn parse_server_error_info(
         number: error_number,
         message,
         cursor_id,
+        pos: if error_pos > 0 { error_pos } else { 0 },
         row_count,
+        rowid,
+        batch_errors,
         compilation_error_warning: warning_flags & 0x20 != 0,
     })
 }
 
-fn skip_sb2(reader: &mut TtcReader<'_>) -> Result<()> {
-    let len = reader.read_u8()?;
-    reader.skip(usize::from(len & 0x7f))
-}
-
-fn skip_rowid(reader: &mut TtcReader<'_>) -> Result<()> {
-    let _rba = reader.read_ub4()?;
-    let _partition_id = reader.read_ub2()?;
+fn read_rowid(reader: &mut TtcReader<'_>) -> Result<Option<String>> {
+    let rba = reader.read_ub4()?;
+    let partition_id = reader.read_ub2()?;
     reader.skip(1)?;
-    let _block_num = reader.read_ub4()?;
-    let _slot_num = reader.read_ub2()?;
-    Ok(())
-}
-
-fn skip_packed_ub2_array(reader: &mut TtcReader<'_>, count: u16) -> Result<()> {
-    let first_byte = reader.read_u8()?;
-    for _ in 0..count {
-        if first_byte == crate::wire::TNS_LONG_LENGTH_INDICATOR {
-            let _chunk_len = reader.read_ub4()?;
-        }
-        let _value = reader.read_ub2()?;
-    }
-    if first_byte == crate::wire::TNS_LONG_LENGTH_INDICATOR {
-        reader.skip(1)?;
-    }
-    Ok(())
-}
-
-fn skip_packed_ub4_array(reader: &mut TtcReader<'_>, count: u32) -> Result<()> {
-    let first_byte = reader.read_u8()?;
-    for _ in 0..count {
-        if first_byte == crate::wire::TNS_LONG_LENGTH_INDICATOR {
-            let _chunk_len = reader.read_ub4()?;
-        }
-        let _value = reader.read_ub4()?;
-    }
-    if first_byte == crate::wire::TNS_LONG_LENGTH_INDICATOR {
-        reader.skip(1)?;
-    }
-    Ok(())
+    let block_num = reader.read_ub4()?;
+    let slot_num = reader.read_ub2()?;
+    Ok(encode_rowid(rba, partition_id, block_num, slot_num))
 }
 
 fn parse_return_parameters(reader: &mut TtcReader<'_>) -> Result<AuthResponse> {

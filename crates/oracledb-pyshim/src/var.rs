@@ -92,6 +92,9 @@ pub(crate) fn thin_var_from_type_spec(
 ) -> PyResult<Py<ThinVar>> {
     let type_name = py_type_name(typ);
     let object_type = py_db_object_type_impl(typ)?;
+    if object_type.is_none() {
+        validate_var_type_spec(py, typ)?;
+    }
     let default_bind = if let Some(object_type) = object_type.as_ref() {
         object_type
             .object_output_bind()
@@ -139,6 +142,28 @@ pub(crate) fn thin_var_from_type_spec(
     )
 }
 
+/// Mirrors reference impl/base/metadata.pyx `OracleMetadata.from_type`
+/// validation: DbType/ApiType/DbObjectType instances pass through, non-types
+/// raise DPY-2007 (ERR_EXPECTING_TYPE) and unsupported Python types raise
+/// DPY-3003 (ERR_PYTHON_TYPE_NOT_SUPPORTED).
+pub(crate) fn validate_var_type_spec(py: Python<'_>, typ: &Bound<'_, PyAny>) -> PyResult<()> {
+    let oracledb = PyModule::import(py, "oracledb")?;
+    if typ.is_instance(&oracledb.getattr("DbType")?)?
+        || typ.is_instance(&oracledb.getattr("ApiType")?)?
+    {
+        return Ok(());
+    }
+    if !typ.is_instance_of::<pyo3::types::PyType>() {
+        return Err(raise_oracledb_driver_error("ERR_EXPECTING_TYPE"));
+    }
+    let name = py_type_name(typ);
+    match name.as_str() {
+        "int" | "float" | "str" | "bytes" | "Decimal" | "bool" | "date" | "datetime"
+        | "timedelta" => Ok(()),
+        _ => Err(raise_python_type_not_supported(typ)),
+    }
+}
+
 pub(crate) fn thin_var_from_input_size(
     py: Python<'_>,
     connection: &Bound<'_, PyAny>,
@@ -146,6 +171,19 @@ pub(crate) fn thin_var_from_input_size(
 ) -> PyResult<Py<ThinVar>> {
     if let Some(var) = thin_var_from_value(value)? {
         return Ok(var);
+    }
+    // Reference impl/base/bind_var.pyx `_create_var_from_type`: a list must
+    // be exactly [type, numelems] (DPY-2011); an int means a string of that
+    // length; anything else must be a supported type spec.
+    if let Ok(list) = value.cast::<PyList>() {
+        if list.len() != 2 {
+            return Err(raise_oracledb_driver_error("ERR_WRONG_ARRAY_DEFINITION"));
+        }
+    } else if value.cast::<PyTuple>().is_err()
+        && value.extract::<u32>().is_err()
+        && py_db_object_type_impl(value)?.is_none()
+    {
+        validate_var_type_spec(py, value)?;
     }
     let default_bind = bind_template_from_input_size(value)?;
     let (is_array, num_elements) = input_size_array_info(value)?;
@@ -209,6 +247,12 @@ pub(crate) struct ThinVar {
 }
 
 impl ThinVar {
+    pub(crate) fn for_fetch_value(dbtype_name: &str) -> Self {
+        let mut var = Self::from_py_value(None);
+        var.dbtype_name = dbtype_name.to_string();
+        var
+    }
+
     pub(crate) fn from_py_value(value: Option<Py<PyAny>>) -> Self {
         Self::with_options(ThinVarOptions {
             value,
@@ -979,6 +1023,17 @@ fn py_any_lob_dbtype_name(value: &Bound<'_, PyAny>) -> PyResult<Option<String>> 
     }))
 }
 
+/// Wraps a ThinVar impl in the public `oracledb.Var` object (reference
+/// `Var._from_impl`); the wrapper is what `setinputsizes`/`bindvars` expose.
+pub(crate) fn py_public_var_from_impl(py: Python<'_>, var: &Py<ThinVar>) -> PyResult<Py<PyAny>> {
+    let var_cls = PyModule::import(py, "oracledb")?.getattr("Var")?;
+    let public = var_cls.call_method1("__new__", (&var_cls,))?;
+    let dbtype = var.borrow(py).dbtype(py)?;
+    public.setattr("_impl", var.clone_ref(py))?;
+    public.setattr("_type", dbtype)?;
+    Ok(public.unbind())
+}
+
 pub(crate) fn thin_var_from_value(value: &Bound<'_, PyAny>) -> PyResult<Option<Py<ThinVar>>> {
     if let Ok(var) = value.extract::<Py<ThinVar>>() {
         return Ok(Some(var));
@@ -1008,6 +1063,27 @@ pub(crate) fn bind_var_from_value(
                 ThinVar::with_options(ThinVarOptions {
                     default_bind,
                     dbtype_name: public_dbtype_name_from_type_name(&type_name).to_string(),
+                    ..ThinVarOptions::default()
+                }),
+            );
+        }
+    }
+    // Plain values (int/float/str/...) take their bind metadata from the
+    // value's Python type so OUT data decodes with the right converter
+    // (reference impl/base/metadata.pyx `OracleMetadata.from_value`).
+    let value_type_name = match py_value_type_name(value).as_str() {
+        "bool" => "int".to_string(),
+        other => other.to_string(),
+    };
+    if !value_type_name.is_empty() {
+        let default_bind = bind_template_from_type_name(&value_type_name, 0);
+        if !matches!(default_bind, BindValue::Null) {
+            return Py::new(
+                py,
+                ThinVar::with_options(ThinVarOptions {
+                    default_bind,
+                    value: Some(value.clone().unbind()),
+                    dbtype_name: public_dbtype_name_from_type_name(&value_type_name).to_string(),
                     ..ThinVarOptions::default()
                 }),
             );

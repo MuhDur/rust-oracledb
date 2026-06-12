@@ -1209,6 +1209,8 @@ pub(crate) fn get_named_bind_value<'py>(
     }
     for (key, value) in parameters.iter() {
         let key = key.extract::<String>()?;
+        // Reference strips a leading ':' from keys (impl/thin/var.pyx:88-94).
+        let key = key.strip_prefix(':').unwrap_or(&key);
         if key.eq_ignore_ascii_case(name) {
             return Ok(Some(value));
         }
@@ -1297,6 +1299,10 @@ pub(crate) fn statement_plsql_output_bind_names(statement: &str) -> PyResult<Vec
 
 pub(crate) fn statement_is_plsql(statement: &str) -> bool {
     sql::statement_is_plsql(statement)
+}
+
+pub(crate) fn statement_is_dml(statement: &str) -> bool {
+    sql::statement_is_dml(statement)
 }
 
 pub(crate) fn is_quoted_bind_name(name: &str) -> bool {

@@ -191,6 +191,21 @@ pub fn statement_is_plsql(statement: &str) -> bool {
         })
 }
 
+/// Mirrors the reference statement-type classification for DML
+/// (impl/thin/statement.pyx `_determine_statement_type`).
+pub fn statement_is_dml(statement: &str) -> bool {
+    statement
+        .trim_start()
+        .split(|ch: char| !ch.is_ascii_alphabetic())
+        .next()
+        .is_some_and(|keyword| {
+            keyword.eq_ignore_ascii_case("insert")
+                || keyword.eq_ignore_ascii_case("update")
+                || keyword.eq_ignore_ascii_case("delete")
+                || keyword.eq_ignore_ascii_case("merge")
+        })
+}
+
 pub fn is_bind_name_char(ch: char) -> bool {
     ch.is_alphanumeric() || matches!(ch, '_' | '$' | '#')
 }
@@ -259,6 +274,9 @@ pub fn bind_names_equal(left: &str, right: &str) -> bool {
 }
 
 pub fn bind_name_matches_key(bind_name: &str, key: &str) -> bool {
+    // python-oracledb strips a leading ':' from bind keys before lookup
+    // (impl/thin/var.pyx:88-94).
+    let key = key.strip_prefix(':').unwrap_or(key);
     if is_quoted_bind_name(bind_name) || is_quoted_bind_name(key) {
         bind_name == key
     } else {

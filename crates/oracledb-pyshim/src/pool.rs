@@ -206,8 +206,6 @@ pub(crate) struct ShimPool {
     engine: PoolEngine<ShimPoolBackend>,
     registry: Registry,
     stmt_cache_size: Mutex<u32>,
-    max_sessions_per_shard: Mutex<u32>,
-    soda_metadata_cache: Mutex<bool>,
 }
 
 fn pool_error_to_pyerr(err: PoolError) -> PyErr {
@@ -302,12 +300,8 @@ impl ShimPool {
         let timeout = get_optional_u32_attr(params_impl, "timeout")?.unwrap_or(0);
         let max_lifetime_session =
             get_optional_u32_attr(params_impl, "max_lifetime_session")?.unwrap_or(0);
-        let max_sessions_per_shard =
-            get_optional_u32_attr(params_impl, "max_sessions_per_shard")?.unwrap_or(0);
         let ping_interval = get_optional_i64_attr(params_impl, "ping_interval")?.unwrap_or(60);
         let ping_timeout = get_optional_u32_attr(params_impl, "ping_timeout")?.unwrap_or(5000);
-        let soda_metadata_cache =
-            get_optional_bool_attr(params_impl, "soda_metadata_cache")?.unwrap_or(false);
         let stmt_cache_size = get_optional_u32_attr(params_impl, "stmtcachesize")?.unwrap_or(20);
         let pool_args = consume_next_pool_args()?;
         let registry: Registry = Arc::new(Mutex::new(HashMap::new()));
@@ -341,8 +335,6 @@ impl ShimPool {
             engine,
             registry,
             stmt_cache_size: Mutex::new(stmt_cache_size),
-            max_sessions_per_shard: Mutex::new(max_sessions_per_shard),
-            soda_metadata_cache: Mutex::new(soda_metadata_cache),
         }))
     }
 
@@ -583,38 +575,32 @@ impl ThinPoolImpl {
         Ok(())
     }
 
+    // Thick-mode-only attributes: reference impl/base/pool.pyx:58-111 raises
+    // DPY-3001 and impl/thin/pool.pyx does not override these four methods.
     fn get_max_sessions_per_shard(&self) -> PyResult<u32> {
-        Ok(*self
-            .pool
-            .max_sessions_per_shard
-            .lock()
-            .map_err(runtime_error)?)
+        Err(raise_not_supported(
+            "getting the maximum sessions per shard in a pool",
+        ))
     }
 
     fn set_max_sessions_per_shard(&self, value: u32) -> PyResult<()> {
-        *self
-            .pool
-            .max_sessions_per_shard
-            .lock()
-            .map_err(runtime_error)? = value;
-        Ok(())
+        let _ = value;
+        Err(raise_not_supported(
+            "setting the maximum sessions per shard",
+        ))
     }
 
     fn get_soda_metadata_cache(&self) -> PyResult<bool> {
-        Ok(*self
-            .pool
-            .soda_metadata_cache
-            .lock()
-            .map_err(runtime_error)?)
+        Err(raise_not_supported(
+            "getting whether the SODA metadata cache is enabled",
+        ))
     }
 
     fn set_soda_metadata_cache(&self, value: bool) -> PyResult<()> {
-        *self
-            .pool
-            .soda_metadata_cache
-            .lock()
-            .map_err(runtime_error)? = value;
-        Ok(())
+        let _ = value;
+        Err(raise_not_supported(
+            "setting whether the SODA metadata cache is enabled",
+        ))
     }
 
     fn reconfigure(&self, _min: u32, _max: u32, _increment: u32) -> PyResult<()> {
@@ -798,38 +784,32 @@ impl AsyncThinPoolImpl {
         Ok(())
     }
 
+    // Thick-mode-only attributes: reference impl/base/pool.pyx:58-111 raises
+    // DPY-3001 and impl/thin/pool.pyx does not override these four methods.
     fn get_max_sessions_per_shard(&self) -> PyResult<u32> {
-        Ok(*self
-            .pool
-            .max_sessions_per_shard
-            .lock()
-            .map_err(runtime_error)?)
+        Err(raise_not_supported(
+            "getting the maximum sessions per shard in a pool",
+        ))
     }
 
     fn set_max_sessions_per_shard(&self, value: u32) -> PyResult<()> {
-        *self
-            .pool
-            .max_sessions_per_shard
-            .lock()
-            .map_err(runtime_error)? = value;
-        Ok(())
+        let _ = value;
+        Err(raise_not_supported(
+            "setting the maximum sessions per shard",
+        ))
     }
 
     fn get_soda_metadata_cache(&self) -> PyResult<bool> {
-        Ok(*self
-            .pool
-            .soda_metadata_cache
-            .lock()
-            .map_err(runtime_error)?)
+        Err(raise_not_supported(
+            "getting whether the SODA metadata cache is enabled",
+        ))
     }
 
     fn set_soda_metadata_cache(&self, value: bool) -> PyResult<()> {
-        *self
-            .pool
-            .soda_metadata_cache
-            .lock()
-            .map_err(runtime_error)? = value;
-        Ok(())
+        let _ = value;
+        Err(raise_not_supported(
+            "setting whether the SODA metadata cache is enabled",
+        ))
     }
 
     fn reconfigure(&self, _min: u32, _max: u32, _increment: u32) -> PyResult<()> {

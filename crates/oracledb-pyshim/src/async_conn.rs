@@ -108,6 +108,29 @@ impl AsyncThinConnImpl {
         self.inner.invoke_session_callback = value;
     }
 
+    fn supports_pipelining(&self) -> bool {
+        // True pipelined transport is not implemented yet; connection.py then
+        // dispatches run_pipeline through the sequential fallback below.
+        false
+    }
+
+    /// Returns the coroutine of the embedded sequential fallback runner
+    /// (reference impl/thin/connection.pyx:1280-1306); connection.py awaits
+    /// the returned object.
+    fn run_pipeline_without_pipelining(
+        &self,
+        py: Python<'_>,
+        conn: Py<PyAny>,
+        results: Py<PyAny>,
+        continue_on_error: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let runner = pipeline_runner_function(py)?;
+        let factory = py.get_type::<PipelineOpResultShimImpl>();
+        Ok(runner
+            .call1((factory, conn, results, continue_on_error))?
+            .unbind())
+    }
+
     async fn connect(&mut self, params_impl: Py<PyAny>) -> PyResult<()> {
         let prepared = Python::attach(|py| self.inner.prepare_connect(params_impl.bind(py)))?;
         let connection = spawn_async_connect_task(prepared.options)

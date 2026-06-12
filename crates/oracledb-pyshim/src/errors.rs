@@ -1,4 +1,8 @@
+use std::sync::{Arc, Mutex};
+
 use oracledb::protocol::thin::QueryResult;
+use oracledb::protocol::ServerErrorDetails;
+use oracledb::Connection as RustConnection;
 use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -93,6 +97,54 @@ pub(crate) fn database_error(py: Python<'_>, message: &str) -> PyResult<PyErr> {
     let exc_type = error_obj.getattr("exc_type")?;
     let exc = exc_type.call1((error_obj,))?;
     Ok(PyErr::from_value(exc))
+}
+
+/// Builds the Python `_Error`/exception for a structured server error and
+/// reports whether the error marks the session dead (reference
+/// messages/base.pyx `_check_and_raise_exception`).
+pub(crate) fn server_error_details_to_pyerr(details: &ServerErrorDetails) -> (PyErr, bool) {
+    Python::attach(|py| -> PyResult<(PyErr, bool)> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("message", &details.message)?;
+        if details.code != 0 {
+            kwargs.set_item("code", details.code)?;
+        } else if let Some(code) = parse_ora_code(&details.message) {
+            kwargs.set_item("code", code)?;
+        }
+        if details.pos > 0 {
+            kwargs.set_item("offset", details.pos)?;
+        } else if let Some(offset) = parse_ora_offset(&details.message) {
+            kwargs.set_item("offset", offset)?;
+        }
+        let error_obj = errors.getattr("_Error")?.call((), Some(&kwargs))?;
+        let is_session_dead = error_obj.getattr("is_session_dead")?.extract::<bool>()?;
+        let exc_type = error_obj.getattr("exc_type")?;
+        let exc = exc_type.call1((error_obj,))?;
+        Ok((PyErr::from_value(exc), is_session_dead))
+    })
+    .unwrap_or_else(|_| (PyRuntimeError::new_err(details.message.clone()), false))
+}
+
+/// Converts a task error to a Python exception. Structured server errors keep
+/// their code/offset; a dead-session error force-disconnects the connection so
+/// `is_healthy()` reports false (reference `_Error.is_session_dead` →
+/// `protocol._disconnect()`).
+pub(crate) fn raise_task_error(
+    err: &TaskError,
+    connection: &Arc<Mutex<Option<RustConnection>>>,
+) -> PyErr {
+    if let Some(details) = err.server_error_details() {
+        let (pyerr, is_session_dead) = server_error_details_to_pyerr(details);
+        if is_session_dead {
+            if let Ok(mut guard) = connection.lock() {
+                *guard = None;
+            }
+        }
+        pyerr
+    } else {
+        runtime_error(err)
+    }
 }
 
 pub(crate) fn compilation_error_warning(py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -261,6 +313,43 @@ pub(crate) fn raise_oracledb_driver_error(error_name: &str) -> PyErr {
 
 pub(crate) fn raise_wrong_executemany_parameters_type() -> PyErr {
     raise_oracledb_driver_error("ERR_WRONG_EXECUTEMANY_PARAMETERS_TYPE")
+}
+
+pub(crate) fn raise_not_supported(feature: &str) -> PyErr {
+    Python::attach(|py| -> PyResult<PyErr> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        match errors.getattr("_raise_not_supported")?.call1((feature,)) {
+            Ok(_) => Ok(PyRuntimeError::new_err(
+                "oracledb.errors._raise_not_supported returned without raising",
+            )),
+            Err(err) => Ok(err),
+        }
+    })
+    .unwrap_or_else(|_| {
+        PyRuntimeError::new_err(format!(
+            "DPY-3001: {feature} is only supported in python-oracledb thick mode"
+        ))
+    })
+}
+
+pub(crate) fn raise_python_type_not_supported(typ: &Bound<'_, PyAny>) -> PyErr {
+    let py = typ.py();
+    (|| -> PyResult<PyErr> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        let error_num = errors.getattr("ERR_PYTHON_TYPE_NOT_SUPPORTED")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("typ", typ)?;
+        match errors
+            .getattr("_raise_err")?
+            .call((error_num,), Some(&kwargs))
+        {
+            Ok(_) => Ok(PyRuntimeError::new_err(
+                "oracledb.errors._raise_err(ERR_PYTHON_TYPE_NOT_SUPPORTED) returned without raising",
+            )),
+            Err(err) => Ok(err),
+        }
+    })()
+    .unwrap_or_else(|_| PyRuntimeError::new_err("DPY-3003: Python type is not supported"))
 }
 
 pub(crate) fn raise_call_timeout_exceeded(timeout: u32) -> PyErr {
