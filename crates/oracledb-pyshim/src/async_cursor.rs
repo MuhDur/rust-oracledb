@@ -166,6 +166,7 @@ pub(crate) fn spawn_async_execute_task(
     prefetchrows: u32,
     call_timeout: Option<u32>,
     autocommit: bool,
+    exec_options: ExecuteOptions,
 ) -> BlockingTask<AsyncExecuteOutcome> {
     spawn_blocking_task("oracledb-pyshim-async-execute", move || {
         let mut guard = connection.lock().map_err(|err| err.to_string())?;
@@ -190,12 +191,18 @@ pub(crate) fn spawn_async_execute_task(
                 materialize_plsql_long_binds_async(&cx, connection, &mut bind_values, call_timeout)
                     .await?;
             }
+            let bind_rows = if bind_values.is_empty() {
+                Vec::new()
+            } else {
+                vec![bind_values.clone()]
+            };
             let mut result = connection
-                .execute_query_with_binds_and_timeout(
+                .execute_query_with_bind_rows_options_and_timeout(
                     &cx,
                     &statement,
                     prefetchrows,
-                    &bind_values,
+                    &bind_rows,
+                    exec_options,
                     call_timeout,
                 )
                 .await
@@ -477,6 +484,7 @@ impl AsyncThinCursorImpl {
         let exec_options = ExecuteOptions {
             batcherrors,
             arraydmlrowcounts,
+            cache_statement: self.inner.cache_statement,
             ..ExecuteOptions::default()
         };
         let start = usize::try_from(offset).map_err(runtime_error)?;
@@ -619,6 +627,10 @@ impl AsyncThinCursorImpl {
             self.inner.prefetchrows,
             call_timeout,
             autocommit,
+            ExecuteOptions {
+                cache_statement: self.inner.cache_statement,
+                ..ExecuteOptions::default()
+            },
         );
         let is_plsql = statement_is_plsql(&statement);
         let outcome = match query.await {

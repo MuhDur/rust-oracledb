@@ -111,6 +111,9 @@ pub(crate) struct ThinCursorImpl {
     pub(crate) implicit_resultsets: Option<Vec<QueryValue>>,
     /// Lazily-built public cursors for `getimplicitresults()`.
     implicit_result_cursors: Option<Vec<Py<PyAny>>>,
+    /// Whether the prepared statement may use the connection statement
+    /// cache (reference `cursor.prepare(cache_statement=...)`).
+    pub(crate) cache_statement: bool,
 }
 
 impl ThinCursorImpl {
@@ -174,6 +177,7 @@ impl ThinCursorImpl {
             dml_row_counts: None,
             implicit_resultsets: None,
             implicit_result_cursors: None,
+            cache_statement: true,
         }
     }
 
@@ -561,10 +565,11 @@ impl ThinCursorImpl {
         &mut self,
         statement: Option<String>,
         _tag: Option<String>,
-        _cache_statement: Option<bool>,
+        cache_statement: Option<bool>,
     ) -> PyResult<()> {
         self.statement_changed = self.statement != statement;
         self.statement = statement;
+        self.cache_statement = cache_statement.unwrap_or(true);
         self.bind_names = if let Some(statement) = self.statement.as_deref() {
             validate_dml_returning_duplicate_binds(statement)?;
             unique_sql_bind_names(statement)?
@@ -830,6 +835,7 @@ impl ThinCursorImpl {
         let exec_options = ExecuteOptions {
             batcherrors,
             arraydmlrowcounts,
+            cache_statement: self.cache_statement,
             ..ExecuteOptions::default()
         };
         let start = usize::try_from(offset).map_err(runtime_error)?;
@@ -1041,6 +1047,10 @@ impl ThinCursorImpl {
         let mut typed_lob_hints = typed_lob_bind_hints(cursor.py(), &self.bind_vars);
         promote_oversized_plsql_bind_hints(statement, &self.bind_values, &mut typed_lob_hints);
         let is_plsql = statement_is_plsql(statement);
+        let exec_options = ExecuteOptions {
+            cache_statement: self.cache_statement,
+            ..ExecuteOptions::default()
+        };
         let mut result = match cursor.py().detach({
             let connection = Arc::clone(&self.connection);
             let state = Arc::clone(&self.state);
@@ -1066,11 +1076,17 @@ impl ThinCursorImpl {
                 if statement_is_plsql(&statement) {
                     materialize_plsql_long_binds(connection, &mut bind_values, call_timeout)?;
                 }
-                BlockingConnection::execute_query_with_binds_and_timeout(
+                let bind_rows = if bind_values.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![bind_values.clone()]
+                };
+                BlockingConnection::execute_query_with_bind_rows_options_and_timeout(
                     connection,
                     &statement,
                     prefetchrows,
-                    &bind_values,
+                    &bind_rows,
+                    exec_options,
                     call_timeout,
                 )
                 .map_err(TaskError::from)

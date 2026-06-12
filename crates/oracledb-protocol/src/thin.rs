@@ -29,6 +29,7 @@ pub const TNS_MSG_TYPE_LOB_DATA: u8 = 14;
 pub const TNS_MSG_TYPE_FLUSH_OUT_BINDS: u8 = 19;
 pub const TNS_MSG_TYPE_BIT_VECTOR: u8 = 21;
 pub const TNS_MSG_TYPE_DESCRIBE_INFO: u8 = 16;
+pub const TNS_MSG_TYPE_PIGGYBACK: u8 = 17;
 pub const TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK: u8 = 23;
 pub const TNS_MSG_TYPE_IMPLICIT_RESULTSET: u8 = 27;
 pub const TNS_MSG_TYPE_END_OF_RESPONSE: u8 = 29;
@@ -42,6 +43,7 @@ pub const TNS_FUNC_LOGOFF: u8 = 9;
 pub const TNS_FUNC_LOB_OP: u8 = 96;
 pub const TNS_FUNC_PING: u8 = 147;
 pub const TNS_FUNC_ROLLBACK: u8 = 15;
+pub const TNS_FUNC_CLOSE_CURSORS: u8 = 105;
 
 pub const TNS_AUTH_MODE_LOGON: u32 = 0x0000_0001;
 pub const TNS_AUTH_MODE_CHANGE_PASSWORD: u32 = 0x0000_0002;
@@ -833,12 +835,30 @@ pub fn build_execute_payload_with_binds_with_seq(
 }
 
 /// Optional execute modes (reference ExecuteMessage attributes).
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExecuteOptions {
     pub batcherrors: bool,
     pub arraydmlrowcounts: bool,
     /// Parse/describe without executing (reference `parse_only`).
     pub parse_only: bool,
+    /// Server cursor id of an already-parsed statement; non-zero skips the
+    /// PARSE option and SQL text (reference Statement._cursor_id).
+    pub cursor_id: u32,
+    /// Whether the statement may be kept in the connection statement cache
+    /// (reference `cursor.prepare(cache_statement=...)`).
+    pub cache_statement: bool,
+}
+
+impl Default for ExecuteOptions {
+    fn default() -> Self {
+        Self {
+            batcherrors: false,
+            arraydmlrowcounts: false,
+            parse_only: false,
+            cursor_id: 0,
+            cache_statement: true,
+        }
+    }
 }
 
 pub fn build_execute_payload_with_bind_rows_with_seq(
@@ -856,6 +876,24 @@ pub fn build_execute_payload_with_bind_rows_with_seq(
         bind_rows,
         ExecuteOptions::default(),
     )
+}
+
+/// Builds a close-cursors piggyback message (reference
+/// `_write_close_cursors_piggyback` + `write_cursors_to_close`); it is
+/// prepended to the next regular message in the same data packet and
+/// consumes a TTC sequence number of its own.
+pub fn build_close_cursors_piggyback(cursor_ids: &[u32], seq_num: u8) -> Vec<u8> {
+    let mut writer = TtcWriter::new();
+    writer.write_u8(TNS_MSG_TYPE_PIGGYBACK);
+    writer.write_u8(TNS_FUNC_CLOSE_CURSORS);
+    writer.write_u8(seq_num);
+    writer.write_ub8(0); // token number (23.1 ext 1+)
+    writer.write_u8(1); // pointer
+    writer.write_ub4(u32::try_from(cursor_ids.len()).unwrap_or(u32::MAX));
+    for cursor_id in cursor_ids {
+        writer.write_ub4(*cursor_id);
+    }
+    writer.into_bytes()
 }
 
 pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
@@ -893,7 +931,13 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
 
     let is_plsql = statement_is_plsql(sql);
     let parse_only = exec_options.parse_only;
-    let mut options = TNS_EXEC_OPTION_PARSE;
+    // a fresh parse is required when the statement has no open server cursor
+    // or is DDL (reference execute.pyx:88-89)
+    let needs_parse = exec_options.cursor_id == 0 || crate::sql::statement_is_ddl(sql);
+    let mut options = 0;
+    if needs_parse {
+        options |= TNS_EXEC_OPTION_PARSE;
+    }
     if !parse_only {
         options |= TNS_EXEC_OPTION_EXECUTE;
     }
@@ -922,8 +966,16 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     } else {
         1
     };
-    let exec_count = if is_query || parse_only {
+    // al8i4[1]: queries report 0 on first execute and the iteration count on
+    // re-execute of an open cursor (execute.pyx:187-193)
+    let exec_count = if parse_only {
         0
+    } else if is_query {
+        if exec_options.cursor_id == 0 {
+            0
+        } else {
+            num_iters
+        }
     } else {
         bind_row_count.max(1)
     };
@@ -940,9 +992,14 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
         exec_flags |= TNS_EXEC_FLAGS_DML_ROWCOUNTS;
     }
     writer.write_ub4(options);
-    writer.write_ub4(0);
-    writer.write_u8(1);
-    writer.write_ub4(sql_len);
+    writer.write_ub4(exec_options.cursor_id);
+    if needs_parse {
+        writer.write_u8(1); // pointer (cursor id)
+        writer.write_ub4(sql_len);
+    } else {
+        writer.write_u8(0); // pointer (cursor id)
+        writer.write_ub4(0);
+    }
     writer.write_u8(1);
     writer.write_ub4(13);
     writer.write_u8(0);
@@ -989,8 +1046,12 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     writer.write_u8(0); // pointer (chunk ids)
     writer.write_ub4(0); // number of chunk ids
 
-    writer.write_bytes_with_length(sql_bytes)?;
-    writer.write_ub4(1);
+    if needs_parse {
+        writer.write_bytes_with_length(sql_bytes)?;
+        writer.write_ub4(1); // al8i4[0] parse
+    } else {
+        writer.write_ub4(0); // al8i4[0] parse
+    }
     writer.write_ub4(exec_count);
     writer.write_ub4(0);
     writer.write_ub4(0);
@@ -2404,6 +2465,25 @@ pub fn parse_query_response_with_binds_and_options(
     binds: &[BindValue],
     exec_options: ExecuteOptions,
 ) -> Result<QueryResult> {
+    parse_query_response_with_binds_options_and_columns(
+        payload,
+        capabilities,
+        binds,
+        exec_options,
+        &[],
+    )
+}
+
+/// `known_columns` carries the fetch metadata of a re-executed statement
+/// whose response does not repeat the describe information (reference keeps
+/// the statement's fetch vars across executions).
+pub fn parse_query_response_with_binds_options_and_columns(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    binds: &[BindValue],
+    exec_options: ExecuteOptions,
+    known_columns: &[ColumnMetadata],
+) -> Result<QueryResult> {
     let bind_columns = binds.iter().map(bind_column_metadata).collect::<Vec<_>>();
     let output_bind_indexes = binds
         .iter()
@@ -2413,7 +2493,7 @@ pub fn parse_query_response_with_binds_and_options(
     parse_query_response_with_context_binds_and_options(
         payload,
         capabilities,
-        &[],
+        known_columns,
         None,
         &bind_columns,
         &output_bind_indexes,

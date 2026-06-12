@@ -14,20 +14,19 @@ use oracledb_protocol::thin::{
     adjust_refetch_metadata, build_auth_phase_two_payload_with_proxy_with_seq,
     build_change_password_payload_with_seq, build_connect_packet_payload,
     build_define_fetch_payload_with_seq, build_execute_payload_with_bind_rows_and_options_with_seq,
-    build_execute_payload_with_binds_with_seq, build_execute_payload_with_seq,
-    build_fast_auth_phase_one_payload, build_fetch_payload_with_seq,
-    build_function_payload_with_seq, build_lob_create_temp_payload_with_seq,
-    build_lob_free_temp_payload_with_seq, build_lob_read_payload_with_seq,
-    build_lob_trim_payload_with_seq, build_lob_write_payload_with_seq, parse_accept_payload,
-    parse_auth_response, parse_fetch_response_with_context, parse_lob_create_temp_response,
+    build_execute_payload_with_seq, build_fast_auth_phase_one_payload,
+    build_fetch_payload_with_seq, build_function_payload_with_seq,
+    build_lob_create_temp_payload_with_seq, build_lob_free_temp_payload_with_seq,
+    build_lob_read_payload_with_seq, build_lob_trim_payload_with_seq,
+    build_lob_write_payload_with_seq, parse_accept_payload, parse_auth_response,
+    parse_fetch_response_with_context, parse_lob_create_temp_response,
     parse_lob_free_temp_response, parse_lob_read_response, parse_lob_trim_response,
     parse_lob_write_response, parse_plain_function_response, parse_query_response,
-    parse_query_response_with_binds, parse_query_response_with_binds_and_options, BindValue,
-    ClientCapabilities, ColumnMetadata, ExecuteOptions, LobReadResult, QueryResult,
-    TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK,
-    TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT,
-    TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT,
-    TNS_PACKET_TYPE_REFUSE,
+    parse_query_response_with_binds_options_and_columns, BindValue, ClientCapabilities,
+    ColumnMetadata, ExecuteOptions, LobReadResult, QueryResult, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF,
+    TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS,
+    TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA,
+    TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE,
 };
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};
@@ -212,7 +211,15 @@ pub struct Connection {
     /// Session combo key from verifier generation, retained for the
     /// change-password call (reference keeps `conn_impl._combo_key`).
     combo_key: Vec<u8>,
+    /// LRU statement cache: SQL text -> open server cursor id (reference
+    /// thin/statement_cache.pyx, default size 20).
+    statement_cache: Vec<(String, u32)>,
+    /// Server cursor ids queued for the close-cursors piggyback (reference
+    /// `_cursors_to_close`).
+    cursors_to_close: Vec<u32>,
 }
+
+const STATEMENT_CACHE_SIZE: usize = 20;
 
 #[derive(Debug)]
 pub struct CancelHandle {
@@ -357,6 +364,8 @@ impl Connection {
             dead: false,
             user: options.user,
             combo_key: encrypted.combo_key,
+            statement_cache: Vec::new(),
+            cursors_to_close: Vec::new(),
         })
     }
 
@@ -518,68 +527,19 @@ impl Connection {
         prefetch_rows: u32,
         binds: &[BindValue],
     ) -> Result<QueryResult> {
-        match self
-            .execute_query_with_binds_adjusted(cx, sql, prefetch_rows, binds)
-            .await
-        {
-            // a query whose underlying types changed since the retained
-            // execution retries once with a full parse after dropping the
-            // retained metadata, mirroring the reference statement-cache
-            // clear + retry on ORA-00932/ORA-01007
-            // (impl/thin/messages/base.pyx:1199-1213)
-            Err(err)
-                if refetch_retry_applies(&err)
-                    && statement_is_query(sql)
-                    && self.forget_fetch_metadata(sql) =>
-            {
-                self.execute_query_with_binds_adjusted(cx, sql, prefetch_rows, binds)
-                    .await
-            }
-            other => other,
-        }
-    }
-
-    async fn execute_query_with_binds_adjusted(
-        &mut self,
-        cx: &Cx,
-        sql: &str,
-        prefetch_rows: u32,
-        binds: &[BindValue],
-    ) -> Result<QueryResult> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
-        let has_ref_cursor_output = binds.iter().any(|value| {
-            matches!(
-                value,
-                BindValue::Output {
-                    ora_type_num: oracledb_protocol::thin::ORA_TYPE_NUM_CURSOR,
-                    ..
-                }
-            )
-        });
-        if has_ref_cursor_output {
-            // python-oracledb reserves this sequence slot for a close-cursor piggyback.
-            let _ = next_ttc_sequence(&mut self.ttc_seq_num);
-        }
-        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let payload = build_execute_payload_with_binds_with_seq(
+        let bind_rows = if binds.is_empty() {
+            Vec::new()
+        } else {
+            vec![binds.to_vec()]
+        };
+        self.execute_query_with_bind_rows_and_options(
+            cx,
             sql,
             prefetch_rows,
-            seq_num,
-            statement_is_query(sql),
-            binds,
-        )?;
-        trace_query_bytes("EXECUTE query payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response =
-            read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, self.sdu)
-                .await?;
-        trace_query_bytes("EXECUTE query response", &response);
-        let parsed = parse_query_response_with_binds(&response, self.capabilities, binds);
-        let result = self.note_parse(parsed)?;
-        self.remember_cursor_columns(&result);
-        self.apply_refetch_metadata(cx, sql, result, prefetch_rows.max(2))
-            .await
+            &bind_rows,
+            ExecuteOptions::default(),
+        )
+        .await
     }
 
     pub async fn execute_query_with_binds_and_timeout(
@@ -619,10 +579,83 @@ impl Connection {
         bind_rows: &[Vec<BindValue>],
         exec_options: ExecuteOptions,
     ) -> Result<QueryResult> {
+        match self
+            .execute_query_with_bind_rows_options_adjusted(
+                cx,
+                sql,
+                prefetch_rows,
+                bind_rows,
+                exec_options,
+            )
+            .await
+        {
+            // a query whose underlying types changed since the retained
+            // execution retries once with a full parse after dropping the
+            // retained metadata, mirroring the reference statement-cache
+            // clear + retry on ORA-00932/ORA-01007
+            // (impl/thin/messages/base.pyx:1199-1213)
+            Err(err)
+                if refetch_retry_applies(&err)
+                    && statement_is_query(sql)
+                    && self.forget_fetch_metadata(sql) =>
+            {
+                self.execute_query_with_bind_rows_options_adjusted(
+                    cx,
+                    sql,
+                    prefetch_rows,
+                    bind_rows,
+                    exec_options,
+                )
+                .await
+            }
+            other => other,
+        }
+    }
+
+    async fn execute_query_with_bind_rows_options_adjusted(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+        bind_rows: &[Vec<BindValue>],
+        exec_options: ExecuteOptions,
+    ) -> Result<QueryResult> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
+        let mut exec_options = exec_options;
+        let use_cache = exec_options.cache_statement && !exec_options.parse_only;
+        if exec_options.cursor_id == 0 && !exec_options.parse_only {
+            if use_cache {
+                if let Some(cursor_id) = self.statement_cache_get(sql) {
+                    exec_options.cursor_id = cursor_id;
+                }
+            } else if let Some(cursor_id) = self.statement_cache_take(sql) {
+                // reference pops the statement from the cache even when
+                // cache_statement=False, reusing its open cursor once
+                exec_options.cursor_id = cursor_id;
+            }
+        }
+        let piggyback = self.take_close_cursors_piggyback();
+        if piggyback.is_none() {
+            let has_ref_cursor_output = bind_rows.iter().any(|row| {
+                row.iter().any(|value| {
+                    matches!(
+                        value,
+                        BindValue::Output {
+                            ora_type_num: oracledb_protocol::thin::ORA_TYPE_NUM_CURSOR,
+                            ..
+                        }
+                    )
+                })
+            });
+            if has_ref_cursor_output {
+                // python-oracledb reserves this sequence slot for a
+                // close-cursor piggyback.
+                let _ = next_ttc_sequence(&mut self.ttc_seq_num);
+            }
+        }
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let payload = build_execute_payload_with_bind_rows_and_options_with_seq(
+        let mut payload = build_execute_payload_with_bind_rows_and_options_with_seq(
             sql,
             prefetch_rows,
             seq_num,
@@ -630,21 +663,52 @@ impl Connection {
             bind_rows,
             exec_options,
         )?;
+        if let Some(mut piggyback_bytes) = piggyback {
+            piggyback_bytes.extend_from_slice(&payload);
+            payload = piggyback_bytes;
+        }
         trace_query_bytes("EXECUTE query payload", &payload);
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
         let response =
             read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, self.sdu)
                 .await?;
         trace_query_bytes("EXECUTE query response", &response);
-        let parsed = parse_query_response_with_binds_and_options(
+        let known_columns = if exec_options.cursor_id != 0 {
+            self.cursor_columns
+                .get(&exec_options.cursor_id)
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let parsed = parse_query_response_with_binds_options_and_columns(
             &response,
             self.capabilities,
             bind_rows.first().map(Vec::as_slice).unwrap_or(&[]),
             exec_options,
+            &known_columns,
         );
-        let result = self.note_parse(parsed)?;
-        self.remember_cursor_columns(&result);
-        Ok(result)
+        match self.note_parse(parsed) {
+            Ok(result) => {
+                if use_cache {
+                    self.statement_cache_put(sql, result.cursor_id);
+                }
+                self.remember_cursor_columns(&result);
+                if exec_options.parse_only {
+                    return Ok(result);
+                }
+                self.apply_refetch_metadata(cx, sql, result, prefetch_rows.max(2))
+                    .await
+            }
+            Err(err) => {
+                // drop the cached cursor so the next execute re-parses
+                // (reference base.pyx:1186-1189 clear_cursor on errors)
+                if use_cache {
+                    self.statement_cache_invalidate(sql, exec_options.cursor_id);
+                }
+                Err(err)
+            }
+        }
     }
 
     pub async fn execute_query_with_bind_rows_and_timeout(
@@ -1362,6 +1426,87 @@ impl Connection {
         }
         self.remember_fetch_metadata(sql, &result.columns);
         Ok(result)
+    }
+
+    /// Looks up an open server cursor for the SQL text, refreshing its LRU
+    /// position (reference `_statement_cache.get_statement`).
+    fn statement_cache_get(&mut self, sql: &str) -> Option<u32> {
+        let index = self
+            .statement_cache
+            .iter()
+            .position(|(cached_sql, _)| cached_sql == sql)?;
+        let entry = self.statement_cache.remove(index);
+        let cursor_id = entry.1;
+        self.statement_cache.push(entry);
+        Some(cursor_id)
+    }
+
+    /// Removes and returns the open cursor for the SQL text; used when the
+    /// caller requested `cache_statement=False` but the statement is still
+    /// present from an earlier cached execution (reference `_get_statement`
+    /// pops from the cache unconditionally).
+    fn statement_cache_take(&mut self, sql: &str) -> Option<u32> {
+        let index = self
+            .statement_cache
+            .iter()
+            .position(|(cached_sql, _)| cached_sql == sql)?;
+        Some(self.statement_cache.remove(index).1)
+    }
+
+    /// Stores/updates the open cursor for the SQL text, evicting the least
+    /// recently used entry into the close-cursors piggyback queue (reference
+    /// `_statement_cache.return_statement`).
+    fn statement_cache_put(&mut self, sql: &str, cursor_id: u32) {
+        if cursor_id == 0 {
+            return;
+        }
+        if let Some(index) = self
+            .statement_cache
+            .iter()
+            .position(|(cached_sql, _)| cached_sql == sql)
+        {
+            let (_, cached_id) = self.statement_cache.remove(index);
+            if cached_id != 0 && cached_id != cursor_id {
+                self.cursors_to_close.push(cached_id);
+            }
+        }
+        self.statement_cache.push((sql.to_string(), cursor_id));
+        while self.statement_cache.len() > STATEMENT_CACHE_SIZE {
+            let (_, evicted_id) = self.statement_cache.remove(0);
+            if evicted_id != 0 {
+                self.cursors_to_close.push(evicted_id);
+            }
+        }
+    }
+
+    /// Drops the cached cursor for the SQL text after a server error so the
+    /// next execute re-parses (reference `_statement_cache.clear_cursor`).
+    fn statement_cache_invalidate(&mut self, sql: &str, cursor_id: u32) {
+        if let Some(index) = self
+            .statement_cache
+            .iter()
+            .position(|(cached_sql, _)| cached_sql == sql)
+        {
+            self.statement_cache.remove(index);
+        }
+        if cursor_id != 0 {
+            self.cursors_to_close.push(cursor_id);
+            self.cursor_columns.remove(&cursor_id);
+        }
+    }
+
+    /// Builds the close-cursors piggyback bytes for any queued cursor ids;
+    /// the piggyback consumes its own TTC sequence number.
+    fn take_close_cursors_piggyback(&mut self) -> Option<Vec<u8>> {
+        if self.cursors_to_close.is_empty() {
+            return None;
+        }
+        let cursor_ids = std::mem::take(&mut self.cursors_to_close);
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        Some(oracledb_protocol::thin::build_close_cursors_piggyback(
+            &cursor_ids,
+            seq_num,
+        ))
     }
 
     pub async fn close(mut self, cx: &Cx) -> Result<()> {
