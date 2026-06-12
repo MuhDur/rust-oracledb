@@ -6,7 +6,7 @@ use std::thread;
 
 use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
 use asupersync::Cx;
-use oracledb::protocol::ProtocolError;
+use oracledb::protocol::{ProtocolError, ServerErrorDetails};
 use oracledb::{
     BlockingConnection, ConnectOptions, Connection as RustConnection, Error as DriverError,
 };
@@ -17,25 +17,45 @@ use crate::*;
 #[derive(Debug)]
 pub(crate) struct TaskError {
     message: String,
-    server_row_count: Option<u64>,
+    server_error: Option<Box<ServerErrorDetails>>,
 }
 
 impl TaskError {
     fn from_driver_error(err: DriverError) -> Self {
-        let server_row_count = match &err {
-            DriverError::Protocol(ProtocolError::ServerErrorWithRowCount { row_count, .. }) => {
-                Some(*row_count)
-            }
+        let server_error = match &err {
+            DriverError::Protocol(ProtocolError::ServerErrorInfo(details)) => Some(details.clone()),
+            DriverError::Protocol(ProtocolError::ServerErrorWithRowCount {
+                message,
+                row_count,
+            }) => Some(Box::new(ServerErrorDetails {
+                message: message.clone(),
+                row_count: *row_count,
+                ..ServerErrorDetails::default()
+            })),
             _ => None,
         };
         Self {
             message: err.to_string(),
-            server_row_count,
+            server_error,
         }
     }
 
-    pub(crate) fn server_row_count(&self) -> Option<u64> {
-        self.server_row_count
+    pub(crate) fn server_error_details(&self) -> Option<&ServerErrorDetails> {
+        self.server_error.as_deref()
+    }
+
+    /// PL/SQL statements report no parse offset; the reference substitutes
+    /// `error_info.rowcount + message.offset` instead — the number of
+    /// successful iterations plus the executemany batch offset
+    /// (messages/execute.pyx `process`).
+    pub(crate) fn with_plsql_row_offset(mut self, offset: usize) -> Self {
+        if let Some(details) = self.server_error.as_deref_mut() {
+            if details.pos == 0 {
+                let offset = (offset as u64).saturating_add(details.row_count);
+                details.pos = i32::try_from(offset).unwrap_or(i32::MAX);
+            }
+        }
+        self
     }
 }
 
@@ -49,7 +69,7 @@ impl From<String> for TaskError {
     fn from(message: String) -> Self {
         Self {
             message,
-            server_row_count: None,
+            server_error: None,
         }
     }
 }

@@ -42,6 +42,8 @@ pub enum ProtocolError {
     ServerError(String),
     #[error("server returned Oracle error: {message}")]
     ServerErrorWithRowCount { message: String, row_count: u64 },
+    #[error("server returned Oracle error: {}", .0.message)]
+    ServerErrorInfo(Box<ServerErrorDetails>),
     #[error("unsupported feature: {0}")]
     UnsupportedFeature(&'static str),
     #[error("missing authentication parameter {key}")]
@@ -55,6 +57,21 @@ pub enum ProtocolError {
 }
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;
+
+/// Structured server error information parsed from the TTC error trailer
+/// (reference impl/thin/messages/base.pyx `_process_error_info`).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ServerErrorDetails {
+    pub message: String,
+    /// ORA error number (extended field).
+    pub code: u32,
+    /// Error position / parse offset (sb2; 0 when not reported).
+    pub pos: i32,
+    /// Server-reported row count at the time of the error.
+    pub row_count: u64,
+    /// Encoded rowid of the last affected row, if any.
+    pub rowid: Option<String>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientIdentity {

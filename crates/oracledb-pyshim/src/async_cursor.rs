@@ -27,6 +27,7 @@ pub(crate) fn spawn_async_executemany_task(
     prefetchrows: u32,
     call_timeout: Option<u32>,
     autocommit: bool,
+    row_offset: usize,
 ) -> BlockingTask<AsyncExecuteOutcome> {
     spawn_async_connection_task(
         "oracledb-pyshim-async-executemany",
@@ -43,6 +44,7 @@ pub(crate) fn spawn_async_executemany_task(
                     call_timeout,
                 )
                 .await?;
+                let is_plsql = statement_is_plsql(&statement);
                 if bind_rows.iter().all(Vec::is_empty)
                     || bind_rows_need_iterative_plsql(&statement, &bind_rows)
                 {
@@ -50,7 +52,15 @@ pub(crate) fn spawn_async_executemany_task(
                     let mut out_values: BTreeMap<usize, Vec<Option<QueryValue>>> = BTreeMap::new();
                     let mut return_values: BTreeMap<usize, Vec<Option<QueryValue>>> =
                         BTreeMap::new();
-                    for row in &bind_rows {
+                    for (row_index, row) in bind_rows.iter().enumerate() {
+                        let map_row_err = |err: oracledb::Error| {
+                            let err = TaskError::from(err);
+                            if is_plsql {
+                                err.with_plsql_row_offset(row_offset + row_index)
+                            } else {
+                                err
+                            }
+                        };
                         let row_result = if row.is_empty() {
                             connection
                                 .execute_query_with_timeout(
@@ -60,7 +70,7 @@ pub(crate) fn spawn_async_executemany_task(
                                     call_timeout,
                                 )
                                 .await
-                                .map_err(TaskError::from)?
+                                .map_err(map_row_err)?
                         } else {
                             let one_row = vec![row.clone()];
                             connection
@@ -72,10 +82,11 @@ pub(crate) fn spawn_async_executemany_task(
                                     call_timeout,
                                 )
                                 .await
-                                .map_err(TaskError::from)?
+                                .map_err(map_row_err)?
                         };
                         result.row_count = result.row_count.saturating_add(row_result.row_count);
                         result.compilation_error_warning |= row_result.compilation_error_warning;
+                        result.last_rowid = row_result.last_rowid;
                         for (index, value) in row_result.out_values {
                             out_values.entry(index).or_default().push(value);
                         }
@@ -106,7 +117,14 @@ pub(crate) fn spawn_async_executemany_task(
                         call_timeout,
                     )
                     .await
-                    .map_err(TaskError::from)?;
+                    .map_err(|err| {
+                        let err = TaskError::from(err);
+                        if is_plsql {
+                            err.with_plsql_row_offset(row_offset)
+                        } else {
+                            err
+                        }
+                    })?;
                 supplement_json_lob_column_metadata_async(
                     cx,
                     connection,
@@ -462,6 +480,7 @@ impl AsyncThinCursorImpl {
             (value > 0).then_some(value)
         };
         let autocommit = *self.inner.autocommit.lock().map_err(runtime_error)?;
+        let is_plsql_statement = statement_is_plsql(&statement);
         let query = spawn_async_executemany_task(
             Arc::clone(&self.inner.connection),
             Arc::clone(&self.inner.state),
@@ -471,6 +490,7 @@ impl AsyncThinCursorImpl {
             self.inner.prefetchrows,
             call_timeout,
             autocommit,
+            start,
         );
         let outcome = match query.await {
             Ok(outcome) => outcome,
@@ -478,10 +498,9 @@ impl AsyncThinCursorImpl {
                 return Err(ora_cancel_error());
             }
             Err(err) => {
-                if let Some(row_count) = err.server_row_count() {
-                    self.inner.rowcount = i64::try_from(row_count).unwrap_or(i64::MAX);
-                }
-                return Err(runtime_error(err));
+                return Err(self
+                    .inner
+                    .raise_execute_task_error(&err, is_plsql_statement));
             }
         };
         if self.inner.cancel_requested.swap(false, Ordering::SeqCst) {
@@ -519,10 +538,13 @@ impl AsyncThinCursorImpl {
         self.inner.cursor_id = result.cursor_id;
         self.inner.more_rows = result.more_rows;
         self.inner.invalid_ref_cursor = false;
-        self.inner.rowcount = if statement_is_plsql(&statement) {
+        self.inner.last_rowid = result.last_rowid;
+        self.inner.rowcount = if is_plsql_statement {
             0
         } else {
-            i64::from(num_execs)
+            // reference sets rowcount from the server error-info trailer
+            // (messages/base.pyx:1188-1189), not the iteration count
+            i64::try_from(result.row_count).unwrap_or(i64::MAX)
         };
         self.inner.is_query = is_query;
         Ok(())
@@ -560,12 +582,13 @@ impl AsyncThinCursorImpl {
             call_timeout,
             autocommit,
         );
+        let is_plsql = statement_is_plsql(&statement);
         let outcome = match query.await {
             Ok(outcome) => outcome,
             Err(_) if self.inner.cancel_requested.swap(false, Ordering::SeqCst) => {
                 return Err(ora_cancel_error());
             }
-            Err(err) => return Err(runtime_error(err)),
+            Err(err) => return Err(self.inner.raise_execute_task_error(&err, is_plsql)),
         };
         let result = outcome.result;
         let should_commit = outcome.should_commit;
@@ -589,7 +612,6 @@ impl AsyncThinCursorImpl {
             )
         })?;
         let is_query = !result.columns.is_empty();
-        let is_plsql = statement_is_plsql(&statement);
         self.inner
             .state
             .lock()
@@ -603,6 +625,7 @@ impl AsyncThinCursorImpl {
         self.inner.cursor_id = result.cursor_id;
         self.inner.more_rows = result.more_rows;
         self.inner.invalid_ref_cursor = false;
+        self.inner.last_rowid = result.last_rowid;
         self.inner.rowcount = if is_query || is_plsql {
             0
         } else {

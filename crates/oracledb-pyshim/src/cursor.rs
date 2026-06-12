@@ -92,6 +92,7 @@ pub(crate) struct ThinCursorImpl {
     input_size_bind_surface: Option<Py<PyAny>>,
     pub(crate) statement_changed: bool,
     pub(crate) is_query: bool,
+    pub(crate) last_rowid: Option<String>,
 }
 
 impl ThinCursorImpl {
@@ -148,7 +149,21 @@ impl ThinCursorImpl {
             input_size_bind_surface: None,
             statement_changed: false,
             is_query: false,
+            last_rowid: None,
         }
+    }
+
+    /// Applies structured server-error side effects (rowcount, lastrowid,
+    /// dead-session disconnect) before raising, mirroring the reference
+    /// `_process_error_info`/`_check_and_raise_exception` pair.
+    pub(crate) fn raise_execute_task_error(&mut self, err: &TaskError, is_plsql: bool) -> PyErr {
+        if let Some(details) = err.server_error_details() {
+            if !is_plsql {
+                self.rowcount = i64::try_from(details.row_count).unwrap_or(i64::MAX);
+            }
+            self.last_rowid = details.rowid.clone();
+        }
+        raise_task_error(err, &self.connection)
     }
 
     pub(crate) fn reset_fetch_define_state(&mut self) {
@@ -199,7 +214,8 @@ impl ThinCursorImpl {
         }
         for (index, value) in values.iter().enumerate() {
             if let Some(Some(var)) = self.fetch_value_vars.get(index) {
-                var.borrow(py).set_bind_py_value(Some(value.clone_ref(py)))?;
+                var.borrow(py)
+                    .set_bind_py_value(Some(value.clone_ref(py)))?;
                 continue;
             }
             let dbtype_name = self
@@ -208,7 +224,8 @@ impl ThinCursorImpl {
                 .map(oracledb::protocol::thin::public_dbtype_name_from_column_metadata)
                 .unwrap_or("DB_TYPE_VARCHAR");
             let var = Py::new(py, ThinVar::for_fetch_value(dbtype_name))?;
-            var.borrow(py).set_bind_py_value(Some(value.clone_ref(py)))?;
+            var.borrow(py)
+                .set_bind_py_value(Some(value.clone_ref(py)))?;
             self.fetch_value_vars[index] = Some(var);
         }
         Ok(())
@@ -648,6 +665,7 @@ impl ThinCursorImpl {
             let value = self.state.lock().map_err(runtime_error)?.call_timeout;
             (value > 0).then_some(value)
         };
+        let is_plsql_statement = statement_is_plsql(statement);
         let mut result = match cursor.py().detach({
             let connection = Arc::clone(&self.connection);
             let state = Arc::clone(&self.state);
@@ -655,19 +673,22 @@ impl ThinCursorImpl {
             let mut bind_rows = bind_rows.clone();
             let typed_lob_hints = typed_lob_hints.clone();
             let prefetchrows = self.prefetchrows;
-            move || -> Result<QueryResult, String> {
-                let mut guard = connection.lock().map_err(|err| err.to_string())?;
+            move || -> Result<QueryResult, TaskError> {
+                let mut guard = connection
+                    .lock()
+                    .map_err(|err| TaskError::from(err.to_string()))?;
                 let connection = guard
                     .as_mut()
-                    .ok_or_else(|| "connection is closed".to_string())?;
+                    .ok_or_else(|| TaskError::from("connection is closed"))?;
                 apply_pending_current_schema_from_state(&state, connection, call_timeout)
-                    .map_err(|err| err.to_string())?;
+                    .map_err(|err| TaskError::from(err.to_string()))?;
                 materialize_typed_lob_bind_rows(
                     connection,
                     &mut bind_rows,
                     &typed_lob_hints,
                     call_timeout,
                 )?;
+                let is_plsql = statement_is_plsql(&statement);
                 if bind_rows.iter().all(Vec::is_empty)
                     || bind_rows_need_iterative_plsql(&statement, &bind_rows)
                 {
@@ -675,7 +696,15 @@ impl ThinCursorImpl {
                     let mut out_values: BTreeMap<usize, Vec<Option<QueryValue>>> = BTreeMap::new();
                     let mut return_values: BTreeMap<usize, Vec<Option<QueryValue>>> =
                         BTreeMap::new();
-                    for row in &bind_rows {
+                    for (row_index, row) in bind_rows.iter().enumerate() {
+                        let map_row_err = |err: oracledb::Error| {
+                            let err = TaskError::from(err);
+                            if is_plsql {
+                                err.with_plsql_row_offset(start + row_index)
+                            } else {
+                                err
+                            }
+                        };
                         let row_result = if row.is_empty() {
                             BlockingConnection::execute_query_with_timeout(
                                 connection,
@@ -683,7 +712,7 @@ impl ThinCursorImpl {
                                 prefetchrows,
                                 call_timeout,
                             )
-                            .map_err(|err| err.to_string())?
+                            .map_err(map_row_err)?
                         } else {
                             let one_row = vec![row.clone()];
                             BlockingConnection::execute_query_with_bind_rows_and_timeout(
@@ -693,10 +722,11 @@ impl ThinCursorImpl {
                                 &one_row,
                                 call_timeout,
                             )
-                            .map_err(|err| err.to_string())?
+                            .map_err(map_row_err)?
                         };
                         result.row_count = result.row_count.saturating_add(row_result.row_count);
                         result.compilation_error_warning |= row_result.compilation_error_warning;
+                        result.last_rowid = row_result.last_rowid;
                         for (index, value) in row_result.out_values {
                             out_values.entry(index).or_default().push(value);
                         }
@@ -718,14 +748,21 @@ impl ThinCursorImpl {
                     &bind_rows,
                     call_timeout,
                 )
-                .map_err(|err| err.to_string())
+                .map_err(|err| {
+                    let err = TaskError::from(err);
+                    if is_plsql {
+                        err.with_plsql_row_offset(start)
+                    } else {
+                        err
+                    }
+                })
             }
         }) {
             Ok(result) => result,
             Err(_) if self.cancel_requested.swap(false, Ordering::SeqCst) => {
                 return Err(ora_cancel_error());
             }
-            Err(err) => return Err(runtime_error(err)),
+            Err(err) => return Err(self.raise_execute_task_error(&err, is_plsql_statement)),
         };
         let is_query = !result.columns.is_empty();
         let should_commit = !is_query && *self.autocommit.lock().map_err(runtime_error)?;
@@ -756,7 +793,6 @@ impl ThinCursorImpl {
                 Some(&lob_context),
             )
         })?;
-        let is_plsql_statement = statement_is_plsql(statement);
         self.state.lock().map_err(runtime_error)?.record_statement(
             statement,
             is_query,
@@ -770,10 +806,13 @@ impl ThinCursorImpl {
         self.cursor_id = result.cursor_id;
         self.more_rows = result.more_rows;
         self.invalid_ref_cursor = false;
+        self.last_rowid = result.last_rowid;
         self.rowcount = if is_plsql_statement {
             0
         } else {
-            i64::from(num_execs)
+            // reference sets rowcount from the server error-info trailer
+            // (messages/base.pyx:1188-1189), not the iteration count
+            i64::try_from(result.row_count).unwrap_or(i64::MAX)
         };
         self.is_query = is_query;
         Ok(())
@@ -793,6 +832,7 @@ impl ThinCursorImpl {
         };
         let mut typed_lob_hints = typed_lob_bind_hints(cursor.py(), &self.bind_vars);
         promote_oversized_plsql_bind_hints(statement, &self.bind_values, &mut typed_lob_hints);
+        let is_plsql = statement_is_plsql(statement);
         let mut result = match cursor.py().detach({
             let connection = Arc::clone(&self.connection);
             let state = Arc::clone(&self.state);
@@ -800,13 +840,15 @@ impl ThinCursorImpl {
             let mut bind_values = self.bind_values.clone();
             let typed_lob_hints = typed_lob_hints.clone();
             let prefetchrows = self.prefetchrows;
-            move || -> Result<QueryResult, String> {
-                let mut guard = connection.lock().map_err(|err| err.to_string())?;
+            move || -> Result<QueryResult, TaskError> {
+                let mut guard = connection
+                    .lock()
+                    .map_err(|err| TaskError::from(err.to_string()))?;
                 let connection = guard
                     .as_mut()
-                    .ok_or_else(|| "connection is closed".to_string())?;
+                    .ok_or_else(|| TaskError::from("connection is closed"))?;
                 apply_pending_current_schema_from_state(&state, connection, call_timeout)
-                    .map_err(|err| err.to_string())?;
+                    .map_err(|err| TaskError::from(err.to_string()))?;
                 materialize_typed_lob_bind_values(
                     connection,
                     &mut bind_values,
@@ -820,14 +862,14 @@ impl ThinCursorImpl {
                     &bind_values,
                     call_timeout,
                 )
-                .map_err(|err| err.to_string())
+                .map_err(TaskError::from)
             }
         }) {
             Ok(result) => result,
             Err(_) if self.cancel_requested.swap(false, Ordering::SeqCst) => {
                 return Err(ora_cancel_error());
             }
-            Err(err) => return Err(runtime_error(err)),
+            Err(err) => return Err(self.raise_execute_task_error(&err, is_plsql)),
         };
         if self.cancel_requested.swap(false, Ordering::SeqCst) {
             self.drain_cancel_response()?;
@@ -850,7 +892,6 @@ impl ThinCursorImpl {
             )
         })?;
         let is_query = !result.columns.is_empty();
-        let is_plsql = statement_is_plsql(statement);
         let should_commit = !is_query && *self.autocommit.lock().map_err(runtime_error)?;
         if should_commit {
             let mut guard = self.connection.lock().map_err(runtime_error)?;
@@ -872,6 +913,7 @@ impl ThinCursorImpl {
         self.cursor_id = result.cursor_id;
         self.more_rows = result.more_rows;
         self.invalid_ref_cursor = false;
+        self.last_rowid = result.last_rowid;
         self.rowcount = if is_query || is_plsql {
             0
         } else {
@@ -974,8 +1016,7 @@ impl ThinCursorImpl {
                 // fetch_decimals is in effect (impl/base/cursor.pyx:211-214).
                 if self.fetch_decimals
                     && self.columns.get(index).is_some_and(|metadata| {
-                        metadata.ora_type_num
-                            == oracledb::protocol::thin::ORA_TYPE_NUM_NUMBER
+                        metadata.ora_type_num == oracledb::protocol::thin::ORA_TYPE_NUM_NUMBER
                     })
                 {
                     if let Some(QueryValue::Number { text, .. }) = value {
@@ -1145,7 +1186,13 @@ impl ThinCursorImpl {
     }
 
     pub(crate) fn get_lastrowid(&self) -> Option<String> {
-        None
+        // reference thin/cursor.pyx get_lastrowid: only exposed when the
+        // last statement affected at least one row
+        if self.rowcount > 0 {
+            self.last_rowid.clone()
+        } else {
+            None
+        }
     }
 
     pub(crate) fn get_handle(&self) -> PyResult<Py<PyAny>> {

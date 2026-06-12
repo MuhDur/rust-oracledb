@@ -136,6 +136,7 @@ const TNS_BIND_DIR_INPUT: u8 = 32;
 const TNS_CHARSET_UTF8: u16 = 873;
 const TNS_MAX_LONG_LENGTH: u32 = 0x7fff_ffff;
 const TNS_ERR_NO_DATA_FOUND: u32 = 1403;
+const TNS_ERR_ARRAY_DML_ERRORS: u32 = 24381;
 const TNS_UDS_FLAGS_IS_JSON: u32 = 0x01;
 const TNS_UDS_FLAGS_IS_OSON: u32 = 0x02;
 const ORA_TYPE_SIZE_BINARY_DOUBLE: u32 = 8;
@@ -642,6 +643,10 @@ pub struct QueryResult {
     pub row_count: u64,
     pub more_rows: bool,
     pub compilation_error_warning: bool,
+    /// Encoded rowid of the last affected row (reference cursor `lastrowid`).
+    pub last_rowid: Option<String>,
+    /// Batch errors collected with `executemany(batcherrors=True)`.
+    pub batch_errors: Vec<BatchServerError>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -2202,13 +2207,18 @@ fn parse_query_response_with_context_and_binds(
                 }
                 result.row_count = info.row_count;
                 result.compilation_error_warning |= info.compilation_error_warning;
+                result.last_rowid = info.rowid.clone();
                 if info.number == TNS_ERR_NO_DATA_FOUND && !result.columns.is_empty() {
                     result.more_rows = false;
+                } else if info.number == TNS_ERR_ARRAY_DML_ERRORS {
+                    // executemany(batcherrors=True): errors are reported via
+                    // the batch error arrays instead of raising ORA-24381
+                    // (reference messages/base.pyx `_process_error_info`).
+                    result.batch_errors = info.batch_errors;
                 } else if info.number != 0 {
-                    return Err(ProtocolError::ServerErrorWithRowCount {
-                        message: info.message,
-                        row_count: info.row_count,
-                    });
+                    return Err(ProtocolError::ServerErrorInfo(Box::new(
+                        info.into_details(),
+                    )));
                 }
             }
             _ => {
@@ -3614,13 +3624,61 @@ fn skip_query_return_parameters(reader: &mut TtcReader<'_>) -> Result<()> {
     Ok(())
 }
 
+/// One batch error entry from `executemany(batcherrors=True)` (reference
+/// impl/thin/messages/base.pyx batch error codes/offsets/messages arrays).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BatchServerError {
+    pub code: u32,
+    pub offset: u32,
+    pub message: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ServerErrorInfo {
     number: u32,
     message: String,
     cursor_id: u16,
+    pos: i32,
     row_count: u64,
+    rowid: Option<String>,
+    batch_errors: Vec<BatchServerError>,
     compilation_error_warning: bool,
+}
+
+impl ServerErrorInfo {
+    fn into_details(self) -> crate::ServerErrorDetails {
+        crate::ServerErrorDetails {
+            message: self.message,
+            code: self.number,
+            pos: self.pos,
+            row_count: self.row_count,
+            rowid: self.rowid,
+        }
+    }
+}
+
+/// Encodes a physical rowid the way the reference driver does
+/// (impl/thin/utils.pyx `_encode_rowid`/`_convert_base64`).
+fn encode_rowid(rba: u32, partition_id: u16, block_num: u32, slot_num: u16) -> Option<String> {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    if rba == 0 && partition_id == 0 && block_num == 0 && slot_num == 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(18);
+    let mut convert = |value: u64, size: usize| {
+        let start = out.len();
+        out.resize(start + size, 0u8);
+        let mut value = value;
+        for i in 0..size {
+            out[start + size - i - 1] = ALPHABET[(value & 0x3f) as usize];
+            value >>= 6;
+        }
+    };
+    convert(u64::from(rba), 6);
+    convert(u64::from(partition_id), 3);
+    convert(u64::from(block_num), 6);
+    convert(u64::from(slot_num), 3);
+    String::from_utf8(out).ok()
 }
 
 fn parse_server_error(reader: &mut TtcReader<'_>, ttc_field_version: u8) -> Result<Option<String>> {
@@ -3645,33 +3703,65 @@ fn parse_server_error_info(
     let _array_elem_error_1 = reader.read_ub2()?;
     let _array_elem_error_2 = reader.read_ub2()?;
     let cursor_id = reader.read_ub2()?;
-    skip_sb2(reader)?;
+    let error_pos = reader.read_sb4()?; // sb2 error position (same wire shape)
     reader.skip(5)?;
     let warning_flags = reader.read_u8()?;
-    skip_rowid(reader)?;
+    let rowid = read_rowid(reader)?;
     let _os_error = reader.read_ub4()?;
     reader.skip(2)?;
     let _padding = reader.read_ub2()?;
     let _success_iters = reader.read_ub4()?;
     reader.read_bytes_with_length()?;
 
+    let mut batch_errors: Vec<BatchServerError> = Vec::new();
     let batch_error_count = reader.read_ub2()?;
     if batch_error_count > 0 {
-        skip_packed_ub2_array(reader, batch_error_count)?;
+        let first_byte = reader.read_u8()?;
+        for _ in 0..batch_error_count {
+            if first_byte == crate::wire::TNS_LONG_LENGTH_INDICATOR {
+                let _chunk_len = reader.read_ub4()?;
+            }
+            let code = reader.read_ub2()?;
+            batch_errors.push(BatchServerError {
+                code: u32::from(code),
+                ..BatchServerError::default()
+            });
+        }
+        if first_byte == crate::wire::TNS_LONG_LENGTH_INDICATOR {
+            reader.skip(1)?;
+        }
     }
 
     let batch_offset_count = reader.read_ub4()?;
     if batch_offset_count > 0 {
-        skip_packed_ub4_array(reader, batch_offset_count)?;
+        let first_byte = reader.read_u8()?;
+        for index in 0..batch_offset_count {
+            if first_byte == crate::wire::TNS_LONG_LENGTH_INDICATOR {
+                let _chunk_len = reader.read_ub4()?;
+            }
+            let offset = reader.read_ub4()?;
+            if let Some(entry) = batch_errors.get_mut(index as usize) {
+                entry.offset = offset;
+            }
+        }
+        if first_byte == crate::wire::TNS_LONG_LENGTH_INDICATOR {
+            reader.skip(1)?;
+        }
     }
 
     let batch_message_count = reader.read_ub2()?;
     if batch_message_count > 0 {
-        reader.skip(1)?;
-        for _ in 0..batch_message_count {
-            let chunk_len = reader.read_ub2()?;
-            reader.skip(usize::from(chunk_len))?;
-            reader.skip(2)?;
+        reader.skip(1)?; // packed size
+        for index in 0..batch_message_count {
+            let _chunk_len = reader.read_ub2()?;
+            let message = reader
+                .read_bytes()?
+                .map(|bytes| String::from_utf8_lossy(&bytes).trim_end().to_string())
+                .unwrap_or_default();
+            if let Some(entry) = batch_errors.get_mut(usize::from(index)) {
+                entry.message = message;
+            }
+            reader.skip(2)?; // end marker
         }
     }
 
@@ -3696,51 +3786,21 @@ fn parse_server_error_info(
         number: error_number,
         message,
         cursor_id,
+        pos: if error_pos > 0 { error_pos } else { 0 },
         row_count,
+        rowid,
+        batch_errors,
         compilation_error_warning: warning_flags & 0x20 != 0,
     })
 }
 
-fn skip_sb2(reader: &mut TtcReader<'_>) -> Result<()> {
-    let len = reader.read_u8()?;
-    reader.skip(usize::from(len & 0x7f))
-}
-
-fn skip_rowid(reader: &mut TtcReader<'_>) -> Result<()> {
-    let _rba = reader.read_ub4()?;
-    let _partition_id = reader.read_ub2()?;
+fn read_rowid(reader: &mut TtcReader<'_>) -> Result<Option<String>> {
+    let rba = reader.read_ub4()?;
+    let partition_id = reader.read_ub2()?;
     reader.skip(1)?;
-    let _block_num = reader.read_ub4()?;
-    let _slot_num = reader.read_ub2()?;
-    Ok(())
-}
-
-fn skip_packed_ub2_array(reader: &mut TtcReader<'_>, count: u16) -> Result<()> {
-    let first_byte = reader.read_u8()?;
-    for _ in 0..count {
-        if first_byte == crate::wire::TNS_LONG_LENGTH_INDICATOR {
-            let _chunk_len = reader.read_ub4()?;
-        }
-        let _value = reader.read_ub2()?;
-    }
-    if first_byte == crate::wire::TNS_LONG_LENGTH_INDICATOR {
-        reader.skip(1)?;
-    }
-    Ok(())
-}
-
-fn skip_packed_ub4_array(reader: &mut TtcReader<'_>, count: u32) -> Result<()> {
-    let first_byte = reader.read_u8()?;
-    for _ in 0..count {
-        if first_byte == crate::wire::TNS_LONG_LENGTH_INDICATOR {
-            let _chunk_len = reader.read_ub4()?;
-        }
-        let _value = reader.read_ub4()?;
-    }
-    if first_byte == crate::wire::TNS_LONG_LENGTH_INDICATOR {
-        reader.skip(1)?;
-    }
-    Ok(())
+    let block_num = reader.read_ub4()?;
+    let slot_num = reader.read_ub2()?;
+    Ok(encode_rowid(rba, partition_id, block_num, slot_num))
 }
 
 fn parse_return_parameters(reader: &mut TtcReader<'_>) -> Result<AuthResponse> {
