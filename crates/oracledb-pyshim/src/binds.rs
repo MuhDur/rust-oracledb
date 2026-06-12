@@ -435,6 +435,13 @@ pub(crate) fn thin_var_object_return_projection(
     let Some(object_type) = var.object_type.clone() else {
         return Ok(None);
     };
+    // a variable that can bind as a real ADT out bind (oid known) needs no
+    // scalar projection rewrite: the RETURNING value comes back as packed
+    // object data; rewriting the projection while binding ADT pairs a CHAR
+    // expression with an ADT bind and the server raises ORA-00932
+    if object_type.object_output_bind().is_some() {
+        return Ok(None);
+    }
     let Some(attr_name) = var
         .object_return_attr
         .clone()
