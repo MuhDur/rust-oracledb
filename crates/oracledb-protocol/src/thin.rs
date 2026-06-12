@@ -43,6 +43,7 @@ pub const TNS_FUNC_PING: u8 = 147;
 pub const TNS_FUNC_ROLLBACK: u8 = 15;
 
 pub const TNS_AUTH_MODE_LOGON: u32 = 0x0000_0001;
+pub const TNS_AUTH_MODE_CHANGE_PASSWORD: u32 = 0x0000_0002;
 pub const TNS_AUTH_MODE_WITH_PASSWORD: u32 = 0x0000_0100;
 
 pub const TNS_VERIFIER_TYPE_11G_1: u32 = 0xb152;
@@ -2463,6 +2464,30 @@ pub fn build_auth_phase_two_payload_with_proxy_with_seq(
     if !connect_string.is_empty() {
         write_key_value(&mut writer, "AUTH_CONNECT_STRING", connect_string, 0)?;
     }
+    Ok(writer.into_bytes())
+}
+
+/// Change-password payload: an AUTH_PHASE_TWO message carrying only the
+/// combo-key-encrypted old/new passwords (reference
+/// connection.pyx `_create_change_password_message` + messages/auth.pyx
+/// `_write_message`: auth mode WITH_PASSWORD|CHANGE_PASSWORD, two pairs).
+pub fn build_change_password_payload_with_seq(
+    user: &str,
+    encoded_password: &str,
+    encoded_newpassword: &str,
+    seq_num: u8,
+) -> Result<Vec<u8>> {
+    let mut writer = TtcWriter::new();
+    writer.write_function_code_with_seq(TNS_FUNC_AUTH_PHASE_TWO, seq_num);
+    writer.write_ub8(0);
+    write_auth_header(
+        &mut writer,
+        user,
+        TNS_AUTH_MODE_WITH_PASSWORD | TNS_AUTH_MODE_CHANGE_PASSWORD,
+        2,
+    )?;
+    write_key_value(&mut writer, "AUTH_PASSWORD", encoded_password, 0)?;
+    write_key_value(&mut writer, "AUTH_NEWPASSWORD", encoded_newpassword, 0)?;
     Ok(writer.into_bytes())
 }
 

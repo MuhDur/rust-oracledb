@@ -114,7 +114,7 @@ impl AsyncThinConnImpl {
             .await
             .map_err(runtime_error)?;
         let cancel_handle = connection.cancel_handle().map_err(runtime_error)?;
-        self.inner.server_version = (0, 0, 0, 0, 0);
+        self.inner.server_version = connection.server_version_tuple().unwrap_or_default();
         *self.inner.cancel_handle.lock().map_err(runtime_error)? = Some(cancel_handle);
         *self.inner.connection.lock().map_err(runtime_error)? = Some(connection);
         if let Some(new_password) = prepared.new_password {
@@ -204,35 +204,21 @@ impl AsyncThinConnImpl {
     }
 
     async fn change_password(&self, old_password: String, new_password: String) -> PyResult<()> {
-        if new_password.len() > 1024 {
-            return Err(dpy_database_error(
-                "ORA-00988",
-                "missing or invalid password(s)",
-            ));
-        }
-        let user = user_identifier(&self.inner.username)?;
-        let sql = format!(
-            "alter user {user} identified by {} replace {}",
-            quoted_oracle_string(&new_password),
-            quoted_oracle_string(&old_password)
-        );
-        let call_timeout = {
-            let value = self.inner.state.lock().map_err(runtime_error)?.call_timeout;
-            (value > 0).then_some(value)
+        let task = {
+            let new_password = new_password.clone();
+            spawn_async_connection_task(
+                "oracledb-pyshim-async-change-password",
+                Arc::clone(&self.inner.connection),
+                move |cx, connection| {
+                    Box::pin(async move {
+                        connection
+                            .change_password(cx, &old_password, &new_password)
+                            .await
+                            .map_err(TaskError::from)
+                    })
+                },
+            )
         };
-        let task = spawn_async_connection_task(
-            "oracledb-pyshim-async-change-password",
-            Arc::clone(&self.inner.connection),
-            move |cx, connection| {
-                Box::pin(async move {
-                    connection
-                        .execute_query_with_timeout(cx, &sql, 1, call_timeout)
-                        .await
-                        .map(|_| ())
-                        .map_err(TaskError::from)
-                })
-            },
-        );
         task.await
             .map_err(runtime_error)
             .and_then(|()| set_password_override_for_user(&self.inner.username, &new_password))

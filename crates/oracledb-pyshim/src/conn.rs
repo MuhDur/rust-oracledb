@@ -1083,7 +1083,7 @@ impl ThinConnImpl {
         let prepared = self.prepare_connect(params_impl)?;
         let connection = BlockingConnection::connect(prepared.options).map_err(runtime_error)?;
         let cancel_handle = connection.cancel_handle().map_err(runtime_error)?;
-        self.server_version = (0, 0, 0, 0, 0);
+        self.server_version = connection.server_version_tuple().unwrap_or_default();
         *self.cancel_handle.lock().map_err(runtime_error)? = Some(cancel_handle);
         *self.connection.lock().map_err(runtime_error)? = Some(connection);
         if let Some(new_password) = &prepared.new_password {
@@ -1147,20 +1147,14 @@ impl ThinConnImpl {
     }
 
     fn change_password(&self, old_password: &str, new_password: &str) -> PyResult<()> {
-        if new_password.len() > 1024 {
-            return Err(dpy_database_error(
-                "ORA-00988",
-                "missing or invalid password(s)",
-            ));
-        }
-        let user = user_identifier(&self.username)?;
-        let sql = format!(
-            "alter user {user} identified by {} replace {}",
-            quoted_oracle_string(new_password),
-            quoted_oracle_string(old_password)
-        );
-        self.execute_statement(&sql)
-            .and_then(|()| set_password_override_for_user(&self.username, new_password))
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        BlockingConnection::change_password(connection, old_password, new_password)
+            .map_err(runtime_error)?;
+        drop(guard);
+        set_password_override_for_user(&self.username, new_password)
     }
 
     pub(crate) fn get_is_healthy(&self) -> PyResult<bool> {

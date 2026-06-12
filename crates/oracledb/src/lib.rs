@@ -11,14 +11,15 @@ use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
 use asupersync::sync::Mutex as AsyncMutex;
 use asupersync::{time, Cx};
 use oracledb_protocol::thin::{
-    build_auth_phase_two_payload_with_proxy_with_seq, build_connect_packet_payload,
-    build_define_fetch_payload_with_seq, build_execute_payload_with_bind_rows_with_seq,
-    build_execute_payload_with_binds_with_seq, build_execute_payload_with_seq,
-    build_fast_auth_phase_one_payload, build_fetch_payload_with_seq,
-    build_function_payload_with_seq, build_lob_create_temp_payload_with_seq,
-    build_lob_free_temp_payload_with_seq, build_lob_read_payload_with_seq,
-    build_lob_trim_payload_with_seq, build_lob_write_payload_with_seq, parse_accept_payload,
-    parse_auth_response, parse_fetch_response_with_context, parse_lob_create_temp_response,
+    build_auth_phase_two_payload_with_proxy_with_seq, build_change_password_payload_with_seq,
+    build_connect_packet_payload, build_define_fetch_payload_with_seq,
+    build_execute_payload_with_bind_rows_with_seq, build_execute_payload_with_binds_with_seq,
+    build_execute_payload_with_seq, build_fast_auth_phase_one_payload,
+    build_fetch_payload_with_seq, build_function_payload_with_seq,
+    build_lob_create_temp_payload_with_seq, build_lob_free_temp_payload_with_seq,
+    build_lob_read_payload_with_seq, build_lob_trim_payload_with_seq,
+    build_lob_write_payload_with_seq, parse_accept_payload, parse_auth_response,
+    parse_fetch_response_with_context, parse_lob_create_temp_response,
     parse_lob_free_temp_response, parse_lob_read_response, parse_lob_trim_response,
     parse_lob_write_response, parse_plain_function_response, parse_query_response,
     parse_query_response_with_binds, BindValue, ClientCapabilities, ColumnMetadata, LobReadResult,
@@ -47,6 +48,33 @@ const SESSION_DEAD_ORA_CODES: &[u32] = &[
     22, 28, 31, 45, 378, 600, 602, 603, 609, 1012, 1041, 1043, 1089, 1092, 2396, 3113, 3114, 3122,
     3135, 12153, 12537, 12547, 12570, 12583, 27146, 28511, 56600,
 ];
+
+/// TTC field-version threshold where the database version number encoding
+/// changed (reference thin/constants.pxi `TNS_CCAP_FIELD_VERSION_18_1_EXT_1`).
+const TNS_CCAP_FIELD_VERSION_18_1_EXT_1: u8 = 11;
+
+/// Decode the packed `AUTH_VERSION_NO` value into the database version
+/// 5-tuple. The bit layout changed with Oracle Database 18
+/// (reference messages/auth.pyx `_get_version_tuple`).
+fn decode_server_version_number(full: u32, new_format: bool) -> (u8, u8, u8, u8, u8) {
+    if new_format {
+        (
+            ((full >> 24) & 0xFF) as u8,
+            ((full >> 16) & 0xFF) as u8,
+            ((full >> 12) & 0x0F) as u8,
+            ((full >> 4) & 0xFF) as u8,
+            (full & 0x0F) as u8,
+        )
+    } else {
+        (
+            ((full >> 24) & 0xFF) as u8,
+            ((full >> 20) & 0x0F) as u8,
+            ((full >> 12) & 0x0F) as u8,
+            ((full >> 8) & 0x0F) as u8,
+            (full & 0x0F) as u8,
+        )
+    }
+}
 
 fn protocol_error_is_session_dead(err: &oracledb_protocol::ProtocolError) -> bool {
     let message = match err {
@@ -143,11 +171,17 @@ pub struct Connection {
     session_id: u32,
     serial_num: u16,
     server_version: Option<String>,
+    server_version_tuple: Option<(u8, u8, u8, u8, u8)>,
     capabilities: ClientCapabilities,
     ttc_seq_num: u8,
     sdu: usize,
     cursor_columns: BTreeMap<u32, Vec<ColumnMetadata>>,
     dead: bool,
+    /// Logon user, retained for the change-password call.
+    user: String,
+    /// Session combo key from verifier generation, retained for the
+    /// change-password call (reference keeps `conn_impl._combo_key`).
+    combo_key: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -264,6 +298,16 @@ impl Connection {
         let session_id = parse_session_u32(&auth_two.session_data, "AUTH_SESSION_ID")?;
         let serial_num = parse_session_u16(&auth_two.session_data, "AUTH_SERIAL_NUM")?;
         let server_version = auth_two.session_data.get("AUTH_VERSION_STRING").cloned();
+        let server_version_tuple = auth_two
+            .session_data
+            .get("AUTH_VERSION_NO")
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .map(|num| {
+                decode_server_version_number(
+                    num,
+                    capabilities.ttc_field_version >= TNS_CCAP_FIELD_VERSION_18_1_EXT_1,
+                )
+            });
 
         Ok(Self {
             descriptor,
@@ -273,11 +317,14 @@ impl Connection {
             session_id,
             serial_num,
             server_version,
+            server_version_tuple,
             capabilities,
             ttc_seq_num,
             sdu,
             cursor_columns: BTreeMap::new(),
             dead: false,
+            user: options.user,
+            combo_key: encrypted.combo_key,
         })
     }
 
@@ -299,6 +346,12 @@ impl Connection {
 
     pub fn server_version(&self) -> Option<&str> {
         self.server_version.as_deref()
+    }
+
+    /// Database version 5-tuple decoded from `AUTH_VERSION_NO`
+    /// (reference messages/auth.pyx `_get_version_tuple`).
+    pub fn server_version_tuple(&self) -> Option<(u8, u8, u8, u8, u8)> {
+        self.server_version_tuple
     }
 
     pub fn sdu(&self) -> usize {
@@ -335,6 +388,37 @@ impl Connection {
 
     pub async fn ping(&mut self, cx: &Cx) -> Result<()> {
         self.send_function(cx, TNS_FUNC_PING).await
+    }
+
+    /// Change the session password via the dedicated auth round trip
+    /// (reference `ThinConnImpl.change_password`): an AUTH_PHASE_TWO message
+    /// carrying the combo-key-encrypted old/new passwords. Server errors
+    /// (ORA-28218, ORA-01017, ...) surface unchanged.
+    pub async fn change_password(
+        &mut self,
+        cx: &Cx,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<()> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let (encoded_password, encoded_newpassword) =
+            oracledb_protocol::crypto::encrypt_change_password_pair(
+                &self.combo_key,
+                old_password.as_bytes(),
+                new_password.as_bytes(),
+            )?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = build_change_password_payload_with_seq(
+            &self.user,
+            &encoded_password,
+            &encoded_newpassword,
+            seq_num,
+        )?;
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.note_parse(parse_auth_response(&response).map(|_| ()))?;
+        Ok(())
     }
 
     /// Ping with an upper bound on the round trip, used by pool health
@@ -1054,6 +1138,21 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection.ping_with_timeout(&cx, timeout_ms).await
+        })
+    }
+
+    pub fn change_password(
+        connection: &mut Connection,
+        old_password: &str,
+        new_password: &str,
+    ) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .change_password(&cx, old_password, new_password)
+                .await
         })
     }
 

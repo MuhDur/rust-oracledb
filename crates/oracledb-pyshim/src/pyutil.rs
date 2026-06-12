@@ -168,21 +168,6 @@ pub(crate) fn python_int_from_decimal_text(py: Python<'_>, text: &str) -> PyResu
     Ok(builtins.getattr("int")?.call1((decimal,))?.unbind())
 }
 
-pub(crate) fn quoted_oracle_string(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
-}
-
-pub(crate) fn user_identifier(value: &str) -> PyResult<String> {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '#'))
-    {
-        Ok(value.to_ascii_uppercase())
-    } else {
-        Err(not_implemented("quoted Oracle username"))
-    }
-}
-
 pub(crate) fn query_value_to_string(value: &Option<QueryValue>) -> Option<String> {
     match value {
         Some(QueryValue::Text(value)) => Some(value.clone()),

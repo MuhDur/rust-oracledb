@@ -134,6 +134,7 @@ impl PoolBackend for ShimPoolBackend {
 
         // Phase 3 (GIL): finalize the impl and register the Python object.
         Python::attach(|py| {
+            conn_impl.server_version = connection.server_version_tuple().unwrap_or_default();
             *conn_impl.cancel_handle.lock().map_err(runtime_error)? = Some(cancel_handle);
             *conn_impl.connection.lock().map_err(runtime_error)? = Some(connection);
             if let Some(edition) = prepared.edition {
