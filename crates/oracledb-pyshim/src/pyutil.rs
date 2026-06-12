@@ -169,13 +169,6 @@ pub(crate) fn python_int_from_decimal_text(py: Python<'_>, text: &str) -> PyResu
         .unbind())
 }
 
-pub(crate) fn python_decimal_from_text(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
-    Ok(PyModule::import(py, "decimal")?
-        .getattr("Decimal")?
-        .call1((text,))?
-        .unbind())
-}
-
 pub(crate) fn query_value_to_string(value: &Option<QueryValue>) -> Option<String> {
     match value {
         Some(QueryValue::Text(value)) => Some(value.clone()),

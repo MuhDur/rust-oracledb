@@ -63,7 +63,6 @@ fn oracledb_pyshim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AsyncThinConnImpl>()?;
     m.add_class::<ThinPoolImpl>()?;
     m.add_class::<AsyncThinPoolImpl>()?;
-    m.add_class::<PipelineOpResultShimImpl>()?;
     m.add_class::<EndUserSecurityContextImpl>()?;
     Ok(())
 }
