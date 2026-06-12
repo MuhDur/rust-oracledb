@@ -1,0 +1,10 @@
+connected 23.26.1.0.0
+tables ready
+=== capture 1: single batch ===
+=== capture 2: batch_size=2 over 4 rows ===
+=== capture 3: long segment (>0xfa bytes) ===
+=== capture 4: DPY-8001 -> abort op ===
+expected error: DPY-8001: value for column "NAME" may not be null on row 1
+dpl_golden rows: (7, 1, 13)
+dpl_golden_wide rows: (1, 600)
+done

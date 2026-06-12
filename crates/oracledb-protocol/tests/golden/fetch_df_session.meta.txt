@@ -1,0 +1,31 @@
+connected 23.26.1.0.0
+table ready
+=== capture: fetch_df_all ===
+schema:
+  ID: int64
+  BIG: double
+  PRICE: double
+  ANYNUM: double
+  NAME: large_string
+  FIXED: large_string
+  HIRED: timestamp[s]
+  UPDATED: timestamp[us]
+  PAYLOAD: large_binary
+  RATING: double
+  SCORE: float
+rows:
+  {'ID': 1, 'BIG': 12345678901234.0, 'PRICE': 12.34, 'ANYNUM': 1.5, 'NAME': 'alpha', 'FIXED': 'ab   ', 'HIRED': datetime.datetime(2024, 1, 2, 3, 4, 5), 'UPDATED': datetime.datetime(2024, 1, 2, 3, 4, 5, 123456), 'PAYLOAD': b'\x01\x02', 'RATING': 2.5, 'SCORE': 0.5}
+  {'ID': 2, 'BIG': None, 'PRICE': None, 'ANYNUM': None, 'NAME': None, 'FIXED': None, 'HIRED': None, 'UPDATED': None, 'PAYLOAD': None, 'RATING': None, 'SCORE': None}
+  {'ID': 3, 'BIG': -42.0, 'PRICE': -99.99, 'ANYNUM': -0.25, 'NAME': 'gamma', 'FIXED': 'xyz  ', 'HIRED': datetime.datetime(1988, 12, 31, 23, 59, 58), 'UPDATED': datetime.datetime(1988, 12, 31, 23, 59, 58, 999999), 'PAYLOAD': b'\xff\xff\xff\xff\xff\xff\xff\xff', 'RATING': -1.5, 'SCORE': -2.0}
+=== capture: fetch_df_all with fetch_decimals ===
+schema (fetch_decimals=True):
+  ID: decimal128(9, 0)
+  PRICE: decimal128(9, 2)
+  ANYNUM: double
+  {'ID': Decimal('1'), 'PRICE': Decimal('12.34'), 'ANYNUM': 1.5}
+  {'ID': Decimal('2'), 'PRICE': None, 'ANYNUM': None}
+  {'ID': Decimal('3'), 'PRICE': Decimal('-99.99'), 'ANYNUM': -0.25}
+=== capture: null-only column ===
+  N: large_string
+  []
+done

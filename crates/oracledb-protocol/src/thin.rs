@@ -56,7 +56,9 @@ pub const ORA_TYPE_NUM_LONG: u8 = 8;
 pub const ORA_TYPE_NUM_ROWID: u8 = 11;
 pub const ORA_TYPE_NUM_DATE: u8 = 12;
 pub const ORA_TYPE_NUM_RAW: u8 = 23;
+pub const ORA_TYPE_NUM_BINARY_FLOAT: u8 = 100;
 pub const ORA_TYPE_NUM_BINARY_DOUBLE: u8 = 101;
+pub const ORA_TYPE_NUM_BOOLEAN: u8 = 252;
 pub const ORA_TYPE_NUM_CURSOR: u8 = 102;
 pub const ORA_TYPE_NUM_LONG_RAW: u8 = 24;
 pub const ORA_TYPE_NUM_CHAR: u8 = 96;
@@ -134,7 +136,7 @@ const TNS_BIND_USE_INDICATORS: u8 = 0x01;
 const TNS_BIND_ARRAY: u8 = 0x40;
 const TNS_BIND_DIR_INPUT: u8 = 32;
 const TNS_CHARSET_UTF8: u16 = 873;
-const TNS_MAX_LONG_LENGTH: u32 = 0x7fff_ffff;
+pub const TNS_MAX_LONG_LENGTH: u32 = 0x7fff_ffff;
 const TNS_ERR_NO_DATA_FOUND: u32 = 1403;
 const TNS_UDS_FLAGS_IS_JSON: u32 = 0x01;
 const TNS_UDS_FLAGS_IS_OSON: u32 = 0x02;
@@ -243,6 +245,9 @@ pub struct AuthResponse {
 pub struct ClientCapabilities {
     pub ttc_field_version: u8,
     pub max_string_size: u32,
+    /// Database character set id from the protocol-info response. Charset
+    /// ids >= 800 are multi-byte (drives direct path CLOB form selection).
+    pub charset_id: u16,
 }
 
 impl Default for ClientCapabilities {
@@ -250,6 +255,8 @@ impl Default for ClientCapabilities {
         Self {
             ttc_field_version: 24,
             max_string_size: 32_767,
+            // AL32UTF8: the charset the thin protocol always negotiates
+            charset_id: 873,
         }
     }
 }
@@ -375,9 +382,8 @@ impl<'a> DbObjectPackedReader<'a> {
     }
 
     fn skip_length(&mut self) -> Result<()> {
-        match self.read_u8()? {
-            TNS_LONG_LENGTH_INDICATOR => self.skip(4)?,
-            _ => {}
+        if self.read_u8()? == TNS_LONG_LENGTH_INDICATOR {
+            self.skip(4)?;
         }
         Ok(())
     }
@@ -1878,6 +1884,7 @@ pub fn build_lob_read_payload_with_seq(
     Ok(writer.into_bytes())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_lob_op_header(
     writer: &mut TtcWriter,
     locator: &[u8],
@@ -2515,7 +2522,7 @@ fn skip_protocol_message(reader: &mut TtcReader<'_>) -> Result<Option<ClientCapa
             break;
         }
     }
-    let _charset = reader.read_u16le()?;
+    let charset_id = reader.read_u16le()?;
     let _server_flags = reader.read_u8()?;
     let num_elem = reader.read_u16le()?;
     reader.skip(usize::from(num_elem) * 5)?;
@@ -2544,6 +2551,7 @@ fn skip_protocol_message(reader: &mut TtcReader<'_>) -> Result<Option<ClientCapa
     Ok(Some(ClientCapabilities {
         ttc_field_version,
         max_string_size,
+        charset_id,
     }))
 }
 
@@ -2586,7 +2594,7 @@ fn parse_describe_info(
     Ok(())
 }
 
-fn parse_column_metadata(
+pub(crate) fn parse_column_metadata(
     reader: &mut TtcReader<'_>,
     capabilities: ClientCapabilities,
 ) -> Result<ColumnMetadata> {
@@ -2832,6 +2840,26 @@ fn parse_column_value(
             };
             decode_binary_double(&bytes)
                 .map(|value| Some(QueryValue::BinaryDouble(value.to_string())))
+        }
+        ORA_TYPE_NUM_BINARY_FLOAT => {
+            let Some(bytes) = reader.read_bytes()? else {
+                return Ok(None);
+            };
+            // text form keeps QueryValue stable; f32 Display round-trips
+            decode_binary_float(&bytes)
+                .map(|value| Some(QueryValue::BinaryDouble(value.to_string())))
+        }
+        ORA_TYPE_NUM_BOOLEAN => {
+            let Some(bytes) = reader.read_bytes()? else {
+                return Ok(None);
+            };
+            // reference read_bool: last byte == 1 means true; surfaced as
+            // NUMBER 0/1 (QueryValue has no dedicated boolean variant)
+            let is_true = matches!(bytes.last(), Some(&1));
+            Ok(Some(QueryValue::Number {
+                text: if is_true { "1".into() } else { "0".into() },
+                is_integer: true,
+            }))
         }
         ORA_TYPE_NUM_DATE
         | ORA_TYPE_NUM_TIMESTAMP
@@ -3129,7 +3157,7 @@ fn parse_lob_op_response(
     Ok(result)
 }
 
-fn encode_oracle_date(
+pub(crate) fn encode_oracle_date(
     year: i32,
     month: u8,
     day: u8,
@@ -3159,7 +3187,7 @@ fn encode_oracle_date(
     ])
 }
 
-fn encode_oracle_timestamp(
+pub(crate) fn encode_oracle_timestamp(
     year: i32,
     month: u8,
     day: u8,
@@ -3181,7 +3209,7 @@ fn encode_oracle_timestamp(
     Ok(bytes)
 }
 
-fn encode_oracle_timestamp_tz(
+pub(crate) fn encode_oracle_timestamp_tz(
     year: i32,
     month: u8,
     day: u8,
@@ -3313,7 +3341,7 @@ fn civil_from_days(days: i64) -> Result<(i32, u8, u8)> {
     ))
 }
 
-fn encode_binary_double(value: f64) -> [u8; 8] {
+pub(crate) fn encode_binary_double(value: f64) -> [u8; 8] {
     let mut bytes = value.to_bits().to_be_bytes();
     if bytes[0] & 0x80 == 0 {
         bytes[0] |= 0x80;
@@ -3323,6 +3351,33 @@ fn encode_binary_double(value: f64) -> [u8; 8] {
         }
     }
     bytes
+}
+
+pub(crate) fn encode_binary_float(value: f32) -> [u8; 4] {
+    let mut bytes = value.to_bits().to_be_bytes();
+    if bytes[0] & 0x80 == 0 {
+        bytes[0] |= 0x80;
+    } else {
+        for byte in &mut bytes {
+            *byte = !*byte;
+        }
+    }
+    bytes
+}
+
+fn decode_binary_float(bytes: &[u8]) -> Result<f32> {
+    let bytes: [u8; 4] = bytes
+        .try_into()
+        .map_err(|_| ProtocolError::TtcDecode("invalid BINARY_FLOAT length"))?;
+    let mut decoded = bytes;
+    if decoded[0] & 0x80 != 0 {
+        decoded[0] &= 0x7f;
+    } else {
+        for byte in &mut decoded {
+            *byte = !*byte;
+        }
+    }
+    Ok(f32::from_bits(u32::from_be_bytes(decoded)))
 }
 
 fn decode_binary_double(bytes: &[u8]) -> Result<f64> {
@@ -3340,7 +3395,7 @@ fn decode_binary_double(bytes: &[u8]) -> Result<f64> {
     Ok(f64::from_bits(u64::from_be_bytes(decoded)))
 }
 
-fn encode_number_text(value: &str) -> Result<Vec<u8>> {
+pub(crate) fn encode_number_text(value: &str) -> Result<Vec<u8>> {
     let value = value.as_bytes();
     if value.is_empty() {
         return Err(ProtocolError::TtcDecode("empty NUMBER bind"));
@@ -3431,7 +3486,7 @@ fn encode_number_text(value: &str) -> Result<Vec<u8>> {
     while digits.last().is_some_and(|digit| *digit == 0) {
         digits.pop();
     }
-    if digits.len() > NUMBER_MAX_DIGITS || decimal_point_index > 126 || decimal_point_index < -129 {
+    if digits.len() > NUMBER_MAX_DIGITS || !(-129..=126).contains(&decimal_point_index) {
         return Err(ProtocolError::TtcDecode("NUMBER bind out of range"));
     }
 
@@ -3615,9 +3670,9 @@ fn skip_query_return_parameters(reader: &mut TtcReader<'_>) -> Result<()> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ServerErrorInfo {
-    number: u32,
-    message: String,
+pub(crate) struct ServerErrorInfo {
+    pub(crate) number: u32,
+    pub(crate) message: String,
     cursor_id: u16,
     row_count: u64,
     compilation_error_warning: bool,
@@ -3634,7 +3689,7 @@ fn parse_server_error(reader: &mut TtcReader<'_>, ttc_field_version: u8) -> Resu
     }
 }
 
-fn parse_server_error_info(
+pub(crate) fn parse_server_error_info(
     reader: &mut TtcReader<'_>,
     ttc_field_version: u8,
 ) -> Result<ServerErrorInfo> {
@@ -3761,7 +3816,7 @@ fn parse_return_parameters(reader: &mut TtcReader<'_>) -> Result<AuthResponse> {
     Ok(response)
 }
 
-fn skip_server_side_piggyback(reader: &mut TtcReader<'_>) -> Result<()> {
+pub(crate) fn skip_server_side_piggyback(reader: &mut TtcReader<'_>) -> Result<()> {
     let opcode = reader.read_u8()?;
     match opcode {
         TNS_SERVER_PIGGYBACK_LTXID => {
@@ -3835,6 +3890,14 @@ fn skip_keyword_value_pairs(reader: &mut TtcReader<'_>, num_pairs: u16) -> Resul
         let _keyword_num = reader.read_ub2()?;
     }
     Ok(())
+}
+
+fn has_u8_flag(flags: u8, mask: u8) -> bool {
+    flags & mask > 0
+}
+
+fn has_u32_flag(flags: u32, mask: u32) -> bool {
+    flags & mask > 0
 }
 
 #[cfg(test)]
@@ -4548,12 +4611,4 @@ mod tests {
             is_array: false,
         }
     }
-}
-
-fn has_u8_flag(flags: u8, mask: u8) -> bool {
-    flags & mask > 0
-}
-
-fn has_u32_flag(flags: u32, mask: u32) -> bool {
-    flags & mask > 0
 }
