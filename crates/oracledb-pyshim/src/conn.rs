@@ -1119,6 +1119,12 @@ impl ThinConnImpl {
         Ok(self.connection.lock().map_err(runtime_error)?.is_some())
     }
 
+    /// Parity with the reference base connection impl
+    /// (impl/base/connection.pyx:360-361): sync connections never pipeline.
+    fn supports_pipelining(&self) -> bool {
+        false
+    }
+
     pub(crate) fn get_sdu(&self) -> PyResult<u32> {
         let guard = self.connection.lock().map_err(runtime_error)?;
         let connection = guard

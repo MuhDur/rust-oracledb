@@ -338,7 +338,11 @@ impl ThinVar {
                     csfrm: CS_FORM_IMPLICIT,
                     size: value.chars().count() as u64,
                     chunk_size: 0,
-                    context: None,
+                    // carry the cursor's LOB context so async cursors surface
+                    // an AsyncLOB (awaitable read) instead of a sync LOB; the
+                    // local data buffer still satisfies reads without a round
+                    // trip in both modes
+                    context: lob_context.cloned(),
                     is_open: Arc::new(Mutex::new(false)),
                     bfile_name: None,
                 },

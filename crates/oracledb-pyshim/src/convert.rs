@@ -241,6 +241,17 @@ pub(crate) fn thin_lob_value_to_bind(py: Python<'_>, lob: &ThinLob) -> PyResult<
     Ok(BindValue::Text(data.extract::<String>()?))
 }
 
+pub(crate) fn py_is_async_lob(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if value.extract::<PyRef<'_, AsyncThinLob>>().is_ok() {
+        return Ok(true);
+    }
+    if value.hasattr("_impl")? {
+        let impl_obj = value.getattr("_impl")?;
+        return Ok(impl_obj.extract::<PyRef<'_, AsyncThinLob>>().is_ok());
+    }
+    Ok(false)
+}
+
 pub(crate) fn py_lob_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<Option<BindValue>> {
     if let Some(lob) = py_lob_impl(value)? {
         return thin_lob_value_to_bind(value.py(), &lob).map(Some);
@@ -265,7 +276,7 @@ pub(crate) fn scalar_value_to_memory_lob(
         "DB_TYPE_NCLOB" => (ORA_TYPE_NUM_CLOB, CS_FORM_NCHAR),
         _ => return Ok(None),
     };
-    if value.is_none() || py_lob_impl(value)?.is_some() {
+    if value.is_none() || py_lob_impl(value)?.is_some() || py_is_async_lob(value)? {
         return Ok(None);
     }
     let (data, size) = if ora_type_num == ORA_TYPE_NUM_BLOB {

@@ -897,6 +897,14 @@ impl ThinCursorImpl {
                 {
                     return json_query_value_to_py(py, value, Some(_cursor), Some(&lob_context));
                 }
+                // fetch_decimals parity: NUMBER columns surface as
+                // decimal.Decimal when requested (defaults.fetch_decimals or a
+                // per-cursor/pipeline-op override)
+                if self.fetch_decimals {
+                    if let Some(QueryValue::Number { text, .. }) = value {
+                        return python_decimal_from_text(py, text);
+                    }
+                }
                 query_value_to_py(
                     py,
                     value,
