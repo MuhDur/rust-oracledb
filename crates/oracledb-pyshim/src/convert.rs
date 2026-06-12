@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use asupersync::Cx;
 use oracledb::protocol::thin::{
     bind_template_from_type_name, bind_value_type_info, cursor_bind_template,
-    dbobject_element_bind_type_info, decode_bfile_locator_name, define_metadata_from_bind,
+    dbobject_element_bind_type_info, decode_bfile_locator_name,
     encode_lob_text as protocol_encode_lob_text, BindValue, ColumnMetadata, QueryValue,
     CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE,
     ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_NUMBER,
@@ -93,7 +93,24 @@ pub(crate) fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> 
     if let Ok(number) = value.extract::<f64>() {
         return Ok(BindValue::Number(number.to_string()));
     }
-    Err(not_implemented("ThinCursorImpl bind value type"))
+    if let Some(bind) = py_timedelta_to_bind(value)? {
+        return Ok(bind);
+    }
+    // unsupported Python value without an input type handler raises DPY-3002
+    // (reference impl/base/metadata.pyx:455 via bind_var.pyx:167-169)
+    Err(raise_python_value_not_supported(&py_value_type_name(value)))
+}
+
+pub(crate) fn py_timedelta_to_bind(value: &Bound<'_, PyAny>) -> PyResult<Option<BindValue>> {
+    let timedelta_type = PyModule::import(value.py(), "datetime")?.getattr("timedelta")?;
+    if !value.is_instance(&timedelta_type)? {
+        return Ok(None);
+    }
+    Ok(Some(BindValue::IntervalDS {
+        days: value.getattr("days")?.extract::<i32>()?,
+        seconds: value.getattr("seconds")?.extract::<i32>()?,
+        microseconds: value.getattr("microseconds")?.extract::<i32>()?,
+    }))
 }
 
 pub(crate) fn py_value_to_bind_with_template(
@@ -659,13 +676,6 @@ pub(crate) fn bind_type_info(value: &BindValue) -> Option<(u8, u8, u32)> {
     bind_value_type_info(value).map(|info| (info.ora_type_num, info.csfrm, info.buffer_size))
 }
 
-pub(crate) fn fetch_define_metadata_from_var(
-    source: &ColumnMetadata,
-    value: &BindValue,
-) -> ColumnMetadata {
-    define_metadata_from_bind(source, value)
-}
-
 pub(crate) fn bind_optional_text(value: Option<&str>) -> BindValue {
     value
         .map(|value| BindValue::Text(value.to_string()))
@@ -821,6 +831,44 @@ pub(crate) fn direct_lob_value_to_py(
     )
 }
 
+/// Decode character data that failed strict text decoding in the protocol
+/// layer using Python's codec machinery so the configured `encoding_errors`
+/// policy (or a genuine `UnicodeDecodeError` when none is set) is honored,
+/// exactly as the reference does (reference impl/base/converters.pyx:421-429).
+pub(crate) fn text_raw_to_py_str(
+    py: Python<'_>,
+    bytes: &[u8],
+    csfrm: u8,
+    encoding_errors: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    let encoding = if csfrm == CS_FORM_NCHAR {
+        "utf-16-be"
+    } else {
+        "utf-8"
+    };
+    let py_bytes = PyBytes::new(py, bytes);
+    let decoded = match encoding_errors {
+        Some(errors) => py_bytes.call_method1("decode", (encoding, errors))?,
+        None => py_bytes.call_method1("decode", (encoding,))?,
+    };
+    Ok(decoded.unbind())
+}
+
+pub(crate) fn interval_ds_to_py(
+    py: Python<'_>,
+    days: i32,
+    hours: i32,
+    minutes: i32,
+    seconds: i32,
+    fseconds: i32,
+) -> PyResult<Py<PyAny>> {
+    let timedelta = PyModule::import(py, "datetime")?.getattr("timedelta")?;
+    let total_seconds = i64::from(hours) * 3600 + i64::from(minutes) * 60 + i64::from(seconds);
+    Ok(timedelta
+        .call1((days, total_seconds, i64::from(fseconds) / 1000))?
+        .unbind())
+}
+
 pub(crate) fn query_value_to_py(
     py: Python<'_>,
     value: &Option<QueryValue>,
@@ -831,6 +879,14 @@ pub(crate) fn query_value_to_py(
     match value {
         None => Ok(py.None()),
         Some(QueryValue::Text(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
+        Some(QueryValue::TextRaw { bytes, csfrm }) => text_raw_to_py_str(py, bytes, *csfrm, None),
+        Some(QueryValue::IntervalDS {
+            days,
+            hours,
+            minutes,
+            seconds,
+            fseconds,
+        }) => interval_ds_to_py(py, *days, *hours, *minutes, *seconds, *fseconds),
         Some(QueryValue::Rowid(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
         #[allow(clippy::useless_conversion)]
         // pre-existing lint at pre-split HEAD 978491a; not movement-induced

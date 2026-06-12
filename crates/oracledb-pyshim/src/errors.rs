@@ -171,6 +171,80 @@ pub(crate) fn raise_dml_returning_dup_bind(name: &str) -> PyErr {
     })
 }
 
+pub(crate) fn raise_oracledb_driver_error_with_kwargs(
+    error_name: &str,
+    fallback: &str,
+    fill: impl Fn(Python<'_>, &Bound<'_, PyDict>) -> PyResult<()>,
+) -> PyErr {
+    Python::attach(|py| -> PyResult<PyErr> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        let error_num = errors.getattr(error_name)?;
+        let kwargs = PyDict::new(py);
+        fill(py, &kwargs)?;
+        match errors
+            .getattr("_raise_err")?
+            .call((error_num,), Some(&kwargs))
+        {
+            Ok(_) => Ok(PyRuntimeError::new_err(format!(
+                "oracledb.errors._raise_err({error_name}) returned without raising"
+            ))),
+            Err(err) => Ok(err),
+        }
+    })
+    .unwrap_or_else(|_| PyRuntimeError::new_err(fallback.to_string()))
+}
+
+pub(crate) fn raise_incorrect_var_arraysize(var_arraysize: u32, required_arraysize: u32) -> PyErr {
+    raise_oracledb_driver_error_with_kwargs(
+        "ERR_INCORRECT_VAR_ARRAYSIZE",
+        &format!(
+            "DPY-2016: variable array size of {var_arraysize} is too small (should be at least {required_arraysize})"
+        ),
+        move |_py, kwargs| {
+            kwargs.set_item("var_arraysize", var_arraysize)?;
+            kwargs.set_item("required_arraysize", required_arraysize)?;
+            Ok(())
+        },
+    )
+}
+
+pub(crate) fn raise_lob_of_wrong_type(actual_type_name: &str, expected_type_name: &str) -> PyErr {
+    raise_oracledb_driver_error_with_kwargs(
+        "ERR_LOB_OF_WRONG_TYPE",
+        &format!(
+            "DPY-3014: LOB is of type {actual_type_name} but must be of type {expected_type_name}"
+        ),
+        move |_py, kwargs| {
+            kwargs.set_item("actual_type_name", actual_type_name)?;
+            kwargs.set_item("expected_type_name", expected_type_name)?;
+            Ok(())
+        },
+    )
+}
+
+pub(crate) fn raise_python_value_not_supported(type_name: &str) -> PyErr {
+    raise_oracledb_driver_error_with_kwargs(
+        "ERR_PYTHON_VALUE_NOT_SUPPORTED",
+        &format!("DPY-3002: Python value of type \"{type_name}\" is not supported"),
+        move |_py, kwargs| {
+            kwargs.set_item("type_name", type_name)?;
+            Ok(())
+        },
+    )
+}
+
+pub(crate) fn raise_inconsistent_datatypes(input_type: &str, output_type: &str) -> PyErr {
+    raise_oracledb_driver_error_with_kwargs(
+        "ERR_INCONSISTENT_DATATYPES",
+        &format!("DPY-4007: cannot convert from data type {input_type} to {output_type}"),
+        move |_py, kwargs| {
+            kwargs.set_item("input_type", input_type)?;
+            kwargs.set_item("output_type", output_type)?;
+            Ok(())
+        },
+    )
+}
+
 pub(crate) fn raise_oracledb_driver_error(error_name: &str) -> PyErr {
     Python::attach(|py| -> PyResult<PyErr> {
         let errors = PyModule::import(py, "oracledb.errors")?;

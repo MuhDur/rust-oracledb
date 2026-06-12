@@ -526,6 +526,9 @@ impl AsyncThinCursorImpl {
             i64::from(num_execs)
         };
         self.inner.is_query = is_query;
+        if self.inner.is_query {
+            Python::attach(|py| self.inner.prepare_fetch_defines(py, _cursor.bind(py)))?;
+        }
         Ok(())
     }
 
@@ -607,6 +610,9 @@ impl AsyncThinCursorImpl {
             i64::try_from(result.row_count).unwrap_or(i64::MAX)
         };
         self.inner.is_query = is_query;
+        if self.inner.is_query {
+            Python::attach(|py| self.inner.prepare_fetch_defines(py, _cursor.bind(py)))?;
+        }
         Ok(())
     }
 

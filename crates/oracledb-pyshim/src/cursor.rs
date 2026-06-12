@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use oracledb::protocol::thin::{BindValue, ColumnMetadata, QueryResult, QueryValue};
+use oracledb::protocol::thin::{
+    check_fetch_conversion, public_dbtype_name_from_column_metadata, BindValue, ColumnMetadata,
+    QueryResult, QueryValue, CS_FORM_IMPLICIT, ORA_TYPE_NUM_VARCHAR,
+};
 use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
@@ -179,6 +182,13 @@ impl ThinCursorImpl {
             .map(|handler| handler.clone_ref(py)))
     }
 
+    /// Invokes the output type handler (if any) and prepares the fetch
+    /// defines. Mirrors the reference `_create_fetch_var` protocol
+    /// (reference impl/base/cursor.pyx:146-240, 300-324, 484-494): the
+    /// handler runs during execute response processing, receives the public
+    /// cursor plus a `FetchInfo` (or the legacy 6-argument form), and any
+    /// returned variable is validated (DPY-2015/DPY-2016) and checked for
+    /// fetch-conversion legality (DPY-4007).
     pub(crate) fn prepare_fetch_defines(
         &mut self,
         py: Python<'_>,
@@ -195,6 +205,9 @@ impl ThinCursorImpl {
             return Ok(());
         };
         let handler = handler.bind(py);
+        let uses_metadata = handler_uses_metadata(py, handler);
+        // a proxy stands in for the public cursor because the real cursor's
+        // attribute access would re-borrow this (mutably borrowed) impl
         let handler_cursor = Py::new(
             py,
             FetchHandlerCursor {
@@ -203,27 +216,74 @@ impl ThinCursorImpl {
             },
         )?;
         let handler_cursor = handler_cursor.bind(py);
+        let mut define_changed = false;
         for (index, metadata) in self.columns.iter().enumerate() {
-            let pub_metadata = Py::new(
+            let impl_metadata = Py::new(
                 py,
                 FetchMetadataImpl {
                     metadata: metadata.clone(),
                 },
             )?;
-            let value = handler.call1((handler_cursor, pub_metadata.bind(py)))?;
+            let impl_metadata = impl_metadata.bind(py);
+            let value = if uses_metadata {
+                let fetch_info = PyModule::import(py, "oracledb.fetch_info")?
+                    .getattr("FetchInfo")?
+                    .call_method1("_from_impl", (impl_metadata,))?;
+                handler.call1((handler_cursor, fetch_info))?
+            } else {
+                // legacy 6-argument handler signature
+                // (cursor, name, default_type, size, precision, scale)
+                handler.call1((
+                    handler_cursor,
+                    impl_metadata.getattr("name")?,
+                    impl_metadata.getattr("dbtype")?,
+                    impl_metadata.getattr("max_size")?,
+                    impl_metadata.getattr("precision")?,
+                    impl_metadata.getattr("scale")?,
+                ))?
+            };
             if value.is_none() {
                 continue;
             }
             let Some(var) = thin_var_from_value(&value)? else {
                 return Err(raise_oracledb_driver_error("ERR_EXPECTING_VAR"));
             };
-            let default_bind = var.borrow(py).default_bind.clone();
-            let define_metadata = fetch_define_metadata_from_var(metadata, &default_bind);
-            if !define_metadata.eq(metadata) {
-                self.requires_define = true;
+            {
+                let var_ref = var.borrow(py);
+                if self.arraysize > var_ref.num_elements_value() {
+                    return Err(raise_incorrect_var_arraysize(
+                        var_ref.num_elements_value(),
+                        self.arraysize,
+                    ));
+                }
+                let fetch_dbtype = public_dbtype_name_from_column_metadata(metadata);
+                if var_ref.dbtype_name != fetch_dbtype {
+                    let (to_ora_type_num, to_csfrm, _) = bind_type_info(&var_ref.default_bind)
+                        .unwrap_or((ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 1));
+                    let Some(define_metadata) =
+                        check_fetch_conversion(metadata, to_ora_type_num, to_csfrm)
+                    else {
+                        return Err(raise_inconsistent_datatypes(
+                            fetch_dbtype,
+                            &var_ref.dbtype_name,
+                        ));
+                    };
+                    if !define_metadata.eq(metadata) {
+                        self.requires_define = true;
+                        define_changed = true;
+                    }
+                    self.fetch_define_columns[index] = define_metadata;
+                }
             }
-            self.fetch_define_columns[index] = define_metadata;
             self.fetch_vars[index] = Some(var);
+        }
+        // the reference discards rows prefetched with the previous defines
+        // and re-executes when an output type handler changes the define
+        // types (statement._requires_define)
+        if define_changed && !self.rows.is_empty() && self.cursor_id != 0 {
+            self.rows.clear();
+            self.row_index = 0;
+            self.more_rows = true;
         }
         Ok(())
     }
@@ -463,6 +523,31 @@ impl ThinCursorImpl {
                 .iter()
                 .map(|var| var.clone_ref(py))
                 .collect::<Vec<_>>();
+            // input type handler runs before any other bind processing
+            // (reference impl/base/cursor.pyx bind_one: num_elements is 1
+            // for single-row execution)
+            let input_type_handler =
+                active_input_type_handler(py, _cursor, self.inputtypehandler.as_ref())?;
+            let (handled_parameters, handled_keyword_parameters) = if let Some(handler) =
+                &input_type_handler
+            {
+                let handler = handler.bind(py);
+                (
+                    apply_input_type_handler(py, _cursor, handler, self.arraysize, parameters, 1)?,
+                    apply_input_type_handler(
+                        py,
+                        _cursor,
+                        handler,
+                        self.arraysize,
+                        keyword_parameters,
+                        1,
+                    )?,
+                )
+            } else {
+                (None, None)
+            };
+            let parameters = handled_parameters.as_ref().or(parameters);
+            let keyword_parameters = handled_keyword_parameters.as_ref().or(keyword_parameters);
             let (effective_statement, effective_parameters, effective_keyword_parameters) =
                 prepare_object_execute_inputs(py, &statement, parameters, keyword_parameters)?;
             let effective_parameters = effective_parameters.as_ref().map(|value| value.bind(py));
@@ -701,6 +786,9 @@ impl ThinCursorImpl {
             i64::from(num_execs)
         };
         self.is_query = is_query;
+        if self.is_query {
+            self.prepare_fetch_defines(cursor.py(), cursor)?;
+        }
         Ok(())
     }
 
@@ -805,6 +893,12 @@ impl ThinCursorImpl {
             i64::try_from(result.row_count).unwrap_or(i64::MAX)
         };
         self.is_query = is_query;
+        if self.is_query {
+            // output type handlers run during execute in the reference
+            // implementation (DPY-2015/2016/4007 surface from execute and
+            // cursor.fetchvars is populated immediately afterwards)
+            self.prepare_fetch_defines(cursor.py(), cursor)?;
+        }
         Ok(())
     }
 
@@ -998,8 +1092,6 @@ impl ThinCursorImpl {
         convert_nulls: bool,
         is_array: bool,
     ) -> PyResult<Py<ThinVar>> {
-        let _ = inconverter;
-        let _ = encoding_errors;
         thin_var_from_type_spec(
             py,
             connection,
@@ -1007,7 +1099,9 @@ impl ThinCursorImpl {
             size,
             is_array,
             num_elements,
+            inconverter,
             outconverter,
+            encoding_errors,
             convert_nulls,
             bypass_decode,
         )
