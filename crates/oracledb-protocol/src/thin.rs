@@ -1324,7 +1324,7 @@ pub fn public_dbtype_name_from_type_name(type_name: &str) -> &'static str {
         "DB_TYPE_LONG" | "LONG" | "LONG_STRING" => "DB_TYPE_LONG",
         "DB_TYPE_LONG_NVARCHAR" | "LONG NVARCHAR" => "DB_TYPE_LONG_NVARCHAR",
         "DB_TYPE_LONG_RAW" | "LONG RAW" | "LONG_BINARY" => "DB_TYPE_LONG_RAW",
-        "DB_TYPE_RAW" | "bytes" => "DB_TYPE_RAW",
+        "DB_TYPE_RAW" | "BINARY" | "bytes" => "DB_TYPE_RAW",
         "ROWID" | "DB_TYPE_ROWID" => "DB_TYPE_ROWID",
         "DB_TYPE_UROWID" => "DB_TYPE_UROWID",
         "DATETIME" | "DB_TYPE_DATE" | "date" | "datetime" => "DB_TYPE_DATE",
@@ -1699,7 +1699,7 @@ pub fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
             csfrm: 0,
             buffer_size: TNS_MAX_LONG_LENGTH,
         },
-        "DB_TYPE_RAW" | "bytes" => BindValue::TypedNull {
+        "DB_TYPE_RAW" | "BINARY" | "bytes" => BindValue::TypedNull {
             ora_type_num: ORA_TYPE_NUM_RAW,
             csfrm: 0,
             buffer_size: size.max(1).max(4000),

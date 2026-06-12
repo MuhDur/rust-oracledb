@@ -261,6 +261,10 @@ impl ThinVar {
         self.num_elements
     }
 
+    pub(crate) fn is_array_variable(&self) -> bool {
+        self.is_array
+    }
+
     pub(crate) fn to_bind_value(&self, py: Python<'_>) -> PyResult<BindValue> {
         // NOTE: the `values` mutex must never be held while converting a
         // stored value: conversion re-enters arbitrary Python code and other
@@ -1125,6 +1129,14 @@ pub(crate) fn apply_out_bind_values(
                 .iter()
                 .map(|value| var_ref.output_value_to_py(py, value, lob_context))
                 .collect::<PyResult<Vec<_>>>()?;
+            if var_ref.is_array_variable() {
+                // a PL/SQL out array populates the variable's element slots
+                // and the element count so getvalue() returns the list
+                // (reference thin var _set_array_value semantics)
+                let list = PyList::new(py, values)?;
+                var_ref.set_py_value(py, Some(list.unbind().into()))?;
+                continue;
+            }
             drop(var_ref);
             var.borrow(py).clear_returned_values()?;
             for value in values {

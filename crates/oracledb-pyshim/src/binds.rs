@@ -585,16 +585,10 @@ pub(crate) fn extract_positional_bind_values_for_execute(
                 // to self-deadlock when both were the same object
                 py_value_to_execute_bind(&value)?
             } else if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
-                match var.check_value(py, &value) {
-                    Ok(coerced) => {
-                        var.set_py_value(py, Some(coerced))?;
-                        var.to_bind_value(py)?
-                    }
-                    // a value the variable cannot hold discards the
-                    // setinputsizes variable and binds a variable derived
-                    // from the value instead (reference bind_var.pyx
-                    // _set_by_value `was_set` handling)
-                    Err(_) => py_value_to_execute_bind(&value)?,
+                if set_input_size_var_value(py, &var, &value)? {
+                    var.to_bind_value(py)?
+                } else {
+                    py_value_to_execute_bind(&value)?
                 }
             } else {
                 py_value_to_execute_bind(&value)?
@@ -605,6 +599,30 @@ pub(crate) fn extract_positional_bind_values_for_execute(
         values.push(bind);
     }
     Ok(values)
+}
+
+/// Stores a non-Var value into a setinputsizes variable, mirroring the
+/// reference `bind_var.pyx _set_by_value`: array variables consume lists
+/// element-wise through the raw set path; scalar values coerce through the
+/// `_check_value` matrix. Returns `Ok(false)` when the variable cannot hold
+/// the value — the caller must then discard the setinputsizes variable and
+/// derive the bind from the value itself (the reference `was_set` handling).
+pub(crate) fn set_input_size_var_value(
+    py: Python<'_>,
+    var: &PyRef<'_, ThinVar>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    if var.is_array_variable() {
+        var.set_py_value(py, Some(value.clone().unbind()))?;
+        return Ok(true);
+    }
+    match var.check_value(py, value) {
+        Ok(coerced) => {
+            var.set_py_value(py, Some(coerced))?;
+            Ok(true)
+        }
+        Err(_) => Ok(false),
+    }
 }
 
 pub(crate) fn extract_positional_bind_values_with_input_sizes(
@@ -752,17 +770,10 @@ pub(crate) fn extract_named_bind_values(
                             if record_input_size_values && !is_return_bind && !is_plsql_output_bind
                             {
                                 bind_recording_executemany_input_value(py, &var, &value)?
+                            } else if set_input_size_var_value(py, &var, &value)? {
+                                var.to_bind_value(py)?
                             } else {
-                                match var.check_value(py, &value) {
-                                    Ok(coerced) => {
-                                        var.set_py_value(py, Some(coerced))?;
-                                        var.to_bind_value(py)?
-                                    }
-                                    // an incompatible value discards the
-                                    // setinputsizes variable (reference
-                                    // bind_var.pyx _set_by_value `was_set`)
-                                    Err(_) => py_value_to_execute_bind(&value)?,
-                                }
+                                py_value_to_execute_bind(&value)?
                             }
                         } else {
                             py_value_to_execute_bind(&value)?
@@ -1104,15 +1115,10 @@ pub(crate) fn extract_positional_bind_var_objects_for_execute(
                 // _set_by_value)
                 values.push(bind_var_from_value(py, &value)?);
             } else if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>() {
-                match var.check_value(py, &value) {
-                    Ok(coerced) => {
-                        var.set_py_value(py, Some(coerced))?;
-                        values.push(bind_var_from_value(py, input_size_var.bind(py))?);
-                    }
-                    // an incompatible value discards the setinputsizes
-                    // variable (reference bind_var.pyx _set_by_value
-                    // `was_set` handling)
-                    Err(_) => values.push(bind_var_from_value(py, &value)?),
+                if set_input_size_var_value(py, &var, &value)? {
+                    values.push(bind_var_from_value(py, input_size_var.bind(py))?);
+                } else {
+                    values.push(bind_var_from_value(py, &value)?);
                 }
             } else {
                 values.push(bind_var_from_value(py, input_size_var.bind(py))?);
@@ -1153,15 +1159,10 @@ pub(crate) fn extract_named_bind_var_objects(
                         values.push(bind_var_from_value(py, &value)?);
                     } else if let Ok(var) = input_size_var.bind(py).extract::<PyRef<'_, ThinVar>>()
                     {
-                        match var.check_value(py, &value) {
-                            Ok(coerced) => {
-                                var.set_py_value(py, Some(coerced))?;
-                                values.push(bind_var_from_value(py, input_size_var.bind(py))?);
-                            }
-                            // an incompatible value discards the
-                            // setinputsizes variable (reference bind_var.pyx
-                            // _set_by_value `was_set` handling)
-                            Err(_) => values.push(bind_var_from_value(py, &value)?),
+                        if set_input_size_var_value(py, &var, &value)? {
+                            values.push(bind_var_from_value(py, input_size_var.bind(py))?);
+                        } else {
+                            values.push(bind_var_from_value(py, &value)?);
                         }
                     } else {
                         values.push(bind_var_from_value(py, input_size_var.bind(py))?);
