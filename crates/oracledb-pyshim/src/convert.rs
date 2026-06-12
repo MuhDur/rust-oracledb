@@ -93,7 +93,24 @@ pub(crate) fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> 
     if let Ok(number) = value.extract::<f64>() {
         return Ok(BindValue::Number(number.to_string()));
     }
-    Err(not_implemented("ThinCursorImpl bind value type"))
+    if let Some(bind) = py_timedelta_to_bind(value)? {
+        return Ok(bind);
+    }
+    // unsupported Python value without an input type handler raises DPY-3002
+    // (reference impl/base/metadata.pyx:455 via bind_var.pyx:167-169)
+    Err(raise_python_value_not_supported(&py_value_type_name(value)))
+}
+
+pub(crate) fn py_timedelta_to_bind(value: &Bound<'_, PyAny>) -> PyResult<Option<BindValue>> {
+    let timedelta_type = PyModule::import(value.py(), "datetime")?.getattr("timedelta")?;
+    if !value.is_instance(&timedelta_type)? {
+        return Ok(None);
+    }
+    Ok(Some(BindValue::IntervalDS {
+        days: value.getattr("days")?.extract::<i32>()?,
+        seconds: value.getattr("seconds")?.extract::<i32>()?,
+        microseconds: value.getattr("microseconds")?.extract::<i32>()?,
+    }))
 }
 
 pub(crate) fn py_value_to_bind_with_template(

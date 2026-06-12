@@ -1,0 +1,8 @@
+export PYO_TEST_DRIVER_MODE=thin
+export PYO_TEST_CONNECT_STRING=localhost:1524/FREEPDB1
+export PYO_TEST_ADMIN_USER=system
+export PYO_TEST_ADMIN_PASSWORD=OracledbTest#2026
+export PYO_TEST_MAIN_USER=pythontest
+export PYO_TEST_MAIN_PASSWORD=pythontest
+export PYO_TEST_PROXY_USER=pythontestproxy
+export PYO_TEST_PROXY_PASSWORD=pythontestproxy
