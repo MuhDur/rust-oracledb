@@ -394,9 +394,8 @@ impl<'a> DbObjectPackedReader<'a> {
     }
 
     fn skip_length(&mut self) -> Result<()> {
-        match self.read_u8()? {
-            TNS_LONG_LENGTH_INDICATOR => self.skip(4)?,
-            _ => {}
+        if self.read_u8()? == TNS_LONG_LENGTH_INDICATOR {
+            self.skip(4)?;
         }
         Ok(())
     }
@@ -1403,27 +1402,29 @@ pub fn public_dbtype_size_info(dbtype_name: &str) -> (u32, u32) {
 /// output type handler variable, returns the metadata that should be used for
 /// the wire define. Conversions that only affect the Python materialization
 /// keep the original wire metadata; LOB and JSON sources adjust the define so
-/// the server sends inline data. Unsupported pairs return `Err(())` and the
+/// the server sends inline data. Unsupported pairs return `None` and the
 /// caller is expected to raise `DPY-4007`.
 pub fn check_fetch_conversion(
     source: &ColumnMetadata,
     to_ora_type_num: u8,
     to_csfrm: u8,
-) -> std::result::Result<ColumnMetadata, ()> {
+) -> Option<ColumnMetadata> {
     const CHAR_TYPES: [u8; 3] = [ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_VARCHAR];
     let from = source.ora_type_num;
     let to = to_ora_type_num;
     if from == to {
-        return Ok(source.clone());
+        return Some(source.clone());
     }
     let supported = match from {
-        ORA_TYPE_NUM_BINARY_DOUBLE | ORA_TYPE_NUM_BINARY_FLOAT => matches!(
-            to,
-            ORA_TYPE_NUM_BINARY_INTEGER
-                | ORA_TYPE_NUM_BINARY_DOUBLE
-                | ORA_TYPE_NUM_BINARY_FLOAT
-                | ORA_TYPE_NUM_NUMBER
-        ) || CHAR_TYPES.contains(&to),
+        ORA_TYPE_NUM_BINARY_DOUBLE | ORA_TYPE_NUM_BINARY_FLOAT => {
+            matches!(
+                to,
+                ORA_TYPE_NUM_BINARY_INTEGER
+                    | ORA_TYPE_NUM_BINARY_DOUBLE
+                    | ORA_TYPE_NUM_BINARY_FLOAT
+                    | ORA_TYPE_NUM_NUMBER
+            ) || CHAR_TYPES.contains(&to)
+        }
         ORA_TYPE_NUM_BINARY_INTEGER => to == ORA_TYPE_NUM_NUMBER || CHAR_TYPES.contains(&to),
         ORA_TYPE_NUM_BLOB => {
             if matches!(to, ORA_TYPE_NUM_RAW | ORA_TYPE_NUM_LONG_RAW) {
@@ -1432,49 +1433,57 @@ pub fn check_fetch_conversion(
                 metadata.csfrm = 0;
                 metadata.buffer_size = TNS_MAX_LONG_LENGTH;
                 metadata.max_size = 0;
-                return Ok(metadata);
+                return Some(metadata);
             }
             false
         }
-        ORA_TYPE_NUM_CHAR | ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_VARCHAR => matches!(
-            to,
-            ORA_TYPE_NUM_BINARY_DOUBLE
-                | ORA_TYPE_NUM_BINARY_FLOAT
-                | ORA_TYPE_NUM_NUMBER
-                | ORA_TYPE_NUM_BINARY_INTEGER
-        ) || CHAR_TYPES.contains(&to),
+        ORA_TYPE_NUM_CHAR | ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_VARCHAR => {
+            matches!(
+                to,
+                ORA_TYPE_NUM_BINARY_DOUBLE
+                    | ORA_TYPE_NUM_BINARY_FLOAT
+                    | ORA_TYPE_NUM_NUMBER
+                    | ORA_TYPE_NUM_BINARY_INTEGER
+            ) || CHAR_TYPES.contains(&to)
+        }
         ORA_TYPE_NUM_CLOB => {
             if CHAR_TYPES.contains(&to) {
                 let mut metadata = source.clone();
                 metadata.ora_type_num = ORA_TYPE_NUM_LONG;
                 metadata.buffer_size = TNS_MAX_LONG_LENGTH;
                 metadata.max_size = 0;
-                return Ok(metadata);
+                return Some(metadata);
             }
             false
         }
         ORA_TYPE_NUM_DATE
         | ORA_TYPE_NUM_TIMESTAMP
         | ORA_TYPE_NUM_TIMESTAMP_LTZ
-        | ORA_TYPE_NUM_TIMESTAMP_TZ => matches!(
-            to,
-            ORA_TYPE_NUM_DATE
-                | ORA_TYPE_NUM_TIMESTAMP
-                | ORA_TYPE_NUM_TIMESTAMP_LTZ
-                | ORA_TYPE_NUM_TIMESTAMP_TZ
-        ) || CHAR_TYPES.contains(&to),
+        | ORA_TYPE_NUM_TIMESTAMP_TZ => {
+            matches!(
+                to,
+                ORA_TYPE_NUM_DATE
+                    | ORA_TYPE_NUM_TIMESTAMP
+                    | ORA_TYPE_NUM_TIMESTAMP_LTZ
+                    | ORA_TYPE_NUM_TIMESTAMP_TZ
+            ) || CHAR_TYPES.contains(&to)
+        }
         ORA_TYPE_NUM_INTERVAL_DS | ORA_TYPE_NUM_ROWID => CHAR_TYPES.contains(&to),
-        ORA_TYPE_NUM_NUMBER => matches!(
-            to,
-            ORA_TYPE_NUM_BINARY_INTEGER | ORA_TYPE_NUM_BINARY_DOUBLE | ORA_TYPE_NUM_BINARY_FLOAT
-        ) || CHAR_TYPES.contains(&to),
+        ORA_TYPE_NUM_NUMBER => {
+            matches!(
+                to,
+                ORA_TYPE_NUM_BINARY_INTEGER
+                    | ORA_TYPE_NUM_BINARY_DOUBLE
+                    | ORA_TYPE_NUM_BINARY_FLOAT
+            ) || CHAR_TYPES.contains(&to)
+        }
         _ => false,
     };
     let _ = to_csfrm;
     if supported {
-        Ok(source.clone())
+        Some(source.clone())
     } else {
-        Err(())
+        None
     }
 }
 
@@ -2052,6 +2061,7 @@ pub fn build_lob_read_payload_with_seq(
     Ok(writer.into_bytes())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_lob_op_header(
     writer: &mut TtcWriter,
     locator: &[u8],
@@ -3695,7 +3705,7 @@ fn encode_number_text(value: &str) -> Result<Vec<u8>> {
     while digits.last().is_some_and(|digit| *digit == 0) {
         digits.pop();
     }
-    if digits.len() > NUMBER_MAX_DIGITS || decimal_point_index > 126 || decimal_point_index < -129 {
+    if digits.len() > NUMBER_MAX_DIGITS || !(-129..=126).contains(&decimal_point_index) {
         return Err(ProtocolError::TtcDecode("NUMBER bind out of range"));
     }
 

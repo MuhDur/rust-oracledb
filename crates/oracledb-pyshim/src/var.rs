@@ -252,10 +252,6 @@ impl ThinVar {
         }
     }
 
-    pub(crate) fn is_array_var(&self) -> bool {
-        self.is_array
-    }
-
     pub(crate) fn num_elements_value(&self) -> u32 {
         self.num_elements
     }
@@ -359,14 +355,20 @@ impl ThinVar {
             return self.check_and_set_scalar_value(py, pos, value);
         }
         let Ok(list) = value.cast::<PyList>() else {
-            return Err(raise_oracledb_driver_error("ERR_EXPECTING_LIST_FOR_ARRAY_VAR"));
+            return Err(raise_oracledb_driver_error(
+                "ERR_EXPECTING_LIST_FOR_ARRAY_VAR",
+            ));
         };
         let count = u32::try_from(list.len()).unwrap_or(u32::MAX);
         if count > self.num_elements {
             return Err(raise_incorrect_var_arraysize(self.num_elements, count));
         }
         for (index, element) in list.iter().enumerate() {
-            self.check_and_set_scalar_value(py, u32::try_from(index).unwrap_or(u32::MAX), &element)?;
+            self.check_and_set_scalar_value(
+                py,
+                u32::try_from(index).unwrap_or(u32::MAX),
+                &element,
+            )?;
         }
         *self.num_elements_in_array.lock().map_err(runtime_error)? = count;
         Ok(())
@@ -421,8 +423,12 @@ impl ThinVar {
             return Ok(py.None());
         }
         let pass = || Ok(value.clone().unbind());
-        let unsupported =
-            || Err(raise_unsupported_python_type_for_db_type(value, &self.dbtype_name));
+        let unsupported = || {
+            Err(raise_unsupported_python_type_for_db_type(
+                value,
+                &self.dbtype_name,
+            ))
+        };
         match self.dbtype_name.as_str() {
             "DB_TYPE_NUMBER"
             | "DB_TYPE_BINARY_INTEGER"
@@ -533,7 +539,10 @@ impl ThinVar {
                 }
                 unsupported()
             }
-            "DB_TYPE_BOOLEAN" => Ok(PyBool::new(py, value.is_truthy()?).to_owned().unbind().into()),
+            "DB_TYPE_BOOLEAN" => Ok(PyBool::new(py, value.is_truthy()?)
+                .to_owned()
+                .unbind()
+                .into()),
             "DB_TYPE_JSON" => pass(),
             _ => Err(raise_unsupported_type_set(&self.dbtype_name)),
         }
@@ -570,11 +579,7 @@ impl ThinVar {
             .collect()
     }
 
-    fn materialize_value(
-        &self,
-        py: Python<'_>,
-        value: Option<&Py<PyAny>>,
-    ) -> PyResult<Py<PyAny>> {
+    fn materialize_value(&self, py: Python<'_>, value: Option<&Py<PyAny>>) -> PyResult<Py<PyAny>> {
         let Some(value) = value else {
             return Ok(py.None());
         };
@@ -700,7 +705,10 @@ impl ThinVar {
                 if self.dbtype_name == "DB_TYPE_NUMBER" || target_is_float =>
             {
                 let builtins = PyModule::import(py, "builtins")?;
-                Ok(builtins.getattr("float")?.call1((value.as_str(),))?.unbind())
+                Ok(builtins
+                    .getattr("float")?
+                    .call1((value.as_str(),))?
+                    .unbind())
             }
             (ThinVarReturnKind::Plain, Some(QueryValue::Number { text, .. }))
                 if self.dbtype_name == "DB_TYPE_BINARY_INTEGER" =>
@@ -720,9 +728,7 @@ impl ThinVar {
                 let builtins = PyModule::import(py, "builtins")?;
                 Ok(builtins.getattr("float")?.call1((text.as_str(),))?.unbind())
             }
-            (ThinVarReturnKind::Plain, Some(QueryValue::Number { text, .. }))
-                if target_is_char =>
-            {
+            (ThinVarReturnKind::Plain, Some(QueryValue::Number { text, .. })) if target_is_char => {
                 Ok(text.clone().into_pyobject(py)?.unbind().into())
             }
             (ThinVarReturnKind::Plain, Some(QueryValue::BinaryDouble(text)))
@@ -732,9 +738,7 @@ impl ThinVar {
             }
             // str(float) of a BINARY_DOUBLE/BINARY_FLOAT value
             // (converters.pyx:548-553)
-            (ThinVarReturnKind::Plain, Some(QueryValue::BinaryDouble(text)))
-                if target_is_char =>
-            {
+            (ThinVarReturnKind::Plain, Some(QueryValue::BinaryDouble(text))) if target_is_char => {
                 let value = text.parse::<f64>().map_err(runtime_error)?;
                 let builtins = PyModule::import(py, "builtins")?;
                 let py_float = value.into_pyobject(py)?;

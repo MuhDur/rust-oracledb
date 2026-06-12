@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use asupersync::Cx;
 use oracledb::protocol::thin::{
     bind_template_from_type_name, bind_value_type_info, cursor_bind_template,
-    dbobject_element_bind_type_info, decode_bfile_locator_name, define_metadata_from_bind,
+    dbobject_element_bind_type_info, decode_bfile_locator_name,
     encode_lob_text as protocol_encode_lob_text, BindValue, ColumnMetadata, QueryValue,
     CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE,
     ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_NUMBER,
@@ -676,13 +676,6 @@ pub(crate) fn bind_type_info(value: &BindValue) -> Option<(u8, u8, u32)> {
     bind_value_type_info(value).map(|info| (info.ora_type_num, info.csfrm, info.buffer_size))
 }
 
-pub(crate) fn fetch_define_metadata_from_var(
-    source: &ColumnMetadata,
-    value: &BindValue,
-) -> ColumnMetadata {
-    define_metadata_from_bind(source, value)
-}
-
 pub(crate) fn bind_optional_text(value: Option<&str>) -> BindValue {
     value
         .map(|value| BindValue::Text(value.to_string()))
@@ -870,8 +863,7 @@ pub(crate) fn interval_ds_to_py(
     fseconds: i32,
 ) -> PyResult<Py<PyAny>> {
     let timedelta = PyModule::import(py, "datetime")?.getattr("timedelta")?;
-    let total_seconds =
-        i64::from(hours) * 3600 + i64::from(minutes) * 60 + i64::from(seconds);
+    let total_seconds = i64::from(hours) * 3600 + i64::from(minutes) * 60 + i64::from(seconds);
     Ok(timedelta
         .call1((days, total_seconds, i64::from(fseconds) / 1000))?
         .unbind())

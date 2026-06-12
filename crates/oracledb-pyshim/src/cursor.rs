@@ -260,7 +260,7 @@ impl ThinCursorImpl {
                 if var_ref.dbtype_name != fetch_dbtype {
                     let (to_ora_type_num, to_csfrm, _) = bind_type_info(&var_ref.default_bind)
                         .unwrap_or((ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 1));
-                    let Ok(define_metadata) =
+                    let Some(define_metadata) =
                         check_fetch_conversion(metadata, to_ora_type_num, to_csfrm)
                     else {
                         return Err(raise_inconsistent_datatypes(

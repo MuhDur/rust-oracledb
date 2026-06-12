@@ -162,9 +162,9 @@ fn encrypt_cbc(key: &[u8], plain_text: &[u8], zeros: bool) -> Result<Vec<u8>> {
     let mut data = plain_text.to_vec();
     let pad_len = 16 - (data.len() % 16);
     if zeros {
-        data.extend(std::iter::repeat(0).take(pad_len));
+        data.extend(std::iter::repeat_n(0, pad_len));
     } else {
-        data.extend(std::iter::repeat(pad_len as u8).take(pad_len));
+        data.extend(std::iter::repeat_n(pad_len as u8, pad_len));
     }
 
     let cipher = Aes256::new_from_slice(key).map_err(|_| ProtocolError::InvalidAesKey)?;
