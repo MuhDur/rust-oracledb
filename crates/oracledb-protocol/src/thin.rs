@@ -1222,6 +1222,40 @@ pub fn define_metadata_from_bind(source: &ColumnMetadata, value: &BindValue) -> 
     metadata
 }
 
+/// When the same query is re-executed after a column's data type changed to
+/// CLOB/BLOB but the previous execution fetched the column as a char/raw
+/// type, the server streams the data as LONG/LONG RAW (same as a define of
+/// CLOB/BLOB as string/bytes); the fetch metadata must follow (reference
+/// impl/thin/messages/base.pyx:820-845 `_adjust_metadata`). Returns `true`
+/// when the metadata was adjusted.
+pub fn adjust_refetch_metadata(previous: &ColumnMetadata, current: &mut ColumnMetadata) -> bool {
+    if current.ora_type_num == ORA_TYPE_NUM_CLOB
+        && matches!(
+            previous.ora_type_num,
+            ORA_TYPE_NUM_CHAR | ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_VARCHAR
+        )
+    {
+        current.ora_type_num = ORA_TYPE_NUM_LONG;
+        current.csfrm = previous.csfrm;
+        current.buffer_size = TNS_MAX_LONG_LENGTH;
+        current.max_size = 0;
+        return true;
+    }
+    if current.ora_type_num == ORA_TYPE_NUM_BLOB
+        && matches!(
+            previous.ora_type_num,
+            ORA_TYPE_NUM_RAW | ORA_TYPE_NUM_LONG_RAW
+        )
+    {
+        current.ora_type_num = ORA_TYPE_NUM_LONG_RAW;
+        current.csfrm = 0;
+        current.buffer_size = TNS_MAX_LONG_LENGTH;
+        current.max_size = 0;
+        return true;
+    }
+    false
+}
+
 pub fn output_bind(value: BindValue) -> BindValue {
     match value {
         BindValue::ObjectOutput {
@@ -4551,6 +4585,68 @@ mod tests {
                 buffer_size: ORA_TYPE_SIZE_BINARY_DOUBLE,
             })
         );
+    }
+
+    #[test]
+    fn adjust_refetch_metadata_follows_reference_rules() {
+        let column = |ora_type_num: u8, csfrm: u8| ColumnMetadata {
+            name: "VALUE".to_string(),
+            ora_type_num,
+            csfrm,
+            precision: 0,
+            scale: 0,
+            buffer_size: 4000,
+            max_size: 1000,
+            nulls_allowed: true,
+            is_json: false,
+            is_oson: false,
+            object_schema: None,
+            object_type_name: None,
+            is_array: false,
+        };
+
+        // VARCHAR -> CLOB fetches as LONG keeping the previous csfrm
+        let mut current = column(ORA_TYPE_NUM_CLOB, CS_FORM_IMPLICIT);
+        assert!(adjust_refetch_metadata(
+            &column(ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT),
+            &mut current
+        ));
+        assert_eq!(current.ora_type_num, ORA_TYPE_NUM_LONG);
+        assert_eq!(current.csfrm, CS_FORM_IMPLICIT);
+        assert_eq!(current.buffer_size, TNS_MAX_LONG_LENGTH);
+        assert_eq!(current.max_size, 0);
+
+        // NVARCHAR -> NCLOB keeps the NCHAR character set form
+        let mut current = column(ORA_TYPE_NUM_CLOB, CS_FORM_NCHAR);
+        assert!(adjust_refetch_metadata(
+            &column(ORA_TYPE_NUM_VARCHAR, CS_FORM_NCHAR),
+            &mut current
+        ));
+        assert_eq!(current.ora_type_num, ORA_TYPE_NUM_LONG);
+        assert_eq!(current.csfrm, CS_FORM_NCHAR);
+
+        // RAW -> BLOB fetches as LONG RAW
+        let mut current = column(ORA_TYPE_NUM_BLOB, 0);
+        assert!(adjust_refetch_metadata(
+            &column(ORA_TYPE_NUM_RAW, 0),
+            &mut current
+        ));
+        assert_eq!(current.ora_type_num, ORA_TYPE_NUM_LONG_RAW);
+        assert_eq!(current.csfrm, 0);
+
+        // unrelated type changes are untouched
+        let mut current = column(ORA_TYPE_NUM_CLOB, CS_FORM_IMPLICIT);
+        assert!(!adjust_refetch_metadata(
+            &column(ORA_TYPE_NUM_NUMBER, 0),
+            &mut current
+        ));
+        assert_eq!(current.ora_type_num, ORA_TYPE_NUM_CLOB);
+        let mut current = column(ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT);
+        assert!(!adjust_refetch_metadata(
+            &column(ORA_TYPE_NUM_CLOB, CS_FORM_IMPLICIT),
+            &mut current
+        ));
+        assert_eq!(current.ora_type_num, ORA_TYPE_NUM_VARCHAR);
     }
 
     #[test]

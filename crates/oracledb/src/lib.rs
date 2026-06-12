@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::process;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,15 +11,15 @@ use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
 use asupersync::sync::Mutex as AsyncMutex;
 use asupersync::{time, Cx};
 use oracledb_protocol::thin::{
-    build_auth_phase_two_payload_with_proxy_with_seq, build_change_password_payload_with_seq,
-    build_connect_packet_payload, build_define_fetch_payload_with_seq,
-    build_execute_payload_with_bind_rows_with_seq, build_execute_payload_with_binds_with_seq,
-    build_execute_payload_with_seq, build_fast_auth_phase_one_payload,
-    build_fetch_payload_with_seq, build_function_payload_with_seq,
-    build_lob_create_temp_payload_with_seq, build_lob_free_temp_payload_with_seq,
-    build_lob_read_payload_with_seq, build_lob_trim_payload_with_seq,
-    build_lob_write_payload_with_seq, parse_accept_payload, parse_auth_response,
-    parse_fetch_response_with_context, parse_lob_create_temp_response,
+    adjust_refetch_metadata, build_auth_phase_two_payload_with_proxy_with_seq,
+    build_change_password_payload_with_seq, build_connect_packet_payload,
+    build_define_fetch_payload_with_seq, build_execute_payload_with_bind_rows_with_seq,
+    build_execute_payload_with_binds_with_seq, build_execute_payload_with_seq,
+    build_fast_auth_phase_one_payload, build_fetch_payload_with_seq,
+    build_function_payload_with_seq, build_lob_create_temp_payload_with_seq,
+    build_lob_free_temp_payload_with_seq, build_lob_read_payload_with_seq,
+    build_lob_trim_payload_with_seq, build_lob_write_payload_with_seq, parse_accept_payload,
+    parse_auth_response, parse_fetch_response_with_context, parse_lob_create_temp_response,
     parse_lob_free_temp_response, parse_lob_read_response, parse_lob_trim_response,
     parse_lob_write_response, parse_plain_function_response, parse_query_response,
     parse_query_response_with_binds, BindValue, ClientCapabilities, ColumnMetadata, LobReadResult,
@@ -121,6 +121,23 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Whether an execute error is the server signalling that the cached
+/// statement's types no longer match (ORA-00932 inconsistent datatypes /
+/// ORA-01007 variable not in select list), the two errors the reference
+/// retries with a full parse (impl/thin/constants.pxi:166-167,
+/// messages/base.pyx:1199-1213).
+fn refetch_retry_applies(err: &Error) -> bool {
+    let message = match err {
+        Error::Protocol(oracledb_protocol::ProtocolError::ServerError(message)) => message,
+        Error::Protocol(oracledb_protocol::ProtocolError::ServerErrorWithRowCount {
+            message,
+            ..
+        }) => message,
+        _ => return false,
+    };
+    message.starts_with("ORA-00932") || message.starts_with("ORA-01007")
+}
+
 #[derive(Clone, Debug)]
 pub struct ConnectOptions {
     pub connect_string: String,
@@ -181,6 +198,13 @@ pub struct Connection {
     ttc_seq_num: u8,
     sdu: usize,
     cursor_columns: BTreeMap<u32, Vec<ColumnMetadata>>,
+    /// Fetch metadata of the most recent execution keyed by SQL text,
+    /// mirroring the reference statement cache's per-statement
+    /// `_fetch_var_impls` retention (impl/thin/statement.pyx:300-310) that
+    /// drives the re-execute type-change adjustment.
+    fetch_metadata_by_sql: HashMap<String, Vec<ColumnMetadata>>,
+    /// Insertion order for [`Self::fetch_metadata_by_sql`] eviction.
+    fetch_metadata_order: VecDeque<String>,
     dead: bool,
     /// Logon user, retained for the change-password call.
     user: String,
@@ -327,6 +351,8 @@ impl Connection {
             ttc_seq_num,
             sdu,
             cursor_columns: BTreeMap::new(),
+            fetch_metadata_by_sql: HashMap::new(),
+            fetch_metadata_order: VecDeque::new(),
             dead: false,
             user: options.user,
             combo_key: encrypted.combo_key,
@@ -491,6 +517,34 @@ impl Connection {
         prefetch_rows: u32,
         binds: &[BindValue],
     ) -> Result<QueryResult> {
+        match self
+            .execute_query_with_binds_adjusted(cx, sql, prefetch_rows, binds)
+            .await
+        {
+            // a query whose underlying types changed since the retained
+            // execution retries once with a full parse after dropping the
+            // retained metadata, mirroring the reference statement-cache
+            // clear + retry on ORA-00932/ORA-01007
+            // (impl/thin/messages/base.pyx:1199-1213)
+            Err(err)
+                if refetch_retry_applies(&err)
+                    && statement_is_query(sql)
+                    && self.forget_fetch_metadata(sql) =>
+            {
+                self.execute_query_with_binds_adjusted(cx, sql, prefetch_rows, binds)
+                    .await
+            }
+            other => other,
+        }
+    }
+
+    async fn execute_query_with_binds_adjusted(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+        binds: &[BindValue],
+    ) -> Result<QueryResult> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
         let has_ref_cursor_output = binds.iter().any(|value| {
@@ -523,7 +577,8 @@ impl Connection {
         let parsed = parse_query_response_with_binds(&response, self.capabilities, binds);
         let result = self.note_parse(parsed)?;
         self.remember_cursor_columns(&result);
-        Ok(result)
+        self.apply_refetch_metadata(cx, sql, result, prefetch_rows.max(2))
+            .await
     }
 
     pub async fn execute_query_with_binds_and_timeout(
@@ -1169,6 +1224,82 @@ impl Connection {
             self.cursor_columns
                 .insert(result.cursor_id, result.columns.clone());
         }
+    }
+
+    /// Retains the fetch metadata of the most recent execution of `sql`,
+    /// evicting the oldest entry beyond the cap (reference retains this on
+    /// the cached Statement object, impl/thin/statement.pyx:300-310).
+    fn remember_fetch_metadata(&mut self, sql: &str, columns: &[ColumnMetadata]) {
+        const FETCH_METADATA_RETENTION_CAP: usize = 100;
+        if !self.fetch_metadata_by_sql.contains_key(sql) {
+            if self.fetch_metadata_order.len() >= FETCH_METADATA_RETENTION_CAP {
+                if let Some(oldest) = self.fetch_metadata_order.pop_front() {
+                    self.fetch_metadata_by_sql.remove(&oldest);
+                }
+            }
+            self.fetch_metadata_order.push_back(sql.to_string());
+        }
+        self.fetch_metadata_by_sql
+            .insert(sql.to_string(), columns.to_vec());
+    }
+
+    /// Drops the retained fetch metadata for `sql` (the reference clears the
+    /// cached statement's cursor before a type-change retry,
+    /// impl/thin/messages/base.pyx:1206-1213). Returns whether an entry
+    /// existed.
+    fn forget_fetch_metadata(&mut self, sql: &str) -> bool {
+        if self.fetch_metadata_by_sql.remove(sql).is_some() {
+            self.fetch_metadata_order.retain(|entry| entry != sql);
+            return true;
+        }
+        false
+    }
+
+    /// Applies the re-execute type-change rule: when the retained fetch
+    /// metadata for this SQL says a column previously fetched as char/raw is
+    /// now described as CLOB/BLOB, re-define the cursor so the data streams
+    /// as LONG/LONG RAW (reference _adjust_metadata + _requires_define,
+    /// impl/thin/messages/base.pyx:820-845, 1148-1158).
+    async fn apply_refetch_metadata(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        mut result: QueryResult,
+        arraysize: u32,
+    ) -> Result<QueryResult> {
+        if result.columns.is_empty() {
+            return Ok(result);
+        }
+        if let Some(previous_columns) = self.fetch_metadata_by_sql.get(sql) {
+            let mut adjusted = result.columns.clone();
+            let mut any_adjusted = false;
+            for (index, column) in adjusted.iter_mut().enumerate() {
+                if let Some(previous) = previous_columns.get(index) {
+                    any_adjusted |= adjust_refetch_metadata(previous, column);
+                }
+            }
+            if any_adjusted && result.cursor_id != 0 {
+                let cursor_id = result.cursor_id;
+                let mut redefined = self
+                    .define_and_fetch_rows_with_columns(
+                        cx,
+                        cursor_id,
+                        arraysize.max(1),
+                        &adjusted,
+                        None,
+                    )
+                    .await?;
+                if redefined.columns.is_empty() {
+                    redefined.columns = adjusted;
+                }
+                if redefined.cursor_id == 0 {
+                    redefined.cursor_id = cursor_id;
+                }
+                result = redefined;
+            }
+        }
+        self.remember_fetch_metadata(sql, &result.columns);
+        Ok(result)
     }
 
     pub async fn close(mut self, cx: &Cx) -> Result<()> {
