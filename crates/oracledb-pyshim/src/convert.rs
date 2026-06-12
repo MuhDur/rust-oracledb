@@ -65,6 +65,12 @@ pub(crate) fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> 
     if let Ok(bytes) = value.cast::<PyBytes>() {
         return Ok(BindValue::Raw(bytes.as_bytes().to_vec()));
     }
+    // IntervalYM is a namedtuple and must be recognized before the generic
+    // tuple -> array-bind branch (reference metadata.pyx:452-453; only the
+    // concrete oracledb.IntervalYM class is accepted, not (int, int) tuples)
+    if let Some(bind) = py_interval_ym_to_bind(value)? {
+        return Ok(bind);
+    }
     if value.cast::<PyList>().is_ok() || value.cast::<PyTuple>().is_ok() {
         let values = py_list_to_array_bind_values(value)?;
         let (ora_type_num, csfrm, buffer_size) = values
@@ -105,6 +111,17 @@ pub(crate) fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> 
     // unsupported Python value without an input type handler raises DPY-3002
     // (reference impl/base/metadata.pyx:455 via bind_var.pyx:167-169)
     Err(raise_python_value_not_supported(&py_value_type_name(value)))
+}
+
+pub(crate) fn py_interval_ym_to_bind(value: &Bound<'_, PyAny>) -> PyResult<Option<BindValue>> {
+    let interval_ym_type = PyModule::import(value.py(), "oracledb")?.getattr("IntervalYM")?;
+    if !value.is_instance(&interval_ym_type)? {
+        return Ok(None);
+    }
+    Ok(Some(BindValue::IntervalYM {
+        years: value.getattr("years")?.extract::<i32>()?,
+        months: value.getattr("months")?.extract::<i32>()?,
+    }))
 }
 
 pub(crate) fn py_timedelta_to_bind(value: &Bound<'_, PyAny>) -> PyResult<Option<BindValue>> {
@@ -998,6 +1015,12 @@ pub(crate) fn query_value_to_py(
             seconds,
             fseconds,
         }) => interval_ds_to_py(py, *days, *hours, *minutes, *seconds, *fseconds),
+        // reference converters.pyx:222-228: INTERVAL YEAR TO MONTH
+        // materializes as the oracledb.IntervalYM namedtuple
+        Some(QueryValue::IntervalYM { years, months }) => Ok(PyModule::import(py, "oracledb")?
+            .getattr("IntervalYM")?
+            .call1((*years, *months))?
+            .unbind()),
         Some(QueryValue::Rowid(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
         #[allow(clippy::useless_conversion)]
         // pre-existing lint at pre-split HEAD 978491a; not movement-induced

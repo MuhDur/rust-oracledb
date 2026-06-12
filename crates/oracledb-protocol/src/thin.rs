@@ -70,6 +70,7 @@ pub const ORA_TYPE_NUM_OBJECT: u8 = 109;
 pub const ORA_TYPE_NUM_TIMESTAMP: u8 = 180;
 pub const ORA_TYPE_NUM_TIMESTAMP_TZ: u8 = 181;
 pub const ORA_TYPE_NUM_INTERVAL_DS: u8 = 183;
+pub const ORA_TYPE_NUM_INTERVAL_YM: u8 = 182;
 pub const ORA_TYPE_NUM_UROWID: u8 = 208;
 pub const ORA_TYPE_NUM_TIMESTAMP_LTZ: u8 = 231;
 pub const TNS_OBJ_TOP_LEVEL: u32 = 0x01;
@@ -148,6 +149,7 @@ const ORA_TYPE_SIZE_BOOLEAN: u32 = 4;
 const ORA_TYPE_SIZE_NUMBER: u32 = 22;
 const ORA_TYPE_SIZE_DATE: u32 = 7;
 const ORA_TYPE_SIZE_INTERVAL_DS: u32 = 11;
+const ORA_TYPE_SIZE_INTERVAL_YM: u32 = 5;
 const ORA_TYPE_SIZE_ROWID: u32 = 18;
 const ORA_TYPE_SIZE_TIMESTAMP: u32 = 11;
 const ORA_TYPE_SIZE_TIMESTAMP_TZ: u32 = 13;
@@ -308,6 +310,10 @@ pub enum QueryValue {
         minutes: i32,
         seconds: i32,
         fseconds: i32,
+    },
+    IntervalYM {
+        years: i32,
+        months: i32,
     },
     Number {
         text: String,
@@ -632,6 +638,10 @@ pub enum BindValue {
         days: i32,
         seconds: i32,
         microseconds: i32,
+    },
+    IntervalYM {
+        years: i32,
+        months: i32,
     },
     DateTime {
         year: i32,
@@ -1169,6 +1179,7 @@ pub fn bind_value_type_info(value: &BindValue) -> Option<BindTypeInfo> {
         BindValue::BinaryDouble(_) => (ORA_TYPE_NUM_BINARY_DOUBLE, 0, ORA_TYPE_SIZE_BINARY_DOUBLE),
         BindValue::BinaryFloat(_) => (ORA_TYPE_NUM_BINARY_FLOAT, 0, ORA_TYPE_SIZE_BINARY_FLOAT),
         BindValue::IntervalDS { .. } => (ORA_TYPE_NUM_INTERVAL_DS, 0, ORA_TYPE_SIZE_INTERVAL_DS),
+        BindValue::IntervalYM { .. } => (ORA_TYPE_NUM_INTERVAL_YM, 0, ORA_TYPE_SIZE_INTERVAL_YM),
         BindValue::DateTime { .. } => (ORA_TYPE_NUM_DATE, 0, ORA_TYPE_SIZE_DATE),
         BindValue::Timestamp { ora_type_num, .. } => (
             *ora_type_num,
@@ -1346,6 +1357,7 @@ pub fn public_dbtype_name_from_type_name(type_name: &str) -> &'static str {
         "DB_TYPE_BINARY_FLOAT" | "BINARY_FLOAT" => "DB_TYPE_BINARY_FLOAT",
         "DB_TYPE_BOOLEAN" | "BOOLEAN" | "bool" => "DB_TYPE_BOOLEAN",
         "DB_TYPE_INTERVAL_DS" | "INTERVAL DAY TO SECOND" | "timedelta" => "DB_TYPE_INTERVAL_DS",
+        "DB_TYPE_INTERVAL_YM" | "INTERVAL YEAR TO MONTH" | "IntervalYM" => "DB_TYPE_INTERVAL_YM",
         "DB_TYPE_BFILE" | "BFILE" => "DB_TYPE_BFILE",
         "DB_TYPE_JSON" | "JSON" => "DB_TYPE_JSON",
         "STRING" | "DB_TYPE_VARCHAR" | "str" => "DB_TYPE_VARCHAR",
@@ -1411,6 +1423,7 @@ pub fn public_dbtype_name_from_column_metadata(metadata: &ColumnMetadata) -> &'s
         (ORA_TYPE_NUM_TIMESTAMP_LTZ, _) => "DB_TYPE_TIMESTAMP_LTZ",
         (ORA_TYPE_NUM_TIMESTAMP_TZ, _) => "DB_TYPE_TIMESTAMP_TZ",
         (ORA_TYPE_NUM_INTERVAL_DS, _) => "DB_TYPE_INTERVAL_DS",
+        (ORA_TYPE_NUM_INTERVAL_YM, _) => "DB_TYPE_INTERVAL_YM",
         (ORA_TYPE_NUM_BOOLEAN, _) => "DB_TYPE_BOOLEAN",
         _ => "DB_TYPE_VARCHAR",
     }
@@ -1514,7 +1527,9 @@ pub fn check_fetch_conversion(
                     | ORA_TYPE_NUM_TIMESTAMP_TZ
             ) || CHAR_TYPES.contains(&to)
         }
-        ORA_TYPE_NUM_INTERVAL_DS | ORA_TYPE_NUM_ROWID => CHAR_TYPES.contains(&to),
+        ORA_TYPE_NUM_INTERVAL_DS | ORA_TYPE_NUM_INTERVAL_YM | ORA_TYPE_NUM_ROWID => {
+            CHAR_TYPES.contains(&to)
+        }
         ORA_TYPE_NUM_NUMBER => {
             matches!(
                 to,
@@ -1648,6 +1663,7 @@ pub fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
         BindValue::BinaryFloat(_) => "DB_TYPE_BINARY_FLOAT",
         BindValue::Boolean(_) => "DB_TYPE_BOOLEAN",
         BindValue::IntervalDS { .. } => "DB_TYPE_INTERVAL_DS",
+        BindValue::IntervalYM { .. } => "DB_TYPE_INTERVAL_YM",
         BindValue::DateTime { .. } => "DB_TYPE_DATE",
         BindValue::Timestamp { ora_type_num, .. } => match *ora_type_num {
             ORA_TYPE_NUM_TIMESTAMP_LTZ => "DB_TYPE_TIMESTAMP_LTZ",
@@ -1692,6 +1708,11 @@ pub fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
             ora_type_num: ORA_TYPE_NUM_INTERVAL_DS,
             csfrm: 0,
             buffer_size: ORA_TYPE_SIZE_INTERVAL_DS,
+        },
+        "DB_TYPE_INTERVAL_YM" | "INTERVAL YEAR TO MONTH" | "IntervalYM" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_INTERVAL_YM,
+            csfrm: 0,
+            buffer_size: ORA_TYPE_SIZE_INTERVAL_YM,
         },
         "STRING" | "DB_TYPE_VARCHAR" | "DB_TYPE_CHAR" | "str" => BindValue::TypedNull {
             ora_type_num: ORA_TYPE_NUM_VARCHAR,
@@ -1798,6 +1819,7 @@ fn public_dbtype_name_from_type_info(ora_type_num: u8, csfrm: u8) -> &'static st
         (ORA_TYPE_NUM_BINARY_DOUBLE, _) => "DB_TYPE_BINARY_DOUBLE",
         (ORA_TYPE_NUM_BINARY_FLOAT, _) => "DB_TYPE_BINARY_FLOAT",
         (ORA_TYPE_NUM_INTERVAL_DS, _) => "DB_TYPE_INTERVAL_DS",
+        (ORA_TYPE_NUM_INTERVAL_YM, _) => "DB_TYPE_INTERVAL_YM",
         (ORA_TYPE_NUM_BOOLEAN, _) => "DB_TYPE_BOOLEAN",
         (ORA_TYPE_NUM_BINARY_INTEGER, _) => "DB_TYPE_BINARY_INTEGER",
         (ORA_TYPE_NUM_NUMBER, _) => "DB_TYPE_NUMBER",
@@ -1883,6 +1905,10 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm: u8) -> Res
             microseconds,
         } => {
             let bytes = encode_interval_ds(*days, *seconds, *microseconds)?;
+            writer.write_bytes_with_length(&bytes)
+        }
+        BindValue::IntervalYM { years, months } => {
+            let bytes = encode_interval_ym(*years, *months)?;
             writer.write_bytes_with_length(&bytes)
         }
         BindValue::DateTime {
@@ -3163,6 +3189,12 @@ fn parse_column_value(
             };
             decode_interval_ds(&bytes).map(Some)
         }
+        ORA_TYPE_NUM_INTERVAL_YM => {
+            let Some(bytes) = reader.read_bytes()? else {
+                return Ok(None);
+            };
+            decode_interval_ym(&bytes).map(Some)
+        }
         ORA_TYPE_NUM_DATE
         | ORA_TYPE_NUM_TIMESTAMP
         | ORA_TYPE_NUM_TIMESTAMP_LTZ
@@ -3749,6 +3781,35 @@ fn decode_interval_ds(bytes: &[u8]) -> Result<QueryValue> {
         minutes: i32::from(bytes[5]) - TNS_DURATION_OFFSET,
         seconds: i32::from(bytes[6]) - TNS_DURATION_OFFSET,
         fseconds: to_component(i64::from(fseconds_wire) - TNS_DURATION_MID)?,
+    })
+}
+
+/// Encodes an INTERVAL YEAR TO MONTH value (reference
+/// impl/base/encoders.pyx:151-161): big-endian years offset by
+/// TNS_DURATION_MID followed by months offset by TNS_DURATION_OFFSET.
+fn encode_interval_ym(years: i32, months: i32) -> Result<[u8; 5]> {
+    let mut bytes = [0u8; 5];
+    let wire_years = u32::try_from(i64::from(years) + TNS_DURATION_MID)
+        .map_err(|_| ProtocolError::TtcDecode("INTERVAL YM years out of range"))?;
+    bytes[..4].copy_from_slice(&wire_years.to_be_bytes());
+    bytes[4] = u8::try_from(months + TNS_DURATION_OFFSET)
+        .map_err(|_| ProtocolError::TtcDecode("INTERVAL YM months out of range"))?;
+    Ok(bytes)
+}
+
+/// Decodes an INTERVAL YEAR TO MONTH value (reference
+/// impl/base/decoders.pyx:147-155). Components are signed: negative
+/// intervals subtract below the offsets.
+fn decode_interval_ym(bytes: &[u8]) -> Result<QueryValue> {
+    if bytes.len() < 5 {
+        return Err(ProtocolError::TtcDecode("invalid INTERVAL YM length"));
+    }
+    let years_wire = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let years = i32::try_from(i64::from(years_wire) - TNS_DURATION_MID)
+        .map_err(|_| ProtocolError::TtcDecode("INTERVAL YM out of range"))?;
+    Ok(QueryValue::IntervalYM {
+        years,
+        months: i32::from(bytes[4]) - TNS_DURATION_OFFSET,
     })
 }
 

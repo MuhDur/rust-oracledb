@@ -533,6 +533,13 @@ impl ThinVar {
                 }
                 unsupported()
             }
+            "DB_TYPE_INTERVAL_YM" => {
+                let interval_ym_type = PyModule::import(py, "oracledb")?.getattr("IntervalYM")?;
+                if value.is_instance(&interval_ym_type)? {
+                    return pass();
+                }
+                unsupported()
+            }
             "DB_TYPE_CLOB" | "DB_TYPE_NCLOB" | "DB_TYPE_BLOB" | "DB_TYPE_BFILE" => {
                 if let Some(actual) = py_any_lob_dbtype_name(value)? {
                     if actual != self.dbtype_name {
@@ -1076,7 +1083,7 @@ pub(crate) fn bind_var_from_value(
     let class_name = py_value_type_name(value);
     let type_name = match class_name.as_str() {
         "bool" | "int" | "float" | "Decimal" | "str" | "bytes" | "date" | "datetime"
-        | "timedelta" => class_name,
+        | "timedelta" | "IntervalYM" => class_name,
         _ => String::new(),
     };
     if !type_name.is_empty() {
