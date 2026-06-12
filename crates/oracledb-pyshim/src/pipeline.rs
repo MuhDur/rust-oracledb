@@ -1,146 +1,159 @@
-//! Sequential pipeline fallback (reference impl/thin/connection.pyx
-//! `run_pipeline_without_pipelining`, lines 1280-1306, and
-//! `_run_pipeline_op_without_pipelining`, lines 1045-1090).
-//!
-//! The fallback runner drives the *public* AsyncConnection/AsyncCursor
-//! objects exactly like the reference does, so each operation goes through
-//! the shim's normal execute/callproc/callfunc paths. The loop itself is
-//! Python coroutine glue (await chains over public objects), so it is
-//! expressed as an embedded Python helper; all database work still runs
-//! through the Rust shim. True pipelined transport is owned by the
-//! PIPELINING cluster (protocol + driver).
-
 use std::ffi::CString;
 
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyModule;
 
-#[pyclass(module = "oracledb.thin_impl", name = "PipelineOpResultShimImpl")]
-pub(crate) struct PipelineOpResultShimImpl {
-    #[pyo3(get)]
-    operation: Py<PyAny>,
-    #[pyo3(get, set)]
-    error: Option<Py<PyAny>>,
-    #[pyo3(get, set)]
-    warning: Option<Py<PyAny>>,
-    #[pyo3(get, set)]
-    rows: Option<Py<PyAny>>,
-    #[pyo3(get, set)]
-    return_value: Option<Py<PyAny>>,
-    #[pyo3(get, set)]
-    fetch_metadata: Option<Py<PyAny>>,
-}
-
-#[pymethods]
-impl PipelineOpResultShimImpl {
-    #[new]
-    fn new(operation: Py<PyAny>) -> Self {
-        Self {
-            operation,
-            error: None,
-            warning: None,
-            rows: None,
-            return_value: None,
-            fetch_metadata: None,
-        }
-    }
-}
-
+/// Sequential pipeline runner mirroring the reference thin driver's
+/// `run_pipeline_without_pipelining` path (impl/thin/connection.pyx:1280-1304
+/// wrapping `_run_pipeline_op_without_pipelining`, :1045-1089). The public
+/// `AsyncConnection.run_pipeline` routes here whenever the conn impl reports
+/// `supports_pipelining() == False` — the same path the reference itself takes
+/// against servers without END_OF_RESPONSE support.
+///
+/// Each public `PipelineOpResult` arrives holding the genuine Cython
+/// `PipelineOpResultImpl`, whose result attributes are readonly cdef fields
+/// (base_impl.pxd) that only Cython code can assign. The runner therefore
+/// substitutes a shim-owned, attribute-compatible result impl on
+/// `result._impl` (a plain writable attribute of the pure-Python result
+/// object) before running any operation.
+///
+/// Per-op execution is delegated to the unmodified public async cursor API,
+/// which lands in this shim's native Rust execute/fetch paths; this module is
+/// orchestration glue only.
 const PIPELINE_RUNNER_SOURCE: &str = r#"
-import oracledb
-from oracledb import errors
-
-_OP_CALL_FUNC = 1
-_OP_CALL_PROC = 2
-_OP_COMMIT = 3
-_OP_EXECUTE = 4
-_OP_EXECUTE_MANY = 5
-_OP_FETCH_ALL = 6
-_OP_FETCH_MANY = 7
-_OP_FETCH_ONE = 8
+from oracledb import errors, exceptions
+from oracledb.enums import PipelineOpType
 
 
-async def _run_op(conn, op, shim):
-    # mirrors impl/thin/connection.pyx _run_pipeline_op_without_pipelining
-    if op.op_type == _OP_COMMIT:
+class PipelineOpResultImpl:
+    """Writable stand-in for the readonly Cython PipelineOpResultImpl."""
+
+    def __init__(self, operation):
+        self.operation = operation
+        self.return_value = None
+        self.rows = None
+        self.error = None
+        self.warning = None
+        self.fetch_metadata = None
+
+    def _capture_err(self, exc):
+        # parity with impl/base/pipeline.pyx PipelineOpResultImpl._capture_err
+        if isinstance(exc, exceptions.Error):
+            self.error = exc.args[0]
+        else:
+            self.error = errors._create_err(
+                errors.ERR_UNEXPECTED_PIPELINE_FAILURE, cause=exc
+            )
+
+
+async def _run_op(conn, result_impl):
+    op_impl = result_impl.operation
+    op_type = op_impl.op_type
+    if op_type == PipelineOpType.COMMIT:
         await conn.commit()
         return
     cursor = conn.cursor()
-    if op.op_type == _OP_CALL_FUNC:
-        shim.return_value = await cursor.callfunc(
-            op.name, op.return_type, op.parameters, op.keyword_parameters
+    if op_type == PipelineOpType.CALL_FUNC:
+        result_impl.return_value = await cursor.callfunc(
+            op_impl.name,
+            op_impl.return_type,
+            op_impl.parameters,
+            op_impl.keyword_parameters,
         )
-    elif op.op_type == _OP_CALL_PROC:
-        await cursor.callproc(op.name, op.parameters, op.keyword_parameters)
-    elif op.op_type == _OP_EXECUTE:
-        await cursor.execute(op.statement, op.parameters)
-    elif op.op_type == _OP_EXECUTE_MANY:
-        await cursor.executemany(op.statement, op.parameters)
-    elif op.op_type == _OP_FETCH_ALL:
-        await cursor.execute(op.statement, op.parameters)
-        cursor.rowfactory = op.rowfactory
-        shim.rows = await cursor.fetchall()
-    elif op.op_type == _OP_FETCH_MANY:
-        await cursor.execute(op.statement, op.parameters)
-        cursor.rowfactory = op.rowfactory
-        shim.rows = await cursor.fetchmany(op.num_rows)
-    elif op.op_type == _OP_FETCH_ONE:
-        await cursor.execute(op.statement, op.parameters)
-        cursor.rowfactory = op.rowfactory
-        shim.rows = await cursor.fetchmany(1)
+    elif op_type == PipelineOpType.CALL_PROC:
+        await cursor.callproc(
+            op_impl.name, op_impl.parameters, op_impl.keyword_parameters
+        )
+    elif op_type == PipelineOpType.EXECUTE:
+        await cursor.execute(op_impl.statement, op_impl.parameters)
+    elif op_type == PipelineOpType.EXECUTE_MANY:
+        await cursor.executemany(op_impl.statement, op_impl.parameters)
+    elif op_type in (
+        PipelineOpType.FETCH_ALL,
+        PipelineOpType.FETCH_MANY,
+        PipelineOpType.FETCH_ONE,
+    ):
+        if op_type == PipelineOpType.FETCH_ONE:
+            num_rows = 1
+        elif op_type == PipelineOpType.FETCH_MANY:
+            num_rows = op_impl.num_rows
+        else:
+            num_rows = op_impl.arraysize
+        # the reference copies these op attributes onto the cursor impl in its
+        # with-pipelining message builder (impl/thin/connection.pyx
+        # _create_message_for_pipeline_op); the tests assert that observable
+        # behavior, so the sequential runner honors them identically
+        cursor._impl.prefetchrows = num_rows
+        cursor._impl.arraysize = num_rows
+        cursor._impl.fetch_lobs = op_impl.fetch_lobs
+        cursor._impl.fetch_decimals = op_impl.fetch_decimals
+        await cursor.execute(op_impl.statement, op_impl.parameters)
+        cursor.rowfactory = op_impl.rowfactory
+        if op_type == PipelineOpType.FETCH_ALL:
+            result_impl.rows = await cursor.fetchall()
+        elif op_type == PipelineOpType.FETCH_MANY:
+            result_impl.rows = await cursor.fetchmany(num_rows)
+        else:
+            result_impl.rows = await cursor.fetchmany(1)
     else:
         errors._raise_err(
-            errors.ERR_UNSUPPORTED_PIPELINE_OPERATION, op_type=op.op_type
+            errors.ERR_UNSUPPORTED_PIPELINE_OPERATION, op_type=op_type
         )
-    shim.warning = cursor.warning
-    metadata = cursor._impl.fetch_metadata
-    shim.fetch_metadata = metadata if metadata else None
+    result_impl.warning = cursor.warning
+    # the genuine cursor impl reports None for non-queries; this shim's
+    # fetch_metadata getter reports an empty list, which PipelineOpResult
+    # .columns would render as [] instead of None
+    fetch_metadata = cursor._impl.fetch_metadata
+    result_impl.fetch_metadata = fetch_metadata if fetch_metadata else None
 
 
-def _capture_err(shim, exc):
-    # mirrors impl/base/pipeline.pyx PipelineOpResultImpl._capture_err
-    if isinstance(exc, oracledb.Error):
-        shim.error = exc.args[0]
-    else:
-        shim.error = errors._create_err(
-            errors.ERR_UNEXPECTED_PIPELINE_FAILURE, cause=exc
-        )
-
-
-async def run_pipeline_without_pipelining(
-    result_shim_factory, conn, results, continue_on_error
-):
-    call_timeout = conn._impl.get_call_timeout()
+async def run_pipeline_sequential(conn, results, continue_on_error):
+    conn_impl = conn._impl
+    call_timeout = conn_impl.get_call_timeout()
+    for result in results:
+        if not isinstance(result._impl, PipelineOpResultImpl):
+            result._impl = PipelineOpResultImpl(result._impl.operation)
     try:
         for result in results:
-            op = result._impl.operation
-            shim = result_shim_factory(op)
-            result._impl = shim
             try:
-                await _run_op(conn, op, shim)
+                await _run_op(conn, result._impl)
             except Exception as exc:
                 if not continue_on_error:
                     raise
-                _capture_err(shim, exc)
+                result._impl._capture_err(exc)
     finally:
-        conn._impl.set_call_timeout(call_timeout)
+        conn_impl.set_call_timeout(call_timeout)
 "#;
 
-static PIPELINE_RUNNER_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+static PIPELINE_RUNNER: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
 
-pub(crate) fn pipeline_runner_function<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-    let module = PIPELINE_RUNNER_MODULE.get_or_try_init(py, || {
-        let source = CString::new(PIPELINE_RUNNER_SOURCE)
-            .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))?;
-        let file_name = CString::new("oracledb_pyshim_pipeline.py")
-            .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))?;
-        let module_name = CString::new("oracledb_pyshim_pipeline")
-            .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))?;
-        PyModule::from_code(py, &source, &file_name, &module_name).map(Bound::unbind)
-    })?;
-    module
-        .bind(py)
-        .getattr("run_pipeline_without_pipelining")
-        .map(Bound::into_any)
+fn pipeline_runner<'py>(py: Python<'py>) -> PyResult<&'py Bound<'py, PyModule>> {
+    Ok(PIPELINE_RUNNER
+        .get_or_try_init(py, || -> PyResult<Py<PyModule>> {
+            let code = CString::new(PIPELINE_RUNNER_SOURCE)
+                .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+            let module = PyModule::from_code(
+                py,
+                code.as_c_str(),
+                c"oracledb_pyshim/_pipeline_runner.py",
+                c"oracledb_pyshim._pipeline_runner",
+            )?;
+            Ok(module.unbind())
+        })?
+        .bind(py))
+}
+
+/// Returns the coroutine object for the sequential runner; the public layer
+/// awaits it on its own event loop.
+pub(crate) fn run_pipeline_sequential(
+    py: Python<'_>,
+    conn: Py<PyAny>,
+    results: Py<PyAny>,
+    continue_on_error: bool,
+) -> PyResult<Py<PyAny>> {
+    Ok(pipeline_runner(py)?
+        .getattr("run_pipeline_sequential")?
+        .call1((conn, results, continue_on_error))?
+        .unbind())
 }

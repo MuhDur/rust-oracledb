@@ -428,4 +428,37 @@ impl AsyncThinConnImpl {
             inner: self.inner.create_cursor_impl(py, scrollable)?,
         })
     }
+
+    /// Stage-1 pipeline contract (reference connection.py:2786-2796): report
+    /// no native pipelining support so the public layer routes every pipeline
+    /// through the sequential runner — the same fallback the reference takes
+    /// against servers without END_OF_RESPONSE support. Flips to a capability
+    /// check once the native pipeline transport lands.
+    fn supports_pipelining(&self) -> bool {
+        false
+    }
+
+    /// Native single-round-trip pipelining is not implemented yet; until the
+    /// driver grows the BEGIN_PIPELINE/END_OF_REQUEST transport this delegates
+    /// to the sequential runner (public code never calls it while
+    /// `supports_pipelining` reports false).
+    fn run_pipeline_with_pipelining(
+        &self,
+        py: Python<'_>,
+        conn: Py<PyAny>,
+        results: Py<PyAny>,
+        continue_on_error: bool,
+    ) -> PyResult<Py<PyAny>> {
+        run_pipeline_sequential(py, conn, results, continue_on_error)
+    }
+
+    fn run_pipeline_without_pipelining(
+        &self,
+        py: Python<'_>,
+        conn: Py<PyAny>,
+        results: Py<PyAny>,
+        continue_on_error: bool,
+    ) -> PyResult<Py<PyAny>> {
+        run_pipeline_sequential(py, conn, results, continue_on_error)
+    }
 }

@@ -161,11 +161,19 @@ pub(crate) fn python_int_from_value(value: &Bound<'_, PyAny>) -> PyResult<Py<PyA
 }
 
 pub(crate) fn python_int_from_decimal_text(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
-    let decimal = PyModule::import(py, "decimal")?
-        .getattr("Decimal")?
-        .call1((text,))?;
+    let decimal = python_decimal_from_text(py, text)?;
     let builtins = PyModule::import(py, "builtins")?;
-    Ok(builtins.getattr("int")?.call1((decimal,))?.unbind())
+    Ok(builtins
+        .getattr("int")?
+        .call1((decimal.bind(py),))?
+        .unbind())
+}
+
+pub(crate) fn python_decimal_from_text(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
+    Ok(PyModule::import(py, "decimal")?
+        .getattr("Decimal")?
+        .call1((text,))?
+        .unbind())
 }
 
 pub(crate) fn query_value_to_string(value: &Option<QueryValue>) -> Option<String> {
