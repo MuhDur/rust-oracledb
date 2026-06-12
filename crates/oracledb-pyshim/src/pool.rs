@@ -69,9 +69,14 @@ impl ThinPoolImpl {
         })
     }
 
-    fn acquire(&self, _params_impl: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn acquire(&self, params_impl: &Bound<'_, PyAny>) -> PyResult<()> {
         if !*self.opened.lock().map_err(runtime_error)? {
             return Err(raise_oracledb_driver_error("ERR_POOL_NOT_OPEN"));
+        }
+        // session tagging has not been implemented yet
+        // (reference impl/thin/pool.pyx:631-633)
+        if !params_impl.getattr("tag")?.is_none() {
+            return Err(raise_not_supported("session tagging"));
         }
         Err(not_implemented("ThinPoolImpl.acquire"))
     }
@@ -160,7 +165,9 @@ impl ThinPoolImpl {
 
     fn set_max_sessions_per_shard(&mut self, value: u32) -> PyResult<()> {
         let _ = value;
-        Err(raise_not_supported("setting the maximum sessions per shard"))
+        Err(raise_not_supported(
+            "setting the maximum sessions per shard",
+        ))
     }
 
     fn set_ping_interval(&mut self, value: u32) {
@@ -201,9 +208,17 @@ impl AsyncThinPoolImpl {
         }
     }
 
-    async fn acquire(&self, _params_impl: Py<PyAny>) -> PyResult<()> {
+    async fn acquire(&self, params_impl: Py<PyAny>) -> PyResult<()> {
         if !*self.opened.lock().map_err(runtime_error)? {
             return Err(raise_oracledb_driver_error("ERR_POOL_NOT_OPEN"));
+        }
+        // session tagging has not been implemented yet
+        // (reference impl/thin/pool.pyx:827-829)
+        let tag_set = Python::attach(|py| -> PyResult<bool> {
+            Ok(!params_impl.bind(py).getattr("tag")?.is_none())
+        })?;
+        if tag_set {
+            return Err(raise_not_supported("session tagging"));
         }
         Err(not_implemented("AsyncThinPoolImpl.acquire"))
     }
