@@ -542,6 +542,7 @@ impl AsyncThinCursorImpl {
             .lock()
             .map_err(runtime_error)?
             .record_statement(&statement, is_query, should_commit);
+        self.inner.record_implicit_resultsets(&mut result);
         self.inner.columns = result.columns;
         self.inner.reset_fetch_define_state();
         self.inner.requires_define = columns_require_define(&self.inner.columns);
@@ -605,7 +606,7 @@ impl AsyncThinCursorImpl {
             }
             Err(err) => return Err(self.inner.raise_execute_task_error(&err, is_plsql)),
         };
-        let result = outcome.result;
+        let mut result = outcome.result;
         let should_commit = outcome.should_commit;
         if self.inner.cancel_requested.swap(false, Ordering::SeqCst) {
             self.inner.drain_cancel_response()?;
@@ -632,6 +633,7 @@ impl AsyncThinCursorImpl {
             .lock()
             .map_err(runtime_error)?
             .record_statement(&statement, is_query, should_commit);
+        self.inner.record_implicit_resultsets(&mut result);
         self.inner.columns = result.columns;
         self.inner.reset_fetch_define_state();
         self.inner.requires_define = columns_require_define(&self.inner.columns);
@@ -765,7 +767,7 @@ impl AsyncThinCursorImpl {
         self.inner.get_bind_names()
     }
 
-    fn get_implicit_results(&self, connection: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+    fn get_implicit_results(&mut self, connection: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
         self.inner.get_implicit_results(connection)
     }
 

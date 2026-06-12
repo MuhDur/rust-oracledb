@@ -30,6 +30,7 @@ pub const TNS_MSG_TYPE_FLUSH_OUT_BINDS: u8 = 19;
 pub const TNS_MSG_TYPE_BIT_VECTOR: u8 = 21;
 pub const TNS_MSG_TYPE_DESCRIBE_INFO: u8 = 16;
 pub const TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK: u8 = 23;
+pub const TNS_MSG_TYPE_IMPLICIT_RESULTSET: u8 = 27;
 pub const TNS_MSG_TYPE_END_OF_RESPONSE: u8 = 29;
 
 pub const TNS_FUNC_AUTH_PHASE_ONE: u8 = 118;
@@ -651,6 +652,10 @@ pub struct QueryResult {
     pub batch_errors: Vec<BatchServerError>,
     /// Per-iteration row counts from `executemany(arraydmlrowcounts=True)`.
     pub array_dml_row_counts: Option<Vec<u64>>,
+    /// Child cursors returned via `dbms_sql.return_result`
+    /// (`QueryValue::Cursor` entries); `Some` only when the response carried
+    /// a TNS_MSG_TYPE_IMPLICIT_RESULTSET message.
+    pub implicit_resultsets: Option<Vec<QueryValue>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -837,17 +842,6 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
             length: bind_rows.len(),
             minimum: 0,
         })?;
-    let has_ref_cursor_output = bind_rows.iter().any(|row| {
-        row.iter().any(|value| {
-            matches!(
-                value,
-                BindValue::Output {
-                    ora_type_num: ORA_TYPE_NUM_CURSOR,
-                    ..
-                }
-            )
-        })
-    });
     let mut writer = TtcWriter::new();
     writer.write_function_code_with_seq(TNS_FUNC_EXECUTE, seq_num);
     writer.write_ub8(0);
@@ -873,11 +867,10 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     let num_iters = if is_query { prefetch_rows } else { 1 };
     let exec_count = if is_query { 0 } else { bind_row_count.max(1) };
     let query_flag = u32::from(is_query);
-    let mut exec_flags = if is_query || has_ref_cursor_output {
-        TNS_EXEC_FLAGS_IMPLICIT_RESULTSET
-    } else {
-        0
-    };
+    // reference sets the implicit-resultset flag on every full execute with
+    // SQL (execute.pyx:81-82); anonymous PL/SQL blocks need it for
+    // dbms_sql.return_result (ORA-29481 otherwise)
+    let mut exec_flags = TNS_EXEC_FLAGS_IMPLICIT_RESULTSET;
     if exec_options.arraydmlrowcounts {
         exec_flags |= TNS_EXEC_FLAGS_DML_ROWCOUNTS;
     }
@@ -2284,6 +2277,23 @@ fn parse_query_response_with_context_binds_and_options(
             }
             TNS_MSG_TYPE_FLUSH_OUT_BINDS => break,
             TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => skip_server_side_piggyback(&mut reader)?,
+            TNS_MSG_TYPE_IMPLICIT_RESULTSET => {
+                // reference messages/base.pyx `_process_implicit_result`
+                let num_results = reader.read_ub4()?;
+                let mut resultsets = Vec::with_capacity(num_results as usize);
+                for _ in 0..num_results {
+                    let num_bytes = reader.read_u8()?;
+                    reader.skip(usize::from(num_bytes))?;
+                    let mut child = QueryResult::default();
+                    parse_describe_info(&mut reader, capabilities, &mut child)?;
+                    let child_cursor_id = u32::from(reader.read_ub2()?);
+                    resultsets.push(QueryValue::Cursor {
+                        columns: child.columns,
+                        cursor_id: child_cursor_id,
+                    });
+                }
+                result.implicit_resultsets = Some(resultsets);
+            }
             TNS_MSG_TYPE_END_OF_RESPONSE => break,
             TNS_MSG_TYPE_ERROR => {
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
@@ -3758,25 +3768,15 @@ impl ServerErrorInfo {
 /// Encodes a physical rowid the way the reference driver does
 /// (impl/thin/utils.pyx `_encode_rowid`/`_convert_base64`).
 fn encode_rowid(rba: u32, partition_id: u16, block_num: u32, slot_num: u16) -> Option<String> {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     if rba == 0 && partition_id == 0 && block_num == 0 && slot_num == 0 {
         return None;
     }
-    let mut out = Vec::with_capacity(18);
-    let mut convert = |value: u64, size: usize| {
-        let start = out.len();
-        out.resize(start + size, 0u8);
-        let mut value = value;
-        for i in 0..size {
-            out[start + size - i - 1] = ALPHABET[(value & 0x3f) as usize];
-            value >>= 6;
-        }
-    };
-    convert(u64::from(rba), 6);
-    convert(u64::from(partition_id), 3);
-    convert(u64::from(block_num), 6);
-    convert(u64::from(slot_num), 3);
-    String::from_utf8(out).ok()
+    let mut out = String::with_capacity(18);
+    encode_rowid_component(rba, 6, &mut out);
+    encode_rowid_component(u32::from(partition_id), 3, &mut out);
+    encode_rowid_component(block_num, 6, &mut out);
+    encode_rowid_component(u32::from(slot_num), 3, &mut out);
+    Some(out)
 }
 
 fn parse_server_error(reader: &mut TtcReader<'_>, ttc_field_version: u8) -> Result<Option<String>> {

@@ -101,6 +101,12 @@ pub(crate) struct ThinCursorImpl {
     /// `Some` after `executemany(arraydmlrowcounts=True)` (reference
     /// `_dmlrowcounts`).
     pub(crate) dml_row_counts: Option<Vec<u64>>,
+    /// `QueryValue::Cursor` entries from `dbms_sql.return_result`
+    /// (reference `_implicit_resultsets`; `None` until a statement returns
+    /// implicit results).
+    pub(crate) implicit_resultsets: Option<Vec<QueryValue>>,
+    /// Lazily-built public cursors for `getimplicitresults()`.
+    implicit_result_cursors: Option<Vec<Py<PyAny>>>,
 }
 
 impl ThinCursorImpl {
@@ -160,6 +166,17 @@ impl ThinCursorImpl {
             last_rowid: None,
             batch_errors_state: None,
             dml_row_counts: None,
+            implicit_resultsets: None,
+            implicit_result_cursors: None,
+        }
+    }
+
+    /// Adopts implicit resultsets from an execute response (reference
+    /// `_process_implicit_result`).
+    pub(crate) fn record_implicit_resultsets(&mut self, result: &mut QueryResult) {
+        if let Some(resultsets) = result.implicit_resultsets.take() {
+            self.implicit_resultsets = Some(resultsets);
+            self.implicit_result_cursors = None;
         }
     }
 
@@ -836,6 +853,7 @@ impl ThinCursorImpl {
             is_query,
             should_commit,
         );
+        self.record_implicit_resultsets(&mut result);
         self.columns = result.columns;
         self.reset_fetch_define_state();
         self.requires_define = columns_require_define(&self.columns);
@@ -946,6 +964,7 @@ impl ThinCursorImpl {
             is_query,
             should_commit,
         );
+        self.record_implicit_resultsets(&mut result);
         self.columns = result.columns;
         self.reset_fetch_define_state();
         self.requires_define = columns_require_define(&self.columns);
@@ -1239,10 +1258,30 @@ impl ThinCursorImpl {
     }
 
     pub(crate) fn get_implicit_results(
-        &self,
-        _connection: &Bound<'_, PyAny>,
+        &mut self,
+        connection: &Bound<'_, PyAny>,
     ) -> PyResult<Vec<Py<PyAny>>> {
-        Err(not_implemented("ThinCursorImpl.get_implicit_results"))
+        let py = connection.py();
+        if let Some(cursors) = &self.implicit_result_cursors {
+            return Ok(cursors.iter().map(|cursor| cursor.clone_ref(py)).collect());
+        }
+        // reference thin/cursor.pyx get_implicit_results: DPY-1004 until a
+        // statement producing implicit results has been executed
+        let Some(resultsets) = &self.implicit_resultsets else {
+            return Err(raise_oracledb_driver_error("ERR_NO_STATEMENT_EXECUTED"));
+        };
+        let mut cursors = Vec::with_capacity(resultsets.len());
+        for value in resultsets {
+            let QueryValue::Cursor { columns, cursor_id } = value else {
+                continue;
+            };
+            let child_cursor = connection.call_method0("cursor")?;
+            hydrate_cursor_impl(&child_cursor, columns, *cursor_id, false)?;
+            cursors.push(child_cursor.unbind());
+        }
+        self.implicit_result_cursors =
+            Some(cursors.iter().map(|cursor| cursor.clone_ref(py)).collect());
+        Ok(cursors)
     }
 
     pub(crate) fn get_lastrowid(&self) -> Option<String> {
