@@ -747,7 +747,20 @@ impl ThinVar {
         let value = self.convert_output_value(py, value, lob_context)?;
         if let Some(outconverter) = self.outconverter_value.as_ref() {
             if !value.bind(py).is_none() || self.convert_nulls {
-                return Ok(outconverter.bind(py).call1((value,))?.unbind());
+                let converted = outconverter.bind(py).call1((value,))?;
+                // In async mode an outconverter may return a coroutine (e.g.
+                // `lambda v: v.read()` on an AsyncLOB). The reference awaits it
+                // in postprocess_async (impl/thin/messages/base.pyx). These LOB
+                // reads resolve without an actual round trip (local data), so
+                // drive the coroutine to completion synchronously rather than
+                // returning an un-awaited coroutine.
+                let async_mode = lob_context.is_some_and(|context| context.async_mode);
+                if async_mode {
+                    if let Some(resolved) = resolve_sync_awaitable(py, &converted)? {
+                        return Ok(resolved.unbind());
+                    }
+                }
+                return Ok(converted.unbind());
             }
         }
         Ok(value)
@@ -1299,6 +1312,37 @@ pub(crate) fn apply_out_bind_values(
     Ok(())
 }
 
+/// Drives a Python awaitable (coroutine) to completion synchronously, when it
+/// resolves without suspending on the event loop. Returns `Some(result)` if it
+/// completed, or `None` if `value` is not awaitable or it suspended (i.e. would
+/// genuinely need the asyncio event loop — not the case for the async-LOB read
+/// outconverters this handles, whose data is already local). The protocol:
+/// obtain the underlying iterator via `__await__`, then `send(None)`; a
+/// `StopIteration` carries the result in its `value`.
+fn resolve_sync_awaitable<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let inspect = PyModule::import(py, "inspect")?;
+    if !inspect.call_method1("isawaitable", (value,))?.is_truthy()? {
+        return Ok(None);
+    }
+    // Coroutines/generators expose __await__ -> iterator; iterate once.
+    let iterator = value.call_method0("__await__")?;
+    match iterator.call_method1("send", (py.None(),)) {
+        Ok(_yielded) => {
+            // The awaitable suspended (yielded to the event loop). This path is
+            // not reachable for local-data LOB reads; leave it un-driven.
+            Ok(None)
+        }
+        Err(err) if err.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) => {
+            let result = err.value(py).getattr("value")?;
+            Ok(Some(result))
+        }
+        Err(err) => Err(err),
+    }
+}
+
 pub(crate) fn apply_cursor_out_bind(
     py: Python<'_>,
     var: &Py<ThinVar>,
@@ -1308,4 +1352,40 @@ pub(crate) fn apply_cursor_out_bind(
     let cursor = var.borrow(py).get_py_value(py)?;
     let cursor = cursor.bind(py);
     hydrate_cursor_impl(cursor, columns, cursor_id, cursor_id == 0)
+}
+
+/// After an execute, resets every already-open cursor that was passed as an IN
+/// CURSOR (REF CURSOR) bind. Such a bind appears as `BindValue::Cursor` (only
+/// produced for a cursor with a non-zero cursor_id); the called PL/SQL may have
+/// closed the cursor server-side, so its cached statement/cursor_id is stale.
+/// Clearing it lets the next execute on that cursor re-parse the SQL with a
+/// fresh cursor_id instead of reusing the invalid one (ORA-01001). Mirrors the
+/// reference `cursor_impl.statement = None` done when a CURSOR bind is written
+/// (impl/thin/messages/base.pyx). Test 1315 / 5815.
+pub(crate) fn reset_cursor_bind_vars(
+    py: Python<'_>,
+    bind_values: &[BindValue],
+    bind_vars: &[Py<ThinVar>],
+) -> PyResult<()> {
+    for (index, bind_value) in bind_values.iter().enumerate() {
+        if !matches!(bind_value, BindValue::Cursor { .. }) {
+            continue;
+        }
+        let Some(var) = bind_vars.get(index) else {
+            continue;
+        };
+        let cursor = var.borrow(py).get_py_value(py)?;
+        let cursor = cursor.bind(py);
+        if !is_public_cursor_value(cursor)? {
+            continue;
+        }
+        let impl_obj = cursor.getattr("_impl")?;
+        if let Ok(mut cursor_impl) = impl_obj.extract::<PyRefMut<'_, ThinCursorImpl>>() {
+            cursor_impl.reset_after_cursor_bind();
+        } else if let Ok(mut cursor_impl) = impl_obj.extract::<PyRefMut<'_, AsyncThinCursorImpl>>()
+        {
+            cursor_impl.inner.reset_after_cursor_bind();
+        }
+    }
+    Ok(())
 }

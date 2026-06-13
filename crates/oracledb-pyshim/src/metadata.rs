@@ -82,18 +82,27 @@ impl FetchMetadataImpl {
     }
 
     #[getter]
-    fn annotations(&self) -> Option<Py<PyAny>> {
-        None
+    fn annotations(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        match &self.metadata.annotations {
+            None => Ok(None),
+            Some(pairs) => {
+                let dict = pyo3::types::PyDict::new(py);
+                for (key, value) in pairs {
+                    dict.set_item(key, value)?;
+                }
+                Ok(Some(dict.into_any().unbind()))
+            }
+        }
     }
 
     #[getter]
     fn domain_name(&self) -> Option<&str> {
-        None
+        self.metadata.domain_name.as_deref()
     }
 
     #[getter]
     fn domain_schema(&self) -> Option<&str> {
-        None
+        self.metadata.domain_schema.as_deref()
     }
 
     #[getter]

@@ -219,6 +219,11 @@ const TNS_UDS_FLAGS_IS_OSON: u32 = 0x0000_0800;
 const ORA_TYPE_SIZE_BINARY_DOUBLE: u32 = 8;
 const ORA_TYPE_SIZE_BINARY_FLOAT: u32 = 4;
 const ORA_TYPE_SIZE_BOOLEAN: u32 = 4;
+/// Marker byte introducing a length-escaped value on the wire. A NULL BOOLEAN
+/// bind is encoded as the two raw bytes `[TNS_ESCAPE_CHAR, 1]` rather than the
+/// usual single `0` null indicator (reference messages/base.pyx
+/// `_write_bind_params_column`).
+const TNS_ESCAPE_CHAR: u8 = 253;
 const ORA_TYPE_SIZE_NUMBER: u32 = 22;
 const ORA_TYPE_SIZE_DATE: u32 = 7;
 const ORA_TYPE_SIZE_INTERVAL_DS: u32 = 11;
@@ -341,7 +346,7 @@ impl Default for ClientCapabilities {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ColumnMetadata {
     pub name: String,
     pub ora_type_num: u8,
@@ -364,6 +369,16 @@ pub struct ColumnMetadata {
     pub vector_format: u8,
     /// VECTOR columns only: the metadata flags byte (sparse / flexible).
     pub vector_flags: u8,
+    /// SQL data-use-case domain schema (23ai+), or `None` if the column has no
+    /// domain.
+    pub domain_schema: Option<String>,
+    /// SQL data-use-case domain name (23ai+), or `None` if the column has no
+    /// domain.
+    pub domain_name: Option<String>,
+    /// Ordered column annotations (23ai+), as (key, value) pairs preserving
+    /// server order; `None` if the column has no annotations. A null annotation
+    /// value is normalized to an empty string, matching python-oracledb.
+    pub annotations: Option<Vec<(String, String)>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -402,6 +417,9 @@ pub enum QueryValue {
         text: String,
         is_integer: bool,
     },
+    /// Native Oracle `DB_TYPE_BOOLEAN` (`ora_type_num` 252, 23ai+): surfaced as
+    /// a Python `bool` rather than an integer.
+    Boolean(bool),
     Cursor {
         columns: Vec<ColumnMetadata>,
         cursor_id: u32,
@@ -2711,6 +2729,18 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm: u8) -> Res
             writer.write_u8(0);
             Ok(())
         }
+        // A NULL BOOLEAN bind is encoded as the two raw bytes
+        // [TNS_ESCAPE_CHAR, 1], not the usual single 0 null indicator; sending
+        // a plain 0 makes the server reject a PL/SQL BOOLEAN parameter with
+        // PLS-00306 (reference messages/base.pyx _write_bind_params_column).
+        BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_BOOLEAN,
+            ..
+        } => {
+            writer.write_u8(TNS_ESCAPE_CHAR);
+            writer.write_u8(1);
+            Ok(())
+        }
         BindValue::Null | BindValue::TypedNull { .. } => {
             writer.write_u8(0);
             Ok(())
@@ -3506,6 +3536,9 @@ fn bind_column_metadata(value: &BindValue) -> ColumnMetadata {
         vector_dimensions: None,
         vector_format: 0,
         vector_flags: 0,
+        domain_schema: None,
+        domain_name: None,
+        annotations: None,
     }
 }
 
@@ -3928,9 +3961,12 @@ pub(crate) fn parse_column_metadata(
     let object_type_name = reader.read_string_with_length()?;
     let _column_position = reader.read_ub2()?;
     let uds_flags = reader.read_ub4()?;
+    let mut domain_schema = None;
+    let mut domain_name = None;
+    let mut annotations: Option<Vec<(String, String)>> = None;
     if capabilities.ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1 {
-        let _domain_schema = reader.read_string_with_length()?;
-        let _domain_name = reader.read_string_with_length()?;
+        domain_schema = reader.read_string_with_length()?;
+        domain_name = reader.read_string_with_length()?;
     }
     if capabilities.ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_3 {
         let num_annotations = reader.read_ub4()?;
@@ -3938,12 +3974,17 @@ pub(crate) fn parse_column_metadata(
             reader.skip(1)?;
             let num_annotations = reader.read_ub4()?;
             reader.skip(1)?;
+            let mut collected = Vec::with_capacity(num_annotations as usize);
             for _ in 0..num_annotations {
-                let _key = reader.read_string_with_length()?;
-                let _value = reader.read_string_with_length()?;
+                let key = reader.read_string_with_length()?.unwrap_or_default();
+                // A null annotation value is normalized to "" by the reference
+                // driver (python-oracledb base.pyx _process_metadata).
+                let value = reader.read_string_with_length()?.unwrap_or_default();
                 let _flags = reader.read_ub4()?;
+                collected.push((key, value));
             }
             let _flags = reader.read_ub4()?;
+            annotations = Some(collected);
         }
     }
     let mut vector_dimensions = None;
@@ -3976,6 +4017,9 @@ pub(crate) fn parse_column_metadata(
         vector_dimensions,
         vector_format,
         vector_flags,
+        domain_schema,
+        domain_name,
+        annotations,
     })
 }
 
@@ -4179,13 +4223,10 @@ fn parse_column_value(
             let Some(bytes) = reader.read_bytes()? else {
                 return Ok(None);
             };
-            // reference read_bool: last byte == 1 means true; surfaced as
-            // NUMBER 0/1 (QueryValue has no dedicated boolean variant)
+            // reference read_bool: last byte == 1 means true; native
+            // DB_TYPE_BOOLEAN surfaces as a Python bool.
             let is_true = matches!(bytes.last(), Some(&1));
-            Ok(Some(QueryValue::Number {
-                text: if is_true { "1".into() } else { "0".into() },
-                is_integer: true,
-            }))
+            Ok(Some(QueryValue::Boolean(is_true)))
         }
         ORA_TYPE_NUM_INTERVAL_DS => {
             let Some(bytes) = reader.read_bytes()? else {
@@ -5801,6 +5842,7 @@ mod tests {
             vector_dimensions: None,
             vector_format: 0,
             vector_flags: 0,
+            ..Default::default()
         };
 
         // VARCHAR -> CLOB fetches as LONG keeping the previous csfrm
@@ -6240,6 +6282,7 @@ mod tests {
             vector_dimensions: None,
             vector_format: 0,
             vector_flags: 0,
+            ..Default::default()
         }
     }
 
@@ -6261,6 +6304,7 @@ mod tests {
             vector_dimensions: None,
             vector_format: 0,
             vector_flags: 0,
+            ..Default::default()
         }
     }
 }

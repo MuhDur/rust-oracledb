@@ -280,7 +280,11 @@ pub(crate) fn py_value_to_bind_with_template(
     // variable with bool() (impl/base/connection.pyx:139-140)
     if ora_type_num == ORA_TYPE_NUM_BOOLEAN {
         if value.is_none() {
-            return Ok(BindValue::Null);
+            // A NULL bound through a BOOLEAN variable must keep its
+            // DB_TYPE_BOOLEAN bind type (the template is TypedNull BOOLEAN);
+            // an untyped Null falls back to VARCHAR and PL/SQL rejects it with
+            // PLS-00306 (test_3103).
+            return Ok(template.clone());
         }
         return Ok(BindValue::Boolean(value.is_truthy()?));
     }
@@ -1282,6 +1286,10 @@ pub(crate) fn query_value_to_py(
             .getattr("IntervalYM")?
             .call1((*years, *months))?
             .unbind()),
+        // Native DB_TYPE_BOOLEAN fetches as a Python bool.
+        Some(QueryValue::Boolean(value)) => {
+            Ok(PyBool::new(py, *value).to_owned().into_any().unbind())
+        }
         Some(QueryValue::Rowid(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
         #[allow(clippy::useless_conversion)]
         // pre-existing lint at pre-split HEAD 978491a; not movement-induced
@@ -1484,12 +1492,25 @@ pub(crate) fn json_query_value_to_py(
     owner_cursor: Option<&Bound<'_, PyAny>>,
     lob_context: Option<&ThinLobContext>,
 ) -> PyResult<Py<PyAny>> {
+    // Mirrors the reference is_json text converter
+    // (impl/base/cursor.pyx `_build_json_converter_fn`): bytes are decoded to
+    // text and an empty/false value yields None (the `if value:` guard) so that
+    // an empty CLOB/BLOB column is not passed to json.loads (which would raise
+    // "Expecting value"). fetch_lobs=false materializes any CLOB/BLOB to
+    // str/bytes already, so there is no LOB object left to read here.
     let value = query_value_to_py(py, value, owner_cursor, lob_context, false, false)?;
-    if value.bind(py).is_none() {
-        return Ok(value);
+    let mut value = value.into_bound(py);
+    if value.is_none() {
+        return Ok(value.unbind());
+    }
+    if let Ok(bytes) = value.cast::<PyBytes>() {
+        value = bytes.call_method0("decode")?;
+    }
+    if !value.is_truthy()? {
+        return Ok(py.None());
     }
     Ok(PyModule::import(py, "json")?
         .getattr("loads")?
-        .call1((value.bind(py),))?
+        .call1((&value,))?
         .unbind())
 }
