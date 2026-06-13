@@ -21,6 +21,29 @@ pub(crate) fn runtime_error(err: impl std::fmt::Display) -> PyErr {
         return Python::attach(|py| database_error(py, server_message))
             .unwrap_or_else(|_| PyRuntimeError::new_err(message));
     }
+    // OSON decode errors surfaced during fetch carry their DPY code in the
+    // Display text; route them to the matching oracledb error number so the
+    // raised exception has the right full_code (e.g. test_3509 -> DPY-3007).
+    // These specific DPY-3007/5004/5006 handlers MUST run before the generic
+    // `DPY-` catch-all below; otherwise the catch-all routes them through
+    // `database_error` and drops the `name` kwarg / correct full_code.
+    if let Some(name) = message.strip_prefix("DPY-3007: the data type ") {
+        let name = name
+            .strip_suffix(" is not supported")
+            .unwrap_or(name)
+            .to_string();
+        return raise_oracledb_driver_error_with_kwargs(
+            "ERR_DB_TYPE_NOT_SUPPORTED",
+            &message,
+            move |_py, kwargs| kwargs.set_item("name", name.clone()),
+        );
+    }
+    if message.starts_with("DPY-5004: ") {
+        return raise_oracledb_driver_error("ERR_UNEXPECTED_DATA");
+    }
+    if message.starts_with("DPY-5006: ") {
+        return raise_oracledb_driver_error("ERR_UNEXPECTED_END_OF_DATA");
+    }
     // driver-side DPY-* errors (e.g. sessionless DPY-3034/3035/3036) carry the
     // full code as their message prefix; build the matching DatabaseError so
     // `full_code` resolves correctly.
@@ -324,6 +347,40 @@ pub(crate) fn raise_oracledb_driver_error(error_name: &str) -> PyErr {
 
 pub(crate) fn raise_wrong_executemany_parameters_type() -> PyErr {
     raise_oracledb_driver_error("ERR_WRONG_EXECUTEMANY_PARAMETERS_TYPE")
+}
+
+/// Maps an OSON codec error to the corresponding python-oracledb error code so
+/// `assert_raises_full_code` matches: OsonNotEncoded -> DPY-5004
+/// (ERR_UNEXPECTED_DATA), OsonInvalid -> DPY-5006 (ERR_UNEXPECTED_END_OF_DATA),
+/// OsonTypeNotSupported -> DPY-3007 (ERR_DB_TYPE_NOT_SUPPORTED). Other errors
+/// fall back to the generic conversion.
+pub(crate) fn oson_error_to_pyerr(err: &oracledb::protocol::ProtocolError) -> PyErr {
+    use oracledb::protocol::ProtocolError;
+    let (error_name, type_name): (&str, Option<&'static str>) = match err {
+        ProtocolError::OsonNotEncoded(_) => ("ERR_UNEXPECTED_DATA", None),
+        ProtocolError::OsonInvalid(_) => ("ERR_UNEXPECTED_END_OF_DATA", None),
+        ProtocolError::OsonTypeNotSupported(name) => ("ERR_DB_TYPE_NOT_SUPPORTED", Some(name)),
+        other => return runtime_error(other),
+    };
+    Python::attach(|py| -> PyResult<PyErr> {
+        let errors = PyModule::import(py, "oracledb.errors")?;
+        let error_num = errors.getattr(error_name)?;
+        let raise_err = errors.getattr("_raise_err")?;
+        let result = if let Some(name) = type_name {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("name", name)?;
+            raise_err.call((error_num,), Some(&kwargs))
+        } else {
+            raise_err.call1((error_num,))
+        };
+        match result {
+            Ok(_) => Ok(PyRuntimeError::new_err(format!(
+                "oracledb.errors._raise_err({error_name}) returned without raising"
+            ))),
+            Err(err) => Ok(err),
+        }
+    })
+    .unwrap_or_else(|_| PyRuntimeError::new_err(error_name.to_string()))
 }
 
 pub(crate) fn raise_not_supported(feature: &str) -> PyErr {

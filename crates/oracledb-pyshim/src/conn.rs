@@ -1282,6 +1282,32 @@ impl ThinConnImpl {
         set_password_override_for_user(&self.username, new_password)
     }
 
+    /// Encodes a Python value to OSON bytes (reference
+    /// thin/connection.pyx `encode_oson`). Long field names (>255 bytes) are
+    /// permitted on Oracle 23ai+ (OSON version 3); the encoder still emits
+    /// version 1 when no long name is present.
+    fn encode_oson<'py>(
+        &self,
+        py: Python<'py>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Py<PyBytes>> {
+        let oson = py_value_to_oson(value)?;
+        let supports_long_fnames = self.server_version.0 >= 23;
+        let image = oracledb::protocol::oson::encode_oson(&oson, supports_long_fnames)
+            .map_err(|err| oson_error_to_pyerr(&err))?;
+        Ok(PyBytes::new(py, &image).unbind())
+    }
+
+    /// Decodes OSON bytes to a Python value (reference
+    /// thin/connection.pyx `decode_oson`). Raises DPY-5004 when the input is not
+    /// OSON and DPY-5006 when it is structurally invalid.
+    fn decode_oson(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let bytes = data.extract::<Vec<u8>>()?;
+        let value = oracledb::protocol::oson::decode_oson(&bytes)
+            .map_err(|err| oson_error_to_pyerr(&err))?;
+        oson_value_to_py(py, &value)
+    }
+
     pub(crate) fn get_is_healthy(&self) -> PyResult<bool> {
         Ok(self.connection.lock().map_err(runtime_error)?.is_some())
     }

@@ -116,6 +116,7 @@ pub const ORA_TYPE_NUM_CLOB: u8 = 112;
 pub const ORA_TYPE_NUM_BLOB: u8 = 113;
 pub const ORA_TYPE_NUM_BFILE: u8 = 114;
 pub const ORA_TYPE_NUM_OBJECT: u8 = 109;
+pub const ORA_TYPE_NUM_JSON: u8 = 119;
 pub const ORA_TYPE_NUM_TIMESTAMP: u8 = 180;
 pub const ORA_TYPE_NUM_TIMESTAMP_TZ: u8 = 181;
 pub const ORA_TYPE_NUM_INTERVAL_DS: u8 = 183;
@@ -125,6 +126,8 @@ pub const ORA_TYPE_NUM_TIMESTAMP_LTZ: u8 = 231;
 pub const ORA_TYPE_NUM_VECTOR: u8 = 127;
 /// Maximum VECTOR prefetch length (`TNS_VECTOR_MAX_LENGTH` = 1 MiB).
 const TNS_VECTOR_MAX_LENGTH: u32 = 1024 * 1024;
+/// Maximum JSON (OSON) prefetch length (`TNS_JSON_MAX_LENGTH` = 32 MiB).
+const TNS_JSON_MAX_LENGTH: u32 = 32 * 1024 * 1024;
 pub const TNS_OBJ_TOP_LEVEL: u32 = 0x01;
 const TNS_LONG_LENGTH_INDICATOR: u8 = 254;
 const TNS_NULL_LENGTH_INDICATOR: u8 = 255;
@@ -425,6 +428,9 @@ pub enum QueryValue {
         chunk_size: u32,
     },
     Vector(crate::vector::Vector),
+    /// Native Oracle JSON (`DB_TYPE_JSON`, `ora_type_num` 119): the OSON image
+    /// is decoded eagerly into the lossless [`crate::oson::OsonValue`] tree.
+    Json(crate::oson::OsonValue),
     Array(Vec<Option<QueryValue>>),
 }
 
@@ -1005,6 +1011,10 @@ pub enum BindValue {
         values: Vec<Option<BindValue>>,
     },
     Vector(crate::vector::Vector),
+    /// Native Oracle JSON bind (`DB_TYPE_JSON`): the already-encoded OSON image.
+    /// The Python-facing layer encodes the value to OSON before binding so the
+    /// connection's long-field-name capability can be applied.
+    Json(Vec<u8>),
     Cursor {
         cursor_id: u32,
     },
@@ -1848,6 +1858,13 @@ fn write_bind_metadata_with_type(
         }
         _ => (TNS_BIND_USE_INDICATORS, 0),
     };
+    // JSON binds advertise a TNS_JSON_MAX_LENGTH prefetch buffer (reference
+    // base.pyx:1398-1400) so a returned/out OSON image streams inline.
+    let buffer_size = if ora_type_num == ORA_TYPE_NUM_JSON {
+        TNS_JSON_MAX_LENGTH
+    } else {
+        buffer_size
+    };
     writer.write_u8(ora_type_num);
     writer.write_u8(flags);
     writer.write_u8(0);
@@ -1856,7 +1873,7 @@ fn write_bind_metadata_with_type(
     writer.write_ub4(max_elements);
     let cont_flags = if matches!(
         ora_type_num,
-        ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR
+        ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR | ORA_TYPE_NUM_JSON
     ) {
         TNS_LOB_PREFETCH_FLAG
     } else {
@@ -1880,10 +1897,10 @@ fn write_bind_metadata_with_type(
     writer.write_u8(csfrm);
     // max chars (LOB prefetch length): VECTOR advertises TNS_VECTOR_MAX_LENGTH
     // so the server prefetches the image inline (reference base.pyx)
-    let lob_prefetch_length = if ora_type_num == ORA_TYPE_NUM_VECTOR {
-        TNS_VECTOR_MAX_LENGTH
-    } else {
-        0
+    let lob_prefetch_length = match ora_type_num {
+        ORA_TYPE_NUM_VECTOR => TNS_VECTOR_MAX_LENGTH,
+        ORA_TYPE_NUM_JSON => TNS_JSON_MAX_LENGTH,
+        _ => 0,
     };
     writer.write_ub4(lob_prefetch_length);
     writer.write_ub4(0);
@@ -1959,6 +1976,12 @@ pub fn bind_value_type_info(value: &BindValue) -> Option<BindTypeInfo> {
         // reference base.pyx _write_column_metadata: VECTOR binds advertise a
         // TNS_VECTOR_MAX_LENGTH prefetch buffer and the LOB-prefetch cont flag
         BindValue::Vector(_) => (ORA_TYPE_NUM_VECTOR, 0, TNS_VECTOR_MAX_LENGTH),
+        // JSON binds: the reference DB_TYPE_JSON var has buffer_size_factor 0, so
+        // its metadata buffer_size is small and the OSON value is written inline
+        // (not deferred to the "long" bind section). The TNS_JSON_MAX_LENGTH
+        // prefetch buffer is applied only in the wire metadata writer, not here,
+        // so the long/non-long bind-data ordering matches the reference.
+        BindValue::Json(_) => (ORA_TYPE_NUM_JSON, 0, 1),
         BindValue::Cursor { .. } => (ORA_TYPE_NUM_CURSOR, 0, 4),
     };
     Some(BindTypeInfo {
@@ -2190,6 +2213,7 @@ pub fn public_dbtype_name_from_column_metadata(metadata: &ColumnMetadata) -> &'s
         (ORA_TYPE_NUM_INTERVAL_YM, _) => "DB_TYPE_INTERVAL_YM",
         (ORA_TYPE_NUM_BOOLEAN, _) => "DB_TYPE_BOOLEAN",
         (ORA_TYPE_NUM_VECTOR, _) => "DB_TYPE_VECTOR",
+        (ORA_TYPE_NUM_JSON, _) => "DB_TYPE_JSON",
         _ => "DB_TYPE_VARCHAR",
     }
 }
@@ -2216,6 +2240,7 @@ pub fn public_dbtype_size_info(dbtype_name: &str) -> (u32, u32) {
         "DB_TYPE_ROWID" => (0, ORA_TYPE_SIZE_ROWID),
         "DB_TYPE_TIMESTAMP" | "DB_TYPE_TIMESTAMP_LTZ" => (0, ORA_TYPE_SIZE_TIMESTAMP),
         "DB_TYPE_TIMESTAMP_TZ" => (0, ORA_TYPE_SIZE_TIMESTAMP_TZ),
+        "DB_TYPE_JSON" | "DB_TYPE_VECTOR" => (0, 1),
         _ => (0, 0),
     }
 }
@@ -2455,6 +2480,7 @@ pub fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
             _ => "DB_TYPE_TIMESTAMP",
         },
         BindValue::Vector(_) => "DB_TYPE_VECTOR",
+        BindValue::Json(_) => "DB_TYPE_JSON",
         BindValue::Cursor { .. } => "DB_TYPE_CURSOR",
         BindValue::Null => "DB_TYPE_VARCHAR",
     }
@@ -2575,6 +2601,11 @@ pub fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
             csfrm: 0,
             buffer_size: TNS_VECTOR_MAX_LENGTH,
         },
+        "DB_TYPE_JSON" | "JSON" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_JSON,
+            csfrm: 0,
+            buffer_size: TNS_VECTOR_MAX_LENGTH,
+        },
         _ => BindValue::Null,
     }
 }
@@ -2628,6 +2659,8 @@ fn public_dbtype_name_from_type_info(ora_type_num: u8, csfrm: u8) -> &'static st
         (ORA_TYPE_NUM_TIMESTAMP_TZ, _) => "DB_TYPE_TIMESTAMP_TZ",
         (ORA_TYPE_NUM_CURSOR, _) => "DB_TYPE_CURSOR",
         (ORA_TYPE_NUM_OBJECT, _) => "DB_TYPE_OBJECT",
+        (ORA_TYPE_NUM_VECTOR, _) => "DB_TYPE_VECTOR",
+        (ORA_TYPE_NUM_JSON, _) => "DB_TYPE_JSON",
         _ => "DB_TYPE_VARCHAR",
     }
 }
@@ -2765,6 +2798,9 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm: u8) -> Res
             let image = crate::vector::encode_vector(vector);
             crate::vector::write_vector_image(writer, &image)
         }
+        // reference WriteBuffer.write_oson: a QLocator carrying the OSON image
+        // length, then the image bytes-with-length (same framing as VECTOR).
+        BindValue::Json(image) => crate::vector::write_vector_image(writer, image),
         BindValue::Cursor { cursor_id } => {
             if *cursor_id == 0 {
                 writer.write_u8(1);
@@ -2884,6 +2920,11 @@ fn write_define_column_metadata(writer: &mut TtcWriter, metadata: &ColumnMetadat
             TNS_VECTOR_MAX_LENGTH,
             TNS_LOB_PREFETCH_FLAG,
             TNS_VECTOR_MAX_LENGTH,
+        ),
+        ORA_TYPE_NUM_JSON => (
+            TNS_JSON_MAX_LENGTH,
+            TNS_LOB_PREFETCH_FLAG,
+            TNS_JSON_MAX_LENGTH,
         ),
         _ => (metadata.buffer_size, 0, 0),
     };
@@ -4141,6 +4182,7 @@ fn parse_column_value(
             parse_lob_value(reader, metadata)
         }
         ORA_TYPE_NUM_VECTOR => parse_vector_value(reader),
+        ORA_TYPE_NUM_JSON => parse_json_value(reader),
         ORA_TYPE_NUM_CURSOR => parse_cursor_value(reader).map(Some),
         ORA_TYPE_NUM_OBJECT => parse_object_value(reader, metadata),
         _ => Err(ProtocolError::UnsupportedFeature("query column type")),
@@ -4289,6 +4331,27 @@ fn parse_vector_value(reader: &mut TtcReader<'_>) -> Result<Option<QueryValue>> 
     }
     let vector = crate::vector::decode_vector(&data)?;
     Ok(Some(QueryValue::Vector(vector)))
+}
+
+/// Parses a native JSON (`DB_TYPE_JSON`) column value. Like VECTOR, OSON is sent
+/// as a fully-prefetched LOB: `num_bytes`, `size`, `chunk_size`, the OSON image,
+/// then a (discarded) LOB locator (reference packet.pyx `read_oson`).
+fn parse_json_value(reader: &mut TtcReader<'_>) -> Result<Option<QueryValue>> {
+    let num_bytes = reader.read_ub4()?;
+    if num_bytes == 0 {
+        return Ok(None);
+    }
+    reader.read_ub8()?; // size (unused)
+    reader.read_ub4()?; // chunk size (unused)
+    let Some(data) = reader.read_bytes()? else {
+        return Ok(None);
+    };
+    reader.read_bytes()?; // LOB locator (unused)
+    if data.is_empty() {
+        return Ok(None);
+    }
+    let value = crate::oson::decode_oson(&data)?;
+    Ok(Some(QueryValue::Json(value)))
 }
 
 fn parse_object_value(
@@ -4690,7 +4753,7 @@ pub(crate) fn encode_binary_float(value: f32) -> [u8; 4] {
     bytes
 }
 
-fn decode_binary_float(bytes: &[u8]) -> Result<f32> {
+pub(crate) fn decode_binary_float(bytes: &[u8]) -> Result<f32> {
     let bytes: [u8; 4] = bytes
         .try_into()
         .map_err(|_| ProtocolError::TtcDecode("invalid BINARY_FLOAT length"))?;
@@ -4708,7 +4771,7 @@ fn decode_binary_float(bytes: &[u8]) -> Result<f32> {
 const TNS_DURATION_MID: i64 = 0x8000_0000;
 const TNS_DURATION_OFFSET: i32 = 60;
 
-fn encode_interval_ds(days: i32, seconds: i32, microseconds: i32) -> Result<[u8; 11]> {
+pub(crate) fn encode_interval_ds(days: i32, seconds: i32, microseconds: i32) -> Result<[u8; 11]> {
     let mut bytes = [0u8; 11];
     let wire_days = u32::try_from(i64::from(days) + TNS_DURATION_MID)
         .map_err(|_| ProtocolError::TtcDecode("INTERVAL DS days out of range"))?;
@@ -4727,7 +4790,7 @@ fn encode_interval_ds(days: i32, seconds: i32, microseconds: i32) -> Result<[u8;
     Ok(bytes)
 }
 
-fn decode_interval_ds(bytes: &[u8]) -> Result<QueryValue> {
+pub(crate) fn decode_interval_ds(bytes: &[u8]) -> Result<QueryValue> {
     if bytes.len() < 11 {
         return Err(ProtocolError::TtcDecode("invalid INTERVAL DS length"));
     }
@@ -4774,7 +4837,7 @@ fn decode_interval_ym(bytes: &[u8]) -> Result<QueryValue> {
     })
 }
 
-fn decode_binary_double(bytes: &[u8]) -> Result<f64> {
+pub(crate) fn decode_binary_double(bytes: &[u8]) -> Result<f64> {
     let bytes: [u8; 8] = bytes
         .try_into()
         .map_err(|_| ProtocolError::TtcDecode("invalid BINARY_DOUBLE length"))?;

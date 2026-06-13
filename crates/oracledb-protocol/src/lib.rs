@@ -4,6 +4,7 @@ pub mod capabilities;
 pub mod crypto;
 pub mod dpl;
 pub mod net;
+pub mod oson;
 pub mod packet;
 pub mod sql;
 pub mod thin;
@@ -75,6 +76,19 @@ pub enum ProtocolError {
     DirectPathLoadTooMuchData,
     #[error("not implemented: {0}")]
     NotImplemented(&'static str),
+    // OSON / DB_TYPE_JSON. These mirror python-oracledb error numbers so the
+    // Python-facing layer can map them one-to-one:
+    //   DPY-5004 ERR_OSON_NODE_TYPE_NOT_SUPPORTED is *not* this; 5004 is the
+    //   "not previously encoded" case (bad magic/version) and 5006 is a
+    //   structurally invalid OSON image (truncation / bad offset).
+    #[error("DPY-5004: input data is not in the OSON format: {0}")]
+    OsonNotEncoded(&'static str),
+    #[error("DPY-5006: invalid OSON data: {0}")]
+    OsonInvalid(&'static str),
+    /// A JSON scalar node decoded to an Oracle type with no Python mapping
+    /// (e.g. INTERVAL YEAR TO MONTH). Mirrors DPY-3007 / ERR_DB_TYPE_NOT_SUPPORTED.
+    #[error("DPY-3007: the data type {0} is not supported")]
+    OsonTypeNotSupported(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;
