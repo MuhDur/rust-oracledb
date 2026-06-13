@@ -145,6 +145,75 @@ pub enum QueryValue {
     Array(Vec<Option<QueryValue>>),
 }
 
+impl QueryValue {
+    /// Borrow this value as decoded text when it is a `VARCHAR2` / `CHAR` /
+    /// `NVARCHAR2` / `CLOB`-inlined string, otherwise `None`. Convenience
+    /// accessor for callers that want to avoid matching the full enum.
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            QueryValue::Text(value) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Interpret this value as a 64-bit integer. Works for `NUMBER` values
+    /// whose canonical text parses as an `i64`, and for the native
+    /// `DB_TYPE_BOOLEAN` (`true` -> 1, `false` -> 0). Returns `None` for any
+    /// other variant, or a `NUMBER` that does not fit / is not integral.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            QueryValue::Number { text, .. } => text.parse::<i64>().ok(),
+            QueryValue::Boolean(value) => Some(i64::from(*value)),
+            _ => None,
+        }
+    }
+
+    /// Interpret this value as an `f64`. Works for `NUMBER`, `BINARY_DOUBLE`
+    /// and `BINARY_FLOAT` (all carried as canonical text), otherwise `None`.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            QueryValue::Number { text, .. } => text.parse::<f64>().ok(),
+            QueryValue::BinaryDouble(text) => text.parse::<f64>().ok(),
+            _ => None,
+        }
+    }
+
+    /// Borrow the canonical decimal text of a `NUMBER` value (lossless,
+    /// arbitrary precision), otherwise `None`.
+    pub fn as_number_text(&self) -> Option<&str> {
+        match self {
+            QueryValue::Number { text, .. } => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Return the boolean of a native `DB_TYPE_BOOLEAN` value, otherwise
+    /// `None`.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            QueryValue::Boolean(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Borrow the bytes of a `RAW` value, otherwise `None`.
+    pub fn as_raw(&self) -> Option<&[u8]> {
+        match self {
+            QueryValue::Raw(bytes) => Some(bytes.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Borrow the encoded text of a `ROWID` / `UROWID` value, otherwise
+    /// `None`.
+    pub fn as_rowid(&self) -> Option<&str> {
+        match self {
+            QueryValue::Rowid(value) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum BindValue {
     Null,
@@ -267,6 +336,25 @@ pub struct QueryResult {
     pub sessionless_txn_state: Option<SessionlessTxnState>,
 }
 
+impl QueryResult {
+    /// Borrow the value at `(row, col)` of the fetched result, or `None` when
+    /// either index is out of range or the cell is SQL `NULL`. Convenience
+    /// accessor so callers do not have to index `rows[row][col]` and unwrap
+    /// the `Option` by hand.
+    pub fn cell(&self, row: usize, col: usize) -> Option<&QueryValue> {
+        self.rows.get(row)?.get(col)?.as_ref()
+    }
+
+    /// Zero-based column index of the column whose name matches `name`
+    /// case-insensitively (Oracle folds unquoted identifiers to upper case),
+    /// or `None` when there is no such column.
+    pub fn column_index(&self, name: &str) -> Option<usize> {
+        self.columns
+            .iter()
+            .position(|col| col.name.eq_ignore_ascii_case(name))
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LobReadResult {
     pub data: Option<Vec<u8>>,
@@ -358,4 +446,66 @@ pub struct BatchServerError {
     pub code: u32,
     pub offset: u32,
     pub message: String,
+}
+
+#[cfg(test)]
+mod accessor_tests {
+    use super::*;
+
+    #[test]
+    fn query_value_typed_accessors() {
+        let text = QueryValue::Text("hello".to_string());
+        assert_eq!(text.as_text(), Some("hello"));
+        assert_eq!(text.as_i64(), None);
+
+        let int = QueryValue::Number {
+            text: "42".to_string(),
+            is_integer: true,
+        };
+        assert_eq!(int.as_i64(), Some(42));
+        assert_eq!(int.as_f64(), Some(42.0));
+        assert_eq!(int.as_number_text(), Some("42"));
+
+        let dbl = QueryValue::BinaryDouble("2.5".to_string());
+        assert_eq!(dbl.as_f64(), Some(2.5));
+
+        let boolean = QueryValue::Boolean(true);
+        assert_eq!(boolean.as_bool(), Some(true));
+        assert_eq!(boolean.as_i64(), Some(1));
+
+        let raw = QueryValue::Raw(vec![0xDE, 0xAD]);
+        assert_eq!(raw.as_raw(), Some([0xDE, 0xAD].as_slice()));
+
+        let rowid = QueryValue::Rowid("AAAR".to_string());
+        assert_eq!(rowid.as_rowid(), Some("AAAR"));
+    }
+
+    #[test]
+    fn query_result_cell_and_column_index() {
+        let result = QueryResult {
+            columns: vec![
+                ColumnMetadata {
+                    name: "ID".to_string(),
+                    ..ColumnMetadata::default()
+                },
+                ColumnMetadata {
+                    name: "NAME".to_string(),
+                    ..ColumnMetadata::default()
+                },
+            ],
+            rows: vec![vec![
+                Some(QueryValue::Number {
+                    text: "7".to_string(),
+                    is_integer: true,
+                }),
+                None,
+            ]],
+            ..QueryResult::default()
+        };
+        assert_eq!(result.cell(0, 0).and_then(QueryValue::as_i64), Some(7));
+        assert!(result.cell(0, 1).is_none(), "NULL cell is None");
+        assert!(result.cell(1, 0).is_none(), "out-of-range row is None");
+        assert_eq!(result.column_index("name"), Some(1));
+        assert_eq!(result.column_index("missing"), None);
+    }
 }
