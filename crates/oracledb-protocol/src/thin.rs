@@ -1209,7 +1209,14 @@ fn write_bind_metadata_with_type(
         writer.write_ub2(0);
     }
     writer.write_u8(csfrm);
-    writer.write_ub4(0);
+    // max chars (LOB prefetch length): VECTOR advertises TNS_VECTOR_MAX_LENGTH
+    // so the server prefetches the image inline (reference base.pyx)
+    let lob_prefetch_length = if ora_type_num == ORA_TYPE_NUM_VECTOR {
+        TNS_VECTOR_MAX_LENGTH
+    } else {
+        0
+    };
+    writer.write_ub4(lob_prefetch_length);
     writer.write_ub4(0);
     Ok(())
 }
@@ -2176,17 +2183,25 @@ pub fn build_define_fetch_payload_with_seq(
 }
 
 fn write_define_column_metadata(writer: &mut TtcWriter, metadata: &ColumnMetadata) {
+    // reference base.pyx: VECTOR (and JSON) columns advertise a LOB-prefetch
+    // buffer so the server streams the image inline rather than returning a
+    // bare temp-LOB locator
+    let (mut buffer_size, cont_flags, lob_prefetch_length) = match metadata.ora_type_num {
+        ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB => (metadata.buffer_size, TNS_LOB_PREFETCH_FLAG, 0),
+        ORA_TYPE_NUM_VECTOR => (
+            TNS_VECTOR_MAX_LENGTH,
+            TNS_LOB_PREFETCH_FLAG,
+            TNS_VECTOR_MAX_LENGTH,
+        ),
+        _ => (metadata.buffer_size, 0, 0),
+    };
+    buffer_size = buffer_size.max(1);
     writer.write_u8(metadata.ora_type_num);
     writer.write_u8(TNS_BIND_USE_INDICATORS);
     writer.write_u8(0);
     writer.write_u8(0);
-    writer.write_ub4(metadata.buffer_size.max(1));
+    writer.write_ub4(buffer_size);
     writer.write_ub4(0);
-    let cont_flags = if matches!(metadata.ora_type_num, ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB) {
-        TNS_LOB_PREFETCH_FLAG
-    } else {
-        0
-    };
     writer.write_ub8(cont_flags);
     writer.write_ub4(0);
     writer.write_ub2(0);
@@ -2196,7 +2211,7 @@ fn write_define_column_metadata(writer: &mut TtcWriter, metadata: &ColumnMetadat
         writer.write_ub2(0);
     }
     writer.write_u8(metadata.csfrm);
-    writer.write_ub4(0);
+    writer.write_ub4(lob_prefetch_length);
     writer.write_ub4(0);
 }
 

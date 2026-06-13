@@ -285,6 +285,10 @@ pub(crate) fn raise_python_value_not_supported(type_name: &str) -> PyErr {
     )
 }
 
+pub(crate) fn raise_invalid_vector() -> PyErr {
+    raise_oracledb_driver_error("ERR_INVALID_VECTOR")
+}
+
 pub(crate) fn raise_inconsistent_datatypes(input_type: &str, output_type: &str) -> PyErr {
     raise_oracledb_driver_error_with_kwargs(
         "ERR_INCONSISTENT_DATATYPES",

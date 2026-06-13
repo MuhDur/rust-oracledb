@@ -178,6 +178,10 @@ impl<'a> TtcReader<'a> {
         self.pos
     }
 
+    pub fn remaining_slice(&self) -> &[u8] {
+        &self.bytes[self.pos.min(self.bytes.len())..]
+    }
+
     pub fn peek_u8(&self) -> Result<u8> {
         self.bytes
             .get(self.pos)

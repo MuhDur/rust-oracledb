@@ -632,6 +632,25 @@ impl ThinVar {
                 .unbind()
                 .into()),
             "DB_TYPE_JSON" => pass(),
+            // reference connection.pyx _check_value: list -> array('d'),
+            // array.array (f/d/b/B) and SparseVector pass through; empty
+            // vectors raise DPY-4031; anything else DPY-3013
+            "DB_TYPE_VECTOR" => {
+                if let Ok(list) = value.cast::<PyList>() {
+                    if list.is_empty() {
+                        return Err(raise_invalid_vector());
+                    }
+                    let array_mod = PyModule::import(py, "array")?;
+                    return Ok(array_mod.getattr("array")?.call1(("d", list))?.unbind());
+                }
+                if crate::vector::is_vector_value(value)? {
+                    // validate the typecode / non-emptiness eagerly so binding
+                    // errors surface at set time, matching the reference
+                    crate::vector::py_to_vector(value, false)?;
+                    return pass();
+                }
+                unsupported()
+            }
             _ => Err(raise_unsupported_type_set(&self.dbtype_name)),
         }
     }
