@@ -347,7 +347,13 @@ pub(crate) fn parse_query_response_with_context_binds_and_options(
             TNS_MSG_TYPE_IMPLICIT_RESULTSET => {
                 // reference messages/base.pyx `_process_implicit_result`
                 let num_results = reader.read_ub4()?;
-                let mut resultsets = Vec::with_capacity(num_results as usize);
+                // `num_results` is read straight off the wire (a ub4, up to
+                // ~4e9); each resultset consumes at least one byte, so cap the
+                // reservation by the bytes left in the payload. Without this a
+                // hostile server forces a multi-gigabyte allocation (OOM)
+                // before the truncated read in the loop body fails closed.
+                let mut resultsets =
+                    Vec::with_capacity((num_results as usize).min(reader.remaining()));
                 for _ in 0..num_results {
                     let num_bytes = reader.read_u8()?;
                     reader.skip(usize::from(num_bytes))?;
@@ -564,7 +570,11 @@ pub(crate) fn parse_column_metadata(
             reader.skip(1)?;
             let num_annotations = reader.read_ub4()?;
             reader.skip(1)?;
-            let mut collected = Vec::with_capacity(num_annotations as usize);
+            // Bound by remaining bytes: each annotation reads at least a
+            // length-prefixed key/value, so a ub4 count larger than the
+            // payload is a lie that must not pre-allocate gigabytes.
+            let mut collected =
+                Vec::with_capacity((num_annotations as usize).min(reader.remaining()));
             for _ in 0..num_annotations {
                 let key = reader.read_string_with_length()?.unwrap_or_default();
                 // A null annotation value is normalized to "" by the reference
@@ -691,7 +701,9 @@ pub(crate) fn parse_out_bind_row_data(
                     minimum: 0,
                 }
             })?;
-            let mut values = Vec::with_capacity(num_elements);
+            // Cap by remaining bytes (each element consumes wire data); a ub4
+            // count cannot legitimately exceed the payload size.
+            let mut values = Vec::with_capacity(num_elements.min(reader.remaining()));
             for _ in 0..num_elements {
                 let value = parse_column_value(reader, metadata)?;
                 let actual_num_bytes = reader.read_sb4()?;
@@ -731,7 +743,8 @@ pub(crate) fn parse_returning_row_data(
                 minimum: 0,
             }
         })?;
-        let mut values = Vec::with_capacity(num_rows);
+        // Cap by remaining bytes; see the OOM-hardening note above.
+        let mut values = Vec::with_capacity(num_rows.min(reader.remaining()));
         for _ in 0..num_rows {
             let value = parse_column_value(reader, metadata)?;
             let actual_num_bytes = reader.read_sb4()?;
@@ -1075,11 +1088,35 @@ pub(crate) fn parse_query_return_parameters(
     if arraydmlrowcounts {
         // reference messages/base.pyx `_process_return_parameters` tail
         let num_rows = reader.read_ub4()?;
-        let mut row_counts = Vec::with_capacity(num_rows as usize);
+        // Each ub8 row count consumes at least one byte, so cap the
+        // reservation by the remaining payload size (OOM hardening).
+        let mut row_counts = Vec::with_capacity((num_rows as usize).min(reader.remaining()));
         for _ in 0..num_rows {
             row_counts.push(reader.read_ub8()?);
         }
         return Ok(Some(row_counts));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod fuzz_regression_tests {
+    use super::*;
+
+    // Regression (w6-fuzz, query_response target): a TNS_MSG_TYPE_IMPLICIT_RESULTSET
+    // message (27) whose ub4 result count was ~620M made the dispatch loop
+    // `Vec::with_capacity` several gigabytes of `QueryValue::Cursor` before the
+    // truncated read failed, tripping libFuzzer's OOM detector. The parser must
+    // now fail closed (truncated payload) without the giant allocation.
+    #[test]
+    fn fuzz_regression_implicit_resultset_oom() {
+        // payload: type=27, ub4 length byte 4, value 0x25000000 (~620M), then EOF
+        let payload = [27u8, 4, 37, 0, 0, 0];
+        let err = parse_query_response(&payload, ClientCapabilities::default())
+            .expect_err("oversized implicit-resultset count must fail closed");
+        assert!(
+            matches!(err, ProtocolError::TtcDecode(_)),
+            "expected fail-closed TtcDecode, got {err:?}"
+        );
+    }
 }

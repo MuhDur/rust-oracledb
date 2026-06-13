@@ -281,14 +281,22 @@ impl<'a> TtcReader<'a> {
         if len > 4 {
             return Err(ProtocolError::TtcDecode("invalid sb4 length"));
         }
-        let mut value = 0i32;
+        // Accumulate in the unsigned width and reinterpret as signed: a server
+        // can send four bytes whose high bit is set (so the signed value is
+        // i32::MIN) and flag the length as negative. Negating i32::MIN — or even
+        // the intermediate `value << 8` — would overflow and panic under the
+        // debug/overflow-checked fuzz build. `wrapping_neg` matches the
+        // reference C decoder's two's-complement behavior and never panics.
+        let mut value = 0u32;
         for byte in self.read_raw(usize::from(len))? {
-            value = (value << 8) | i32::from(*byte);
+            value = (value << 8) | u32::from(*byte);
         }
-        if is_negative {
-            value = -value;
-        }
-        Ok(value)
+        let value = value as i32;
+        Ok(if is_negative {
+            value.wrapping_neg()
+        } else {
+            value
+        })
     }
 
     pub fn read_sb8(&mut self) -> Result<i64> {
@@ -301,14 +309,18 @@ impl<'a> TtcReader<'a> {
         if len > 8 {
             return Err(ProtocolError::TtcDecode("invalid sb8 length"));
         }
-        let mut value = 0i64;
+        // See `read_sb4`: unsigned accumulation plus `wrapping_neg` avoids the
+        // i64::MIN negate-overflow panic on adversarial input.
+        let mut value = 0u64;
         for byte in self.read_raw(usize::from(len))? {
-            value = (value << 8) | i64::from(*byte);
+            value = (value << 8) | u64::from(*byte);
         }
-        if is_negative {
-            value = -value;
-        }
-        Ok(value)
+        let value = value as i64;
+        Ok(if is_negative {
+            value.wrapping_neg()
+        } else {
+            value
+        })
     }
 
     pub fn read_ub8(&mut self) -> Result<u64> {
@@ -420,6 +432,44 @@ pub fn encode_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression (w6-fuzz, query_response target): a negative-flagged sb4/sb8
+    // whose magnitude is i32::MIN / i64::MIN made `-value` overflow and panic
+    // ("attempt to negate with overflow") under the overflow-checked fuzz
+    // build. `read_sb4`/`read_sb8` must now wrap instead of panicking.
+    #[test]
+    fn sb4_sb8_negate_overflow_does_not_panic() {
+        // len byte 0x84 => negative, 4 bytes; value bytes 80 00 00 00 => i32::MIN.
+        let bytes = [0x84u8, 0x80, 0x00, 0x00, 0x00];
+        let mut reader = TtcReader::new(&bytes);
+        assert_eq!(reader.read_sb4().expect("sb4 must not panic"), i32::MIN);
+
+        // len byte 0x88 => negative, 8 bytes; 80 00.. => i64::MIN.
+        let bytes8 = [0x88u8, 0x80, 0, 0, 0, 0, 0, 0, 0];
+        let mut reader8 = TtcReader::new(&bytes8);
+        assert_eq!(reader8.read_sb8().expect("sb8 must not panic"), i64::MIN);
+    }
+
+    // Round-trip ordinary signed values to confirm the unsigned-accumulation
+    // rewrite did not change behavior for the common range.
+    #[test]
+    fn sb4_decodes_representative_values() {
+        // Hand-encoded sign-magnitude: len|0x80 for negatives.
+        let cases: [(&[u8], i32); 4] = [
+            (&[0x00], 0),
+            (&[0x01, 0x2a], 42),
+            (&[0x81, 0x2a], -42),
+            (&[0x02, 0x01, 0x00], 256),
+        ];
+        for (bytes, expected) in cases {
+            let mut reader = TtcReader::new(bytes);
+            assert_eq!(
+                reader.read_sb4().expect("sb4 decode"),
+                expected,
+                "{bytes:?}"
+            );
+        }
+    }
 
     #[test]
     fn ub4_round_trips_representative_values() {

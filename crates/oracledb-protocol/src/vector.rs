@@ -147,9 +147,17 @@ pub fn decode_vector(data: &[u8]) -> Result<Vector> {
 
 fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<VectorValues> {
     let count = count as usize;
+    // `count` is read straight off the wire (a u32, up to ~4e9). Reserving that
+    // many elements up front lets a hostile/buggy server force a multi-gigabyte
+    // allocation (OOM) before the first element read even fails on truncation.
+    // A legitimate image always carries `count * element_size` value bytes, so
+    // capping the initial reservation by what remains in the buffer never
+    // affects a valid vector while making the allocation fail-closed. The
+    // per-element `read_raw` below still bounds-checks each read.
+    let cap = |element_size: usize| count.min(reader.remaining() / element_size.max(1));
     match format {
         VECTOR_FORMAT_FLOAT32 => {
-            let mut out = Vec::with_capacity(count);
+            let mut out = Vec::with_capacity(cap(4));
             for _ in 0..count {
                 let raw = reader.read_raw(4)?;
                 out.push(decode_binary_float([raw[0], raw[1], raw[2], raw[3]]));
@@ -157,7 +165,7 @@ fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<V
             Ok(VectorValues::Float32(out))
         }
         VECTOR_FORMAT_FLOAT64 => {
-            let mut out = Vec::with_capacity(count);
+            let mut out = Vec::with_capacity(cap(8));
             for _ in 0..count {
                 let raw = reader.read_raw(8)?;
                 out.push(decode_binary_double([
@@ -167,7 +175,7 @@ fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<V
             Ok(VectorValues::Float64(out))
         }
         VECTOR_FORMAT_INT8 => {
-            let mut out = Vec::with_capacity(count);
+            let mut out = Vec::with_capacity(cap(1));
             for _ in 0..count {
                 out.push(reader.read_u8()? as i8);
             }
@@ -461,6 +469,18 @@ mod tests {
         image[1] = 99; // bump version past WITH_SPARSE
         let err = decode_vector(&image).expect_err("bad version must fail");
         assert!(matches!(err, ProtocolError::TtcDecode(_)));
+    }
+
+    // Regression (w6-fuzz, vector_decoder target): a header advertising a huge
+    // FLOAT64 element count (here ~905M via num_elements 0x36000000) made the
+    // decoder `Vec::with_capacity` ~7 GB before the first truncated element
+    // read failed, tripping libFuzzer's OOM detector. The decoder must now
+    // fail closed (truncated payload) without the giant allocation.
+    #[test]
+    fn fuzz_regression_oom_oversized_element_count() {
+        let input = [219, 0, 0, 18, 3, 54, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let err = decode_vector(&input).expect_err("oversized count must fail closed");
+        assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
     }
 
     #[test]
