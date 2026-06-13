@@ -1,0 +1,79 @@
+[package]
+name = "oracledb-protocol-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# An empty `[workspace]` table makes this a standalone workspace root, so the
+# fuzz crate is NOT a member of the parent rust-oracledb workspace. This keeps
+# the libfuzzer-sys / arbitrary fuzz dependencies out of the normal workspace
+# build and lockfile (the GATE requirement: "the fuzz crate must NOT break the
+# normal workspace build").
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oracledb-protocol]
+path = ".."
+
+# cargo-fuzz builds these with sanitizers; libFuzzer is the engine.
+[[bin]]
+name = "packet_framing"
+path = "fuzz_targets/packet_framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "query_response"
+path = "fuzz_targets/query_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oson_decoder"
+path = "fuzz_targets/oson_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "vector_decoder"
+path = "fuzz_targets/vector_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scalar_codecs"
+path = "fuzz_targets/scalar_codecs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "server_error_info"
+path = "fuzz_targets/server_error_info.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dpl_response"
+path = "fuzz_targets/dpl_response.rs"
+test = false
+doc = false
+bench = false
+
+# Release profile with debug assertions on: catches arithmetic overflow panics
+# (the protocol decoder must fail-closed, never panic on overflow) while keeping
+# libFuzzer fast.
+[profile.release]
+debug = 1
+debug-assertions = true
+overflow-checks = true

@@ -41,6 +41,10 @@ thiserror = "2.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+# `cfg(fuzzing)` is set by cargo-fuzz when building the libFuzzer harnesses in
+# crates/oracledb-protocol/fuzz/. Registering it keeps the unexpected_cfgs lint
+# (and thus the `-D warnings` clippy gate) quiet for the normal workspace build.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 
 [workspace.lints.clippy]
 dbg_macro = "deny"

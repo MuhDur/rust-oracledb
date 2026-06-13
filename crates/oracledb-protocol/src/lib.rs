@@ -163,6 +163,48 @@ fn sanitize_identity_field(field: &'static str, value: String) -> Result<String>
     Ok(out)
 }
 
+/// Fuzz-only thin wrappers over `pub(crate)` decoder entry points.
+///
+/// This module is compiled **only** under `--cfg fuzzing` (set automatically
+/// by `cargo-fuzz`). It exposes the crate-internal decode functions that take
+/// adversarial server bytes — the server-error trailer parser and the
+/// `pub(crate)` scalar codecs — so the `fuzz/` targets can call them directly
+/// without widening the normal public API. Each wrapper is a zero-logic
+/// forward to the real function; the goal is to prove these never panic on
+/// malformed input (they must fail closed with a [`ProtocolError`]).
+#[cfg(fuzzing)]
+pub mod fuzz_api {
+    use crate::wire::TtcReader;
+    use crate::Result;
+
+    /// Fuzz the server-error trailer parser (`parse_server_error_info`).
+    /// `ttc_field_version` is taken from the first input byte so the fuzzer
+    /// can explore both the legacy and 20.1+ trailer layouts.
+    pub fn fuzz_parse_server_error_info(data: &[u8]) -> Result<()> {
+        let (ttc_field_version, rest) = data.split_first().map_or((24u8, data), |(v, r)| (*v, r));
+        let mut reader = TtcReader::new(rest);
+        crate::thin::parse_server_error_info(&mut reader, ttc_field_version).map(|_| ())
+    }
+
+    /// Fuzz the server-side piggyback skipper (`skip_server_side_piggyback`).
+    pub fn fuzz_skip_server_side_piggyback(data: &[u8]) -> Result<()> {
+        let mut reader = TtcReader::new(data);
+        crate::thin::skip_server_side_piggyback(&mut reader).map(|_| ())
+    }
+
+    /// Fuzz every `pub(crate)` scalar codec that decodes raw column bytes.
+    /// Drives them all from one input so a single target covers the full
+    /// scalar surface (NUMBER, datetime, intervals, binary float/double).
+    pub fn fuzz_scalar_codecs(data: &[u8]) {
+        let _ = crate::thin::decode_number_value(data);
+        let _ = crate::thin::decode_datetime_value(data);
+        let _ = crate::thin::decode_interval_ds(data);
+        let _ = crate::thin::decode_interval_ym(data);
+        let _ = crate::thin::decode_binary_float(data);
+        let _ = crate::thin::decode_binary_double(data);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
