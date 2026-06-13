@@ -610,3 +610,170 @@ pub(crate) fn array_capsules<'py>(
     let array_cap = array_capsule(py, ffi_array)?;
     PyTuple::new(py, [schema.into_any(), array_cap.into_any()])
 }
+
+// ---------------------------------------------------------------------------
+// Direct Path Load: Python data -> DirectPathColumnValue rows
+// ---------------------------------------------------------------------------
+
+use oracledb::protocol::dpl::DirectPathColumnValue;
+use oracledb::protocol::thin::{
+    ColumnMetadata, CS_FORM_NCHAR, ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_FLOAT,
+    ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_RAW,
+};
+
+/// Materializes `direct_path_load`'s `data` (a list of row sequences, or an
+/// Arrow PyCapsule stream object such as pyarrow.Table / pandas.DataFrame) into
+/// owned Python row tuples. Done before taking the connection lock so the lock
+/// is held only for the wire exchange.
+pub(crate) fn direct_path_py_rows(data: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyTuple>>> {
+    let py = data.py();
+    let owned;
+    let row_iterable: Bound<'_, PyAny> = if has_arrow_c_stream(data) {
+        owned = arrow_table_to_py_rows(py, data)?.rows.into_any();
+        owned
+    } else {
+        data.clone()
+    };
+    let rows_iter = row_iterable.try_iter().map_err(|_| {
+        dpy_database_error(
+            "DPY-2004",
+            "data must be a list of sequences or a DataFrame",
+        )
+    })?;
+    let mut rows = Vec::new();
+    for row in rows_iter {
+        let row = row?;
+        let cells: Vec<Bound<'_, PyAny>> = row.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+        rows.push(PyTuple::new(py, cells)?.unbind());
+    }
+    Ok(rows)
+}
+
+/// Verifies every materialized row has exactly `num_columns` cells, raising
+/// DPY-4009 otherwise. Run before PREPARE so a width mismatch never leaves a
+/// half-open direct-path cursor on the session.
+pub(crate) fn verify_direct_path_widths(
+    py: Python<'_>,
+    py_rows: &[Py<PyTuple>],
+    num_columns: usize,
+) -> PyResult<()> {
+    for py_row in py_rows {
+        let len = py_row.bind(py).len();
+        if len != num_columns {
+            return Err(dpy_database_error(
+                "DPY-4009",
+                &format!(
+                    "{num_columns} positional bind values are required but {len} were provided"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Converts materialized Python rows into direct-path rows using the prepared
+/// per-column Oracle metadata (so a Python `float` becomes BINARY_FLOAT,
+/// BINARY_DOUBLE, or NUMBER as the target column requires).
+pub(crate) fn direct_path_rows_from_py(
+    py: Python<'_>,
+    py_rows: &[Py<PyTuple>],
+    column_metadata: &[ColumnMetadata],
+    num_columns: usize,
+) -> PyResult<Vec<Vec<DirectPathColumnValue>>> {
+    let mut rows = Vec::with_capacity(py_rows.len());
+    for py_row in py_rows {
+        let row = py_row.bind(py);
+        let mut converted = Vec::with_capacity(num_columns);
+        for (index, cell) in row.iter().enumerate() {
+            converted.push(py_value_to_direct_path(&cell, column_metadata.get(index))?);
+        }
+        rows.push(converted);
+    }
+    Ok(rows)
+}
+
+/// Converts a single Python value to a [`DirectPathColumnValue`]. The target
+/// column metadata (when known) disambiguates numeric encodings and the text
+/// charset (NCHAR-form columns are UTF-16BE on the wire).
+fn py_value_to_direct_path(
+    value: &Bound<'_, PyAny>,
+    metadata: Option<&ColumnMetadata>,
+) -> PyResult<DirectPathColumnValue> {
+    let ora_type_num = metadata.map(|m| m.ora_type_num);
+    if value.is_none() {
+        return Ok(DirectPathColumnValue::Null);
+    }
+    if value.is_instance_of::<pyo3::types::PyBool>() && ora_type_num != Some(ORA_TYPE_NUM_NUMBER) {
+        return Ok(DirectPathColumnValue::Boolean(value.is_truthy()?));
+    }
+    if let Ok(bytes) = value.cast::<pyo3::types::PyBytes>() {
+        return Ok(DirectPathColumnValue::Bytes(bytes.as_bytes().to_vec()));
+    }
+    if let Ok(text) = value.extract::<String>() {
+        // Oracle stores an empty VARCHAR/CHAR as NULL; a direct-path load of an
+        // empty string into a NOT NULL column must therefore raise DPY-8001.
+        if text.is_empty() {
+            return Ok(DirectPathColumnValue::Null);
+        }
+        // NCHAR-form columns (incl. CLOBs streamed as LONG over a multi-byte DB
+        // charset) carry UTF-16BE bytes on the direct-path wire; other character
+        // columns are UTF-8.
+        let is_nchar = metadata.is_some_and(|m| m.csfrm == CS_FORM_NCHAR);
+        let encoded = if is_nchar {
+            text.encode_utf16().flat_map(u16::to_be_bytes).collect()
+        } else {
+            text.into_bytes()
+        };
+        return Ok(DirectPathColumnValue::Bytes(encoded));
+    }
+    if let Some((year, month, day, hour, minute, second, nanosecond)) =
+        crate::py_date_time_fields(value)?
+    {
+        return Ok(DirectPathColumnValue::DateTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+        });
+    }
+    // Numeric value: pick the encoding from the target column type.
+    match ora_type_num {
+        Some(ORA_TYPE_NUM_BINARY_FLOAT) => {
+            return Ok(DirectPathColumnValue::BinaryFloat(value.extract::<f32>()?));
+        }
+        Some(ORA_TYPE_NUM_BINARY_DOUBLE) => {
+            return Ok(DirectPathColumnValue::BinaryDouble(value.extract::<f64>()?));
+        }
+        Some(ORA_TYPE_NUM_RAW) | Some(ORA_TYPE_NUM_BLOB) => {
+            // RAW/BLOB from a non-bytes value is unsupported.
+        }
+        _ => {
+            // int / Decimal / float bound to a NUMBER column all keep their
+            // exact decimal text representation.
+            if value.is_instance_of::<pyo3::types::PyInt>()
+                || crate::py_value_type_name(value) == "Decimal"
+                || value.extract::<f64>().is_ok()
+            {
+                return Ok(DirectPathColumnValue::Number(
+                    value.str()?.extract::<String>()?,
+                ));
+            }
+        }
+    }
+    Err(dpy_database_error(
+        "DPY-3002",
+        &format!(
+            "Python value of type \"{}\" is not supported",
+            crate::py_value_type_name(value)
+        ),
+    ))
+}
+
+/// Maps a driver direct-path-load error to a Python exception, preserving the
+/// reference DPY-* / ORA-* codes the driver already embeds in its messages.
+pub(crate) fn direct_path_error_to_py(err: oracledb::Error) -> PyErr {
+    crate::ora_database_error(&err.to_string())
+}

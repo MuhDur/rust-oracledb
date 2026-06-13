@@ -1225,6 +1225,30 @@ impl Connection {
         op_result
     }
 
+    /// Loads pre-converted rows against an already-prepared direct path cursor,
+    /// then sends the FINISH (or ABORT on failure) op. Lets a caller convert its
+    /// data using the prepared `column_metadata` without a second PREPARE round
+    /// trip (so the reference round-trip count holds).
+    pub async fn direct_path_load_prepared(
+        &mut self,
+        cx: &Cx,
+        prepare: &oracledb_protocol::dpl::DirectPathPrepareResult,
+        rows: &[Vec<oracledb_protocol::dpl::DirectPathColumnValue>],
+        batch_size: u32,
+    ) -> Result<()> {
+        let load_result = self
+            .direct_path_load_batches(cx, prepare, rows, batch_size)
+            .await;
+        let op_code = if load_result.is_ok() {
+            oracledb_protocol::dpl::TNS_DP_OP_FINISH
+        } else {
+            oracledb_protocol::dpl::TNS_DP_OP_ABORT
+        };
+        let op_result = self.direct_path_op(cx, prepare.cursor_id, op_code).await;
+        load_result?;
+        op_result
+    }
+
     async fn direct_path_load_batches(
         &mut self,
         cx: &Cx,
@@ -1808,6 +1832,38 @@ impl BlockingConnection {
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection
                 .direct_path_load(&cx, schema_name, table_name, column_names, rows, batch_size)
+                .await
+        })
+    }
+
+    pub fn direct_path_prepare(
+        connection: &mut Connection,
+        schema_name: &str,
+        table_name: &str,
+        column_names: &[String],
+    ) -> Result<oracledb_protocol::dpl::DirectPathPrepareResult> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .direct_path_prepare(&cx, schema_name, table_name, column_names)
+                .await
+        })
+    }
+
+    pub fn direct_path_load_prepared(
+        connection: &mut Connection,
+        prepare: &oracledb_protocol::dpl::DirectPathPrepareResult,
+        rows: &[Vec<oracledb_protocol::dpl::DirectPathColumnValue>],
+        batch_size: u32,
+    ) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .direct_path_load_prepared(&cx, prepare, rows, batch_size)
                 .await
         })
     }

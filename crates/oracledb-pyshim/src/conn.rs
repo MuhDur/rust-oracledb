@@ -11,7 +11,7 @@ use oracledb::protocol::thin::{
 };
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection};
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
@@ -1132,6 +1132,56 @@ impl ThinConnImpl {
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
         BlockingConnection::commit(connection).map_err(runtime_error)?;
+        self.state
+            .lock()
+            .map_err(runtime_error)?
+            .transaction_in_progress = false;
+        Ok(())
+    }
+
+    /// Loads data into a table via the Direct Path Load interface (reference
+    /// thin/connection.pyx:589). `data` is a list of row sequences or an object
+    /// implementing the Arrow PyCapsule stream interface (pyarrow.Table /
+    /// pandas.DataFrame). A successful load commits server-side (FINISH op).
+    fn direct_path_load(
+        &self,
+        schema_name: &str,
+        table_name: &str,
+        column_names: Vec<String>,
+        data: &Bound<'_, PyAny>,
+        batch_size: u32,
+    ) -> PyResult<()> {
+        if batch_size == 0 {
+            return Err(PyTypeError::new_err(
+                "batch_size must be a positive integer",
+            ));
+        }
+        // Materialize the data into Python row tuples up front (Arrow/pandas are
+        // consumed into native values), and validate the row widths *before*
+        // PREPARE so a column-count mismatch (DPY-4009) never leaves a half-open
+        // direct-path cursor behind.
+        let py_rows = direct_path_py_rows(data)?;
+        Python::attach(|py| verify_direct_path_widths(py, &py_rows, column_names.len()))?;
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        // PREPARE first so the per-column Oracle types are known; values are then
+        // converted against that metadata (e.g. float -> BINARY_FLOAT vs NUMBER).
+        let prepare = BlockingConnection::direct_path_prepare(
+            connection,
+            schema_name,
+            table_name,
+            &column_names,
+        )
+        .map_err(direct_path_error_to_py)?;
+        let rows = Python::attach(|py| {
+            direct_path_rows_from_py(py, &py_rows, &prepare.column_metadata, column_names.len())
+        })?;
+        BlockingConnection::direct_path_load_prepared(connection, &prepare, &rows, batch_size)
+            .map_err(direct_path_error_to_py)?;
+        // A successful direct path load commits on the server; reflect that in
+        // the shim transaction state.
         self.state
             .lock()
             .map_err(runtime_error)?

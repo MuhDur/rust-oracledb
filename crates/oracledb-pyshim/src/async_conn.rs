@@ -3,8 +3,9 @@ use std::sync::{Arc, Mutex};
 use oracledb::protocol::thin::{
     CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB,
 };
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyTuple};
 
 use crate::*;
 
@@ -195,6 +196,82 @@ impl AsyncThinConnImpl {
             },
         );
         task.await.map_err(runtime_error)?;
+        self.inner
+            .state
+            .lock()
+            .map_err(runtime_error)?
+            .transaction_in_progress = false;
+        Ok(())
+    }
+
+    /// Async Direct Path Load (reference thin/connection.pyx:1179). Mirrors the
+    /// sync ThinConnImpl::direct_path_load but bridges each wire step through the
+    /// async fetch-task runtime: materialize+verify (GIL) -> PREPARE -> convert
+    /// against the prepared metadata (GIL) -> load+FINISH/ABORT.
+    async fn direct_path_load(
+        &self,
+        schema_name: String,
+        table_name: String,
+        column_names: Vec<String>,
+        data: Py<PyAny>,
+        batch_size: u32,
+    ) -> PyResult<()> {
+        if batch_size == 0 {
+            return Err(PyTypeError::new_err(
+                "batch_size must be a positive integer",
+            ));
+        }
+        let num_columns = column_names.len();
+        let py_rows = Python::attach(|py| -> PyResult<Vec<Py<PyTuple>>> {
+            let data = data.bind(py);
+            let py_rows = direct_path_py_rows(data)?;
+            verify_direct_path_widths(py, &py_rows, num_columns)?;
+            Ok(py_rows)
+        })?;
+
+        // PREPARE.
+        let prepare = {
+            let schema_name = schema_name.clone();
+            let table_name = table_name.clone();
+            let column_names = column_names.clone();
+            let task = spawn_async_connection_task(
+                "oracledb-pyshim-async-dpl-prepare",
+                Arc::clone(&self.inner.connection),
+                move |cx, connection| {
+                    Box::pin(async move {
+                        connection
+                            .direct_path_prepare(cx, &schema_name, &table_name, &column_names)
+                            .await
+                            .map_err(TaskError::from)
+                    })
+                },
+            );
+            task.await
+                .map_err(|err| ora_database_error(&err.to_string()))?
+        };
+
+        // Convert against the prepared per-column metadata.
+        let rows = Python::attach(|py| {
+            direct_path_rows_from_py(py, &py_rows, &prepare.column_metadata, num_columns)
+        })?;
+
+        // LOAD + FINISH/ABORT.
+        let task = spawn_async_connection_task(
+            "oracledb-pyshim-async-dpl-load",
+            Arc::clone(&self.inner.connection),
+            move |cx, connection| {
+                Box::pin(async move {
+                    connection
+                        .direct_path_load_prepared(cx, &prepare, &rows, batch_size)
+                        .await
+                        .map_err(TaskError::from)
+                })
+            },
+        );
+        // Surface DPL wire errors (DPY-8000/8001, ORA-*) as proper oracledb
+        // DatabaseErrors carrying the embedded code, not a bare RuntimeError.
+        task.await
+            .map_err(|err| ora_database_error(&err.to_string()))?;
         self.inner
             .state
             .lock()
