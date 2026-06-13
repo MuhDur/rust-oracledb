@@ -334,6 +334,11 @@ pub struct QueryResult {
     /// server-side piggyback (reference `_update_sessionless_txn_state`);
     /// `None` when the execute did not change the sessionless state.
     pub sessionless_txn_state: Option<SessionlessTxnState>,
+    /// Whether a server-side transaction is in progress, sampled from the final
+    /// end-of-call status bit `TNS_EOCS_FLAGS_TXN_IN_PROGRESS` (reference
+    /// protocol.pyx `_process_call_status`). `None` when the response carried no
+    /// STATUS message (the caller then leaves the flag unchanged).
+    pub txn_in_progress: Option<bool>,
 }
 
 impl QueryResult {

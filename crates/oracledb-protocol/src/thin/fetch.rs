@@ -329,8 +329,9 @@ pub(crate) fn parse_query_response_with_context_binds_and_options(
                 }
             }
             TNS_MSG_TYPE_STATUS => {
-                let _call_status = reader.read_ub4()?;
+                let call_status = reader.read_ub4()?;
                 let _seq = reader.read_ub2()?;
+                result.txn_in_progress = Some(call_status & TNS_EOCS_FLAGS_TXN_IN_PROGRESS != 0);
             }
             TNS_MSG_TYPE_IO_VECTOR => {
                 out_bind_indexes = parse_io_vector(&mut reader, bind_columns.len())?
