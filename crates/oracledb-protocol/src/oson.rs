@@ -323,8 +323,7 @@ impl<'a> OsonDecoder<'a> {
             // field id array and (re-read) the child count.
             let offset = self.get_offset(node_type)?;
             offsets_pos = self.reader.pos;
-            self.reader
-                .seek_to(self.tree_seg_pos + offset as usize)?;
+            self.reader.seek_to(self.tree_seg_pos + offset as usize)?;
             let shared_type = self.reader.read_u8()?;
             let (shared_num, _) = self.get_num_children(shared_type)?;
             num_children = shared_num;
@@ -372,8 +371,7 @@ impl<'a> OsonDecoder<'a> {
                     .ok_or(ProtocolError::OsonInvalid("relative offset overflow"))?;
             }
             offsets_pos = self.reader.pos;
-            self.reader
-                .seek_to(self.tree_seg_pos + offset as usize)?;
+            self.reader.seek_to(self.tree_seg_pos + offset as usize)?;
             let child = self.decode_node()?;
             if is_object {
                 object.push((name, child));
@@ -748,7 +746,8 @@ impl FieldNamesSegment {
     }
 
     fn process_field_names(&mut self, field_id_offset: u32) {
-        self.field_names.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+        self.field_names
+            .sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
         for (index, field_name) in self.field_names.iter_mut().enumerate() {
             field_name.field_id = field_id_offset + index as u32 + 1;
         }
@@ -777,9 +776,11 @@ impl TreeSegment {
         if num_children < 256 {
             self.buffer.push(num_children as u8);
         } else if num_children < 65536 {
-            self.buffer.extend_from_slice(&(num_children as u16).to_be_bytes());
+            self.buffer
+                .extend_from_slice(&(num_children as u16).to_be_bytes());
         } else {
-            self.buffer.extend_from_slice(&(num_children as u32).to_be_bytes());
+            self.buffer
+                .extend_from_slice(&(num_children as u32).to_be_bytes());
         }
     }
 
@@ -787,8 +788,7 @@ impl TreeSegment {
         let num_children = values.len();
         self.encode_container_header(TNS_JSON_TYPE_ARRAY, num_children);
         let mut offset = self.buffer.len();
-        self.buffer
-            .resize(self.buffer.len() + num_children * 4, 0);
+        self.buffer.resize(self.buffer.len() + num_children * 4, 0);
         for element in values {
             let pos = self.buffer.len() as u32;
             self.buffer[offset..offset + 4].copy_from_slice(&pos.to_be_bytes());
@@ -895,7 +895,13 @@ impl TreeSegment {
                 } else {
                     self.buffer.push(TNS_JSON_TYPE_TIMESTAMP);
                     let bytes = encode_oracle_timestamp(
-                        *year, *month, *day, *hour, *minute, *second, *nanosecond,
+                        *year,
+                        *month,
+                        *day,
+                        *hour,
+                        *minute,
+                        *second,
+                        *nanosecond,
                     )?;
                     // TIMESTAMP node is always the full 11-byte form.
                     self.buffer.extend_from_slice(&bytes);
@@ -918,7 +924,8 @@ impl TreeSegment {
                 self.buffer.push(TNS_JSON_TYPE_EXTENDED);
                 self.buffer.push(TNS_JSON_TYPE_VECTOR);
                 let image = crate::vector::encode_vector(vector);
-                self.buffer.extend_from_slice(&(image.len() as u32).to_be_bytes());
+                self.buffer
+                    .extend_from_slice(&(image.len() as u32).to_be_bytes());
                 self.buffer.extend_from_slice(&image);
             }
             OsonValue::Array(values) => self.encode_array(values, encoder)?,
@@ -1037,9 +1044,12 @@ impl OsonEncoder {
     /// Copies the (post-sort) `field_id` and `offset` from the segment field
     /// names back into `field_names_dict` so object encoding can look them up.
     fn sync_field_ids(&mut self) {
-        for seg in [self.short_fnames_seg.as_ref(), self.long_fnames_seg.as_ref()]
-            .into_iter()
-            .flatten()
+        for seg in [
+            self.short_fnames_seg.as_ref(),
+            self.long_fnames_seg.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             for field_name in &seg.field_names {
                 if let Some(entry) = self.field_names_dict.get_mut(&field_name.name) {
@@ -1223,7 +1233,12 @@ mod tests {
     }
 
     fn obj(pairs: &[(&str, OsonValue)]) -> OsonValue {
-        OsonValue::Object(pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect())
+        OsonValue::Object(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        )
     }
 
     fn num(text: &str) -> OsonValue {
@@ -1271,10 +1286,7 @@ mod tests {
                     obj(&[("name", s("John")), ("city", s("Delhi"))]),
                 )])]),
             )]),
-            "obj_3516" => obj(&[
-                ("key_1", s("test_3516a")),
-                ("key_2", s("test_3516b")),
-            ]),
+            "obj_3516" => obj(&[("key_1", s("test_3516a")), ("key_2", s("test_3516b"))]),
             "timestamp7" => OsonValue::DateTime {
                 year: 2004,
                 month: 2,
@@ -1331,14 +1343,18 @@ mod tests {
             let encoded = encode_oson(&value, supports_long)
                 .unwrap_or_else(|e| panic!("encode {name} failed: {e}"));
             assert_eq!(
-                encoded, expected,
+                encoded,
+                expected,
                 "OSON encode mismatch for golden case {name}\n got: {}\nwant: {}",
                 hex(&encoded),
                 hex(&expected)
             );
             checked += 1;
         }
-        assert!(checked >= 20, "expected to check >=20 golden cases, got {checked}");
+        assert!(
+            checked >= 20,
+            "expected to check >=20 golden cases, got {checked}"
+        );
     }
 
     #[test]
@@ -1369,7 +1385,10 @@ mod tests {
             ("value", s("string 6903")),
             ("flag", OsonValue::Bool(false)),
             ("nothing", OsonValue::Null),
-            ("nums", OsonValue::Array(vec![num("1"), num("2.5"), num("-3")])),
+            (
+                "nums",
+                OsonValue::Array(vec![num("1"), num("2.5"), num("-3")]),
+            ),
             ("bf", OsonValue::BinaryFloat(38.75)),
             ("bd", OsonValue::BinaryDouble(125.875)),
         ]);
@@ -1382,7 +1401,10 @@ mod tests {
     fn bad_magic_is_dpy_5004() {
         let bytes = b"{'not a previous encoded value': 3}";
         let err = decode_oson(bytes).unwrap_err();
-        assert!(matches!(err, ProtocolError::OsonNotEncoded(_)), "got {err:?}");
+        assert!(
+            matches!(err, ProtocolError::OsonNotEncoded(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]

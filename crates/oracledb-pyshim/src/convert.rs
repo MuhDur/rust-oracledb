@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use asupersync::Cx;
+use oracledb::protocol::oson::OsonValue;
 use oracledb::protocol::thin::{
     bind_template_from_type_name, bind_value_type_info, cursor_bind_template,
     dbobject_element_bind_type_info, decode_bfile_locator_name,
@@ -10,7 +11,6 @@ use oracledb::protocol::thin::{
     ORA_TYPE_NUM_JSON, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
     ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR, ORA_TYPE_NUM_VECTOR,
 };
-use oracledb::protocol::oson::OsonValue;
 use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -166,7 +166,8 @@ pub(crate) fn py_value_to_oson(value: &Bound<'_, PyAny>) -> PyResult<OsonValue> 
         });
     }
     // datetime.datetime / datetime.date -> DATE / TIMESTAMP.
-    if let Some((year, month, day, hour, minute, second, nanosecond)) = py_date_time_fields(value)? {
+    if let Some((year, month, day, hour, minute, second, nanosecond)) = py_date_time_fields(value)?
+    {
         return Ok(OsonValue::DateTime {
             year,
             month,
@@ -197,15 +198,17 @@ pub(crate) fn py_value_to_oson(value: &Bound<'_, PyAny>) -> PyResult<OsonValue> 
     if let Ok(dict) = value.cast::<PyDict>() {
         let mut entries = Vec::with_capacity(dict.len());
         for (key, child) in dict.iter() {
-            let key = key.extract::<String>().map_err(|_| {
-                raise_oracledb_driver_error("ERR_PYTHON_TYPE_NOT_SUPPORTED")
-            })?;
+            let key = key
+                .extract::<String>()
+                .map_err(|_| raise_oracledb_driver_error("ERR_PYTHON_TYPE_NOT_SUPPORTED"))?;
             entries.push((key, py_value_to_oson(&child)?));
         }
         return Ok(OsonValue::Object(entries));
     }
     // Unsupported type (e.g. a bare `list` class object) raises DPY-3003.
-    Err(raise_python_type_not_supported(&value.get_type().into_any()))
+    Err(raise_python_type_not_supported(
+        &value.get_type().into_any(),
+    ))
 }
 
 /// Builds a [`BindValue::Json`] from a Python value by encoding it to OSON.

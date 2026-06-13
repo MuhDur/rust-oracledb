@@ -2410,7 +2410,11 @@ fn write_define_column_metadata(writer: &mut TtcWriter, metadata: &ColumnMetadat
             TNS_LOB_PREFETCH_FLAG,
             TNS_VECTOR_MAX_LENGTH,
         ),
-        ORA_TYPE_NUM_JSON => (TNS_JSON_MAX_LENGTH, TNS_LOB_PREFETCH_FLAG, TNS_JSON_MAX_LENGTH),
+        ORA_TYPE_NUM_JSON => (
+            TNS_JSON_MAX_LENGTH,
+            TNS_LOB_PREFETCH_FLAG,
+            TNS_JSON_MAX_LENGTH,
+        ),
         _ => (metadata.buffer_size, 0, 0),
     };
     buffer_size = buffer_size.max(1);

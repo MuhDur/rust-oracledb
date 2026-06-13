@@ -1234,8 +1234,8 @@ impl ThinConnImpl {
     /// OSON and DPY-5006 when it is structurally invalid.
     fn decode_oson(&self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let bytes = data.extract::<Vec<u8>>()?;
-        let value =
-            oracledb::protocol::oson::decode_oson(&bytes).map_err(|err| oson_error_to_pyerr(&err))?;
+        let value = oracledb::protocol::oson::decode_oson(&bytes)
+            .map_err(|err| oson_error_to_pyerr(&err))?;
         oson_value_to_py(py, &value)
     }
 
