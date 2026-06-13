@@ -24,14 +24,17 @@ use oracledb_protocol::thin::{
     parse_fetch_response_with_context, parse_lob_create_temp_response,
     parse_lob_free_temp_response, parse_lob_read_response, parse_lob_trim_response,
     parse_lob_write_response, parse_plain_function_response, parse_query_response,
-    parse_query_response_with_binds_options_and_columns, BindValue, ClientCapabilities,
-    ColumnMetadata, ExecuteOptions, LobReadResult, QueryResult, TNS_DATA_FLAGS_BEGIN_PIPELINE,
-    TNS_DATA_FLAGS_END_OF_REQUEST, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING,
-    TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS,
-    TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA,
-    TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE, TNS_PIPELINE_MODE_ABORT_ON_ERROR,
-    TNS_PIPELINE_MODE_CONTINUE_ON_ERROR,
+    parse_query_response_with_binds_options_and_columns, parse_tpc_txn_switch_response, BindValue,
+    ClientCapabilities, ColumnMetadata, ExecuteOptions, LobReadResult, QueryResult,
+    SessionlessTxnState, TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST,
+    TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE,
+    TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT,
+    TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE,
+    TNS_PIPELINE_MODE_ABORT_ON_ERROR, TNS_PIPELINE_MODE_CONTINUE_ON_ERROR, TNS_TPC_TXN_DETACH,
+    TNS_TPC_TXN_POST_DETACH, TNS_TPC_TXN_START, TPC_TXN_FLAGS_NEW, TPC_TXN_FLAGS_RESUME,
+    TPC_TXN_FLAGS_SESSIONLESS,
 };
+use oracledb_protocol::thin::{build_sessionless_piggyback, build_tpc_txn_switch_payload_with_seq};
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};
 
@@ -118,12 +121,62 @@ pub enum Error {
     MissingSessionField(&'static str),
     #[error("call timeout of {0} ms exceeded")]
     CallTimeout(u32),
+    /// A sessionless transaction client-API misuse (reference
+    /// ERR_SESSIONLESS_* / DPY-3034/3035/3036). The payload is the DPY full
+    /// code so the shim can raise the matching DatabaseError.
+    #[error("{0}")]
+    SessionlessTransaction(SessionlessError),
     #[cfg(feature = "arrow")]
     #[error(transparent)]
     ArrowConversion(#[from] arrow::ArrowConversionError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Client-API misuse of the sessionless transaction API, mirroring the
+/// reference `ERR_SESSIONLESS_*` errors (impl/oracledb/errors.py:338-340).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionlessError {
+    /// DPY-3034: suspend/resume was attempted on a transaction started with
+    /// DBMS_TRANSACTION (or vice versa).
+    DifferingMethods,
+    /// DPY-3035: a sessionless transaction is already active on the connection.
+    AlreadyActive,
+    /// DPY-3036: no sessionless transaction is active on the connection.
+    Inactive,
+}
+
+impl SessionlessError {
+    /// The DPY full code (reference errors.py full codes).
+    pub fn full_code(self) -> &'static str {
+        match self {
+            Self::DifferingMethods => "DPY-3034",
+            Self::AlreadyActive => "DPY-3035",
+            Self::Inactive => "DPY-3036",
+        }
+    }
+
+    /// The reference error message text (errors.py:945-953).
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::DifferingMethods => {
+                "suspending or resuming a Sessionless Transaction can be done with \
+                 DBMS_TRANSACTION or with python-oracledb, but not both"
+            }
+            Self::AlreadyActive => {
+                "suspend, commit, or rollback the current active sessionless \
+                 transaction before beginning or resuming another one"
+            }
+            Self::Inactive => "no Sessionless Transaction is active",
+        }
+    }
+}
+
+impl std::fmt::Display for SessionlessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.full_code(), self.message())
+    }
+}
 
 /// Whether an execute error is the server signalling that the cached
 /// statement's types no longer match (ORA-00932 inconsistent datatypes /
@@ -227,6 +280,30 @@ pub struct Connection {
     /// Server cursor ids queued for the close-cursors piggyback (reference
     /// `_cursors_to_close`).
     cursors_to_close: Vec<u32>,
+    /// State of the active sessionless transaction (reference
+    /// `BaseThinConnImpl._sessionless_data`); `None` when no sessionless
+    /// transaction is active on this connection.
+    sessionless_data: Option<SessionlessData>,
+}
+
+/// Mirrors the reference `_SessionlessData` (impl/thin/connection.pyx): the
+/// pending or active sessionless transaction tracked on the connection.
+#[derive(Clone, Debug)]
+struct SessionlessData {
+    transaction_id: Vec<u8>,
+    timeout: u32,
+    /// One of `TNS_TPC_TXN_START` / `TNS_TPC_TXN_DETACH`, optionally OR'd with
+    /// `TNS_TPC_TXN_POST_DETACH` once a suspend-on-success is folded in.
+    operation: u32,
+    /// `TPC_TXN_FLAGS_NEW` or `TPC_TXN_FLAGS_RESUME` (SESSIONLESS is added when
+    /// the message is built).
+    flags: u32,
+    /// A begin/resume that must ride as a piggyback on the next execute
+    /// (`defer_round_trip=True`, or a folded-in suspend-on-success).
+    piggyback_pending: bool,
+    /// The transaction was started via DBMS_TRANSACTION on the server; the
+    /// client API may not suspend/resume it (reference `started_on_server`).
+    started_on_server: bool,
 }
 
 const STATEMENT_CACHE_SIZE: usize = 20;
@@ -388,6 +465,7 @@ impl Connection {
             combo_key: encrypted.combo_key,
             statement_cache: Vec::new(),
             cursors_to_close: Vec::new(),
+            sessionless_data: None,
         })
     }
 
@@ -510,11 +588,205 @@ impl Connection {
     }
 
     pub async fn commit(&mut self, cx: &Cx) -> Result<()> {
-        self.send_function(cx, TNS_FUNC_COMMIT).await
+        self.send_function(cx, TNS_FUNC_COMMIT).await?;
+        // a commit ends any active sessionless transaction on the server
+        // (reference clears `_sessionless_data` via the SYNC piggyback)
+        self.sessionless_data = None;
+        Ok(())
     }
 
     pub async fn rollback(&mut self, cx: &Cx) -> Result<()> {
-        self.send_function(cx, TNS_FUNC_ROLLBACK).await
+        self.send_function(cx, TNS_FUNC_ROLLBACK).await?;
+        self.sessionless_data = None;
+        Ok(())
+    }
+
+    /// Begins (`flags = TPC_TXN_FLAGS_NEW`) or resumes
+    /// (`flags = TPC_TXN_FLAGS_RESUME`) a sessionless transaction. With
+    /// `defer_round_trip = false` the request is sent immediately; with `true`
+    /// it is queued as a piggyback on the next execute (reference
+    /// impl/thin/connection.pyx `_start_sessionless_transaction`).
+    async fn start_sessionless_transaction(
+        &mut self,
+        cx: &Cx,
+        transaction_id: &[u8],
+        timeout: u32,
+        flags: u32,
+        defer_round_trip: bool,
+    ) -> Result<()> {
+        if self.sessionless_data.is_some() {
+            return Err(Error::SessionlessTransaction(SessionlessError::AlreadyActive));
+        }
+        let data = SessionlessData {
+            transaction_id: transaction_id.to_vec(),
+            timeout,
+            operation: TNS_TPC_TXN_START,
+            flags,
+            piggyback_pending: defer_round_trip,
+            started_on_server: false,
+        };
+        if defer_round_trip {
+            // queue the begin/resume to ride on the next execute
+            self.sessionless_data = Some(data);
+            return Ok(());
+        }
+        // send the begin/resume immediately
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = build_tpc_txn_switch_payload_with_seq(
+            seq_num,
+            0,
+            data.operation,
+            data.flags | TPC_TXN_FLAGS_SESSIONLESS,
+            data.timeout,
+            Some(transaction_id),
+        );
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        let state = self.note_parse(parse_tpc_txn_switch_response(&response, self.capabilities))?;
+        self.sessionless_data = Some(data);
+        self.apply_sessionless_state(state);
+        Ok(())
+    }
+
+    /// Begins a new sessionless transaction (reference
+    /// `begin_sessionless_transaction`).
+    pub async fn begin_sessionless_transaction(
+        &mut self,
+        cx: &Cx,
+        transaction_id: &[u8],
+        timeout: u32,
+        defer_round_trip: bool,
+    ) -> Result<()> {
+        self.start_sessionless_transaction(
+            cx,
+            transaction_id,
+            timeout,
+            TPC_TXN_FLAGS_NEW,
+            defer_round_trip,
+        )
+        .await
+    }
+
+    /// Resumes an existing sessionless transaction (reference
+    /// `resume_sessionless_transaction`).
+    pub async fn resume_sessionless_transaction(
+        &mut self,
+        cx: &Cx,
+        transaction_id: &[u8],
+        timeout: u32,
+        defer_round_trip: bool,
+    ) -> Result<()> {
+        self.start_sessionless_transaction(
+            cx,
+            transaction_id,
+            timeout,
+            TPC_TXN_FLAGS_RESUME,
+            defer_round_trip,
+        )
+        .await
+    }
+
+    /// Suspends the active sessionless transaction immediately (reference
+    /// `suspend_sessionless_transaction`).
+    pub async fn suspend_sessionless_transaction(&mut self, cx: &Cx) -> Result<()> {
+        match &self.sessionless_data {
+            None => return Err(Error::SessionlessTransaction(SessionlessError::Inactive)),
+            Some(data) if data.started_on_server => {
+                return Err(Error::SessionlessTransaction(
+                    SessionlessError::DifferingMethods,
+                ));
+            }
+            Some(_) => {}
+        }
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = build_tpc_txn_switch_payload_with_seq(
+            seq_num,
+            0,
+            TNS_TPC_TXN_DETACH,
+            TPC_TXN_FLAGS_SESSIONLESS,
+            0,
+            None,
+        );
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        let state = self.note_parse(parse_tpc_txn_switch_response(&response, self.capabilities))?;
+        // a suspend always clears the active transaction locally; the server's
+        // SYNC piggyback confirms it (reference clears `_sessionless_data`)
+        self.sessionless_data = None;
+        self.apply_sessionless_state(state);
+        Ok(())
+    }
+
+    /// Validate that a `suspend_on_success` request is legal and fold the
+    /// post-detach into the pending sessionless piggyback (reference
+    /// execute.pyx `_handle_sessionless_suspend`). Called by the cursor execute
+    /// path before building the execute message.
+    pub fn prepare_sessionless_suspend_on_success(&mut self) -> Result<()> {
+        match &mut self.sessionless_data {
+            None => Err(Error::SessionlessTransaction(SessionlessError::Inactive)),
+            Some(data) if data.started_on_server => Err(Error::SessionlessTransaction(
+                SessionlessError::DifferingMethods,
+            )),
+            Some(data) => {
+                if data.piggyback_pending {
+                    data.operation |= TNS_TPC_TXN_POST_DETACH;
+                } else {
+                    data.operation = TNS_TPC_TXN_POST_DETACH;
+                    data.flags = TPC_TXN_FLAGS_SESSIONLESS;
+                    data.piggyback_pending = true;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Take the pending sessionless piggyback bytes (if any) to prepend to the
+    /// next execute payload, mirroring the close-cursors piggyback flow. The
+    /// piggyback's sequence number is consumed from the connection counter so
+    /// it precedes the execute's own sequence number.
+    fn take_sessionless_piggyback(&mut self) -> Option<Vec<u8>> {
+        let data = self.sessionless_data.as_mut()?;
+        if !data.piggyback_pending {
+            return None;
+        }
+        data.piggyback_pending = false;
+        let xid = if data.operation & TNS_TPC_TXN_START != 0 {
+            Some(data.transaction_id.clone())
+        } else {
+            None
+        };
+        let flags = data.flags | TPC_TXN_FLAGS_SESSIONLESS;
+        let operation = data.operation;
+        let timeout = data.timeout;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        Some(build_sessionless_piggyback(
+            seq_num,
+            0,
+            operation,
+            flags,
+            timeout,
+            xid.as_deref(),
+        ))
+    }
+
+    /// Apply a sessionless state update reported by the server (via the SYNC
+    /// piggyback) to the connection's tracked state (reference
+    /// `_update_sessionless_txn_state`).
+    fn apply_sessionless_state(&mut self, state: Option<SessionlessTxnState>) {
+        match state {
+            Some(SessionlessTxnState::Unset) => self.sessionless_data = None,
+            Some(SessionlessTxnState::Set { started_on_server }) => {
+                if let Some(data) = self.sessionless_data.as_mut() {
+                    data.started_on_server = started_on_server;
+                    data.piggyback_pending = false;
+                }
+            }
+            None => {}
+        }
     }
 
     pub async fn execute_query(
@@ -653,6 +925,12 @@ impl Connection {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
         let mut exec_options = exec_options;
+        // a `suspend_on_success` execute folds a post-detach into the pending
+        // sessionless piggyback; validate (DPY-3034/3036) before any wire work
+        // (reference execute.pyx `_handle_sessionless_suspend`)
+        if exec_options.suspend_on_success {
+            self.prepare_sessionless_suspend_on_success()?;
+        }
         let use_cache = exec_options.cache_statement && !exec_options.parse_only;
         if exec_options.cursor_id == 0 && !exec_options.parse_only {
             if use_cache {
@@ -684,6 +962,11 @@ impl Connection {
                 let _ = next_ttc_sequence(&mut self.ttc_seq_num);
             }
         }
+        // a deferred begin/resume or a folded-in suspend-on-success rides as a
+        // sessionless piggyback prepended to this execute (reference
+        // messages/base.pyx `_write_sessionless_piggyback`); its sequence number
+        // is consumed before the execute's, after the close-cursors piggyback's.
+        let sessionless_piggyback = self.take_sessionless_piggyback();
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let mut payload = build_execute_payload_with_bind_rows_and_options_with_seq(
             sql,
@@ -693,6 +976,11 @@ impl Connection {
             bind_rows,
             exec_options,
         )?;
+        if let Some(piggyback_bytes) = sessionless_piggyback {
+            let mut combined = piggyback_bytes;
+            combined.extend_from_slice(&payload);
+            payload = combined;
+        }
         if let Some(mut piggyback_bytes) = piggyback {
             piggyback_bytes.extend_from_slice(&payload);
             payload = piggyback_bytes;
@@ -720,6 +1008,9 @@ impl Connection {
         );
         match self.note_parse(parsed) {
             Ok(result) => {
+                // a deferred begin/resume or a suspend-on-success reports its
+                // outcome through the response's SYNC piggyback
+                self.apply_sessionless_state(result.sessionless_txn_state);
                 if use_cache {
                     self.statement_cache_put(sql, result.cursor_id);
                 }
@@ -1858,6 +2149,47 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection.rollback(&cx).await
+        })
+    }
+
+    pub fn begin_sessionless_transaction(
+        connection: &mut Connection,
+        transaction_id: &[u8],
+        timeout: u32,
+        defer_round_trip: bool,
+    ) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .begin_sessionless_transaction(&cx, transaction_id, timeout, defer_round_trip)
+                .await
+        })
+    }
+
+    pub fn resume_sessionless_transaction(
+        connection: &mut Connection,
+        transaction_id: &[u8],
+        timeout: u32,
+        defer_round_trip: bool,
+    ) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .resume_sessionless_transaction(&cx, transaction_id, timeout, defer_round_trip)
+                .await
+        })
+    }
+
+    pub fn suspend_sessionless_transaction(connection: &mut Connection) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.suspend_sessionless_transaction(&cx).await
         })
     }
 

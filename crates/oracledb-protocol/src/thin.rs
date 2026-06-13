@@ -1156,6 +1156,11 @@ pub struct ExecuteOptions {
     /// suppressed so the server only repositions the open cursor and fetches
     /// (reference `scroll_operation`).
     pub scroll_operation: bool,
+    /// Suspend the active sessionless transaction once this execute succeeds
+    /// (reference `cursor_impl.suspend_on_success`); the driver folds a
+    /// post-detach into the sessionless piggyback. Does not affect the execute
+    /// wire body itself.
+    pub suspend_on_success: bool,
 }
 
 impl Default for ExecuteOptions {
@@ -1171,6 +1176,7 @@ impl Default for ExecuteOptions {
             fetch_orientation: 0,
             fetch_pos: 0,
             scroll_operation: false,
+            suspend_on_success: false,
         }
     }
 }
