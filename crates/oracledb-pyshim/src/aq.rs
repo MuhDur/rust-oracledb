@@ -776,7 +776,7 @@ impl ThinQueueImpl {
                 .map_err(TaskError::from)
         });
         let msgids = msgids.map_err(|e| raise_task_error(&e, &connection))?;
-        for (impl_obj, msgid) in impls.iter().zip(msgids.into_iter()) {
+        for (impl_obj, msgid) in impls.iter().zip(msgids) {
             impl_obj
                 .borrow(py)
                 .inner
@@ -1001,7 +1001,7 @@ impl AsyncThinQueueImpl {
         );
         let msgids = task.await.map_err(runtime_error)?;
         Python::attach(|py| -> PyResult<()> {
-            for (impl_obj, msgid) in props_list.iter().zip(msgids.into_iter()) {
+            for (impl_obj, msgid) in props_list.iter().zip(msgids) {
                 impl_obj
                     .borrow(py)
                     .inner
