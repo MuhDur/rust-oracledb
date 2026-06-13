@@ -69,6 +69,16 @@ pub enum ArrowConversionError {
     CannotConvertFromArrow { arrow_type: String, db_type: String },
     #[error("DPY-4036: {value} cannot be converted to an Apache Arrow integer")]
     CannotConvertToInteger { value: String },
+    #[error("DPY-4038: integer {value} cannot be represented as Apache Arrow type {arrow_type}")]
+    InvalidInteger { value: String, arrow_type: String },
+    #[error(
+        "DPY-4040: value of length {actual_len} does not match the Apache Arrow \
+         fixed size binary length of {fixed_size_len}"
+    )]
+    FixedSizeBinaryViolated {
+        actual_len: usize,
+        fixed_size_len: usize,
+    },
     #[error("DPY-4037: {value} cannot be converted to an Apache Arrow double")]
     CannotConvertToDouble { value: String },
     #[error("DPY-4039: {value} cannot be converted to an Apache Arrow float")]
@@ -588,21 +598,25 @@ fn timestamp_epoch_value(parts: &EpochParts, unit: TimeUnit) -> Result<i64> {
 }
 
 macro_rules! build_int_column {
-    ($builder:ty, $target:ty, $column:expr, $cells:expr, $capacity:expr) => {{
+    ($builder:ty, $target:ty, $arrow_type:expr, $column:expr, $cells:expr, $capacity:expr) => {{
         let mut builder = <$builder>::with_capacity($capacity);
         for cell in $cells {
             match cell {
                 None => builder.append_null(),
                 Some(value) => {
                     let text = numeric_text($column, value)?;
+                    // A non-integer text (fractional / non-numeric) is DPY-4036;
+                    // an in-range integer that overflows the narrower Arrow width
+                    // is DPY-4038 (matching the reference distinction).
                     let wide = parse_number_i64(text).ok_or_else(|| {
                         ArrowConversionError::CannotConvertToInteger {
                             value: text.to_string(),
                         }
                     })?;
                     let narrowed = <$target>::try_from(wide).map_err(|_| {
-                        ArrowConversionError::CannotConvertToInteger {
+                        ArrowConversionError::InvalidInteger {
                             value: text.to_string(),
+                            arrow_type: $arrow_type.to_string(),
                         }
                     })?;
                     builder.append_value(narrowed);
@@ -614,23 +628,34 @@ macro_rules! build_int_column {
 }
 
 macro_rules! build_uint_column {
-    ($builder:ty, $target:ty, $column:expr, $cells:expr, $capacity:expr) => {{
+    ($builder:ty, $target:ty, $arrow_type:expr, $column:expr, $cells:expr, $capacity:expr) => {{
         let mut builder = <$builder>::with_capacity($capacity);
         for cell in $cells {
             match cell {
                 None => builder.append_null(),
                 Some(value) => {
                     let text = numeric_text($column, value)?;
-                    let wide = parse_number_u64(text).ok_or_else(|| {
-                        ArrowConversionError::CannotConvertToInteger {
-                            value: text.to_string(),
+                    // Parse as the widest unsigned, or fall back to a signed
+                    // parse so a valid-but-negative integer surfaces as DPY-4038
+                    // (out of range) rather than DPY-4036 (not an integer).
+                    let invalid = || ArrowConversionError::InvalidInteger {
+                        value: text.to_string(),
+                        arrow_type: $arrow_type.to_string(),
+                    };
+                    let wide = match parse_number_u64(text) {
+                        Some(wide) => wide,
+                        None => {
+                            // A valid integer that is simply out of the unsigned
+                            // range is DPY-4038; anything else is DPY-4036.
+                            if parse_number_i64(text).is_some() {
+                                return Err(invalid());
+                            }
+                            return Err(ArrowConversionError::CannotConvertToInteger {
+                                value: text.to_string(),
+                            });
                         }
-                    })?;
-                    let narrowed = <$target>::try_from(wide).map_err(|_| {
-                        ArrowConversionError::CannotConvertToInteger {
-                            value: text.to_string(),
-                        }
-                    })?;
+                    };
+                    let narrowed = <$target>::try_from(wide).map_err(|_| invalid())?;
                     builder.append_value(narrowed);
                 }
             }
@@ -668,14 +693,20 @@ fn build_column_array<'a>(
     capacity: usize,
 ) -> Result<ArrayRef> {
     match data_type {
-        DataType::Int8 => build_int_column!(Int8Builder, i8, column, cells, capacity),
-        DataType::Int16 => build_int_column!(Int16Builder, i16, column, cells, capacity),
-        DataType::Int32 => build_int_column!(Int32Builder, i32, column, cells, capacity),
-        DataType::Int64 => build_int_column!(Int64Builder, i64, column, cells, capacity),
-        DataType::UInt8 => build_uint_column!(UInt8Builder, u8, column, cells, capacity),
-        DataType::UInt16 => build_uint_column!(UInt16Builder, u16, column, cells, capacity),
-        DataType::UInt32 => build_uint_column!(UInt32Builder, u32, column, cells, capacity),
-        DataType::UInt64 => build_uint_column!(UInt64Builder, u64, column, cells, capacity),
+        DataType::Int8 => build_int_column!(Int8Builder, i8, "int8", column, cells, capacity),
+        DataType::Int16 => build_int_column!(Int16Builder, i16, "int16", column, cells, capacity),
+        DataType::Int32 => build_int_column!(Int32Builder, i32, "int32", column, cells, capacity),
+        DataType::Int64 => build_int_column!(Int64Builder, i64, "int64", column, cells, capacity),
+        DataType::UInt8 => build_uint_column!(UInt8Builder, u8, "uint8", column, cells, capacity),
+        DataType::UInt16 => {
+            build_uint_column!(UInt16Builder, u16, "uint16", column, cells, capacity)
+        }
+        DataType::UInt32 => {
+            build_uint_column!(UInt32Builder, u32, "uint32", column, cells, capacity)
+        }
+        DataType::UInt64 => {
+            build_uint_column!(UInt64Builder, u64, "uint64", column, cells, capacity)
+        }
         DataType::Float64 => {
             let mut builder = Float64Builder::with_capacity(capacity);
             for cell in cells {
@@ -795,11 +826,20 @@ fn build_column_array<'a>(
             Ok(Arc::new(builder.finish()))
         }
         DataType::FixedSizeBinary(size) => {
+            let fixed_size_len = usize::try_from(*size).unwrap_or(0);
             let mut builder = FixedSizeBinaryBuilder::with_capacity(capacity, *size);
             for cell in cells {
                 match cell {
                     None => builder.append_null(),
                     Some(QueryValue::Raw(bytes)) => {
+                        // A byte length that doesn't match the fixed Arrow width
+                        // is DPY-4040 (not a raw Arrow "Invalid argument" error).
+                        if bytes.len() != fixed_size_len {
+                            return Err(ArrowConversionError::FixedSizeBinaryViolated {
+                                actual_len: bytes.len(),
+                                fixed_size_len,
+                            });
+                        }
                         builder.append_value(bytes)?;
                     }
                     Some(_) => return Err(invalid_value(column, "expected a raw value")),
@@ -1745,7 +1785,9 @@ mod tests {
         let columns = vec![column("N", ORA_TYPE_NUM_NUMBER, 9, 0)];
         let rows = vec![vec![number("300")]];
         let err = build_record_batch(&columns, &rows, &options).expect_err("must overflow");
-        assert!(err.to_string().starts_with("DPY-4036:"), "{err}");
+        // A valid integer out of range for the narrower Arrow width is DPY-4038
+        // (the reference reserves DPY-4036 for values that are not integers).
+        assert!(err.to_string().starts_with("DPY-4038:"), "{err}");
     }
 
     #[test]
