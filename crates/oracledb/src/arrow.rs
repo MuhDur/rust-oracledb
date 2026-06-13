@@ -474,6 +474,9 @@ fn numeric_text<'a>(column: &ColumnMetadata, value: &'a QueryValue) -> Result<&'
     match value {
         QueryValue::Number { text, .. } => Ok(text),
         QueryValue::BinaryDouble(text) => Ok(text),
+        // A native DB_TYPE_BOOLEAN is materialized into an arrow numeric column
+        // as 1/0 (it has no dedicated arrow boolean column type here).
+        QueryValue::Boolean(value) => Ok(if *value { "1" } else { "0" }),
         _ => Err(invalid_value(column, "expected a numeric value")),
     }
 }
