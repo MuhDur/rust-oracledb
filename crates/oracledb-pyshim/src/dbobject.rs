@@ -7,11 +7,14 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use oracledb::protocol::thin::{
-    decode_datetime_value, decode_dbobject_binary_double as protocol_decode_dbobject_binary_double,
+    bind_template_from_type_name, collection_flags_for, decode_datetime_value,
+    decode_dbobject_binary_double as protocol_decode_dbobject_binary_double,
     decode_dbobject_binary_float as protocol_decode_dbobject_binary_float,
     decode_dbobject_text as protocol_decode_dbobject_text, decode_dbobject_xmltype_text,
-    decode_number_value, BindValue, ColumnMetadata, DbObjectPackedReader, QueryValue,
-    CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB,
+    decode_number_value, image_begin, image_finalize, image_write_length, image_write_null,
+    image_write_value_bytes, pack_bindvalue_into_image, BindValue, ColumnMetadata,
+    DbObjectPackedReader, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BLOB,
+    ORA_TYPE_NUM_CLOB,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -83,6 +86,14 @@ impl DbObjectTypeImpl {
         self.oid = oid;
         self.version = version;
         self
+    }
+
+    pub(crate) fn oid_bytes(&self) -> Option<Vec<u8>> {
+        self.oid.clone()
+    }
+
+    pub(crate) fn version(&self) -> u32 {
+        self.version
     }
 
     pub(crate) fn object_output_bind(&self) -> Option<BindValue> {
@@ -536,6 +547,127 @@ impl DbObjectImpl {
         *self.attr_values.lock().map_err(runtime_error)? = values;
         Ok(())
     }
+
+    /// Builds the fully packed DbObject pickle image for an IN bind, mirroring
+    /// reference `_get_packed_data` / `_pack_data` / `_pack_value`
+    /// (impl/thin/dbobject.pyx). If the object still holds raw `packed_data`
+    /// (e.g. an OUT-then-IN object) it is forwarded verbatim, exactly as the
+    /// reference does when `packed_data is not None`.
+    pub(crate) fn pack_image(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
+        if let Some(packed) = self.packed_data.lock().map_err(runtime_error)?.as_ref() {
+            return Ok(packed.clone());
+        }
+        let mut image = image_begin(self.object_type.is_collection);
+        self.pack_body(py, &mut image)?;
+        image_finalize(&mut image).map_err(runtime_error)?;
+        Ok(image)
+    }
+
+    /// Appends the collection-flags/count/element body (collection) or the
+    /// declared-order attribute body (record/object) to `image`.
+    fn pack_body(&self, py: Python<'_>, image: &mut Vec<u8>) -> PyResult<()> {
+        self.ensure_unpacked(py)?;
+        if self.object_type.is_collection {
+            let Some(metadata) = self.object_type.element_metadata.as_deref() else {
+                return Err(PyRuntimeError::new_err(
+                    "missing collection element metadata",
+                ));
+            };
+            image.push(collection_flags_for(self.object_type.is_assoc_array));
+            if self.object_type.is_assoc_array {
+                let values = self.assoc_values.lock().map_err(runtime_error)?;
+                image_write_length(image, values.len()).map_err(runtime_error)?;
+                // BTreeMap iterates in sorted-key order (reference sorts keys).
+                for (index, value) in values.iter() {
+                    image.extend_from_slice(&(*index as u32).to_be_bytes());
+                    self.pack_element(py, image, metadata, value, true)?;
+                }
+            } else {
+                let values = self.collection_values.lock().map_err(runtime_error)?;
+                image_write_length(image, values.len()).map_err(runtime_error)?;
+                for value in values.iter() {
+                    self.pack_element(py, image, metadata, value, true)?;
+                }
+            }
+            return Ok(());
+        }
+        let attr_values = self.attr_values.lock().map_err(runtime_error)?;
+        for attr in &self.object_type.attrs {
+            let value = attr_values
+                .get(&attr.name)
+                .map(|value| value.clone_ref(py))
+                .unwrap_or_else(|| py.None());
+            self.pack_element(py, image, attr, &value, false)?;
+        }
+        Ok(())
+    }
+
+    /// Packs a single attribute or collection element value, including the
+    /// recursive nested-object handling (inline for record parents,
+    /// length-prefixed for collection parents).
+    fn pack_element(
+        &self,
+        py: Python<'_>,
+        image: &mut Vec<u8>,
+        metadata: &DbObjectAttrImpl,
+        value: &Py<PyAny>,
+        parent_is_collection: bool,
+    ) -> PyResult<()> {
+        let bound = value.bind(py);
+        if metadata.dbtype_name == "DB_TYPE_OBJECT" {
+            if bound.is_none() {
+                // Non-collection object attr: atomic null (253); collection
+                // element or collection-typed attr: null indicator (255).
+                let child_is_collection = metadata
+                    .objtype
+                    .as_ref()
+                    .map(|objtype| objtype.is_collection)
+                    .unwrap_or(false);
+                image_write_null(image, !(parent_is_collection || child_is_collection));
+                return Ok(());
+            }
+            let Some(child) = py_db_object_impl(bound)? else {
+                return Err(raise_unsupported_python_type_for_db_type(
+                    bound,
+                    &metadata.dbtype_name,
+                ));
+            };
+            // Inline (no length) when this object is a record/object AND the
+            // attribute type is itself a record/object; otherwise pack the full
+            // child image and length-prefix it (reference dbobject.pyx:299-303).
+            let child_is_collection = child.object_type.is_collection;
+            if parent_is_collection || child_is_collection {
+                let child_image = child.pack_image(py)?;
+                image_write_value_bytes(image, &child_image).map_err(runtime_error)?;
+            } else {
+                child.pack_body(py, image)?;
+            }
+            return Ok(());
+        }
+
+        if bound.is_none() {
+            image_write_null(image, false);
+            return Ok(());
+        }
+
+        // Convert the Python value to a scalar BindValue using a template
+        // derived from the attribute's dbtype, then pack it with the image
+        // codecs (BOOLEAN / BINARY_INTEGER use the image-specific 4-byte form).
+        let template =
+            bind_template_from_type_name(&metadata.dbtype_name, metadata.max_size.max(1));
+        let bind = crate::convert::py_value_to_bind_with_template(bound, &template)?;
+        let csfrm = image_csfrm_for(&metadata.dbtype_name);
+        pack_bindvalue_into_image(image, &bind, csfrm).map_err(runtime_error)
+    }
+}
+
+/// CS form used when packing a scalar into an object image: NCHAR-family attrs
+/// encode UTF-16BE (csfrm=2), everything else uses the implicit charset.
+fn image_csfrm_for(dbtype_name: &str) -> u8 {
+    match dbtype_name {
+        "DB_TYPE_NCHAR" | "DB_TYPE_NVARCHAR" | "DB_TYPE_NCLOB" => CS_FORM_NCHAR,
+        _ => CS_FORM_IMPLICIT,
+    }
 }
 
 pub(crate) fn decode_dbobject_text(bytes: &[u8], dbtype_name: &str) -> PyResult<String> {
@@ -613,7 +745,10 @@ pub(crate) fn dbobject_unpack_value(
             // Object-image BOOLEAN packs as uint8(4) + uint32be (reference
             // dbobject.pyx:286-288); non-zero -> True.
             let non_zero = bytes.iter().any(|byte| *byte != 0);
-            Ok(non_zero.into_pyobject(py)?.unbind().into())
+            Ok(pyo3::types::PyBool::new(py, non_zero)
+                .to_owned()
+                .unbind()
+                .into())
         }
         "DB_TYPE_XMLTYPE" => decode_dbobject_xmltype(py, &bytes),
         "DB_TYPE_NUMBER" => {

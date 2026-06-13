@@ -1152,6 +1152,21 @@ pub(crate) fn bind_var_from_value(
     if let Some(var) = thin_var_from_value(value)? {
         return Ok(var);
     }
+    // A DbObject value bound directly (e.g. callproc IN/OUT positional arg)
+    // must carry its object_type so an OUT/IN-OUT readback can reconstruct the
+    // object from the returned packed image (reference keeps the type on the
+    // bind variable). Without this the OUT path has no type to resolve.
+    if let Some(object) = py_db_object_impl(value)? {
+        return Py::new(
+            py,
+            ThinVar::with_options(ThinVarOptions {
+                value: Some(value.clone().unbind()),
+                object_type: Some(object.object_type.clone()),
+                dbtype_name: "DB_TYPE_OBJECT".to_string(),
+                ..ThinVarOptions::default()
+            }),
+        );
+    }
     // derive the variable type from the value's Python class, mirroring
     // OracleMetadata.from_value (impl/base/metadata.pyx:413-458); this keeps
     // out-bind materialization faithful (an in/out NUMBER bound from an int
