@@ -747,7 +747,20 @@ impl ThinVar {
         let value = self.convert_output_value(py, value, lob_context)?;
         if let Some(outconverter) = self.outconverter_value.as_ref() {
             if !value.bind(py).is_none() || self.convert_nulls {
-                return Ok(outconverter.bind(py).call1((value,))?.unbind());
+                let converted = outconverter.bind(py).call1((value,))?;
+                // In async mode an outconverter may return a coroutine (e.g.
+                // `lambda v: v.read()` on an AsyncLOB). The reference awaits it
+                // in postprocess_async (impl/thin/messages/base.pyx). These LOB
+                // reads resolve without an actual round trip (local data), so
+                // drive the coroutine to completion synchronously rather than
+                // returning an un-awaited coroutine.
+                let async_mode = lob_context.is_some_and(|context| context.async_mode);
+                if async_mode {
+                    if let Some(resolved) = resolve_sync_awaitable(py, &converted)? {
+                        return Ok(resolved.unbind());
+                    }
+                }
+                return Ok(converted.unbind());
             }
         }
         Ok(value)
@@ -1297,6 +1310,37 @@ pub(crate) fn apply_out_bind_values(
         var.borrow(py).push_returned_py_value(values)?;
     }
     Ok(())
+}
+
+/// Drives a Python awaitable (coroutine) to completion synchronously, when it
+/// resolves without suspending on the event loop. Returns `Some(result)` if it
+/// completed, or `None` if `value` is not awaitable or it suspended (i.e. would
+/// genuinely need the asyncio event loop — not the case for the async-LOB read
+/// outconverters this handles, whose data is already local). The protocol:
+/// obtain the underlying iterator via `__await__`, then `send(None)`; a
+/// `StopIteration` carries the result in its `value`.
+fn resolve_sync_awaitable<'py>(
+    py: Python<'py>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let inspect = PyModule::import(py, "inspect")?;
+    if !inspect.call_method1("isawaitable", (value,))?.is_truthy()? {
+        return Ok(None);
+    }
+    // Coroutines/generators expose __await__ -> iterator; iterate once.
+    let iterator = value.call_method0("__await__")?;
+    match iterator.call_method1("send", (py.None(),)) {
+        Ok(_yielded) => {
+            // The awaitable suspended (yielded to the event loop). This path is
+            // not reachable for local-data LOB reads; leave it un-driven.
+            Ok(None)
+        }
+        Err(err) if err.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) => {
+            let result = err.value(py).getattr("value")?;
+            Ok(Some(result))
+        }
+        Err(err) => Err(err),
+    }
 }
 
 pub(crate) fn apply_cursor_out_bind(
