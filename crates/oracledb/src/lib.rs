@@ -133,6 +133,11 @@ fn refetch_retry_applies(err: &Error) -> bool {
             message,
             ..
         }) => message,
+        Error::Protocol(oracledb_protocol::ProtocolError::ServerErrorInfo(details)) => {
+            // structured error path: match by ORA code directly (ORA-00932
+            // inconsistent data types / ORA-01007 variable not in select list)
+            return details.code == 932 || details.code == 1007;
+        }
         _ => return false,
     };
     message.starts_with("ORA-00932") || message.starts_with("ORA-01007")
@@ -589,16 +594,17 @@ impl Connection {
             )
             .await
         {
-            // a query whose underlying types changed since the retained
-            // execution retries once with a full parse after dropping the
-            // retained metadata, mirroring the reference statement-cache
-            // clear + retry on ORA-00932/ORA-01007
-            // (impl/thin/messages/base.pyx:1199-1213)
-            Err(err)
-                if refetch_retry_applies(&err)
-                    && statement_is_query(sql)
-                    && self.forget_fetch_metadata(sql) =>
-            {
+            // a query re-executed against an open server cursor whose select
+            // list changed since it was parsed reports ORA-00932 (inconsistent
+            // data types) or ORA-01007 (variable not in select list); the
+            // reference clears the cursor and retries once with a full parse
+            // (impl/thin/messages/base.pyx:1199-1213). The failing adjusted
+            // call has already evicted the stale cursor from the statement
+            // cache, so the retry re-parses from scratch.
+            Err(err) if refetch_retry_applies(&err) && statement_is_query(sql) => {
+                // also drop any retained by-SQL fetch metadata used by the
+                // older refetch path so the retry rebuilds it
+                self.forget_fetch_metadata(sql);
                 self.execute_query_with_bind_rows_options_adjusted(
                     cx,
                     sql,
