@@ -1,4 +1,13 @@
-# GROUND TRUTH — rust-oracledb
+# Ground Truth — rust-oracledb
+
+> **CURRENT STATUS (2026-06-13): SUITE GREEN.** The filtered 72-module python-oracledb thin
+> test suite passes 2236/2236 baseline tests, 0 regressions, against a local Oracle 23ai Free
+> container. Adversarially verified real (no fake parity) — see `docs/FAKE_PARITY_AUDIT.md`.
+> Forward plan in `docs/ROADMAP.md` (Waves 4-6: structural, TLS/wallet, gauntlet).
+> Journey this session: ~38% -> 91% (Wave 2) -> 100% of baseline (Wave 3).
+> `thin.rs` de-monolithized into `thin/` (12 modules). Below is the historical detail.
+
+---
 
 Recorded 2026-06-11 (~18:00Z) at HEAD `978491a` ("Fix async executemany parity gaps"), branch
 `master`. Every claim cites its evidence source or is marked UNVERIFIED. Where evidence batches
