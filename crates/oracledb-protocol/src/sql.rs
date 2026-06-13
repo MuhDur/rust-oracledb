@@ -45,6 +45,18 @@ pub fn unique_bind_names(statement: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// Returns one bind-name entry per placeholder occurrence for non-PL/SQL SQL,
+/// and the unique names for PL/SQL, mirroring the reference `_add_bind`
+/// (impl/thin/statement.pyx:337-354): PL/SQL coalesces duplicate placeholders
+/// into a single bind, whereas plain SQL binds each occurrence separately so a
+/// repeated placeholder consumes one positional value per occurrence.
+pub fn bind_names_per_occurrence(statement: &str) -> Result<Vec<String>> {
+    if statement_is_plsql(statement) {
+        return unique_bind_names(statement);
+    }
+    scan_bind_names(statement)
+}
+
 pub fn public_bind_name(name: &str) -> String {
     if is_quoted_bind_name(name) {
         name[1..name.len() - 1].to_string()

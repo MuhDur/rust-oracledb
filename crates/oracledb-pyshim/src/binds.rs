@@ -489,7 +489,10 @@ pub(crate) fn extract_positional_bind_values_for_execute(
     named_input_sizes: &[(String, Py<PyAny>)],
 ) -> PyResult<Vec<BindValue>> {
     let row_values = positional_bind_items(value)?;
-    let names = unique_sql_bind_names(statement)?;
+    // plain SQL binds each placeholder occurrence; a repeated positional
+    // placeholder consumes one supplied value per occurrence (reference
+    // `_add_bind`). PL/SQL coalesces duplicates into a single bind.
+    let names = occurrence_sql_bind_names(statement)?;
     let return_names = statement_return_bind_names(statement)?;
     let plsql_output_names = statement_plsql_output_bind_names(statement)?;
     let input_count = names
@@ -637,7 +640,8 @@ pub(crate) fn extract_positional_bind_values_with_input_sizes(
         ));
     }
     let row_values = positional_bind_items(value)?;
-    let names = unique_sql_bind_names(statement)?;
+    // plain SQL binds each placeholder occurrence (reference `_add_bind`)
+    let names = occurrence_sql_bind_names(statement)?;
     let return_names = statement_return_bind_names(statement)?;
     let plsql_output_names = statement_plsql_output_bind_names(statement)?;
     let input_count = names
@@ -1061,7 +1065,8 @@ pub(crate) fn extract_positional_bind_var_objects_for_execute(
     named_input_sizes: &[(String, Py<PyAny>)],
 ) -> PyResult<Vec<Py<ThinVar>>> {
     let row_values = positional_bind_items(value)?;
-    let names = unique_sql_bind_names(statement)?;
+    // plain SQL binds each placeholder occurrence (reference `_add_bind`)
+    let names = occurrence_sql_bind_names(statement)?;
     let return_names = statement_return_bind_names(statement)?;
     let plsql_output_names = statement_plsql_output_bind_names(statement)?;
     let input_count = names
@@ -1317,6 +1322,14 @@ pub(crate) fn get_named_bind_value<'py>(
 // d49: migrate to oracledb-protocol (sql.rs statement analytics)
 pub(crate) fn unique_sql_bind_names(statement: &str) -> PyResult<Vec<String>> {
     sql::unique_bind_names(statement).map_err(sql_parse_error)
+}
+
+/// One bind name per placeholder occurrence for plain SQL (duplicates counted),
+/// unique names for PL/SQL — the positional bind surface the reference builds
+/// in `_add_bind`. Used so a repeated positional placeholder (e.g. `:1` used in
+/// two columns) consumes one supplied value per occurrence.
+pub(crate) fn occurrence_sql_bind_names(statement: &str) -> PyResult<Vec<String>> {
+    sql::bind_names_per_occurrence(statement).map_err(sql_parse_error)
 }
 
 pub(crate) fn public_bind_name(name: &str) -> String {
