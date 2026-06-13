@@ -3042,12 +3042,57 @@ impl BlockingConnection {
     }
 }
 
-fn build_io_runtime() -> Result<Runtime> {
+/// Construct a fresh single-threaded Asupersync runtime with a native reactor.
+///
+/// This is the heavy path: it creates an epoll reactor and spawns a worker OS
+/// thread. It is only called once per thread by [`io_runtime`], which caches
+/// the result; callers should use [`build_io_runtime`] (the cached accessor)
+/// rather than this directly.
+fn new_io_runtime() -> Result<Runtime> {
     let reactor = reactor::create_reactor()?;
     RuntimeBuilder::current_thread()
         .with_reactor(reactor)
         .build()
         .map_err(|err| Error::Runtime(err.to_string()))
+}
+
+thread_local! {
+    /// One blocking-facade runtime per calling thread, built lazily on first
+    /// use and reused for every subsequent `BlockingConnection` /
+    /// `CancelHandle` call on that thread.
+    ///
+    /// The previous behaviour built a brand-new runtime — a fresh epoll reactor
+    /// plus a worker OS thread that is spawned and immediately joined — on every
+    /// single call. For the synchronous facade, which the PyO3 shim drives for
+    /// every suite operation, that fixed per-call cost dominated cheap
+    /// operations like `select 1 from dual`. Caching the runtime per thread
+    /// removes that overhead from every call after the first.
+    ///
+    /// Correctness is preserved: each `Runtime::block_on` still installs a fresh
+    /// request-scoped `Cx` (with `Budget::INFINITE`) and runtime/Cx guards for
+    /// the duration of the polled future, so cancellation and context semantics
+    /// are unchanged. The connection's socket re-registers (`rearm`) with the
+    /// persistent reactor on each call exactly as Asupersync's owned TCP halves
+    /// are designed to; this is strictly less work than dropping and rebuilding
+    /// a reactor every call. The runtime is current-thread, so it never crosses
+    /// threads, and it lives for the thread's lifetime.
+    static IO_RUNTIME: std::cell::RefCell<Option<Runtime>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Return this thread's cached blocking-facade runtime, building it on first
+/// use. The returned `Runtime` is a cheap `Arc`-backed clone of the cached
+/// instance; cloning does not spawn threads or create reactors. Behaviourally
+/// equivalent to constructing a runtime per call, minus the per-call build cost.
+fn build_io_runtime() -> Result<Runtime> {
+    IO_RUNTIME.with(|slot| {
+        if let Some(runtime) = slot.borrow().as_ref() {
+            return Ok(runtime.clone());
+        }
+        let runtime = new_io_runtime()?;
+        *slot.borrow_mut() = Some(runtime.clone());
+        Ok(runtime)
+    })
 }
 
 /// Runs a connection future to completion on a fresh blocking runtime,

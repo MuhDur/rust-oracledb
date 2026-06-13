@@ -391,24 +391,62 @@ pub fn decode_dbobject_xmltype_text(bytes: &[u8]) -> Result<Option<String>> {
 pub fn decode_lob_text(bytes: &[u8], csfrm: u8, locator: Option<&[u8]>) -> Result<String> {
     let (use_utf16, little_endian) = lob_text_uses_utf16(csfrm, locator);
     if !use_utf16 {
-        return String::from_utf8(bytes.to_vec())
+        // Validate UTF-8 in place over the borrowed bytes, then allocate the
+        // owned String once. Equivalent to `String::from_utf8(bytes.to_vec())`
+        // but without the temporary Vec that was copied, validated, and moved.
+        return core::str::from_utf8(bytes)
+            .map(str::to_owned)
             .map_err(|_| ProtocolError::TtcDecode("invalid LOB UTF-8 text"));
     }
-    let mut chunks = bytes.chunks_exact(2);
-    let units = chunks
-        .by_ref()
-        .map(|chunk| {
-            if little_endian {
-                u16::from_le_bytes([chunk[0], chunk[1]])
-            } else {
-                u16::from_be_bytes([chunk[0], chunk[1]])
-            }
-        })
-        .collect::<Vec<_>>();
-    if !chunks.remainder().is_empty() {
+    // UTF-16 (almost always AL16UTF16 from the server for a multi-byte CLOB).
+    // An odd byte count is malformed; reject it before decoding, matching the
+    // previous `chunks_exact().remainder()` check.
+    if bytes.len() % 2 != 0 {
         return Err(ProtocolError::TtcDecode("invalid LOB UTF-16 text"));
     }
-    String::from_utf16(&units).map_err(|_| ProtocolError::TtcDecode("invalid LOB UTF-16 text"))
+    // LOB text is overwhelmingly ASCII/Latin, where every UTF-16 code unit is a
+    // single ASCII byte (high byte 0, low byte < 0x80 in big-endian; the mirror
+    // in little-endian). Decode those inline — one `String::push` of a 1-byte
+    // char, no intermediate buffer — and only on the first non-ASCII or
+    // surrogate unit hand the *remaining* bytes to the general
+    // `char::decode_utf16` decoder. This skips the old intermediate `Vec<u16>`
+    // (a second large allocation filled by a separate byte-swap pass) for the
+    // common case while staying byte-for-byte identical to the previous
+    // `String::from_utf16` output, including its rejection of lone surrogates.
+    // The byte-index walk means the fallback never rescans what was already
+    // decoded, so the worst case matches the general decoder rather than
+    // doubling it.
+    let mut out = String::with_capacity(bytes.len() / 2);
+    let mut i = 0;
+    while i < bytes.len() {
+        let b0 = bytes[i];
+        let b1 = bytes[i + 1];
+        let is_ascii = if little_endian {
+            b1 == 0 && b0 < 0x80
+        } else {
+            b0 == 0 && b1 < 0x80
+        };
+        if is_ascii {
+            // The non-zero byte is the ASCII code point regardless of endianness.
+            let ascii = if little_endian { b0 } else { b1 };
+            out.push(ascii as char);
+            i += 2;
+        } else {
+            let units = bytes[i..].chunks_exact(2).map(|chunk| {
+                if little_endian {
+                    u16::from_le_bytes([chunk[0], chunk[1]])
+                } else {
+                    u16::from_be_bytes([chunk[0], chunk[1]])
+                }
+            });
+            for unit in char::decode_utf16(units) {
+                let ch = unit.map_err(|_| ProtocolError::TtcDecode("invalid LOB UTF-16 text"))?;
+                out.push(ch);
+            }
+            return Ok(out);
+        }
+    }
+    Ok(out)
 }
 
 pub fn encode_lob_text(value: &str, csfrm: u8, locator: Option<&[u8]>) -> Vec<u8> {
@@ -493,4 +531,111 @@ pub fn decode_dbobject_binary_double(bytes: &[u8]) -> Result<f64> {
         }
     }
     Ok(f64::from_bits(u64::from_be_bytes(bytes)))
+}
+
+#[cfg(test)]
+mod decode_lob_text_tests {
+    use super::*;
+
+    /// A locator that drives the UTF-16 decode path, with selectable endianness.
+    fn utf16_locator(little_endian: bool) -> Vec<u8> {
+        let mut loc = vec![0u8; 40];
+        loc[TNS_LOB_LOC_OFFSET_FLAG_3] = TNS_LOB_LOC_FLAGS_VAR_LENGTH_CHARSET;
+        if little_endian {
+            loc[TNS_LOB_LOC_OFFSET_FLAG_4] = TNS_LOB_LOC_FLAGS_LITTLE_ENDIAN;
+        }
+        loc
+    }
+
+    fn encode_utf16(s: &str, little_endian: bool) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(s.len() * 2);
+        for unit in s.encode_utf16() {
+            let pair = if little_endian {
+                unit.to_le_bytes()
+            } else {
+                unit.to_be_bytes()
+            };
+            bytes.extend_from_slice(&pair);
+        }
+        bytes
+    }
+
+    /// Reference decoder = the previous implementation, used as the isomorphism
+    /// oracle for the optimized `decode_lob_text`.
+    fn reference_from_utf16(bytes: &[u8], little_endian: bool) -> Result<String> {
+        let mut chunks = bytes.chunks_exact(2);
+        let units = chunks
+            .by_ref()
+            .map(|chunk| {
+                if little_endian {
+                    u16::from_le_bytes([chunk[0], chunk[1]])
+                } else {
+                    u16::from_be_bytes([chunk[0], chunk[1]])
+                }
+            })
+            .collect::<Vec<_>>();
+        if !chunks.remainder().is_empty() {
+            return Err(ProtocolError::TtcDecode("invalid LOB UTF-16 text"));
+        }
+        String::from_utf16(&units).map_err(|_| ProtocolError::TtcDecode("invalid LOB UTF-16 text"))
+    }
+
+    #[test]
+    fn utf16_matches_reference_for_varied_text_both_endians() {
+        let samples = [
+            "",
+            "a",
+            "the quick brown fox 0123456789",
+            "café résumé naïve",           // BMP non-ASCII (Latin-1 supplement)
+            "ASCII then 漢字 then more",   // BMP CJK
+            "emoji: 😀🎉 mixed with text", // surrogate pairs
+            "\u{0000}\u{007f}\u{0080}\u{07ff}\u{0800}\u{ffff}", // boundary code points
+        ];
+        for sample in samples {
+            for little_endian in [false, true] {
+                let bytes = encode_utf16(sample, little_endian);
+                let loc = utf16_locator(little_endian);
+                let got =
+                    decode_lob_text(&bytes, CS_FORM_NCHAR, Some(&loc)).expect("optimized decode");
+                let expected =
+                    reference_from_utf16(&bytes, little_endian).expect("reference decode");
+                assert_eq!(got, expected, "sample {sample:?} le={little_endian}");
+                assert_eq!(got, sample);
+            }
+        }
+    }
+
+    #[test]
+    fn utf16_odd_length_is_rejected_like_reference() {
+        let loc = utf16_locator(false);
+        // 3 bytes: one full unit plus a dangling byte.
+        let bytes = [0x00, 0x41, 0x00];
+        assert!(decode_lob_text(&bytes, CS_FORM_NCHAR, Some(&loc)).is_err());
+        assert!(reference_from_utf16(&bytes, false).is_err());
+    }
+
+    #[test]
+    fn utf16_lone_surrogate_is_rejected_like_reference() {
+        let loc = utf16_locator(false);
+        // ASCII prefix then a lone high surrogate (no following low surrogate).
+        let mut bytes = encode_utf16("ok ", false);
+        bytes.extend_from_slice(&0xD83Du16.to_be_bytes());
+        bytes.extend_from_slice(&encode_utf16("tail", false));
+        assert!(decode_lob_text(&bytes, CS_FORM_NCHAR, Some(&loc)).is_err());
+        assert!(reference_from_utf16(&bytes, false).is_err());
+    }
+
+    #[test]
+    fn utf8_path_matches_from_utf8() {
+        // csfrm != NCHAR and no UTF-16 locator flag -> UTF-8 path.
+        let loc = vec![0u8; 40];
+        let sample = "café — utf8 path ✓";
+        let bytes = sample.as_bytes();
+        let got = decode_lob_text(bytes, 1, Some(&loc)).expect("utf8 decode");
+        assert_eq!(got, String::from_utf8(bytes.to_vec()).unwrap());
+        assert_eq!(got, sample);
+        // invalid UTF-8 errors like String::from_utf8.
+        let bad = [0x66, 0x6f, 0xff, 0x6f];
+        assert!(decode_lob_text(&bad, 1, Some(&loc)).is_err());
+    }
 }

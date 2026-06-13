@@ -35,7 +35,7 @@ use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
 use asupersync::Cx;
 use criterion::{criterion_group, criterion_main, Criterion};
 use oracledb::protocol::thin::{decode_lob_text, BindValue, QueryValue};
-use oracledb::{ConnectOptions, Connection};
+use oracledb::{BlockingConnection, ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;
 
 const PROGRAM: &str = "rust-oracledb-bench";
@@ -192,6 +192,46 @@ fn bench_thin_driver(c: &mut Criterion) {
             });
         });
         group.finish();
+    }
+
+    // ----------------------------------------------------------------------
+    // (b2) single-row SELECT through the synchronous `BlockingConnection`
+    //      facade, the exact path the PyO3 shim drives for every suite
+    //      operation. Unlike `select_one_row` above (which reuses one runtime
+    //      via this bench's `block_on` helper), this measures the facade's own
+    //      per-call runtime handling, so it reflects what a synchronous Rust
+    //      caller — and the suite — actually pays. `execute_query` reuses the
+    //      cursor through the statement cache, so the loop does not exhaust
+    //      `open_cursors`.
+    // ----------------------------------------------------------------------
+    {
+        let mut blocking_conn =
+            BlockingConnection::connect(options.clone()).expect("blocking facade connection");
+        let mut group = c.benchmark_group("oracledb_thin");
+        group.bench_function("select_one_row_blocking", |b| {
+            b.iter(|| {
+                // Drive the statement-cache path (empty bind rows) so the open
+                // server cursor is reused across iterations, exactly as the
+                // async `select_one_row` bench does — the only difference being
+                // that this goes through the synchronous facade.
+                let result = BlockingConnection::execute_query_with_bind_rows(
+                    &mut blocking_conn,
+                    "select 1 from dual",
+                    1,
+                    &[],
+                )
+                .expect("blocking cached execute");
+                assert_eq!(result.rows.len(), 1, "select returns exactly one row");
+                // release the open cursor so the same SQL reuses it next
+                // iteration instead of parsing a fresh one (else the loop
+                // exhausts open_cursors). `release_cursor` is a synchronous
+                // bookkeeping call; this is what closing a cursor object does in
+                // the shim, mirroring the async `select_one_row` bench above.
+                blocking_conn.release_cursor(result.cursor_id);
+            });
+        });
+        group.finish();
+        BlockingConnection::close(blocking_conn).expect("close blocking facade connection");
     }
 
     // ----------------------------------------------------------------------
