@@ -839,6 +839,66 @@ impl Connection {
         Ok(result)
     }
 
+    /// Sends a scroll request on an open scrollable cursor and returns the
+    /// repositioned buffer (reference `_create_scroll_message` +
+    /// `_post_process_scroll`). The caller computes the orientation/position;
+    /// `arraysize` is the prefetch/iteration count used for the fetch.
+    pub async fn scroll_cursor(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        cursor_id: u32,
+        arraysize: u32,
+        fetch_orientation: u32,
+        fetch_pos: u32,
+    ) -> Result<QueryResult> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let exec_options = ExecuteOptions {
+            cursor_id,
+            scrollable: true,
+            scroll_operation: true,
+            fetch_orientation,
+            fetch_pos,
+            cache_statement: false,
+            ..ExecuteOptions::default()
+        };
+        let piggyback = self.take_close_cursors_piggyback();
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let mut payload = build_execute_payload_with_bind_rows_and_options_with_seq(
+            sql,
+            arraysize,
+            seq_num,
+            true,
+            &[],
+            exec_options,
+        )?;
+        if let Some(mut piggyback_bytes) = piggyback {
+            piggyback_bytes.extend_from_slice(&payload);
+            payload = piggyback_bytes;
+        }
+        trace_query_bytes("SCROLL payload", &payload);
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response =
+            read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, self.sdu).await?;
+        trace_query_bytes("SCROLL response", &response);
+        let known_columns = self
+            .cursor_columns
+            .get(&cursor_id)
+            .cloned()
+            .unwrap_or_default();
+        let parsed = parse_query_response_with_binds_options_and_columns(
+            &response,
+            self.capabilities,
+            &[],
+            exec_options,
+            &known_columns,
+        );
+        let result = self.note_parse(parsed)?;
+        self.remember_cursor_columns(&result);
+        Ok(result)
+    }
+
     pub async fn read_lob(
         &mut self,
         cx: &Cx,
@@ -1828,6 +1888,31 @@ impl BlockingConnection {
                     arraysize,
                     define_columns,
                     previous_row,
+                )
+                .await
+        })
+    }
+
+    pub fn scroll_cursor(
+        connection: &mut Connection,
+        sql: &str,
+        cursor_id: u32,
+        arraysize: u32,
+        fetch_orientation: u32,
+        fetch_pos: u32,
+    ) -> Result<QueryResult> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .scroll_cursor(
+                    &cx,
+                    sql,
+                    cursor_id,
+                    arraysize,
+                    fetch_orientation,
+                    fetch_pos,
                 )
                 .await
         })

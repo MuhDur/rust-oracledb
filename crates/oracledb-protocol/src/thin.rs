@@ -45,6 +45,15 @@ pub const TNS_FUNC_PING: u8 = 147;
 pub const TNS_FUNC_ROLLBACK: u8 = 15;
 pub const TNS_FUNC_CLOSE_CURSORS: u8 = 105;
 
+/// Fetch orientations for scrollable cursors (reference constants.pxi).
+pub const TNS_FETCH_ORIENTATION_CURRENT: u32 = 0x01;
+pub const TNS_FETCH_ORIENTATION_NEXT: u32 = 0x02;
+pub const TNS_FETCH_ORIENTATION_FIRST: u32 = 0x04;
+pub const TNS_FETCH_ORIENTATION_LAST: u32 = 0x08;
+pub const TNS_FETCH_ORIENTATION_PRIOR: u32 = 0x10;
+pub const TNS_FETCH_ORIENTATION_ABSOLUTE: u32 = 0x20;
+pub const TNS_FETCH_ORIENTATION_RELATIVE: u32 = 0x40;
+
 pub const TNS_AUTH_MODE_LOGON: u32 = 0x0000_0001;
 pub const TNS_AUTH_MODE_CHANGE_PASSWORD: u32 = 0x0000_0002;
 pub const TNS_AUTH_MODE_WITH_PASSWORD: u32 = 0x0000_0100;
@@ -132,6 +141,8 @@ const TNS_EXEC_OPTION_NOT_PLSQL: u32 = 0x8000;
 const TNS_EXEC_OPTION_DESCRIBE: u32 = 0x20000;
 const TNS_EXEC_OPTION_BATCH_ERRORS: u32 = 0x80000;
 const TNS_EXEC_FLAGS_DML_ROWCOUNTS: u32 = 0x4000;
+const TNS_EXEC_FLAGS_SCROLLABLE: u32 = 0x02;
+const TNS_EXEC_FLAGS_NO_CANCEL_ON_EOF: u32 = 0x80;
 const TNS_DURATION_SESSION: u32 = 10;
 const TNS_LOB_OP_READ: u32 = 0x0002;
 const TNS_LOB_OP_TRIM: u32 = 0x0020;
@@ -847,6 +858,20 @@ pub struct ExecuteOptions {
     /// Whether the statement may be kept in the connection statement cache
     /// (reference `cursor.prepare(cache_statement=...)`).
     pub cache_statement: bool,
+    /// Whether the cursor was opened scrollable; sets the scrollable execute
+    /// flags and primes the fetch orientation (reference `cursor_impl.scrollable`).
+    pub scrollable: bool,
+    /// Fetch orientation for the next fetch (reference `fetch_orientation`,
+    /// al8i4[10]); one of the `TNS_FETCH_ORIENTATION_*` constants. Zero leaves
+    /// the server default.
+    pub fetch_orientation: u32,
+    /// Desired row position paired with `fetch_orientation` (reference
+    /// `fetch_pos`, al8i4[11]).
+    pub fetch_pos: u32,
+    /// True when this execute is a scroll request: the EXECUTE/BIND options are
+    /// suppressed so the server only repositions the open cursor and fetches
+    /// (reference `scroll_operation`).
+    pub scroll_operation: bool,
 }
 
 impl Default for ExecuteOptions {
@@ -857,6 +882,10 @@ impl Default for ExecuteOptions {
             parse_only: false,
             cursor_id: 0,
             cache_statement: true,
+            scrollable: false,
+            fetch_orientation: 0,
+            fetch_pos: 0,
+            scroll_operation: false,
         }
     }
 }
@@ -934,11 +963,14 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     // a fresh parse is required when the statement has no open server cursor
     // or is DDL (reference execute.pyx:88-89)
     let needs_parse = exec_options.cursor_id == 0 || crate::sql::statement_is_ddl(sql);
+    // a scroll request only repositions the open cursor and fetches; the
+    // EXECUTE/BIND options are suppressed (reference execute.pyx:82-84,105)
+    let scroll_operation = exec_options.scroll_operation;
     let mut options = 0;
     if needs_parse {
         options |= TNS_EXEC_OPTION_PARSE;
     }
-    if !parse_only {
+    if !parse_only && !scroll_operation {
         options |= TNS_EXEC_OPTION_EXECUTE;
     }
     if is_query {
@@ -948,7 +980,7 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
             options |= TNS_EXEC_OPTION_FETCH;
         }
     }
-    if bind_count > 0 {
+    if bind_count > 0 && !scroll_operation {
         options |= TNS_EXEC_OPTION_BIND;
     }
     if is_plsql {
@@ -990,6 +1022,12 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     };
     if exec_options.arraydmlrowcounts {
         exec_flags |= TNS_EXEC_FLAGS_DML_ROWCOUNTS;
+    }
+    // scrollable cursors keep the result set open across fetches and avoid the
+    // server cancelling on end-of-fetch (reference execute.pyx:85-87)
+    if exec_options.scrollable && !parse_only {
+        exec_flags |= TNS_EXEC_FLAGS_SCROLLABLE;
+        exec_flags |= TNS_EXEC_FLAGS_NO_CANCEL_ON_EOF;
     }
     writer.write_ub4(options);
     writer.write_ub4(exec_options.cursor_id);
@@ -1058,13 +1096,15 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     writer.write_ub4(0);
     writer.write_ub4(0);
     writer.write_ub4(0);
-    writer.write_ub4(query_flag);
-    writer.write_ub4(0);
-    writer.write_ub4(exec_flags);
-    writer.write_ub4(0);
-    writer.write_ub4(0);
-    writer.write_ub4(0);
-    if !bind_rows.is_empty() {
+    writer.write_ub4(query_flag); // al8i4[7] is query
+    writer.write_ub4(0); // al8i4[8]
+    writer.write_ub4(exec_flags); // al8i4[9] execute flags
+    writer.write_ub4(exec_options.fetch_orientation); // al8i4[10] fetch orientation
+    writer.write_ub4(exec_options.fetch_pos); // al8i4[11] fetch pos
+    writer.write_ub4(0); // al8i4[12]
+    // a scroll request carries no bind parameters (reference suppresses the
+    // BIND option and never writes bind params for scroll_operation)
+    if !bind_rows.is_empty() && !scroll_operation {
         write_bind_params(&mut writer, bind_rows, is_plsql)?;
     }
     Ok(writer.into_bytes())
