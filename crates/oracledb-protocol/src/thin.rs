@@ -1102,8 +1102,8 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     writer.write_ub4(exec_options.fetch_orientation); // al8i4[10] fetch orientation
     writer.write_ub4(exec_options.fetch_pos); // al8i4[11] fetch pos
     writer.write_ub4(0); // al8i4[12]
-    // a scroll request carries no bind parameters (reference suppresses the
-    // BIND option and never writes bind params for scroll_operation)
+                         // a scroll request carries no bind parameters (reference suppresses the
+                         // BIND option and never writes bind params for scroll_operation)
     if !bind_rows.is_empty() && !scroll_operation {
         write_bind_params(&mut writer, bind_rows, is_plsql)?;
     }

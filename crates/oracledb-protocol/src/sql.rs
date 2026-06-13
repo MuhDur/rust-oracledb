@@ -598,6 +598,33 @@ mod tests {
     }
 
     #[test]
+    fn counts_bind_occurrences_for_plain_sql_but_coalesces_plsql() {
+        // plain SQL: a repeated positional placeholder is one bind per
+        // occurrence (reference `_add_bind`)
+        let sql = "insert into t (a, b) values (:1, udt_array(:1, :2, :3))";
+        assert_eq!(
+            bind_names_per_occurrence(sql).expect("scan"),
+            vec![
+                "1".to_string(),
+                "1".to_string(),
+                "2".to_string(),
+                "3".to_string()
+            ]
+        );
+        // unique view still collapses duplicates
+        assert_eq!(
+            unique_bind_names(sql).expect("scan"),
+            vec!["1".to_string(), "2".to_string(), "3".to_string()]
+        );
+        // PL/SQL coalesces duplicate placeholders into a single bind
+        let plsql = "begin proc(:x, :x, :y); end;";
+        assert_eq!(
+            bind_names_per_occurrence(plsql).expect("scan"),
+            vec!["x".to_string(), "y".to_string()]
+        );
+    }
+
+    #[test]
     fn reports_unclosed_single_quote() {
         let err = scan_bind_names("select ':not_closed from dual")
             .expect_err("unclosed quote should be rejected");

@@ -886,7 +886,8 @@ impl Connection {
         trace_query_bytes("SCROLL payload", &payload);
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
         let response =
-            read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, self.sdu).await?;
+            read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, self.sdu)
+                .await?;
         trace_query_bytes("SCROLL response", &response);
         let known_columns = self
             .cursor_columns
@@ -1912,14 +1913,7 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection
-                .scroll_cursor(
-                    &cx,
-                    sql,
-                    cursor_id,
-                    arraysize,
-                    fetch_orientation,
-                    fetch_pos,
-                )
+                .scroll_cursor(&cx, sql, cursor_id, arraysize, fetch_orientation, fetch_pos)
                 .await
         })
     }

@@ -207,8 +207,8 @@ impl ThinCursorImpl {
             self.buffer_max_row = 0;
         } else {
             let server_rowcount = result.row_count;
-            self.rowcount = i64::try_from(server_rowcount.saturating_sub(buffer_rowcount))
-                .unwrap_or(i64::MAX);
+            self.rowcount =
+                i64::try_from(server_rowcount.saturating_sub(buffer_rowcount)).unwrap_or(i64::MAX);
             self.more_rows = result.more_rows;
             self.row_index = 0;
             self.buffer_min_row = u64::try_from(self.rowcount.max(0))
@@ -696,26 +696,24 @@ impl ThinCursorImpl {
         let statement = self.statement.clone().unwrap_or_default();
         let cursor_id = self.cursor_id;
         let arraysize = self.arraysize;
-        let result = cursor
-            .py()
-            .detach(|| -> Result<QueryResult, TaskError> {
-                let mut guard = self
-                    .connection
-                    .lock()
-                    .map_err(|err| TaskError::from(err.to_string()))?;
-                let connection = guard
-                    .as_mut()
-                    .ok_or_else(|| TaskError::from("connection is closed"))?;
-                BlockingConnection::scroll_cursor(
-                    connection,
-                    &statement,
-                    cursor_id,
-                    arraysize,
-                    orientation,
-                    fetch_pos,
-                )
-                .map_err(TaskError::from)
-            });
+        let result = cursor.py().detach(|| -> Result<QueryResult, TaskError> {
+            let mut guard = self
+                .connection
+                .lock()
+                .map_err(|err| TaskError::from(err.to_string()))?;
+            let connection = guard
+                .as_mut()
+                .ok_or_else(|| TaskError::from("connection is closed"))?;
+            BlockingConnection::scroll_cursor(
+                connection,
+                &statement,
+                cursor_id,
+                arraysize,
+                orientation,
+                fetch_pos,
+            )
+            .map_err(TaskError::from)
+        });
         let result = match result {
             Ok(result) => result,
             Err(err) => return Err(raise_task_error(&err, &self.connection)),
