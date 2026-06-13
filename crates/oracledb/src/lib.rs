@@ -1440,7 +1440,7 @@ impl Connection {
     /// boundary-delimited responses (one per operation plus the end-pipeline
     /// response) are returned as raw TTC payloads in token order. Mirrors the
     /// reference flow (impl/thin/connection.pyx `run_pipeline_with_pipelining`
-    /// + protocol.pyx `end_pipeline`):
+    /// and protocol.pyx `end_pipeline`):
     ///
     /// * the first message is prefixed with the begin-pipeline piggyback and
     ///   its first packet carries TNS_DATA_FLAGS_BEGIN_PIPELINE,

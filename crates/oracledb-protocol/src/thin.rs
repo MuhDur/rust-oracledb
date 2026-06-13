@@ -820,8 +820,9 @@ pub fn build_function_payload_with_seq_and_token(
 }
 
 /// Begin-pipeline piggyback (messages/base.pyx `_write_begin_pipeline_piggyback`
-/// + `_write_piggyback_code`): prepended to the first pipelined message's
+/// and `_write_piggyback_code`): prepended to the first pipelined message's
 /// payload. The packet carrying it must set [`TNS_DATA_FLAGS_BEGIN_PIPELINE`].
+///
 /// `token_num` is the token of the message the piggyback rides on (1 for the
 /// first pipeline operation); `pipeline_mode` is one of
 /// [`TNS_PIPELINE_MODE_CONTINUE_ON_ERROR`] / [`TNS_PIPELINE_MODE_ABORT_ON_ERROR`].
