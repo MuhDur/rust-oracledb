@@ -2339,6 +2339,25 @@ pub fn check_fetch_conversion(
                     | ORA_TYPE_NUM_BINARY_FLOAT
             ) || CHAR_TYPES.contains(&to)
         }
+        ORA_TYPE_NUM_VECTOR => {
+            // VECTOR fetched as a character type streams its JSON text via a
+            // LONG wire define; VECTOR fetched as a CLOB streams via a CLOB
+            // locator (reference var.pyx:234-243).
+            if CHAR_TYPES.contains(&to) {
+                let mut metadata = source.clone();
+                metadata.ora_type_num = ORA_TYPE_NUM_LONG;
+                metadata.csfrm = CS_FORM_IMPLICIT;
+                metadata.buffer_size = TNS_MAX_LONG_LENGTH;
+                metadata.max_size = 0;
+                return Some(metadata);
+            }
+            if to == ORA_TYPE_NUM_CLOB {
+                let mut metadata = source.clone();
+                metadata.ora_type_num = ORA_TYPE_NUM_CLOB;
+                return Some(metadata);
+            }
+            false
+        }
         _ => false,
     };
     let _ = to_csfrm;

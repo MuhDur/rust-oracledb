@@ -635,7 +635,12 @@ pub(crate) fn set_input_size_var_value(
             var.set_py_value(py, Some(coerced))?;
             Ok(true)
         }
-        Err(_) => Ok(false),
+        // only a "value type not acceptable for this db type" mismatch
+        // (DPY-3013 / DPY-3004) falls back to deriving the bind from the value;
+        // hard validation errors (e.g. DPY-4031 empty vector) propagate, matching
+        // the reference `_check_value` `is_ok` handling
+        Err(err) if is_setinputsizes_fallback_error(py, &err) => Ok(false),
+        Err(err) => Err(err),
     }
 }
 
