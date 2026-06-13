@@ -371,3 +371,14 @@ builds from different worktrees cross-contaminate artifacts (one lane's in-progr
 enum variants leaked into another lane's build). RULE: every concurrent agent exports
 its own `CARGO_TARGET_DIR=/tmp/cargo-target-<lane>` for all cargo/maturin invocations.
 Single-builder sessions (main checkout only) may keep the default for cache warmth.
+
+## Container fleet (verification + lanes)
+
+- **rust-oracledb-free** (port 1522): the GLOBAL verification container — every post-merge
+  check on the main checkout runs here. MUST be restarted after any host/Docker event.
+- **rust-oracledb-lane-1523/1524/1526/1527** (+ 1525 retired): per-lane containers.
+- Containers stop on host events (API outages, reboots); schemas PERSIST across `docker start`.
+  After any outage, restart ALL of them (1522 included — easy to forget) and verify each with a
+  `select count(*) from TestNumbers` before trusting a red run. A down container shows as mass
+  `RuntimeError: Connection refused (os error 111)` setup-errors, which looks like a code
+  regression but is not — check container health FIRST.
