@@ -21,6 +21,13 @@ pub(crate) fn runtime_error(err: impl std::fmt::Display) -> PyErr {
         return Python::attach(|py| database_error(py, server_message))
             .unwrap_or_else(|_| PyRuntimeError::new_err(message));
     }
+    // driver-side DPY-* errors (e.g. sessionless DPY-3034/3035/3036) carry the
+    // full code as their message prefix; build the matching DatabaseError so
+    // `full_code` resolves correctly.
+    if message.starts_with("DPY-") {
+        return Python::attach(|py| database_error(py, &message))
+            .unwrap_or_else(|_| PyRuntimeError::new_err(message));
+    }
     match message.as_str() {
         "connection is closed" => return raise_oracledb_driver_error("ERR_NOT_CONNECTED"),
         "TTC decode failed: truncated DML RETURNING value" => return raise_column_truncated(),

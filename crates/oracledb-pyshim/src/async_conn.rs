@@ -204,6 +204,92 @@ impl AsyncThinConnImpl {
         Ok(())
     }
 
+    /// Async begin of a sessionless transaction (reference async connection.py
+    /// `begin_sessionless_transaction`).
+    async fn begin_sessionless_transaction(
+        &self,
+        transaction_id: Vec<u8>,
+        timeout: u32,
+        defer_round_trip: bool,
+    ) -> PyResult<()> {
+        let task = spawn_async_connection_task(
+            "oracledb-pyshim-async-begin-sessionless",
+            Arc::clone(&self.inner.connection),
+            move |cx, connection| {
+                Box::pin(async move {
+                    connection
+                        .begin_sessionless_transaction(
+                            cx,
+                            &transaction_id,
+                            timeout,
+                            defer_round_trip,
+                        )
+                        .await
+                        .map_err(TaskError::from)
+                })
+            },
+        );
+        task.await.map_err(runtime_error)?;
+        self.inner
+            .state
+            .lock()
+            .map_err(runtime_error)?
+            .transaction_in_progress = true;
+        Ok(())
+    }
+
+    /// Async resume of a sessionless transaction (reference async
+    /// `resume_sessionless_transaction`).
+    async fn resume_sessionless_transaction(
+        &self,
+        transaction_id: Vec<u8>,
+        timeout: u32,
+        defer_round_trip: bool,
+    ) -> PyResult<()> {
+        let task = spawn_async_connection_task(
+            "oracledb-pyshim-async-resume-sessionless",
+            Arc::clone(&self.inner.connection),
+            move |cx, connection| {
+                Box::pin(async move {
+                    connection
+                        .resume_sessionless_transaction(
+                            cx,
+                            &transaction_id,
+                            timeout,
+                            defer_round_trip,
+                        )
+                        .await
+                        .map_err(TaskError::from)
+                })
+            },
+        );
+        task.await.map_err(runtime_error)?;
+        self.inner
+            .state
+            .lock()
+            .map_err(runtime_error)?
+            .transaction_in_progress = true;
+        Ok(())
+    }
+
+    /// Async suspend of the active sessionless transaction (reference async
+    /// `suspend_sessionless_transaction`).
+    async fn suspend_sessionless_transaction(&self) -> PyResult<()> {
+        let task = spawn_async_connection_task(
+            "oracledb-pyshim-async-suspend-sessionless",
+            Arc::clone(&self.inner.connection),
+            |cx, connection| {
+                Box::pin(async move {
+                    connection
+                        .suspend_sessionless_transaction(cx)
+                        .await
+                        .map_err(TaskError::from)
+                })
+            },
+        );
+        task.await.map_err(runtime_error)
+    }
+
     /// Async Direct Path Load (reference thin/connection.pyx:1179). Mirrors the
     /// sync ThinConnImpl::direct_path_load but bridges each wire step through the
     /// async fetch-task runtime: materialize+verify (GIL) -> PREPARE -> convert
