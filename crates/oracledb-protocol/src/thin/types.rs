@@ -334,6 +334,11 @@ pub struct QueryResult {
     /// server-side piggyback (reference `_update_sessionless_txn_state`);
     /// `None` when the execute did not change the sessionless state.
     pub sessionless_txn_state: Option<SessionlessTxnState>,
+    /// CQN registered-query id read from the registration-info block of the
+    /// execute return parameters (reference `cursor_impl._query_id`,
+    /// base.pyx:1300-1309). `Some(0)` when the server returned no query id
+    /// (qos without SUBSCR_QOS_QUERY); `None` when the block was absent.
+    pub query_id: Option<u64>,
 }
 
 impl QueryResult {
@@ -418,6 +423,11 @@ pub struct ExecuteOptions {
     /// exhaust the cursor before the define-fetch runs, yielding ORA-01002 on
     /// the subsequent fetch.
     pub no_prefetch: bool,
+    /// CQN registration id threaded into the execute body (split into lsb/msb
+    /// at the al8i4 slots) when registering a query against a subscription
+    /// (reference `cursor_impl._registration_id`, execute.pyx:116-163). Zero
+    /// for ordinary executes.
+    pub registration_id: u64,
 }
 
 impl Default for ExecuteOptions {
@@ -435,6 +445,7 @@ impl Default for ExecuteOptions {
             scroll_operation: false,
             suspend_on_success: false,
             no_prefetch: false,
+            registration_id: 0,
         }
     }
 }

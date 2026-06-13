@@ -338,6 +338,42 @@ pub fn parse_notification_stream(
     Ok(records)
 }
 
+/// Consume the leading `TNS_MSG_TYPE_OAC` byte that precedes the OAC record
+/// stream (`process()` reads it once before delivering any record). Returns the
+/// number of bytes consumed (1) or an error if the byte is not OAC.
+pub fn check_notification_header(bytes: &[u8]) -> Result<usize> {
+    let mut reader = TtcReader::new(bytes);
+    let message_type = reader.read_u8()?;
+    if message_type != TNS_MSG_TYPE_OAC {
+        return Err(ProtocolError::UnknownMessageType {
+            message_type,
+            position: 0,
+        });
+    }
+    Ok(reader.position())
+}
+
+/// Attempt to decode exactly one OAC record from the front of `bytes`. Returns
+/// the decoded record and the number of bytes consumed, or `Ok(None)` when the
+/// buffer does not yet hold a complete record (the caller must read more data
+/// from the EMON socket and retry — mirroring the reference `ReadBuffer`
+/// chaining packets within a single `process()` call).
+pub fn try_parse_oac_record(
+    bytes: &[u8],
+    namespace: u32,
+    public_qos: u32,
+    db_name: Option<&str>,
+) -> Result<Option<(NotificationRecord, usize)>> {
+    let mut reader = TtcReader::new(bytes);
+    match parse_oac_record(&mut reader, namespace, public_qos, db_name) {
+        Ok(record) => Ok(Some((record, reader.position()))),
+        // The server only emits well-formed records; a decode failure while the
+        // stream is still being chained means the buffer is short, so signal
+        // "need more bytes" rather than treating it as corruption.
+        Err(_) => Ok(None),
+    }
+}
+
 /// Decode a single OAC record. Ports `notification.pyx::_process_oac` plus the
 /// inner payload decode.
 pub fn parse_oac_record(
