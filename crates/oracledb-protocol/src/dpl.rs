@@ -156,7 +156,9 @@ pub fn parse_direct_path_prepare_response(
                 let _call_status = reader.read_ub4()?;
                 let _seq = reader.read_ub2()?;
             }
-            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => skip_server_side_piggyback(&mut reader)?,
+            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => {
+                let _ = skip_server_side_piggyback(&mut reader)?;
+            }
             TNS_MSG_TYPE_END_OF_RESPONSE => break,
             TNS_MSG_TYPE_ERROR => {
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
@@ -268,7 +270,9 @@ pub fn parse_direct_path_simple_response(
                 let _call_status = reader.read_ub4()?;
                 let _seq = reader.read_ub2()?;
             }
-            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => skip_server_side_piggyback(&mut reader)?,
+            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => {
+                let _ = skip_server_side_piggyback(&mut reader)?;
+            }
             TNS_MSG_TYPE_END_OF_RESPONSE => break,
             TNS_MSG_TYPE_ERROR => {
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;

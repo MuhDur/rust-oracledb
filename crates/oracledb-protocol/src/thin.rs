@@ -49,6 +49,35 @@ pub const TNS_FUNC_PIPELINE_BEGIN: u8 = 199;
 pub const TNS_FUNC_PIPELINE_END: u8 = 200;
 pub const TNS_FUNC_ROLLBACK: u8 = 15;
 pub const TNS_FUNC_CLOSE_CURSORS: u8 = 105;
+/// Two-phase-commit / sessionless transaction switch (start/attach/detach);
+/// reference `TNS_FUNC_TPC_TXN_SWITCH` (impl/thin/constants.pxi:440).
+pub const TNS_FUNC_TPC_TXN_SWITCH: u8 = 103;
+
+// Sessionless / TPC transaction switch operations (reference constants.pxi:597).
+pub const TNS_TPC_TXN_START: u32 = 0x01;
+pub const TNS_TPC_TXN_DETACH: u32 = 0x02;
+pub const TNS_TPC_TXN_POST_DETACH: u32 = 0x04;
+
+// TPC transaction flags (reference base_impl.pxd:218).
+pub const TPC_TXN_FLAGS_NEW: u32 = 0x0000_0001;
+pub const TPC_TXN_FLAGS_RESUME: u32 = 0x0000_0004;
+pub const TPC_TXN_FLAGS_SESSIONLESS: u32 = 0x0000_0010;
+
+/// Format id stamped into the XID of a sessionless transaction so the server
+/// can distinguish it from an XA global transaction (reference
+/// impl/thin/connection.pyx `_SessionlessData.create_message`).
+pub const SESSIONLESS_FORMAT_ID: u32 = 0x4e_5c_3e;
+
+/// Keyword number carrying the (binary) sessionless transaction id / state in
+/// a return-parameter key/value pair (reference constants.pxi:207).
+pub const TNS_KEYWORD_NUM_TRANSACTION_ID: u16 = 201;
+
+// Sessionless server-state bits, packed in the second-to-last byte of the
+// transaction-id key/value binary payload (reference constants.pxi:608).
+pub const TNS_TPC_TXNID_SYNC_SET: u8 = 0x40;
+pub const TNS_TPC_TXNID_SYNC_UNSET: u8 = 0x80;
+// Sessionless state reason bits (reference constants.pxi:613).
+pub const TNS_TPC_TXNID_SYNC_SERVER: u8 = 0x01;
 
 /// Fetch orientations for scrollable cursors (reference constants.pxi).
 pub const TNS_FETCH_ORIENTATION_CURRENT: u32 = 0x01;
@@ -738,6 +767,10 @@ pub struct QueryResult {
     /// Pipeline token echoed by the server (TNS message 33) at the start of
     /// each pipelined response; `None` outside pipelines.
     pub token_num: Option<u64>,
+    /// Sessionless transaction state update carried by the response's SYNC
+    /// server-side piggyback (reference `_update_sessionless_txn_state`);
+    /// `None` when the execute did not change the sessionless state.
+    pub sessionless_txn_state: Option<SessionlessTxnState>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -844,6 +877,185 @@ pub fn build_function_payload_with_seq_and_token(
     writer.write_function_code_with_seq(function_code, seq_num);
     writer.write_ub8(token_num);
     writer.into_bytes()
+}
+
+/// Outcome of a sessionless transaction switch / suspend round trip, as
+/// signalled by the server through the transaction-id key/value pair
+/// (reference messages/base.pyx `_update_sessionless_txn_state`). `None`
+/// means the response carried no transaction-id update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionlessTxnState {
+    /// A sessionless transaction was started or resumed (`TXNID_SYNC_SET`).
+    Set { started_on_server: bool },
+    /// The active sessionless transaction was suspended or ended
+    /// (`TXNID_SYNC_UNSET`).
+    Unset,
+}
+
+/// Body of the transaction-switch message (reference impl/thin/messages/
+/// tpc_switch.pyx `_write_message`), shared by the direct function call and the
+/// piggyback forms. `xid` is the (format_id, global_txn_id) of a sessionless
+/// transaction being started; `None` for a suspend/detach which carries no XID.
+fn write_tpc_txn_switch_body(
+    writer: &mut TtcWriter,
+    operation: u32,
+    flags: u32,
+    timeout: u32,
+    xid: Option<&[u8]>,
+) {
+    writer.write_ub4(operation);
+    writer.write_u8(0); // pointer (transaction context)
+    writer.write_ub4(0); // transaction context length
+    if let Some(global_txn_id) = xid {
+        // sessionless transactions send only a global transaction id; the
+        // branch qualifier is empty and the combined value is right-padded
+        // with zero bytes to 128 bytes (tpc_switch.pyx:80-81).
+        let mut xid_bytes = global_txn_id.to_vec();
+        xid_bytes.resize(128, 0);
+        writer.write_ub4(SESSIONLESS_FORMAT_ID);
+        writer.write_ub4(u32::try_from(global_txn_id.len()).unwrap_or(0)); // global txn id len
+        writer.write_ub4(0); // branch qualifier length
+        writer.write_u8(1); // pointer (XID)
+        writer.write_ub4(u32::try_from(xid_bytes.len()).unwrap_or(0));
+        writer.write_ub4(flags);
+        writer.write_ub4(timeout);
+        writer.write_u8(1); // pointer (application value)
+        writer.write_u8(1); // pointer (return context)
+        writer.write_u8(1); // pointer (return context length)
+        writer.write_u8(0); // pointer (internal name)
+        writer.write_ub4(0); // length of internal name
+        writer.write_u8(0); // pointer (external name)
+        writer.write_ub4(0); // length of external name
+        writer.write_raw(&xid_bytes);
+        writer.write_ub4(0); // application value
+    } else {
+        writer.write_ub4(0); // format id
+        writer.write_ub4(0); // global transaction id length
+        writer.write_ub4(0); // branch qualifier length
+        writer.write_u8(0); // pointer (XID)
+        writer.write_ub4(0); // XID length
+        writer.write_ub4(flags);
+        writer.write_ub4(timeout);
+        writer.write_u8(1); // pointer (application value)
+        writer.write_u8(1); // pointer (return context)
+        writer.write_u8(1); // pointer (return context length)
+        writer.write_u8(0); // pointer (internal name)
+        writer.write_ub4(0); // length of internal name
+        writer.write_u8(0); // pointer (external name)
+        writer.write_ub4(0); // length of external name
+        writer.write_ub4(0); // application value
+    }
+}
+
+/// Direct (non-deferred) transaction-switch function call used to begin/resume
+/// (`TNS_TPC_TXN_START` + new/resume flag, with `xid`) or suspend
+/// (`TNS_TPC_TXN_DETACH`, no `xid`) a sessionless transaction. Reference
+/// impl/thin/connection.pyx `begin/resume/suspend_sessionless_transaction`.
+pub fn build_tpc_txn_switch_payload_with_seq(
+    seq_num: u8,
+    token_num: u64,
+    operation: u32,
+    flags: u32,
+    timeout: u32,
+    xid: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut writer = TtcWriter::new();
+    writer.write_function_code_with_seq(TNS_FUNC_TPC_TXN_SWITCH, seq_num);
+    writer.write_ub8(token_num);
+    write_tpc_txn_switch_body(&mut writer, operation, flags, timeout, xid);
+    writer.into_bytes()
+}
+
+/// Sessionless transaction-switch piggyback, prepended to the next execute
+/// message's payload (reference messages/base.pyx `_write_sessionless_piggyback`
+/// — the same message body written with a `TNS_MSG_TYPE_PIGGYBACK` header). Used
+/// for a deferred begin/resume (`defer_round_trip=True`) and for the
+/// `suspend_on_success` post-detach. `operation` already encodes whether a
+/// post-detach is folded in (`TNS_TPC_TXN_START | TNS_TPC_TXN_POST_DETACH`).
+pub fn build_sessionless_piggyback(
+    seq_num: u8,
+    token_num: u64,
+    operation: u32,
+    flags: u32,
+    timeout: u32,
+    xid: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut writer = TtcWriter::new();
+    writer.write_u8(TNS_MSG_TYPE_PIGGYBACK);
+    writer.write_u8(TNS_FUNC_TPC_TXN_SWITCH);
+    writer.write_u8(seq_num);
+    writer.write_ub8(token_num);
+    write_tpc_txn_switch_body(&mut writer, operation, flags, timeout, xid);
+    writer.into_bytes()
+}
+
+/// Decode the sessionless state bits packed in the transaction-id key/value
+/// binary payload (reference `_update_sessionless_txn_state`). The last two
+/// bytes are the state mask and the sync version; the leading bytes are the
+/// transaction id itself.
+pub fn decode_sessionless_txn_state(binary: &[u8]) -> Result<Option<SessionlessTxnState>> {
+    if binary.len() < 2 {
+        return Err(ProtocolError::TtcDecode("short sessionless txn state"));
+    }
+    let state = binary[binary.len() - 2];
+    let sync_version = binary[binary.len() - 1];
+    if sync_version != 1 {
+        return Err(ProtocolError::TtcDecode("unknown transaction sync version"));
+    }
+    if state & TNS_TPC_TXNID_SYNC_UNSET != 0 {
+        Ok(Some(SessionlessTxnState::Unset))
+    } else if state & TNS_TPC_TXNID_SYNC_SET != 0 {
+        Ok(Some(SessionlessTxnState::Set {
+            started_on_server: state & TNS_TPC_TXNID_SYNC_SERVER != 0,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Parse a transaction-switch response (reference tpc_switch.pyx
+/// `_process_return_parameters` plus base.pyx message loop). Returns any
+/// sessionless state update carried by a transaction-id key/value pair; server
+/// errors (e.g. ORA-25351 / ORA-26217) are surfaced as `ProtocolError`.
+pub fn parse_tpc_txn_switch_response(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+) -> Result<Option<SessionlessTxnState>> {
+    let mut reader = TtcReader::new(payload);
+    let mut state = None;
+    while reader.remaining() > 0 {
+        let message_type = reader.read_u8()?;
+        match message_type {
+            0 => {}
+            TNS_MSG_TYPE_STATUS => {
+                let _call_status = reader.read_ub4()?;
+                let _seq = reader.read_ub2()?;
+            }
+            TNS_MSG_TYPE_PARAMETER => {
+                // tpc_switch.pyx `_process_return_parameters`: application value
+                // (ub4) then the return transaction context (ub2 length + bytes).
+                let _application_value = reader.read_ub4()?;
+                let context_len = reader.read_ub2()?;
+                if context_len > 0 {
+                    reader.skip(usize::from(context_len))?;
+                }
+            }
+            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => {
+                if let Some(update) = skip_server_side_piggyback(&mut reader)? {
+                    state = Some(update);
+                }
+            }
+            TNS_MSG_TYPE_END_OF_RESPONSE => break,
+            TNS_MSG_TYPE_ERROR => {
+                let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
+                if info.number != 0 {
+                    return Err(ProtocolError::ServerErrorInfo(Box::new(info.into_details())));
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(state)
 }
 
 /// Begin-pipeline piggyback (messages/base.pyx `_write_begin_pipeline_piggyback`
@@ -2826,7 +3038,11 @@ fn parse_query_response_with_context_binds_and_options(
                     .collect();
             }
             TNS_MSG_TYPE_FLUSH_OUT_BINDS => break,
-            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => skip_server_side_piggyback(&mut reader)?,
+            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => {
+                if let Some(update) = skip_server_side_piggyback(&mut reader)? {
+                    result.sessionless_txn_state = Some(update);
+                }
+            }
             TNS_MSG_TYPE_IMPLICIT_RESULTSET => {
                 // reference messages/base.pyx `_process_implicit_result`
                 let num_results = reader.read_ub4()?;
@@ -3177,7 +3393,9 @@ pub fn parse_auth_response(payload: &[u8]) -> Result<AuthResponse> {
                 let _call_status = reader.read_ub4()?;
                 let _seq = reader.read_ub2()?;
             }
-            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => skip_server_side_piggyback(&mut reader)?,
+            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => {
+                let _ = skip_server_side_piggyback(&mut reader)?;
+            }
             TNS_MSG_TYPE_END_OF_RESPONSE => break,
             TNS_MSG_TYPE_ERROR => {
                 if let Some(message) = parse_server_error(&mut reader, 13)? {
@@ -3849,7 +4067,9 @@ pub fn parse_lob_free_temp_response(
                 let _call_status = reader.read_ub4()?;
                 let _seq = reader.read_ub2()?;
             }
-            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => skip_server_side_piggyback(&mut reader)?,
+            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => {
+                let _ = skip_server_side_piggyback(&mut reader)?;
+            }
             TNS_MSG_TYPE_END_OF_RESPONSE => break,
             TNS_MSG_TYPE_ERROR => {
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
@@ -3885,7 +4105,9 @@ pub fn parse_plain_function_response(
                 let _call_status = reader.read_ub4()?;
                 let _seq = reader.read_ub2()?;
             }
-            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => skip_server_side_piggyback(&mut reader)?,
+            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => {
+                let _ = skip_server_side_piggyback(&mut reader)?;
+            }
             TNS_MSG_TYPE_END_OF_RESPONSE => break,
             TNS_MSG_TYPE_ERROR => {
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
@@ -3936,7 +4158,9 @@ fn parse_lob_op_response(
                 let _call_status = reader.read_ub4()?;
                 let _seq = reader.read_ub2()?;
             }
-            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => skip_server_side_piggyback(&mut reader)?,
+            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => {
+                let _ = skip_server_side_piggyback(&mut reader)?;
+            }
             TNS_MSG_TYPE_END_OF_RESPONSE => break,
             TNS_MSG_TYPE_ERROR => {
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
@@ -4736,8 +4960,15 @@ fn parse_return_parameters(reader: &mut TtcReader<'_>) -> Result<AuthResponse> {
     Ok(response)
 }
 
-pub(crate) fn skip_server_side_piggyback(reader: &mut TtcReader<'_>) -> Result<()> {
+/// Process a server-side piggyback, returning any sessionless transaction
+/// state update carried by the SYNC piggyback's `TRANSACTION_ID` keyword
+/// (reference messages/base.pyx `_process_server_side_piggyback`). Most callers
+/// discard the result with `?;`.
+pub(crate) fn skip_server_side_piggyback(
+    reader: &mut TtcReader<'_>,
+) -> Result<Option<SessionlessTxnState>> {
     let opcode = reader.read_u8()?;
+    let mut txn_state = None;
     match opcode {
         TNS_SERVER_PIGGYBACK_LTXID => {
             let _ltxid = reader.read_bytes_with_length()?;
@@ -4752,7 +4983,7 @@ pub(crate) fn skip_server_side_piggyback(reader: &mut TtcReader<'_>) -> Result<(
             reader.skip(1)?;
             let num_elements = reader.read_ub2()?;
             reader.skip(1)?;
-            skip_keyword_value_pairs(reader, num_elements)?;
+            txn_state = read_keyword_value_pairs_for_txn_state(reader, num_elements)?;
             let _flags = reader.read_ub4()?;
         }
         TNS_SERVER_PIGGYBACK_EXT_SYNC => {
@@ -4796,20 +5027,40 @@ pub(crate) fn skip_server_side_piggyback(reader: &mut TtcReader<'_>) -> Result<(
         }
         _ => return Err(ProtocolError::UnsupportedFeature("server-side piggyback")),
     }
-    Ok(())
+    Ok(txn_state)
 }
 
 fn skip_keyword_value_pairs(reader: &mut TtcReader<'_>, num_pairs: u16) -> Result<()> {
+    read_keyword_value_pairs_for_txn_state(reader, num_pairs).map(|_| ())
+}
+
+/// Like [`skip_keyword_value_pairs`] but extracts the sessionless transaction
+/// state carried by the `TRANSACTION_ID` keyword (201). Reference
+/// `_process_keyword_value_pairs` calls `_update_sessionless_txn_state` on the
+/// binary value of that keyword.
+fn read_keyword_value_pairs_for_txn_state(
+    reader: &mut TtcReader<'_>,
+    num_pairs: u16,
+) -> Result<Option<SessionlessTxnState>> {
+    let mut state = None;
     for _ in 0..num_pairs {
         if reader.read_ub2()? > 0 {
             let _text_value = reader.read_bytes()?;
         }
+        let mut binary_value = None;
         if reader.read_ub2()? > 0 {
-            let _binary_value = reader.read_bytes()?;
+            binary_value = reader.read_bytes()?;
         }
-        let _keyword_num = reader.read_ub2()?;
+        let keyword_num = reader.read_ub2()?;
+        if keyword_num == TNS_KEYWORD_NUM_TRANSACTION_ID {
+            if let Some(binary) = binary_value.as_deref() {
+                if let Some(update) = decode_sessionless_txn_state(binary)? {
+                    state = Some(update);
+                }
+            }
+        }
     }
-    Ok(())
+    Ok(state)
 }
 
 fn has_u8_flag(flags: u8, mask: u8) -> bool {
