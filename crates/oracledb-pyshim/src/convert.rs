@@ -7,13 +7,14 @@ use oracledb::protocol::thin::{
     encode_lob_text as protocol_encode_lob_text, BindValue, ColumnMetadata, QueryValue,
     CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE,
     ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_BOOLEAN, ORA_TYPE_NUM_CLOB,
-    ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
+    ORA_TYPE_NUM_JSON, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
     ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR, ORA_TYPE_NUM_VECTOR,
 };
+use oracledb::protocol::oson::OsonValue;
 use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyBytesMethods, PyList, PyTuple};
+use pyo3::types::{PyBool, PyBytes, PyBytesMethods, PyDict, PyList, PyTuple};
 
 use crate::*;
 
@@ -118,6 +119,108 @@ pub(crate) fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> 
     Err(raise_python_value_not_supported(&py_value_type_name(value)))
 }
 
+/// Converts a Python value to an [`OsonValue`] for OSON encoding, mirroring the
+/// reference `OsonTreeSegment.encode_node` (impl/base/oson.pyx). Unsupported
+/// Python types raise DPY-3003 (ERR_PYTHON_TYPE_NOT_SUPPORTED), matching the
+/// reference (test_3508).
+pub(crate) fn py_value_to_oson(value: &Bound<'_, PyAny>) -> PyResult<OsonValue> {
+    let py = value.py();
+    if value.is_none() {
+        return Ok(OsonValue::Null);
+    }
+    // bool precedes the numeric branch (bool is an int subclass).
+    if value.is_instance_of::<PyBool>() {
+        return Ok(OsonValue::Bool(value.extract::<bool>()?));
+    }
+    // int / float / decimal.Decimal -> Oracle NUMBER carried as its str().
+    let decimal_type = PyModule::import(py, "decimal")?.getattr("Decimal")?;
+    let is_int = value.is_instance_of::<pyo3::types::PyInt>();
+    let is_float = value.is_instance_of::<pyo3::types::PyFloat>();
+    let is_decimal = value.is_instance(&decimal_type)?;
+    if is_int || is_float || is_decimal {
+        // str() preserves arbitrary-precision ints and Decimals exactly, which
+        // is what the reference does (`PyObject_Str(value)`).
+        let text = value.str()?.extract::<String>()?;
+        return Ok(OsonValue::Number(text));
+    }
+    if let Ok(bytes) = value.cast::<PyBytes>() {
+        return Ok(OsonValue::Raw(bytes.as_bytes().to_vec()));
+    }
+    // array.array / SparseVector -> embedded VECTOR node.
+    if is_vector_value(value)? {
+        return Ok(OsonValue::Vector(py_to_vector(value, false)?));
+    }
+    // timedelta -> INTERVAL DAY TO SECOND (checked before the generic datetime
+    // attribute probe, which it would not satisfy anyway).
+    let timedelta_type = PyModule::import(py, "datetime")?.getattr("timedelta")?;
+    if value.is_instance(&timedelta_type)? {
+        let days = value.getattr("days")?.extract::<i32>()?;
+        let seconds = value.getattr("seconds")?.extract::<i32>()?;
+        let microseconds = value.getattr("microseconds")?.extract::<i32>()?;
+        return Ok(OsonValue::IntervalDS {
+            days,
+            hours: seconds / 3600,
+            minutes: (seconds % 3600) / 60,
+            seconds: seconds % 60,
+            fseconds: microseconds * 1000,
+        });
+    }
+    // datetime.datetime / datetime.date -> DATE / TIMESTAMP.
+    if let Some((year, month, day, hour, minute, second, nanosecond)) = py_date_time_fields(value)? {
+        return Ok(OsonValue::DateTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+        });
+    }
+    if let Ok(text) = value.extract::<String>() {
+        return Ok(OsonValue::String(text));
+    }
+    if let Ok(items) = value.cast::<PyList>() {
+        let mut out = Vec::with_capacity(items.len());
+        for item in items.iter() {
+            out.push(py_value_to_oson(&item)?);
+        }
+        return Ok(OsonValue::Array(out));
+    }
+    if let Ok(items) = value.cast::<PyTuple>() {
+        let mut out = Vec::with_capacity(items.len());
+        for item in items.iter() {
+            out.push(py_value_to_oson(&item)?);
+        }
+        return Ok(OsonValue::Array(out));
+    }
+    if let Ok(dict) = value.cast::<PyDict>() {
+        let mut entries = Vec::with_capacity(dict.len());
+        for (key, child) in dict.iter() {
+            let key = key.extract::<String>().map_err(|_| {
+                raise_oracledb_driver_error("ERR_PYTHON_TYPE_NOT_SUPPORTED")
+            })?;
+            entries.push((key, py_value_to_oson(&child)?));
+        }
+        return Ok(OsonValue::Object(entries));
+    }
+    // Unsupported type (e.g. a bare `list` class object) raises DPY-3003.
+    Err(raise_python_type_not_supported(&value.get_type().into_any()))
+}
+
+/// Builds a [`BindValue::Json`] from a Python value. Pre-encoded OSON `bytes`
+/// are passed through unchanged; everything else is encoded to OSON. Long field
+/// names (>255 bytes) are permitted (OSON version 3); the encoder still emits
+/// version 1 when no long name is present, matching the live driver byte-for-byte.
+pub(crate) fn py_value_to_json_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> {
+    if let Ok(bytes) = value.cast::<PyBytes>() {
+        return Ok(BindValue::Json(bytes.as_bytes().to_vec()));
+    }
+    let oson = py_value_to_oson(value)?;
+    let image = oracledb::protocol::oson::encode_oson(&oson, true).map_err(runtime_error)?;
+    Ok(BindValue::Json(image))
+}
+
 pub(crate) fn py_interval_ym_to_bind(value: &Bound<'_, PyAny>) -> PyResult<Option<BindValue>> {
     let interval_ym_type = PyModule::import(value.py(), "oracledb")?.getattr("IntervalYM")?;
     if !value.is_instance(&interval_ym_type)? {
@@ -198,6 +301,15 @@ pub(crate) fn py_value_to_bind_with_template(
             return Ok(BindValue::Null);
         }
         return Ok(BindValue::Vector(py_to_vector(value, true)?));
+    }
+    // A value bound through a DB_TYPE_JSON variable is encoded to OSON. Already-
+    // encoded OSON `bytes` are passed through unchanged (reference accepts a
+    // pre-encoded image; test_6906).
+    if ora_type_num == ORA_TYPE_NUM_JSON {
+        if value.is_none() {
+            return Ok(BindValue::Null);
+        }
+        return py_value_to_json_bind(value);
     }
     let Some((year, month, day, hour, minute, second, nanosecond)) = py_date_time_fields(value)?
     else {
@@ -1213,6 +1325,68 @@ pub(crate) fn query_value_to_py(
                 py,
                 DbObjectImpl::with_packed_data(object_type, packed_data.clone(), lob_context),
             )
+        }
+        // Native Oracle JSON (DB_TYPE_JSON): the OSON image was decoded by the
+        // protocol layer into an OsonValue tree; marshal it to Python objects.
+        Some(QueryValue::Json(value)) => oson_value_to_py(py, value),
+    }
+}
+
+/// Converts a decoded [`OsonValue`] to its Python equivalent, matching
+/// python-oracledb's OSON decode: numbers -> `decimal.Decimal` (lossless),
+/// binary float/double -> `float`, strings -> `str`, raw -> `bytes`,
+/// dates/timestamps -> `datetime.datetime`, INTERVAL DS -> `datetime.timedelta`,
+/// objects -> `dict` (insertion order preserved), arrays -> `list`.
+pub(crate) fn oson_value_to_py(py: Python<'_>, value: &OsonValue) -> PyResult<Py<PyAny>> {
+    match value {
+        OsonValue::Null => Ok(py.None()),
+        OsonValue::Bool(value) => Ok(PyBool::new(py, *value).to_owned().unbind().into()),
+        // OSON numbers always decode to decimal.Decimal in python-oracledb so
+        // arbitrary precision is preserved (verified against the live driver).
+        OsonValue::Number(text) => Ok(PyModule::import(py, "decimal")?
+            .getattr("Decimal")?
+            .call1((text.as_str(),))?
+            .unbind()),
+        OsonValue::BinaryFloat(value) => Ok(f64::from(*value).into_pyobject(py)?.unbind().into()),
+        OsonValue::BinaryDouble(value) => Ok((*value).into_pyobject(py)?.unbind().into()),
+        OsonValue::String(text) => Ok(text.clone().into_pyobject(py)?.unbind().into()),
+        OsonValue::Raw(bytes) => Ok(PyBytes::new(py, bytes).unbind().into()),
+        OsonValue::DateTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+        } => {
+            let datetime = PyModule::import(py, "datetime")?.getattr("datetime")?;
+            let microsecond = nanosecond / 1000;
+            Ok(datetime
+                .call1((*year, *month, *day, *hour, *minute, *second, microsecond))?
+                .unbind())
+        }
+        OsonValue::IntervalDS {
+            days,
+            hours,
+            minutes,
+            seconds,
+            fseconds,
+        } => interval_ds_to_py(py, *days, *hours, *minutes, *seconds, *fseconds),
+        OsonValue::Vector(vector) => vector_to_py(py, vector),
+        OsonValue::Array(values) => {
+            let items = values
+                .iter()
+                .map(|item| oson_value_to_py(py, item))
+                .collect::<PyResult<Vec<_>>>()?;
+            Ok(PyList::new(py, items)?.unbind().into())
+        }
+        OsonValue::Object(entries) => {
+            let dict = PyDict::new(py);
+            for (key, child) in entries {
+                dict.set_item(key, oson_value_to_py(py, child)?)?;
+            }
+            Ok(dict.unbind().into())
         }
     }
 }

@@ -1768,10 +1768,15 @@ impl ThinCursorImpl {
                         .borrow(py)
                         .output_value_to_py(py, value, Some(&lob_context));
                 }
-                if self
-                    .columns
-                    .get(index)
-                    .is_some_and(|metadata| metadata.is_json)
+                // Native DB_TYPE_JSON columns (ora_type_num 119) arrive as a
+                // decoded OsonValue and are converted directly. The is_json text
+                // path is only for JSON stored in a CLOB/BLOB (json.loads of the
+                // fetched text); it must not run on an already-decoded value.
+                if !matches!(value, Some(QueryValue::Json(_)))
+                    && self
+                        .columns
+                        .get(index)
+                        .is_some_and(|metadata| metadata.is_json)
                 {
                     return json_query_value_to_py(py, value, Some(_cursor), Some(&lob_context));
                 }

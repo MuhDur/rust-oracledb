@@ -1,5 +1,6 @@
 use oracledb::protocol::thin::{
-    ColumnMetadata, QueryValue, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_VECTOR,
+    ColumnMetadata, QueryValue, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_JSON,
+    ORA_TYPE_NUM_VECTOR,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -187,6 +188,7 @@ pub(crate) fn query_value_to_string(value: &Option<QueryValue>) -> Option<String
         Some(QueryValue::Cursor { .. }) => None,
         Some(QueryValue::Object { .. }) => None,
         Some(QueryValue::Lob { .. }) => None,
+        Some(QueryValue::Json(_)) => None,
         None => None,
     }
 }
@@ -206,7 +208,7 @@ pub(crate) fn columns_require_define(columns: &[ColumnMetadata]) -> bool {
     columns.iter().any(|metadata| {
         matches!(
             metadata.ora_type_num,
-            ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR
+            ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR | ORA_TYPE_NUM_JSON
         )
     })
 }
