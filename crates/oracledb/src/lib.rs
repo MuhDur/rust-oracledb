@@ -1,3 +1,118 @@
+//! A pure-Rust, thin-mode driver for Oracle Database.
+//!
+//! `oracledb` speaks the Oracle TNS/TTC wire protocol directly over TCP. It
+//! needs no Oracle Instant Client, no OCI libraries, and no C toolchain: add
+//! the crate, point it at a listener, and connect. The driver is a faithful
+//! port of the python-oracledb thin client, so its behavior tracks that
+//! reference implementation.
+//!
+//! # Why thin mode
+//!
+//! A traditional OCI-based client links a large native library and inherits
+//! whatever identity the OS hands it. Because this driver builds every packet
+//! itself, the application controls the full connection envelope, including the
+//! session identity the database records.
+//!
+//! # Caller-set identity (the differentiator)
+//!
+//! Every connection carries a [`ClientIdentity`](protocol::ClientIdentity) the
+//! caller supplies: `program`, `machine`, `osuser`, and `terminal`. The
+//! database stores those exact values in `v$session`. An OCI client reports the
+//! host process and OS user it happens to run as; here the application decides.
+//! This is invaluable for multi-tenant services and connection multiplexers
+//! that need each logical user attributed correctly in the DBA's session views,
+//! audit trail, and resource-manager rules.
+//!
+//! ```no_run
+//! use oracledb::{BlockingConnection, ConnectOptions};
+//! use oracledb::protocol::ClientIdentity;
+//! use oracledb::protocol::thin::{BindValue, QueryValue};
+//!
+//! # fn main() -> Result<(), oracledb::Error> {
+//! // The identity the database will record for this session.
+//! let identity = ClientIdentity::new(
+//!     "billing-worker", // program
+//!     "edge-pod-7",     // machine
+//!     "tenant-42",      // osuser
+//!     "shard-a",        // terminal
+//!     "rust-oracledb",  // driver name
+//! )?;
+//!
+//! let options = ConnectOptions::new(
+//!     "dbhost:1521/FREEPDB1", // EasyConnect string
+//!     "app_user",
+//!     "app_password",
+//!     identity,
+//! );
+//!
+//! let mut conn = BlockingConnection::connect(options)?;
+//!
+//! // Bind parameters positionally (:1, :2, ...).
+//! let result = BlockingConnection::execute_query_with_binds(
+//!     &mut conn,
+//!     "select :1 + :2 from dual",
+//!     1,
+//!     &[
+//!         BindValue::Number("40".to_string()),
+//!         BindValue::Number("2".to_string()),
+//!     ],
+//! )?;
+//!
+//! // Typed accessors avoid matching the full value enum.
+//! assert_eq!(result.cell(0, 0).and_then(QueryValue::as_i64), Some(42));
+//!
+//! BlockingConnection::close(conn)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Choosing an API surface
+//!
+//! Two equivalent surfaces are exposed:
+//!
+//! - [`BlockingConnection`] runs each operation on a private single-threaded
+//!   runtime and blocks the calling thread. Use it from synchronous code; it is
+//!   the simplest way to use the driver as a library.
+//! - [`Connection`] is the native asynchronous API. Every method takes an
+//!   `&Cx` (the Asupersync request context) so the work participates in
+//!   structured concurrency and cancellation. Use it inside an Asupersync
+//!   runtime.
+//!
+//! `BlockingConnection` is a thin shim over `Connection`: it owns a
+//! [`Connection`] and drives the async methods to completion.
+//!
+//! # Working with values
+//!
+//! Fetched cells are [`QueryValue`](protocol::thin::QueryValue), a sum type
+//! over every Oracle scalar (NUMBER carried as lossless text, VARCHAR2, DATE /
+//! TIMESTAMP, RAW, ROWID, BOOLEAN, BINARY_DOUBLE, VECTOR, JSON, LOB locators,
+//! object images, ...). Convenience accessors
+//! ([`as_i64`](protocol::thin::QueryValue::as_i64),
+//! [`as_text`](protocol::thin::QueryValue::as_text),
+//! [`as_f64`](protocol::thin::QueryValue::as_f64), and friends) and
+//! [`QueryResult::cell`](protocol::thin::QueryResult::cell) cover the common
+//! cases without an explicit `match`.
+//!
+//! Columns that stream their value through a client-side define (`CLOB`,
+//! `BLOB`, `VECTOR`, native `JSON`) come back from a plain
+//! [`Connection::execute_query`] as describe-only metadata with a `None` cell,
+//! matching the wire protocol. Use
+//! [`execute_query_collect`](Connection::execute_query_collect) to fetch the
+//! first batch with those cells fully materialized in a single call.
+//!
+//! # Optional features
+//!
+//! - `arrow`: fetch result sets directly into Apache Arrow `RecordBatch`es via
+//!   [`Connection::fetch_all_record_batch`] and
+//!   [`Connection::fetch_record_batches`].
+//!
+//! # Connection pooling
+//!
+//! The [`pool`] module provides a connection-pool engine (`PoolEngine`) that
+//! mirrors python-oracledb's thin pool: free/busy lists, growth planning,
+//! getmode semantics, ping policy, idle timeout, and max lifetime. The engine
+//! is generic over a [`PoolBackend`](pool::PoolBackend) so the embedder
+//! supplies how a pooled connection is created, pinged, and closed.
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -200,18 +315,36 @@ fn refetch_retry_applies(err: &Error) -> bool {
     message.starts_with("ORA-00932") || message.starts_with("ORA-01007")
 }
 
+/// Everything needed to open a connection: where to connect, who to
+/// authenticate as, and the [`ClientIdentity`] the database will record.
+///
+/// Build the required fields with [`ConnectOptions::new`], then layer optional
+/// settings with the `with_*` methods.
 #[derive(Clone, Debug)]
 pub struct ConnectOptions {
+    /// EasyConnect descriptor, `host:port/service_name` (the port and service
+    /// may be omitted to take the listener defaults).
     pub connect_string: String,
+    /// Database user to authenticate as.
     pub user: String,
+    /// Password for `user`.
     pub password: String,
+    /// Session identity reported to the database (`v$session`).
     pub identity: ClientIdentity,
+    /// Application-context triples `(namespace, key, value)` set on the
+    /// session at logon (reference `connection.appcontext`).
     pub app_context: Vec<(String, String, String)>,
+    /// Session Data Unit (negotiated packet size) in bytes.
     pub sdu: u16,
+    /// Proxy user for `[proxy_user]` style connections, if any.
     pub proxy_user: Option<String>,
 }
 
 impl ConnectOptions {
+    /// Create connect options with the required fields. `connect_string` is an
+    /// EasyConnect descriptor (`host:port/service_name`); `identity` is the
+    /// session identity the database will record. Optional settings default to
+    /// an 8 KiB SDU, no application context, and no proxy user.
     pub fn new(
         connect_string: impl Into<String>,
         user: impl Into<String>,
@@ -229,16 +362,21 @@ impl ConnectOptions {
         }
     }
 
+    /// Set the application-context triples applied at logon.
     pub fn with_app_context(mut self, app_context: Vec<(String, String, String)>) -> Self {
         self.app_context = app_context;
         self
     }
 
+    /// Set the proxy user for `[proxy_user]` style authentication.
     pub fn with_proxy_user(mut self, proxy_user: Option<String>) -> Self {
         self.proxy_user = proxy_user;
         self
     }
 
+    /// Request a Session Data Unit size, clamped to the protocol-legal range
+    /// `512..=65535` bytes. The value is a hint; the server negotiates the
+    /// effective SDU at connect time.
     pub fn with_sdu(mut self, sdu: u32) -> Self {
         let clamped = sdu.clamp(512, u32::from(u16::MAX));
         self.sdu = u16::try_from(clamped).unwrap_or(u16::MAX);
@@ -246,6 +384,15 @@ impl ConnectOptions {
     }
 }
 
+/// A live asynchronous connection to an Oracle Database session.
+///
+/// Every method takes an `&Cx` and runs on an Asupersync runtime. For
+/// synchronous code use [`BlockingConnection`], which owns a `Connection` and
+/// drives these methods to completion on a private runtime.
+///
+/// A connection is not `Clone` and is not safe to use from two tasks at once;
+/// drive one operation to completion before starting the next. To pool
+/// connections, use the [`pool`] engine.
 #[derive(Debug)]
 pub struct Connection {
     descriptor: EasyConnect,
@@ -339,6 +486,11 @@ pub struct CancelHandle {
 }
 
 impl Connection {
+    /// Open a connection: resolve the EasyConnect descriptor, complete the TNS
+    /// handshake and TTC capability negotiation, and authenticate `user` with
+    /// the supplied [`ClientIdentity`]. On success the database has recorded a
+    /// session whose `program` / `machine` / `osuser` / `terminal` are exactly
+    /// the identity fields.
     pub async fn connect(cx: &Cx, options: ConnectOptions) -> Result<Self> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
@@ -489,18 +641,23 @@ impl Connection {
         &self.descriptor
     }
 
+    /// The [`ClientIdentity`] this session was opened with (the values the
+    /// database recorded in `v$session`).
     pub fn identity(&self) -> &ClientIdentity {
         &self.identity
     }
 
+    /// Server-assigned session id (`v$session.sid`).
     pub fn session_id(&self) -> u32 {
         self.session_id
     }
 
+    /// Server-assigned session serial number (`v$session.serial#`).
     pub fn serial_num(&self) -> u16 {
         self.serial_num
     }
 
+    /// Server version banner, if the server reported one.
     pub fn server_version(&self) -> Option<&str> {
         self.server_version.as_deref()
     }
@@ -550,6 +707,7 @@ impl Connection {
         }
     }
 
+    /// Round-trip a lightweight PING to verify the session is alive.
     pub async fn ping(&mut self, cx: &Cx) -> Result<()> {
         self.send_function(cx, TNS_FUNC_PING).await
     }
@@ -603,6 +761,8 @@ impl Connection {
         }
     }
 
+    /// Commit the current transaction. DML on a connection is not durable
+    /// until committed.
     pub async fn commit(&mut self, cx: &Cx) -> Result<()> {
         self.send_function(cx, TNS_FUNC_COMMIT).await?;
         // a commit ends any active sessionless transaction on the server
@@ -611,6 +771,7 @@ impl Connection {
         Ok(())
     }
 
+    /// Roll back the current transaction, discarding uncommitted DML.
     pub async fn rollback(&mut self, cx: &Cx) -> Result<()> {
         self.send_function(cx, TNS_FUNC_ROLLBACK).await?;
         self.sessionless_data = None;
@@ -826,6 +987,16 @@ impl Connection {
         }
     }
 
+    /// Execute `sql` with no binds and return the first fetch batch.
+    ///
+    /// For a query, up to `prefetch_rows` rows are returned in the
+    /// [`QueryResult`]; if [`QueryResult::more_rows`] is set, fetch the rest
+    /// with [`Self::fetch_rows`] on the result's `cursor_id`. For DML/DDL the
+    /// row count is in [`QueryResult::row_count`].
+    ///
+    /// Columns that need a client-side define (`CLOB` / `BLOB` / `VECTOR` /
+    /// native `JSON`) return describe-only metadata with `None` cells here;
+    /// use [`Self::execute_query_collect`] to materialize them in one call.
     pub async fn execute_query(
         &mut self,
         cx: &Cx,
@@ -847,6 +1018,52 @@ impl Connection {
         Ok(result)
     }
 
+    /// Execute `sql` and return the first fetch batch with every cell fully
+    /// materialized, including columns that need a client-side define to
+    /// stream their value (`CLOB` / `BLOB` / `VECTOR` / native `JSON`).
+    ///
+    /// Plain [`Self::execute_query`] mirrors the wire protocol exactly: for a
+    /// define-requiring column it returns the describe metadata but a `None`
+    /// cell, because the value only arrives after a follow-up define-fetch
+    /// round trip. This convenience wrapper performs that round trip for the
+    /// first batch automatically, so a standalone caller selecting such a
+    /// column gets the actual value without hand-driving the cursor. For
+    /// scalar-only result sets it is identical to `execute_query`.
+    ///
+    /// `prefetch_rows` is the requested batch size. Rows beyond the first
+    /// batch (when `more_rows` is set) are fetched with the cursor's
+    /// `fetch_rows` / `define_and_fetch_rows_with_columns` methods as usual.
+    pub async fn execute_query_collect(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+    ) -> Result<QueryResult> {
+        let mut result = self.execute_query(cx, sql, prefetch_rows).await?;
+        if !columns_require_define(&result.columns) || result.cursor_id == 0 {
+            return Ok(result);
+        }
+        // When the open server cursor already streamed rows inline (an active
+        // define on a re-execute), those rows are authoritative; keep them.
+        if !result.rows.is_empty() {
+            return Ok(result);
+        }
+        let cursor_id = result.cursor_id;
+        let columns = result.columns.clone();
+        let fetched = self
+            .define_and_fetch_rows_with_columns(cx, cursor_id, prefetch_rows.max(1), &columns, None)
+            .await?;
+        result.rows = fetched.rows;
+        result.more_rows = fetched.more_rows;
+        if !fetched.columns.is_empty() {
+            result.columns = fetched.columns;
+        }
+        if result.cursor_id == 0 {
+            result.cursor_id = cursor_id;
+        }
+        Ok(result)
+    }
+
     pub async fn execute_query_with_timeout(
         &mut self,
         cx: &Cx,
@@ -858,6 +1075,12 @@ impl Connection {
             .await
     }
 
+    /// Execute `sql` with one row of bind values and return the first batch.
+    ///
+    /// Binds are positional: `binds[0]` fills `:1` (or the first named
+    /// placeholder in declaration order), `binds[1]` fills `:2`, and so on. Use
+    /// [`Self::execute_query_with_bind_rows`] to run the same statement over
+    /// many bind rows in a single array-DML round trip.
     pub async fn execute_query_with_binds(
         &mut self,
         cx: &Cx,
@@ -892,6 +1115,13 @@ impl Connection {
             .await
     }
 
+    /// Execute `sql` once per bind row (array DML / `executemany`). Each inner
+    /// `Vec<BindValue>` is one positional bind row; the server applies the
+    /// statement to every row in a single round trip and reports the total in
+    /// [`QueryResult::row_count`]. For per-iteration row counts or collected
+    /// batch errors, use
+    /// [`Self::execute_query_with_bind_rows_and_options`] with the matching
+    /// [`ExecuteOptions`] flags.
     pub async fn execute_query_with_bind_rows(
         &mut self,
         cx: &Cx,
@@ -1306,6 +1536,12 @@ impl Connection {
         Ok(result)
     }
 
+    /// Read up to `amount` units from the LOB identified by `locator`,
+    /// starting at 1-based `offset`. The `locator` comes from a
+    /// [`QueryValue::Lob`](protocol::thin::QueryValue::Lob) cell. The returned
+    /// bytes are the raw LOB content in the column's character-set form; decode
+    /// CLOB/NCLOB text with
+    /// [`decode_lob_text`](protocol::thin::decode_lob_text).
     pub async fn read_lob(
         &mut self,
         cx: &Cx,
@@ -2062,6 +2298,8 @@ impl Connection {
         ))
     }
 
+    /// Log off and close the connection, consuming it. Any uncommitted
+    /// transaction is rolled back by the server.
     pub async fn close(mut self, cx: &Cx) -> Result<()> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
@@ -2236,9 +2474,35 @@ impl CancelHandle {
     }
 }
 
+/// Synchronous facade over [`Connection`].
+///
+/// Each associated function spins up a private single-threaded Asupersync
+/// runtime, drives the corresponding async [`Connection`] method to
+/// completion, and blocks the calling thread until it returns. The functions
+/// take a `&mut Connection` (returned by [`BlockingConnection::connect`]) so a
+/// connection can be reused across calls. This is the simplest way to use the
+/// driver from ordinary synchronous Rust.
+///
+/// ```no_run
+/// use oracledb::{BlockingConnection, ConnectOptions};
+/// use oracledb::protocol::ClientIdentity;
+/// use oracledb::protocol::thin::QueryValue;
+///
+/// # fn main() -> Result<(), oracledb::Error> {
+/// let identity = ClientIdentity::new("svc", "host", "user", "term", "rust-oracledb")?;
+/// let mut conn = BlockingConnection::connect(
+///     ConnectOptions::new("dbhost:1521/FREEPDB1", "app", "pw", identity),
+/// )?;
+/// let result = BlockingConnection::execute_query(&mut conn, "select 1 from dual", 1)?;
+/// assert_eq!(result.cell(0, 0).and_then(QueryValue::as_i64), Some(1));
+/// BlockingConnection::close(conn)?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct BlockingConnection;
 
 impl BlockingConnection {
+    /// Open a connection synchronously. See [`Connection::connect`].
     pub fn connect(options: ConnectOptions) -> Result<Connection> {
         let runtime = build_io_runtime()?;
         runtime.block_on(async {
@@ -2350,6 +2614,24 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection.execute_query(&cx, sql, prefetch_rows).await
+        })
+    }
+
+    /// Blocking wrapper for [`Connection::execute_query_collect`]: execute and
+    /// return the first batch with `CLOB` / `BLOB` / `VECTOR` / native `JSON`
+    /// cells fully materialized via an automatic define-fetch round trip.
+    pub fn execute_query_collect(
+        connection: &mut Connection,
+        sql: &str,
+        prefetch_rows: u32,
+    ) -> Result<QueryResult> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .execute_query_collect(&cx, sql, prefetch_rows)
+                .await
         })
     }
 
@@ -3080,6 +3362,22 @@ fn statement_is_query(sql: &str) -> bool {
         .split(|ch: char| !ch.is_ascii_alphabetic())
         .next()
         .is_some_and(|keyword| keyword.eq_ignore_ascii_case("select"))
+}
+
+/// True when any column needs a client-side define to stream its value:
+/// `CLOB` / `BLOB` / `VECTOR` / native `JSON`. Such columns come back from the
+/// initial execute as describe-only metadata; the value is delivered on a
+/// follow-up define-fetch round trip (reference `statement._requires_define`).
+fn columns_require_define(columns: &[ColumnMetadata]) -> bool {
+    use oracledb_protocol::thin::{
+        ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_JSON, ORA_TYPE_NUM_VECTOR,
+    };
+    columns.iter().any(|column| {
+        matches!(
+            column.ora_type_num,
+            ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR | ORA_TYPE_NUM_JSON
+        )
+    })
 }
 
 fn trace_connect_step(step: &'static str) {
