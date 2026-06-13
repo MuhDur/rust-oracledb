@@ -166,6 +166,7 @@ pub(crate) fn spawn_async_execute_task(
     prefetchrows: u32,
     call_timeout: Option<u32>,
     autocommit: bool,
+    exec_options: ExecuteOptions,
 ) -> BlockingTask<AsyncExecuteOutcome> {
     spawn_blocking_task("oracledb-pyshim-async-execute", move || {
         let mut guard = connection.lock().map_err(|err| err.to_string())?;
@@ -190,12 +191,18 @@ pub(crate) fn spawn_async_execute_task(
                 materialize_plsql_long_binds_async(&cx, connection, &mut bind_values, call_timeout)
                     .await?;
             }
+            let bind_rows = if bind_values.is_empty() {
+                Vec::new()
+            } else {
+                vec![bind_values.clone()]
+            };
             let mut result = connection
-                .execute_query_with_binds_and_timeout(
+                .execute_query_with_bind_rows_options_and_timeout(
                     &cx,
                     &statement,
                     prefetchrows,
-                    &bind_values,
+                    &bind_rows,
+                    exec_options,
                     call_timeout,
                 )
                 .await
@@ -263,6 +270,38 @@ pub(crate) fn spawn_async_fetch_task(
                     .await
                     .map_err(TaskError::from)
             }
+        })
+    })
+}
+
+pub(crate) fn spawn_async_scroll_task(
+    connection: Arc<Mutex<Option<RustConnection>>>,
+    statement: String,
+    cursor_id: u32,
+    arraysize: u32,
+    fetch_orientation: u32,
+    fetch_pos: u32,
+) -> BlockingTask<QueryResult> {
+    spawn_blocking_task("oracledb-pyshim-async-scroll", move || {
+        let mut guard = connection.lock().map_err(|err| err.to_string())?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| "connection is closed".to_string())?;
+        let runtime = build_pyshim_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| "asupersync did not install an ambient Cx".to_string())?;
+            connection
+                .scroll_cursor(
+                    &cx,
+                    &statement,
+                    cursor_id,
+                    arraysize,
+                    fetch_orientation,
+                    fetch_pos,
+                )
+                .await
+                .map_err(TaskError::from)
         })
     })
 }
@@ -477,6 +516,7 @@ impl AsyncThinCursorImpl {
         let exec_options = ExecuteOptions {
             batcherrors,
             arraydmlrowcounts,
+            cache_statement: self.inner.cache_statement,
             ..ExecuteOptions::default()
         };
         let start = usize::try_from(offset).map_err(runtime_error)?;
@@ -610,6 +650,22 @@ impl AsyncThinCursorImpl {
             &mut typed_lob_hints,
         );
         let autocommit = *self.inner.autocommit.lock().map_err(runtime_error)?;
+        // a scrollable cursor primes the open result set with orientation
+        // CURRENT at the first row (reference `_create_execute_message`)
+        let exec_options = if self.inner.scrollable {
+            ExecuteOptions {
+                cache_statement: self.inner.cache_statement,
+                scrollable: true,
+                fetch_orientation: oracledb::protocol::thin::TNS_FETCH_ORIENTATION_CURRENT,
+                fetch_pos: u32::try_from(self.inner.rowcount.max(0) + 1).unwrap_or(u32::MAX),
+                ..ExecuteOptions::default()
+            }
+        } else {
+            ExecuteOptions {
+                cache_statement: self.inner.cache_statement,
+                ..ExecuteOptions::default()
+            }
+        };
         let query = spawn_async_execute_task(
             Arc::clone(&self.inner.connection),
             Arc::clone(&self.inner.state),
@@ -619,6 +675,7 @@ impl AsyncThinCursorImpl {
             self.inner.prefetchrows,
             call_timeout,
             autocommit,
+            exec_options,
         );
         let is_plsql = statement_is_plsql(&statement);
         let outcome = match query.await {
@@ -670,6 +727,9 @@ impl AsyncThinCursorImpl {
         } else {
             i64::try_from(result.row_count).unwrap_or(i64::MAX)
         };
+        // the freshly fetched buffer starts one past the consumed rowcount
+        // (reference `_fetch_rows`: `_buffer_min_row = rowcount + 1`)
+        self.inner.refresh_buffer_window();
         self.inner.is_query = is_query;
         if self.inner.is_query {
             Python::attach(|py| self.inner.prepare_fetch_defines(py, _cursor.bind(py)))?;
@@ -693,17 +753,31 @@ impl AsyncThinCursorImpl {
             let previous_row = self.inner.rows.last().cloned();
             let requires_define = self.inner.requires_define;
             let define_columns = self.inner.fetch_define_columns.clone();
-            let fetch = spawn_async_fetch_task(
-                Arc::clone(&self.inner.connection),
-                self.inner.cursor_id,
-                self.inner.arraysize,
-                self.inner.prefetchrows,
-                self.inner.columns.clone(),
-                define_columns.clone(),
-                previous_row,
-                requires_define,
-            );
-            let result = fetch.await.map_err(runtime_error)?;
+            // a scrollable cursor re-executes the open cursor with orientation
+            // CURRENT instead of issuing a plain fetch (reference `_fetch_rows`)
+            let result = if self.inner.scrollable {
+                let scroll = spawn_async_scroll_task(
+                    Arc::clone(&self.inner.connection),
+                    self.inner.statement.clone().unwrap_or_default(),
+                    self.inner.cursor_id,
+                    self.inner.arraysize,
+                    oracledb::protocol::thin::TNS_FETCH_ORIENTATION_CURRENT,
+                    u32::try_from(self.inner.rowcount.max(0) + 1).unwrap_or(u32::MAX),
+                );
+                scroll.await.map_err(runtime_error)?
+            } else {
+                let fetch = spawn_async_fetch_task(
+                    Arc::clone(&self.inner.connection),
+                    self.inner.cursor_id,
+                    self.inner.arraysize,
+                    self.inner.prefetchrows,
+                    self.inner.columns.clone(),
+                    define_columns.clone(),
+                    previous_row,
+                    requires_define,
+                );
+                fetch.await.map_err(runtime_error)?
+            };
             if !result.columns.is_empty() {
                 self.inner.columns = result.columns;
             } else if requires_define {
@@ -719,6 +793,7 @@ impl AsyncThinCursorImpl {
                 self.inner.requires_define = false;
             }
             self.inner.invalid_ref_cursor = false;
+            self.inner.refresh_buffer_window();
         }
         Python::attach(|py| {
             self.inner.fetch_async_lobs = true;
@@ -812,7 +887,20 @@ impl AsyncThinCursorImpl {
         self.inner.attach_external_handle(external_handle_capsule)
     }
 
-    async fn scroll(&mut self, _cursor: Py<PyAny>, _value: i32, _mode: String) -> PyResult<()> {
-        Err(not_implemented("AsyncThinCursorImpl.scroll"))
+    async fn scroll(&mut self, _cursor: Py<PyAny>, value: i32, mode: String) -> PyResult<()> {
+        let Some((orientation, fetch_pos)) = self.inner.resolve_scroll_target(value, &mode)? else {
+            // an in-buffer reposition was applied without contacting the server
+            return Ok(());
+        };
+        let scroll = spawn_async_scroll_task(
+            Arc::clone(&self.inner.connection),
+            self.inner.statement.clone().unwrap_or_default(),
+            self.inner.cursor_id,
+            self.inner.arraysize,
+            orientation,
+            fetch_pos,
+        );
+        let result = scroll.await.map_err(runtime_error)?;
+        self.inner.apply_scroll_result(orientation, result)
     }
 }

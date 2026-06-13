@@ -45,6 +45,18 @@ pub fn unique_bind_names(statement: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// Returns one bind-name entry per placeholder occurrence for non-PL/SQL SQL,
+/// and the unique names for PL/SQL, mirroring the reference `_add_bind`
+/// (impl/thin/statement.pyx:337-354): PL/SQL coalesces duplicate placeholders
+/// into a single bind, whereas plain SQL binds each occurrence separately so a
+/// repeated placeholder consumes one positional value per occurrence.
+pub fn bind_names_per_occurrence(statement: &str) -> Result<Vec<String>> {
+    if statement_is_plsql(statement) {
+        return unique_bind_names(statement);
+    }
+    scan_bind_names(statement)
+}
+
 pub fn public_bind_name(name: &str) -> String {
     if is_quoted_bind_name(name) {
         name[1..name.len() - 1].to_string()
@@ -188,6 +200,23 @@ pub fn statement_is_plsql(statement: &str) -> bool {
             keyword.eq_ignore_ascii_case("begin")
                 || keyword.eq_ignore_ascii_case("declare")
                 || keyword.eq_ignore_ascii_case("call")
+        })
+}
+
+/// Mirrors the reference statement-type classification for DDL
+/// (impl/thin/statement.pyx `_determine_statement_type`).
+pub fn statement_is_ddl(statement: &str) -> bool {
+    statement
+        .trim_start()
+        .split(|ch: char| !ch.is_ascii_alphabetic())
+        .next()
+        .is_some_and(|keyword| {
+            [
+                "create", "alter", "drop", "grant", "revoke", "analyze", "audit", "comment",
+                "truncate",
+            ]
+            .iter()
+            .any(|candidate| keyword.eq_ignore_ascii_case(candidate))
         })
 }
 
@@ -566,6 +595,33 @@ mod tests {
         let names = scan_bind_names("select ':skip', 'it''s :skip2', :a, :\"MiX\" from dual")
             .expect("bind scan should succeed");
         assert_eq!(names, vec!["a".to_string(), "\"MiX\"".to_string()]);
+    }
+
+    #[test]
+    fn counts_bind_occurrences_for_plain_sql_but_coalesces_plsql() {
+        // plain SQL: a repeated positional placeholder is one bind per
+        // occurrence (reference `_add_bind`)
+        let sql = "insert into t (a, b) values (:1, udt_array(:1, :2, :3))";
+        assert_eq!(
+            bind_names_per_occurrence(sql).expect("scan"),
+            vec![
+                "1".to_string(),
+                "1".to_string(),
+                "2".to_string(),
+                "3".to_string()
+            ]
+        );
+        // unique view still collapses duplicates
+        assert_eq!(
+            unique_bind_names(sql).expect("scan"),
+            vec!["1".to_string(), "2".to_string(), "3".to_string()]
+        );
+        // PL/SQL coalesces duplicate placeholders into a single bind
+        let plsql = "begin proc(:x, :x, :y); end;";
+        assert_eq!(
+            bind_names_per_occurrence(plsql).expect("scan"),
+            vec!["x".to_string(), "y".to_string()]
+        );
     }
 
     #[test]

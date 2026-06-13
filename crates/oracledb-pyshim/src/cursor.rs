@@ -77,6 +77,12 @@ pub(crate) struct ThinCursorImpl {
     pub(crate) row_index: usize,
     pub(crate) cursor_id: u32,
     pub(crate) more_rows: bool,
+    /// 1-based position of the first row currently held in `rows`
+    /// (reference `_buffer_min_row`). Zero when the buffer is empty.
+    pub(crate) buffer_min_row: u64,
+    /// 1-based position one past the last row held in `rows`
+    /// (reference `_buffer_max_row`).
+    pub(crate) buffer_max_row: u64,
     pub(crate) invalid_ref_cursor: bool,
     pub(crate) rowcount: i64,
     pub(crate) arraysize: u32,
@@ -111,6 +117,9 @@ pub(crate) struct ThinCursorImpl {
     pub(crate) implicit_resultsets: Option<Vec<QueryValue>>,
     /// Lazily-built public cursors for `getimplicitresults()`.
     implicit_result_cursors: Option<Vec<Py<PyAny>>>,
+    /// Whether the prepared statement may use the connection statement
+    /// cache (reference `cursor.prepare(cache_statement=...)`).
+    pub(crate) cache_statement: bool,
 }
 
 impl ThinCursorImpl {
@@ -120,6 +129,103 @@ impl ThinCursorImpl {
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
         BlockingConnection::drain_cancel_response(connection).map_err(runtime_error)
+    }
+
+    /// Resolves a scroll request to either an in-buffer reposition (already
+    /// applied; returns `None`) or a server round trip carrying the fetch
+    /// orientation and 1-based position (returns `Some`). Mirrors the reference
+    /// `_create_scroll_message`. Shared by the sync and async cursor impls.
+    pub(crate) fn resolve_scroll_target(
+        &mut self,
+        offset: i32,
+        mode: &str,
+    ) -> PyResult<Option<(u32, u32)>> {
+        let (orientation, desired_row) = match mode {
+            "relative" => {
+                let target = self.rowcount + i64::from(offset);
+                if target < 1 {
+                    return Err(raise_oracledb_driver_error("ERR_SCROLL_OUT_OF_RESULT_SET"));
+                }
+                (
+                    oracledb::protocol::thin::TNS_FETCH_ORIENTATION_RELATIVE,
+                    target as u64,
+                )
+            }
+            "absolute" => (
+                oracledb::protocol::thin::TNS_FETCH_ORIENTATION_ABSOLUTE,
+                u64::try_from(offset).unwrap_or(0),
+            ),
+            "first" => (oracledb::protocol::thin::TNS_FETCH_ORIENTATION_FIRST, 1),
+            "last" => (oracledb::protocol::thin::TNS_FETCH_ORIENTATION_LAST, 0),
+            _ => return Err(raise_oracledb_driver_error("ERR_WRONG_SCROLL_MODE")),
+        };
+
+        // an in-buffer reposition avoids contacting the server entirely; LAST
+        // always round-trips (reference cursor.pyx:108-118)
+        if orientation != oracledb::protocol::thin::TNS_FETCH_ORIENTATION_LAST
+            && desired_row >= self.buffer_min_row
+            && desired_row < self.buffer_max_row
+        {
+            self.row_index = usize::try_from(desired_row - self.buffer_min_row).unwrap_or(0);
+            self.rowcount = i64::try_from(desired_row - 1).unwrap_or(i64::MAX);
+            return Ok(None);
+        }
+
+        Ok(Some((
+            orientation,
+            u32::try_from(desired_row).unwrap_or(u32::MAX),
+        )))
+    }
+
+    /// Applies the response of a scroll round trip (reference
+    /// `_post_process_scroll`). Shared by the sync and async cursor impls.
+    pub(crate) fn apply_scroll_result(
+        &mut self,
+        orientation: u32,
+        result: QueryResult,
+    ) -> PyResult<()> {
+        if !result.columns.is_empty() {
+            self.columns = result.columns;
+        }
+        if result.cursor_id != 0 {
+            self.cursor_id = result.cursor_id;
+        }
+        let buffer_rowcount = result.rows.len() as u64;
+        self.rows = result.rows;
+        self.invalid_ref_cursor = false;
+
+        if buffer_rowcount == 0 {
+            if orientation != oracledb::protocol::thin::TNS_FETCH_ORIENTATION_FIRST
+                && orientation != oracledb::protocol::thin::TNS_FETCH_ORIENTATION_LAST
+            {
+                return Err(raise_oracledb_driver_error("ERR_SCROLL_OUT_OF_RESULT_SET"));
+            }
+            self.rowcount = 0;
+            self.more_rows = false;
+            self.row_index = 0;
+            self.buffer_min_row = 0;
+            self.buffer_max_row = 0;
+        } else {
+            let server_rowcount = result.row_count;
+            self.rowcount =
+                i64::try_from(server_rowcount.saturating_sub(buffer_rowcount)).unwrap_or(i64::MAX);
+            self.more_rows = result.more_rows;
+            self.row_index = 0;
+            self.buffer_min_row = u64::try_from(self.rowcount.max(0))
+                .unwrap_or(0)
+                .saturating_add(1);
+            self.buffer_max_row = self.buffer_min_row + buffer_rowcount;
+        }
+        Ok(())
+    }
+
+    /// Recomputes the buffer-window positions from the current `rowcount` and
+    /// `rows` length (reference `_fetch_rows` postlude). `rowcount` here is the
+    /// number of rows already consumed before this buffer.
+    pub(crate) fn refresh_buffer_window(&mut self) {
+        let consumed = u64::try_from(self.rowcount.max(0)).unwrap_or(0);
+        self.buffer_min_row = consumed + 1;
+        self.buffer_max_row = self.buffer_min_row + self.rows.len() as u64;
     }
 
     pub(crate) fn new(
@@ -148,6 +254,8 @@ impl ThinCursorImpl {
             row_index: 0,
             cursor_id: 0,
             more_rows: false,
+            buffer_min_row: 0,
+            buffer_max_row: 0,
             invalid_ref_cursor: false,
             rowcount: 0,
             arraysize: 100,
@@ -174,6 +282,7 @@ impl ThinCursorImpl {
             dml_row_counts: None,
             implicit_resultsets: None,
             implicit_result_cursors: None,
+            cache_statement: true,
         }
     }
 
@@ -561,10 +670,11 @@ impl ThinCursorImpl {
         &mut self,
         statement: Option<String>,
         _tag: Option<String>,
-        _cache_statement: Option<bool>,
+        cache_statement: Option<bool>,
     ) -> PyResult<()> {
         self.statement_changed = self.statement != statement;
         self.statement = statement;
+        self.cache_statement = cache_statement.unwrap_or(true);
         self.bind_names = if let Some(statement) = self.statement.as_deref() {
             validate_dml_returning_duplicate_binds(statement)?;
             unique_sql_bind_names(statement)?
@@ -572,6 +682,43 @@ impl ThinCursorImpl {
             Vec::new()
         };
         Ok(())
+    }
+
+    /// Scrolls a scrollable cursor to a new position (reference
+    /// `_create_scroll_message` + `_post_process_scroll`). When the requested
+    /// row is already buffered the reposition is purely local; otherwise a
+    /// scroll execute is sent to the server.
+    fn scroll(&mut self, cursor: &Bound<'_, PyAny>, offset: i32, mode: &str) -> PyResult<()> {
+        let Some((orientation, fetch_pos)) = self.resolve_scroll_target(offset, mode)? else {
+            return Ok(());
+        };
+
+        let statement = self.statement.clone().unwrap_or_default();
+        let cursor_id = self.cursor_id;
+        let arraysize = self.arraysize;
+        let result = cursor.py().detach(|| -> Result<QueryResult, TaskError> {
+            let mut guard = self
+                .connection
+                .lock()
+                .map_err(|err| TaskError::from(err.to_string()))?;
+            let connection = guard
+                .as_mut()
+                .ok_or_else(|| TaskError::from("connection is closed"))?;
+            BlockingConnection::scroll_cursor(
+                connection,
+                &statement,
+                cursor_id,
+                arraysize,
+                orientation,
+                fetch_pos,
+            )
+            .map_err(TaskError::from)
+        });
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => return Err(raise_task_error(&err, &self.connection)),
+        };
+        self.apply_scroll_result(orientation, result)
     }
 
     pub(crate) fn parse(&mut self, cursor: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -830,6 +977,7 @@ impl ThinCursorImpl {
         let exec_options = ExecuteOptions {
             batcherrors,
             arraydmlrowcounts,
+            cache_statement: self.cache_statement,
             ..ExecuteOptions::default()
         };
         let start = usize::try_from(offset).map_err(runtime_error)?;
@@ -1010,6 +1158,9 @@ impl ThinCursorImpl {
             // (messages/base.pyx:1188-1189), not the iteration count
             i64::try_from(result.row_count).unwrap_or(i64::MAX)
         };
+        // the freshly fetched buffer starts one past the consumed rowcount
+        // (reference `_fetch_rows`: `_buffer_min_row = rowcount + 1`)
+        self.refresh_buffer_window();
         self.is_query = is_query;
         if self.is_query {
             self.prepare_fetch_defines(cursor.py(), cursor)?;
@@ -1041,6 +1192,23 @@ impl ThinCursorImpl {
         let mut typed_lob_hints = typed_lob_bind_hints(cursor.py(), &self.bind_vars);
         promote_oversized_plsql_bind_hints(statement, &self.bind_values, &mut typed_lob_hints);
         let is_plsql = statement_is_plsql(statement);
+        // a scrollable cursor primes the open result set with orientation
+        // CURRENT at the first row (reference `_create_execute_message`:
+        // fetch_orientation = CURRENT, fetch_pos = rowcount + 1)
+        let exec_options = if self.scrollable {
+            ExecuteOptions {
+                cache_statement: self.cache_statement,
+                scrollable: true,
+                fetch_orientation: oracledb::protocol::thin::TNS_FETCH_ORIENTATION_CURRENT,
+                fetch_pos: u32::try_from(self.rowcount.max(0) + 1).unwrap_or(u32::MAX),
+                ..ExecuteOptions::default()
+            }
+        } else {
+            ExecuteOptions {
+                cache_statement: self.cache_statement,
+                ..ExecuteOptions::default()
+            }
+        };
         let mut result = match cursor.py().detach({
             let connection = Arc::clone(&self.connection);
             let state = Arc::clone(&self.state);
@@ -1066,11 +1234,17 @@ impl ThinCursorImpl {
                 if statement_is_plsql(&statement) {
                     materialize_plsql_long_binds(connection, &mut bind_values, call_timeout)?;
                 }
-                BlockingConnection::execute_query_with_binds_and_timeout(
+                let bind_rows = if bind_values.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![bind_values.clone()]
+                };
+                BlockingConnection::execute_query_with_bind_rows_options_and_timeout(
                     connection,
                     &statement,
                     prefetchrows,
-                    &bind_values,
+                    &bind_rows,
+                    exec_options,
                     call_timeout,
                 )
                 .map_err(TaskError::from)
@@ -1158,11 +1332,29 @@ impl ThinCursorImpl {
             let previous_row = self.rows.last().cloned();
             let requires_define = self.requires_define;
             let define_columns = self.fetch_define_columns.clone();
+            // a scrollable cursor re-executes the open cursor with orientation
+            // CURRENT at the next unconsumed row instead of issuing a plain
+            // fetch (reference `_fetch_rows`: scrollable -> execute message)
+            let scroll_fetch = self.scrollable.then(|| {
+                (
+                    self.statement.clone().unwrap_or_default(),
+                    u32::try_from(self.rowcount.max(0) + 1).unwrap_or(u32::MAX),
+                )
+            });
             let mut guard = self.connection.lock().map_err(runtime_error)?;
             let connection = guard
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-            let result = if requires_define {
+            let result = if let Some((statement, fetch_pos)) = scroll_fetch {
+                BlockingConnection::scroll_cursor(
+                    connection,
+                    &statement,
+                    self.cursor_id,
+                    self.arraysize,
+                    oracledb::protocol::thin::TNS_FETCH_ORIENTATION_CURRENT,
+                    fetch_pos,
+                )
+            } else if requires_define {
                 BlockingConnection::define_and_fetch_rows_with_columns(
                     connection,
                     self.cursor_id,
@@ -1195,6 +1387,8 @@ impl ThinCursorImpl {
                 self.requires_define = false;
             }
             self.invalid_ref_cursor = false;
+            drop(guard);
+            self.refresh_buffer_window();
         }
         self.fetch_buffered_next_row(py, _cursor)
     }

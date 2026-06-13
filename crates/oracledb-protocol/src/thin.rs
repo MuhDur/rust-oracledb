@@ -48,6 +48,16 @@ pub const TNS_FUNC_PING: u8 = 147;
 pub const TNS_FUNC_PIPELINE_BEGIN: u8 = 199;
 pub const TNS_FUNC_PIPELINE_END: u8 = 200;
 pub const TNS_FUNC_ROLLBACK: u8 = 15;
+pub const TNS_FUNC_CLOSE_CURSORS: u8 = 105;
+
+/// Fetch orientations for scrollable cursors (reference constants.pxi).
+pub const TNS_FETCH_ORIENTATION_CURRENT: u32 = 0x01;
+pub const TNS_FETCH_ORIENTATION_NEXT: u32 = 0x02;
+pub const TNS_FETCH_ORIENTATION_FIRST: u32 = 0x04;
+pub const TNS_FETCH_ORIENTATION_LAST: u32 = 0x08;
+pub const TNS_FETCH_ORIENTATION_PRIOR: u32 = 0x10;
+pub const TNS_FETCH_ORIENTATION_ABSOLUTE: u32 = 0x20;
+pub const TNS_FETCH_ORIENTATION_RELATIVE: u32 = 0x40;
 
 pub const TNS_PIPELINE_MODE_CONTINUE_ON_ERROR: u8 = 1;
 pub const TNS_PIPELINE_MODE_ABORT_ON_ERROR: u8 = 2;
@@ -139,6 +149,8 @@ const TNS_EXEC_OPTION_NOT_PLSQL: u32 = 0x8000;
 const TNS_EXEC_OPTION_DESCRIBE: u32 = 0x20000;
 const TNS_EXEC_OPTION_BATCH_ERRORS: u32 = 0x80000;
 const TNS_EXEC_FLAGS_DML_ROWCOUNTS: u32 = 0x4000;
+const TNS_EXEC_FLAGS_SCROLLABLE: u32 = 0x02;
+const TNS_EXEC_FLAGS_NO_CANCEL_ON_EOF: u32 = 0x80;
 const TNS_DURATION_SESSION: u32 = 10;
 const TNS_LOB_OP_READ: u32 = 0x0002;
 const TNS_LOB_OP_TRIM: u32 = 0x0020;
@@ -887,7 +899,7 @@ pub fn build_execute_payload_with_binds_with_seq(
 }
 
 /// Optional execute modes (reference ExecuteMessage attributes).
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExecuteOptions {
     pub batcherrors: bool,
     pub arraydmlrowcounts: bool,
@@ -897,6 +909,43 @@ pub struct ExecuteOptions {
     /// (impl/thin/connection.pyx `_create_messages_for_pipeline`),
     /// everything else carries 0.
     pub token_num: u64,
+    /// Server cursor id of an already-parsed statement; non-zero skips the
+    /// PARSE option and SQL text (reference Statement._cursor_id).
+    pub cursor_id: u32,
+    /// Whether the statement may be kept in the connection statement cache
+    /// (reference `cursor.prepare(cache_statement=...)`).
+    pub cache_statement: bool,
+    /// Whether the cursor was opened scrollable; sets the scrollable execute
+    /// flags and primes the fetch orientation (reference `cursor_impl.scrollable`).
+    pub scrollable: bool,
+    /// Fetch orientation for the next fetch (reference `fetch_orientation`,
+    /// al8i4[10]); one of the `TNS_FETCH_ORIENTATION_*` constants. Zero leaves
+    /// the server default.
+    pub fetch_orientation: u32,
+    /// Desired row position paired with `fetch_orientation` (reference
+    /// `fetch_pos`, al8i4[11]).
+    pub fetch_pos: u32,
+    /// True when this execute is a scroll request: the EXECUTE/BIND options are
+    /// suppressed so the server only repositions the open cursor and fetches
+    /// (reference `scroll_operation`).
+    pub scroll_operation: bool,
+}
+
+impl Default for ExecuteOptions {
+    fn default() -> Self {
+        Self {
+            batcherrors: false,
+            arraydmlrowcounts: false,
+            parse_only: false,
+            token_num: 0,
+            cursor_id: 0,
+            cache_statement: true,
+            scrollable: false,
+            fetch_orientation: 0,
+            fetch_pos: 0,
+            scroll_operation: false,
+        }
+    }
 }
 
 pub fn build_execute_payload_with_bind_rows_with_seq(
@@ -940,6 +989,24 @@ pub fn build_execute_payload_with_bind_rows_with_seq_and_token(
     )
 }
 
+/// Builds a close-cursors piggyback message (reference
+/// `_write_close_cursors_piggyback` + `write_cursors_to_close`); it is
+/// prepended to the next regular message in the same data packet and
+/// consumes a TTC sequence number of its own.
+pub fn build_close_cursors_piggyback(cursor_ids: &[u32], seq_num: u8) -> Vec<u8> {
+    let mut writer = TtcWriter::new();
+    writer.write_u8(TNS_MSG_TYPE_PIGGYBACK);
+    writer.write_u8(TNS_FUNC_CLOSE_CURSORS);
+    writer.write_u8(seq_num);
+    writer.write_ub8(0); // token number (23.1 ext 1+)
+    writer.write_u8(1); // pointer
+    writer.write_ub4(u32::try_from(cursor_ids.len()).unwrap_or(u32::MAX));
+    for cursor_id in cursor_ids {
+        writer.write_ub4(*cursor_id);
+    }
+    writer.into_bytes()
+}
+
 pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     sql: &str,
     prefetch_rows: u32,
@@ -975,8 +1042,17 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
 
     let is_plsql = statement_is_plsql(sql);
     let parse_only = exec_options.parse_only;
-    let mut options = TNS_EXEC_OPTION_PARSE;
-    if !parse_only {
+    // a fresh parse is required when the statement has no open server cursor
+    // or is DDL (reference execute.pyx:88-89)
+    let needs_parse = exec_options.cursor_id == 0 || crate::sql::statement_is_ddl(sql);
+    // a scroll request only repositions the open cursor and fetches; the
+    // EXECUTE/BIND options are suppressed (reference execute.pyx:82-84,105)
+    let scroll_operation = exec_options.scroll_operation;
+    let mut options = 0;
+    if needs_parse {
+        options |= TNS_EXEC_OPTION_PARSE;
+    }
+    if !parse_only && !scroll_operation {
         options |= TNS_EXEC_OPTION_EXECUTE;
     }
     if is_query {
@@ -986,7 +1062,7 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
             options |= TNS_EXEC_OPTION_FETCH;
         }
     }
-    if bind_count > 0 {
+    if bind_count > 0 && !scroll_operation {
         options |= TNS_EXEC_OPTION_BIND;
     }
     if is_plsql {
@@ -1004,8 +1080,16 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     } else {
         1
     };
-    let exec_count = if is_query || parse_only {
+    // al8i4[1]: queries report 0 on first execute and the iteration count on
+    // re-execute of an open cursor (execute.pyx:187-193)
+    let exec_count = if parse_only {
         0
+    } else if is_query {
+        if exec_options.cursor_id == 0 {
+            0
+        } else {
+            num_iters
+        }
     } else {
         bind_row_count.max(1)
     };
@@ -1021,10 +1105,21 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     if exec_options.arraydmlrowcounts {
         exec_flags |= TNS_EXEC_FLAGS_DML_ROWCOUNTS;
     }
+    // scrollable cursors keep the result set open across fetches and avoid the
+    // server cancelling on end-of-fetch (reference execute.pyx:85-87)
+    if exec_options.scrollable && !parse_only {
+        exec_flags |= TNS_EXEC_FLAGS_SCROLLABLE;
+        exec_flags |= TNS_EXEC_FLAGS_NO_CANCEL_ON_EOF;
+    }
     writer.write_ub4(options);
-    writer.write_ub4(0);
-    writer.write_u8(1);
-    writer.write_ub4(sql_len);
+    writer.write_ub4(exec_options.cursor_id);
+    if needs_parse {
+        writer.write_u8(1); // pointer (cursor id)
+        writer.write_ub4(sql_len);
+    } else {
+        writer.write_u8(0); // pointer (cursor id)
+        writer.write_ub4(0);
+    }
     writer.write_u8(1);
     writer.write_ub4(13);
     writer.write_u8(0);
@@ -1071,21 +1166,27 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     writer.write_u8(0); // pointer (chunk ids)
     writer.write_ub4(0); // number of chunk ids
 
-    writer.write_bytes_with_length(sql_bytes)?;
-    writer.write_ub4(1);
+    if needs_parse {
+        writer.write_bytes_with_length(sql_bytes)?;
+        writer.write_ub4(1); // al8i4[0] parse
+    } else {
+        writer.write_ub4(0); // al8i4[0] parse
+    }
     writer.write_ub4(exec_count);
     writer.write_ub4(0);
     writer.write_ub4(0);
     writer.write_ub4(0);
     writer.write_ub4(0);
     writer.write_ub4(0);
-    writer.write_ub4(query_flag);
-    writer.write_ub4(0);
-    writer.write_ub4(exec_flags);
-    writer.write_ub4(0);
-    writer.write_ub4(0);
-    writer.write_ub4(0);
-    if !bind_rows.is_empty() {
+    writer.write_ub4(query_flag); // al8i4[7] is query
+    writer.write_ub4(0); // al8i4[8]
+    writer.write_ub4(exec_flags); // al8i4[9] execute flags
+    writer.write_ub4(exec_options.fetch_orientation); // al8i4[10] fetch orientation
+    writer.write_ub4(exec_options.fetch_pos); // al8i4[11] fetch pos
+    writer.write_ub4(0); // al8i4[12]
+                         // a scroll request carries no bind parameters (reference suppresses the
+                         // BIND option and never writes bind params for scroll_operation)
+    if !bind_rows.is_empty() && !scroll_operation {
         write_bind_params(&mut writer, bind_rows, is_plsql)?;
     }
     Ok(writer.into_bytes())
@@ -2486,6 +2587,25 @@ pub fn parse_query_response_with_binds_and_options(
     binds: &[BindValue],
     exec_options: ExecuteOptions,
 ) -> Result<QueryResult> {
+    parse_query_response_with_binds_options_and_columns(
+        payload,
+        capabilities,
+        binds,
+        exec_options,
+        &[],
+    )
+}
+
+/// `known_columns` carries the fetch metadata of a re-executed statement
+/// whose response does not repeat the describe information (reference keeps
+/// the statement's fetch vars across executions).
+pub fn parse_query_response_with_binds_options_and_columns(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    binds: &[BindValue],
+    exec_options: ExecuteOptions,
+    known_columns: &[ColumnMetadata],
+) -> Result<QueryResult> {
     let bind_columns = binds.iter().map(bind_column_metadata).collect::<Vec<_>>();
     let output_bind_indexes = binds
         .iter()
@@ -2495,7 +2615,7 @@ pub fn parse_query_response_with_binds_and_options(
     parse_query_response_with_context_binds_and_options(
         payload,
         capabilities,
-        &[],
+        known_columns,
         None,
         &bind_columns,
         &output_bind_indexes,
@@ -2592,8 +2712,19 @@ fn parse_query_response_with_context_binds_and_options(
             0 => {}
             TNS_MSG_TYPE_DESCRIBE_INFO => {
                 let _describe_name = reader.read_bytes()?;
-                result.columns.clear();
+                let previous = std::mem::take(&mut result.columns);
                 parse_describe_info(&mut reader, capabilities, &mut result)?;
+                // re-executing an open cursor whose underlying types changed:
+                // the server re-describes mid-response but still streams the
+                // row data in the adjusted (LONG/LONG RAW) form expected by
+                // the previous fetch metadata (reference `_adjust_metadata`,
+                // impl/thin/messages/base.pyx:820-845, applied during
+                // `_process_describe_info`).
+                for (index, column) in result.columns.iter_mut().enumerate() {
+                    if let Some(prev) = previous.get(index) {
+                        adjust_refetch_metadata(prev, column);
+                    }
+                }
             }
             TNS_MSG_TYPE_ROW_HEADER => {
                 bit_vector = parse_row_header(&mut reader)?;
