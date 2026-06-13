@@ -1005,9 +1005,18 @@ impl Connection {
     ) -> Result<QueryResult> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
+        // Flush any cursors queued for close (via `close_cursor`) ahead of this
+        // execute: the close-cursors piggyback carries its own sequence number
+        // and is prepended to the execute payload, mirroring the bind-rows
+        // execute path. With no queued closes this is a no-op.
+        let close_piggyback = self.take_close_cursors_piggyback();
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let payload =
+        let mut payload =
             build_execute_payload_with_seq(sql, prefetch_rows, seq_num, statement_is_query(sql))?;
+        if let Some(mut piggyback_bytes) = close_piggyback {
+            piggyback_bytes.extend_from_slice(&payload);
+            payload = piggyback_bytes;
+        }
         trace_query_bytes("EXECUTE query payload", &payload);
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
         let response = read_data_response(&mut self.read, cx, &self.write).await?;
@@ -2251,6 +2260,27 @@ impl Connection {
         if self.copied_cursors.remove(&cursor_id) {
             self.cursors_to_close.push(cursor_id);
             self.cursor_columns.remove(&cursor_id);
+        }
+    }
+
+    /// Queue an open server cursor to be closed on the next round trip
+    /// (reference `_add_cursor_to_close`). Unlike [`Self::release_cursor`],
+    /// which returns a cached cursor to the statement cache for reuse, this
+    /// drops the cursor entirely: its id is sent in the close-cursors piggyback
+    /// that rides the next execute, and its retained describe metadata is
+    /// forgotten. Use this for a non-cached cursor (for example one opened by
+    /// [`Self::execute_query_collect`]) once its result is fully consumed, to
+    /// keep a long-lived connection from accumulating open cursors. A cursor id
+    /// of `0` is ignored.
+    pub fn close_cursor(&mut self, cursor_id: u32) {
+        if cursor_id == 0 {
+            return;
+        }
+        self.in_use_cursors.remove(&cursor_id);
+        self.copied_cursors.remove(&cursor_id);
+        self.cursor_columns.remove(&cursor_id);
+        if !self.cursors_to_close.contains(&cursor_id) {
+            self.cursors_to_close.push(cursor_id);
         }
     }
 
