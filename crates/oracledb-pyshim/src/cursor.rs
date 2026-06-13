@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use oracledb::protocol::thin::{
     check_fetch_conversion, public_dbtype_name_from_column_metadata, BatchServerError, BindValue,
-    ColumnMetadata, ExecuteOptions, QueryResult, QueryValue, CS_FORM_IMPLICIT,
-    ORA_TYPE_NUM_VARCHAR,
+    ColumnMetadata, ExecuteOptions, QueryResult, QueryValue, CS_FORM_IMPLICIT, ORA_TYPE_NUM_BLOB,
+    ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
@@ -14,6 +14,73 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::*;
 
+/// True for LOB column types whose fetched values are locators (CLOB/BLOB/
+/// NCLOB) and so need inlining before Arrow conversion.
+fn is_lob_ora_type(ora_type_num: u8) -> bool {
+    matches!(ora_type_num, ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB)
+}
+
+/// Wraps a fully-read LOB payload in the `QueryValue` the Arrow builder expects
+/// for the inlined (LONG / LONG RAW) column: CLOB text vs BLOB raw bytes.
+fn lob_bytes_to_query_value(ora_type_num: u8, data: Vec<u8>) -> QueryValue {
+    if ora_type_num == ORA_TYPE_NUM_BLOB {
+        QueryValue::Raw(data)
+    } else {
+        QueryValue::Text(String::from_utf8_lossy(&data).into_owned())
+    }
+}
+
+/// Maps a driver Arrow-conversion error to a Python exception. The driver's
+/// messages already carry the reference DPY-* codes, so the harness error
+/// mapper recognizes them.
+fn arrow_error_to_py(err: oracledb::arrow::ArrowConversionError) -> PyErr {
+    ora_database_error(&err.to_string())
+}
+
+/// Rewrites the given (Arrow timestamp) columns of `rows` to encode as
+/// TIMESTAMP, recovering the fractional-second (nanosecond) component from the
+/// original Python `datetime` objects in `params` (a list of row tuples). The
+/// DATE bind that value inference picked would have dropped those fractions.
+fn promote_timestamp_bind_columns(
+    params: &Bound<'_, PyAny>,
+    rows: &mut [Vec<BindValue>],
+    timestamp_columns: &[usize],
+) -> PyResult<()> {
+    let param_rows = params.cast::<PyList>().map_err(runtime_error)?;
+    for (row, param_row) in rows.iter_mut().zip(param_rows.iter()) {
+        let param_row = param_row.cast::<PyTuple>().map_err(runtime_error)?;
+        for &index in timestamp_columns {
+            let Some(slot) = row.get_mut(index) else {
+                continue;
+            };
+            if matches!(slot, BindValue::Null) {
+                continue;
+            }
+            let Ok(value) = param_row.get_item(index) else {
+                continue;
+            };
+            if value.is_none() {
+                continue;
+            }
+            if let Some((year, month, day, hour, minute, second, nanosecond)) =
+                py_date_time_fields(&value)?
+            {
+                *slot = BindValue::Timestamp {
+                    ora_type_num: oracledb::protocol::thin::ORA_TYPE_NUM_TIMESTAMP,
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    nanosecond,
+                };
+            }
+        }
+    }
+    Ok(())
+}
+
 #[pyclass(module = "oracledb.thin_impl", name = "ExecutemanyManager")]
 // d49: migrate to oracledb (executemany manager belongs on driver)
 pub(crate) struct ExecutemanyManager {
@@ -21,20 +88,53 @@ pub(crate) struct ExecutemanyManager {
     batch_size: u32,
     num_rows: u32,
     message_offset: u32,
+    /// Cumulative row offsets of chunk boundaries (DataFrame ingestion of an
+    /// Arrow chunked array). A batch never spans a boundary, so each chunk's
+    /// trailing partial batch becomes its own round trip — matching the
+    /// reference BatchLoadManager. Empty for plain (single-chunk) binds.
+    chunk_ends: Vec<u32>,
 }
 
 impl ExecutemanyManager {
     fn new(total_rows: usize, batch_size: u32) -> PyResult<Self> {
+        Self::with_chunks(total_rows, batch_size, Vec::new())
+    }
+
+    fn with_chunks(
+        total_rows: usize,
+        batch_size: u32,
+        chunk_lengths: Vec<usize>,
+    ) -> PyResult<Self> {
         let total_rows = u32::try_from(total_rows).map_err(runtime_error)?;
         if batch_size == 0 {
             return Err(PyTypeError::new_err("batch_size must be greater than zero"));
         }
-        Ok(Self {
+        let mut chunk_ends = Vec::with_capacity(chunk_lengths.len());
+        let mut acc: u32 = 0;
+        for len in chunk_lengths {
+            acc = acc.saturating_add(u32::try_from(len).map_err(runtime_error)?);
+            chunk_ends.push(acc);
+        }
+        let mut manager = Self {
             total_rows,
             batch_size,
-            num_rows: total_rows.min(batch_size),
+            num_rows: 0,
             message_offset: 0,
-        })
+            chunk_ends,
+        };
+        manager.num_rows = manager.batch_len_from(0);
+        Ok(manager)
+    }
+
+    /// Number of rows in the batch starting at `offset`: at most `batch_size`,
+    /// and never crossing the next chunk boundary.
+    fn batch_len_from(&self, offset: u32) -> u32 {
+        let remaining = self.total_rows.saturating_sub(offset);
+        let mut len = remaining.min(self.batch_size);
+        if let Some(next_end) = self.chunk_ends.iter().find(|&&end| end > offset) {
+            len = len.min(next_end.saturating_sub(offset));
+        }
+        len
     }
 }
 
@@ -52,8 +152,7 @@ impl ExecutemanyManager {
 
     fn next_batch(&mut self) {
         self.message_offset = self.message_offset.saturating_add(self.num_rows);
-        let remaining = self.total_rows.saturating_sub(self.message_offset);
-        self.num_rows = remaining.min(self.batch_size);
+        self.num_rows = self.batch_len_from(self.message_offset);
     }
 }
 
@@ -93,6 +192,12 @@ pub(crate) struct ThinCursorImpl {
     pub(crate) fetch_async_lobs: bool,
     pub(crate) fetch_decimals: bool,
     pub(crate) fetch_decimals_overridden: bool,
+    /// Set by `connection.fetch_df_*` before execute; selects the Arrow
+    /// DataFrame fetch path (reference `fetching_arrow`).
+    pub(crate) fetching_arrow: bool,
+    /// Optional `requested_schema` for the Arrow fetch (reference
+    /// `schema_impl`).
+    pub(crate) schema_impl: Option<Py<ArrowSchemaImpl>>,
     pub(crate) suspend_on_success: bool,
     pub(crate) rowfactory: Option<Py<PyAny>>,
     pub(crate) inputtypehandler: Option<Py<PyAny>>,
@@ -266,6 +371,8 @@ impl ThinCursorImpl {
             fetch_async_lobs: false,
             fetch_decimals: false,
             fetch_decimals_overridden: false,
+            fetching_arrow: false,
+            schema_impl: None,
             suspend_on_success: false,
             rowfactory: None,
             inputtypehandler: None,
@@ -338,6 +445,163 @@ impl ThinCursorImpl {
         self.has_positional_input_sizes = false;
         self.has_named_input_sizes = false;
         self.named_input_sizes.clear();
+    }
+
+    /// Drains the remaining result set into a single Arrow [`RecordBatch`].
+    ///
+    /// The statement was already executed (with `fetching_arrow` set) so the
+    /// cursor holds the prefetched rows plus a live cursor for the rest. LOB
+    /// columns are re-defined to LONG / LONG RAW (`arrow_define_columns`) so
+    /// their values arrive inline as text/bytes the Arrow builder understands.
+    /// When a re-define is required (CLOB/BLOB), execute deferred the row fetch
+    /// and the first fetch must be a DEFINE-FETCH carrying the arrow columns.
+    pub(crate) fn build_arrow_batch(
+        &mut self,
+        py: Python<'_>,
+        cursor: &Bound<'_, PyAny>,
+    ) -> PyResult<arrow_array::RecordBatch> {
+        let (arrow_columns, mut pending_define) = self.arrow_drain_plan(py, cursor)?;
+        let mut all_rows: Vec<Vec<Option<QueryValue>>> = std::mem::take(&mut self.rows);
+        self.row_index = 0;
+        while self.more_rows && self.cursor_id != 0 {
+            let previous_row = all_rows.last().cloned();
+            let result = {
+                let mut guard = self.connection.lock().map_err(runtime_error)?;
+                let connection = guard
+                    .as_mut()
+                    .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+                if pending_define {
+                    BlockingConnection::define_and_fetch_rows_with_columns(
+                        connection,
+                        self.cursor_id,
+                        self.arraysize,
+                        &arrow_columns,
+                        previous_row.as_deref(),
+                    )
+                } else {
+                    BlockingConnection::fetch_rows_with_columns(
+                        connection,
+                        self.cursor_id,
+                        self.arraysize,
+                        &arrow_columns,
+                        previous_row.as_deref(),
+                    )
+                }
+                .map_err(runtime_error)?
+            };
+            pending_define = false;
+            self.more_rows = result.more_rows;
+            if result.cursor_id != 0 {
+                self.cursor_id = result.cursor_id;
+            }
+            all_rows.extend(result.rows);
+        }
+        self.requires_define = false;
+        // Any CLOB/BLOB locators left in the prefetched rows (when no re-define
+        // fetch ran, e.g. the whole result set was prefetched) are materialized.
+        self.inline_lob_cells(&arrow_columns, &mut all_rows)?;
+        self.finish_arrow_batch(py, &arrow_columns, &all_rows)
+    }
+
+    /// Establishes fetch-define columns (running any output type handler) and
+    /// returns the LOB-inlined arrow column metadata plus whether the first
+    /// fetch must be a DEFINE-FETCH (CLOB/BLOB defer their initial fetch).
+    pub(crate) fn arrow_drain_plan(
+        &mut self,
+        py: Python<'_>,
+        cursor: &Bound<'_, PyAny>,
+    ) -> PyResult<(Vec<ColumnMetadata>, bool)> {
+        if !self.is_query {
+            return Err(raise_oracledb_driver_error("ERR_NOT_A_QUERY"));
+        }
+        self.prepare_fetch_defines(py, cursor)?;
+        let arrow_columns = oracledb::arrow::arrow_define_columns(&self.columns);
+        Ok((arrow_columns, self.requires_define))
+    }
+
+    /// Builds the final [`RecordBatch`] from drained rows and arrow columns.
+    pub(crate) fn finish_arrow_batch(
+        &self,
+        py: Python<'_>,
+        arrow_columns: &[ColumnMetadata],
+        all_rows: &[Vec<Option<QueryValue>>],
+    ) -> PyResult<arrow_array::RecordBatch> {
+        let options = self.arrow_fetch_options(py)?;
+        oracledb::arrow::build_record_batch(arrow_columns, all_rows, &options)
+            .map_err(arrow_error_to_py)
+    }
+
+    /// Builds the driver fetch options from `fetch_decimals` and an optional
+    /// `requested_schema` (`schema_impl`).
+    pub(crate) fn arrow_fetch_options(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<oracledb::arrow::ArrowFetchOptions> {
+        let requested_schema = self
+            .schema_impl
+            .as_ref()
+            .map(|schema_impl| schema_impl.borrow(py).schema());
+        Ok(oracledb::arrow::ArrowFetchOptions {
+            fetch_decimals: self.fetch_decimals,
+            requested_schema,
+        })
+    }
+
+    /// Replaces `QueryValue::Lob` cells with their full inline value so the
+    /// Arrow builder (which only understands text/raw) can consume them.
+    pub(crate) fn inline_lob_cells(
+        &self,
+        columns: &[ColumnMetadata],
+        rows: &mut [Vec<Option<QueryValue>>],
+    ) -> PyResult<()> {
+        let lob_indices: Vec<usize> = self
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| is_lob_ora_type(column.ora_type_num))
+            .map(|(index, _)| index)
+            .collect();
+        if lob_indices.is_empty() {
+            return Ok(());
+        }
+        let call_timeout = {
+            let value = self.state.lock().map_err(runtime_error)?.call_timeout;
+            (value > 0).then_some(value)
+        };
+        for row in rows.iter_mut() {
+            for &index in &lob_indices {
+                let Some(slot) = row.get_mut(index) else {
+                    continue;
+                };
+                let inlined = match slot.take() {
+                    Some(QueryValue::Lob { locator, .. }) => {
+                        let column = &columns[index];
+                        let data = self.read_full_lob(&locator, call_timeout)?;
+                        Some(lob_bytes_to_query_value(column.ora_type_num, data))
+                    }
+                    other => other,
+                };
+                *slot = inlined;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads a LOB fully into memory via the blocking driver API.
+    fn read_full_lob(&self, locator: &[u8], call_timeout: Option<u32>) -> PyResult<Vec<u8>> {
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        let result = BlockingConnection::read_lob_with_timeout(
+            connection,
+            locator,
+            1,
+            u64::from(u32::MAX),
+            call_timeout,
+        )
+        .map_err(runtime_error)?;
+        Ok(result.data.unwrap_or_default())
     }
 
     fn active_output_type_handler(
@@ -598,6 +862,26 @@ impl ThinCursorImpl {
     }
 
     #[getter]
+    fn fetching_arrow(&self) -> bool {
+        self.fetching_arrow
+    }
+
+    #[setter]
+    fn set_fetching_arrow(&mut self, value: bool) {
+        self.fetching_arrow = value;
+    }
+
+    #[getter]
+    fn schema_impl(&self, py: Python<'_>) -> Option<Py<ArrowSchemaImpl>> {
+        self.schema_impl.as_ref().map(|value| value.clone_ref(py))
+    }
+
+    #[setter]
+    fn set_schema_impl(&mut self, value: Option<Py<ArrowSchemaImpl>>) {
+        self.schema_impl = value;
+    }
+
+    #[getter]
     fn suspend_on_success(&self) -> bool {
         self.suspend_on_success
     }
@@ -797,6 +1081,13 @@ impl ThinCursorImpl {
         // applied by cursor.py after prepare, before execute.
         self.fetch_lobs = default_fetch_lobs(_cursor.py())?;
         self.fetch_decimals = default_fetch_decimals(_cursor.py())?;
+        // execute() does not accept DataFrame / Arrow params (only executemany
+        // does); the reference raises DPY-2003 (impl/base/cursor.pyx).
+        if parameters.is_some_and(has_arrow_c_stream) {
+            return Err(raise_oracledb_driver_error(
+                "ERR_WRONG_EXECUTE_PARAMETERS_TYPE",
+            ));
+        }
         let statement = self
             .statement
             .as_deref()
@@ -939,22 +1230,50 @@ impl ThinCursorImpl {
         let statement = self
             .statement
             .as_deref()
-            .ok_or_else(|| raise_oracledb_driver_error("ERR_NO_STATEMENT"))?;
-        validate_dml_returning_duplicate_binds(statement)?;
-        self.bind_names = unique_sql_bind_names(statement)?;
+            .ok_or_else(|| raise_oracledb_driver_error("ERR_NO_STATEMENT"))?
+            .to_string();
+        validate_dml_returning_duplicate_binds(&statement)?;
+        self.bind_names = unique_sql_bind_names(&statement)?;
+        // DataFrame / pyarrow.Table ingestion (params implement the Arrow
+        // PyCapsule stream interface). Materialize the Arrow data into native
+        // Python row tuples and feed the existing executemany bind path so the
+        // type inference and wire encoding are shared with list-of-tuples binds.
+        let owned_rows;
+        let mut chunk_lengths = Vec::new();
+        let mut timestamp_columns: Vec<usize> = Vec::new();
+        let bind_params = if has_arrow_c_stream(parameters) {
+            let ingest = arrow_table_to_py_rows(parameters.py(), parameters)?;
+            chunk_lengths = ingest.chunk_lengths;
+            timestamp_columns = ingest.timestamp_columns;
+            owned_rows = ingest.rows.into_any();
+            &owned_rows
+        } else {
+            parameters
+        };
         self.bind_vars = extract_executemany_bind_var_objects(
-            parameters.py(),
-            statement,
-            parameters,
+            bind_params.py(),
+            &statement,
+            bind_params,
             &self.named_input_sizes,
         )?;
         self.many_bind_rows = extract_bind_rows(
-            parameters.py(),
-            statement,
-            parameters,
+            bind_params.py(),
+            &statement,
+            bind_params,
             &self.named_input_sizes,
         )?;
-        ExecutemanyManager::new(self.many_bind_rows.len(), batch_size)
+        // Arrow timestamp columns must encode as TIMESTAMP (not the DATE that
+        // value inference picks for a `datetime`) so fractional seconds survive.
+        // Re-read the original Python datetime objects to recover the nanosecond
+        // component that the DATE bind would have dropped.
+        if !timestamp_columns.is_empty() {
+            promote_timestamp_bind_columns(
+                bind_params,
+                &mut self.many_bind_rows,
+                &timestamp_columns,
+            )?;
+        }
+        ExecutemanyManager::with_chunks(self.many_bind_rows.len(), batch_size, chunk_lengths)
     }
 
     fn executemany(
@@ -1453,6 +1772,48 @@ impl ThinCursorImpl {
             return rowfactory.call1(py, tuple).map(Some).map_err(Into::into);
         }
         Ok(Some(tuple.unbind().into()))
+    }
+
+    /// Fetches all remaining rows and returns a public `DataFrame` built from
+    /// an Arrow `RecordBatch` (reference `fetch_df_all`). The statement was
+    /// already executed (with `fetching_arrow` set) by `connection.fetch_df_all`.
+    fn fetch_df_all<'py>(
+        &mut self,
+        py: Python<'py>,
+        cursor: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let batch = self.build_arrow_batch(py, cursor)?;
+        dataframe_from_batch(py, batch)
+    }
+
+    /// Yields the result set as a list of `DataFrame` batches of `batch_size`
+    /// rows each (reference `fetch_df_batches`). The shim materializes the whole
+    /// result and slices it into RecordBatch-backed DataFrames so the public
+    /// iterator semantics (at least one batch, even when empty) hold.
+    fn fetch_df_batches<'py>(
+        &mut self,
+        py: Python<'py>,
+        cursor: &Bound<'py, PyAny>,
+        batch_size: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let batch = self.build_arrow_batch(py, cursor)?;
+        let size = usize::try_from(batch_size.max(1))
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let total = batch.num_rows();
+        let frames = PyList::empty(py);
+        if total == 0 {
+            frames.append(dataframe_from_batch(py, batch)?)?;
+        } else {
+            let mut offset = 0usize;
+            while offset < total {
+                let len = size.min(total - offset);
+                let slice = batch.slice(offset, len);
+                frames.append(dataframe_from_batch(py, slice)?)?;
+                offset += len;
+            }
+        }
+        Ok(frames.into_any())
     }
 
     #[pyo3(name = "get_fetch_vars")]
