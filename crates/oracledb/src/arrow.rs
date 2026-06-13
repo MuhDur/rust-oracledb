@@ -27,16 +27,16 @@ use arrow_buffer::NullBuffer;
 use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef, TimeUnit};
 
 use oracledb_protocol::dpl::DirectPathColumnValue;
-use oracledb_protocol::vector::{
-    Vector, VectorValues, VECTOR_FORMAT_BINARY, VECTOR_FORMAT_FLOAT32, VECTOR_FORMAT_FLOAT64,
-    VECTOR_FORMAT_INT8,
-};
 use oracledb_protocol::thin::{
     ColumnMetadata, QueryValue, CS_FORM_NCHAR, ORA_TYPE_NUM_BINARY_DOUBLE,
     ORA_TYPE_NUM_BINARY_FLOAT, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_BOOLEAN, ORA_TYPE_NUM_CHAR,
     ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW,
     ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
     ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR, TNS_MAX_LONG_LENGTH,
+};
+use oracledb_protocol::vector::{
+    Vector, VectorValues, VECTOR_FORMAT_BINARY, VECTOR_FORMAT_FLOAT32, VECTOR_FORMAT_FLOAT64,
+    VECTOR_FORMAT_INT8,
 };
 
 const ORA_TYPE_NUM_VECTOR: u8 = 127;
@@ -1023,8 +1023,12 @@ impl VectorListBuilder {
     /// Builder for the child arrow type carried by a vector `List` field.
     fn for_item(item: &DataType) -> Result<Self> {
         Ok(match item {
-            DataType::Float32 => VectorListBuilder::Float32(ListBuilder::new(Float32Builder::new())),
-            DataType::Float64 => VectorListBuilder::Float64(ListBuilder::new(Float64Builder::new())),
+            DataType::Float32 => {
+                VectorListBuilder::Float32(ListBuilder::new(Float32Builder::new()))
+            }
+            DataType::Float64 => {
+                VectorListBuilder::Float64(ListBuilder::new(Float64Builder::new()))
+            }
             DataType::Int8 => VectorListBuilder::Int8(ListBuilder::new(Int8Builder::new())),
             DataType::UInt8 => VectorListBuilder::UInt8(ListBuilder::new(UInt8Builder::new())),
             _ => {
@@ -1960,13 +1964,13 @@ mod tests {
     fn dense_float32_vector_builds_list_array_with_nulls() {
         let columns = vec![vector_column("V", VECTOR_FORMAT_FLOAT32, 0)];
         let rows = vec![
-            vec![Some(QueryValue::Vector(Vector::Dense(VectorValues::Float32(
-                vec![34.6, 77.8],
-            ))))],
+            vec![Some(QueryValue::Vector(Vector::Dense(
+                VectorValues::Float32(vec![34.6, 77.8]),
+            )))],
             vec![None],
-            vec![Some(QueryValue::Vector(Vector::Dense(VectorValues::Float32(
-                vec![34.6, 77.8, 55.9],
-            ))))],
+            vec![Some(QueryValue::Vector(Vector::Dense(
+                VectorValues::Float32(vec![34.6, 77.8, 55.9]),
+            )))],
         ];
         let batch =
             build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
