@@ -2071,10 +2071,6 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm: u8) -> Res
         // length, then the image bytes-with-length
         BindValue::Vector(vector) => {
             let image = crate::vector::encode_vector(vector);
-            if std::env::var("RUST_VECTOR_DEBUG").is_ok() {
-                let hex: String = image.iter().map(|b| format!("{b:02x}")).collect();
-                eprintln!("VECTOR bind image ({} bytes): {hex}", image.len());
-            }
             crate::vector::write_vector_image(writer, &image)
         }
         BindValue::Cursor { cursor_id } => {
@@ -3552,10 +3548,6 @@ fn parse_vector_value(reader: &mut TtcReader<'_>) -> Result<Option<QueryValue>> 
     reader.read_bytes()?; // LOB locator (unused)
     if data.is_empty() {
         return Ok(None);
-    }
-    if std::env::var("RUST_VECTOR_DEBUG").is_ok() {
-        let hex: String = data.iter().map(|b| format!("{b:02x}")).collect();
-        eprintln!("VECTOR image ({} bytes): {hex}", data.len());
     }
     let vector = crate::vector::decode_vector(&data)?;
     Ok(Some(QueryValue::Vector(vector)))
