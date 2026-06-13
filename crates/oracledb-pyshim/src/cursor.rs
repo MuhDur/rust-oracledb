@@ -960,6 +960,24 @@ impl ThinCursorImpl {
         self.warning.as_ref().map(|value| value.clone_ref(py))
     }
 
+    /// Resets a cursor that has just been written as a CURSOR (REF CURSOR)
+    /// bind to a server call. The PL/SQL routine may have closed the cursor
+    /// server-side, so its cached statement/cursor_id is no longer valid;
+    /// clear them so the next execute re-parses with a fresh cursor_id rather
+    /// than reusing the stale one (which the server rejects with ORA-01001).
+    /// Mirrors the reference `cursor_impl.statement = None` performed when a
+    /// CURSOR bind is written (impl/thin/messages/base.pyx
+    /// `_write_bind_params_column`). Test 1315 / 5815.
+    pub(crate) fn reset_after_cursor_bind(&mut self) {
+        self.statement = None;
+        self.cursor_id = 0;
+        self.reset_fetch_define_state();
+        self.rows.clear();
+        self.row_index = 0;
+        self.more_rows = false;
+        self.is_query = false;
+    }
+
     #[pyo3(signature = (in_del=None))]
     pub(crate) fn close(&mut self, in_del: Option<bool>) {
         let _ = in_del;
@@ -1642,7 +1660,8 @@ impl ThinCursorImpl {
                 &result.out_values,
                 &result.return_values,
                 Some(&lob_context),
-            )
+            )?;
+            reset_cursor_bind_vars(py, &self.bind_values, &self.bind_vars)
         })?;
         let is_query = !result.columns.is_empty();
         let should_commit = !is_query && *self.autocommit.lock().map_err(runtime_error)?;

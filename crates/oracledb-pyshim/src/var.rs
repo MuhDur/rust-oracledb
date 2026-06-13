@@ -1309,3 +1309,40 @@ pub(crate) fn apply_cursor_out_bind(
     let cursor = cursor.bind(py);
     hydrate_cursor_impl(cursor, columns, cursor_id, cursor_id == 0)
 }
+
+/// After an execute, resets every already-open cursor that was passed as an IN
+/// CURSOR (REF CURSOR) bind. Such a bind appears as `BindValue::Cursor` (only
+/// produced for a cursor with a non-zero cursor_id); the called PL/SQL may have
+/// closed the cursor server-side, so its cached statement/cursor_id is stale.
+/// Clearing it lets the next execute on that cursor re-parse the SQL with a
+/// fresh cursor_id instead of reusing the invalid one (ORA-01001). Mirrors the
+/// reference `cursor_impl.statement = None` done when a CURSOR bind is written
+/// (impl/thin/messages/base.pyx). Test 1315 / 5815.
+pub(crate) fn reset_cursor_bind_vars(
+    py: Python<'_>,
+    bind_values: &[BindValue],
+    bind_vars: &[Py<ThinVar>],
+) -> PyResult<()> {
+    for (index, bind_value) in bind_values.iter().enumerate() {
+        if !matches!(bind_value, BindValue::Cursor { .. }) {
+            continue;
+        }
+        let Some(var) = bind_vars.get(index) else {
+            continue;
+        };
+        let cursor = var.borrow(py).get_py_value(py)?;
+        let cursor = cursor.bind(py);
+        if !is_public_cursor_value(cursor)? {
+            continue;
+        }
+        let impl_obj = cursor.getattr("_impl")?;
+        if let Ok(mut cursor_impl) = impl_obj.extract::<PyRefMut<'_, ThinCursorImpl>>() {
+            cursor_impl.reset_after_cursor_bind();
+        } else if let Ok(mut cursor_impl) =
+            impl_obj.extract::<PyRefMut<'_, AsyncThinCursorImpl>>()
+        {
+            cursor_impl.inner.reset_after_cursor_bind();
+        }
+    }
+    Ok(())
+}

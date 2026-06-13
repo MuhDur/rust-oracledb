@@ -768,7 +768,8 @@ impl AsyncThinCursorImpl {
                 &result.out_values,
                 &result.return_values,
                 Some(&lob_context),
-            )
+            )?;
+            reset_cursor_bind_vars(py, &self.inner.bind_values, &self.inner.bind_vars)
         })?;
         let is_query = !result.columns.is_empty();
         self.inner

@@ -1035,6 +1035,13 @@ impl Connection {
                 if use_cache {
                     self.statement_cache_put(sql, result.cursor_id);
                 }
+                // A cursor passed as an IN REF CURSOR bind may be closed
+                // server-side by the called PL/SQL (e.g. `close a_cursor`); its
+                // cached cursor_id is then invalid. Drop any statement-cache
+                // entry pointing at a bound cursor_id so the next execute on
+                // that cursor re-parses with a fresh one instead of reusing the
+                // closed one (ORA-01001). Test 1315 / 5815.
+                self.invalidate_bound_ref_cursors(bind_rows);
                 self.remember_cursor_columns(&result);
                 if exec_options.parse_only {
                     return Ok(result);
@@ -1902,6 +1909,26 @@ impl Connection {
             let (_, evicted_id) = self.statement_cache.remove(0);
             if evicted_id != 0 {
                 self.cursors_to_close.push(evicted_id);
+            }
+        }
+    }
+
+    /// Drops any statement-cache entry whose open cursor was passed as an IN
+    /// REF CURSOR bind in `bind_rows`. The called PL/SQL may have closed the
+    /// cursor server-side, leaving the cached cursor_id invalid; clearing the
+    /// entry forces a re-parse on the next execute of that SQL rather than
+    /// reusing the closed cursor (ORA-01001). Test 1315 / 5815.
+    fn invalidate_bound_ref_cursors(&mut self, bind_rows: &[Vec<BindValue>]) {
+        for row in bind_rows {
+            for value in row {
+                if let BindValue::Cursor { cursor_id } = value {
+                    if *cursor_id == 0 {
+                        continue;
+                    }
+                    self.statement_cache
+                        .retain(|(_, cached_id)| cached_id != cursor_id);
+                    self.cursor_columns.remove(cursor_id);
+                }
             }
         }
     }
