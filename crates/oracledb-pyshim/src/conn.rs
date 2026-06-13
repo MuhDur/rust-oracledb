@@ -1202,6 +1202,70 @@ impl ThinConnImpl {
         Ok(())
     }
 
+    /// Begins a sessionless transaction (reference connection.py
+    /// `begin_sessionless_transaction` -> `_impl.begin_sessionless_transaction`).
+    /// The Python layer has already normalized `transaction_id` (bytes) and
+    /// validated `timeout`.
+    fn begin_sessionless_transaction(
+        &self,
+        transaction_id: &[u8],
+        timeout: u32,
+        defer_round_trip: bool,
+    ) -> PyResult<()> {
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        BlockingConnection::begin_sessionless_transaction(
+            connection,
+            transaction_id,
+            timeout,
+            defer_round_trip,
+        )
+        .map_err(runtime_error)?;
+        self.state
+            .lock()
+            .map_err(runtime_error)?
+            .transaction_in_progress = true;
+        Ok(())
+    }
+
+    /// Resumes an existing sessionless transaction (reference
+    /// `resume_sessionless_transaction`).
+    fn resume_sessionless_transaction(
+        &self,
+        transaction_id: &[u8],
+        timeout: u32,
+        defer_round_trip: bool,
+    ) -> PyResult<()> {
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        BlockingConnection::resume_sessionless_transaction(
+            connection,
+            transaction_id,
+            timeout,
+            defer_round_trip,
+        )
+        .map_err(runtime_error)?;
+        self.state
+            .lock()
+            .map_err(runtime_error)?
+            .transaction_in_progress = true;
+        Ok(())
+    }
+
+    /// Suspends the active sessionless transaction (reference
+    /// `suspend_sessionless_transaction`).
+    fn suspend_sessionless_transaction(&self) -> PyResult<()> {
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        BlockingConnection::suspend_sessionless_transaction(connection).map_err(runtime_error)
+    }
+
     fn change_password(&self, old_password: &str, new_password: &str) -> PyResult<()> {
         let mut guard = self.connection.lock().map_err(runtime_error)?;
         let connection = guard

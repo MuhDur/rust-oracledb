@@ -578,6 +578,7 @@ impl AsyncThinCursorImpl {
             batcherrors,
             arraydmlrowcounts,
             cache_statement: self.inner.cache_statement,
+            suspend_on_success: self.inner.suspend_on_success,
             ..ExecuteOptions::default()
         };
         let start = usize::try_from(offset).map_err(runtime_error)?;
@@ -719,11 +720,13 @@ impl AsyncThinCursorImpl {
                 scrollable: true,
                 fetch_orientation: oracledb::protocol::thin::TNS_FETCH_ORIENTATION_CURRENT,
                 fetch_pos: u32::try_from(self.inner.rowcount.max(0) + 1).unwrap_or(u32::MAX),
+                suspend_on_success: self.inner.suspend_on_success,
                 ..ExecuteOptions::default()
             }
         } else {
             ExecuteOptions {
                 cache_statement: self.inner.cache_statement,
+                suspend_on_success: self.inner.suspend_on_success,
                 ..ExecuteOptions::default()
             }
         };

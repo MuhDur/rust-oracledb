@@ -1,0 +1,7 @@
+connected 23.26.1.0.0
+table ready
+=== capture A: begin (immediate) ===
+=== capture B: suspend (immediate) ===
+=== capture C: resume (deferred) + execute piggyback ===
+=== capture D: resume + commit ===
+done
