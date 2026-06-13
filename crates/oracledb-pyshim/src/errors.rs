@@ -47,6 +47,26 @@ pub(crate) fn runtime_error(err: impl std::fmt::Display) -> PyErr {
         }
         _ => {}
     }
+    // OSON decode errors surfaced during fetch carry their DPY code in the
+    // Display text; route them to the matching oracledb error number so the
+    // raised exception has the right full_code (e.g. test_3509 -> DPY-3007).
+    if let Some(name) = message.strip_prefix("DPY-3007: the data type ") {
+        let name = name
+            .strip_suffix(" is not supported")
+            .unwrap_or(name)
+            .to_string();
+        return raise_oracledb_driver_error_with_kwargs(
+            "ERR_DB_TYPE_NOT_SUPPORTED",
+            &message,
+            move |_py, kwargs| kwargs.set_item("name", name.clone()),
+        );
+    }
+    if message.starts_with("DPY-5004: ") {
+        return raise_oracledb_driver_error("ERR_UNEXPECTED_DATA");
+    }
+    if message.starts_with("DPY-5006: ") {
+        return raise_oracledb_driver_error("ERR_UNEXPECTED_END_OF_DATA");
+    }
     if let Some(timeout_text) = message
         .strip_prefix("call timeout of ")
         .and_then(|value| value.strip_suffix(" ms exceeded"))

@@ -1736,10 +1736,18 @@ impl ThinCursorImpl {
                     fetch_pos,
                 )
             } else if requires_define {
+                // The define-fetch is the primary fetch when nothing was
+                // prefetched (prefetchrows == 0): fall back to arraysize so a
+                // row is actually retrieved rather than requesting zero rows.
+                let define_fetch_rows = if self.prefetchrows == 0 {
+                    self.arraysize.max(1)
+                } else {
+                    self.prefetchrows
+                };
                 BlockingConnection::define_and_fetch_rows_with_columns(
                     connection,
                     self.cursor_id,
-                    self.prefetchrows,
+                    define_fetch_rows,
                     &define_columns,
                     previous_row.as_deref(),
                 )

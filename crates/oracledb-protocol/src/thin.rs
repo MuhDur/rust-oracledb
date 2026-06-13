@@ -1487,9 +1487,12 @@ pub fn bind_value_type_info(value: &BindValue) -> Option<BindTypeInfo> {
         // reference base.pyx _write_column_metadata: VECTOR binds advertise a
         // TNS_VECTOR_MAX_LENGTH prefetch buffer and the LOB-prefetch cont flag
         BindValue::Vector(_) => (ORA_TYPE_NUM_VECTOR, 0, TNS_VECTOR_MAX_LENGTH),
-        // JSON binds advertise a TNS_JSON_MAX_LENGTH prefetch buffer (the OSON
-        // image is sent inline as a prefetched LOB).
-        BindValue::Json(_) => (ORA_TYPE_NUM_JSON, 0, TNS_JSON_MAX_LENGTH),
+        // JSON binds: the reference DB_TYPE_JSON var has buffer_size_factor 0, so
+        // its metadata buffer_size is small and the OSON value is written inline
+        // (not deferred to the "long" bind section). The TNS_JSON_MAX_LENGTH
+        // prefetch buffer is applied only in the wire metadata writer, not here,
+        // so the long/non-long bind-data ordering matches the reference.
+        BindValue::Json(_) => (ORA_TYPE_NUM_JSON, 0, 1),
         BindValue::Cursor { .. } => (ORA_TYPE_NUM_CURSOR, 0, 4),
     };
     Some(BindTypeInfo {
