@@ -167,12 +167,20 @@ pub(crate) fn spawn_async_execute_task(
     call_timeout: Option<u32>,
     autocommit: bool,
     exec_options: ExecuteOptions,
+    prior_cursor_id: u32,
 ) -> BlockingTask<AsyncExecuteOutcome> {
     spawn_blocking_task("oracledb-pyshim-async-execute", move || {
         let mut guard = connection.lock().map_err(|err| err.to_string())?;
         let connection = guard
             .as_mut()
             .ok_or_else(|| "connection is closed".to_string())?;
+        // Release the cursor's previously held server cursor before the
+        // statement-cache lookup, mirroring the reference `_prepare` which
+        // returns the old statement (in_use=False) before getting the new one.
+        // This lets a cursor re-executing the same SQL reuse its own server
+        // cursor, while a *different* cursor running the same SQL concurrently
+        // still sees it as in use and gets a fresh one (ORA-01002 avoidance).
+        connection.release_cursor(prior_cursor_id);
         let runtime = build_pyshim_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
@@ -738,6 +746,7 @@ impl AsyncThinCursorImpl {
                 ..ExecuteOptions::default()
             }
         };
+        let prior_cursor_id = self.inner.cursor_id;
         let query = spawn_async_execute_task(
             Arc::clone(&self.inner.connection),
             Arc::clone(&self.inner.state),
@@ -748,6 +757,7 @@ impl AsyncThinCursorImpl {
             call_timeout,
             autocommit,
             exec_options,
+            prior_cursor_id,
         );
         let is_plsql = statement_is_plsql(&statement);
         let outcome = match query.await {

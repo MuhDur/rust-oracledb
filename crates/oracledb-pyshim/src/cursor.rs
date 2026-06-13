@@ -981,6 +981,19 @@ impl ThinCursorImpl {
     #[pyo3(signature = (in_del=None))]
     pub(crate) fn close(&mut self, in_del: Option<bool>) {
         let _ = in_del;
+        // Return the open server cursor to the statement cache (reference
+        // cursor `_close` -> `_return_statement`): clear its `in_use` mark so a
+        // later execute of the same SQL on another cursor may reuse it. A
+        // `try_lock` keeps `__del__` non-blocking; if the connection is busy
+        // the id stays in use (forcing a harmless fresh parse) until it is
+        // evicted or re-released.
+        if self.cursor_id != 0 {
+            if let Ok(mut guard) = self.connection.try_lock() {
+                if let Some(connection) = guard.as_mut() {
+                    connection.release_cursor(self.cursor_id);
+                }
+            }
+        }
         self.statement = None;
         self.bind_values.clear();
         self.bind_vars.clear();
@@ -1611,6 +1624,7 @@ impl ThinCursorImpl {
                 ..ExecuteOptions::default()
             }
         };
+        let prior_cursor_id = self.cursor_id;
         let mut result = match cursor.py().detach({
             let connection = Arc::clone(&self.connection);
             let state = Arc::clone(&self.state);
@@ -1625,6 +1639,10 @@ impl ThinCursorImpl {
                 let connection = guard
                     .as_mut()
                     .ok_or_else(|| TaskError::from("connection is closed"))?;
+                // Return this cursor's previously held server cursor before the
+                // statement-cache lookup, so a same-SQL re-execute reuses it
+                // (reference `_prepare` -> `_return_statement` -> `_get_statement`).
+                connection.release_cursor(prior_cursor_id);
                 apply_pending_current_schema_from_state(&state, connection, call_timeout)
                     .map_err(|err| TaskError::from(err.to_string()))?;
                 materialize_typed_lob_bind_values(
