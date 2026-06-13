@@ -201,6 +201,237 @@ pub fn build_end_pipeline_payload_with_seq(seq_num: u8) -> Vec<u8> {
     writer.into_bytes()
 }
 
+/// A two-phase-commit transaction id (reference `Xid` namedtuple). The
+/// `global_transaction_id` and `branch_qualifier` are the raw (already
+/// UTF-8 encoded) byte values; the shim coerces `str` members before calling.
+#[derive(Clone, Debug)]
+pub struct TpcXid<'a> {
+    pub format_id: u32,
+    pub global_transaction_id: &'a [u8],
+    pub branch_qualifier: &'a [u8],
+}
+
+/// Writes the XID descriptor + the 128-byte zero-padded XID block, shared by
+/// the full-XA switch (func 103) and change-state (func 104) messages. The
+/// descriptor (`format_id`, gtid length, bqual length, pointer, block length)
+/// is written at the caller-specified position; the 128-byte block itself is
+/// written by [`write_xid_block_bytes`] later in the message body, after the
+/// context bytes (reference tpc_switch.pyx / tpc_change_state.pyx).
+fn write_xid_descriptor(writer: &mut TtcWriter, xid: Option<&TpcXid<'_>>) {
+    match xid {
+        Some(xid) => {
+            writer.write_ub4(xid.format_id);
+            writer.write_ub4(u32::try_from(xid.global_transaction_id.len()).unwrap_or(0));
+            writer.write_ub4(u32::try_from(xid.branch_qualifier.len()).unwrap_or(0));
+            writer.write_u8(1); // pointer (XID)
+            writer.write_ub4(128); // length of the XID block
+        }
+        None => {
+            writer.write_ub4(0); // format id
+            writer.write_ub4(0); // global transaction id length
+            writer.write_ub4(0); // branch qualifier length
+            writer.write_u8(0); // pointer (XID)
+            writer.write_ub4(0); // XID length
+        }
+    }
+}
+
+/// The 128-byte XID block: `global_transaction_id + branch_qualifier`,
+/// right-zero-padded to exactly 128 bytes (reference tpc_switch.pyx:80-81).
+fn write_xid_block_bytes(writer: &mut TtcWriter, xid: &TpcXid<'_>) {
+    let mut xid_bytes = Vec::with_capacity(128);
+    xid_bytes.extend_from_slice(xid.global_transaction_id);
+    xid_bytes.extend_from_slice(xid.branch_qualifier);
+    xid_bytes.resize(128, 0);
+    writer.write_raw(&xid_bytes);
+}
+
+/// Full-XA transaction-switch payload (func 103), used by `tpc_begin`
+/// (`operation = TNS_TPC_TXN_START`) and `tpc_end` (`operation =
+/// TNS_TPC_TXN_DETACH`). Unlike [`build_tpc_txn_switch_payload_with_seq`] (the
+/// sessionless special case) this carries a real `format_id`, a non-empty
+/// branch qualifier, and the captured transaction `context` to echo back.
+/// Reference messages/tpc_switch.pyx `_write_message`.
+pub fn build_tpc_switch_payload_with_seq(
+    seq_num: u8,
+    operation: u32,
+    flags: u32,
+    timeout: u32,
+    xid: Option<&TpcXid<'_>>,
+    context: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut writer = TtcWriter::new();
+    writer.write_function_code_with_seq(TNS_FUNC_TPC_TXN_SWITCH, seq_num);
+    writer.write_ub8(0); // token
+    writer.write_ub4(operation);
+    match context {
+        Some(context) => {
+            writer.write_u8(1); // pointer (transaction context)
+            writer.write_ub4(u32::try_from(context.len()).unwrap_or(0));
+        }
+        None => {
+            writer.write_u8(0); // pointer (transaction context)
+            writer.write_ub4(0); // transaction context length
+        }
+    }
+    write_xid_descriptor(&mut writer, xid);
+    writer.write_ub4(flags);
+    writer.write_ub4(timeout);
+    writer.write_u8(1); // pointer (application value)
+    writer.write_u8(1); // pointer (return context)
+    writer.write_u8(1); // pointer (return context length)
+    writer.write_u8(0); // pointer (internal name)
+    writer.write_ub4(0); // length of internal name
+    writer.write_u8(0); // pointer (external name)
+    writer.write_ub4(0); // length of external name
+    if let Some(context) = context {
+        writer.write_raw(context);
+    }
+    if let Some(xid) = xid {
+        write_xid_block_bytes(&mut writer, xid);
+    }
+    writer.write_ub4(0); // application value
+    writer.into_bytes()
+}
+
+/// TPC transaction change-state payload (func 104), used by `tpc_prepare`
+/// (`operation = TNS_TPC_TXN_PREPARE`), `tpc_commit` (`TNS_TPC_TXN_COMMIT`) and
+/// `tpc_rollback` (`TNS_TPC_TXN_ABORT`). `requested_state` is the desired state
+/// (0 for prepare; READ_ONLY/COMMITTED for commit; ABORTED for rollback).
+/// Reference messages/tpc_change_state.pyx `_write_message`.
+pub fn build_tpc_change_state_payload_with_seq(
+    seq_num: u8,
+    operation: u32,
+    requested_state: u32,
+    flags: u32,
+    xid: Option<&TpcXid<'_>>,
+    context: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut writer = TtcWriter::new();
+    writer.write_function_code_with_seq(TNS_FUNC_TPC_TXN_CHANGE_STATE, seq_num);
+    writer.write_ub8(0); // token
+    writer.write_ub4(operation);
+    match context {
+        Some(context) => {
+            writer.write_u8(1); // pointer (context)
+            writer.write_ub4(u32::try_from(context.len()).unwrap_or(0));
+        }
+        None => {
+            writer.write_u8(0); // pointer (context)
+            writer.write_ub4(0); // context length
+        }
+    }
+    write_xid_descriptor(&mut writer, xid);
+    writer.write_ub4(0); // timeout (always 0)
+    writer.write_ub4(requested_state);
+    writer.write_u8(1); // pointer (out state)
+    writer.write_ub4(flags);
+    if let Some(context) = context {
+        writer.write_raw(context);
+    }
+    if let Some(xid) = xid {
+        write_xid_block_bytes(&mut writer, xid);
+    }
+    writer.into_bytes()
+}
+
+/// Parse a full-XA transaction-switch response (reference tpc_switch.pyx
+/// `_process_return_parameters` plus the base.pyx message loop). Captures the
+/// returned transaction context (PARAMETER message) and the txn-in-progress bit
+/// (last call status). Server errors are surfaced as `ProtocolError`.
+pub fn parse_tpc_switch_response(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+) -> Result<TpcSwitchResponse> {
+    let mut reader = TtcReader::new(payload);
+    let mut response = TpcSwitchResponse::default();
+    while reader.remaining() > 0 {
+        let message_type = reader.read_u8()?;
+        match message_type {
+            0 => {}
+            TNS_MSG_TYPE_STATUS => {
+                let call_status = reader.read_ub4()?;
+                let _seq = reader.read_ub2()?;
+                response.txn_in_progress = call_status & TNS_EOCS_FLAGS_TXN_IN_PROGRESS != 0;
+            }
+            TNS_MSG_TYPE_PARAMETER => {
+                // tpc_switch.pyx `_process_return_parameters`: application value
+                // (ub4) then the return transaction context (ub2 length + bytes).
+                let _application_value = reader.read_ub4()?;
+                let context_len = reader.read_ub2()?;
+                let context = reader.read_raw(usize::from(context_len))?;
+                response.context = context.to_vec();
+            }
+            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => {
+                if let Some(update) = skip_server_side_piggyback(&mut reader)? {
+                    response.sessionless_state = Some(update);
+                }
+            }
+            TNS_MSG_TYPE_END_OF_RESPONSE => break,
+            TNS_MSG_TYPE_ERROR => {
+                // On a server error the reference raises before
+                // `_process_call_status` runs, so `_txn_in_progress` keeps its
+                // prior value; we likewise leave `txn_in_progress` untouched and
+                // surface the error.
+                let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
+                if info.number != 0 {
+                    return Err(ProtocolError::ServerErrorInfo(Box::new(
+                        info.into_details(),
+                    )));
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(response)
+}
+
+/// Parse a TPC change-state response (reference tpc_change_state.pyx
+/// `_process_return_parameters` plus the base.pyx message loop). Reads the out
+/// state from the PARAMETER message and the txn-in-progress bit from the last
+/// call status. Server errors are surfaced as `ProtocolError`.
+pub fn parse_tpc_change_state_response(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+) -> Result<TpcChangeStateResponse> {
+    let mut reader = TtcReader::new(payload);
+    let mut response = TpcChangeStateResponse::default();
+    while reader.remaining() > 0 {
+        let message_type = reader.read_u8()?;
+        match message_type {
+            0 => {}
+            TNS_MSG_TYPE_STATUS => {
+                let call_status = reader.read_ub4()?;
+                let _seq = reader.read_ub2()?;
+                response.txn_in_progress = call_status & TNS_EOCS_FLAGS_TXN_IN_PROGRESS != 0;
+            }
+            TNS_MSG_TYPE_PARAMETER => {
+                // tpc_change_state.pyx `_process_return_parameters` reads the
+                // out state (ub4).
+                response.state = reader.read_ub4()?;
+            }
+            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => {
+                skip_server_side_piggyback(&mut reader)?;
+            }
+            TNS_MSG_TYPE_END_OF_RESPONSE => break,
+            TNS_MSG_TYPE_ERROR => {
+                // On a server error the reference raises before
+                // `_process_call_status` runs, so `_txn_in_progress` keeps its
+                // prior value; we likewise leave `txn_in_progress` untouched and
+                // surface the error.
+                let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
+                if info.number != 0 {
+                    return Err(ProtocolError::ServerErrorInfo(Box::new(
+                        info.into_details(),
+                    )));
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(response)
+}
+
 pub(crate) fn skip_keyword_value_pairs(reader: &mut TtcReader<'_>, num_pairs: u16) -> Result<()> {
     read_keyword_value_pairs_for_txn_state(reader, num_pairs).map(|_| ())
 }

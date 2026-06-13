@@ -45,16 +45,42 @@ pub const TNS_FUNC_CLOSE_CURSORS: u8 = 105;
 /// Two-phase-commit / sessionless transaction switch (start/attach/detach);
 /// reference `TNS_FUNC_TPC_TXN_SWITCH` (impl/thin/constants.pxi:440).
 pub const TNS_FUNC_TPC_TXN_SWITCH: u8 = 103;
+/// Two-phase-commit transaction change-state (commit/abort/prepare/forget);
+/// reference `TNS_FUNC_TPC_TXN_CHANGE_STATE` (impl/thin/constants.pxi:441).
+pub const TNS_FUNC_TPC_TXN_CHANGE_STATE: u8 = 104;
 
 // Sessionless / TPC transaction switch operations (reference constants.pxi:597).
 pub const TNS_TPC_TXN_START: u32 = 0x01;
 pub const TNS_TPC_TXN_DETACH: u32 = 0x02;
 pub const TNS_TPC_TXN_POST_DETACH: u32 = 0x04;
 
+// TPC transaction change-state operations (reference constants.pxi:601-604).
+pub const TNS_TPC_TXN_COMMIT: u32 = 0x01;
+pub const TNS_TPC_TXN_ABORT: u32 = 0x02;
+pub const TNS_TPC_TXN_PREPARE: u32 = 0x03;
+pub const TNS_TPC_TXN_FORGET: u32 = 0x04;
+
+// TPC transaction states returned (and requested) by change-state
+// (reference constants.pxi:606-611).
+pub const TNS_TPC_TXN_STATE_PREPARE: u32 = 0;
+pub const TNS_TPC_TXN_STATE_REQUIRES_COMMIT: u32 = 1;
+pub const TNS_TPC_TXN_STATE_COMMITTED: u32 = 2;
+pub const TNS_TPC_TXN_STATE_ABORTED: u32 = 3;
+pub const TNS_TPC_TXN_STATE_READ_ONLY: u32 = 4;
+pub const TNS_TPC_TXN_STATE_FORGOTTEN: u32 = 5;
+
 // TPC transaction flags (reference base_impl.pxd:218).
 pub const TPC_TXN_FLAGS_NEW: u32 = 0x0000_0001;
+pub const TPC_TXN_FLAGS_JOIN: u32 = 0x0000_0002;
 pub const TPC_TXN_FLAGS_RESUME: u32 = 0x0000_0004;
+pub const TPC_TXN_FLAGS_PROMOTE: u32 = 0x0000_0008;
 pub const TPC_TXN_FLAGS_SESSIONLESS: u32 = 0x0000_0010;
+
+/// End-of-call status flag signalling a server-side transaction is in progress
+/// (reference constants.pxi:586 `TNS_EOCS_FLAGS_TXN_IN_PROGRESS`). Sampled from
+/// the last STATUS / ERROR message of every round trip to drive
+/// `transaction_in_progress` (reference protocol.pyx `_process_call_status`).
+pub const TNS_EOCS_FLAGS_TXN_IN_PROGRESS: u32 = 0x0000_0002;
 
 /// Format id stamped into the XID of a sessionless transaction so the server
 /// can distinguish it from an XA global transaction (reference
