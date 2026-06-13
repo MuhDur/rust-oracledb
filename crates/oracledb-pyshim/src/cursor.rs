@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use oracledb::protocol::thin::{
     check_fetch_conversion, public_dbtype_name_from_column_metadata, BatchServerError, BindValue,
     ColumnMetadata, ExecuteOptions, QueryResult, QueryValue, CS_FORM_IMPLICIT, ORA_TYPE_NUM_BLOB,
-    ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_VARCHAR, ORA_TYPE_NUM_VECTOR,
+    ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_JSON, ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_VARCHAR,
+    ORA_TYPE_NUM_VECTOR, TNS_MAX_LONG_LENGTH,
 };
 use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
@@ -441,6 +442,31 @@ impl ThinCursorImpl {
         self.requires_define = false;
     }
 
+    /// Rewrites is_oson CLOB/BLOB define columns to LONG_RAW so the OSON image is
+    /// streamed inline, marking them so the fetch dispatch decodes them as OSON.
+    /// Native DB_TYPE_JSON columns (ora_type_num 119) are left untouched.
+    fn adjust_oson_lob_define_columns(&mut self) {
+        for column in &mut self.fetch_define_columns {
+            if column.is_oson && column.ora_type_num != ORA_TYPE_NUM_JSON {
+                column.ora_type_num = ORA_TYPE_NUM_LONG_RAW;
+                column.csfrm = 0;
+                column.buffer_size = TNS_MAX_LONG_LENGTH;
+                column.max_size = TNS_MAX_LONG_LENGTH;
+                self.requires_define = true;
+            }
+        }
+    }
+
+    /// True when column `index` carries OSON bytes inside a (re-defined LONG_RAW)
+    /// LOB and must be decoded via the OSON codec. Consults the retained define
+    /// columns, which keep `is_oson` even after the server's define response
+    /// replaces `self.columns` with bare LONG_RAW metadata.
+    fn is_oson_lob_column(&self, index: usize) -> bool {
+        self.fetch_define_columns
+            .get(index)
+            .is_some_and(|column| column.is_oson && column.ora_type_num != ORA_TYPE_NUM_JSON)
+    }
+
     pub(crate) fn clear_input_sizes_state(&mut self) {
         self.has_positional_input_sizes = false;
         self.has_named_input_sizes = false;
@@ -675,6 +701,10 @@ impl ThinCursorImpl {
             .take(self.columns.len())
             .collect();
         self.fetch_define_columns = self.columns.clone();
+        // JSON stored in a CLOB/BLOB (is_oson but not native DB_TYPE_JSON) is
+        // re-defined as LONG_RAW so the server streams the OSON bytes inline,
+        // then decoded by the fetch dispatch (reference cursor.pyx:215-220).
+        self.adjust_oson_lob_define_columns();
         let Some(handler) = self.active_output_type_handler(py, cursor)? else {
             return Ok(());
         };
@@ -1464,17 +1494,19 @@ impl ThinCursorImpl {
         self.columns = result.columns;
         self.reset_fetch_define_state();
         self.requires_define = columns_require_define(&self.columns);
-        // VECTOR columns set the reference's stmt._no_prefetch: rows prefetched
-        // during execute (before a client-side define is sent) are unreliable,
-        // so discard them and re-fetch through the define path (reference
-        // base.pyx:1159-1164 + execute.pyx:99). Scoped to VECTOR only so JSON
-        // and LOB fetch paths keep their existing prefetch behavior.
+        // VECTOR and native/embedded JSON columns set the reference's
+        // stmt._no_prefetch: rows prefetched during execute (before a client-side
+        // define is sent) arrive as bare LOB locators, not the inline VECTOR/OSON
+        // image, so they are discarded and re-fetched through the define path
+        // (reference base.pyx:1159-1164 + execute.pyx:99). Plain LOB columns keep
+        // their prefetch behavior because their locators are read on demand later.
         if self.requires_define
             && result.cursor_id != 0
-            && self
-                .columns
-                .iter()
-                .any(|metadata| metadata.ora_type_num == ORA_TYPE_NUM_VECTOR)
+            && self.columns.iter().any(|metadata| {
+                metadata.ora_type_num == ORA_TYPE_NUM_VECTOR
+                    || metadata.ora_type_num == ORA_TYPE_NUM_JSON
+                    || metadata.is_oson
+            })
         {
             self.rows = Vec::new();
             self.more_rows = true;
@@ -1629,17 +1661,19 @@ impl ThinCursorImpl {
         self.columns = result.columns;
         self.reset_fetch_define_state();
         self.requires_define = columns_require_define(&self.columns);
-        // VECTOR columns set the reference's stmt._no_prefetch: rows prefetched
-        // during execute (before a client-side define is sent) are unreliable,
-        // so discard them and re-fetch through the define path (reference
-        // base.pyx:1159-1164 + execute.pyx:99). Scoped to VECTOR only so JSON
-        // and LOB fetch paths keep their existing prefetch behavior.
+        // VECTOR and native/embedded JSON columns set the reference's
+        // stmt._no_prefetch: rows prefetched during execute (before a client-side
+        // define is sent) arrive as bare LOB locators, not the inline VECTOR/OSON
+        // image, so they are discarded and re-fetched through the define path
+        // (reference base.pyx:1159-1164 + execute.pyx:99). Plain LOB columns keep
+        // their prefetch behavior because their locators are read on demand later.
         if self.requires_define
             && result.cursor_id != 0
-            && self
-                .columns
-                .iter()
-                .any(|metadata| metadata.ora_type_num == ORA_TYPE_NUM_VECTOR)
+            && self.columns.iter().any(|metadata| {
+                metadata.ora_type_num == ORA_TYPE_NUM_VECTOR
+                    || metadata.ora_type_num == ORA_TYPE_NUM_JSON
+                    || metadata.is_oson
+            })
         {
             self.rows = Vec::new();
             self.more_rows = true;
@@ -1767,6 +1801,27 @@ impl ThinCursorImpl {
                     return var
                         .borrow(py)
                         .output_value_to_py(py, value, Some(&lob_context));
+                }
+                // JSON stored in a CLOB/BLOB (is_oson, re-defined as LONG_RAW):
+                // the fetched RAW bytes are the OSON image, decoded via the codec
+                // (reference cursor.pyx:215-220, outconverter = decode_oson).
+                if self.is_oson_lob_column(index) {
+                    return match value {
+                        None => Ok(py.None()),
+                        Some(QueryValue::Raw(bytes)) => {
+                            let decoded = oracledb::protocol::oson::decode_oson(bytes)
+                                .map_err(|err| oson_error_to_pyerr(&err))?;
+                            oson_value_to_py(py, &decoded)
+                        }
+                        _ => query_value_to_py(
+                            py,
+                            value,
+                            Some(_cursor),
+                            Some(&lob_context),
+                            self.fetch_lobs,
+                            self.fetch_decimals,
+                        ),
+                    };
                 }
                 // Native DB_TYPE_JSON columns (ora_type_num 119) arrive as a
                 // decoded OsonValue and are converted directly. The is_json text

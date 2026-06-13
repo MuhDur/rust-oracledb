@@ -97,6 +97,8 @@ pub const ORA_TYPE_NUM_TIMESTAMP_LTZ: u8 = 231;
 pub const ORA_TYPE_NUM_VECTOR: u8 = 127;
 /// Maximum VECTOR prefetch length (`TNS_VECTOR_MAX_LENGTH` = 1 MiB).
 const TNS_VECTOR_MAX_LENGTH: u32 = 1024 * 1024;
+/// Maximum JSON (OSON) prefetch length (`TNS_JSON_MAX_LENGTH` = 32 MiB).
+const TNS_JSON_MAX_LENGTH: u32 = 32 * 1024 * 1024;
 pub const TNS_OBJ_TOP_LEVEL: u32 = 0x01;
 const TNS_LONG_LENGTH_INDICATOR: u8 = 254;
 const TNS_NULL_LENGTH_INDICATOR: u8 = 255;
@@ -1370,6 +1372,13 @@ fn write_bind_metadata_with_type(
         }
         _ => (TNS_BIND_USE_INDICATORS, 0),
     };
+    // JSON binds advertise a TNS_JSON_MAX_LENGTH prefetch buffer (reference
+    // base.pyx:1398-1400) so a returned/out OSON image streams inline.
+    let buffer_size = if ora_type_num == ORA_TYPE_NUM_JSON {
+        TNS_JSON_MAX_LENGTH
+    } else {
+        buffer_size
+    };
     writer.write_u8(ora_type_num);
     writer.write_u8(flags);
     writer.write_u8(0);
@@ -1378,7 +1387,7 @@ fn write_bind_metadata_with_type(
     writer.write_ub4(max_elements);
     let cont_flags = if matches!(
         ora_type_num,
-        ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR
+        ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR | ORA_TYPE_NUM_JSON
     ) {
         TNS_LOB_PREFETCH_FLAG
     } else {
@@ -1400,10 +1409,10 @@ fn write_bind_metadata_with_type(
     writer.write_u8(csfrm);
     // max chars (LOB prefetch length): VECTOR advertises TNS_VECTOR_MAX_LENGTH
     // so the server prefetches the image inline (reference base.pyx)
-    let lob_prefetch_length = if ora_type_num == ORA_TYPE_NUM_VECTOR {
-        TNS_VECTOR_MAX_LENGTH
-    } else {
-        0
+    let lob_prefetch_length = match ora_type_num {
+        ORA_TYPE_NUM_VECTOR => TNS_VECTOR_MAX_LENGTH,
+        ORA_TYPE_NUM_JSON => TNS_JSON_MAX_LENGTH,
+        _ => 0,
     };
     writer.write_ub4(lob_prefetch_length);
     writer.write_ub4(0);
@@ -1478,9 +1487,9 @@ pub fn bind_value_type_info(value: &BindValue) -> Option<BindTypeInfo> {
         // reference base.pyx _write_column_metadata: VECTOR binds advertise a
         // TNS_VECTOR_MAX_LENGTH prefetch buffer and the LOB-prefetch cont flag
         BindValue::Vector(_) => (ORA_TYPE_NUM_VECTOR, 0, TNS_VECTOR_MAX_LENGTH),
-        // JSON binds, like VECTOR, advertise a TNS_VECTOR_MAX_LENGTH prefetch
-        // buffer (the OSON image is sent inline as a prefetched LOB).
-        BindValue::Json(_) => (ORA_TYPE_NUM_JSON, 0, TNS_VECTOR_MAX_LENGTH),
+        // JSON binds advertise a TNS_JSON_MAX_LENGTH prefetch buffer (the OSON
+        // image is sent inline as a prefetched LOB).
+        BindValue::Json(_) => (ORA_TYPE_NUM_JSON, 0, TNS_JSON_MAX_LENGTH),
         BindValue::Cursor { .. } => (ORA_TYPE_NUM_CURSOR, 0, 4),
     };
     Some(BindTypeInfo {
@@ -2393,11 +2402,12 @@ fn write_define_column_metadata(writer: &mut TtcWriter, metadata: &ColumnMetadat
     // bare temp-LOB locator
     let (mut buffer_size, cont_flags, lob_prefetch_length) = match metadata.ora_type_num {
         ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB => (metadata.buffer_size, TNS_LOB_PREFETCH_FLAG, 0),
-        ORA_TYPE_NUM_VECTOR | ORA_TYPE_NUM_JSON => (
+        ORA_TYPE_NUM_VECTOR => (
             TNS_VECTOR_MAX_LENGTH,
             TNS_LOB_PREFETCH_FLAG,
             TNS_VECTOR_MAX_LENGTH,
         ),
+        ORA_TYPE_NUM_JSON => (TNS_JSON_MAX_LENGTH, TNS_LOB_PREFETCH_FLAG, TNS_JSON_MAX_LENGTH),
         _ => (metadata.buffer_size, 0, 0),
     };
     buffer_size = buffer_size.max(1);
