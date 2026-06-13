@@ -180,6 +180,7 @@ pub(crate) fn query_value_to_string(value: &Option<QueryValue>) -> Option<String
         Some(QueryValue::Raw(value)) => String::from_utf8(value.clone()).ok(),
         Some(QueryValue::BinaryDouble(value)) => Some(value.clone()),
         Some(QueryValue::Number { text, .. }) => Some(text.clone()),
+        Some(QueryValue::Boolean(_)) => None,
         Some(QueryValue::DateTime { .. }) => None,
         Some(QueryValue::IntervalDS { .. }) => None,
         Some(QueryValue::IntervalYM { .. }) => None,

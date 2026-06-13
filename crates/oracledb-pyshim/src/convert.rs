@@ -1222,6 +1222,10 @@ pub(crate) fn query_value_to_py(
             .getattr("IntervalYM")?
             .call1((*years, *months))?
             .unbind()),
+        // Native DB_TYPE_BOOLEAN fetches as a Python bool.
+        Some(QueryValue::Boolean(value)) => {
+            Ok(PyBool::new(py, *value).to_owned().into_any().unbind())
+        }
         Some(QueryValue::Rowid(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
         #[allow(clippy::useless_conversion)]
         // pre-existing lint at pre-split HEAD 978491a; not movement-induced
@@ -1435,7 +1439,7 @@ pub(crate) fn json_query_value_to_py(
     if value.is_none() {
         return Ok(value.unbind());
     }
-    if let Ok(bytes) = value.downcast::<pyo3::types::PyBytes>() {
+    if let Ok(bytes) = value.cast::<PyBytes>() {
         value = bytes.call_method0("decode")?;
     }
     if !value.is_truthy()? {

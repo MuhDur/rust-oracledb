@@ -412,6 +412,9 @@ pub enum QueryValue {
         text: String,
         is_integer: bool,
     },
+    /// Native Oracle `DB_TYPE_BOOLEAN` (`ora_type_num` 252, 23ai+): surfaced as
+    /// a Python `bool` rather than an integer.
+    Boolean(bool),
     Cursor {
         columns: Vec<ColumnMetadata>,
         cursor_id: u32,
@@ -4173,13 +4176,10 @@ fn parse_column_value(
             let Some(bytes) = reader.read_bytes()? else {
                 return Ok(None);
             };
-            // reference read_bool: last byte == 1 means true; surfaced as
-            // NUMBER 0/1 (QueryValue has no dedicated boolean variant)
+            // reference read_bool: last byte == 1 means true; native
+            // DB_TYPE_BOOLEAN surfaces as a Python bool.
             let is_true = matches!(bytes.last(), Some(&1));
-            Ok(Some(QueryValue::Number {
-                text: if is_true { "1".into() } else { "0".into() },
-                is_integer: true,
-            }))
+            Ok(Some(QueryValue::Boolean(is_true)))
         }
         ORA_TYPE_NUM_INTERVAL_DS => {
             let Some(bytes) = reader.read_bytes()? else {
