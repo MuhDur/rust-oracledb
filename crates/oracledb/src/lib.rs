@@ -27,12 +27,12 @@ use oracledb_protocol::thin::{
     parse_query_response_with_binds_options_and_columns, parse_tpc_txn_switch_response, BindValue,
     ClientCapabilities, ColumnMetadata, ExecuteOptions, LobReadResult, QueryResult,
     SessionlessTxnState, TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST,
-    TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE,
-    TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT,
-    TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE,
-    TNS_PIPELINE_MODE_ABORT_ON_ERROR, TNS_PIPELINE_MODE_CONTINUE_ON_ERROR, TNS_TPC_TXN_DETACH,
-    TNS_TPC_TXN_POST_DETACH, TNS_TPC_TXN_START, TPC_TXN_FLAGS_NEW, TPC_TXN_FLAGS_RESUME,
-    TPC_TXN_FLAGS_SESSIONLESS,
+    TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK,
+    TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT,
+    TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT,
+    TNS_PACKET_TYPE_REFUSE, TNS_PIPELINE_MODE_ABORT_ON_ERROR, TNS_PIPELINE_MODE_CONTINUE_ON_ERROR,
+    TNS_TPC_TXN_DETACH, TNS_TPC_TXN_POST_DETACH, TNS_TPC_TXN_START, TPC_TXN_FLAGS_NEW,
+    TPC_TXN_FLAGS_RESUME, TPC_TXN_FLAGS_SESSIONLESS,
 };
 use oracledb_protocol::thin::{build_sessionless_piggyback, build_tpc_txn_switch_payload_with_seq};
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
@@ -615,7 +615,9 @@ impl Connection {
         defer_round_trip: bool,
     ) -> Result<()> {
         if self.sessionless_data.is_some() {
-            return Err(Error::SessionlessTransaction(SessionlessError::AlreadyActive));
+            return Err(Error::SessionlessTransaction(
+                SessionlessError::AlreadyActive,
+            ));
         }
         let data = SessionlessData {
             transaction_id: transaction_id.to_vec(),
@@ -786,25 +788,24 @@ impl Connection {
             // started via DBMS_TRANSACTION on the server, where no client-side
             // data existed yet: the server SET carries `started_on_server` so a
             // later client suspend/resume correctly raises DPY-3034.
-            Some(SessionlessTxnState::Set { started_on_server }) => match self
-                .sessionless_data
-                .as_mut()
-            {
-                Some(data) => {
-                    data.started_on_server = started_on_server;
-                    data.piggyback_pending = false;
+            Some(SessionlessTxnState::Set { started_on_server }) => {
+                match self.sessionless_data.as_mut() {
+                    Some(data) => {
+                        data.started_on_server = started_on_server;
+                        data.piggyback_pending = false;
+                    }
+                    None => {
+                        self.sessionless_data = Some(SessionlessData {
+                            transaction_id: Vec::new(),
+                            timeout: 0,
+                            operation: TNS_TPC_TXN_START,
+                            flags: 0,
+                            piggyback_pending: false,
+                            started_on_server,
+                        });
+                    }
                 }
-                None => {
-                    self.sessionless_data = Some(SessionlessData {
-                        transaction_id: Vec::new(),
-                        timeout: 0,
-                        operation: TNS_TPC_TXN_START,
-                        flags: 0,
-                        piggyback_pending: false,
-                        started_on_server,
-                    });
-                }
-            },
+            }
             None => {}
         }
     }

@@ -1049,7 +1049,9 @@ pub fn parse_tpc_txn_switch_response(
             TNS_MSG_TYPE_ERROR => {
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
                 if info.number != 0 {
-                    return Err(ProtocolError::ServerErrorInfo(Box::new(info.into_details())));
+                    return Err(ProtocolError::ServerErrorInfo(Box::new(
+                        info.into_details(),
+                    )));
                 }
             }
             _ => break,
