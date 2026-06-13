@@ -279,7 +279,11 @@ pub(crate) fn py_value_to_bind_with_template(
     // variable with bool() (impl/base/connection.pyx:139-140)
     if ora_type_num == ORA_TYPE_NUM_BOOLEAN {
         if value.is_none() {
-            return Ok(BindValue::Null);
+            // A NULL bound through a BOOLEAN variable must keep its
+            // DB_TYPE_BOOLEAN bind type (the template is TypedNull BOOLEAN);
+            // an untyped Null falls back to VARCHAR and PL/SQL rejects it with
+            // PLS-00306 (test_3103).
+            return Ok(template.clone());
         }
         return Ok(BindValue::Boolean(value.is_truthy()?));
     }

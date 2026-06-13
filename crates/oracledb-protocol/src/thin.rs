@@ -219,6 +219,11 @@ const TNS_UDS_FLAGS_IS_OSON: u32 = 0x0000_0800;
 const ORA_TYPE_SIZE_BINARY_DOUBLE: u32 = 8;
 const ORA_TYPE_SIZE_BINARY_FLOAT: u32 = 4;
 const ORA_TYPE_SIZE_BOOLEAN: u32 = 4;
+/// Marker byte introducing a length-escaped value on the wire. A NULL BOOLEAN
+/// bind is encoded as the two raw bytes `[TNS_ESCAPE_CHAR, 1]` rather than the
+/// usual single `0` null indicator (reference messages/base.pyx
+/// `_write_bind_params_column`).
+const TNS_ESCAPE_CHAR: u8 = 253;
 const ORA_TYPE_SIZE_NUMBER: u32 = 22;
 const ORA_TYPE_SIZE_DATE: u32 = 7;
 const ORA_TYPE_SIZE_INTERVAL_DS: u32 = 11;
@@ -2692,6 +2697,18 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm: u8) -> Res
         } => {
             writer.write_u8(1);
             writer.write_u8(0);
+            Ok(())
+        }
+        // A NULL BOOLEAN bind is encoded as the two raw bytes
+        // [TNS_ESCAPE_CHAR, 1], not the usual single 0 null indicator; sending
+        // a plain 0 makes the server reject a PL/SQL BOOLEAN parameter with
+        // PLS-00306 (reference messages/base.pyx _write_bind_params_column).
+        BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_BOOLEAN,
+            ..
+        } => {
+            writer.write_u8(TNS_ESCAPE_CHAR);
+            writer.write_u8(1);
             Ok(())
         }
         BindValue::Null | BindValue::TypedNull { .. } => {
