@@ -1854,6 +1854,25 @@ pub fn public_dbtype_name_from_oracle_type_name(type_name: &str) -> &'static str
         "NUMBER" | "INTEGER" | "SMALLINT" | "REAL" | "DOUBLE PRECISION" | "FLOAT" => {
             "DB_TYPE_NUMBER"
         }
+        // PL/SQL scalar attribute/element type names returned verbatim by the
+        // type catalog. Without these arms they would fall through to the ADT
+        // fallback below and be misclassified as nested objects (reference
+        // impl/base/types.pyx:154-175,451-455 db_type_by_ora_name).
+        "BOOLEAN" | "PL/SQL BOOLEAN" => "DB_TYPE_BOOLEAN",
+        "BINARY_INTEGER" | "PLS_INTEGER" | "PL/SQL BINARY INTEGER" | "PL/SQL PLS INTEGER" => {
+            "DB_TYPE_BINARY_INTEGER"
+        }
+        "LONG" => "DB_TYPE_LONG",
+        "LONG RAW" => "DB_TYPE_LONG_RAW",
+        "ROWID" => "DB_TYPE_ROWID",
+        "UROWID" => "DB_TYPE_UROWID",
+        "BFILE" => "DB_TYPE_BFILE",
+        "JSON" => "DB_TYPE_JSON",
+        "VECTOR" => "DB_TYPE_VECTOR",
+        "INTERVAL DAY TO SECOND" => "DB_TYPE_INTERVAL_DS",
+        "INTERVAL YEAR TO MONTH" => "DB_TYPE_INTERVAL_YM",
+        // An unknown name IS a nested object type (mirrors reference
+        // _create_attr only calling get_type_for_info when type_owner is set).
         _ => "DB_TYPE_OBJECT",
     }
 }
@@ -5398,6 +5417,20 @@ mod tests {
             public_dbtype_name_from_oracle_type_name("UDT_OBJECT"),
             "DB_TYPE_OBJECT"
         );
+        // PL/SQL scalar attribute/element type names must NOT fall through to
+        // the DB_TYPE_OBJECT ADT fallback (Wave 3 BUG 1).
+        for (name, expected) in [
+            ("BOOLEAN", "DB_TYPE_BOOLEAN"),
+            ("PL/SQL BOOLEAN", "DB_TYPE_BOOLEAN"),
+            ("PL/SQL PLS INTEGER", "DB_TYPE_BINARY_INTEGER"),
+            ("PL/SQL BINARY INTEGER", "DB_TYPE_BINARY_INTEGER"),
+            ("BINARY_INTEGER", "DB_TYPE_BINARY_INTEGER"),
+            ("PLS_INTEGER", "DB_TYPE_BINARY_INTEGER"),
+            ("INTERVAL DAY TO SECOND", "DB_TYPE_INTERVAL_DS"),
+            ("INTERVAL YEAR TO MONTH", "DB_TYPE_INTERVAL_YM"),
+        ] {
+            assert_eq!(public_dbtype_name_from_oracle_type_name(name), expected);
+        }
 
         assert_eq!(
             dbobject_attr_precision_scale("NUMBER", None, Some(0)),

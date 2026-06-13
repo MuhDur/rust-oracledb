@@ -598,6 +598,23 @@ pub(crate) fn dbobject_unpack_value(
                 .into())
         }
         "DB_TYPE_RAW" => Ok(PyBytes::new(py, &bytes).unbind().into()),
+        // PL/SQL PLS_INTEGER / BINARY_INTEGER attributes pack as uint8(4) +
+        // uint32be inside the object image (reference dbobject.pyx:277-278);
+        // read_value_bytes already consumed the length byte, leaving 4 BE bytes.
+        "DB_TYPE_BINARY_INTEGER" => {
+            let mut buf = [0u8; 4];
+            for (slot, byte) in buf.iter_mut().zip(bytes.iter()) {
+                *slot = *byte;
+            }
+            let value = i64::from(u32::from_be_bytes(buf)) as i32;
+            Ok(value.into_pyobject(py)?.unbind().into())
+        }
+        "DB_TYPE_BOOLEAN" => {
+            // Object-image BOOLEAN packs as uint8(4) + uint32be (reference
+            // dbobject.pyx:286-288); non-zero -> True.
+            let non_zero = bytes.iter().any(|byte| *byte != 0);
+            Ok(non_zero.into_pyobject(py)?.unbind().into())
+        }
         "DB_TYPE_XMLTYPE" => decode_dbobject_xmltype(py, &bytes),
         "DB_TYPE_NUMBER" => {
             let value = decode_number_value(&bytes).map_err(runtime_error)?;
