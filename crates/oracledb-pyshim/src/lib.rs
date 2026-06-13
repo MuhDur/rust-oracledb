@@ -21,6 +21,7 @@ mod metadata;
 mod pipeline;
 mod pool;
 mod pyutil;
+mod subscr;
 mod typehandler;
 mod var;
 mod vector;
@@ -41,6 +42,7 @@ pub(crate) use metadata::*;
 pub(crate) use pipeline::*;
 pub(crate) use pool::*;
 pub(crate) use pyutil::*;
+pub(crate) use subscr::*;
 pub(crate) use typehandler::*;
 pub(crate) use var::*;
 pub(crate) use vector::*;
@@ -76,5 +78,6 @@ fn oracledb_pyshim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ArrowSchemaImpl>()?;
     m.add_class::<AsyncDataFrameBatchIter>()?;
     m.add_class::<ImmediateAwaitable>()?;
+    m.add_class::<ThinSubscrImpl>()?;
     Ok(())
 }

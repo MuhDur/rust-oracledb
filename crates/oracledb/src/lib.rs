@@ -495,6 +495,30 @@ struct SessionlessData {
     started_on_server: bool,
 }
 
+/// Result of one bounded notification packet read.
+enum PacketRead {
+    /// A DATA packet's payload was appended to the notification buffer.
+    Appended,
+    /// The read timed out (no data within the window); the caller should poll
+    /// its shutdown flag and may retry.
+    TimedOut,
+    /// The emon socket was closed or returned a non-DATA packet; the stream is
+    /// finished.
+    Closed,
+}
+
+/// Outcome of [`Connection::recv_notification`].
+#[derive(Clone, Debug)]
+pub enum NotificationOutcome {
+    /// A decoded notification record to deliver to the callback.
+    Record(NotificationRecord),
+    /// No record arrived within the read window; poll the shutdown flag and
+    /// call again to keep waiting.
+    TimedOut,
+    /// The emon socket closed (teardown / STOP_NOTIF); stop the receive loop.
+    Closed,
+}
+
 const STATEMENT_CACHE_SIZE: usize = 20;
 
 /// One operation in a pipelined batch (`Connection::run_pipeline`).
@@ -823,29 +847,41 @@ impl Connection {
     /// the value returned by [`Self::subscribe_register`] (now non-None so its
     /// pointer/bytes are emitted) and `registration_id` rides on the tail.
     /// Reference `ThinSubscrImpl.unsubscribe`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn subscribe_unregister(
         &mut self,
         cx: &Cx,
         registration_id: u64,
         client_id: &[u8],
         namespace: u32,
+        name: Option<&str>,
+        public_qos: u32,
+        operations: u32,
+        timeout: u32,
+        grouping_class: u8,
+        grouping_value: u32,
+        grouping_type: u8,
     ) -> Result<()> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        // unregister reuses the same `_write_message` path: the name/qos/
+        // operations/grouping fields mirror the original registration so the
+        // server can match the subscription (reference passes the same
+        // `subscr_impl`).
         let payload = build_subscribe_payload_with_seq(
             seq_num,
             TNS_SUBSCR_OP_UNREGISTER,
             Some(&self.user),
             Some(client_id),
             namespace,
-            None,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
+            name,
+            public_qos,
+            operations,
+            timeout,
+            grouping_class,
+            grouping_value,
+            grouping_type,
             registration_id,
             self.capabilities.ttc_field_version,
         )?;
@@ -878,27 +914,35 @@ impl Connection {
         Ok(())
     }
 
-    /// Block until the next CQN notification record is pushed by the EMON
-    /// process, decode it, and return it. Returns `Ok(None)` when the stream
-    /// ends (STOP_NOTIF) or the emon socket is force-closed during teardown
-    /// (the reference swallows the resulting read error). Records may span
-    /// several pushed packets, so this chains packets through
+    /// Wait for the next CQN notification record pushed by the EMON process and
+    /// decode it. `read_timeout` bounds each underlying socket read so the
+    /// background receive loop can poll a shutdown flag between reads (the DB
+    /// never sends an end-of-stream marker; teardown unblocks the loop). The
+    /// reference blocks forever and is unblocked by a forced socket close; the
+    /// bounded read achieves the same clean teardown without a cross-thread
+    /// socket close, and never hangs.
+    ///
+    /// Records may span several pushed packets, so this chains packets through
     /// `notification_buffer` exactly like the reference `ReadBuffer`.
     pub async fn recv_notification(
         &mut self,
         cx: &Cx,
         namespace: u32,
         public_qos: u32,
-    ) -> Result<Option<NotificationRecord>> {
+        read_timeout: Duration,
+    ) -> Result<NotificationOutcome> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
         let db_name = self.descriptor.service_name.clone();
         loop {
             // consume the leading OAC message-type byte once
             if !self.notification_header_consumed {
                 if self.notification_buffer.is_empty() {
-                    if !self.read_one_notification_packet(cx).await? {
-                        return Ok(None);
+                    match self.read_one_notification_packet(read_timeout).await? {
+                        PacketRead::Appended => continue,
+                        PacketRead::TimedOut => return Ok(NotificationOutcome::TimedOut),
+                        PacketRead::Closed => return Ok(NotificationOutcome::Closed),
                     }
-                    continue;
                 }
                 let consumed = check_notification_header(&self.notification_buffer)?;
                 self.notification_buffer.drain(..consumed);
@@ -913,12 +957,16 @@ impl Connection {
                     Some(&db_name),
                 )? {
                     self.notification_buffer.drain(..consumed);
-                    return Ok(Some(record));
+                    return Ok(NotificationOutcome::Record(record));
                 }
             }
-            // need more bytes: block reading another pushed packet
-            if !self.read_one_notification_packet(cx).await? {
-                return Ok(None);
+            // need more bytes: read another pushed packet (bounded)
+            match self.read_one_notification_packet(read_timeout).await? {
+                PacketRead::Appended => {}
+                // a timeout mid-record is unusual; surface it so the caller can
+                // re-check the shutdown flag and resume reading
+                PacketRead::TimedOut => return Ok(NotificationOutcome::TimedOut),
+                PacketRead::Closed => return Ok(NotificationOutcome::Closed),
             }
         }
     }
@@ -945,27 +993,28 @@ impl Connection {
         Ok(result.query_id)
     }
 
-    /// Reads one DATA packet from the emon socket and appends its TTC payload
-    /// (after the 2-byte data flags) to `notification_buffer`. Returns `false`
-    /// when the socket is closed (force-close on teardown) so the caller can
-    /// exit the receive loop cleanly. Non-DATA packets are ignored.
-    async fn read_one_notification_packet(&mut self, cx: &Cx) -> Result<bool> {
-        let _ = cx;
-        let packet = match read_packet(&mut self.read, PacketLengthWidth::Large32).await {
-            Ok(packet) => packet,
-            // any read failure (incl. forced socket close on teardown) ends the
-            // stream cleanly, mirroring the reference's swallowed exception
-            Err(_) => return Ok(false),
+    /// Reads one DATA packet from the emon socket (bounded by `read_timeout`)
+    /// and appends its TTC payload (after the 2-byte data flags) to
+    /// `notification_buffer`. Reports a timeout (so the caller can poll its
+    /// shutdown flag) or a closed/errored socket distinctly. Non-DATA packets
+    /// (markers, disconnect) end the stream.
+    async fn read_one_notification_packet(&mut self, read_timeout: Duration) -> Result<PacketRead> {
+        let read = read_packet(&mut self.read, PacketLengthWidth::Large32);
+        let packet = match time::timeout(time::wall_now(), read_timeout, read).await {
+            Ok(Ok(packet)) => packet,
+            // socket closed / errored (incl. force-close on teardown): end the
+            // stream cleanly, mirroring the reference's swallowed read error
+            Ok(Err(_)) => return Ok(PacketRead::Closed),
+            Err(_) => return Ok(PacketRead::TimedOut),
         };
         if packet.packet_type != TNS_PACKET_TYPE_DATA {
-            // markers / disconnect indicators end the stream
-            return Ok(false);
+            return Ok(PacketRead::Closed);
         }
         let Some((_data_flags, payload)) = packet.payload.split_at_checked(2) else {
-            return Ok(false);
+            return Ok(PacketRead::Closed);
         };
         self.notification_buffer.extend_from_slice(payload);
-        Ok(true)
+        Ok(PacketRead::Appended)
     }
 
     /// Ping with an upper bound on the round trip, used by pool health
@@ -2845,18 +2894,38 @@ impl BlockingConnection {
 
     /// Unregister a CQN subscription (FUNC 125, opcode 2). See
     /// [`Connection::subscribe_unregister`].
+    #[allow(clippy::too_many_arguments)]
     pub fn subscribe_unregister(
         connection: &mut Connection,
         registration_id: u64,
         client_id: &[u8],
         namespace: u32,
+        name: Option<&str>,
+        public_qos: u32,
+        operations: u32,
+        timeout: u32,
+        grouping_class: u8,
+        grouping_value: u32,
+        grouping_type: u8,
     ) -> Result<()> {
         let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection
-                .subscribe_unregister(&cx, registration_id, client_id, namespace)
+                .subscribe_unregister(
+                    &cx,
+                    registration_id,
+                    client_id,
+                    namespace,
+                    name,
+                    public_qos,
+                    operations,
+                    timeout,
+                    grouping_class,
+                    grouping_value,
+                    grouping_type,
+                )
                 .await
         })
     }
