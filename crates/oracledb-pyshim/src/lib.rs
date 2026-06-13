@@ -1,7 +1,11 @@
-#![forbid(unsafe_code)]
+// The crate denies unsafe code everywhere except the single audited
+// `arrow_capsule` module, which carries `#[allow(unsafe_code)]` for the Arrow
+// C Data Interface PyCapsule export. See that module for SAFETY documentation.
+#![deny(unsafe_code)]
 
 use pyo3::prelude::*;
 
+mod arrow_capsule;
 mod async_bridge;
 mod async_conn;
 mod async_cursor;
@@ -20,6 +24,7 @@ mod pyutil;
 mod typehandler;
 mod var;
 
+pub(crate) use arrow_capsule::*;
 pub(crate) use async_bridge::*;
 pub(crate) use async_conn::*;
 pub(crate) use async_cursor::*;
@@ -64,5 +69,10 @@ fn oracledb_pyshim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ThinPoolImpl>()?;
     m.add_class::<AsyncThinPoolImpl>()?;
     m.add_class::<EndUserSecurityContextImpl>()?;
+    m.add_class::<DataFrameImpl>()?;
+    m.add_class::<ArrowArrayImpl>()?;
+    m.add_class::<ArrowSchemaImpl>()?;
+    m.add_class::<AsyncDataFrameBatchIter>()?;
+    m.add_class::<ImmediateAwaitable>()?;
     Ok(())
 }

@@ -120,6 +120,9 @@ name = "arrow-schema"
 version = "59.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "80b3e786a0dd9103acd583a6fb486dbf2f3268466cc0bd571dcf34cef231c1f1"
+dependencies = [
+ "bitflags",
+]
 
 [[package]]
 name = "asupersync"
@@ -1102,6 +1105,9 @@ dependencies = [
 name = "oracledb-pyshim"
 version = "0.0.0"
 dependencies = [
+ "arrow-array",
+ "arrow-data",
+ "arrow-schema",
  "asupersync",
  "oracledb",
  "pyo3",

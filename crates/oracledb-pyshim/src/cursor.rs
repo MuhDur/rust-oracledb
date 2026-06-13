@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use oracledb::protocol::thin::{
     check_fetch_conversion, public_dbtype_name_from_column_metadata, BatchServerError, BindValue,
-    ColumnMetadata, ExecuteOptions, QueryResult, QueryValue, CS_FORM_IMPLICIT,
-    ORA_TYPE_NUM_VARCHAR,
+    ColumnMetadata, ExecuteOptions, QueryResult, QueryValue, CS_FORM_IMPLICIT, ORA_TYPE_NUM_BLOB,
+    ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
@@ -13,6 +13,29 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::*;
+
+/// True for LOB column types whose fetched values are locators (CLOB/BLOB/
+/// NCLOB) and so need inlining before Arrow conversion.
+fn is_lob_ora_type(ora_type_num: u8) -> bool {
+    matches!(ora_type_num, ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB)
+}
+
+/// Wraps a fully-read LOB payload in the `QueryValue` the Arrow builder expects
+/// for the inlined (LONG / LONG RAW) column: CLOB text vs BLOB raw bytes.
+fn lob_bytes_to_query_value(ora_type_num: u8, data: Vec<u8>) -> QueryValue {
+    if ora_type_num == ORA_TYPE_NUM_BLOB {
+        QueryValue::Raw(data)
+    } else {
+        QueryValue::Text(String::from_utf8_lossy(&data).into_owned())
+    }
+}
+
+/// Maps a driver Arrow-conversion error to a Python exception. The driver's
+/// messages already carry the reference DPY-* codes, so the harness error
+/// mapper recognizes them.
+fn arrow_error_to_py(err: oracledb::arrow::ArrowConversionError) -> PyErr {
+    ora_database_error(&err.to_string())
+}
 
 #[pyclass(module = "oracledb.thin_impl", name = "ExecutemanyManager")]
 // d49: migrate to oracledb (executemany manager belongs on driver)
@@ -87,6 +110,12 @@ pub(crate) struct ThinCursorImpl {
     pub(crate) fetch_async_lobs: bool,
     pub(crate) fetch_decimals: bool,
     pub(crate) fetch_decimals_overridden: bool,
+    /// Set by `connection.fetch_df_*` before execute; selects the Arrow
+    /// DataFrame fetch path (reference `fetching_arrow`).
+    pub(crate) fetching_arrow: bool,
+    /// Optional `requested_schema` for the Arrow fetch (reference
+    /// `schema_impl`).
+    pub(crate) schema_impl: Option<Py<ArrowSchemaImpl>>,
     pub(crate) suspend_on_success: bool,
     pub(crate) rowfactory: Option<Py<PyAny>>,
     pub(crate) inputtypehandler: Option<Py<PyAny>>,
@@ -158,6 +187,8 @@ impl ThinCursorImpl {
             fetch_async_lobs: false,
             fetch_decimals: false,
             fetch_decimals_overridden: false,
+            fetching_arrow: false,
+            schema_impl: None,
             suspend_on_success: false,
             rowfactory: None,
             inputtypehandler: None,
@@ -229,6 +260,163 @@ impl ThinCursorImpl {
         self.has_positional_input_sizes = false;
         self.has_named_input_sizes = false;
         self.named_input_sizes.clear();
+    }
+
+    /// Drains the remaining result set into a single Arrow [`RecordBatch`].
+    ///
+    /// The statement was already executed (with `fetching_arrow` set) so the
+    /// cursor holds the prefetched rows plus a live cursor for the rest. LOB
+    /// columns are re-defined to LONG / LONG RAW (`arrow_define_columns`) so
+    /// their values arrive inline as text/bytes the Arrow builder understands.
+    /// When a re-define is required (CLOB/BLOB), execute deferred the row fetch
+    /// and the first fetch must be a DEFINE-FETCH carrying the arrow columns.
+    pub(crate) fn build_arrow_batch(
+        &mut self,
+        py: Python<'_>,
+        cursor: &Bound<'_, PyAny>,
+    ) -> PyResult<arrow_array::RecordBatch> {
+        let (arrow_columns, mut pending_define) = self.arrow_drain_plan(py, cursor)?;
+        let mut all_rows: Vec<Vec<Option<QueryValue>>> = std::mem::take(&mut self.rows);
+        self.row_index = 0;
+        while self.more_rows && self.cursor_id != 0 {
+            let previous_row = all_rows.last().cloned();
+            let result = {
+                let mut guard = self.connection.lock().map_err(runtime_error)?;
+                let connection = guard
+                    .as_mut()
+                    .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+                if pending_define {
+                    BlockingConnection::define_and_fetch_rows_with_columns(
+                        connection,
+                        self.cursor_id,
+                        self.arraysize,
+                        &arrow_columns,
+                        previous_row.as_deref(),
+                    )
+                } else {
+                    BlockingConnection::fetch_rows_with_columns(
+                        connection,
+                        self.cursor_id,
+                        self.arraysize,
+                        &arrow_columns,
+                        previous_row.as_deref(),
+                    )
+                }
+                .map_err(runtime_error)?
+            };
+            pending_define = false;
+            self.more_rows = result.more_rows;
+            if result.cursor_id != 0 {
+                self.cursor_id = result.cursor_id;
+            }
+            all_rows.extend(result.rows);
+        }
+        self.requires_define = false;
+        // Any CLOB/BLOB locators left in the prefetched rows (when no re-define
+        // fetch ran, e.g. the whole result set was prefetched) are materialized.
+        self.inline_lob_cells(&arrow_columns, &mut all_rows)?;
+        self.finish_arrow_batch(py, &arrow_columns, &all_rows)
+    }
+
+    /// Establishes fetch-define columns (running any output type handler) and
+    /// returns the LOB-inlined arrow column metadata plus whether the first
+    /// fetch must be a DEFINE-FETCH (CLOB/BLOB defer their initial fetch).
+    pub(crate) fn arrow_drain_plan(
+        &mut self,
+        py: Python<'_>,
+        cursor: &Bound<'_, PyAny>,
+    ) -> PyResult<(Vec<ColumnMetadata>, bool)> {
+        if !self.is_query {
+            return Err(raise_oracledb_driver_error("ERR_NOT_A_QUERY"));
+        }
+        self.prepare_fetch_defines(py, cursor)?;
+        let arrow_columns = oracledb::arrow::arrow_define_columns(&self.columns);
+        Ok((arrow_columns, self.requires_define))
+    }
+
+    /// Builds the final [`RecordBatch`] from drained rows and arrow columns.
+    pub(crate) fn finish_arrow_batch(
+        &self,
+        py: Python<'_>,
+        arrow_columns: &[ColumnMetadata],
+        all_rows: &[Vec<Option<QueryValue>>],
+    ) -> PyResult<arrow_array::RecordBatch> {
+        let options = self.arrow_fetch_options(py)?;
+        oracledb::arrow::build_record_batch(arrow_columns, all_rows, &options)
+            .map_err(arrow_error_to_py)
+    }
+
+    /// Builds the driver fetch options from `fetch_decimals` and an optional
+    /// `requested_schema` (`schema_impl`).
+    pub(crate) fn arrow_fetch_options(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<oracledb::arrow::ArrowFetchOptions> {
+        let requested_schema = self
+            .schema_impl
+            .as_ref()
+            .map(|schema_impl| schema_impl.borrow(py).schema());
+        Ok(oracledb::arrow::ArrowFetchOptions {
+            fetch_decimals: self.fetch_decimals,
+            requested_schema,
+        })
+    }
+
+    /// Replaces `QueryValue::Lob` cells with their full inline value so the
+    /// Arrow builder (which only understands text/raw) can consume them.
+    pub(crate) fn inline_lob_cells(
+        &self,
+        columns: &[ColumnMetadata],
+        rows: &mut [Vec<Option<QueryValue>>],
+    ) -> PyResult<()> {
+        let lob_indices: Vec<usize> = self
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| is_lob_ora_type(column.ora_type_num))
+            .map(|(index, _)| index)
+            .collect();
+        if lob_indices.is_empty() {
+            return Ok(());
+        }
+        let call_timeout = {
+            let value = self.state.lock().map_err(runtime_error)?.call_timeout;
+            (value > 0).then_some(value)
+        };
+        for row in rows.iter_mut() {
+            for &index in &lob_indices {
+                let Some(slot) = row.get_mut(index) else {
+                    continue;
+                };
+                let inlined = match slot.take() {
+                    Some(QueryValue::Lob { locator, .. }) => {
+                        let column = &columns[index];
+                        let data = self.read_full_lob(&locator, call_timeout)?;
+                        Some(lob_bytes_to_query_value(column.ora_type_num, data))
+                    }
+                    other => other,
+                };
+                *slot = inlined;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads a LOB fully into memory via the blocking driver API.
+    fn read_full_lob(&self, locator: &[u8], call_timeout: Option<u32>) -> PyResult<Vec<u8>> {
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        let result = BlockingConnection::read_lob_with_timeout(
+            connection,
+            locator,
+            1,
+            u64::from(u32::MAX),
+            call_timeout,
+        )
+        .map_err(runtime_error)?;
+        Ok(result.data.unwrap_or_default())
     }
 
     fn active_output_type_handler(
@@ -486,6 +674,26 @@ impl ThinCursorImpl {
     fn set_fetch_decimals(&mut self, value: bool) {
         self.fetch_decimals = value;
         self.fetch_decimals_overridden = true;
+    }
+
+    #[getter]
+    fn fetching_arrow(&self) -> bool {
+        self.fetching_arrow
+    }
+
+    #[setter]
+    fn set_fetching_arrow(&mut self, value: bool) {
+        self.fetching_arrow = value;
+    }
+
+    #[getter]
+    fn schema_impl(&self, py: Python<'_>) -> Option<Py<ArrowSchemaImpl>> {
+        self.schema_impl.as_ref().map(|value| value.clone_ref(py))
+    }
+
+    #[setter]
+    fn set_schema_impl(&mut self, value: Option<Py<ArrowSchemaImpl>>) {
+        self.schema_impl = value;
     }
 
     #[getter]
@@ -1259,6 +1467,48 @@ impl ThinCursorImpl {
             return rowfactory.call1(py, tuple).map(Some).map_err(Into::into);
         }
         Ok(Some(tuple.unbind().into()))
+    }
+
+    /// Fetches all remaining rows and returns a public `DataFrame` built from
+    /// an Arrow `RecordBatch` (reference `fetch_df_all`). The statement was
+    /// already executed (with `fetching_arrow` set) by `connection.fetch_df_all`.
+    fn fetch_df_all<'py>(
+        &mut self,
+        py: Python<'py>,
+        cursor: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let batch = self.build_arrow_batch(py, cursor)?;
+        dataframe_from_batch(py, batch)
+    }
+
+    /// Yields the result set as a list of `DataFrame` batches of `batch_size`
+    /// rows each (reference `fetch_df_batches`). The shim materializes the whole
+    /// result and slices it into RecordBatch-backed DataFrames so the public
+    /// iterator semantics (at least one batch, even when empty) hold.
+    fn fetch_df_batches<'py>(
+        &mut self,
+        py: Python<'py>,
+        cursor: &Bound<'py, PyAny>,
+        batch_size: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let batch = self.build_arrow_batch(py, cursor)?;
+        let size = usize::try_from(batch_size.max(1))
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let total = batch.num_rows();
+        let frames = PyList::empty(py);
+        if total == 0 {
+            frames.append(dataframe_from_batch(py, batch)?)?;
+        } else {
+            let mut offset = 0usize;
+            while offset < total {
+                let len = size.min(total - offset);
+                let slice = batch.slice(offset, len);
+                frames.append(dataframe_from_batch(py, slice)?)?;
+                offset += len;
+            }
+        }
+        Ok(frames.into_any())
     }
 
     #[pyo3(name = "get_fetch_vars")]

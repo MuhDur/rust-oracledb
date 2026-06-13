@@ -272,6 +272,44 @@ pub(crate) struct AsyncThinCursorImpl {
     pub(crate) inner: ThinCursorImpl,
 }
 
+impl AsyncThinCursorImpl {
+    /// Drains the executed cursor into a single Arrow [`RecordBatch`], mirroring
+    /// the sync `build_arrow_batch` but using the async fetch task bridge. The
+    /// CLOB/BLOB re-define case fetches inline; remaining locators (fully
+    /// prefetched) are materialized by the sync `inline_lob_cells`.
+    async fn drain_arrow_batch(&mut self, cursor: Py<PyAny>) -> PyResult<arrow_array::RecordBatch> {
+        let (arrow_columns, mut pending_define) =
+            Python::attach(|py| self.inner.arrow_drain_plan(py, cursor.bind(py)))?;
+        let mut all_rows: Vec<Vec<Option<QueryValue>>> = std::mem::take(&mut self.inner.rows);
+        self.inner.row_index = 0;
+        while self.inner.more_rows && self.inner.cursor_id != 0 {
+            let previous_row = all_rows.last().cloned();
+            let fetch = spawn_async_fetch_task(
+                Arc::clone(&self.inner.connection),
+                self.inner.cursor_id,
+                self.inner.arraysize,
+                self.inner.arraysize,
+                arrow_columns.clone(),
+                arrow_columns.clone(),
+                previous_row,
+                pending_define,
+            );
+            let result = fetch.await.map_err(runtime_error)?;
+            pending_define = false;
+            self.inner.more_rows = result.more_rows;
+            if result.cursor_id != 0 {
+                self.inner.cursor_id = result.cursor_id;
+            }
+            all_rows.extend(result.rows);
+        }
+        self.inner.requires_define = false;
+        Python::attach(|py| {
+            self.inner.inline_lob_cells(&arrow_columns, &mut all_rows)?;
+            self.inner.finish_arrow_batch(py, &arrow_columns, &all_rows)
+        })
+    }
+}
+
 #[pymethods]
 impl AsyncThinCursorImpl {
     #[getter]
@@ -355,6 +393,29 @@ impl AsyncThinCursorImpl {
     #[setter]
     fn set_suspend_on_success(&mut self, value: bool) {
         self.inner.suspend_on_success = value;
+    }
+
+    #[getter]
+    fn fetching_arrow(&self) -> bool {
+        self.inner.fetching_arrow
+    }
+
+    #[setter]
+    fn set_fetching_arrow(&mut self, value: bool) {
+        self.inner.fetching_arrow = value;
+    }
+
+    #[getter]
+    fn schema_impl(&self, py: Python<'_>) -> Option<Py<ArrowSchemaImpl>> {
+        self.inner
+            .schema_impl
+            .as_ref()
+            .map(|value| value.clone_ref(py))
+    }
+
+    #[setter]
+    fn set_schema_impl(&mut self, value: Option<Py<ArrowSchemaImpl>>) {
+        self.inner.schema_impl = value;
     }
 
     #[getter]
@@ -726,6 +787,29 @@ impl AsyncThinCursorImpl {
             self.inner.fetch_async_lobs = false;
             result
         })
+    }
+
+    /// Fetches all remaining rows and returns a public `DataFrame` (reference
+    /// async `fetch_df_all`).
+    async fn fetch_df_all(&mut self, cursor: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        let batch = self.drain_arrow_batch(cursor).await?;
+        Python::attach(|py| Ok(dataframe_from_batch(py, batch)?.unbind()))
+    }
+
+    /// Returns an async iterator yielding the result set as `DataFrame` batches
+    /// (reference async `fetch_df_batches`, consumed via `async for`). The whole
+    /// result set is drained eagerly here (one logical fetch) and sliced; the
+    /// returned iterator hands the batches out. This must be a *sync* method so
+    /// the caller's `async for` sees an async iterator rather than a coroutine.
+    fn fetch_df_batches(
+        &mut self,
+        py: Python<'_>,
+        cursor: &Bound<'_, PyAny>,
+        batch_size: i64,
+    ) -> PyResult<AsyncDataFrameBatchIter> {
+        let batch = self.inner.build_arrow_batch(py, cursor)?;
+        let frames = slice_batch_into_frames(py, batch, batch_size)?;
+        Ok(AsyncDataFrameBatchIter::new(frames))
     }
 
     fn setinputsizes(

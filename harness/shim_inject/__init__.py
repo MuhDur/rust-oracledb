@@ -119,8 +119,35 @@ def _install_pool_capture(shim):
         pool_cls.__init__ = wrapped_pool_init
 
 
+def _install_arrow_impl(shim):
+    """Swap the Arrow DataFrame/array/schema impl classes for the Rust shim ones.
+
+    The pure-Python dataframe.py / arrow_array.py / connection.py modules bind
+    ``DataFrameImpl`` / ``ArrowArrayImpl`` / ``ArrowSchemaImpl`` via
+    ``from .arrow_impl import ...`` at import time. We rebind those names (and the
+    ``arrow_impl`` module attributes) to the Rust classes. We deliberately do NOT
+    replace ``sys.modules["oracledb.arrow_impl"]``: the compiled ``base_impl`` /
+    ``thin_impl`` Cython modules ``cimport`` those classes at the C level and
+    perform a struct-size check at init, which a Python-level class would fail.
+    """
+    arrow_impl = importlib.import_module("oracledb.arrow_impl")
+    dataframe_mod = importlib.import_module("oracledb.dataframe")
+    arrow_array_mod = importlib.import_module("oracledb.arrow_array")
+    connection_mod = importlib.import_module("oracledb.connection")
+    for module, name in (
+        (dataframe_mod, "DataFrameImpl"),
+        (arrow_array_mod, "ArrowArrayImpl"),
+        (connection_mod, "ArrowSchemaImpl"),
+        (arrow_impl, "DataFrameImpl"),
+        (arrow_impl, "ArrowArrayImpl"),
+        (arrow_impl, "ArrowSchemaImpl"),
+    ):
+        setattr(module, name, getattr(shim, name))
+
+
 def pytest_load_initial_conftests(*_args, **_kwargs):
     shim = importlib.import_module("oracledb_pyshim")
     sys.modules["oracledb.thin_impl"] = shim
     _install_connect_capture(shim)
     _install_pool_capture(shim)
+    _install_arrow_impl(shim)
