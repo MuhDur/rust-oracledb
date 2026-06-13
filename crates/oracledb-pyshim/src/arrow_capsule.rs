@@ -418,19 +418,16 @@ fn arrow_cell_to_py(py: Python<'_>, array: &ArrayRef, row: usize) -> PyResult<Py
             date_from_days(py, millis.div_euclid(86_400_000))?
         }
         DataType::Timestamp(unit, _) => timestamp_cell_to_py(py, array, row, *unit)?,
-        // Lists/structs are vector shapes; binding them needs VECTOR support that
-        // the driver foundation does not yet provide. Surface the reference
-        // DPY-3033 so the public layer errors cleanly instead of hanging.
+        // An Arrow list maps to a dense VECTOR: its primitive child becomes a
+        // Python array.array (reference converters.pyx:138-139 get_vector), which
+        // the bind path then encodes as DB_TYPE_VECTOR.
         DataType::List(_) | DataType::LargeList(_) | DataType::FixedSizeList(_, _) => {
-            return Err(dpy_database_error(
-                "DPY-3033",
-                &format!(
-                    "conversion from Apache Arrow list with child format \"{}\" \
-                     to Oracle Database vector is not supported",
-                    arrow_type_name(array.data_type())
-                ),
-            ));
+            arrow_list_cell_to_dense_vector(py, array, row)?
         }
+        // An Arrow struct maps to a sparse VECTOR carrying num_dimensions /
+        // indices / values (reference converters.pyx:140-147 get_sparse_vector ->
+        // SparseVector), which the bind path encodes as DB_TYPE_VECTOR.
+        DataType::Struct(_) => arrow_struct_cell_to_sparse_vector(py, array, row)?,
         other => {
             return Err(dpy_database_error(
                 "DPY-3032",
@@ -443,6 +440,226 @@ fn arrow_cell_to_py(py: Python<'_>, array: &ArrayRef, row: usize) -> PyResult<Py
         }
     };
     Ok(value)
+}
+
+/// Builds a Python `array.array(typecode, values)` from native-endian bytes.
+fn build_py_array(py: Python<'_>, typecode: &str, bytes: &[u8]) -> PyResult<Py<PyAny>> {
+    let array_mod = py.import("array")?;
+    let arr = array_mod
+        .getattr("array")?
+        .call1((typecode, pyo3::types::PyBytes::new(py, &[])))?;
+    arr.call_method1("frombytes", (pyo3::types::PyBytes::new(py, bytes),))?;
+    Ok(arr.unbind())
+}
+
+/// Converts an Arrow numeric child array slice (`offset..offset+len`) into a
+/// dense-vector Python `array.array`. Supported element types match the Oracle
+/// VECTOR storage formats: int8 -> "b", float32 -> "f", float64 -> "d"
+/// (reference get_vector / VectorEncoder formats).
+fn arrow_numeric_child_to_py_array(
+    py: Python<'_>,
+    child: &ArrayRef,
+    offset: usize,
+    len: usize,
+) -> PyResult<Py<PyAny>> {
+    match child.data_type() {
+        DataType::Int8 => {
+            let values = child.as_primitive::<Int8Type>().values();
+            let bytes: Vec<u8> = values[offset..offset + len]
+                .iter()
+                .map(|value| *value as u8)
+                .collect();
+            build_py_array(py, "b", &bytes)
+        }
+        DataType::Float32 => {
+            let values = child.as_primitive::<Float32Type>().values();
+            let mut bytes = Vec::with_capacity(len * 4);
+            for value in &values[offset..offset + len] {
+                bytes.extend_from_slice(&value.to_ne_bytes());
+            }
+            build_py_array(py, "f", &bytes)
+        }
+        DataType::Float64 => {
+            let values = child.as_primitive::<Float64Type>().values();
+            let mut bytes = Vec::with_capacity(len * 8);
+            for value in &values[offset..offset + len] {
+                bytes.extend_from_slice(&value.to_ne_bytes());
+            }
+            build_py_array(py, "d", &bytes)
+        }
+        other => Err(dpy_database_error(
+            "DPY-3033",
+            &format!(
+                "conversion from Apache Arrow list with child format \"{}\" \
+                 to Oracle Database vector is not supported",
+                arrow_type_name(other)
+            ),
+        )),
+    }
+}
+
+/// Converts an Arrow list cell into a dense-vector `array.array`. Resolves the
+/// (offset, length) of the row's child slice for List / LargeList /
+/// FixedSizeList, then materializes the numeric child as an `array.array`.
+fn arrow_list_cell_to_dense_vector(
+    py: Python<'_>,
+    array: &ArrayRef,
+    row: usize,
+) -> PyResult<Py<PyAny>> {
+    let (child, offset, len) = match array.data_type() {
+        DataType::List(_) => {
+            let list = array.as_list::<i32>();
+            let offsets = list.value_offsets();
+            let start = offsets[row] as usize;
+            let end = offsets[row + 1] as usize;
+            (list.values().clone(), start, end - start)
+        }
+        DataType::LargeList(_) => {
+            let list = array.as_list::<i64>();
+            let offsets = list.value_offsets();
+            let start = offsets[row] as usize;
+            let end = offsets[row + 1] as usize;
+            (list.values().clone(), start, end - start)
+        }
+        DataType::FixedSizeList(_, size) => {
+            let list = array.as_fixed_size_list();
+            let size = *size as usize;
+            (list.values().clone(), row * size, size)
+        }
+        other => {
+            return Err(dpy_database_error(
+                "DPY-3033",
+                &format!(
+                    "conversion from Apache Arrow list with child format \"{}\" \
+                     to Oracle Database vector is not supported",
+                    arrow_type_name(other)
+                ),
+            ));
+        }
+    };
+    arrow_numeric_child_to_py_array(py, &child, offset, len)
+}
+
+/// Converts an Arrow struct cell (fields `num_dimensions`, `indices`, `values`)
+/// into an `oracledb.SparseVector` (reference converters.pyx:140-147). `indices`
+/// is materialized as a Python list of ints and `values` as a dense
+/// `array.array` whose typecode matches the struct's value field.
+fn arrow_struct_cell_to_sparse_vector(
+    py: Python<'_>,
+    array: &ArrayRef,
+    row: usize,
+) -> PyResult<Py<PyAny>> {
+    let st = array.as_struct();
+    let field = |name: &str| -> PyResult<ArrayRef> {
+        st.column_by_name(name).cloned().ok_or_else(|| {
+            dpy_database_error(
+                "DPY-3032",
+                &format!(
+                    "conversion from Apache Arrow struct without a \"{name}\" field \
+                     to Oracle Database is not supported"
+                ),
+            )
+        })
+    };
+    let num_dimensions_arr = field("num_dimensions")?;
+    let num_dimensions: u32 = match num_dimensions_arr.data_type() {
+        DataType::Int64 => num_dimensions_arr.as_primitive::<Int64Type>().value(row) as u32,
+        DataType::Int32 => num_dimensions_arr.as_primitive::<Int32Type>().value(row) as u32,
+        DataType::UInt32 => num_dimensions_arr.as_primitive::<UInt32Type>().value(row),
+        DataType::UInt64 => num_dimensions_arr.as_primitive::<UInt64Type>().value(row) as u32,
+        other => {
+            return Err(dpy_database_error(
+                "DPY-3032",
+                &format!(
+                    "conversion from Apache Arrow struct num_dimensions format \
+                     \"{}\" to Oracle Database is not supported",
+                    arrow_type_name(other)
+                ),
+            ));
+        }
+    };
+
+    let indices_arr = field("indices")?;
+    let (indices_child, idx_offset, idx_len) = list_child_slice(&indices_arr, row)?;
+    let indices = arrow_integer_child_to_py_list(py, &indices_child, idx_offset, idx_len)?;
+
+    let values_arr = field("values")?;
+    let (values_child, val_offset, val_len) = list_child_slice(&values_arr, row)?;
+    let values = arrow_numeric_child_to_py_array(py, &values_child, val_offset, val_len)?;
+
+    let sparse_cls = py.import("oracledb")?.getattr("SparseVector")?;
+    Ok(sparse_cls
+        .call1((num_dimensions, indices, values))?
+        .unbind())
+}
+
+/// Resolves the (child, offset, length) of a row's slice for a List / LargeList
+/// / FixedSizeList array. Shared by the sparse-vector indices and values fields.
+fn list_child_slice(array: &ArrayRef, row: usize) -> PyResult<(ArrayRef, usize, usize)> {
+    match array.data_type() {
+        DataType::List(_) => {
+            let list = array.as_list::<i32>();
+            let offsets = list.value_offsets();
+            let start = offsets[row] as usize;
+            let end = offsets[row + 1] as usize;
+            Ok((list.values().clone(), start, end - start))
+        }
+        DataType::LargeList(_) => {
+            let list = array.as_list::<i64>();
+            let offsets = list.value_offsets();
+            let start = offsets[row] as usize;
+            let end = offsets[row + 1] as usize;
+            Ok((list.values().clone(), start, end - start))
+        }
+        DataType::FixedSizeList(_, size) => {
+            let list = array.as_fixed_size_list();
+            let size = *size as usize;
+            Ok((list.values().clone(), row * size, size))
+        }
+        other => Err(dpy_database_error(
+            "DPY-3033",
+            &format!(
+                "conversion from Apache Arrow list with child format \"{}\" \
+                 to Oracle Database vector is not supported",
+                arrow_type_name(other)
+            ),
+        )),
+    }
+}
+
+/// Materializes an Arrow integer child slice as a Python list of ints (sparse
+/// vector indices).
+fn arrow_integer_child_to_py_list(
+    py: Python<'_>,
+    child: &ArrayRef,
+    offset: usize,
+    len: usize,
+) -> PyResult<Py<PyAny>> {
+    let list = PyList::empty(py);
+    for index in offset..offset + len {
+        let value: i64 = match child.data_type() {
+            DataType::Int8 => i64::from(child.as_primitive::<Int8Type>().value(index)),
+            DataType::Int16 => i64::from(child.as_primitive::<Int16Type>().value(index)),
+            DataType::Int32 => i64::from(child.as_primitive::<Int32Type>().value(index)),
+            DataType::Int64 => child.as_primitive::<Int64Type>().value(index),
+            DataType::UInt8 => i64::from(child.as_primitive::<UInt8Type>().value(index)),
+            DataType::UInt16 => i64::from(child.as_primitive::<UInt16Type>().value(index)),
+            DataType::UInt32 => i64::from(child.as_primitive::<UInt32Type>().value(index)),
+            DataType::UInt64 => child.as_primitive::<UInt64Type>().value(index) as i64,
+            other => {
+                return Err(dpy_database_error(
+                    "DPY-3032",
+                    &format!(
+                        "conversion from Apache Arrow struct indices format \"{}\" \
+                         to Oracle Database is not supported",
+                        arrow_type_name(other)
+                    ),
+                ));
+            }
+        };
+        list.append(value)?;
+    }
+    Ok(list.into_any().unbind())
 }
 
 /// Converts a decimal128 cell to a `decimal.Decimal` (the type the NUMBER bind
