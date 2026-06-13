@@ -182,7 +182,7 @@ fn bench_thin_driver(c: &mut Criterion) {
             b.iter(|| {
                 block_on(&runtime, async |cx| {
                     let result = execute_cached(cx, &mut conn, "select 1 from dual", 1).await;
-                    debug_assert_eq!(result.rows.len(), 1);
+                    assert_eq!(result.rows.len(), 1, "select returns exactly one row");
                     // release the open cursor so the same SQL reuses it next
                     // iteration instead of parsing a fresh one (else the loop
                     // exhausts open_cursors). This is what closing a cursor
@@ -207,7 +207,7 @@ fn bench_thin_driver(c: &mut Criterion) {
                 let total = block_on(&runtime, async |cx| {
                     fetch_all(cx, &mut conn, sql, 1000).await
                 });
-                debug_assert_eq!(total, 10_000);
+                assert_eq!(total, 10_000, "bulk fetch drains all 10000 rows");
             });
         });
         group.finish();
@@ -253,7 +253,7 @@ fn bench_thin_driver(c: &mut Criterion) {
                         .execute_query_with_bind_rows(cx, &insert_sql, 1, &rows)
                         .await
                         .expect("array-DML insert of 1000 rows");
-                    debug_assert_eq!(result.row_count, 1000);
+                    assert_eq!(result.row_count, 1000, "executemany inserts all 1000 rows");
                     // roll back so the next iteration inserts into an empty table
                     conn.rollback(cx).await.expect("rollback scratch insert");
                 });
@@ -277,12 +277,24 @@ fn bench_thin_driver(c: &mut Criterion) {
             )
             .await
             .expect("create clob table");
-            // 64 KiB of repeated text: rpad a 64-char seed out to 65536 chars.
+            // Build a real 64 KiB CLOB by appending 1024-char chunks in PL/SQL:
+            // a bare SQL rpad() caps at the 4000-char VARCHAR2 limit, so it
+            // cannot stand in for a large LOB. 64 chunks of 1024 chars give
+            // exactly 65536 characters.
             conn.execute_query(
                 cx,
-                "insert into PERFTEST_CLOB values (1, \
-                 to_clob(rpad('the quick brown fox jumps over the lazy dog 0123456789ABCDEF', \
-                 65536, 'x')))",
+                "declare \
+                   l_body clob; \
+                   l_chunk varchar2(1024) := rpad('the quick brown fox jumps over \
+                     the lazy dog 0123456789ABCDEF', 1024, 'x'); \
+                 begin \
+                   dbms_lob.createtemporary(l_body, true); \
+                   for i in 1 .. 64 loop \
+                     dbms_lob.append(l_body, to_clob(l_chunk)); \
+                   end loop; \
+                   insert into PERFTEST_CLOB values (1, l_body); \
+                   dbms_lob.freetemporary(l_body); \
+                 end;",
                 1,
             )
             .await
@@ -321,7 +333,9 @@ fn bench_thin_driver(c: &mut Criterion) {
                     let bytes = read.data.expect("clob read returns data");
                     let text =
                         decode_lob_text(&bytes, csfrm, Some(&locator)).expect("decode clob text");
-                    debug_assert_eq!(text.len(), 65_536);
+                    // bench builds are release-optimized: assert (not
+                    // debug_assert) so the 64 KiB read is genuinely verified.
+                    assert_eq!(text.len(), 65_536, "clob read returns the full body");
                     conn.close_cursor(select_cursor);
                 });
             });
