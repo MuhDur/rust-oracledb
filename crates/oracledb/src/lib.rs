@@ -1051,13 +1051,7 @@ impl Connection {
         let cursor_id = result.cursor_id;
         let columns = result.columns.clone();
         let fetched = self
-            .define_and_fetch_rows_with_columns(
-                cx,
-                cursor_id,
-                prefetch_rows.max(1),
-                &columns,
-                None,
-            )
+            .define_and_fetch_rows_with_columns(cx, cursor_id, prefetch_rows.max(1), &columns, None)
             .await?;
         result.rows = fetched.rows;
         result.more_rows = fetched.more_rows;

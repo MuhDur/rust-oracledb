@@ -18,9 +18,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use oracledb::pool::{
-    AcquireOptions, PoolBackend, PoolConfig, PoolEngine, POOL_GETMODE_WAIT,
-};
+use oracledb::pool::{AcquireOptions, PoolBackend, PoolConfig, PoolEngine, POOL_GETMODE_WAIT};
 use oracledb::protocol::oson::OsonValue;
 use oracledb::protocol::thin::{BindValue, ExecuteOptions, QueryValue};
 use oracledb::protocol::vector::{Vector, VectorValues};
@@ -155,11 +153,19 @@ fn typed_scalar_fetch_covers_core_types() {
             Some("2.5"),
         );
         // VARCHAR2
-        assert_eq!(result.cell(0, 2).and_then(QueryValue::as_text), Some("hello"));
+        assert_eq!(
+            result.cell(0, 2).and_then(QueryValue::as_text),
+            Some("hello")
+        );
         // DATE
         assert!(matches!(
             result.cell(0, 3),
-            Some(QueryValue::DateTime { year: 2024, month: 6, day: 13, .. })
+            Some(QueryValue::DateTime {
+                year: 2024,
+                month: 6,
+                day: 13,
+                ..
+            })
         ));
         // TIMESTAMP with fractional seconds
         assert!(matches!(
@@ -195,11 +201,7 @@ fn rowid_and_boolean_fetch() {
         assert!(!rid.is_empty(), "rowid text should be non-empty");
 
         // BINARY (native DB_TYPE_BOOLEAN) requires 23ai; the container is 23ai.
-        let boolean = BlockingConnection::execute_query(
-            conn,
-            "select true, false from dual",
-            2,
-        );
+        let boolean = BlockingConnection::execute_query(conn, "select true, false from dual", 2);
         match boolean {
             Ok(result) => {
                 assert_eq!(result.cell(0, 0).and_then(QueryValue::as_bool), Some(true));
@@ -231,10 +233,7 @@ fn positional_and_named_binds() {
             ],
         )
         .expect("positional bind select should fetch");
-        assert_eq!(
-            positional.cell(0, 0).and_then(QueryValue::as_i64),
-            Some(42)
-        );
+        assert_eq!(positional.cell(0, 0).and_then(QueryValue::as_i64), Some(42));
 
         // named binds (:lo, :hi) bound in declaration order
         let named = BlockingConnection::execute_query_with_binds(
@@ -298,12 +297,9 @@ fn dml_with_commit_and_rollback() {
         BlockingConnection::commit(conn).expect("commit update");
 
         // DELETE without commit, then rollback -> row reappears
-        let del = BlockingConnection::execute_query(
-            conn,
-            "delete from rust_itest_dml where id = 1",
-            1,
-        )
-        .expect("delete");
+        let del =
+            BlockingConnection::execute_query(conn, "delete from rust_itest_dml where id = 1", 1)
+                .expect("delete");
         assert_eq!(del.row_count, 1);
         BlockingConnection::rollback(conn).expect("rollback");
 
@@ -357,12 +353,9 @@ fn executemany_array_dml() {
         assert_eq!(result.row_count, 4, "array DML inserts all rows");
         BlockingConnection::commit(conn).expect("commit");
 
-        let count = BlockingConnection::execute_query(
-            conn,
-            "select count(*) from rust_itest_many",
-            2,
-        )
-        .expect("count");
+        let count =
+            BlockingConnection::execute_query(conn, "select count(*) from rust_itest_many", 2)
+                .expect("count");
         assert_eq!(count.cell(0, 0).and_then(QueryValue::as_i64), Some(4));
 
         // arraydmlrowcounts: ask the server for a per-iteration row count vector
@@ -434,8 +427,8 @@ fn clob_read_round_trip() {
         };
         assert!(size > 0, "clob reports a non-zero length");
 
-        let read = BlockingConnection::read_lob(conn, &locator, 1, size)
-            .expect("read_lob round trip");
+        let read =
+            BlockingConnection::read_lob(conn, &locator, 1, size).expect("read_lob round trip");
         let bytes = read.data.expect("clob read returns data");
         // decode the raw LOB bytes per the column character-set form (the
         // server streams CLOB content in its own charset; the public
@@ -477,12 +470,9 @@ fn object_type_fetch() {
         .expect("insert object");
         BlockingConnection::commit(conn).expect("commit");
 
-        let select = BlockingConnection::execute_query(
-            conn,
-            "select p from rust_itest_obj where id = 1",
-            2,
-        )
-        .expect("select object column");
+        let select =
+            BlockingConnection::execute_query(conn, "select p from rust_itest_obj where id = 1", 2)
+                .expect("select object column");
         // the column metadata identifies the object type
         let column = &select.columns[0];
         assert_eq!(
@@ -696,15 +686,21 @@ fn connection_pool_acquire_release() {
     let engine = PoolEngine::start(backend.clone(), config).expect("pool starts");
 
     // acquire two distinct connections up to max
-    let a = engine.acquire(AcquireOptions::default()).expect("acquire a");
-    let b = engine.acquire(AcquireOptions::default()).expect("acquire b");
+    let a = engine
+        .acquire(AcquireOptions::default())
+        .expect("acquire a");
+    let b = engine
+        .acquire(AcquireOptions::default())
+        .expect("acquire b");
     assert_ne!(a, b, "two acquires up to max yield distinct connections");
     assert_eq!(engine.busy_count().expect("busy count"), 2);
 
     // release one and re-acquire: the freed connection is reused (LIFO)
     engine.return_connection(a).expect("return a");
     assert_eq!(engine.busy_count().expect("busy count"), 1);
-    let c = engine.acquire(AcquireOptions::default()).expect("re-acquire");
+    let c = engine
+        .acquire(AcquireOptions::default())
+        .expect("re-acquire");
     assert_eq!(c, a, "released connection is reused");
 
     engine.return_connection(b).expect("return b");

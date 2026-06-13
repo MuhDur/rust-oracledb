@@ -82,7 +82,10 @@ fn fetch_record_batch_from_live_query() {
         assert_eq!(batch.schema().field(1).data_type(), &DataType::Float64);
 
         let ids = batch.column(0).as_primitive::<Int64Type>();
-        assert_eq!((0..3).map(|i| ids.value(i)).collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(
+            (0..3).map(|i| ids.value(i)).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
         let amounts = batch.column(1).as_primitive::<Float64Type>();
         assert_eq!(amounts.value(0), 10.50);
         assert_eq!(amounts.value(2), 30.00);
