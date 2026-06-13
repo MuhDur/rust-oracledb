@@ -847,6 +847,58 @@ impl Connection {
         Ok(result)
     }
 
+    /// Execute `sql` and return the first fetch batch with every cell fully
+    /// materialized, including columns that need a client-side define to
+    /// stream their value (`CLOB` / `BLOB` / `VECTOR` / native `JSON`).
+    ///
+    /// Plain [`Self::execute_query`] mirrors the wire protocol exactly: for a
+    /// define-requiring column it returns the describe metadata but a `None`
+    /// cell, because the value only arrives after a follow-up define-fetch
+    /// round trip. This convenience wrapper performs that round trip for the
+    /// first batch automatically, so a standalone caller selecting such a
+    /// column gets the actual value without hand-driving the cursor. For
+    /// scalar-only result sets it is identical to `execute_query`.
+    ///
+    /// `prefetch_rows` is the requested batch size. Rows beyond the first
+    /// batch (when `more_rows` is set) are fetched with the cursor's
+    /// `fetch_rows` / `define_and_fetch_rows_with_columns` methods as usual.
+    pub async fn execute_query_collect(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+    ) -> Result<QueryResult> {
+        let mut result = self.execute_query(cx, sql, prefetch_rows).await?;
+        if !columns_require_define(&result.columns) || result.cursor_id == 0 {
+            return Ok(result);
+        }
+        // When the open server cursor already streamed rows inline (an active
+        // define on a re-execute), those rows are authoritative; keep them.
+        if !result.rows.is_empty() {
+            return Ok(result);
+        }
+        let cursor_id = result.cursor_id;
+        let columns = result.columns.clone();
+        let fetched = self
+            .define_and_fetch_rows_with_columns(
+                cx,
+                cursor_id,
+                prefetch_rows.max(1),
+                &columns,
+                None,
+            )
+            .await?;
+        result.rows = fetched.rows;
+        result.more_rows = fetched.more_rows;
+        if !fetched.columns.is_empty() {
+            result.columns = fetched.columns;
+        }
+        if result.cursor_id == 0 {
+            result.cursor_id = cursor_id;
+        }
+        Ok(result)
+    }
+
     pub async fn execute_query_with_timeout(
         &mut self,
         cx: &Cx,
@@ -2353,6 +2405,24 @@ impl BlockingConnection {
         })
     }
 
+    /// Blocking wrapper for [`Connection::execute_query_collect`]: execute and
+    /// return the first batch with `CLOB` / `BLOB` / `VECTOR` / native `JSON`
+    /// cells fully materialized via an automatic define-fetch round trip.
+    pub fn execute_query_collect(
+        connection: &mut Connection,
+        sql: &str,
+        prefetch_rows: u32,
+    ) -> Result<QueryResult> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .execute_query_collect(&cx, sql, prefetch_rows)
+                .await
+        })
+    }
+
     pub fn execute_query_with_timeout(
         connection: &mut Connection,
         sql: &str,
@@ -3080,6 +3150,22 @@ fn statement_is_query(sql: &str) -> bool {
         .split(|ch: char| !ch.is_ascii_alphabetic())
         .next()
         .is_some_and(|keyword| keyword.eq_ignore_ascii_case("select"))
+}
+
+/// True when any column needs a client-side define to stream its value:
+/// `CLOB` / `BLOB` / `VECTOR` / native `JSON`. Such columns come back from the
+/// initial execute as describe-only metadata; the value is delivered on a
+/// follow-up define-fetch round trip (reference `statement._requires_define`).
+fn columns_require_define(columns: &[ColumnMetadata]) -> bool {
+    use oracledb_protocol::thin::{
+        ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_JSON, ORA_TYPE_NUM_VECTOR,
+    };
+    columns.iter().any(|column| {
+        matches!(
+            column.ora_type_num,
+            ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR | ORA_TYPE_NUM_JSON
+        )
+    })
 }
 
 fn trace_connect_step(step: &'static str) {
