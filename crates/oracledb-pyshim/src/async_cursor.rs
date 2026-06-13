@@ -798,6 +798,19 @@ impl AsyncThinCursorImpl {
         self.inner.is_query = is_query;
         if self.inner.is_query {
             Python::attach(|py| self.inner.prepare_fetch_defines(py, _cursor.bind(py)))?;
+            // A query whose select list has a LOB/JSON/VECTOR column cannot be
+            // prefetched inline, so the execute returns the describe with rows
+            // deferred. The reference resends the execute with a define that
+            // performs the fetch during execute, so a per-row compute error
+            // (e.g. ORA-01476 from 1/0) surfaces on execute, not only on the
+            // later fetch. Prime the define buffer eagerly here to match, using
+            // the define columns established by prepare_fetch_defines (so the
+            // output type handler is honored). Test 6348. The arrow / DataFrame
+            // fetch path performs its own define-fetch with arrow columns, so
+            // skip the eager prime there.
+            if self.inner.requires_define && !self.inner.fetching_arrow {
+                self.fetch_next_buffer().await?;
+            }
         }
         Ok(())
     }
@@ -806,60 +819,71 @@ impl AsyncThinCursorImpl {
         self.inner.is_query(connection)
     }
 
+    /// Fetches the next batch of rows from the open cursor into the buffer,
+    /// applying the active define (LOB/JSON/VECTOR re-define) when required.
+    /// Used both by the row iterator and by `execute` to prime the buffer
+    /// eagerly. Returns without doing anything when the buffer still has rows or
+    /// the result set is exhausted.
+    async fn fetch_next_buffer(&mut self) -> PyResult<()> {
+        if self.inner.row_index < self.inner.rows.len()
+            || !self.inner.more_rows
+            || self.inner.cursor_id == 0
+        {
+            return Ok(());
+        }
+        let previous_row = self.inner.rows.last().cloned();
+        let requires_define = self.inner.requires_define;
+        let define_columns = self.inner.fetch_define_columns.clone();
+        // a scrollable cursor re-executes the open cursor with orientation
+        // CURRENT instead of issuing a plain fetch (reference `_fetch_rows`)
+        let result = if self.inner.scrollable {
+            let scroll = spawn_async_scroll_task(
+                Arc::clone(&self.inner.connection),
+                self.inner.statement.clone().unwrap_or_default(),
+                self.inner.cursor_id,
+                self.inner.arraysize,
+                oracledb::protocol::thin::TNS_FETCH_ORIENTATION_CURRENT,
+                u32::try_from(self.inner.rowcount.max(0) + 1).unwrap_or(u32::MAX),
+            );
+            scroll.await.map_err(runtime_error)?
+        } else {
+            let fetch = spawn_async_fetch_task(
+                Arc::clone(&self.inner.connection),
+                self.inner.cursor_id,
+                self.inner.arraysize,
+                self.inner.prefetchrows,
+                self.inner.columns.clone(),
+                define_columns.clone(),
+                previous_row,
+                requires_define,
+            );
+            fetch.await.map_err(runtime_error)?
+        };
+        if !result.columns.is_empty() {
+            self.inner.columns = result.columns;
+        } else if requires_define {
+            self.inner.columns = define_columns;
+        }
+        self.inner.rows = result.rows;
+        self.inner.row_index = 0;
+        if result.cursor_id != 0 {
+            self.inner.cursor_id = result.cursor_id;
+        }
+        self.inner.more_rows = result.more_rows;
+        if requires_define {
+            self.inner.requires_define = false;
+        }
+        self.inner.invalid_ref_cursor = false;
+        self.inner.refresh_buffer_window();
+        Ok(())
+    }
+
     async fn fetch_next_row(&mut self, cursor: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
         if self.inner.invalid_ref_cursor {
             return Err(raise_oracledb_driver_error("ERR_INVALID_REF_CURSOR"));
         }
         Python::attach(|py| self.inner.prepare_fetch_defines(py, cursor.bind(py)))?;
-        if self.inner.row_index >= self.inner.rows.len()
-            && self.inner.more_rows
-            && self.inner.cursor_id != 0
-        {
-            let previous_row = self.inner.rows.last().cloned();
-            let requires_define = self.inner.requires_define;
-            let define_columns = self.inner.fetch_define_columns.clone();
-            // a scrollable cursor re-executes the open cursor with orientation
-            // CURRENT instead of issuing a plain fetch (reference `_fetch_rows`)
-            let result = if self.inner.scrollable {
-                let scroll = spawn_async_scroll_task(
-                    Arc::clone(&self.inner.connection),
-                    self.inner.statement.clone().unwrap_or_default(),
-                    self.inner.cursor_id,
-                    self.inner.arraysize,
-                    oracledb::protocol::thin::TNS_FETCH_ORIENTATION_CURRENT,
-                    u32::try_from(self.inner.rowcount.max(0) + 1).unwrap_or(u32::MAX),
-                );
-                scroll.await.map_err(runtime_error)?
-            } else {
-                let fetch = spawn_async_fetch_task(
-                    Arc::clone(&self.inner.connection),
-                    self.inner.cursor_id,
-                    self.inner.arraysize,
-                    self.inner.prefetchrows,
-                    self.inner.columns.clone(),
-                    define_columns.clone(),
-                    previous_row,
-                    requires_define,
-                );
-                fetch.await.map_err(runtime_error)?
-            };
-            if !result.columns.is_empty() {
-                self.inner.columns = result.columns;
-            } else if requires_define {
-                self.inner.columns = define_columns;
-            }
-            self.inner.rows = result.rows;
-            self.inner.row_index = 0;
-            if result.cursor_id != 0 {
-                self.inner.cursor_id = result.cursor_id;
-            }
-            self.inner.more_rows = result.more_rows;
-            if requires_define {
-                self.inner.requires_define = false;
-            }
-            self.inner.invalid_ref_cursor = false;
-            self.inner.refresh_buffer_window();
-        }
+        self.fetch_next_buffer().await?;
         Python::attach(|py| {
             self.inner.fetch_async_lobs = true;
             let result = self.inner.fetch_buffered_next_row(py, cursor.bind(py));
