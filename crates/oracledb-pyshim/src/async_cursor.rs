@@ -661,10 +661,18 @@ impl AsyncThinCursorImpl {
         self.inner.columns = result.columns;
         self.inner.reset_fetch_define_state();
         self.inner.requires_define = columns_require_define(&self.inner.columns);
+        let execute_returned_rows = !result.rows.is_empty();
         self.inner.rows = result.rows;
         self.inner.row_index = 0;
         self.inner.cursor_id = result.cursor_id;
         self.inner.more_rows = result.more_rows;
+        // a re-executed open VECTOR cursor streams its rows in the execute
+        // response (server prefetch suppressed via ExecuteOptions::no_prefetch);
+        // the active server define is already satisfied, so clear requires_define
+        // to avoid a define-fetch landing out of sequence (ORA-01002)
+        if execute_returned_rows && self.inner.requires_define {
+            self.inner.requires_define = false;
+        }
         self.inner.invalid_ref_cursor = false;
         self.inner.last_rowid = result.last_rowid;
         self.inner.rowcount = if is_plsql_statement {
@@ -780,10 +788,18 @@ impl AsyncThinCursorImpl {
         self.inner.columns = result.columns;
         self.inner.reset_fetch_define_state();
         self.inner.requires_define = columns_require_define(&self.inner.columns);
+        let execute_returned_rows = !result.rows.is_empty();
         self.inner.rows = result.rows;
         self.inner.row_index = 0;
         self.inner.cursor_id = result.cursor_id;
         self.inner.more_rows = result.more_rows;
+        // a re-executed open VECTOR cursor streams its rows in the execute
+        // response (server prefetch suppressed via ExecuteOptions::no_prefetch);
+        // the active server define is already satisfied, so clear requires_define
+        // to avoid a define-fetch landing out of sequence (ORA-01002)
+        if execute_returned_rows && self.inner.requires_define {
+            self.inner.requires_define = false;
+        }
         self.inner.invalid_ref_cursor = false;
         self.inner.last_rowid = result.last_rowid;
         self.inner.rowcount = if is_query || is_plsql {

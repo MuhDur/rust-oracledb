@@ -964,6 +964,24 @@ impl Connection {
                 exec_options.cursor_id = cursor_id;
             }
         }
+        // Re-executing an open cursor whose columns require a client-side define
+        // (VECTOR) must suppress server-side prefetch (reference
+        // `stmt._no_prefetch`, set once during describe in messages/base.pyx
+        // 1159-1164 and persisted on the cached statement). Otherwise the
+        // re-execute prefetches the row inline and exhausts the cursor before
+        // the define-fetch runs, raising ORA-01002 on the next fetch.
+        if exec_options.cursor_id != 0 && statement_is_query(sql) {
+            if let Some(columns) = self.cursor_columns.get(&exec_options.cursor_id) {
+                if columns
+                    .iter()
+                    .any(|column| {
+                        column.ora_type_num == oracledb_protocol::thin::ORA_TYPE_NUM_VECTOR
+                    })
+                {
+                    exec_options.no_prefetch = true;
+                }
+            }
+        }
         let piggyback = self.take_close_cursors_piggyback();
         if piggyback.is_none() {
             let has_ref_cursor_output = bind_rows.iter().any(|row| {
