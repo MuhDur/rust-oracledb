@@ -1,0 +1,6 @@
+# cargo-fuzz build output and libFuzzer runtime artifacts.
+/target
+/corpus
+/artifacts
+/coverage
+Cargo.lock
