@@ -227,6 +227,10 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
         writer.write_u8(1);
         writer.write_ub4(bind_count);
     }
+    // CQN registration id (registerquery) split lsb/msb across the al8i4 slots
+    // (reference execute.pyx:116-119,156,163). Zero for ordinary executes.
+    let registration_id_lsb = (exec_options.registration_id & 0xffff_ffff) as u32;
+    let registration_id_msb = ((exec_options.registration_id >> 32) & 0xffff_ffff) as u32;
     writer.write_u8(0);
     writer.write_u8(0);
     writer.write_u8(0);
@@ -234,14 +238,14 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     writer.write_u8(0);
     writer.write_u8(0);
     writer.write_ub4(0);
-    writer.write_ub4(0);
+    writer.write_ub4(registration_id_lsb); // registration id (lsb)
     writer.write_u8(0); // pointer (al8objlist)
     writer.write_u8(1); // pointer (al8objlen)
     writer.write_u8(0); // pointer (al8blv)
     writer.write_ub4(0); // al8blvl
     writer.write_u8(0); // pointer (al8dnam)
     writer.write_ub4(0); // al8dnaml
-    writer.write_ub4(0); // registration id (msb)
+    writer.write_ub4(registration_id_msb); // registration id (msb)
     if exec_options.arraydmlrowcounts {
         writer.write_u8(1); // pointer (al8pidmlrc)
         writer.write_ub4(exec_count); // al8pidmlrcbl

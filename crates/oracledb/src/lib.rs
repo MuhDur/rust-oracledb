@@ -149,6 +149,11 @@ use oracledb_protocol::thin::{
     TNS_TPC_TXN_DETACH, TNS_TPC_TXN_POST_DETACH, TNS_TPC_TXN_START, TPC_TXN_FLAGS_NEW,
     TPC_TXN_FLAGS_RESUME, TPC_TXN_FLAGS_SESSIONLESS,
 };
+use oracledb_protocol::thin::{
+    build_notify_payload_with_seq, build_subscribe_payload_with_seq, check_notification_header,
+    parse_subscribe_response, try_parse_oac_record, NotificationRecord, SubscribeResult,
+    TNS_SUBSCR_OP_REGISTER, TNS_SUBSCR_OP_UNREGISTER,
+};
 use oracledb_protocol::thin::{build_sessionless_piggyback, build_tpc_txn_switch_payload_with_seq};
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};
@@ -338,6 +343,11 @@ pub struct ConnectOptions {
     pub sdu: u16,
     /// Proxy user for `[proxy_user]` style connections, if any.
     pub proxy_user: Option<String>,
+    /// When set, `(SERVER=emon)` is injected into the connect descriptor's
+    /// `CONNECT_DATA`. This routes the connection to the database EMON process
+    /// used to push CQN notifications (reference `subscr.pyx` rewrites
+    /// `description.server_type = "emon"` for the background connection).
+    pub server_type_emon: bool,
 }
 
 impl ConnectOptions {
@@ -359,7 +369,16 @@ impl ConnectOptions {
             app_context: Vec::new(),
             sdu: 8192,
             proxy_user: None,
+            server_type_emon: false,
         }
+    }
+
+    /// Route this connection to the database EMON process by injecting
+    /// `(SERVER=emon)` into the connect descriptor (used by the CQN background
+    /// notification connection).
+    pub fn with_server_type_emon(mut self, emon: bool) -> Self {
+        self.server_type_emon = emon;
+        self
     }
 
     /// Set the application-context triples applied at logon.
@@ -445,6 +464,15 @@ pub struct Connection {
     /// `BaseThinConnImpl._sessionless_data`); `None` when no sessionless
     /// transaction is active on this connection.
     sessionless_data: Option<SessionlessData>,
+    /// Leftover (partially-decoded) bytes from the EMON notification stream.
+    /// The reference `ReadBuffer` chains pushed packets so a single logical
+    /// `process()` call decodes records that span packet boundaries; this
+    /// buffer plays the same role for [`Connection::recv_notification`].
+    notification_buffer: Vec<u8>,
+    /// Whether the leading `TNS_MSG_TYPE_OAC` byte of the notification stream
+    /// has been consumed (the reference reads it once via the outer
+    /// `process()` loop before delivering any record).
+    notification_header_consumed: bool,
 }
 
 /// Mirrors the reference `_SessionlessData` (impl/thin/connection.pyx): the
@@ -465,6 +493,30 @@ struct SessionlessData {
     /// The transaction was started via DBMS_TRANSACTION on the server; the
     /// client API may not suspend/resume it (reference `started_on_server`).
     started_on_server: bool,
+}
+
+/// Result of one bounded notification packet read.
+enum PacketRead {
+    /// A DATA packet's payload was appended to the notification buffer.
+    Appended,
+    /// The read timed out (no data within the window); the caller should poll
+    /// its shutdown flag and may retry.
+    TimedOut,
+    /// The emon socket was closed or returned a non-DATA packet; the stream is
+    /// finished.
+    Closed,
+}
+
+/// Outcome of [`Connection::recv_notification`].
+#[derive(Clone, Debug)]
+pub enum NotificationOutcome {
+    /// A decoded notification record to deliver to the callback.
+    Record(NotificationRecord),
+    /// No record arrived within the read window; poll the shutdown flag and
+    /// call again to keep waiting.
+    TimedOut,
+    /// The emon socket closed (teardown / STOP_NOTIF); stop the receive loop.
+    Closed,
 }
 
 const STATEMENT_CACHE_SIZE: usize = 20;
@@ -507,7 +559,11 @@ impl Connection {
         let write = Arc::new(AsyncMutex::with_name("oracle_tcp_write", write));
         trace_connect_step("tcp connected");
 
-        let connect_descriptor = listener_connect_descriptor(&descriptor, &identity);
+        let connect_descriptor = listener_connect_descriptor_with_server(
+            &descriptor,
+            &identity,
+            options.server_type_emon,
+        );
         trace_connect_value("CONNECT descriptor", &connect_descriptor);
         let connect_payload = build_connect_packet_payload(&connect_descriptor, options.sdu)?;
         let packet = encode_packet(
@@ -634,6 +690,8 @@ impl Connection {
             copied_cursors: HashSet::new(),
             cursors_to_close: Vec::new(),
             sessionless_data: None,
+            notification_buffer: Vec::new(),
+            notification_header_consumed: false,
         })
     }
 
@@ -741,6 +799,222 @@ impl Connection {
         let response = read_data_response(&mut self.read, cx, &self.write).await?;
         self.note_parse(parse_auth_response(&response).map(|_| ()))?;
         Ok(())
+    }
+
+    /// Register a CQN subscription (FUNC 125, opcode 1) on this connection.
+    /// Returns the registration id (`Subscription.id`) and the EMON client id
+    /// echoed in the subsequent NOTIFY. `public_qos`/`operations` are the public
+    /// `SUBSCR_QOS_*` / `OPCODE_*` values; the wire derivation lives in the
+    /// protocol builder. Reference `ThinSubscrImpl.subscribe`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn subscribe_register(
+        &mut self,
+        cx: &Cx,
+        namespace: u32,
+        name: Option<&str>,
+        public_qos: u32,
+        operations: u32,
+        timeout: u32,
+        grouping_class: u8,
+        grouping_value: u32,
+        grouping_type: u8,
+    ) -> Result<SubscribeResult> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = build_subscribe_payload_with_seq(
+            seq_num,
+            TNS_SUBSCR_OP_REGISTER,
+            Some(&self.user),
+            None,
+            namespace,
+            name,
+            public_qos,
+            operations,
+            timeout,
+            grouping_class,
+            grouping_value,
+            grouping_type,
+            0,
+            self.capabilities.ttc_field_version,
+        )?;
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.note_parse(parse_subscribe_response(&response, self.capabilities))
+    }
+
+    /// Unregister a CQN subscription (FUNC 125, opcode 2). The `client_id` is
+    /// the value returned by [`Self::subscribe_register`] (now non-None so its
+    /// pointer/bytes are emitted) and `registration_id` rides on the tail.
+    /// Reference `ThinSubscrImpl.unsubscribe`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn subscribe_unregister(
+        &mut self,
+        cx: &Cx,
+        registration_id: u64,
+        client_id: &[u8],
+        namespace: u32,
+        name: Option<&str>,
+        public_qos: u32,
+        operations: u32,
+        timeout: u32,
+        grouping_class: u8,
+        grouping_value: u32,
+        grouping_type: u8,
+    ) -> Result<()> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        // unregister reuses the same `_write_message` path: the name/qos/
+        // operations/grouping fields mirror the original registration so the
+        // server can match the subscription (reference passes the same
+        // `subscr_impl`).
+        let payload = build_subscribe_payload_with_seq(
+            seq_num,
+            TNS_SUBSCR_OP_UNREGISTER,
+            Some(&self.user),
+            Some(client_id),
+            namespace,
+            name,
+            public_qos,
+            operations,
+            timeout,
+            grouping_class,
+            grouping_value,
+            grouping_type,
+            registration_id,
+            self.capabilities.ttc_field_version,
+        )?;
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.note_parse(parse_subscribe_response(&response, self.capabilities))?;
+        Ok(())
+    }
+
+    /// Send the single NOTIFY message (FUNC 187) that arms the EMON push stream
+    /// on this (emon) connection. No response is read here; pushed notification
+    /// packets are consumed by [`Self::recv_notification`]. Reference
+    /// `ThinSubscrImpl._bg_task_func` (sends NOTIFY then blocks reading).
+    pub async fn notify_register(&mut self, cx: &Cx, client_id: &[u8]) -> Result<()> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload =
+            build_notify_payload_with_seq(seq_num, client_id, self.capabilities.ttc_field_version)?;
+        // NOTIFY sets the END_OF_REQUEST data flag on its (single) packet.
+        send_data_packet_shared_with_flags(
+            cx,
+            &self.write,
+            &payload,
+            self.sdu,
+            0,
+            TNS_DATA_FLAGS_END_OF_REQUEST,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Wait for the next CQN notification record pushed by the EMON process and
+    /// decode it. `read_timeout` bounds each underlying socket read so the
+    /// background receive loop can poll a shutdown flag between reads (the DB
+    /// never sends an end-of-stream marker; teardown unblocks the loop). The
+    /// reference blocks forever and is unblocked by a forced socket close; the
+    /// bounded read achieves the same clean teardown without a cross-thread
+    /// socket close, and never hangs.
+    ///
+    /// Records may span several pushed packets, so this chains packets through
+    /// `notification_buffer` exactly like the reference `ReadBuffer`.
+    pub async fn recv_notification(
+        &mut self,
+        cx: &Cx,
+        namespace: u32,
+        public_qos: u32,
+        read_timeout: Duration,
+    ) -> Result<NotificationOutcome> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let db_name = self.descriptor.service_name.clone();
+        loop {
+            // consume the leading OAC message-type byte once
+            if !self.notification_header_consumed {
+                if self.notification_buffer.is_empty() {
+                    match self.read_one_notification_packet(read_timeout).await? {
+                        PacketRead::Appended => continue,
+                        PacketRead::TimedOut => return Ok(NotificationOutcome::TimedOut),
+                        PacketRead::Closed => return Ok(NotificationOutcome::Closed),
+                    }
+                }
+                let consumed = check_notification_header(&self.notification_buffer)?;
+                self.notification_buffer.drain(..consumed);
+                self.notification_header_consumed = true;
+            }
+            // try to decode one full record from the buffered bytes
+            if !self.notification_buffer.is_empty() {
+                if let Some((record, consumed)) = try_parse_oac_record(
+                    &self.notification_buffer,
+                    namespace,
+                    public_qos,
+                    Some(&db_name),
+                )? {
+                    self.notification_buffer.drain(..consumed);
+                    return Ok(NotificationOutcome::Record(record));
+                }
+            }
+            // need more bytes: read another pushed packet (bounded)
+            match self.read_one_notification_packet(read_timeout).await? {
+                PacketRead::Appended => {}
+                // a timeout mid-record is unusual; surface it so the caller can
+                // re-check the shutdown flag and resume reading
+                PacketRead::TimedOut => return Ok(NotificationOutcome::TimedOut),
+                PacketRead::Closed => return Ok(NotificationOutcome::Closed),
+            }
+        }
+    }
+
+    /// Execute a registerquery: run `sql` with the CQN `registration_id`
+    /// threaded into the execute body and return the query id read back from the
+    /// registration-info block (reference `ThinSubscrImpl.register_query` ->
+    /// `cursor_impl._query_id`). Returns `Some(0)`/`None` when the server sent no
+    /// query id (qos without SUBSCR_QOS_QUERY). Server errors (ORA-00942,
+    /// ORA-29975) surface unchanged.
+    pub async fn execute_query_for_registration(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        registration_id: u64,
+    ) -> Result<Option<u64>> {
+        let exec_options = ExecuteOptions {
+            registration_id,
+            ..ExecuteOptions::default()
+        };
+        let result = self
+            .execute_query_with_bind_rows_and_options(cx, sql, 0, &[], exec_options)
+            .await?;
+        Ok(result.query_id)
+    }
+
+    /// Reads one DATA packet from the emon socket (bounded by `read_timeout`)
+    /// and appends its TTC payload (after the 2-byte data flags) to
+    /// `notification_buffer`. Reports a timeout (so the caller can poll its
+    /// shutdown flag) or a closed/errored socket distinctly. Non-DATA packets
+    /// (markers, disconnect) end the stream.
+    async fn read_one_notification_packet(&mut self, read_timeout: Duration) -> Result<PacketRead> {
+        let read = read_packet(&mut self.read, PacketLengthWidth::Large32);
+        let packet = match time::timeout(time::wall_now(), read_timeout, read).await {
+            Ok(Ok(packet)) => packet,
+            // socket closed / errored (incl. force-close on teardown): end the
+            // stream cleanly, mirroring the reference's swallowed read error
+            Ok(Err(_)) => return Ok(PacketRead::Closed),
+            Err(_) => return Ok(PacketRead::TimedOut),
+        };
+        if packet.packet_type != TNS_PACKET_TYPE_DATA {
+            return Ok(PacketRead::Closed);
+        }
+        let Some((_data_flags, payload)) = packet.payload.split_at_checked(2) else {
+            return Ok(PacketRead::Closed);
+        };
+        self.notification_buffer.extend_from_slice(payload);
+        Ok(PacketRead::Appended)
     }
 
     /// Ping with an upper bound on the round trip, used by pool health
@@ -2584,6 +2858,95 @@ impl BlockingConnection {
         })
     }
 
+    /// Register a CQN subscription (FUNC 125, opcode 1). See
+    /// [`Connection::subscribe_register`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn subscribe_register(
+        connection: &mut Connection,
+        namespace: u32,
+        name: Option<&str>,
+        public_qos: u32,
+        operations: u32,
+        timeout: u32,
+        grouping_class: u8,
+        grouping_value: u32,
+        grouping_type: u8,
+    ) -> Result<SubscribeResult> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .subscribe_register(
+                    &cx,
+                    namespace,
+                    name,
+                    public_qos,
+                    operations,
+                    timeout,
+                    grouping_class,
+                    grouping_value,
+                    grouping_type,
+                )
+                .await
+        })
+    }
+
+    /// Unregister a CQN subscription (FUNC 125, opcode 2). See
+    /// [`Connection::subscribe_unregister`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn subscribe_unregister(
+        connection: &mut Connection,
+        registration_id: u64,
+        client_id: &[u8],
+        namespace: u32,
+        name: Option<&str>,
+        public_qos: u32,
+        operations: u32,
+        timeout: u32,
+        grouping_class: u8,
+        grouping_value: u32,
+        grouping_type: u8,
+    ) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .subscribe_unregister(
+                    &cx,
+                    registration_id,
+                    client_id,
+                    namespace,
+                    name,
+                    public_qos,
+                    operations,
+                    timeout,
+                    grouping_class,
+                    grouping_value,
+                    grouping_type,
+                )
+                .await
+        })
+    }
+
+    /// Execute a registerquery (registration id into the execute, query id out).
+    /// See [`Connection::execute_query_for_registration`].
+    pub fn execute_query_for_registration(
+        connection: &mut Connection,
+        sql: &str,
+        registration_id: u64,
+    ) -> Result<Option<u64>> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .execute_query_for_registration(&cx, sql, registration_id)
+                .await
+        })
+    }
+
     pub fn rollback(connection: &mut Connection) -> Result<()> {
         let runtime = build_io_runtime()?;
         runtime.block_on(async {
@@ -3385,12 +3748,26 @@ where
     })
 }
 
-fn listener_connect_descriptor(descriptor: &EasyConnect, identity: &ClientIdentity) -> String {
+/// Builds the listener connect descriptor, optionally injecting `(SERVER=emon)`
+/// into `CONNECT_DATA` (between `SERVICE_NAME` and `CID`, matching the golden
+/// emon connect packet). The reference sets `description.server_type = "emon"`
+/// for the background CQN connection (subscr.pyx:70-73).
+fn listener_connect_descriptor_with_server(
+    descriptor: &EasyConnect,
+    identity: &ClientIdentity,
+    server_type_emon: bool,
+) -> String {
+    let server = if server_type_emon {
+        "(SERVER=emon)"
+    } else {
+        ""
+    };
     format!(
-        "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST={})(PORT={}))(CONNECT_DATA=(SERVICE_NAME={})(CID=(PROGRAM={})(HOST={})(USER={}))))",
+        "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST={})(PORT={}))(CONNECT_DATA=(SERVICE_NAME={}){}(CID=(PROGRAM={})(HOST={})(USER={}))))",
         descriptor.host,
         descriptor.port,
         descriptor.service_name,
+        server,
         identity.program,
         identity.machine,
         identity.osuser,
@@ -3507,10 +3884,14 @@ mod tests {
         let options = ConnectOptions::new("localhost/FREEPDB1", "user", "password", identity());
         let descriptor =
             EasyConnect::parse(&options.connect_string).expect("test connect string should parse");
-        let built = listener_connect_descriptor(&descriptor, &options.identity);
+        let built = listener_connect_descriptor_with_server(&descriptor, &options.identity, false);
         assert!(built.contains("(PROGRAM=program)"));
         assert!(built.contains("(HOST=machine)"));
         assert!(built.contains("(USER=osuser)"));
+        assert!(!built.contains("(SERVER=emon)"));
+        // emon variant injects the SERVER directive ahead of the CID block
+        let emon = listener_connect_descriptor_with_server(&descriptor, &options.identity, true);
+        assert!(emon.contains("(SERVICE_NAME=FREEPDB1)(SERVER=emon)(CID="));
     }
 
     #[test]

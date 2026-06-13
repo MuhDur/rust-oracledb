@@ -23,6 +23,7 @@ mod execute;
 mod fetch;
 mod lob;
 mod sessionless;
+mod subscr;
 mod types;
 
 pub use auth::*;
@@ -35,6 +36,7 @@ pub use execute::*;
 pub use fetch::*;
 pub use lob::*;
 pub use sessionless::*;
+pub use subscr::*;
 pub use types::*;
 // `errors` holds only crate-internal items (ServerErrorInfo + parse/skip helpers);
 // re-export at crate visibility so the glob has something to re-export.

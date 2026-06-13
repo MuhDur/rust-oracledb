@@ -178,6 +178,12 @@ pub(crate) struct ThinConnImpl {
     new_password: Option<String>,
     /// Engine identity when this connection is owned by a pool.
     pub(crate) pool_conn_id: Option<u64>,
+    /// The [`ConnectOptions`] used for the primary connection, retained so the
+    /// CQN background ("emon") connection can be built by cloning them and
+    /// injecting `(SERVER=emon)`. Populated on `connect()`. (The DPY-1007
+    /// double-unsubscribe guard lives in the shipped python `unsubscribe`,
+    /// which checks `subscr._impl is None`, so no shim-side tracking is needed.)
+    pub(crate) connect_options: Arc<Mutex<Option<ConnectOptions>>>,
 }
 
 pub(crate) struct PreparedConnect {
@@ -240,6 +246,31 @@ impl ThinConnImpl {
             new_password: self.new_password.clone(),
             edition,
         })
+    }
+
+    /// Run `f` with the locked live connection, mapping a closed connection and
+    /// any driver error to the appropriate Python exception. Used by the CQN
+    /// subscription impl for the primary-connection round trips.
+    pub(crate) fn with_connection<T>(
+        &self,
+        f: impl FnOnce(&mut RustConnection) -> Result<T, oracledb::Error>,
+    ) -> PyResult<T> {
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        f(connection).map_err(runtime_error)
+    }
+
+    /// Build the connect options for the CQN background ("emon") connection:
+    /// the retained primary options with `(SERVER=emon)` injected. Errors if the
+    /// primary connect options were never recorded (connection not established).
+    pub(crate) fn emon_connect_options(&self) -> PyResult<ConnectOptions> {
+        let guard = self.connect_options.lock().map_err(runtime_error)?;
+        let options = guard
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is not established"))?;
+        Ok(options.clone().with_server_type_emon(true))
     }
 
     fn apply_pending_current_schema(
@@ -955,6 +986,7 @@ impl ThinConnImpl {
             connect_password: password,
             new_password: None,
             pool_conn_id: Some(pool_conn_id),
+            connect_options: Arc::new(Mutex::new(None)),
         })
     }
 }
@@ -1001,6 +1033,7 @@ impl ThinConnImpl {
             connect_password: connect_args.password,
             new_password: connect_args.new_password,
             pool_conn_id: None,
+            connect_options: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -1092,6 +1125,9 @@ impl ThinConnImpl {
 
     fn connect(&mut self, params_impl: &Bound<'_, PyAny>) -> PyResult<()> {
         let prepared = self.prepare_connect(params_impl)?;
+        // retain the connect options so a CQN subscription can spawn the emon
+        // background connection (clone + (SERVER=emon))
+        *self.connect_options.lock().map_err(runtime_error)? = Some(prepared.options.clone());
         let connection = BlockingConnection::connect(prepared.options).map_err(runtime_error)?;
         let cancel_handle = connection.cancel_handle().map_err(runtime_error)?;
         self.server_version = connection.server_version_tuple().unwrap_or_default();
@@ -1670,6 +1706,54 @@ impl ThinConnImpl {
         lob_type: &Bound<'_, PyAny>,
     ) -> PyResult<Py<ThinLob>> {
         Py::new(py, self.create_temp_lob_value(lob_type, false)?)
+    }
+
+    /// Build a CQN subscription impl. Mirrors `connection.pyx:559
+    /// create_subscr_impl`: a server-initiated subscription (client_initiated
+    /// false) is not supported in thin mode.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        conn, callback, namespace, name, protocol, ip_address, port, timeout,
+        operations, qos, grouping_class, grouping_value, grouping_type,
+        client_initiated
+    ))]
+    fn create_subscr_impl(
+        &self,
+        py: Python<'_>,
+        conn: Py<PyAny>,
+        callback: Option<Py<PyAny>>,
+        namespace: u32,
+        name: Option<String>,
+        protocol: u32,
+        ip_address: Option<String>,
+        port: u32,
+        timeout: u32,
+        operations: u32,
+        qos: u32,
+        grouping_class: u8,
+        grouping_value: u32,
+        grouping_type: u8,
+        client_initiated: bool,
+    ) -> PyResult<Py<ThinSubscrImpl>> {
+        if !client_initiated {
+            return Err(raise_not_supported("server initiated subscription"));
+        }
+        let impl_ = ThinSubscrImpl::new(
+            conn,
+            callback,
+            namespace,
+            name,
+            protocol,
+            ip_address,
+            port,
+            timeout,
+            operations,
+            qos,
+            grouping_class,
+            grouping_value,
+            grouping_type,
+        );
+        Py::new(py, impl_)
     }
 
     pub(crate) fn create_cursor_impl(

@@ -322,10 +322,13 @@ pub(crate) fn parse_query_response_with_context_binds_and_options(
                 bit_vector = Some(parse_bit_vector(&mut reader, result.columns.len())?);
             }
             TNS_MSG_TYPE_PARAMETER => {
-                let row_counts =
+                let params =
                     parse_query_return_parameters(&mut reader, exec_options.arraydmlrowcounts)?;
                 if exec_options.arraydmlrowcounts {
-                    result.array_dml_row_counts = Some(row_counts.unwrap_or_default());
+                    result.array_dml_row_counts = Some(params.row_counts.unwrap_or_default());
+                }
+                if params.query_id.is_some() {
+                    result.query_id = params.query_id;
                 }
             }
             TNS_MSG_TYPE_STATUS => {
@@ -1067,10 +1070,17 @@ pub(crate) fn parse_cursor_value(reader: &mut TtcReader<'_>) -> Result<QueryValu
     })
 }
 
+pub(crate) struct QueryReturnParameters {
+    pub row_counts: Option<Vec<u64>>,
+    /// CQN registered-query id extracted from the registration-info block
+    /// (reference base.pyx:1300-1309); `None` when no block was present.
+    pub query_id: Option<u64>,
+}
+
 pub(crate) fn parse_query_return_parameters(
     reader: &mut TtcReader<'_>,
     arraydmlrowcounts: bool,
-) -> Result<Option<Vec<u64>>> {
+) -> Result<QueryReturnParameters> {
     let num_params = reader.read_ub2()?;
     for _ in 0..num_params {
         let _value = reader.read_ub4()?;
@@ -1081,9 +1091,27 @@ pub(crate) fn parse_query_return_parameters(
     }
     let num_pairs = reader.read_ub2()?;
     skip_keyword_value_pairs(reader, num_pairs)?;
-    let num_bytes = reader.read_ub2()?;
+    // registration info block: the trailing 8 bytes (msb at -4, lsb at -8) are
+    // the CQN query id when a registration id was sent (reference base.pyx).
+    let num_bytes = usize::from(reader.read_ub2()?);
+    let mut query_id = None;
     if num_bytes > 0 {
-        reader.skip(usize::from(num_bytes))?;
+        let block = reader.read_raw(num_bytes)?;
+        if num_bytes >= 8 {
+            let msb = u32::from_be_bytes([
+                block[num_bytes - 4],
+                block[num_bytes - 3],
+                block[num_bytes - 2],
+                block[num_bytes - 1],
+            ]);
+            let lsb = u32::from_be_bytes([
+                block[num_bytes - 8],
+                block[num_bytes - 7],
+                block[num_bytes - 6],
+                block[num_bytes - 5],
+            ]);
+            query_id = Some((u64::from(msb) << 32) | u64::from(lsb));
+        }
     }
     if arraydmlrowcounts {
         // reference messages/base.pyx `_process_return_parameters` tail
@@ -1094,9 +1122,15 @@ pub(crate) fn parse_query_return_parameters(
         for _ in 0..num_rows {
             row_counts.push(reader.read_ub8()?);
         }
-        return Ok(Some(row_counts));
+        return Ok(QueryReturnParameters {
+            row_counts: Some(row_counts),
+            query_id,
+        });
     }
-    Ok(None)
+    Ok(QueryReturnParameters {
+        row_counts: None,
+        query_id,
+    })
 }
 
 #[cfg(test)]
