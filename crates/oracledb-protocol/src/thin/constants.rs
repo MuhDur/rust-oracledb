@@ -46,6 +46,50 @@ pub const TNS_FUNC_CLOSE_CURSORS: u8 = 105;
 /// reference `TNS_FUNC_TPC_TXN_SWITCH` (impl/thin/constants.pxi:440).
 pub const TNS_FUNC_TPC_TXN_SWITCH: u8 = 103;
 
+// CQN / subscription wire constants (reference thin/constants.pxi).
+/// Register / unregister a subscription (FUNC byte on the primary connection).
+pub const TNS_FUNC_SUBSCRIBE: u8 = 125;
+/// Arm the EMON notification stream (FUNC byte on the second/emon connection).
+pub const TNS_FUNC_NOTIFY: u8 = 187;
+pub const TNS_SUBSCR_OP_REGISTER: u8 = 1;
+pub const TNS_SUBSCR_OP_UNREGISTER: u8 = 2;
+pub const TNS_SUBSCR_MODE_CLIENT_INITIATED: u32 = 4;
+pub const TNS_SUBSCR_CLIENT_ID_LEN: u32 = 29;
+pub const TNS_INIT_KPNDRREQ: u8 = 1;
+/// OAC record `message_type` value that ends the notification stream.
+pub const TNS_SUBSCR_STOP_NOTIF: u32 = 0x04;
+// Wire QOS flags (distinct numeric space from the public SUBSCR_QOS_* enums).
+pub const TNS_SUBSCR_QOS_RELIABLE: u32 = 0x01;
+pub const TNS_SUBSCR_QOS_SECURE: u32 = 0x08;
+pub const TNS_SUBSCR_QOS_PURGE_ON_NTFN: u32 = 0x10;
+// Wire registration flags.
+pub const TNS_SUBSCR_FLAGS_INCLUDE_ROWIDS: u32 = 0x10;
+pub const TNS_SUBSCR_FLAGS_QUERY: u32 = 0x20;
+/// Notification namespaces (shared numeric space with the public enums).
+pub const TNS_SUBSCR_NAMESPACE_AQ: u32 = 1;
+pub const TNS_SUBSCR_NAMESPACE_DBCHANGE: u32 = 2;
+/// OAC data message type read at the head of the notification stream.
+pub const TNS_MSG_TYPE_OAC: u8 = 13;
+/// `ttc_field_version` gate that drives the 12.1 SUBSCRIBE block / response
+/// client-id read (reference `TNS_CCAP_FIELD_VERSION_12_1`).
+pub const TNS_CCAP_FIELD_VERSION_12_1: u8 = 7;
+
+// Public QOS bits (base_impl.pxd SUBSCR_QOS_*), consumed when deriving the
+// wire qos/flags. These match `oracledb.SUBSCR_QOS_*` in the shipped python
+// layer.
+pub const SUBSCR_QOS_RELIABLE: u32 = 0x01;
+pub const SUBSCR_QOS_DEREG_NFY: u32 = 0x02;
+pub const SUBSCR_QOS_ROWIDS: u32 = 0x04;
+pub const SUBSCR_QOS_QUERY: u32 = 0x08;
+
+// CQN notification event types (base_impl.pxd EVENT_*).
+pub const EVENT_DEREG: u32 = 5;
+pub const EVENT_OBJCHANGE: u32 = 6;
+pub const EVENT_QUERYCHANGE: u32 = 7;
+pub const EVENT_AQ: u32 = 100;
+/// Table operation flag: rows are summarised (no per-row records follow).
+pub const OPCODE_ALLROWS: u32 = 0x01;
+
 // Sessionless / TPC transaction switch operations (reference constants.pxi:597).
 pub const TNS_TPC_TXN_START: u32 = 0x01;
 pub const TNS_TPC_TXN_DETACH: u32 = 0x02;
