@@ -85,6 +85,11 @@ ratio above 1.0 means Rust was faster, below 1.0 means python-oracledb was
 faster. Numbers below ~200 us carry the most host jitter; treat one-significant-
 figure differences there as a tie.
 
+The two rows that were previously "python faster" — `select_one_row` and
+`read_clob` — have since been optimized on the Rust side; see
+[Optimization history](#optimization-history). The numbers below are the
+pre-optimization baseline against which those changes were measured.
+
 | Operation          | rust-oracledb median | python-oracledb thin median | ratio (py / rust) |
 |--------------------|----------------------|-----------------------------|-------------------|
 | `connect`          | 32.6 ms              | 33.3 ms                     | 1.02 (tie)        |
@@ -119,27 +124,94 @@ about 2.5 ms depending on the pass), which is host contention on a shared
 machine, not a property of either driver. We report the slower mode because it
 was more common.
 
-**`select_one_row`: python-oracledb is faster (about 80 us vs 127 us).** This is
-a single round trip where the network cost is tiny and almost everything is
-client-side per-call overhead. The Rust blocking benches drive an async runtime
-synchronously: every call goes through `Runtime::block_on`, which constructs a
-fresh request-scoped `Cx` and installs runtime and context guards before polling
-the future (asupersync `builder.rs`). python-oracledb thin is natively
-synchronous and pays no equivalent re-entry. On an operation this cheap that
-fixed per-call cost is a real fraction of the total. It is an artifact of the
-current `BlockingConnection` wrapper, not of the protocol codec, and it would
-shrink for a caller driving the async `Connection` API directly inside one
-runtime.
+**`select_one_row`: was python-faster, now optimized.** This is a single round
+trip where the network cost is tiny and almost everything is client-side
+per-call overhead. The synchronous `BlockingConnection` facade — which the PyO3
+shim drives for every suite operation — used to build a brand-new Asupersync
+runtime on every call (a fresh epoll reactor plus a worker OS thread that was
+spawned and immediately joined), then went through `Runtime::block_on`. python-
+oracledb thin is natively synchronous and pays no equivalent re-entry. That
+fixed per-call cost was the entire gap on an operation this cheap. Caching one
+current-thread runtime per calling thread removed it: the facade's
+`select_one_row_blocking` bench dropped from ~327 us to ~123 us (−62%), now in
+line with the async path. See [Optimization history](#optimization-history). The
+`select_one_row` row in the table above is the async bench (which already reused
+one runtime), so it was unaffected by this change; the facade was the slow path.
 
-**`read_clob`: python-oracledb is faster (about 0.44 ms vs 0.90 ms).** Both
-drivers do the same three round trips here (execute, define-fetch the locator,
-read the bytes), confirmed by `v$mystat` round-trip counts, so the gap is
-CPU-side in the Rust LOB read and decode path, not extra network traffic. This
-is the clearest candidate for optimization work: the Rust `read_lob` path
-currently reads the full 64 KiB in one request and the difference is in how the
-bytes are buffered and decoded. It is called out here precisely because it is
-the one place where the Rust path is materially slower and the cause is in our
-code.
+**`read_clob`: was python-faster, now optimized.** Both drivers do the same
+three round trips here (execute, define-fetch the locator, read the bytes),
+confirmed by `v$mystat` round-trip counts, so the gap is CPU-side in the Rust LOB
+read and decode path, not extra network traffic. Phase attribution showed the
+64 KiB CLOB comes back from the server as AL16UTF16 (131072 bytes), and the
+UTF-16-to-`String` decode was ~178 us of pure CPU — it built an intermediate
+`Vec<u16>` (a second 128 KiB allocation, filled by a separate byte-swap pass)
+before re-scanning it in `String::from_utf16`. A single-pass decoder that pushes
+ASCII units inline and only falls back to the general `char::decode_utf16` path
+on the first non-ASCII unit halved that to ~88 us and cut the whole `read_clob`
+from ~0.90 ms to ~0.77 ms (−17%). The remaining `read_lob` cost is I/O-bound
+(≈16 packet reads across the wire), not buffer management — a micro-benchmark
+confirmed preallocating the chunked-bytes accumulator does not help — so it was
+left alone. See [Optimization history](#optimization-history).
+
+## Optimization history
+
+The two operations where the Rust path was materially slower than python-oracledb
+thin — `select_one_row` and `read_clob` — were both profiled and optimized. Each
+change is behaviour-preserving (the full reference suite stays green: 2236/2236)
+and was proved with a before/after criterion delta on the same container.
+All deltas below are from `cargo bench -p oracledb --bench thin_driver` against
+the local Oracle container; the host was shared and busy, so sub-200 us numbers
+carry the usual jitter and are reported with their criterion confidence interval.
+
+### 1. Cache the `BlockingConnection` runtime per thread
+
+**Problem (profiled).** Every `BlockingConnection::*` and `CancelHandle::cancel`
+call built a fresh single-threaded Asupersync runtime: `create_reactor()` (a new
+epoll fd) plus `RuntimeBuilder::current_thread().build()`, which spawns a worker
+OS thread that is then joined when the runtime drops — all on every call. The
+PyO3 shim drives this synchronous facade for every suite operation, so that fixed
+per-call cost dominated cheap operations. A bench driving the real facade
+(`select_one_row_blocking`, added for this work) measured ~327 us versus ~131 us
+for the otherwise-identical async path that reuses one runtime; the ~196 us
+delta was entirely runtime construction.
+
+**Fix.** Cache one current-thread runtime per calling thread in a `thread_local`,
+built lazily on first use and reused for every subsequent call. The connection's
+socket re-registers (`rearm`) with the persistent reactor on each call exactly as
+Asupersync's owned TCP halves are designed to — strictly less work than dropping
+and rebuilding a reactor per call. Each `Runtime::block_on` still installs a
+fresh request-scoped `Cx` (`Budget::INFINITE`) and runtime/Cx guards for the
+polled future, so cancellation and context semantics are unchanged.
+
+**Result.** `select_one_row_blocking` `[322 us → 132 us]`, **−59% to −62%**
+(p < 0.05) across runs — the facade now matches the async path. Because the shim
+drives this path for every suite operation, the whole suite gets the speedup.
+
+### 2. Single-pass ASCII-inline UTF-16 LOB decode
+
+**Problem (profiled).** Phase attribution of `read_clob` (~983 us) split it into
+`execute_query_collect` ~329 us (2 round trips), `read_lob` wire+parse ~459 us
+(1 round trip), and `decode_lob_text` ~178 us — pure CPU, no I/O. The 64 KiB
+CLOB returns as AL16UTF16 (131072 bytes), and the decoder collected an
+intermediate `Vec<u16>` (a second 128 KiB allocation, filled by a separate
+byte-swap pass) before re-scanning it in `String::from_utf16`.
+
+**Fix.** Decode straight from the byte pairs in one pass. LOB text is
+overwhelmingly ASCII/Latin, where every UTF-16 code unit is a single ASCII byte;
+those are pushed inline (no buffer). Only on the first non-ASCII or surrogate
+unit do the remaining bytes go to the general `char::decode_utf16` decoder,
+walked by byte index so the fallback never rescans. The UTF-8 path likewise
+validates in place instead of copying into a temporary `Vec` first. Output is
+byte-for-byte identical to the previous `String::from_utf16` / `String::from_utf8`,
+including rejection of lone surrogates and odd-length input; new isomorphism unit
+tests cover ASCII, BMP non-ASCII, CJK, surrogate pairs, code-point boundaries,
+both endiannesses, and the error cases against the previous implementation.
+
+**Result.** `decode_lob_text` ~178 us → ~88 us (−50%); `read_clob`
+`[927 us → 768 us]`, **−16% to −18%** (p < 0.05). The remaining `read_lob` cost
+is I/O-bound (≈16 packet reads), not buffer management: a micro-benchmark showed
+preallocating the chunked-bytes accumulator does not beat `Vec`'s amortized
+growth, so that path was left unchanged.
 
 ## Honest caveats
 
