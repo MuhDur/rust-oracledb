@@ -1494,19 +1494,17 @@ impl ThinCursorImpl {
         self.columns = result.columns;
         self.reset_fetch_define_state();
         self.requires_define = columns_require_define(&self.columns);
-        // VECTOR and native/embedded JSON columns set the reference's
-        // stmt._no_prefetch: rows prefetched during execute (before a client-side
-        // define is sent) arrive as bare LOB locators, not the inline VECTOR/OSON
-        // image, so they are discarded and re-fetched through the define path
-        // (reference base.pyx:1159-1164 + execute.pyx:99). Plain LOB columns keep
-        // their prefetch behavior because their locators are read on demand later.
+        // VECTOR columns set the reference's stmt._no_prefetch: rows prefetched
+        // during execute (before a client-side define is sent) are unreliable,
+        // so discard them and re-fetch through the define path (reference
+        // base.pyx:1159-1164 + execute.pyx:99). Scoped to VECTOR only so JSON
+        // and LOB fetch paths keep their existing prefetch behavior.
         if self.requires_define
             && result.cursor_id != 0
-            && self.columns.iter().any(|metadata| {
-                metadata.ora_type_num == ORA_TYPE_NUM_VECTOR
-                    || metadata.ora_type_num == ORA_TYPE_NUM_JSON
-                    || metadata.is_oson
-            })
+            && self
+                .columns
+                .iter()
+                .any(|metadata| metadata.ora_type_num == ORA_TYPE_NUM_VECTOR)
         {
             self.rows = Vec::new();
             self.more_rows = true;
@@ -1661,19 +1659,17 @@ impl ThinCursorImpl {
         self.columns = result.columns;
         self.reset_fetch_define_state();
         self.requires_define = columns_require_define(&self.columns);
-        // VECTOR and native/embedded JSON columns set the reference's
-        // stmt._no_prefetch: rows prefetched during execute (before a client-side
-        // define is sent) arrive as bare LOB locators, not the inline VECTOR/OSON
-        // image, so they are discarded and re-fetched through the define path
-        // (reference base.pyx:1159-1164 + execute.pyx:99). Plain LOB columns keep
-        // their prefetch behavior because their locators are read on demand later.
+        // VECTOR columns set the reference's stmt._no_prefetch: rows prefetched
+        // during execute (before a client-side define is sent) are unreliable,
+        // so discard them and re-fetch through the define path (reference
+        // base.pyx:1159-1164 + execute.pyx:99). Scoped to VECTOR only so JSON
+        // and LOB fetch paths keep their existing prefetch behavior.
         if self.requires_define
             && result.cursor_id != 0
-            && self.columns.iter().any(|metadata| {
-                metadata.ora_type_num == ORA_TYPE_NUM_VECTOR
-                    || metadata.ora_type_num == ORA_TYPE_NUM_JSON
-                    || metadata.is_oson
-            })
+            && self
+                .columns
+                .iter()
+                .any(|metadata| metadata.ora_type_num == ORA_TYPE_NUM_VECTOR)
         {
             self.rows = Vec::new();
             self.more_rows = true;

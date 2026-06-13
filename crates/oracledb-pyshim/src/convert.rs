@@ -208,14 +208,14 @@ pub(crate) fn py_value_to_oson(value: &Bound<'_, PyAny>) -> PyResult<OsonValue> 
     Err(raise_python_type_not_supported(&value.get_type().into_any()))
 }
 
-/// Builds a [`BindValue::Json`] from a Python value. Pre-encoded OSON `bytes`
-/// are passed through unchanged; everything else is encoded to OSON. Long field
-/// names (>255 bytes) are permitted (OSON version 3); the encoder still emits
-/// version 1 when no long name is present, matching the live driver byte-for-byte.
+/// Builds a [`BindValue::Json`] from a Python value by encoding it to OSON.
+/// Every Python type (including `bytes`, which becomes an OSON binary scalar
+/// node) is encoded; the reference does not special-case pre-encoded images
+/// (test_6906 binds OSON bytes and they are re-wrapped as a binary node, then
+/// decoded again by the test). Long field names (>255 bytes) are permitted
+/// (OSON version 3); the encoder still emits version 1 when no long name is
+/// present, matching the live driver byte-for-byte.
 pub(crate) fn py_value_to_json_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> {
-    if let Ok(bytes) = value.cast::<PyBytes>() {
-        return Ok(BindValue::Json(bytes.as_bytes().to_vec()));
-    }
     let oson = py_value_to_oson(value)?;
     let image = oracledb::protocol::oson::encode_oson(&oson, true).map_err(runtime_error)?;
     Ok(BindValue::Json(image))
