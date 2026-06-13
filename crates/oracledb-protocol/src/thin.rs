@@ -341,7 +341,7 @@ impl Default for ClientCapabilities {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ColumnMetadata {
     pub name: String,
     pub ora_type_num: u8,
@@ -364,6 +364,16 @@ pub struct ColumnMetadata {
     pub vector_format: u8,
     /// VECTOR columns only: the metadata flags byte (sparse / flexible).
     pub vector_flags: u8,
+    /// SQL data-use-case domain schema (23ai+), or `None` if the column has no
+    /// domain.
+    pub domain_schema: Option<String>,
+    /// SQL data-use-case domain name (23ai+), or `None` if the column has no
+    /// domain.
+    pub domain_name: Option<String>,
+    /// Ordered column annotations (23ai+), as (key, value) pairs preserving
+    /// server order; `None` if the column has no annotations. A null annotation
+    /// value is normalized to an empty string, matching python-oracledb.
+    pub annotations: Option<Vec<(String, String)>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3476,6 +3486,9 @@ fn bind_column_metadata(value: &BindValue) -> ColumnMetadata {
         vector_dimensions: None,
         vector_format: 0,
         vector_flags: 0,
+        domain_schema: None,
+        domain_name: None,
+        annotations: None,
     }
 }
 
@@ -3898,9 +3911,12 @@ pub(crate) fn parse_column_metadata(
     let object_type_name = reader.read_string_with_length()?;
     let _column_position = reader.read_ub2()?;
     let uds_flags = reader.read_ub4()?;
+    let mut domain_schema = None;
+    let mut domain_name = None;
+    let mut annotations: Option<Vec<(String, String)>> = None;
     if capabilities.ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1 {
-        let _domain_schema = reader.read_string_with_length()?;
-        let _domain_name = reader.read_string_with_length()?;
+        domain_schema = reader.read_string_with_length()?;
+        domain_name = reader.read_string_with_length()?;
     }
     if capabilities.ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_3 {
         let num_annotations = reader.read_ub4()?;
@@ -3908,12 +3924,17 @@ pub(crate) fn parse_column_metadata(
             reader.skip(1)?;
             let num_annotations = reader.read_ub4()?;
             reader.skip(1)?;
+            let mut collected = Vec::with_capacity(num_annotations as usize);
             for _ in 0..num_annotations {
-                let _key = reader.read_string_with_length()?;
-                let _value = reader.read_string_with_length()?;
+                let key = reader.read_string_with_length()?.unwrap_or_default();
+                // A null annotation value is normalized to "" by the reference
+                // driver (python-oracledb base.pyx _process_metadata).
+                let value = reader.read_string_with_length()?.unwrap_or_default();
                 let _flags = reader.read_ub4()?;
+                collected.push((key, value));
             }
             let _flags = reader.read_ub4()?;
+            annotations = Some(collected);
         }
     }
     let mut vector_dimensions = None;
@@ -3946,6 +3967,9 @@ pub(crate) fn parse_column_metadata(
         vector_dimensions,
         vector_format,
         vector_flags,
+        domain_schema,
+        domain_name,
+        annotations,
     })
 }
 
@@ -5771,6 +5795,7 @@ mod tests {
             vector_dimensions: None,
             vector_format: 0,
             vector_flags: 0,
+            ..Default::default()
         };
 
         // VARCHAR -> CLOB fetches as LONG keeping the previous csfrm
@@ -6210,6 +6235,7 @@ mod tests {
             vector_dimensions: None,
             vector_format: 0,
             vector_flags: 0,
+            ..Default::default()
         }
     }
 
@@ -6231,6 +6257,7 @@ mod tests {
             vector_dimensions: None,
             vector_format: 0,
             vector_flags: 0,
+            ..Default::default()
         }
     }
 }

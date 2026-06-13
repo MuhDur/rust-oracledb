@@ -1652,6 +1652,7 @@ mod tests {
             vector_dimensions: None,
             vector_format: 0,
             vector_flags: 0,
+            ..Default::default()
         }
     }
 
