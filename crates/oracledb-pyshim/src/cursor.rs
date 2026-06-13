@@ -997,10 +997,19 @@ impl ThinCursorImpl {
         self.columns = result.columns;
         self.reset_fetch_define_state();
         self.requires_define = columns_require_define(&self.columns);
-        self.rows = result.rows;
+        // VECTOR/LOB/JSON columns set the reference's stmt._no_prefetch: rows
+        // prefetched during execute (before a client-side define is sent) are
+        // unreliable for these types, so discard them and re-fetch through the
+        // define path (reference base.pyx:1159-1164 + execute.pyx:99).
+        if self.requires_define && result.cursor_id != 0 {
+            self.rows = Vec::new();
+            self.more_rows = true;
+        } else {
+            self.rows = result.rows;
+            self.more_rows = result.more_rows;
+        }
         self.row_index = 0;
         self.cursor_id = result.cursor_id;
-        self.more_rows = result.more_rows;
         self.invalid_ref_cursor = false;
         self.last_rowid = result.last_rowid;
         self.rowcount = if is_plsql_statement {
@@ -1120,10 +1129,19 @@ impl ThinCursorImpl {
         self.columns = result.columns;
         self.reset_fetch_define_state();
         self.requires_define = columns_require_define(&self.columns);
-        self.rows = result.rows;
+        // VECTOR/LOB/JSON columns set the reference's stmt._no_prefetch: rows
+        // prefetched during execute (before a client-side define is sent) are
+        // unreliable for these types, so discard them and re-fetch through the
+        // define path (reference base.pyx:1159-1164 + execute.pyx:99).
+        if self.requires_define && result.cursor_id != 0 {
+            self.rows = Vec::new();
+            self.more_rows = true;
+        } else {
+            self.rows = result.rows;
+            self.more_rows = result.more_rows;
+        }
         self.row_index = 0;
         self.cursor_id = result.cursor_id;
-        self.more_rows = result.more_rows;
         self.invalid_ref_cursor = false;
         self.last_rowid = result.last_rowid;
         self.rowcount = if is_query || is_plsql {
