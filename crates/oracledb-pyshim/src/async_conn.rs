@@ -406,19 +406,35 @@ impl AsyncThinConnImpl {
         })
     }
 
-    /// Stage-1 pipeline contract (reference connection.py:2786-2796): report
-    /// no native pipelining support so the public layer routes every pipeline
-    /// through the sequential runner — the same fallback the reference takes
-    /// against servers without END_OF_RESPONSE support. Flips to a capability
-    /// check once the native pipeline transport lands.
+    /// Pipeline contract (reference connection.py:2786-2796): report no native
+    /// pipelining support so the public layer routes every pipeline through the
+    /// sequential runner — the same fallback the reference takes against servers
+    /// without END_OF_RESPONSE support.
+    ///
+    /// The native single-round-trip transport itself exists and is verified at
+    /// the driver layer (`oracledb::Connection::run_pipeline`: BEGIN_PIPELINE
+    /// piggyback, END_OF_REQUEST framing, end-pipeline FUNC 200, N+1
+    /// boundary-delimited responses — proven byte-for-byte against the reference
+    /// client by `oracledb-protocol/tests/pipeline_golden.rs` and live against a
+    /// 23ai container by `oracledb/tests/pipeline_live.rs`). It is NOT yet wired
+    /// into this Python-facing path: routing test_7600's full op matrix
+    /// (execute / executemany / callfunc / callproc / fetchall|many|one with
+    /// rowfactory, fetch_lobs, fetch_decimals, warnings, per-op continue-on-error
+    /// errors) through native pipelining requires re-deriving every result
+    /// attribute from the raw N+1 TTC payloads — a full re-implementation of the
+    /// cursor result layer that the sequential runner gets for free by delegating
+    /// to the already-proven public cursor API. Until that translation lands this
+    /// stays false so the flag never lies about which path actually runs.
     fn supports_pipelining(&self) -> bool {
         false
     }
 
-    /// Native single-round-trip pipelining is not implemented yet; until the
-    /// driver grows the BEGIN_PIPELINE/END_OF_REQUEST transport this delegates
-    /// to the sequential runner (public code never calls it while
-    /// `supports_pipelining` reports false).
+    /// Native single-round-trip pipelining is not wired into the pyshim yet (see
+    /// `supports_pipelining`); the driver-level transport exists and is verified,
+    /// but its raw-payload results are not yet translated back into
+    /// `PipelineOpResultImpl` attributes here, so this delegates to the
+    /// sequential runner. Public code never calls it while `supports_pipelining`
+    /// reports false.
     fn run_pipeline_with_pipelining(
         &self,
         py: Python<'_>,

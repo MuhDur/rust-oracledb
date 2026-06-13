@@ -14,6 +14,8 @@ pub const TNS_PACKET_TYPE_REDIRECT: u8 = 5;
 pub const TNS_PACKET_TYPE_DATA: u8 = 6;
 
 pub const TNS_DATA_FLAGS_EOF: u16 = 0x0040;
+pub const TNS_DATA_FLAGS_END_OF_REQUEST: u16 = 0x0800;
+pub const TNS_DATA_FLAGS_BEGIN_PIPELINE: u16 = 0x1000;
 pub const TNS_DATA_FLAGS_END_OF_RESPONSE: u16 = 0x2000;
 
 pub const TNS_MSG_TYPE_PROTOCOL: u8 = 1;
@@ -29,9 +31,11 @@ pub const TNS_MSG_TYPE_LOB_DATA: u8 = 14;
 pub const TNS_MSG_TYPE_FLUSH_OUT_BINDS: u8 = 19;
 pub const TNS_MSG_TYPE_BIT_VECTOR: u8 = 21;
 pub const TNS_MSG_TYPE_DESCRIBE_INFO: u8 = 16;
+pub const TNS_MSG_TYPE_PIGGYBACK: u8 = 17;
 pub const TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK: u8 = 23;
 pub const TNS_MSG_TYPE_IMPLICIT_RESULTSET: u8 = 27;
 pub const TNS_MSG_TYPE_END_OF_RESPONSE: u8 = 29;
+pub const TNS_MSG_TYPE_TOKEN: u8 = 33;
 
 pub const TNS_FUNC_AUTH_PHASE_ONE: u8 = 118;
 pub const TNS_FUNC_AUTH_PHASE_TWO: u8 = 115;
@@ -41,7 +45,12 @@ pub const TNS_FUNC_FETCH: u8 = 5;
 pub const TNS_FUNC_LOGOFF: u8 = 9;
 pub const TNS_FUNC_LOB_OP: u8 = 96;
 pub const TNS_FUNC_PING: u8 = 147;
+pub const TNS_FUNC_PIPELINE_BEGIN: u8 = 199;
+pub const TNS_FUNC_PIPELINE_END: u8 = 200;
 pub const TNS_FUNC_ROLLBACK: u8 = 15;
+
+pub const TNS_PIPELINE_MODE_CONTINUE_ON_ERROR: u8 = 1;
+pub const TNS_PIPELINE_MODE_ABORT_ON_ERROR: u8 = 2;
 
 pub const TNS_AUTH_MODE_LOGON: u32 = 0x0000_0001;
 pub const TNS_AUTH_MODE_CHANGE_PASSWORD: u32 = 0x0000_0002;
@@ -699,6 +708,9 @@ pub struct QueryResult {
     /// (`QueryValue::Cursor` entries); `Some` only when the response carried
     /// a TNS_MSG_TYPE_IMPLICIT_RESULTSET message.
     pub implicit_resultsets: Option<Vec<QueryValue>>,
+    /// Pipeline token echoed by the server (TNS message 33) at the start of
+    /// each pipelined response; `None` outside pipelines.
+    pub token_num: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -790,9 +802,51 @@ pub fn build_function_payload(function_code: u8) -> Vec<u8> {
 }
 
 pub fn build_function_payload_with_seq(function_code: u8, seq_num: u8) -> Vec<u8> {
+    build_function_payload_with_seq_and_token(function_code, seq_num, 0)
+}
+
+/// Bare function message with an explicit pipeline token (messages/base.pyx
+/// `_write_function_code` writes `ub8 token_num` for field version >= 23.1
+/// ext 1; non-pipelined messages carry 0).
+pub fn build_function_payload_with_seq_and_token(
+    function_code: u8,
+    seq_num: u8,
+    token_num: u64,
+) -> Vec<u8> {
     let mut writer = TtcWriter::new();
     writer.write_function_code_with_seq(function_code, seq_num);
-    writer.write_ub8(0);
+    writer.write_ub8(token_num);
+    writer.into_bytes()
+}
+
+/// Begin-pipeline piggyback (messages/base.pyx `_write_begin_pipeline_piggyback`
+/// and `_write_piggyback_code`): prepended to the first pipelined message's
+/// payload. The packet carrying it must set [`TNS_DATA_FLAGS_BEGIN_PIPELINE`].
+///
+/// `token_num` is the token of the message the piggyback rides on (1 for the
+/// first pipeline operation); `pipeline_mode` is one of
+/// [`TNS_PIPELINE_MODE_CONTINUE_ON_ERROR`] / [`TNS_PIPELINE_MODE_ABORT_ON_ERROR`].
+pub fn build_begin_pipeline_piggyback(seq_num: u8, token_num: u64, pipeline_mode: u8) -> Vec<u8> {
+    let mut writer = TtcWriter::new();
+    writer.write_u8(TNS_MSG_TYPE_PIGGYBACK);
+    writer.write_u8(TNS_FUNC_PIPELINE_BEGIN);
+    writer.write_u8(seq_num);
+    writer.write_ub8(token_num);
+    writer.write_ub2(0); // error set ID
+    writer.write_u8(0); // error set mode
+    writer.write_u8(pipeline_mode);
+    writer.into_bytes()
+}
+
+/// End-pipeline message (messages/end_pipeline.pyx): function 200 plus an
+/// unused ub4 identifier. Sent after every pipelined operation message; its
+/// packet carries no END_OF_REQUEST flag and its response is the final
+/// (N+1th) boundary-delimited response of the pipeline.
+pub fn build_end_pipeline_payload_with_seq(seq_num: u8) -> Vec<u8> {
+    let mut writer = TtcWriter::new();
+    writer.write_function_code_with_seq(TNS_FUNC_PIPELINE_END, seq_num);
+    writer.write_ub8(0); // token (the end-pipeline message itself has none)
+    writer.write_ub4(0); // error set ID (unused)
     writer.into_bytes()
 }
 
@@ -839,6 +893,10 @@ pub struct ExecuteOptions {
     pub arraydmlrowcounts: bool,
     /// Parse/describe without executing (reference `parse_only`).
     pub parse_only: bool,
+    /// Pipeline token; pipelined operations carry tokens 1..N
+    /// (impl/thin/connection.pyx `_create_messages_for_pipeline`),
+    /// everything else carries 0.
+    pub token_num: u64,
 }
 
 pub fn build_execute_payload_with_bind_rows_with_seq(
@@ -855,6 +913,30 @@ pub fn build_execute_payload_with_bind_rows_with_seq(
         is_query,
         bind_rows,
         ExecuteOptions::default(),
+    )
+}
+
+/// Execute message with an explicit pipeline token; pipelined operations
+/// carry tokens 1..N (impl/thin/connection.pyx `_create_messages_for_pipeline`),
+/// everything else carries 0.
+pub fn build_execute_payload_with_bind_rows_with_seq_and_token(
+    sql: &str,
+    prefetch_rows: u32,
+    seq_num: u8,
+    is_query: bool,
+    bind_rows: &[Vec<BindValue>],
+    token_num: u64,
+) -> Result<Vec<u8>> {
+    build_execute_payload_with_bind_rows_and_options_with_seq(
+        sql,
+        prefetch_rows,
+        seq_num,
+        is_query,
+        bind_rows,
+        ExecuteOptions {
+            token_num,
+            ..ExecuteOptions::default()
+        },
     )
 }
 
@@ -889,7 +971,7 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
         })?;
     let mut writer = TtcWriter::new();
     writer.write_function_code_with_seq(TNS_FUNC_EXECUTE, seq_num);
-    writer.write_ub8(0);
+    writer.write_ub8(exec_options.token_num);
 
     let is_plsql = statement_is_plsql(sql);
     let parse_only = exec_options.parse_only;
@@ -2582,6 +2664,12 @@ fn parse_query_response_with_context_binds_and_options(
                 result.implicit_resultsets = Some(resultsets);
             }
             TNS_MSG_TYPE_END_OF_RESPONSE => break,
+            // pipeline responses open with the token of the operation they
+            // answer (messages/base.pyx:288-293); callers compare it against
+            // the expected token (mismatch -> DPY-2052 at the driver layer)
+            TNS_MSG_TYPE_TOKEN => {
+                result.token_num = Some(reader.read_ub8()?);
+            }
             TNS_MSG_TYPE_ERROR => {
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
                 if info.cursor_id != 0 {

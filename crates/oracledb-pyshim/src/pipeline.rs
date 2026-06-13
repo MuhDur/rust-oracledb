@@ -82,13 +82,20 @@ async def _run_op(conn, result_impl):
             num_rows = op_impl.arraysize
         # the reference copies these op attributes onto the cursor impl in its
         # with-pipelining message builder (impl/thin/connection.pyx
-        # _create_message_for_pipeline_op); the tests assert that observable
-        # behavior, so the sequential runner honors them identically
+        # _create_message_for_pipeline_op) AFTER _prepare_for_execute, which
+        # resets the fetch flags from oracledb.defaults (impl/base/cursor.pyx
+        # 420-421). The tests assert that observable behavior, so the
+        # sequential runner routes the op fetch flags through the public
+        # execute() keywords, which the genuine cursor.py applies after
+        # prepare (cursor.py async execute, fetch_lobs/fetch_decimals).
         cursor._impl.prefetchrows = num_rows
         cursor._impl.arraysize = num_rows
-        cursor._impl.fetch_lobs = op_impl.fetch_lobs
-        cursor._impl.fetch_decimals = op_impl.fetch_decimals
-        await cursor.execute(op_impl.statement, op_impl.parameters)
+        await cursor.execute(
+            op_impl.statement,
+            op_impl.parameters,
+            fetch_lobs=op_impl.fetch_lobs,
+            fetch_decimals=op_impl.fetch_decimals,
+        )
         cursor.rowfactory = op_impl.rowfactory
         if op_type == PipelineOpType.FETCH_ALL:
             result_impl.rows = await cursor.fetchall()

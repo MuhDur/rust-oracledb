@@ -12,22 +12,26 @@ use asupersync::sync::Mutex as AsyncMutex;
 use asupersync::{time, Cx};
 use oracledb_protocol::thin::{
     adjust_refetch_metadata, build_auth_phase_two_payload_with_proxy_with_seq,
-    build_change_password_payload_with_seq, build_connect_packet_payload,
-    build_define_fetch_payload_with_seq, build_execute_payload_with_bind_rows_and_options_with_seq,
+    build_begin_pipeline_piggyback, build_change_password_payload_with_seq,
+    build_connect_packet_payload, build_define_fetch_payload_with_seq,
+    build_end_pipeline_payload_with_seq, build_execute_payload_with_bind_rows_and_options_with_seq,
+    build_execute_payload_with_bind_rows_with_seq_and_token,
     build_execute_payload_with_binds_with_seq, build_execute_payload_with_seq,
     build_fast_auth_phase_one_payload, build_fetch_payload_with_seq,
-    build_function_payload_with_seq, build_lob_create_temp_payload_with_seq,
-    build_lob_free_temp_payload_with_seq, build_lob_read_payload_with_seq,
-    build_lob_trim_payload_with_seq, build_lob_write_payload_with_seq, parse_accept_payload,
-    parse_auth_response, parse_fetch_response_with_context, parse_lob_create_temp_response,
+    build_function_payload_with_seq, build_function_payload_with_seq_and_token,
+    build_lob_create_temp_payload_with_seq, build_lob_free_temp_payload_with_seq,
+    build_lob_read_payload_with_seq, build_lob_trim_payload_with_seq,
+    build_lob_write_payload_with_seq, parse_accept_payload, parse_auth_response,
+    parse_fetch_response_with_context, parse_lob_create_temp_response,
     parse_lob_free_temp_response, parse_lob_read_response, parse_lob_trim_response,
     parse_lob_write_response, parse_plain_function_response, parse_query_response,
     parse_query_response_with_binds, parse_query_response_with_binds_and_options, BindValue,
     ClientCapabilities, ColumnMetadata, ExecuteOptions, LobReadResult, QueryResult,
-    TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK,
-    TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT,
-    TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT,
-    TNS_PACKET_TYPE_REFUSE,
+    TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF,
+    TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS,
+    TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA,
+    TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE, TNS_PIPELINE_MODE_ABORT_ON_ERROR,
+    TNS_PIPELINE_MODE_CONTINUE_ON_ERROR,
 };
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};
@@ -198,6 +202,7 @@ pub struct Connection {
     capabilities: ClientCapabilities,
     ttc_seq_num: u8,
     sdu: usize,
+    supports_end_of_response: bool,
     cursor_columns: BTreeMap<u32, Vec<ColumnMetadata>>,
     /// Fetch metadata of the most recent execution keyed by SQL text,
     /// mirroring the reference statement cache's per-statement
@@ -212,6 +217,17 @@ pub struct Connection {
     /// Session combo key from verifier generation, retained for the
     /// change-password call (reference keeps `conn_impl._combo_key`).
     combo_key: Vec<u8>,
+}
+
+/// One operation in a pipelined batch (`Connection::run_pipeline`).
+#[derive(Clone, Debug)]
+pub enum PipelineRequest {
+    Execute {
+        sql: String,
+        bind_rows: Vec<Vec<BindValue>>,
+        prefetch_rows: u32,
+    },
+    Commit,
 }
 
 #[derive(Debug)]
@@ -351,6 +367,7 @@ impl Connection {
             capabilities,
             ttc_seq_num,
             sdu,
+            supports_end_of_response: accept_info.supports_end_of_response,
             cursor_columns: BTreeMap::new(),
             fetch_metadata_by_sql: HashMap::new(),
             fetch_metadata_order: VecDeque::new(),
@@ -388,6 +405,13 @@ impl Connection {
 
     pub fn sdu(&self) -> usize {
         self.sdu
+    }
+
+    /// Whether the server negotiated END_OF_RESPONSE framing at accept time
+    /// (protocol version >= 319 with TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE) --
+    /// the prerequisite for pipelining (impl/thin/capabilities.pyx:126-130).
+    pub fn supports_pipelining(&self) -> bool {
+        self.supports_end_of_response
     }
 
     pub fn cancel_handle(&self) -> Result<CancelHandle> {
@@ -1411,6 +1435,101 @@ impl Connection {
         Ok(())
     }
 
+    /// Runs a batch of operations as a true wire pipeline (single round trip):
+    /// every request is written before anything is read, then the N+1
+    /// boundary-delimited responses (one per operation plus the end-pipeline
+    /// response) are returned as raw TTC payloads in token order. Mirrors the
+    /// reference flow (impl/thin/connection.pyx `run_pipeline_with_pipelining`
+    /// and protocol.pyx `end_pipeline`):
+    ///
+    /// * the first message is prefixed with the begin-pipeline piggyback and
+    ///   its first packet carries TNS_DATA_FLAGS_BEGIN_PIPELINE,
+    /// * each operation message carries token 1..N and its final packet
+    ///   carries TNS_DATA_FLAGS_END_OF_REQUEST,
+    /// * the end-pipeline message (function 200) closes the batch,
+    /// * marker packets received while reading pipeline responses are dropped
+    ///   without sending a reset (packet.pyx:346-370),
+    /// * responses are read for every operation even after a server error --
+    ///   the server answers each message in both pipeline modes, so callers
+    ///   parse per-operation payloads and decide error semantics.
+    pub async fn run_pipeline(
+        &mut self,
+        cx: &Cx,
+        requests: &[PipelineRequest],
+        continue_on_error: bool,
+    ) -> Result<Vec<Vec<u8>>> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        if requests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pipeline_mode = if continue_on_error {
+            TNS_PIPELINE_MODE_CONTINUE_ON_ERROR
+        } else {
+            TNS_PIPELINE_MODE_ABORT_ON_ERROR
+        };
+        for (index, request) in requests.iter().enumerate() {
+            let token_num = index as u64 + 1;
+            let mut payload = Vec::new();
+            let mut first_packet_flags = 0u16;
+            if index == 0 {
+                let piggyback_seq = next_ttc_sequence(&mut self.ttc_seq_num);
+                payload.extend_from_slice(&build_begin_pipeline_piggyback(
+                    piggyback_seq,
+                    token_num,
+                    pipeline_mode,
+                ));
+                first_packet_flags |= TNS_DATA_FLAGS_BEGIN_PIPELINE;
+            }
+            let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+            match request {
+                PipelineRequest::Execute {
+                    sql,
+                    bind_rows,
+                    prefetch_rows,
+                } => payload.extend_from_slice(
+                    &build_execute_payload_with_bind_rows_with_seq_and_token(
+                        sql,
+                        *prefetch_rows,
+                        seq_num,
+                        statement_is_query(sql),
+                        bind_rows,
+                        token_num,
+                    )?,
+                ),
+                PipelineRequest::Commit => {
+                    payload.extend_from_slice(&build_function_payload_with_seq_and_token(
+                        TNS_FUNC_COMMIT,
+                        seq_num,
+                        token_num,
+                    ));
+                }
+            }
+            trace_query_bytes("PIPELINE op payload", &payload);
+            send_data_packet_shared_with_flags(
+                cx,
+                &self.write,
+                &payload,
+                self.sdu,
+                first_packet_flags,
+                TNS_DATA_FLAGS_END_OF_REQUEST,
+            )
+            .await?;
+        }
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let end_payload = build_end_pipeline_payload_with_seq(seq_num);
+        trace_query_bytes("PIPELINE end payload", &end_payload);
+        send_data_packet_shared(cx, &self.write, &end_payload, self.sdu).await?;
+        let mut responses = Vec::with_capacity(requests.len() + 1);
+        for _ in 0..=requests.len() {
+            let response =
+                read_data_response_boundary(&mut self.read, cx, &self.write, true).await?;
+            trace_query_bytes("PIPELINE response", &response.payload);
+            responses.push(response.payload);
+        }
+        Ok(responses)
+    }
+
     async fn send_function(&mut self, cx: &Cx, function_code: u8) -> Result<()> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
@@ -1812,6 +1931,21 @@ impl BlockingConnection {
         })
     }
 
+    pub fn run_pipeline(
+        connection: &mut Connection,
+        requests: &[PipelineRequest],
+        continue_on_error: bool,
+    ) -> Result<Vec<Vec<u8>>> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .run_pipeline(&cx, requests, continue_on_error)
+                .await
+        })
+    }
+
     pub fn drain_cancel_response(connection: &mut Connection) -> Result<()> {
         let runtime = build_io_runtime()?;
         runtime.block_on(async {
@@ -1895,6 +2029,25 @@ async fn send_data_packet_shared(
     send_data_packet(&mut *guard, payload, sdu).await
 }
 
+async fn send_data_packet_shared_with_flags(
+    cx: &Cx,
+    write: &SharedWriteHalf,
+    payload: &[u8],
+    sdu: usize,
+    first_packet_flags: u16,
+    last_packet_flags: u16,
+) -> Result<()> {
+    let mut guard = lock_write(cx, write).await?;
+    send_data_packet_with_flags(
+        &mut *guard,
+        payload,
+        sdu,
+        first_packet_flags,
+        last_packet_flags,
+    )
+    .await
+}
+
 async fn send_marker_shared(cx: &Cx, write: &SharedWriteHalf, marker_type: u8) -> Result<()> {
     let mut guard = lock_write(cx, write).await?;
     send_marker(&mut *guard, marker_type).await
@@ -1904,12 +2057,39 @@ async fn send_data_packet<W>(stream: &mut W, payload: &[u8], sdu: usize) -> Resu
 where
     W: AsyncWrite + Unpin,
 {
+    send_data_packet_with_flags(stream, payload, sdu, 0, 0).await
+}
+
+/// Sends a TTC payload as one or more data packets, applying
+/// `first_packet_flags` to the first packet and `last_packet_flags` to the
+/// last (combined when the payload fits a single packet) -- the WriteBuffer
+/// `_data_flags` semantics the pipeline framing relies on (BEGIN_PIPELINE on
+/// the packet carrying the begin piggyback, END_OF_REQUEST on a message's
+/// final packet).
+async fn send_data_packet_with_flags<W>(
+    stream: &mut W,
+    payload: &[u8],
+    sdu: usize,
+    first_packet_flags: u16,
+    last_packet_flags: u16,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     let max_payload = sdu.saturating_sub(TNS_DATA_PACKET_OVERHEAD).max(1);
-    for chunk in payload.chunks(max_payload) {
+    let chunk_count = payload.chunks(max_payload).len();
+    for (index, chunk) in payload.chunks(max_payload).enumerate() {
+        let mut flags = 0u16;
+        if index == 0 {
+            flags |= first_packet_flags;
+        }
+        if index + 1 == chunk_count {
+            flags |= last_packet_flags;
+        }
         let packet = encode_packet(
             TNS_PACKET_TYPE_DATA,
             0,
-            Some(0),
+            Some(flags),
             chunk,
             PacketLengthWidth::Large32,
         )?;
@@ -1929,7 +2109,9 @@ async fn read_data_response(
     cx: &Cx,
     write: &SharedWriteHalf,
 ) -> Result<Vec<u8>> {
-    Ok(read_data_response_boundary(read, cx, write).await?.payload)
+    Ok(read_data_response_boundary(read, cx, write, false)
+        .await?
+        .payload)
 }
 
 async fn read_data_response_flushing_out_binds(
@@ -1938,23 +2120,30 @@ async fn read_data_response_flushing_out_binds(
     write: &SharedWriteHalf,
     sdu: usize,
 ) -> Result<Vec<u8>> {
-    let mut response = read_data_response_boundary(read, cx, write).await?;
+    let mut response = read_data_response_boundary(read, cx, write, false).await?;
     let mut payload = response.payload;
     while response.flush_out_binds {
         if matches!(payload.last(), Some(&TNS_MSG_TYPE_FLUSH_OUT_BINDS)) {
             payload.pop();
         }
         send_data_packet_shared(cx, write, &[TNS_MSG_TYPE_FLUSH_OUT_BINDS], sdu).await?;
-        response = read_data_response_boundary(read, cx, write).await?;
+        response = read_data_response_boundary(read, cx, write, false).await?;
         payload.extend_from_slice(&response.payload);
     }
     Ok(payload)
 }
 
+/// Reads one boundary-delimited TTC response. While `in_pipeline` is set,
+/// marker packets are silently dropped instead of triggering the
+/// send-reset/await-reset dance -- the reference does the same while reading
+/// pipelined responses (packet.pyx:346-370, protocol.pyx:889-906), since the
+/// server emits a marker alongside an in-pipeline error without expecting a
+/// reset exchange.
 async fn read_data_response_boundary(
     read: &mut OwnedReadHalf,
     cx: &Cx,
     write: &SharedWriteHalf,
+    in_pipeline: bool,
 ) -> Result<DataResponse> {
     let mut response = Vec::new();
     let mut flush_out_binds = false;
@@ -1965,6 +2154,10 @@ async fn read_data_response_boundary(
             None => read_packet(read, PacketLengthWidth::Large32).await?,
         };
         if packet.packet_type == TNS_PACKET_TYPE_MARKER {
+            if in_pipeline {
+                trace_connect_bytes("MARKER packet skipped in pipeline", &packet.payload);
+                continue;
+            }
             pending_packet = reset_after_marker(read, cx, write, &packet).await?;
             continue;
         }
