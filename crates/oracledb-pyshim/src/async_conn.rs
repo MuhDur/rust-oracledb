@@ -569,6 +569,14 @@ impl AsyncThinConnImpl {
         })
     }
 
+    fn create_queue_impl(&self) -> crate::aq::AsyncThinQueueImpl {
+        crate::aq::AsyncThinQueueImpl::new()
+    }
+
+    fn create_msg_props_impl(&self) -> crate::aq::ThinMsgPropsImpl {
+        crate::aq::ThinMsgPropsImpl::new()
+    }
+
     /// Pipeline contract (reference connection.py:2786-2796): report no native
     /// pipelining support so the public layer routes every pipeline through the
     /// sequential runner — the same fallback the reference takes against servers

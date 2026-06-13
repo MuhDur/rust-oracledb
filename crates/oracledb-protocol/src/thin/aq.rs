@@ -417,7 +417,9 @@ pub fn parse_aq_enq_response(
             TNS_MSG_TYPE_ERROR => {
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
                 if info.number != 0 {
-                    return Err(ProtocolError::ServerError(info.message));
+                    return Err(ProtocolError::ServerErrorInfo(Box::new(
+                        info.into_details(),
+                    )));
                 }
             }
             _ => {
@@ -592,7 +594,9 @@ pub fn parse_aq_deq_response(
                 if info.number == TNS_ERR_NO_MESSAGES_FOUND as u32 {
                     no_msg_found = true;
                 } else if info.number != 0 {
-                    return Err(ProtocolError::ServerError(info.message));
+                    return Err(ProtocolError::ServerErrorInfo(Box::new(
+                        info.into_details(),
+                    )));
                 }
             }
             _ => {
@@ -836,7 +840,9 @@ pub fn parse_aq_array_response(
                 if info.number == TNS_ERR_NO_MESSAGES_FOUND as u32 {
                     no_msg_found = true;
                 } else if info.number != 0 {
-                    return Err(ProtocolError::ServerError(info.message));
+                    return Err(ProtocolError::ServerErrorInfo(Box::new(
+                        info.into_details(),
+                    )));
                 }
             }
             _ => {
@@ -905,16 +911,20 @@ fn process_msg_props(
     Ok(())
 }
 
-/// Reads an Oracle date prefixed with a ub4 length (reference `_process_date`).
+/// Reads an Oracle date the way the reference `_process_date` does: a ub4
+/// presence flag, then `read_raw_bytes_and_length` (a single u8 length byte
+/// followed by that many raw date bytes).
 fn process_date(reader: &mut TtcReader<'_>) -> Result<Option<QueryValue>> {
     let num_bytes = reader.read_ub4()?;
     if num_bytes == 0 {
         return Ok(None);
     }
-    let bytes = reader
-        .read_bytes_with_length()?
-        .ok_or(ProtocolError::TtcDecode("AQ enqueue-time date missing"))?;
-    Ok(Some(decode_datetime_value(&bytes)?))
+    let len = usize::from(reader.read_u8()?);
+    if len == 0 {
+        return Ok(None);
+    }
+    let bytes = reader.read_raw(len)?;
+    Ok(Some(decode_datetime_value(bytes)?))
 }
 
 fn process_extensions(reader: &mut TtcReader<'_>) -> Result<()> {
