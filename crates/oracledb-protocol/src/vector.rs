@@ -152,7 +152,7 @@ fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<V
             let mut out = Vec::with_capacity(count);
             for _ in 0..count {
                 let raw = reader.read_raw(4)?;
-                out.push(f32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]));
+                out.push(decode_binary_float([raw[0], raw[1], raw[2], raw[3]]));
             }
             Ok(VectorValues::Float32(out))
         }
@@ -160,7 +160,7 @@ fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<V
             let mut out = Vec::with_capacity(count);
             for _ in 0..count {
                 let raw = reader.read_raw(8)?;
-                out.push(f64::from_be_bytes([
+                out.push(decode_binary_double([
                     raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
                 ]));
             }
@@ -242,12 +242,12 @@ fn encode_values(buf: &mut Vec<u8>, values: &VectorValues) {
     match values {
         VectorValues::Float32(v) => {
             for value in v {
-                buf.extend_from_slice(&value.to_be_bytes());
+                buf.extend_from_slice(&encode_binary_float(*value));
             }
         }
         VectorValues::Float64(v) => {
             for value in v {
-                buf.extend_from_slice(&value.to_be_bytes());
+                buf.extend_from_slice(&encode_binary_double(*value));
             }
         }
         VectorValues::Int8(v) => {
@@ -257,6 +257,65 @@ fn encode_values(buf: &mut Vec<u8>, values: &VectorValues) {
         }
         VectorValues::Binary(v) => buf.extend_from_slice(v),
     }
+}
+
+// VECTOR float elements are stored in Oracle's BINARY_FLOAT / BINARY_DOUBLE wire
+// form (reference `VectorDecoder._decode_values` / `VectorEncoder._encode_values`
+// in `impl/base/vector.pyx`, which call `decode_binary_float` / `encode_binary_double`
+// from `decoders.pyx` / `encoders.pyx`), NOT plain IEEE-754 big-endian. The
+// transform makes the byte order sort-comparable: a positive value gets its sign
+// bit set; a negative value has every bit inverted.
+
+/// Decode an Oracle BINARY_DOUBLE-encoded f64 element.
+fn decode_binary_double(bytes: [u8; 8]) -> f64 {
+    let mut decoded = bytes;
+    if decoded[0] & 0x80 != 0 {
+        decoded[0] &= 0x7f;
+    } else {
+        for byte in &mut decoded {
+            *byte = !*byte;
+        }
+    }
+    f64::from_bits(u64::from_be_bytes(decoded))
+}
+
+/// Decode an Oracle BINARY_FLOAT-encoded f32 element.
+fn decode_binary_float(bytes: [u8; 4]) -> f32 {
+    let mut decoded = bytes;
+    if decoded[0] & 0x80 != 0 {
+        decoded[0] &= 0x7f;
+    } else {
+        for byte in &mut decoded {
+            *byte = !*byte;
+        }
+    }
+    f32::from_bits(u32::from_be_bytes(decoded))
+}
+
+/// Encode an f64 element in Oracle BINARY_DOUBLE wire form.
+fn encode_binary_double(value: f64) -> [u8; 8] {
+    let mut bytes = value.to_bits().to_be_bytes();
+    if bytes[0] & 0x80 == 0 {
+        bytes[0] |= 0x80;
+    } else {
+        for byte in &mut bytes {
+            *byte = !*byte;
+        }
+    }
+    bytes
+}
+
+/// Encode an f32 element in Oracle BINARY_FLOAT wire form.
+fn encode_binary_float(value: f32) -> [u8; 4] {
+    let mut bytes = value.to_bits().to_be_bytes();
+    if bytes[0] & 0x80 == 0 {
+        bytes[0] |= 0x80;
+    } else {
+        for byte in &mut bytes {
+            *byte = !*byte;
+        }
+    }
+    bytes
 }
 
 // VECTOR images use plain big-endian fixed-width integers in the header (not
@@ -352,6 +411,42 @@ mod tests {
             indices: vec![2],
             values: VectorValues::Int8(vec![42]),
         });
+    }
+
+    // Regression: VECTOR float elements use Oracle's BINARY_FLOAT/DOUBLE
+    // sign-transform wire form, NOT plain IEEE-754 big-endian. A positive value
+    // gets its sign bit set; a negative value has every bit inverted. Pinning
+    // the exact element bytes guards against a regression back to plain
+    // `to_be_bytes`/`from_be_bytes`, which silently negates positive values and
+    // corrupts negatives (the w3-async P0 bug).
+    #[test]
+    fn float_elements_use_oracle_binary_transform() {
+        // f64 1.0 -> sign bit set -> 0xbff0_0000_0000_0000 (NOT 0x3ff0...).
+        let image = encode_vector(&Vector::Dense(VectorValues::Float64(vec![1.0, -2.0])));
+        let body = &image[17..]; // 1 magic + 1 ver + 2 flags + 1 fmt + 4 num + 8 norm
+        assert_eq!(&body[0..8], &[0xbf, 0xf0, 0, 0, 0, 0, 0, 0], "f64 +1.0");
+        // f64 -2.0 -> negative -> every bit inverted from 0xc000... -> 0x3fff...
+        assert_eq!(
+            &body[8..16],
+            &[0x3f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            "f64 -2.0"
+        );
+
+        // f32 1.0 -> 0xbf80_0000 (NOT 0x3f80_0000).
+        let image32 = encode_vector(&Vector::Dense(VectorValues::Float32(vec![1.0, -2.0])));
+        let body32 = &image32[17..];
+        assert_eq!(&body32[0..4], &[0xbf, 0x80, 0, 0], "f32 +1.0");
+        assert_eq!(&body32[4..8], &[0x3f, 0xff, 0xff, 0xff], "f32 -2.0");
+
+        // Decoding the same bytes must recover the originals exactly.
+        assert_eq!(
+            decode_vector(&image).expect("decode f64"),
+            Vector::Dense(VectorValues::Float64(vec![1.0, -2.0]))
+        );
+        assert_eq!(
+            decode_vector(&image32).expect("decode f32"),
+            Vector::Dense(VectorValues::Float32(vec![1.0, -2.0]))
+        );
     }
 
     #[test]
