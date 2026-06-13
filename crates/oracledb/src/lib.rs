@@ -125,6 +125,11 @@ use asupersync::net::{OwnedReadHalf, OwnedWriteHalf, TcpStream};
 use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
 use asupersync::sync::Mutex as AsyncMutex;
 use asupersync::{time, Cx};
+use oracledb_protocol::thin::aq::{
+    build_aq_array_deq_payload, build_aq_array_enq_payload, build_aq_deq_payload,
+    build_aq_enq_payload, parse_aq_array_response, parse_aq_deq_response, parse_aq_enq_response,
+    AqArrayResult, AqDeqOptions, AqDeqResult, AqEnqOptions, AqMsgProps, AqQueueDesc,
+};
 use oracledb_protocol::thin::{
     adjust_refetch_metadata, build_auth_phase_two_payload_with_proxy_with_seq,
     build_begin_pipeline_piggyback, build_change_password_payload_with_seq,
@@ -150,6 +155,7 @@ use oracledb_protocol::thin::{
     TPC_TXN_FLAGS_RESUME, TPC_TXN_FLAGS_SESSIONLESS,
 };
 use oracledb_protocol::thin::{build_sessionless_piggyback, build_tpc_txn_switch_payload_with_seq};
+use oracledb_protocol::thin::{TNS_AQ_ARRAY_DEQ, TNS_AQ_ARRAY_ENQ};
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};
 
@@ -666,6 +672,14 @@ impl Connection {
     /// (reference messages/auth.pyx `_get_version_tuple`).
     pub fn server_version_tuple(&self) -> Option<(u8, u8, u8, u8, u8)> {
         self.server_version_tuple
+    }
+
+    /// Whether the server supports OSON long field names (server major version
+    /// >= 23). Mirrors the reference `conn_impl.supports_oson_long_field_names`.
+    fn supports_oson_long_fnames(&self) -> bool {
+        self.server_version_tuple
+            .map(|(major, ..)| major >= 23)
+            .unwrap_or(false)
     }
 
     pub fn sdu(&self) -> usize {
@@ -1589,6 +1603,128 @@ impl Connection {
     ) -> Result<LobReadResult> {
         self.read_lob_call_timeout(cx, locator, offset, amount, timeout_ms)
             .await
+    }
+
+    /// Enqueues a single AQ message (FUNC 121), returning the assigned 16-byte
+    /// message id. The TTC round-trip mirrors `read_lob`.
+    pub async fn aq_enq_one(
+        &mut self,
+        cx: &Cx,
+        queue: &AqQueueDesc,
+        props: &AqMsgProps,
+        enq_options: &AqEnqOptions,
+    ) -> Result<Option<Vec<u8>>> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = build_aq_enq_payload(
+            queue,
+            props,
+            enq_options,
+            seq_num,
+            self.capabilities.ttc_field_version,
+            self.supports_oson_long_fnames(),
+        )?;
+        trace_query_bytes("AQ ENQ payload", &payload);
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        trace_query_bytes("AQ ENQ response", &response);
+        self.note_parse(parse_aq_enq_response(&response, self.capabilities))
+    }
+
+    /// Dequeues a single AQ message (FUNC 122). Returns `None` when the queue is
+    /// empty (ORA-25228 cleared server-side).
+    pub async fn aq_deq_one(
+        &mut self,
+        cx: &Cx,
+        queue: &AqQueueDesc,
+        deq_options: &AqDeqOptions,
+    ) -> Result<AqDeqResult> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = build_aq_deq_payload(
+            queue,
+            deq_options,
+            seq_num,
+            self.capabilities.ttc_field_version,
+        )?;
+        trace_query_bytes("AQ DEQ payload", &payload);
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        trace_query_bytes("AQ DEQ response", &response);
+        self.note_parse(parse_aq_deq_response(
+            &response,
+            self.capabilities,
+            &queue.kind,
+        ))
+    }
+
+    /// Enqueues many AQ messages in one array round-trip (FUNC 145, op=ENQ),
+    /// returning the assigned msgid per input message in order.
+    pub async fn aq_enq_many(
+        &mut self,
+        cx: &Cx,
+        queue: &AqQueueDesc,
+        props_list: &[AqMsgProps],
+        enq_options: &AqEnqOptions,
+    ) -> Result<Vec<Vec<u8>>> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = build_aq_array_enq_payload(
+            queue,
+            props_list,
+            enq_options,
+            seq_num,
+            self.capabilities.ttc_field_version,
+            self.supports_oson_long_fnames(),
+        )?;
+        trace_query_bytes("AQ ARRAY ENQ payload", &payload);
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        trace_query_bytes("AQ ARRAY ENQ response", &response);
+        let result: AqArrayResult = self.note_parse(parse_aq_array_response(
+            &response,
+            self.capabilities,
+            TNS_AQ_ARRAY_ENQ,
+            props_list.len() as u32,
+            &queue.kind,
+        ))?;
+        Ok(result.enq_msgids)
+    }
+
+    /// Dequeues up to `max_num_messages` AQ messages in one array round-trip
+    /// (FUNC 145, op=DEQ). Returns the dequeued messages (empty when none).
+    pub async fn aq_deq_many(
+        &mut self,
+        cx: &Cx,
+        queue: &AqQueueDesc,
+        deq_options: &AqDeqOptions,
+        max_num_messages: u32,
+    ) -> Result<Vec<oracledb_protocol::thin::aq::AqDeqMessage>> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = build_aq_array_deq_payload(
+            queue,
+            deq_options,
+            max_num_messages,
+            seq_num,
+            self.capabilities.ttc_field_version,
+        )?;
+        trace_query_bytes("AQ ARRAY DEQ payload", &payload);
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        trace_query_bytes("AQ ARRAY DEQ response", &response);
+        let result: AqArrayResult = self.note_parse(parse_aq_array_response(
+            &response,
+            self.capabilities,
+            TNS_AQ_ARRAY_DEQ,
+            max_num_messages,
+            &queue.kind,
+        ))?;
+        Ok(result.deq_messages)
     }
 
     pub async fn create_temp_lob(
@@ -2879,6 +3015,65 @@ impl BlockingConnection {
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection
                 .read_lob_call_timeout(&cx, locator, offset, amount, timeout_ms)
+                .await
+        })
+    }
+
+    pub fn aq_enq_one(
+        connection: &mut Connection,
+        queue: &AqQueueDesc,
+        props: &AqMsgProps,
+        enq_options: &AqEnqOptions,
+    ) -> Result<Option<Vec<u8>>> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.aq_enq_one(&cx, queue, props, enq_options).await
+        })
+    }
+
+    pub fn aq_deq_one(
+        connection: &mut Connection,
+        queue: &AqQueueDesc,
+        deq_options: &AqDeqOptions,
+    ) -> Result<AqDeqResult> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.aq_deq_one(&cx, queue, deq_options).await
+        })
+    }
+
+    pub fn aq_enq_many(
+        connection: &mut Connection,
+        queue: &AqQueueDesc,
+        props_list: &[AqMsgProps],
+        enq_options: &AqEnqOptions,
+    ) -> Result<Vec<Vec<u8>>> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .aq_enq_many(&cx, queue, props_list, enq_options)
+                .await
+        })
+    }
+
+    pub fn aq_deq_many(
+        connection: &mut Connection,
+        queue: &AqQueueDesc,
+        deq_options: &AqDeqOptions,
+        max_num_messages: u32,
+    ) -> Result<Vec<oracledb_protocol::thin::aq::AqDeqMessage>> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .aq_deq_many(&cx, queue, deq_options, max_num_messages)
                 .await
         })
     }
