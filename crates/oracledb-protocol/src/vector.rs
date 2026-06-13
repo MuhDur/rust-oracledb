@@ -174,7 +174,9 @@ fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<V
             Ok(VectorValues::Int8(out))
         }
         VECTOR_FORMAT_BINARY => Ok(VectorValues::Binary(reader.read_raw(count)?.to_vec())),
-        _ => Err(ProtocolError::TtcDecode("vector: unsupported element format")),
+        _ => Err(ProtocolError::TtcDecode(
+            "vector: unsupported element format",
+        )),
     }
 }
 
@@ -321,11 +323,15 @@ mod tests {
 
     #[test]
     fn roundtrips_every_dense_format() {
-        roundtrip(Vector::Dense(VectorValues::Float32(vec![1.5, -2.25, 3.0, 0.0])));
+        roundtrip(Vector::Dense(VectorValues::Float32(vec![
+            1.5, -2.25, 3.0, 0.0,
+        ])));
         roundtrip(Vector::Dense(VectorValues::Float64(vec![
             6501.0, 25.25, 18.125, -3.5,
         ])));
-        roundtrip(Vector::Dense(VectorValues::Int8(vec![-5, 1, -2, 127, -128])));
+        roundtrip(Vector::Dense(VectorValues::Int8(vec![
+            -5, 1, -2, 127, -128,
+        ])));
         roundtrip(Vector::Dense(VectorValues::Binary(vec![0xA5, 0x3C])));
     }
 
@@ -350,7 +356,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_magic() {
-        let err = decode_vector(&[0x00, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap_err();
+        let err = decode_vector(&[0x00, 0, 0, 0, 0, 0, 0, 0, 0]).expect_err("bad magic must fail");
         assert!(matches!(err, ProtocolError::TtcDecode(_)));
     }
 
@@ -358,7 +364,7 @@ mod tests {
     fn rejects_unsupported_version() {
         let mut image = encode_vector(&Vector::Dense(VectorValues::Int8(vec![1])));
         image[1] = 99; // bump version past WITH_SPARSE
-        let err = decode_vector(&image).unwrap_err();
+        let err = decode_vector(&image).expect_err("bad version must fail");
         assert!(matches!(err, ProtocolError::TtcDecode(_)));
     }
 
@@ -375,31 +381,28 @@ mod tests {
     //    (DB-validated round-trips). See tests/golden/vectors.json. --
 
     fn build_from_golden(entry: &Value) -> Vector {
-        let typecode = entry["typecode"].as_str().unwrap();
+        let typecode = entry["typecode"].as_str().expect("typecode");
+        let f64_at = |x: &Value| x.as_f64().expect("number");
+        let i64_at = |x: &Value| x.as_i64().expect("int");
+        let u64_at = |x: &Value| x.as_u64().expect("uint");
         let make_values = |arr: &Value| -> VectorValues {
-            let v = arr.as_array().unwrap();
+            let v = arr.as_array().expect("array");
             match typecode {
-                "f" => VectorValues::Float32(
-                    v.iter().map(|x| x.as_f64().unwrap() as f32).collect(),
-                ),
-                "d" => VectorValues::Float64(v.iter().map(|x| x.as_f64().unwrap()).collect()),
-                "b" => {
-                    VectorValues::Int8(v.iter().map(|x| x.as_i64().unwrap() as i8).collect())
-                }
-                "B" => {
-                    VectorValues::Binary(v.iter().map(|x| x.as_u64().unwrap() as u8).collect())
-                }
+                "f" => VectorValues::Float32(v.iter().map(|x| f64_at(x) as f32).collect()),
+                "d" => VectorValues::Float64(v.iter().map(f64_at).collect()),
+                "b" => VectorValues::Int8(v.iter().map(|x| i64_at(x) as i8).collect()),
+                "B" => VectorValues::Binary(v.iter().map(|x| u64_at(x) as u8).collect()),
                 other => panic!("unknown typecode {other}"),
             }
         };
         if entry["kind"] == "sparse" {
             Vector::Sparse {
-                num_dimensions: entry["num_dimensions"].as_u64().unwrap() as u32,
+                num_dimensions: u64_at(&entry["num_dimensions"]) as u32,
                 indices: entry["indices"]
                     .as_array()
-                    .unwrap()
+                    .expect("indices array")
                     .iter()
-                    .map(|x| x.as_u64().unwrap() as u32)
+                    .map(|x| u64_at(x) as u32)
                     .collect(),
                 values: make_values(&entry["values"]),
             }
@@ -415,7 +418,7 @@ mod tests {
         let obj = golden.as_object().expect("golden is an object");
         assert!(!obj.is_empty(), "golden capture must not be empty");
         for (name, entry) in obj {
-            let expected_hex = entry["image_hex"].as_str().unwrap();
+            let expected_hex = entry["image_hex"].as_str().expect("image_hex");
             let expected = hex::decode(expected_hex).expect("decode golden hex");
 
             // encode our model -> must equal the captured image byte-for-byte

@@ -76,9 +76,7 @@ pub const ORA_TYPE_NUM_UROWID: u8 = 208;
 pub const ORA_TYPE_NUM_TIMESTAMP_LTZ: u8 = 231;
 pub const ORA_TYPE_NUM_VECTOR: u8 = 127;
 /// Maximum VECTOR prefetch length (`TNS_VECTOR_MAX_LENGTH` = 1 MiB).
-const TNS_VECTOR_MAX_LENGTH: u32 = 1 * 1024 * 1024;
-/// Sparse-vector marker in the describe metadata `vector_flags` byte.
-const VECTOR_META_FLAG_SPARSE_VECTOR: u8 = 0x02;
+const TNS_VECTOR_MAX_LENGTH: u32 = 1024 * 1024;
 pub const TNS_OBJ_TOP_LEVEL: u32 = 0x01;
 const TNS_LONG_LENGTH_INDICATOR: u8 = 254;
 const TNS_NULL_LENGTH_INDICATOR: u8 = 255;
