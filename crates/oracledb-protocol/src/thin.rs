@@ -2590,8 +2590,19 @@ fn parse_query_response_with_context_binds_and_options(
             0 => {}
             TNS_MSG_TYPE_DESCRIBE_INFO => {
                 let _describe_name = reader.read_bytes()?;
-                result.columns.clear();
+                let previous = std::mem::take(&mut result.columns);
                 parse_describe_info(&mut reader, capabilities, &mut result)?;
+                // re-executing an open cursor whose underlying types changed:
+                // the server re-describes mid-response but still streams the
+                // row data in the adjusted (LONG/LONG RAW) form expected by
+                // the previous fetch metadata (reference `_adjust_metadata`,
+                // impl/thin/messages/base.pyx:820-845, applied during
+                // `_process_describe_info`).
+                for (index, column) in result.columns.iter_mut().enumerate() {
+                    if let Some(prev) = previous.get(index) {
+                        adjust_refetch_metadata(prev, column);
+                    }
+                }
             }
             TNS_MSG_TYPE_ROW_HEADER => {
                 bit_vector = parse_row_header(&mut reader)?;
