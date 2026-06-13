@@ -131,6 +131,103 @@ impl ThinCursorImpl {
         BlockingConnection::drain_cancel_response(connection).map_err(runtime_error)
     }
 
+    /// Resolves a scroll request to either an in-buffer reposition (already
+    /// applied; returns `None`) or a server round trip carrying the fetch
+    /// orientation and 1-based position (returns `Some`). Mirrors the reference
+    /// `_create_scroll_message`. Shared by the sync and async cursor impls.
+    pub(crate) fn resolve_scroll_target(
+        &mut self,
+        offset: i32,
+        mode: &str,
+    ) -> PyResult<Option<(u32, u32)>> {
+        let (orientation, desired_row) = match mode {
+            "relative" => {
+                let target = self.rowcount + i64::from(offset);
+                if target < 1 {
+                    return Err(raise_oracledb_driver_error("ERR_SCROLL_OUT_OF_RESULT_SET"));
+                }
+                (
+                    oracledb::protocol::thin::TNS_FETCH_ORIENTATION_RELATIVE,
+                    target as u64,
+                )
+            }
+            "absolute" => (
+                oracledb::protocol::thin::TNS_FETCH_ORIENTATION_ABSOLUTE,
+                u64::try_from(offset).unwrap_or(0),
+            ),
+            "first" => (oracledb::protocol::thin::TNS_FETCH_ORIENTATION_FIRST, 1),
+            "last" => (oracledb::protocol::thin::TNS_FETCH_ORIENTATION_LAST, 0),
+            _ => return Err(raise_oracledb_driver_error("ERR_WRONG_SCROLL_MODE")),
+        };
+
+        // an in-buffer reposition avoids contacting the server entirely; LAST
+        // always round-trips (reference cursor.pyx:108-118)
+        if orientation != oracledb::protocol::thin::TNS_FETCH_ORIENTATION_LAST
+            && desired_row >= self.buffer_min_row
+            && desired_row < self.buffer_max_row
+        {
+            self.row_index = usize::try_from(desired_row - self.buffer_min_row).unwrap_or(0);
+            self.rowcount = i64::try_from(desired_row - 1).unwrap_or(i64::MAX);
+            return Ok(None);
+        }
+
+        Ok(Some((
+            orientation,
+            u32::try_from(desired_row).unwrap_or(u32::MAX),
+        )))
+    }
+
+    /// Applies the response of a scroll round trip (reference
+    /// `_post_process_scroll`). Shared by the sync and async cursor impls.
+    pub(crate) fn apply_scroll_result(
+        &mut self,
+        orientation: u32,
+        result: QueryResult,
+    ) -> PyResult<()> {
+        if !result.columns.is_empty() {
+            self.columns = result.columns;
+        }
+        if result.cursor_id != 0 {
+            self.cursor_id = result.cursor_id;
+        }
+        let buffer_rowcount = result.rows.len() as u64;
+        self.rows = result.rows;
+        self.invalid_ref_cursor = false;
+
+        if buffer_rowcount == 0 {
+            if orientation != oracledb::protocol::thin::TNS_FETCH_ORIENTATION_FIRST
+                && orientation != oracledb::protocol::thin::TNS_FETCH_ORIENTATION_LAST
+            {
+                return Err(raise_oracledb_driver_error("ERR_SCROLL_OUT_OF_RESULT_SET"));
+            }
+            self.rowcount = 0;
+            self.more_rows = false;
+            self.row_index = 0;
+            self.buffer_min_row = 0;
+            self.buffer_max_row = 0;
+        } else {
+            let server_rowcount = result.row_count;
+            self.rowcount = i64::try_from(server_rowcount.saturating_sub(buffer_rowcount))
+                .unwrap_or(i64::MAX);
+            self.more_rows = result.more_rows;
+            self.row_index = 0;
+            self.buffer_min_row = u64::try_from(self.rowcount.max(0))
+                .unwrap_or(0)
+                .saturating_add(1);
+            self.buffer_max_row = self.buffer_min_row + buffer_rowcount;
+        }
+        Ok(())
+    }
+
+    /// Recomputes the buffer-window positions from the current `rowcount` and
+    /// `rows` length (reference `_fetch_rows` postlude). `rowcount` here is the
+    /// number of rows already consumed before this buffer.
+    pub(crate) fn refresh_buffer_window(&mut self) {
+        let consumed = u64::try_from(self.rowcount.max(0)).unwrap_or(0);
+        self.buffer_min_row = consumed + 1;
+        self.buffer_max_row = self.buffer_min_row + self.rows.len() as u64;
+    }
+
     pub(crate) fn new(
         connection: Arc<Mutex<Option<RustConnection>>>,
         autocommit: Arc<Mutex<bool>>,
@@ -592,40 +689,11 @@ impl ThinCursorImpl {
     /// row is already buffered the reposition is purely local; otherwise a
     /// scroll execute is sent to the server.
     fn scroll(&mut self, cursor: &Bound<'_, PyAny>, offset: i32, mode: &str) -> PyResult<()> {
-        // resolve the desired 1-based row and fetch orientation
-        let (orientation, desired_row) = match mode {
-            "relative" => {
-                let target = self.rowcount + i64::from(offset);
-                if target < 1 {
-                    return Err(raise_oracledb_driver_error("ERR_SCROLL_OUT_OF_RESULT_SET"));
-                }
-                (
-                    oracledb::protocol::thin::TNS_FETCH_ORIENTATION_RELATIVE,
-                    target as u64,
-                )
-            }
-            "absolute" => (
-                oracledb::protocol::thin::TNS_FETCH_ORIENTATION_ABSOLUTE,
-                u64::try_from(offset).unwrap_or(0),
-            ),
-            "first" => (oracledb::protocol::thin::TNS_FETCH_ORIENTATION_FIRST, 1),
-            "last" => (oracledb::protocol::thin::TNS_FETCH_ORIENTATION_LAST, 0),
-            _ => return Err(raise_oracledb_driver_error("ERR_WRONG_SCROLL_MODE")),
+        let Some((orientation, fetch_pos)) = self.resolve_scroll_target(offset, mode)? else {
+            return Ok(());
         };
 
-        // an in-buffer reposition avoids contacting the server entirely; LAST
-        // always round-trips (reference cursor.pyx:108-118)
-        if orientation != oracledb::protocol::thin::TNS_FETCH_ORIENTATION_LAST
-            && desired_row >= self.buffer_min_row
-            && desired_row < self.buffer_max_row
-        {
-            self.row_index = usize::try_from(desired_row - self.buffer_min_row).unwrap_or(0);
-            self.rowcount = i64::try_from(desired_row - 1).unwrap_or(i64::MAX);
-            return Ok(());
-        }
-
         let statement = self.statement.clone().unwrap_or_default();
-        let fetch_pos = u32::try_from(desired_row).unwrap_or(u32::MAX);
         let cursor_id = self.cursor_id;
         let arraysize = self.arraysize;
         let result = cursor
@@ -652,40 +720,7 @@ impl ThinCursorImpl {
             Ok(result) => result,
             Err(err) => return Err(raise_task_error(&err, &self.connection)),
         };
-
-        if !result.columns.is_empty() {
-            self.columns = result.columns;
-        }
-        if result.cursor_id != 0 {
-            self.cursor_id = result.cursor_id;
-        }
-        let buffer_rowcount = result.rows.len() as u64;
-        self.rows = result.rows;
-        self.invalid_ref_cursor = false;
-
-        // reference `_post_process_scroll`
-        if buffer_rowcount == 0 {
-            if orientation != oracledb::protocol::thin::TNS_FETCH_ORIENTATION_FIRST
-                && orientation != oracledb::protocol::thin::TNS_FETCH_ORIENTATION_LAST
-            {
-                return Err(raise_oracledb_driver_error("ERR_SCROLL_OUT_OF_RESULT_SET"));
-            }
-            self.rowcount = 0;
-            self.more_rows = false;
-            self.row_index = 0;
-            self.buffer_min_row = 0;
-            self.buffer_max_row = 0;
-        } else {
-            let server_rowcount = result.row_count;
-            self.rowcount = i64::try_from(server_rowcount.saturating_sub(buffer_rowcount))
-                .unwrap_or(i64::MAX);
-            self.more_rows = result.more_rows;
-            self.row_index = 0;
-            self.buffer_min_row =
-                u64::try_from(self.rowcount.max(0)).unwrap_or(0).saturating_add(1);
-            self.buffer_max_row = self.buffer_min_row + buffer_rowcount;
-        }
-        Ok(())
+        self.apply_scroll_result(orientation, result)
     }
 
     pub(crate) fn parse(&mut self, cursor: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -1133,15 +1168,6 @@ impl ThinCursorImpl {
             self.prepare_fetch_defines(cursor.py(), cursor)?;
         }
         Ok(())
-    }
-
-    /// Recomputes the buffer-window positions from the current `rowcount` and
-    /// `rows` length (reference `_fetch_rows` postlude). `rowcount` here is the
-    /// number of rows already consumed before this buffer.
-    fn refresh_buffer_window(&mut self) {
-        let consumed = u64::try_from(self.rowcount.max(0)).unwrap_or(0);
-        self.buffer_min_row = consumed + 1;
-        self.buffer_max_row = self.buffer_min_row + self.rows.len() as u64;
     }
 
     fn execute(&mut self, cursor: &Bound<'_, PyAny>) -> PyResult<()> {
