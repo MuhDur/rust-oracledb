@@ -489,6 +489,35 @@ fn parse_number_u64(text: &str) -> Option<u64> {
 /// loses its decimal point and is right-padded with zeros up to the array
 /// scale. Rejects values with more than 38 digits and the special
 /// max-negative value (-1e126).
+/// Formats a Decimal128 (unscaled `i128` + `scale`) as a decimal string, the
+/// inverse of [`decimal128_from_number_text`]. Used when converting an Arrow
+/// decimal cell back to a `decimal.Decimal` for the bind path.
+pub fn decimal128_to_string(unscaled: i128, scale: i8) -> String {
+    if scale <= 0 {
+        // No fractional digits; trailing zeros for negative scale.
+        let mut text = unscaled.to_string();
+        for _ in 0..(-scale as i64) {
+            text.push('0');
+        }
+        return text;
+    }
+    let scale = scale as usize;
+    let negative = unscaled < 0;
+    let digits = unscaled.unsigned_abs().to_string();
+    let text = if digits.len() <= scale {
+        let zeros = "0".repeat(scale - digits.len());
+        format!("0.{zeros}{digits}")
+    } else {
+        let split = digits.len() - scale;
+        format!("{}.{}", &digits[..split], &digits[split..])
+    };
+    if negative {
+        format!("-{text}")
+    } else {
+        text
+    }
+}
+
 fn decimal128_from_number_text(text: &str, scale: i8) -> Option<i128> {
     if text.contains(['e', 'E']) {
         return None; // covers the -1e126 max-negative marker

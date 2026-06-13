@@ -37,6 +37,50 @@ fn arrow_error_to_py(err: oracledb::arrow::ArrowConversionError) -> PyErr {
     ora_database_error(&err.to_string())
 }
 
+/// Rewrites the given (Arrow timestamp) columns of `rows` to encode as
+/// TIMESTAMP, recovering the fractional-second (nanosecond) component from the
+/// original Python `datetime` objects in `params` (a list of row tuples). The
+/// DATE bind that value inference picked would have dropped those fractions.
+fn promote_timestamp_bind_columns(
+    params: &Bound<'_, PyAny>,
+    rows: &mut [Vec<BindValue>],
+    timestamp_columns: &[usize],
+) -> PyResult<()> {
+    let param_rows = params.cast::<PyList>().map_err(runtime_error)?;
+    for (row, param_row) in rows.iter_mut().zip(param_rows.iter()) {
+        let param_row = param_row.cast::<PyTuple>().map_err(runtime_error)?;
+        for &index in timestamp_columns {
+            let Some(slot) = row.get_mut(index) else {
+                continue;
+            };
+            if matches!(slot, BindValue::Null) {
+                continue;
+            }
+            let Ok(value) = param_row.get_item(index) else {
+                continue;
+            };
+            if value.is_none() {
+                continue;
+            }
+            if let Some((year, month, day, hour, minute, second, nanosecond)) =
+                py_date_time_fields(&value)?
+            {
+                *slot = BindValue::Timestamp {
+                    ora_type_num: oracledb::protocol::thin::ORA_TYPE_NUM_TIMESTAMP,
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    nanosecond,
+                };
+            }
+        }
+    }
+    Ok(())
+}
+
 #[pyclass(module = "oracledb.thin_impl", name = "ExecutemanyManager")]
 // d49: migrate to oracledb (executemany manager belongs on driver)
 pub(crate) struct ExecutemanyManager {
@@ -44,20 +88,53 @@ pub(crate) struct ExecutemanyManager {
     batch_size: u32,
     num_rows: u32,
     message_offset: u32,
+    /// Cumulative row offsets of chunk boundaries (DataFrame ingestion of an
+    /// Arrow chunked array). A batch never spans a boundary, so each chunk's
+    /// trailing partial batch becomes its own round trip — matching the
+    /// reference BatchLoadManager. Empty for plain (single-chunk) binds.
+    chunk_ends: Vec<u32>,
 }
 
 impl ExecutemanyManager {
     fn new(total_rows: usize, batch_size: u32) -> PyResult<Self> {
+        Self::with_chunks(total_rows, batch_size, Vec::new())
+    }
+
+    fn with_chunks(
+        total_rows: usize,
+        batch_size: u32,
+        chunk_lengths: Vec<usize>,
+    ) -> PyResult<Self> {
         let total_rows = u32::try_from(total_rows).map_err(runtime_error)?;
         if batch_size == 0 {
             return Err(PyTypeError::new_err("batch_size must be greater than zero"));
         }
-        Ok(Self {
+        let mut chunk_ends = Vec::with_capacity(chunk_lengths.len());
+        let mut acc: u32 = 0;
+        for len in chunk_lengths {
+            acc = acc.saturating_add(u32::try_from(len).map_err(runtime_error)?);
+            chunk_ends.push(acc);
+        }
+        let mut manager = Self {
             total_rows,
             batch_size,
-            num_rows: total_rows.min(batch_size),
+            num_rows: 0,
             message_offset: 0,
-        })
+            chunk_ends,
+        };
+        manager.num_rows = manager.batch_len_from(0);
+        Ok(manager)
+    }
+
+    /// Number of rows in the batch starting at `offset`: at most `batch_size`,
+    /// and never crossing the next chunk boundary.
+    fn batch_len_from(&self, offset: u32) -> u32 {
+        let remaining = self.total_rows.saturating_sub(offset);
+        let mut len = remaining.min(self.batch_size);
+        if let Some(next_end) = self.chunk_ends.iter().find(|&&end| end > offset) {
+            len = len.min(next_end.saturating_sub(offset));
+        }
+        len
     }
 }
 
@@ -75,8 +152,7 @@ impl ExecutemanyManager {
 
     fn next_batch(&mut self) {
         self.message_offset = self.message_offset.saturating_add(self.num_rows);
-        let remaining = self.total_rows.saturating_sub(self.message_offset);
-        self.num_rows = remaining.min(self.batch_size);
+        self.num_rows = self.batch_len_from(self.message_offset);
     }
 }
 
@@ -858,6 +934,13 @@ impl ThinCursorImpl {
         // applied by cursor.py after prepare, before execute.
         self.fetch_lobs = default_fetch_lobs(_cursor.py())?;
         self.fetch_decimals = default_fetch_decimals(_cursor.py())?;
+        // execute() does not accept DataFrame / Arrow params (only executemany
+        // does); the reference raises DPY-2003 (impl/base/cursor.pyx).
+        if parameters.is_some_and(has_arrow_c_stream) {
+            return Err(raise_oracledb_driver_error(
+                "ERR_WRONG_EXECUTE_PARAMETERS_TYPE",
+            ));
+        }
         let statement = self
             .statement
             .as_deref()
@@ -1000,22 +1083,50 @@ impl ThinCursorImpl {
         let statement = self
             .statement
             .as_deref()
-            .ok_or_else(|| raise_oracledb_driver_error("ERR_NO_STATEMENT"))?;
-        validate_dml_returning_duplicate_binds(statement)?;
-        self.bind_names = unique_sql_bind_names(statement)?;
+            .ok_or_else(|| raise_oracledb_driver_error("ERR_NO_STATEMENT"))?
+            .to_string();
+        validate_dml_returning_duplicate_binds(&statement)?;
+        self.bind_names = unique_sql_bind_names(&statement)?;
+        // DataFrame / pyarrow.Table ingestion (params implement the Arrow
+        // PyCapsule stream interface). Materialize the Arrow data into native
+        // Python row tuples and feed the existing executemany bind path so the
+        // type inference and wire encoding are shared with list-of-tuples binds.
+        let owned_rows;
+        let mut chunk_lengths = Vec::new();
+        let mut timestamp_columns: Vec<usize> = Vec::new();
+        let bind_params = if has_arrow_c_stream(parameters) {
+            let ingest = arrow_table_to_py_rows(parameters.py(), parameters)?;
+            chunk_lengths = ingest.chunk_lengths;
+            timestamp_columns = ingest.timestamp_columns;
+            owned_rows = ingest.rows.into_any();
+            &owned_rows
+        } else {
+            parameters
+        };
         self.bind_vars = extract_executemany_bind_var_objects(
-            parameters.py(),
-            statement,
-            parameters,
+            bind_params.py(),
+            &statement,
+            bind_params,
             &self.named_input_sizes,
         )?;
         self.many_bind_rows = extract_bind_rows(
-            parameters.py(),
-            statement,
-            parameters,
+            bind_params.py(),
+            &statement,
+            bind_params,
             &self.named_input_sizes,
         )?;
-        ExecutemanyManager::new(self.many_bind_rows.len(), batch_size)
+        // Arrow timestamp columns must encode as TIMESTAMP (not the DATE that
+        // value inference picks for a `datetime`) so fractional seconds survive.
+        // Re-read the original Python datetime objects to recover the nanosecond
+        // component that the DATE bind would have dropped.
+        if !timestamp_columns.is_empty() {
+            promote_timestamp_bind_columns(
+                bind_params,
+                &mut self.many_bind_rows,
+                &timestamp_columns,
+            )?;
+        }
+        ExecutemanyManager::with_chunks(self.many_bind_rows.len(), batch_size, chunk_lengths)
     }
 
     fn executemany(

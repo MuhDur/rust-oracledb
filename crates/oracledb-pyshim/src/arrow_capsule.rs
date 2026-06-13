@@ -22,18 +22,25 @@ use std::ffi::{c_void, CStr};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
+use arrow_array::cast::AsArray;
 use arrow_array::ffi::{to_ffi, FFI_ArrowArray};
-use arrow_array::ffi_stream::FFI_ArrowArrayStream;
+use arrow_array::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
+use arrow_array::types::{
+    Date32Type, Date64Type, Decimal128Type, Float32Type, Float64Type, Int16Type, Int32Type,
+    Int64Type, Int8Type, TimestampMicrosecondType, TimestampMillisecondType,
+    TimestampNanosecondType, TimestampSecondType, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
+};
 use arrow_array::{Array, ArrayRef, RecordBatch, RecordBatchIterator};
 use arrow_schema::ffi::FFI_ArrowSchema;
-use arrow_schema::{Field, Schema, SchemaRef};
+use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use oracledb::arrow::arrow_type_name;
 use pyo3::exceptions::PyValueError;
 use pyo3::ffi as pyffi;
 use pyo3::prelude::*;
-use pyo3::types::{PyCapsule, PyTuple};
+use pyo3::types::{PyCapsule, PyList, PyTuple};
+use pyo3::IntoPyObjectExt;
 
-use crate::runtime_error;
+use crate::{dpy_database_error, runtime_error};
 
 const CAP_SCHEMA: &CStr = c"arrow_schema";
 const CAP_ARRAY: &CStr = c"arrow_array";
@@ -263,6 +270,228 @@ fn import_schema(obj: &Bound<'_, PyAny>) -> PyResult<Schema> {
             }
         }
     }
+}
+
+/// True when `obj` implements the Arrow PyCapsule stream interface
+/// (`__arrow_c_stream__`) — i.e. is a DataFrame / pyarrow.Table to ingest.
+pub(crate) fn has_arrow_c_stream(obj: &Bound<'_, PyAny>) -> bool {
+    obj.hasattr("__arrow_c_stream__").unwrap_or(false)
+}
+
+/// Imports an `__arrow_c_stream__`-bearing object into a list of [`RecordBatch`].
+fn import_arrow_batches(obj: &Bound<'_, PyAny>) -> PyResult<Vec<RecordBatch>> {
+    let capsule_obj = obj.call_method0("__arrow_c_stream__")?;
+    let capsule = capsule_obj
+        .cast::<PyCapsule>()
+        .map_err(|_| PyValueError::new_err("__arrow_c_stream__ did not return a PyCapsule"))?;
+    // SAFETY: a well-formed `arrow_array_stream` capsule stores a pointer to a
+    // valid, consumer-owned `FFI_ArrowArrayStream` (Arrow PyCapsule protocol).
+    // `ArrowArrayStreamReader::from_raw` moves the stream out (taking ownership of
+    // the producer's release callback), leaving the capsule's struct released so
+    // its own destructor is a no-op. We must do this exactly once per capsule.
+    let mut reader = unsafe {
+        let ptr = pyffi::PyCapsule_GetPointer(capsule.as_ptr(), CAP_STREAM.as_ptr());
+        if ptr.is_null() {
+            return Err(PyValueError::new_err("invalid arrow_array_stream capsule"));
+        }
+        ArrowArrayStreamReader::from_raw(ptr.cast::<FFI_ArrowArrayStream>())
+            .map_err(runtime_error)?
+    };
+    let mut batches = Vec::new();
+    for batch in reader.by_ref() {
+        batches.push(batch.map_err(runtime_error)?);
+    }
+    Ok(batches)
+}
+
+/// Result of materializing an Arrow table for ingestion.
+pub(crate) struct ArrowIngestRows<'py> {
+    /// Row tuples of native Python values for the existing bind path.
+    pub rows: Bound<'py, PyList>,
+    /// Row count of each Arrow chunk/batch, so the executemany manager can keep
+    /// batches from spanning chunk boundaries (reference BatchLoadManager).
+    pub chunk_lengths: Vec<usize>,
+    /// Column indices whose Arrow type is timestamp; their bind values must be
+    /// encoded as TIMESTAMP (not DATE) so fractional seconds survive.
+    pub timestamp_columns: Vec<usize>,
+}
+
+/// Converts an `__arrow_c_stream__` object (DataFrame / pyarrow.Table) into a
+/// Python list of row tuples carrying native Python values, so the existing
+/// executemany bind path (type inference + wire encode) consumes it unchanged.
+pub(crate) fn arrow_table_to_py_rows<'py>(
+    py: Python<'py>,
+    obj: &Bound<'py, PyAny>,
+) -> PyResult<ArrowIngestRows<'py>> {
+    let batches = import_arrow_batches(obj)?;
+    let rows = PyList::empty(py);
+    let mut chunk_lengths = Vec::with_capacity(batches.len());
+    let mut timestamp_columns = Vec::new();
+    if let Some(first) = batches.first() {
+        for (index, field) in first.schema().fields().iter().enumerate() {
+            if matches!(field.data_type(), DataType::Timestamp(_, _)) {
+                timestamp_columns.push(index);
+            }
+        }
+    }
+    for batch in &batches {
+        if batch.num_rows() > 0 {
+            chunk_lengths.push(batch.num_rows());
+        }
+        for row_index in 0..batch.num_rows() {
+            let cells = (0..batch.num_columns())
+                .map(|col| arrow_cell_to_py(py, batch.column(col), row_index))
+                .collect::<PyResult<Vec<_>>>()?;
+            rows.append(PyTuple::new(py, cells)?)?;
+        }
+    }
+    Ok(ArrowIngestRows {
+        rows,
+        chunk_lengths,
+        timestamp_columns,
+    })
+}
+
+/// Converts a single Arrow cell to the native Python value the bind path
+/// expects (int/float/Decimal/str/bytes/bool/datetime/None).
+fn arrow_cell_to_py(py: Python<'_>, array: &ArrayRef, row: usize) -> PyResult<Py<PyAny>> {
+    if array.is_null(row) {
+        return Ok(py.None());
+    }
+    let value: Py<PyAny> = match array.data_type() {
+        DataType::Null => py.None(),
+        DataType::Boolean => array.as_boolean().value(row).into_py_any(py)?,
+        DataType::Int8 => array
+            .as_primitive::<Int8Type>()
+            .value(row)
+            .into_py_any(py)?,
+        DataType::Int16 => array
+            .as_primitive::<Int16Type>()
+            .value(row)
+            .into_py_any(py)?,
+        DataType::Int32 => array
+            .as_primitive::<Int32Type>()
+            .value(row)
+            .into_py_any(py)?,
+        DataType::Int64 => array
+            .as_primitive::<Int64Type>()
+            .value(row)
+            .into_py_any(py)?,
+        DataType::UInt8 => array
+            .as_primitive::<UInt8Type>()
+            .value(row)
+            .into_py_any(py)?,
+        DataType::UInt16 => array
+            .as_primitive::<UInt16Type>()
+            .value(row)
+            .into_py_any(py)?,
+        DataType::UInt32 => array
+            .as_primitive::<UInt32Type>()
+            .value(row)
+            .into_py_any(py)?,
+        DataType::UInt64 => array
+            .as_primitive::<UInt64Type>()
+            .value(row)
+            .into_py_any(py)?,
+        DataType::Float32 => array
+            .as_primitive::<Float32Type>()
+            .value(row)
+            .into_py_any(py)?,
+        DataType::Float64 => array
+            .as_primitive::<Float64Type>()
+            .value(row)
+            .into_py_any(py)?,
+        DataType::Decimal128(_, scale) => decimal128_cell_to_py(py, array, row, *scale)?,
+        DataType::Utf8 => array.as_string::<i32>().value(row).into_py_any(py)?,
+        DataType::LargeUtf8 => array.as_string::<i64>().value(row).into_py_any(py)?,
+        DataType::Utf8View => array.as_string_view().value(row).into_py_any(py)?,
+        DataType::Binary => array.as_binary::<i32>().value(row).into_py_any(py)?,
+        DataType::LargeBinary => array.as_binary::<i64>().value(row).into_py_any(py)?,
+        DataType::BinaryView => array.as_binary_view().value(row).into_py_any(py)?,
+        DataType::FixedSizeBinary(_) => array.as_fixed_size_binary().value(row).into_py_any(py)?,
+        DataType::Date32 => {
+            let days = array.as_primitive::<Date32Type>().value(row);
+            date_from_days(py, i64::from(days))?
+        }
+        DataType::Date64 => {
+            let millis = array.as_primitive::<Date64Type>().value(row);
+            date_from_days(py, millis.div_euclid(86_400_000))?
+        }
+        DataType::Timestamp(unit, _) => timestamp_cell_to_py(py, array, row, *unit)?,
+        // Lists/structs are vector shapes; binding them needs VECTOR support that
+        // the driver foundation does not yet provide. Surface the reference
+        // DPY-3033 so the public layer errors cleanly instead of hanging.
+        DataType::List(_) | DataType::LargeList(_) | DataType::FixedSizeList(_, _) => {
+            return Err(dpy_database_error(
+                "DPY-3033",
+                &format!(
+                    "conversion from Apache Arrow list with child format \"{}\" \
+                     to Oracle Database vector is not supported",
+                    arrow_type_name(array.data_type())
+                ),
+            ));
+        }
+        other => {
+            return Err(dpy_database_error(
+                "DPY-3032",
+                &format!(
+                    "conversion from Apache Arrow format \"{}\" to Oracle Database \
+                     is not supported",
+                    arrow_type_name(other)
+                ),
+            ));
+        }
+    };
+    Ok(value)
+}
+
+/// Converts a decimal128 cell to a `decimal.Decimal` (the type the NUMBER bind
+/// path expects).
+fn decimal128_cell_to_py(
+    py: Python<'_>,
+    array: &ArrayRef,
+    row: usize,
+    scale: i8,
+) -> PyResult<Py<PyAny>> {
+    let unscaled = array.as_primitive::<Decimal128Type>().value(row);
+    let text = oracledb::arrow::decimal128_to_string(unscaled, scale);
+    let decimal_cls = py.import("decimal")?.getattr("Decimal")?;
+    Ok(decimal_cls.call1((text,))?.unbind())
+}
+
+/// Builds a `datetime.date` from a day count since the Unix epoch.
+fn date_from_days(py: Python<'_>, days: i64) -> PyResult<Py<PyAny>> {
+    let date_cls = py.import("datetime")?.getattr("date")?;
+    let epoch = date_cls.call1((1970, 1, 1))?;
+    let timedelta = py.import("datetime")?.getattr("timedelta")?;
+    let delta = timedelta.call1((days,))?;
+    Ok(epoch.call_method1("__add__", (delta,))?.unbind())
+}
+
+/// Converts a timestamp cell to a naive `datetime.datetime`.
+fn timestamp_cell_to_py(
+    py: Python<'_>,
+    array: &ArrayRef,
+    row: usize,
+    unit: TimeUnit,
+) -> PyResult<Py<PyAny>> {
+    let micros = match unit {
+        TimeUnit::Second => array.as_primitive::<TimestampSecondType>().value(row) * 1_000_000,
+        TimeUnit::Millisecond => {
+            array.as_primitive::<TimestampMillisecondType>().value(row) * 1_000
+        }
+        TimeUnit::Microsecond => array.as_primitive::<TimestampMicrosecondType>().value(row),
+        TimeUnit::Nanosecond => array.as_primitive::<TimestampNanosecondType>().value(row) / 1_000,
+    };
+    let datetime_mod = py.import("datetime")?;
+    let epoch = datetime_mod
+        .getattr("datetime")?
+        .call1((1970, 1, 1, 0, 0, 0))?;
+    let delta = datetime_mod.getattr("timedelta")?;
+    let kwargs = pyo3::types::PyDict::new(py);
+    kwargs.set_item("microseconds", micros)?;
+    let delta = delta.call((), Some(&kwargs))?;
+    Ok(epoch.call_method1("__add__", (delta,))?.unbind())
 }
 
 /// Helper so other modules can build a `DataFrame` python object from a batch.
