@@ -1,0 +1,19 @@
+# python-oracledb v4.0.1 filtered-suite contract.
+# Format:
+#   exclude <glob> :: <reason>
+# All other tests/test_*.py modules are in scope.
+exclude test_2700*.py :: AQ hard-excluded
+exclude test_2800*.py :: AQ hard-excluded
+exclude test_3000*.py :: CQN/subscription hard-excluded
+exclude test_3300*.py :: SODA hard-excluded
+exclude test_3400*.py :: SODA hard-excluded
+exclude test_4400*.py :: XA/TPC hard-excluded
+exclude test_5000*.py :: external authentication requires extra non-container setup
+exclude test_7400*.py :: XA/TPC hard-excluded
+exclude test_7800*.py :: AQ hard-excluded
+exclude test_7900*.py :: AQ hard-excluded
+exclude test_8200*.py :: AQ hard-excluded
+exclude test_8300*.py :: AQ hard-excluded
+exclude test_8400*.py :: AQ hard-excluded
+exclude test_8500*.py :: AQ hard-excluded
+exclude test_9800*.py :: external OCI thick-only module
