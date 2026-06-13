@@ -157,7 +157,6 @@ pub(crate) fn spawn_async_executemany_task(
 
 // d49: migrate to oracledb (driver async futures)
 #[allow(clippy::too_many_arguments)] // pre-existing lint at pre-split HEAD 978491a; not movement-induced
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_async_execute_task(
     connection: Arc<Mutex<Option<RustConnection>>>,
     state: Arc<Mutex<ThinConnState>>,
