@@ -27,11 +27,11 @@ use oracledb_protocol::thin::{
     parse_lob_write_response, parse_plain_function_response, parse_query_response,
     parse_query_response_with_binds, parse_query_response_with_binds_and_options, BindValue,
     ClientCapabilities, ColumnMetadata, ExecuteOptions, LobReadResult, QueryResult,
-    TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST, TNS_FUNC_COMMIT,
-    TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE,
-    TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT,
-    TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE,
-    TNS_PIPELINE_MODE_ABORT_ON_ERROR, TNS_PIPELINE_MODE_CONTINUE_ON_ERROR,
+    TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF,
+    TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS,
+    TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA,
+    TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE, TNS_PIPELINE_MODE_ABORT_ON_ERROR,
+    TNS_PIPELINE_MODE_CONTINUE_ON_ERROR,
 };
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};

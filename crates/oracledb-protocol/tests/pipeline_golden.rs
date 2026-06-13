@@ -13,10 +13,9 @@
 use oracledb_protocol::thin::{
     build_begin_pipeline_piggyback, build_end_pipeline_payload_with_seq,
     build_execute_payload_with_bind_rows_with_seq_and_token,
-    build_function_payload_with_seq_and_token, parse_query_response, BindValue,
-    ClientCapabilities, QueryValue, TNS_FUNC_COMMIT, TNS_FUNC_PIPELINE_END,
-    TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FUNCTION, TNS_PIPELINE_MODE_ABORT_ON_ERROR,
-    TNS_PIPELINE_MODE_CONTINUE_ON_ERROR,
+    build_function_payload_with_seq_and_token, parse_query_response, BindValue, ClientCapabilities,
+    QueryValue, TNS_FUNC_COMMIT, TNS_FUNC_PIPELINE_END, TNS_MSG_TYPE_END_OF_RESPONSE,
+    TNS_MSG_TYPE_FUNCTION, TNS_PIPELINE_MODE_ABORT_ON_ERROR, TNS_PIPELINE_MODE_CONTINUE_ON_ERROR,
 };
 
 const TNS_PACKET_TYPE_DATA: u8 = 6;
@@ -153,7 +152,10 @@ fn extract_pipeline(packets: &[CapturedPacket], nth: usize) -> PipelineFrames {
     while responses.len() < op_payloads.len() + 1 {
         let packet = &packets[index];
         index += 1;
-        assert!(!packet.sending, "no client packets between pipeline responses");
+        assert!(
+            !packet.sending,
+            "no client packets between pipeline responses"
+        );
         if packet.packet_type() == TNS_PACKET_TYPE_MARKER {
             // dropped without a reset exchange while in a pipeline
             continue;
@@ -198,11 +200,8 @@ fn abort_mode_request_payloads_byte_match_reference_client() {
     // op 1: begin piggyback (mode 2 = abort on error, token 1) + insert
     let (captured_piggyback, captured_insert) =
         split_first_payload(&frames.op_payloads[0], TNS_PIPELINE_MODE_ABORT_ON_ERROR);
-    let built_piggyback = build_begin_pipeline_piggyback(
-        captured_piggyback[2],
-        1,
-        TNS_PIPELINE_MODE_ABORT_ON_ERROR,
-    );
+    let built_piggyback =
+        build_begin_pipeline_piggyback(captured_piggyback[2], 1, TNS_PIPELINE_MODE_ABORT_ON_ERROR);
     assert_eq!(captured_piggyback, built_piggyback);
     let built = build_execute_payload_with_bind_rows_with_seq_and_token(
         "insert into pipe_golden values (1, 'one')",
@@ -255,7 +254,11 @@ fn abort_mode_request_payloads_byte_match_reference_client() {
 fn abort_mode_responses_parse_with_tokens() {
     let packets = load_pipeline_capture();
     let frames = extract_pipeline(&packets, 0);
-    assert_eq!(frames.responses.len(), 5, "four ops + end-pipeline response");
+    assert_eq!(
+        frames.responses.len(),
+        5,
+        "four ops + end-pipeline response"
+    );
 
     for (index, expected_rows) in [(0usize, 1u64), (1, 1)] {
         let result =
@@ -303,7 +306,11 @@ fn abort_mode_responses_parse_with_tokens() {
 fn continue_mode_pipeline_carries_mode_and_surfaces_midstream_error() {
     let packets = load_pipeline_capture();
     let frames = extract_pipeline(&packets, 1);
-    assert_eq!(frames.op_payloads.len(), 3, "capture B has three operations");
+    assert_eq!(
+        frames.op_payloads.len(),
+        3,
+        "capture B has three operations"
+    );
 
     let (captured_piggyback, _) =
         split_first_payload(&frames.op_payloads[0], TNS_PIPELINE_MODE_CONTINUE_ON_ERROR);

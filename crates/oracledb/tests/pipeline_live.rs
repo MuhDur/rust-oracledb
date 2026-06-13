@@ -21,7 +21,12 @@ fn connect_options() -> Option<ConnectOptions> {
         "rust-oracledb",
     )
     .ok()?;
-    Some(ConnectOptions::new(connect_string, user, password, identity))
+    Some(ConnectOptions::new(
+        connect_string,
+        user,
+        password,
+        identity,
+    ))
 }
 
 #[test]
@@ -142,12 +147,9 @@ fn pipeline_round_trips_against_local_container() {
     }
 
     // the connection must remain healthy for ordinary traffic afterwards
-    let after = BlockingConnection::execute_query(
-        &mut conn,
-        "select max(id) from pipe_live_rust",
-        2,
-    )
-    .expect("plain query after pipelines");
+    let after =
+        BlockingConnection::execute_query(&mut conn, "select max(id) from pipe_live_rust", 2)
+            .expect("plain query after pipelines");
     match &after.rows[0][0] {
         Some(QueryValue::Number { text, .. }) => assert_eq!(text, "3"),
         other => panic!("unexpected max id: {other:?}"),
