@@ -315,6 +315,17 @@ pub(crate) fn prepare_object_execute_inputs(
 ) -> PyResult<(String, Option<Py<PyAny>>, Option<Py<PyAny>>)> {
     let original_parameters = parameters.map(|value| value.clone().unbind());
     let original_keywords = keyword_parameters.map(|value| value.clone().unbind());
+    // PL/SQL (begin/declare/call — produced by callproc/callfunc and anonymous
+    // blocks) cannot use an object SQL-constructor as an assignment target
+    // (PLS-00363). DbObject IN binds in PL/SQL go through the native packed
+    // image (BindValue::ObjectInput); never rewrite them into TYPE(...) text.
+    if statement_is_plsql(statement) {
+        return Ok((
+            statement.to_string(),
+            original_parameters,
+            original_keywords,
+        ));
+    }
     let has_parameters = has_bind_payload(parameters)?;
     let has_keywords = has_bind_payload(keyword_parameters)?;
     if has_parameters && has_keywords {

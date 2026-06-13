@@ -131,6 +131,17 @@ const TNS_NULL_LENGTH_INDICATOR: u8 = 255;
 const TNS_OBJ_ATOMIC_NULL: u8 = 253;
 const TNS_OBJ_IS_DEGENERATE: u8 = 0x10;
 const TNS_OBJ_NO_PREFIX_SEG: u8 = 0x04;
+// DbObject pickle image constants (reference impl/thin/constants.pxi +
+// dbobject.pyx create_new_object/write_header).
+const TNS_OBJ_IS_VERSION_81: u8 = 0x80;
+const TNS_OBJ_IS_COLLECTION: u8 = 0x08;
+const TNS_OBJ_IMAGE_VERSION: u8 = 1;
+const TNS_OBJ_NON_NULL_OID: u8 = 0x02;
+const TNS_OBJ_HAS_EXTENT_OID: u8 = 0x08;
+const TNS_OBJ_HAS_INDEXES: u8 = 0x10;
+const TNS_OBJ_MAX_SHORT_LENGTH: usize = 245;
+/// `TNS_EXTENT_OID` = hex `00000000000000000000000000010001` (16 bytes).
+const TNS_EXTENT_OID: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1];
 const TNS_XML_TYPE_LOB: u32 = 0x0001;
 const TNS_XML_TYPE_STRING: u32 = 0x0004;
 const TNS_XML_TYPE_FLAG_SKIP_NEXT_4: u32 = 0x100000;
@@ -524,6 +535,250 @@ impl<'a> DbObjectPackedReader<'a> {
     }
 }
 
+/// Writes a length-prefixed value into a DbObject pickle image buffer using the
+/// inner-buffer scheme (252 short cutoff, 32767 chunks for the long form). This
+/// mirrors `Buffer.write_bytes_with_length` used by `_pack_value`
+/// (reference impl/thin/packet.pyx) — NOT the 245-cutoff `write_length`.
+pub fn image_write_value_bytes(buf: &mut Vec<u8>, value: &[u8]) -> Result<()> {
+    if value.len() <= crate::wire::TNS_MAX_SHORT_LENGTH {
+        buf.push(value.len() as u8);
+        buf.extend_from_slice(value);
+        return Ok(());
+    }
+    buf.push(TNS_LONG_LENGTH_INDICATOR);
+    for chunk in value.chunks(32_767) {
+        image_write_ub4(
+            buf,
+            u32::try_from(chunk.len()).map_err(|_| ProtocolError::InvalidPacketLength {
+                length: chunk.len(),
+                minimum: 0,
+            })?,
+        );
+        buf.extend_from_slice(chunk);
+    }
+    image_write_ub4(buf, 0);
+    Ok(())
+}
+
+/// Writes a `ub4` into a pickle image buffer (reference `write_ub4`).
+fn image_write_ub4(buf: &mut Vec<u8>, value: u32) {
+    if value == 0 {
+        buf.push(0);
+    } else if value <= u32::from(u8::MAX) {
+        buf.push(1);
+        buf.push(value as u8);
+    } else if value <= u32::from(u16::MAX) {
+        buf.push(2);
+        buf.extend_from_slice(&(value as u16).to_be_bytes());
+    } else {
+        buf.push(4);
+        buf.extend_from_slice(&value.to_be_bytes());
+    }
+}
+
+/// Writes a collection/element count length into a pickle image buffer using
+/// the 245-cutoff scheme (reference `DbObjectPickleBuffer.write_length`).
+pub fn image_write_length(buf: &mut Vec<u8>, length: usize) -> Result<()> {
+    if length <= TNS_OBJ_MAX_SHORT_LENGTH {
+        buf.push(length as u8);
+    } else {
+        buf.push(TNS_LONG_LENGTH_INDICATOR);
+        buf.extend_from_slice(
+            &u32::try_from(length)
+                .map_err(|_| ProtocolError::InvalidPacketLength { length, minimum: 0 })?
+                .to_be_bytes(),
+        );
+    }
+    Ok(())
+}
+
+/// Builds the pickle image header (reference `write_header` + image_flags from
+/// `create_new_object`). Returns the buffer pre-seeded with the header; the
+/// caller appends the body and then calls [`image_finalize`] to back-patch the
+/// total size (4-byte BE at offset 3).
+pub fn image_begin(is_collection: bool) -> Vec<u8> {
+    let mut image_flags = TNS_OBJ_IS_VERSION_81;
+    if is_collection {
+        image_flags |= TNS_OBJ_IS_COLLECTION;
+    } else {
+        image_flags |= TNS_OBJ_NO_PREFIX_SEG;
+    }
+    let mut buf = Vec::new();
+    buf.push(image_flags);
+    buf.push(TNS_OBJ_IMAGE_VERSION);
+    buf.push(TNS_LONG_LENGTH_INDICATOR);
+    buf.extend_from_slice(&0u32.to_be_bytes()); // size placeholder (offset 3)
+    if is_collection {
+        buf.push(1); // length of prefix segment
+        buf.push(1); // prefix segment contents
+    }
+    buf
+}
+
+/// Back-patches the total image size (reference `_get_packed_data`: the 4-byte
+/// BE size at offset 3, after flags + version + 0xFE).
+pub fn image_finalize(buf: &mut [u8]) -> Result<()> {
+    let size = u32::try_from(buf.len()).map_err(|_| ProtocolError::InvalidPacketLength {
+        length: buf.len(),
+        minimum: 0,
+    })?;
+    let slot = buf.get_mut(3..7).ok_or(ProtocolError::TtcDecode(
+        "DbObject image too short to finalize",
+    ))?;
+    slot.copy_from_slice(&size.to_be_bytes());
+    Ok(())
+}
+
+/// Collection flags byte written at the start of a collection body
+/// (`TNS_OBJ_HAS_INDEXES` for associative arrays, else 0). Reference
+/// `_parse_tds` collection_flags + `_pack_data`.
+pub fn collection_flags_for(is_assoc_array: bool) -> u8 {
+    if is_assoc_array {
+        TNS_OBJ_HAS_INDEXES
+    } else {
+        0
+    }
+}
+
+/// Writes a NULL element/attribute marker into the image. Non-collection object
+/// attributes use `TNS_OBJ_ATOMIC_NULL` (253); scalars and collection elements
+/// use `TNS_NULL_LENGTH_INDICATOR` (255). Reference `_pack_value` None branch.
+pub fn image_write_null(buf: &mut Vec<u8>, atomic_null: bool) {
+    if atomic_null {
+        buf.push(TNS_OBJ_ATOMIC_NULL);
+    } else {
+        buf.push(TNS_NULL_LENGTH_INDICATOR);
+    }
+}
+
+/// Packs a single scalar `BindValue` into a DbObject pickle image buffer,
+/// mirroring `_pack_value` (reference impl/thin/dbobject.pyx:247-306). Object
+/// (nested) and Null/Array values are handled by the caller (the pyshim owns
+/// the recursion and null framing); this serves scalar attributes and
+/// collection elements only.
+pub fn pack_bindvalue_into_image(buf: &mut Vec<u8>, value: &BindValue, csfrm: u8) -> Result<()> {
+    match value {
+        BindValue::Text(text) => {
+            let bytes = encode_text_value(text, csfrm);
+            image_write_value_bytes(buf, &bytes)
+        }
+        BindValue::Raw(bytes) => image_write_value_bytes(buf, bytes),
+        BindValue::Number(text) => {
+            let bytes = encode_number_text(text)?;
+            image_write_value_bytes(buf, &bytes)
+        }
+        // PLS_INTEGER / BINARY_INTEGER pack as uint8(4) + uint32be (NOT Oracle
+        // number text) inside an object image.
+        BindValue::BinaryInteger(text) => {
+            let value = parse_binary_integer_u32(text)?;
+            buf.push(4);
+            buf.extend_from_slice(&value.to_be_bytes());
+            Ok(())
+        }
+        // BOOLEAN inside an image is the 4-byte form, NOT [1,1]/[0].
+        BindValue::Boolean(value) => {
+            buf.push(4);
+            buf.extend_from_slice(&u32::from(*value).to_be_bytes());
+            Ok(())
+        }
+        BindValue::BinaryDouble(value) => {
+            let bytes = encode_binary_double(*value);
+            image_write_value_bytes(buf, &bytes)
+        }
+        BindValue::BinaryFloat(value) => {
+            let bytes = encode_binary_float(*value as f32);
+            image_write_value_bytes(buf, &bytes)
+        }
+        BindValue::DateTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        } => {
+            let bytes = encode_oracle_date(*year, *month, *day, *hour, *minute, *second)?;
+            image_write_value_bytes(buf, &bytes)
+        }
+        BindValue::Timestamp {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+            ora_type_num,
+        } => {
+            let bytes = if matches!(*ora_type_num, ORA_TYPE_NUM_TIMESTAMP_TZ) {
+                encode_oracle_timestamp_tz(
+                    *year,
+                    *month,
+                    *day,
+                    *hour,
+                    *minute,
+                    *second,
+                    *nanosecond,
+                )?
+            } else {
+                encode_oracle_timestamp(*year, *month, *day, *hour, *minute, *second, *nanosecond)?
+            };
+            image_write_value_bytes(buf, &bytes)
+        }
+        BindValue::Lob { locator, .. } => image_write_value_bytes(buf, locator),
+        BindValue::IntervalDS {
+            days,
+            seconds,
+            microseconds,
+        } => {
+            let bytes = encode_interval_ds(*days, *seconds, *microseconds)?;
+            image_write_value_bytes(buf, &bytes)
+        }
+        BindValue::IntervalYM { years, months } => {
+            let bytes = encode_interval_ym(*years, *months)?;
+            image_write_value_bytes(buf, &bytes)
+        }
+        BindValue::Null => {
+            image_write_null(buf, false);
+            Ok(())
+        }
+        _ => Err(ProtocolError::UnsupportedFeature(
+            "DbObject attribute type not supported for input binding",
+        )),
+    }
+}
+
+fn parse_binary_integer_u32(text: &str) -> Result<u32> {
+    let trimmed = text.trim();
+    let parsed: i64 = trimmed
+        .parse()
+        .map_err(|_| ProtocolError::TtcDecode("invalid BINARY_INTEGER value"))?;
+    Ok(parsed as u32)
+}
+
+/// Frames a fully-packed DbObject pickle `image` into the outgoing data row,
+/// replacing the zero stub used for empty OUT binds. Mirrors
+/// `WriteBuffer.write_dbobject` (reference impl/thin/packet.pyx:842-857). The
+/// `toid` is derived from the type `oid` per `create_new_object` (620-622).
+pub fn write_dbobject_bind(writer: &mut TtcWriter, oid: &[u8], image: &[u8]) -> Result<()> {
+    let mut toid = Vec::with_capacity(4 + oid.len() + TNS_EXTENT_OID.len());
+    toid.extend_from_slice(&[0x00, 0x22, TNS_OBJ_NON_NULL_OID, TNS_OBJ_HAS_EXTENT_OID]);
+    toid.extend_from_slice(oid);
+    toid.extend_from_slice(&TNS_EXTENT_OID);
+    writer.write_bytes_with_two_lengths(Some(&toid))?;
+    writer.write_bytes_with_two_lengths(Some(oid))?;
+    writer.write_ub4(0); // snapshot
+    writer.write_ub4(0); // version
+    writer.write_ub4(u32::try_from(image.len()).map_err(|_| {
+        ProtocolError::InvalidPacketLength {
+            length: image.len(),
+            minimum: 0,
+        }
+    })?);
+    writer.write_ub4(TNS_OBJ_TOP_LEVEL);
+    writer.write_bytes_with_length(image)
+}
+
 pub fn decode_dbobject_text(bytes: &[u8], dbtype_name: &str) -> Result<String> {
     if matches!(dbtype_name, "DB_TYPE_NCHAR" | "DB_TYPE_NVARCHAR") {
         let mut chunks = bytes.chunks_exact(2);
@@ -691,6 +946,17 @@ pub enum BindValue {
         version: u32,
         buffer_size: u32,
         is_return: bool,
+    },
+    /// A DbObject bound as IN (or IN/OUT). The fully packed pickle `image` is
+    /// built by the pyshim (it owns the recursive Python attribute values); the
+    /// protocol only frames it (toid/oid/snapshot/version/len/flags + image).
+    ObjectInput {
+        schema: String,
+        type_name: String,
+        oid: Vec<u8>,
+        version: u32,
+        image: Vec<u8>,
+        buffer_size: u32,
     },
     Text(String),
     Raw(Vec<u8>),
@@ -1597,7 +1863,9 @@ fn write_bind_metadata_with_type(
         0
     };
     writer.write_ub8(cont_flags);
-    if let BindValue::ObjectOutput { oid, version, .. } = value {
+    if let BindValue::ObjectOutput { oid, version, .. }
+    | BindValue::ObjectInput { oid, version, .. } = value
+    {
         writer.write_bytes_with_two_lengths(Some(oid))?;
         writer.write_ub4(*version);
     } else {
@@ -1640,7 +1908,8 @@ pub fn bind_value_type_info(value: &BindValue) -> Option<BindTypeInfo> {
             csfrm,
             buffer_size,
         } => (*ora_type_num, *csfrm, (*buffer_size).max(1)),
-        BindValue::ObjectOutput { buffer_size, .. } => {
+        BindValue::ObjectOutput { buffer_size, .. }
+        | BindValue::ObjectInput { buffer_size, .. } => {
             (ORA_TYPE_NUM_OBJECT, 0, (*buffer_size).max(1))
         }
         // values larger than 32767 bytes keep the VARCHAR/RAW bind type with
@@ -2074,6 +2343,25 @@ pub fn public_dbtype_name_from_oracle_type_name(type_name: &str) -> &'static str
         "NUMBER" | "INTEGER" | "SMALLINT" | "REAL" | "DOUBLE PRECISION" | "FLOAT" => {
             "DB_TYPE_NUMBER"
         }
+        // PL/SQL scalar attribute/element type names returned verbatim by the
+        // type catalog. Without these arms they would fall through to the ADT
+        // fallback below and be misclassified as nested objects (reference
+        // impl/base/types.pyx:154-175,451-455 db_type_by_ora_name).
+        "BOOLEAN" | "PL/SQL BOOLEAN" => "DB_TYPE_BOOLEAN",
+        "BINARY_INTEGER" | "PLS_INTEGER" | "PL/SQL BINARY INTEGER" | "PL/SQL PLS INTEGER" => {
+            "DB_TYPE_BINARY_INTEGER"
+        }
+        "LONG" => "DB_TYPE_LONG",
+        "LONG RAW" => "DB_TYPE_LONG_RAW",
+        "ROWID" => "DB_TYPE_ROWID",
+        "UROWID" => "DB_TYPE_UROWID",
+        "BFILE" => "DB_TYPE_BFILE",
+        "JSON" => "DB_TYPE_JSON",
+        "VECTOR" => "DB_TYPE_VECTOR",
+        "INTERVAL DAY TO SECOND" => "DB_TYPE_INTERVAL_DS",
+        "INTERVAL YEAR TO MONTH" => "DB_TYPE_INTERVAL_YM",
+        // An unknown name IS a nested object type (mirrors reference
+        // _create_attr only calling get_type_for_info when type_owner is set).
         _ => "DB_TYPE_OBJECT",
     }
 }
@@ -2140,7 +2428,7 @@ pub fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
             csfrm,
             ..
         } => public_dbtype_name_from_type_info(*ora_type_num, *csfrm),
-        BindValue::ObjectOutput { .. } => "DB_TYPE_OBJECT",
+        BindValue::ObjectOutput { .. } | BindValue::ObjectInput { .. } => "DB_TYPE_OBJECT",
         BindValue::Text(_) => "DB_TYPE_VARCHAR",
         BindValue::Raw(_) => "DB_TYPE_RAW",
         BindValue::Lob {
@@ -2369,6 +2657,8 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm: u8) -> Res
             Ok(())
         }
         BindValue::ObjectOutput { .. } => {
+            // NULL object image (empty OUT bind): reference messages/base.pyx
+            // 1462-1468.
             writer.write_ub4(0);
             writer.write_ub4(0);
             writer.write_ub4(0);
@@ -2377,6 +2667,7 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm: u8) -> Res
             writer.write_ub4(TNS_OBJ_TOP_LEVEL);
             Ok(())
         }
+        BindValue::ObjectInput { oid, image, .. } => write_dbobject_bind(writer, oid, image),
         BindValue::Text(value) => {
             let bytes = encode_text_value(value, csfrm);
             writer.write_bytes_with_length(&bytes)
@@ -3116,11 +3407,15 @@ fn parse_query_response_with_context_binds_and_options(
 fn bind_column_metadata(value: &BindValue) -> ColumnMetadata {
     let (ora_type_num, csfrm, buffer_size) = bind_metadata(value);
     let object_schema = match value {
-        BindValue::ObjectOutput { schema, .. } => Some(schema.clone()),
+        BindValue::ObjectOutput { schema, .. } | BindValue::ObjectInput { schema, .. } => {
+            Some(schema.clone())
+        }
         _ => None,
     };
     let object_type_name = match value {
-        BindValue::ObjectOutput { type_name, .. } => Some(type_name.clone()),
+        BindValue::ObjectOutput { type_name, .. } | BindValue::ObjectInput { type_name, .. } => {
+            Some(type_name.clone())
+        }
         _ => None,
     };
     ColumnMetadata {
@@ -5657,6 +5952,20 @@ mod tests {
             public_dbtype_name_from_oracle_type_name("UDT_OBJECT"),
             "DB_TYPE_OBJECT"
         );
+        // PL/SQL scalar attribute/element type names must NOT fall through to
+        // the DB_TYPE_OBJECT ADT fallback (Wave 3 BUG 1).
+        for (name, expected) in [
+            ("BOOLEAN", "DB_TYPE_BOOLEAN"),
+            ("PL/SQL BOOLEAN", "DB_TYPE_BOOLEAN"),
+            ("PL/SQL PLS INTEGER", "DB_TYPE_BINARY_INTEGER"),
+            ("PL/SQL BINARY INTEGER", "DB_TYPE_BINARY_INTEGER"),
+            ("BINARY_INTEGER", "DB_TYPE_BINARY_INTEGER"),
+            ("PLS_INTEGER", "DB_TYPE_BINARY_INTEGER"),
+            ("INTERVAL DAY TO SECOND", "DB_TYPE_INTERVAL_DS"),
+            ("INTERVAL YEAR TO MONTH", "DB_TYPE_INTERVAL_YM"),
+        ] {
+            assert_eq!(public_dbtype_name_from_oracle_type_name(name), expected);
+        }
 
         assert_eq!(
             dbobject_attr_precision_scale("NUMBER", None, Some(0)),

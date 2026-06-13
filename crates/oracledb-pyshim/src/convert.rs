@@ -58,9 +58,7 @@ pub(crate) fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> 
         return Ok(bind);
     }
     if let Some(object) = py_db_object_impl(value)? {
-        if let Some(bind) = dbobject_collection_to_array_bind(value.py(), &object)? {
-            return Ok(bind);
-        }
+        return dbobject_to_bind(value.py(), &object);
     }
     if let Ok(bytes) = value.cast::<PyBytes>() {
         return Ok(BindValue::Raw(bytes.as_bytes().to_vec()));
@@ -396,6 +394,32 @@ pub(crate) fn py_dbobject_element_to_bind(
         }
     }
     py_value_to_bind(value)
+}
+
+/// Builds the bind value for a DbObject IN/IN-OUT bind. Prefers the native
+/// packed-image path (`BindValue::ObjectInput`), which is the parity-correct
+/// wire shape the reference always uses for `ORA_TYPE_NUM_OBJECT` binds
+/// (reference messages/base.pyx:1518-1519). Falls back to the PL/SQL-array
+/// flattening only when the type has no oid (cannot frame a native object).
+pub(crate) fn dbobject_to_bind(py: Python<'_>, object: &DbObjectImpl) -> PyResult<BindValue> {
+    let object_type = &object.object_type;
+    if let Some(oid) = object_type.oid_bytes() {
+        let image = object.pack_image(py)?;
+        let buffer_size = u32::try_from(image.len()).unwrap_or(u32::MAX).max(1);
+        return Ok(BindValue::ObjectInput {
+            schema: object_type.schema.clone(),
+            type_name: object_type.name.clone(),
+            oid,
+            version: object_type.version(),
+            image,
+            buffer_size,
+        });
+    }
+    // No oid: cannot bind natively. Keep the scalar-collection array workaround.
+    if let Some(bind) = dbobject_collection_to_array_bind(py, object)? {
+        return Ok(bind);
+    }
+    Err(raise_python_value_not_supported("DbObject"))
 }
 
 pub(crate) fn dbobject_collection_to_array_bind(

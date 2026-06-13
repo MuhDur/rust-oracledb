@@ -929,6 +929,38 @@ impl ThinVar {
                     .object_type
                     .clone()
                     .ok_or_else(|| PyRuntimeError::new_err("missing object type"))?;
+                // If this variable already holds the bound DbObject (an OUT /
+                // IN-OUT bind), update it in place so the caller's original
+                // Python object reflects the server-modified value.
+                let current = {
+                    let guard = self.values.lock().map_err(runtime_error)?;
+                    guard
+                        .first()
+                        .and_then(Option::as_ref)
+                        .map(|value| value.clone_ref(py))
+                };
+                if let Some(current) = current {
+                    let bound = current.bind(py);
+                    // The stored value is the public DbObject wrapping the
+                    // pyclass impl via `_impl`; mutate the impl in place.
+                    let impl_obj = if bound.extract::<PyRef<'_, DbObjectImpl>>().is_ok() {
+                        Some(bound.clone())
+                    } else if bound.hasattr("_impl")? {
+                        let inner = bound.getattr("_impl")?;
+                        inner
+                            .extract::<PyRef<'_, DbObjectImpl>>()
+                            .is_ok()
+                            .then_some(inner)
+                    } else {
+                        None
+                    };
+                    if let Some(impl_obj) = impl_obj {
+                        let mut object_mut = impl_obj.extract::<PyRefMut<'_, DbObjectImpl>>()?;
+                        object_mut.reset_packed_data(py, packed_data.clone(), None)?;
+                        drop(object_mut);
+                        return Ok(current);
+                    }
+                }
                 py_db_object_from_impl(
                     py,
                     DbObjectImpl::with_packed_data(object_type, packed_data.clone(), None),
@@ -1151,6 +1183,21 @@ pub(crate) fn bind_var_from_value(
 ) -> PyResult<Py<ThinVar>> {
     if let Some(var) = thin_var_from_value(value)? {
         return Ok(var);
+    }
+    // A DbObject value bound directly (e.g. callproc IN/OUT positional arg)
+    // must carry its object_type so an OUT/IN-OUT readback can reconstruct the
+    // object from the returned packed image (reference keeps the type on the
+    // bind variable). Without this the OUT path has no type to resolve.
+    if let Some(object) = py_db_object_impl(value)? {
+        return Py::new(
+            py,
+            ThinVar::with_options(ThinVarOptions {
+                value: Some(value.clone().unbind()),
+                object_type: Some(object.object_type.clone()),
+                dbtype_name: "DB_TYPE_OBJECT".to_string(),
+                ..ThinVarOptions::default()
+            }),
+        );
     }
     // derive the variable type from the value's Python class, mirroring
     // OracleMetadata.from_value (impl/base/metadata.pyx:413-458); this keeps

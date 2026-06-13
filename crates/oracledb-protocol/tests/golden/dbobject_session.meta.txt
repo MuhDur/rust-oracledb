@@ -1,0 +1,12 @@
+connected 23.26.1.0.0
+capture: callfunc pkg_TestRecords.GetStringRep with PKG_TESTRECORDS.UDT_RECORD IN bind
+record values (test_3211):
+  NUMBERVALUE=18 STRINGVALUE='A string in a record'
+  DATEVALUE=2016-02-15 TIMESTAMPVALUE=2016-02-12 14:25:36
+  BOOLEANVALUE=False PLSINTEGERVALUE=21 BINARYINTEGERVALUE=5
+golden packed image (62 bytes, hex):
+  8401fe0000003e02c113144120737472696e6720696e2061207265636f7264
+  077874020f010101077874020c0f1a25040000000004000000150400000005
+type oid (hex): 53ff7a88ac51031fe063040011ac50ca
+result: udt_Record(18, 'A string in a record', to_date('2016-02-15', 'YYYY-MM-DD'),
+  to_timestamp('2016-02-12 14:25:36', 'YYYY-MM-DD HH24:MI:SS'), false, 21, 5)

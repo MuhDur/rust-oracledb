@@ -622,7 +622,12 @@ impl ThinConnImpl {
             row.get(5).and_then(query_value_to_i8),
         );
         let objtype = if dbtype_name == "DB_TYPE_OBJECT" {
-            if let Some(elem_type_package) = elem_type_package {
+            if let Some(table_name) = elem_type_name.strip_suffix("%ROWTYPE") {
+                // A collection of %ROWTYPE: the element type's attributes are the
+                // referenced table's columns (reference resolves the rowtype's
+                // attrs from the catalog, not a shallow ADT).
+                Some(self.rowtype(&elem_type_owner, table_name, &elem_type_name)?)
+            } else if let Some(elem_type_package) = elem_type_package {
                 Some(self.plsql_type_shallow(
                     &elem_type_owner,
                     &elem_type_package,
