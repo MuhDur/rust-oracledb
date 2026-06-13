@@ -1424,12 +1424,25 @@ pub(crate) fn json_query_value_to_py(
     owner_cursor: Option<&Bound<'_, PyAny>>,
     lob_context: Option<&ThinLobContext>,
 ) -> PyResult<Py<PyAny>> {
+    // Mirrors the reference is_json text converter
+    // (impl/base/cursor.pyx `_build_json_converter_fn`): bytes are decoded to
+    // text and an empty/false value yields None (the `if value:` guard) so that
+    // an empty CLOB/BLOB column is not passed to json.loads (which would raise
+    // "Expecting value"). fetch_lobs=false materializes any CLOB/BLOB to
+    // str/bytes already, so there is no LOB object left to read here.
     let value = query_value_to_py(py, value, owner_cursor, lob_context, false, false)?;
-    if value.bind(py).is_none() {
-        return Ok(value);
+    let mut value = value.into_bound(py);
+    if value.is_none() {
+        return Ok(value.unbind());
+    }
+    if let Ok(bytes) = value.downcast::<pyo3::types::PyBytes>() {
+        value = bytes.call_method0("decode")?;
+    }
+    if !value.is_truthy()? {
+        return Ok(py.None());
     }
     Ok(PyModule::import(py, "json")?
         .getattr("loads")?
-        .call1((value.bind(py),))?
+        .call1((&value,))?
         .unbind())
 }
