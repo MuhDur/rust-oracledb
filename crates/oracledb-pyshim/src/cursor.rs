@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use oracledb::protocol::thin::{
     check_fetch_conversion, public_dbtype_name_from_column_metadata, BatchServerError, BindValue,
     ColumnMetadata, ExecuteOptions, QueryResult, QueryValue, CS_FORM_IMPLICIT,
-    ORA_TYPE_NUM_VARCHAR,
+    ORA_TYPE_NUM_VARCHAR, ORA_TYPE_NUM_VECTOR,
 };
 use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
@@ -997,11 +997,18 @@ impl ThinCursorImpl {
         self.columns = result.columns;
         self.reset_fetch_define_state();
         self.requires_define = columns_require_define(&self.columns);
-        // VECTOR/LOB/JSON columns set the reference's stmt._no_prefetch: rows
-        // prefetched during execute (before a client-side define is sent) are
-        // unreliable for these types, so discard them and re-fetch through the
-        // define path (reference base.pyx:1159-1164 + execute.pyx:99).
-        if self.requires_define && result.cursor_id != 0 {
+        // VECTOR columns set the reference's stmt._no_prefetch: rows prefetched
+        // during execute (before a client-side define is sent) are unreliable,
+        // so discard them and re-fetch through the define path (reference
+        // base.pyx:1159-1164 + execute.pyx:99). Scoped to VECTOR only so JSON
+        // and LOB fetch paths keep their existing prefetch behavior.
+        if self.requires_define
+            && result.cursor_id != 0
+            && self
+                .columns
+                .iter()
+                .any(|metadata| metadata.ora_type_num == ORA_TYPE_NUM_VECTOR)
+        {
             self.rows = Vec::new();
             self.more_rows = true;
         } else {
@@ -1129,11 +1136,18 @@ impl ThinCursorImpl {
         self.columns = result.columns;
         self.reset_fetch_define_state();
         self.requires_define = columns_require_define(&self.columns);
-        // VECTOR/LOB/JSON columns set the reference's stmt._no_prefetch: rows
-        // prefetched during execute (before a client-side define is sent) are
-        // unreliable for these types, so discard them and re-fetch through the
-        // define path (reference base.pyx:1159-1164 + execute.pyx:99).
-        if self.requires_define && result.cursor_id != 0 {
+        // VECTOR columns set the reference's stmt._no_prefetch: rows prefetched
+        // during execute (before a client-side define is sent) are unreliable,
+        // so discard them and re-fetch through the define path (reference
+        // base.pyx:1159-1164 + execute.pyx:99). Scoped to VECTOR only so JSON
+        // and LOB fetch paths keep their existing prefetch behavior.
+        if self.requires_define
+            && result.cursor_id != 0
+            && self
+                .columns
+                .iter()
+                .any(|metadata| metadata.ora_type_num == ORA_TYPE_NUM_VECTOR)
+        {
             self.rows = Vec::new();
             self.more_rows = true;
         } else {
