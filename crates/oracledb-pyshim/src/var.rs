@@ -1382,8 +1382,7 @@ pub(crate) fn reset_cursor_bind_vars(
         let impl_obj = cursor.getattr("_impl")?;
         if let Ok(mut cursor_impl) = impl_obj.extract::<PyRefMut<'_, ThinCursorImpl>>() {
             cursor_impl.reset_after_cursor_bind();
-        } else if let Ok(mut cursor_impl) =
-            impl_obj.extract::<PyRefMut<'_, AsyncThinCursorImpl>>()
+        } else if let Ok(mut cursor_impl) = impl_obj.extract::<PyRefMut<'_, AsyncThinCursorImpl>>()
         {
             cursor_impl.inner.reset_after_cursor_bind();
         }
