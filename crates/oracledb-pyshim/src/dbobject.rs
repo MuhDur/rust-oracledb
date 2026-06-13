@@ -357,7 +357,7 @@ pub(crate) fn dbobject_value_byte_size(
 }
 
 impl DbObjectImpl {
-    fn new(py: Python<'_>, object_type: DbObjectTypeImpl) -> PyResult<Self> {
+    pub(crate) fn new(py: Python<'_>, object_type: DbObjectTypeImpl) -> PyResult<Self> {
         let mut attr_values = BTreeMap::new();
         for attr in &object_type.attrs {
             attr_values.insert(attr.name.clone(), py.None());

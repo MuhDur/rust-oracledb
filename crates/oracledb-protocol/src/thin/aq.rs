@@ -960,20 +960,20 @@ fn process_payload(
     kind: &AqPayloadKind,
 ) -> Result<Option<AqDeqPayload>> {
     if matches!(kind, AqPayloadKind::Object) {
-        // Object branch: buf.read_dbobject -> packed image. The wire layout is
-        // TOID/OID/snapshot (two-length each), version ub2, image-len ub4,
-        // flags ub4, then the packed image bytes.
+        // Object branch (reference `read_dbobject`): TOID/OID/snapshot
+        // (length-prefixed each), version ub2, image-len ub4, flags ub2, then
+        // the packed image as a bare length-prefixed chunk (`read_bytes`).
         let _toid = reader.read_bytes_with_length()?;
         let _oid = reader.read_bytes_with_length()?;
         let _snapshot = reader.read_bytes_with_length()?;
         let _version = reader.read_ub2()?;
-        let image_length = reader.read_ub4()? as usize;
-        let _flags = reader.read_ub4()?;
+        let image_length = reader.read_ub4()?;
+        let _flags = reader.read_ub2()?;
         if image_length == 0 {
             return Ok(None);
         }
         let image = reader
-            .read_bytes_with_length()?
+            .read_bytes()?
             .ok_or(ProtocolError::TtcDecode("AQ object payload missing"))?;
         return Ok(Some(AqDeqPayload::Object(image)));
     }

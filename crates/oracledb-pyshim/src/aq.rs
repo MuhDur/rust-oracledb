@@ -444,10 +444,11 @@ fn decode_payload(
         None => {
             if is_json {
                 Ok(py.None())
-            } else if payload_type.is_some() {
-                // Object queue with an empty payload: return a new empty object.
-                let object =
-                    DbObjectImpl::with_packed_data(payload_type.unwrap().clone(), Vec::new(), None);
+            } else if let Some(type_impl) = payload_type {
+                // Object queue with an empty payload (e.g. DEQ_REMOVE_NODATA):
+                // the reference returns a fresh empty object (all attrs None),
+                // matching `payload_type.create_new_object()`.
+                let object = DbObjectImpl::new(py, type_impl.clone())?;
                 py_db_object_from_impl(py, object)
             } else {
                 // RAW with empty image already mapped to Raw(empty); reaching here
