@@ -2357,6 +2357,45 @@ pub fn check_fetch_conversion(
                     | ORA_TYPE_NUM_BINARY_FLOAT
             ) || CHAR_TYPES.contains(&to)
         }
+        ORA_TYPE_NUM_JSON => {
+            // Native JSON (DB_TYPE_JSON) fetched as a character type via an
+            // output type handler. The reference defines the column to the
+            // server as VARCHAR but decodes the returned bytes as LONG: "the
+            // server won't accept LONG being defined but even so it still sends
+            // back LONG data" (reference impl/base/var.pyx:208-215, where
+            // `_fetch_metadata.dbtype = DB_TYPE_LONG` and `return
+            // DB_TYPE_VARCHAR`).
+            //
+            // Our wire define writer keys the VARCHAR ora_type_num off this
+            // metadata, so the server accepts the define and streams the OSON
+            // image inline as text. The returned data is then decoded through
+            // the same `read_bytes` path used for VARCHAR/CHAR/LONG (all three
+            // share identical framing in `parse_column_value`), and the
+            // non-zero LONG-sized `buffer_size` set here keeps the
+            // null-by-describe shortcut from firing — exactly the effect the
+            // reference obtains by decoding as LONG. The handler's outconverter
+            // (e.g. `json.loads`) then materializes the Python value.
+            if matches!(to, ORA_TYPE_NUM_CHAR | ORA_TYPE_NUM_VARCHAR) {
+                let mut metadata = source.clone();
+                metadata.ora_type_num = ORA_TYPE_NUM_VARCHAR;
+                metadata.csfrm = CS_FORM_IMPLICIT;
+                metadata.buffer_size = TNS_MAX_LONG_LENGTH;
+                metadata.max_size = 0;
+                return Some(metadata);
+            }
+            // JSON fetched as RAW/bytes decodes the OSON image bytes directly
+            // (reference var.pyx:216-218 sets `_fetch_metadata.dbtype =
+            // DB_TYPE_RAW`).
+            if to == ORA_TYPE_NUM_RAW {
+                let mut metadata = source.clone();
+                metadata.ora_type_num = ORA_TYPE_NUM_RAW;
+                metadata.csfrm = 0;
+                metadata.buffer_size = TNS_MAX_LONG_LENGTH;
+                metadata.max_size = 0;
+                return Some(metadata);
+            }
+            false
+        }
         ORA_TYPE_NUM_VECTOR => {
             // VECTOR fetched as a character type streams its JSON text via a
             // LONG wire define; VECTOR fetched as a CLOB streams via a CLOB
