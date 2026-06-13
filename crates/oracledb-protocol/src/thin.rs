@@ -93,6 +93,9 @@ pub const ORA_TYPE_NUM_INTERVAL_DS: u8 = 183;
 pub const ORA_TYPE_NUM_INTERVAL_YM: u8 = 182;
 pub const ORA_TYPE_NUM_UROWID: u8 = 208;
 pub const ORA_TYPE_NUM_TIMESTAMP_LTZ: u8 = 231;
+pub const ORA_TYPE_NUM_VECTOR: u8 = 127;
+/// Maximum VECTOR prefetch length (`TNS_VECTOR_MAX_LENGTH` = 1 MiB).
+const TNS_VECTOR_MAX_LENGTH: u32 = 1024 * 1024;
 pub const TNS_OBJ_TOP_LEVEL: u32 = 0x01;
 const TNS_LONG_LENGTH_INDICATOR: u8 = 254;
 const TNS_NULL_LENGTH_INDICATOR: u8 = 255;
@@ -310,6 +313,14 @@ pub struct ColumnMetadata {
     pub object_schema: Option<String>,
     pub object_type_name: Option<String>,
     pub is_array: bool,
+    /// VECTOR columns only: the fixed dimension count, or `None` for a
+    /// flexible-dimension column (server sends 0).
+    pub vector_dimensions: Option<u32>,
+    /// VECTOR columns only: the storage format byte (`VECTOR_FORMAT_*`); 0
+    /// for a flexible-format column.
+    pub vector_format: u8,
+    /// VECTOR columns only: the metadata flags byte (sparse / flexible).
+    pub vector_flags: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -319,7 +330,9 @@ pub struct BindTypeInfo {
     pub buffer_size: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+// `Eq` is intentionally omitted: VECTOR values carry floating-point elements,
+// which only implement `PartialEq`.
+#[derive(Clone, Debug, PartialEq)]
 pub enum QueryValue {
     Text(String),
     /// Character data that could not be decoded as valid text; the raw bytes
@@ -371,6 +384,7 @@ pub enum QueryValue {
         size: u64,
         chunk_size: u32,
     },
+    Vector(crate::vector::Vector),
     Array(Vec<Option<QueryValue>>),
 }
 
@@ -695,12 +709,13 @@ pub enum BindValue {
         max_elements: u32,
         values: Vec<Option<BindValue>>,
     },
+    Vector(crate::vector::Vector),
     Cursor {
         cursor_id: u32,
     },
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct QueryResult {
     pub columns: Vec<ColumnMetadata>,
     pub rows: Vec<Vec<Option<QueryValue>>>,
@@ -1353,7 +1368,10 @@ fn write_bind_metadata_with_type(
     writer.write_u8(0);
     writer.write_ub4(buffer_size);
     writer.write_ub4(max_elements);
-    let cont_flags = if matches!(ora_type_num, ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB) {
+    let cont_flags = if matches!(
+        ora_type_num,
+        ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR
+    ) {
         TNS_LOB_PREFETCH_FLAG
     } else {
         0
@@ -1372,7 +1390,14 @@ fn write_bind_metadata_with_type(
         writer.write_ub2(0);
     }
     writer.write_u8(csfrm);
-    writer.write_ub4(0);
+    // max chars (LOB prefetch length): VECTOR advertises TNS_VECTOR_MAX_LENGTH
+    // so the server prefetches the image inline (reference base.pyx)
+    let lob_prefetch_length = if ora_type_num == ORA_TYPE_NUM_VECTOR {
+        TNS_VECTOR_MAX_LENGTH
+    } else {
+        0
+    };
+    writer.write_ub4(lob_prefetch_length);
     writer.write_ub4(0);
     Ok(())
 }
@@ -1442,6 +1467,9 @@ pub fn bind_value_type_info(value: &BindValue) -> Option<BindTypeInfo> {
             buffer_size,
             ..
         } => (*ora_type_num, *csfrm, (*buffer_size).max(1)),
+        // reference base.pyx _write_column_metadata: VECTOR binds advertise a
+        // TNS_VECTOR_MAX_LENGTH prefetch buffer and the LOB-prefetch cont flag
+        BindValue::Vector(_) => (ORA_TYPE_NUM_VECTOR, 0, TNS_VECTOR_MAX_LENGTH),
         BindValue::Cursor { .. } => (ORA_TYPE_NUM_CURSOR, 0, 4),
     };
     Some(BindTypeInfo {
@@ -1624,6 +1652,7 @@ pub fn public_dbtype_name_from_type_name(type_name: &str) -> &'static str {
         "DB_TYPE_TIMESTAMP_LTZ" | "TIMESTAMP WITH LOCAL TIME ZONE" => "DB_TYPE_TIMESTAMP_LTZ",
         "DB_TYPE_TIMESTAMP_TZ" | "TIMESTAMP WITH TIME ZONE" => "DB_TYPE_TIMESTAMP_TZ",
         "DB_TYPE_CURSOR" | "CURSOR" => "DB_TYPE_CURSOR",
+        "DB_TYPE_VECTOR" | "VECTOR" => "DB_TYPE_VECTOR",
         _ => "DB_TYPE_VARCHAR",
     }
 }
@@ -1671,6 +1700,7 @@ pub fn public_dbtype_name_from_column_metadata(metadata: &ColumnMetadata) -> &'s
         (ORA_TYPE_NUM_INTERVAL_DS, _) => "DB_TYPE_INTERVAL_DS",
         (ORA_TYPE_NUM_INTERVAL_YM, _) => "DB_TYPE_INTERVAL_YM",
         (ORA_TYPE_NUM_BOOLEAN, _) => "DB_TYPE_BOOLEAN",
+        (ORA_TYPE_NUM_VECTOR, _) => "DB_TYPE_VECTOR",
         _ => "DB_TYPE_VARCHAR",
     }
 }
@@ -1916,6 +1946,7 @@ pub fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
             ORA_TYPE_NUM_TIMESTAMP_TZ => "DB_TYPE_TIMESTAMP_TZ",
             _ => "DB_TYPE_TIMESTAMP",
         },
+        BindValue::Vector(_) => "DB_TYPE_VECTOR",
         BindValue::Cursor { .. } => "DB_TYPE_CURSOR",
         BindValue::Null => "DB_TYPE_VARCHAR",
     }
@@ -2031,6 +2062,11 @@ pub fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
             buffer_size: ORA_TYPE_SIZE_TIMESTAMP_TZ,
         },
         "DB_TYPE_CURSOR" | "CURSOR" => cursor_bind_template(),
+        "DB_TYPE_VECTOR" | "VECTOR" => BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_VECTOR,
+            csfrm: 0,
+            buffer_size: TNS_VECTOR_MAX_LENGTH,
+        },
         _ => BindValue::Null,
     }
 }
@@ -2212,6 +2248,12 @@ fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm: u8) -> Res
             }
             Ok(())
         }
+        // reference WriteBuffer.write_vector: a QLocator carrying the image
+        // length, then the image bytes-with-length
+        BindValue::Vector(vector) => {
+            let image = crate::vector::encode_vector(vector);
+            crate::vector::write_vector_image(writer, &image)
+        }
         BindValue::Cursor { cursor_id } => {
             if *cursor_id == 0 {
                 writer.write_u8(1);
@@ -2322,17 +2364,25 @@ pub fn build_define_fetch_payload_with_seq(
 }
 
 fn write_define_column_metadata(writer: &mut TtcWriter, metadata: &ColumnMetadata) {
+    // reference base.pyx: VECTOR (and JSON) columns advertise a LOB-prefetch
+    // buffer so the server streams the image inline rather than returning a
+    // bare temp-LOB locator
+    let (mut buffer_size, cont_flags, lob_prefetch_length) = match metadata.ora_type_num {
+        ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB => (metadata.buffer_size, TNS_LOB_PREFETCH_FLAG, 0),
+        ORA_TYPE_NUM_VECTOR => (
+            TNS_VECTOR_MAX_LENGTH,
+            TNS_LOB_PREFETCH_FLAG,
+            TNS_VECTOR_MAX_LENGTH,
+        ),
+        _ => (metadata.buffer_size, 0, 0),
+    };
+    buffer_size = buffer_size.max(1);
     writer.write_u8(metadata.ora_type_num);
     writer.write_u8(TNS_BIND_USE_INDICATORS);
     writer.write_u8(0);
     writer.write_u8(0);
-    writer.write_ub4(metadata.buffer_size.max(1));
+    writer.write_ub4(buffer_size);
     writer.write_ub4(0);
-    let cont_flags = if matches!(metadata.ora_type_num, ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB) {
-        TNS_LOB_PREFETCH_FLAG
-    } else {
-        0
-    };
     writer.write_ub8(cont_flags);
     writer.write_ub4(0);
     writer.write_ub2(0);
@@ -2342,7 +2392,7 @@ fn write_define_column_metadata(writer: &mut TtcWriter, metadata: &ColumnMetadat
         writer.write_ub2(0);
     }
     writer.write_u8(metadata.csfrm);
-    writer.write_ub4(0);
+    writer.write_ub4(lob_prefetch_length);
     writer.write_ub4(0);
 }
 
@@ -2863,6 +2913,9 @@ fn bind_column_metadata(value: &BindValue) -> ColumnMetadata {
         object_schema,
         object_type_name,
         is_array: matches!(value, BindValue::Array { .. }),
+        vector_dimensions: None,
+        vector_format: 0,
+        vector_flags: 0,
     }
 }
 
@@ -3301,9 +3354,17 @@ pub(crate) fn parse_column_metadata(
             let _flags = reader.read_ub4()?;
         }
     }
+    let mut vector_dimensions = None;
+    let mut vector_format = 0u8;
+    let mut vector_flags = 0u8;
     if capabilities.ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_4 {
-        let _vector_dimensions = reader.read_ub4()?;
-        reader.skip(2)?;
+        // reference metadata.pyx: ub4 dimensions, ub1 format, ub1 flags
+        let dims = reader.read_ub4()?;
+        vector_format = reader.read_u8()?;
+        vector_flags = reader.read_u8()?;
+        if ora_type_num == ORA_TYPE_NUM_VECTOR {
+            vector_dimensions = Some(dims);
+        }
     }
 
     Ok(ColumnMetadata {
@@ -3320,6 +3381,9 @@ pub(crate) fn parse_column_metadata(
         object_schema,
         object_type_name,
         is_array: false,
+        vector_dimensions,
+        vector_format,
+        vector_flags,
     })
 }
 
@@ -3555,6 +3619,7 @@ fn parse_column_value(
         ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_BFILE => {
             parse_lob_value(reader, metadata)
         }
+        ORA_TYPE_NUM_VECTOR => parse_vector_value(reader),
         ORA_TYPE_NUM_CURSOR => parse_cursor_value(reader).map(Some),
         ORA_TYPE_NUM_OBJECT => parse_object_value(reader, metadata),
         _ => Err(ProtocolError::UnsupportedFeature("query column type")),
@@ -3682,6 +3747,27 @@ fn parse_lob_value(
         size,
         chunk_size,
     }))
+}
+
+/// Reads a VECTOR value (reference `ReadBuffer.read_vector` in `packet.pyx`).
+/// VECTOR is sent as a fully-prefetched LOB: the image data precedes the
+/// (discarded) LOB locator.
+fn parse_vector_value(reader: &mut TtcReader<'_>) -> Result<Option<QueryValue>> {
+    let num_bytes = reader.read_ub4()?;
+    if num_bytes == 0 {
+        return Ok(None);
+    }
+    reader.read_ub8()?; // size (unused)
+    reader.read_ub4()?; // chunk size (unused)
+    let Some(data) = reader.read_bytes()? else {
+        return Ok(None);
+    };
+    reader.read_bytes()?; // LOB locator (unused)
+    if data.is_empty() {
+        return Ok(None);
+    }
+    let vector = crate::vector::decode_vector(&data)?;
+    Ok(Some(QueryValue::Vector(vector)))
 }
 
 fn parse_object_value(
@@ -5065,6 +5151,9 @@ mod tests {
             object_schema: None,
             object_type_name: None,
             is_array: false,
+            vector_dimensions: None,
+            vector_format: 0,
+            vector_flags: 0,
         };
 
         // VARCHAR -> CLOB fetches as LONG keeping the previous csfrm
@@ -5487,6 +5576,9 @@ mod tests {
             object_schema: None,
             object_type_name: None,
             is_array: false,
+            vector_dimensions: None,
+            vector_format: 0,
+            vector_flags: 0,
         }
     }
 
@@ -5505,6 +5597,9 @@ mod tests {
             object_schema: None,
             object_type_name: None,
             is_array: false,
+            vector_dimensions: None,
+            vector_format: 0,
+            vector_flags: 0,
         }
     }
 }

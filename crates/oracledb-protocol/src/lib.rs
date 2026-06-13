@@ -7,6 +7,7 @@ pub mod net;
 pub mod packet;
 pub mod sql;
 pub mod thin;
+pub mod vector;
 pub mod wire;
 
 use std::borrow::Cow;

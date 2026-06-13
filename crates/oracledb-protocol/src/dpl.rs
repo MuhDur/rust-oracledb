@@ -904,6 +904,9 @@ mod tests {
             object_schema: None,
             object_type_name: None,
             is_array: false,
+            vector_dimensions: None,
+            vector_format: 0,
+            vector_flags: 0,
         }
     }
 

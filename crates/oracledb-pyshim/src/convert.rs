@@ -8,7 +8,7 @@ use oracledb::protocol::thin::{
     CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE,
     ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_BOOLEAN, ORA_TYPE_NUM_CLOB,
     ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
-    ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR,
+    ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR, ORA_TYPE_NUM_VECTOR,
 };
 use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::PyRuntimeError;
@@ -70,6 +70,11 @@ pub(crate) fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> 
     // concrete oracledb.IntervalYM class is accepted, not (int, int) tuples)
     if let Some(bind) = py_interval_ym_to_bind(value)? {
         return Ok(bind);
+    }
+    // array.array / SparseVector always map to DB_TYPE_VECTOR (reference
+    // metadata.pyx from_value:450-451). A bad array typecode raises DPY-3013.
+    if is_vector_value(value)? {
+        return Ok(BindValue::Vector(py_to_vector(value, false)?));
     }
     if value.cast::<PyList>().is_ok() || value.cast::<PyTuple>().is_ok() {
         let values = py_list_to_array_bind_values(value)?;
@@ -185,6 +190,14 @@ pub(crate) fn py_value_to_bind_with_template(
         && matches!(py_value_type_name(value).as_str(), "Decimal")
     {
         return Ok(BindValue::Number(value.str()?.extract::<String>()?));
+    }
+    // a value bound through a DB_TYPE_VECTOR variable accepts array.array,
+    // SparseVector, and (coerced to array('d')) a plain list
+    if ora_type_num == ORA_TYPE_NUM_VECTOR {
+        if value.is_none() {
+            return Ok(BindValue::Null);
+        }
+        return Ok(BindValue::Vector(py_to_vector(value, true)?));
     }
     let Some((year, month, day, hour, minute, second, nanosecond)) = py_date_time_fields(value)?
     else {
@@ -1124,6 +1137,8 @@ pub(crate) fn query_value_to_py(
                 .collect::<PyResult<Vec<_>>>()?;
             Ok(PyList::new(py, values)?.unbind().into())
         }
+        // dense VECTOR -> array.array, sparse VECTOR -> oracledb.SparseVector
+        Some(QueryValue::Vector(vector)) => vector_to_py(py, vector),
         Some(QueryValue::Cursor { columns, cursor_id }) => {
             let Some(owner_cursor) = owner_cursor else {
                 return Err(not_implemented("ThinCursorImpl cursor value conversion"));

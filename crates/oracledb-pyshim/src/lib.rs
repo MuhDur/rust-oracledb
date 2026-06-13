@@ -23,6 +23,7 @@ mod pool;
 mod pyutil;
 mod typehandler;
 mod var;
+mod vector;
 
 pub(crate) use arrow_capsule::*;
 pub(crate) use async_bridge::*;
@@ -42,6 +43,7 @@ pub(crate) use pool::*;
 pub(crate) use pyutil::*;
 pub(crate) use typehandler::*;
 pub(crate) use var::*;
+pub(crate) use vector::*;
 
 #[pyfunction]
 fn init_thin_impl(_package: &Bound<'_, PyAny>) -> PyResult<()> {

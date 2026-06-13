@@ -98,16 +98,16 @@ impl FetchMetadataImpl {
 
     #[getter]
     fn vector_dimensions(&self) -> Option<u32> {
-        None
+        self.metadata.vector_dimensions
     }
 
     #[getter]
-    fn vector_format(&self) -> Option<u8> {
-        None
+    fn vector_format(&self) -> u8 {
+        self.metadata.vector_format
     }
 
     #[getter]
     fn vector_flags(&self) -> u8 {
-        0
+        self.metadata.vector_flags
     }
 }

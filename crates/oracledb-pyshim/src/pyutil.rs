@@ -1,4 +1,6 @@
-use oracledb::protocol::thin::{ColumnMetadata, QueryValue, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB};
+use oracledb::protocol::thin::{
+    ColumnMetadata, QueryValue, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_VECTOR,
+};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
@@ -181,6 +183,7 @@ pub(crate) fn query_value_to_string(value: &Option<QueryValue>) -> Option<String
         Some(QueryValue::IntervalDS { .. }) => None,
         Some(QueryValue::IntervalYM { .. }) => None,
         Some(QueryValue::Array(_)) => None,
+        Some(QueryValue::Vector(_)) => None,
         Some(QueryValue::Cursor { .. }) => None,
         Some(QueryValue::Object { .. }) => None,
         Some(QueryValue::Lob { .. }) => None,
@@ -200,9 +203,12 @@ pub(crate) fn query_value_to_u32(value: &Option<QueryValue>) -> Option<u32> {
 }
 
 pub(crate) fn columns_require_define(columns: &[ColumnMetadata]) -> bool {
-    columns
-        .iter()
-        .any(|metadata| matches!(metadata.ora_type_num, ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB))
+    columns.iter().any(|metadata| {
+        matches!(
+            metadata.ora_type_num,
+            ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR
+        )
+    })
 }
 
 pub(crate) fn query_value_to_i8(value: &Option<QueryValue>) -> Option<i8> {
