@@ -17,6 +17,60 @@ use pyo3::types::PyBytes;
 
 use crate::*;
 
+/// An owned TPC transaction id: `(format_id, gtid_bytes, bqual_bytes)`.
+pub(crate) type OwnedXid = (u32, Vec<u8>, Vec<u8>);
+
+/// Extract an `Xid` (reference `Xid` namedtuple: `(format_id, gtid, bqual)`)
+/// into `(format_id, gtid_bytes, bqual_bytes)`. The gtid / bqual members may be
+/// `bytes` or `str`; `str` is UTF-8 encoded to mirror the reference message
+/// writer (tpc_switch.pyx). A non-3-element or wrongly typed value raises
+/// `TypeError`, matching the reference `_verify_xid`.
+pub(crate) fn extract_xid(xid: &Bound<'_, PyAny>) -> PyResult<OwnedXid> {
+    let len = xid
+        .len()
+        .map_err(|_| PyTypeError::new_err("xid must be a 3-element Xid"))?;
+    if len != 3 {
+        return Err(PyTypeError::new_err("xid must be a 3-element Xid"));
+    }
+    let format_id: u32 = xid
+        .get_item(0)
+        .and_then(|item| item.extract())
+        .map_err(|_| PyTypeError::new_err("xid format_id must be an integer"))?;
+    let gtid = extract_xid_member(&xid.get_item(1)?, "global_transaction_id")?;
+    let bqual = extract_xid_member(&xid.get_item(2)?, "branch_qualifier")?;
+    Ok((format_id, gtid, bqual))
+}
+
+/// Extract a single `Xid` member (`bytes` directly, or `str` UTF-8 encoded).
+fn extract_xid_member(value: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<u8>> {
+    if let Ok(bytes) = value.cast::<PyBytes>() {
+        return Ok(bytes.as_bytes().to_vec());
+    }
+    if let Ok(text) = value.extract::<String>() {
+        return Ok(text.into_bytes());
+    }
+    Err(PyTypeError::new_err(format!(
+        "xid {name} must be bytes or str"
+    )))
+}
+
+/// Extract an optional `Xid`: `None` (the implicit current transaction) or an
+/// `Xid` namedtuple.
+pub(crate) fn extract_optional_xid(xid: &Bound<'_, PyAny>) -> PyResult<Option<OwnedXid>> {
+    if xid.is_none() {
+        Ok(None)
+    } else {
+        extract_xid(xid).map(Some)
+    }
+}
+
+/// Borrow an owned optional xid as the `(u32, &[u8], &[u8])` tuple the driver
+/// methods accept.
+pub(crate) fn xid_as_refs(xid: &Option<OwnedXid>) -> Option<(u32, &[u8], &[u8])> {
+    xid.as_ref()
+        .map(|(format_id, gtid, bqual)| (*format_id, gtid.as_slice(), bqual.as_slice()))
+}
+
 #[derive(Debug)]
 // d49: migrate to oracledb (session state belongs on driver Connection)
 pub(crate) struct ThinConnState {
@@ -28,7 +82,6 @@ pub(crate) struct ThinConnState {
     internal_name: Option<String>,
     pub(crate) call_timeout: u32,
     stmt_cache_size: u32,
-    pub(crate) transaction_in_progress: bool,
     invalid_connect_string: bool,
     dbop_operation: Option<(String, i64)>,
 }
@@ -44,36 +97,25 @@ impl ThinConnState {
             internal_name: None,
             call_timeout: 0,
             stmt_cache_size,
-            transaction_in_progress: false,
             invalid_connect_string,
             dbop_operation: None,
         }
     }
 
-    pub(crate) fn record_statement(&mut self, statement: &str, is_query: bool, committed: bool) {
+    /// Records side effects of an executed statement on cached session state.
+    /// The transaction-in-progress flag is now derived from the wire end-of-call
+    /// status on the driver (reference protocol.pyx `_txn_in_progress`), so this
+    /// only tracks the schema/edition that the reference reads back from
+    /// `alter session` without a round trip.
+    pub(crate) fn record_statement(&mut self, statement: &str) {
         if let Some(schema) = parse_alter_session_value(statement, "current_schema") {
             self.current_schema = Some(schema);
             self.current_schema_modified = false;
-            self.transaction_in_progress = false;
             return;
         }
         if let Some(edition) = parse_alter_session_value(statement, "edition") {
             self.edition = Some(edition.to_ascii_uppercase());
             self.edition_probe_started = true;
-            self.transaction_in_progress = false;
-            return;
-        }
-        if committed {
-            self.transaction_in_progress = false;
-            return;
-        }
-        if is_query {
-            return;
-        }
-        match first_sql_keyword(statement).as_str() {
-            "insert" | "update" | "delete" | "merge" => self.transaction_in_progress = true,
-            "alter" | "commit" | "rollback" | "truncate" => self.transaction_in_progress = false,
-            _ => {}
         }
     }
 }
@@ -1137,10 +1179,6 @@ impl ThinConnImpl {
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
         BlockingConnection::commit(connection).map_err(runtime_error)?;
-        self.state
-            .lock()
-            .map_err(runtime_error)?
-            .transaction_in_progress = false;
         Ok(())
     }
 
@@ -1185,12 +1223,6 @@ impl ThinConnImpl {
         })?;
         BlockingConnection::direct_path_load_prepared(connection, &prepare, &rows, batch_size)
             .map_err(direct_path_error_to_py)?;
-        // A successful direct path load commits on the server; reflect that in
-        // the shim transaction state.
-        self.state
-            .lock()
-            .map_err(runtime_error)?
-            .transaction_in_progress = false;
         Ok(())
     }
 
@@ -1200,10 +1232,6 @@ impl ThinConnImpl {
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
         BlockingConnection::rollback(connection).map_err(runtime_error)?;
-        self.state
-            .lock()
-            .map_err(runtime_error)?
-            .transaction_in_progress = false;
         Ok(())
     }
 
@@ -1228,10 +1256,6 @@ impl ThinConnImpl {
             defer_round_trip,
         )
         .map_err(runtime_error)?;
-        self.state
-            .lock()
-            .map_err(runtime_error)?
-            .transaction_in_progress = true;
         Ok(())
     }
 
@@ -1254,10 +1278,6 @@ impl ThinConnImpl {
             defer_round_trip,
         )
         .map_err(runtime_error)?;
-        self.state
-            .lock()
-            .map_err(runtime_error)?
-            .transaction_in_progress = true;
         Ok(())
     }
 
@@ -1269,6 +1289,84 @@ impl ThinConnImpl {
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
         BlockingConnection::suspend_sessionless_transaction(connection).map_err(runtime_error)
+    }
+
+    /// Begin an XA global transaction (reference connection.py `tpc_begin` ->
+    /// `_impl.tpc_begin(xid, flags, timeout)`). The Python wrapper has validated
+    /// the flags (DPY-2050) and the xid type before calling.
+    #[pyo3(signature = (xid, flags, timeout))]
+    fn tpc_begin(&self, xid: &Bound<'_, PyAny>, flags: u32, timeout: u32) -> PyResult<()> {
+        let (format_id, gtid, bqual) = extract_xid(xid)?;
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        BlockingConnection::tpc_begin(connection, format_id, &gtid, &bqual, flags, timeout)
+            .map_err(runtime_error)
+    }
+
+    /// End (detach) an XA global transaction branch (reference `tpc_end` ->
+    /// `_impl.tpc_end(xid, flags)`). `xid` is `None` to detach the implicit
+    /// current transaction.
+    #[pyo3(signature = (xid, flags))]
+    fn tpc_end(&self, xid: &Bound<'_, PyAny>, flags: u32) -> PyResult<()> {
+        let xid = extract_optional_xid(xid)?;
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        BlockingConnection::tpc_end(connection, xid_as_refs(&xid), flags).map_err(runtime_error)
+    }
+
+    /// Prepare an XA global transaction for commit (reference `tpc_prepare` ->
+    /// `_impl.tpc_prepare(xid)`). Returns `True` when a commit is needed.
+    #[pyo3(signature = (xid))]
+    fn tpc_prepare(&self, xid: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let xid = extract_optional_xid(xid)?;
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        BlockingConnection::tpc_prepare(connection, xid_as_refs(&xid)).map_err(runtime_error)
+    }
+
+    /// Commit an XA global transaction (reference `tpc_commit` ->
+    /// `_impl.tpc_commit(xid, one_phase)`).
+    #[pyo3(signature = (xid, one_phase))]
+    fn tpc_commit(&self, xid: &Bound<'_, PyAny>, one_phase: bool) -> PyResult<()> {
+        let xid = extract_optional_xid(xid)?;
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        BlockingConnection::tpc_commit(connection, xid_as_refs(&xid), one_phase)
+            .map_err(runtime_error)
+    }
+
+    /// Roll back an XA global transaction (reference `tpc_rollback` ->
+    /// `_impl.tpc_rollback(xid)`).
+    #[pyo3(signature = (xid))]
+    fn tpc_rollback(&self, xid: &Bound<'_, PyAny>) -> PyResult<()> {
+        let xid = extract_optional_xid(xid)?;
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        BlockingConnection::tpc_rollback(connection, xid_as_refs(&xid)).map_err(runtime_error)
+    }
+
+    /// Forget an XA global transaction. Thin mode does not support this; the
+    /// reference base impl raises DPY-3001 (NotSupportedError) and sends no
+    /// packet.
+    #[pyo3(signature = (xid))]
+    fn tpc_forget(&self, xid: &Bound<'_, PyAny>) -> PyResult<()> {
+        // Validate the xid type/shape so the error path mirrors the reference
+        // (the public wrapper's `_verify_xid` already ran, but a bad value
+        // would still be a TypeError before DPY-3001 in the reference).
+        let _ = extract_xid(xid)?;
+        Err(raise_not_supported(
+            "forgetting a TPC (two-phase commit) transaction",
+        ))
     }
 
     fn change_password(&self, old_password: &str, new_password: &str) -> PyResult<()> {
@@ -1544,11 +1642,14 @@ impl ThinConnImpl {
     }
 
     pub(crate) fn get_transaction_in_progress(&self) -> PyResult<bool> {
-        Ok(self
-            .state
-            .lock()
-            .map_err(runtime_error)?
-            .transaction_in_progress)
+        // Read the wire-derived flag from the driver (reference protocol.pyx
+        // `_txn_in_progress`, sampled from the end-of-call status of every round
+        // trip). On a closed connection there is no transaction in progress.
+        let guard = self.connection.lock().map_err(runtime_error)?;
+        Ok(guard
+            .as_ref()
+            .map(|connection| connection.transaction_in_progress())
+            .unwrap_or(false))
     }
 
     pub(crate) fn set_action(&self, value: Option<String>) -> PyResult<()> {

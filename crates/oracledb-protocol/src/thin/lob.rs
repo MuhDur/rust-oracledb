@@ -310,6 +310,9 @@ pub fn parse_plain_function_response(
             TNS_MSG_TYPE_END_OF_RESPONSE => break,
             TNS_MSG_TYPE_ERROR => {
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
+                // The end-of-call ERROR (number 0 on success) carries the
+                // end-of-call status; sample the transaction-in-progress bit.
+                txn_in_progress = info.call_status & TNS_EOCS_FLAGS_TXN_IN_PROGRESS != 0;
                 if info.number != 0 {
                     return Err(ProtocolError::ServerError(info.message));
                 }

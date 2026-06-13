@@ -1194,14 +1194,19 @@ impl Connection {
     fn apply_sessionless_state(&mut self, state: Option<SessionlessTxnState>) {
         match state {
             // transaction ended/suspended on the server (reference clears
-            // `_sessionless_data`)
-            Some(SessionlessTxnState::Unset) => self.sessionless_data = None,
+            // `_sessionless_data` and sets `_txn_in_progress = False`,
+            // base.pyx:152/161)
+            Some(SessionlessTxnState::Unset) => {
+                self.sessionless_data = None;
+                self.txn_in_progress = false;
+            }
             // transaction started/resumed (reference replaces `_sessionless_data`
             // with a fresh `_SessionlessData`). This also covers a transaction
             // started via DBMS_TRANSACTION on the server, where no client-side
             // data existed yet: the server SET carries `started_on_server` so a
             // later client suspend/resume correctly raises DPY-3034.
             Some(SessionlessTxnState::Set { started_on_server }) => {
+                self.txn_in_progress = true;
                 match self.sessionless_data.as_mut() {
                     Some(data) => {
                         data.started_on_server = started_on_server;

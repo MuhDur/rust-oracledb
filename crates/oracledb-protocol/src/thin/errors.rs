@@ -12,6 +12,11 @@ pub(crate) struct ServerErrorInfo {
     pub(crate) rowid: Option<String>,
     pub(crate) batch_errors: Vec<BatchServerError>,
     pub(crate) compilation_error_warning: bool,
+    /// End-of-call status (reference `_process_error_info` reads
+    /// `self.call_status`). On a successful round trip the response's final
+    /// message is an ERROR with `number = 0` whose call status carries the
+    /// transaction-in-progress bit.
+    pub(crate) call_status: u32,
 }
 
 impl ServerErrorInfo {
@@ -64,7 +69,7 @@ pub(crate) fn parse_server_error_info(
     reader: &mut TtcReader<'_>,
     ttc_field_version: u8,
 ) -> Result<ServerErrorInfo> {
-    let _call_status = reader.read_ub4()?;
+    let call_status = reader.read_ub4()?;
     let _seq = reader.read_ub2()?;
     let _current_row = reader.read_ub4()?;
     let _error_number = reader.read_ub2()?;
@@ -159,6 +164,7 @@ pub(crate) fn parse_server_error_info(
         rowid,
         batch_errors,
         compilation_error_warning: warning_flags & 0x20 != 0,
+        call_status,
     })
 }
 

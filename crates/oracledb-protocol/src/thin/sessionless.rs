@@ -369,16 +369,19 @@ pub fn parse_tpc_switch_response(
             }
             TNS_MSG_TYPE_END_OF_RESPONSE => break,
             TNS_MSG_TYPE_ERROR => {
-                // On a server error the reference raises before
-                // `_process_call_status` runs, so `_txn_in_progress` keeps its
-                // prior value; we likewise leave `txn_in_progress` untouched and
-                // surface the error.
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
                 if info.number != 0 {
+                    // On a server error the reference raises before
+                    // `_process_call_status` runs, so `_txn_in_progress` keeps
+                    // its prior value; we surface the error without touching the
+                    // flag.
                     return Err(ProtocolError::ServerErrorInfo(Box::new(
                         info.into_details(),
                     )));
                 }
+                // The end-of-call ERROR (number 0 on success) carries the
+                // end-of-call status; sample the transaction-in-progress bit.
+                response.txn_in_progress = info.call_status & TNS_EOCS_FLAGS_TXN_IN_PROGRESS != 0;
             }
             _ => break,
         }
@@ -415,16 +418,19 @@ pub fn parse_tpc_change_state_response(
             }
             TNS_MSG_TYPE_END_OF_RESPONSE => break,
             TNS_MSG_TYPE_ERROR => {
-                // On a server error the reference raises before
-                // `_process_call_status` runs, so `_txn_in_progress` keeps its
-                // prior value; we likewise leave `txn_in_progress` untouched and
-                // surface the error.
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
                 if info.number != 0 {
+                    // On a server error the reference raises before
+                    // `_process_call_status` runs, so `_txn_in_progress` keeps
+                    // its prior value; we surface the error without touching the
+                    // flag.
                     return Err(ProtocolError::ServerErrorInfo(Box::new(
                         info.into_details(),
                     )));
                 }
+                // The end-of-call ERROR (number 0 on success) carries the
+                // end-of-call status; sample the transaction-in-progress bit.
+                response.txn_in_progress = info.call_status & TNS_EOCS_FLAGS_TXN_IN_PROGRESS != 0;
             }
             _ => break,
         }
@@ -463,4 +469,135 @@ pub(crate) fn read_keyword_value_pairs_for_txn_state(
         }
     }
     Ok(state)
+}
+
+#[cfg(test)]
+mod tpc_tests {
+    use super::*;
+
+    fn xid() -> ([u8; 7], [u8; 8]) {
+        (*b"txn4400", *b"branchId")
+    }
+
+    #[test]
+    fn tpc_begin_payload_encodes_format_branch_and_128_byte_xid() {
+        let (gtid, bqual) = xid();
+        let tpc_xid = TpcXid {
+            format_id: 4400,
+            global_transaction_id: &gtid,
+            branch_qualifier: &bqual,
+        };
+        let payload = build_tpc_switch_payload_with_seq(
+            4,
+            TNS_TPC_TXN_START,
+            TPC_TXN_FLAGS_NEW,
+            0,
+            Some(&tpc_xid),
+            None,
+        );
+        // [msg_type=3][func=0x67=103][seq=4] + token ub8(0) = 1 byte
+        assert_eq!(&payload[..3], &[3, TNS_FUNC_TPC_TXN_SWITCH, 4]);
+        let body = &payload[4..];
+        // operation ub4(START=1) = [1,1]; context ptr u8(0) = [0]; len ub4(0) = [0]
+        assert_eq!(&body[..4], &[1, 1, 0, 0]);
+        // format id ub4(4400=0x1130) = len2 + value (golden: 02 11 30)
+        assert_eq!(&body[4..7], &[2, 0x11, 0x30]);
+        // gtid len ub4(7)=[1,7], bqual len ub4(8)=[1,8], xid ptr u8(1)=[1],
+        // block len ub4(128)=[1,0x80]
+        assert_eq!(&body[7..14], &[1, 7, 1, 8, 1, 1, 0x80]);
+        // the 128-byte xid block must contain gtid+bqual zero-padded; it is the
+        // last 128 bytes before the trailing application value ub4(0) = [0].
+        let block_start = payload.len() - 128 - 1;
+        let block = &payload[block_start..block_start + 128];
+        assert_eq!(&block[..7], b"txn4400");
+        assert_eq!(&block[7..15], b"branchId");
+        assert!(block[15..].iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn tpc_end_payload_echoes_context() {
+        let context = vec![0xAAu8; 168];
+        let payload =
+            build_tpc_switch_payload_with_seq(7, TNS_TPC_TXN_DETACH, 0, 0, None, Some(&context));
+        let body = &payload[4..];
+        // operation ub4(DETACH=2)=[1,2]; context ptr u8(1)=[1]; len ub4(168)=[1,0xA8]
+        assert_eq!(&body[..5], &[1, 2, 1, 1, 0xA8]);
+        // context bytes are echoed verbatim somewhere in the payload tail
+        assert!(payload
+            .windows(context.len())
+            .any(|window| window == context.as_slice()));
+    }
+
+    #[test]
+    fn change_state_prepare_payload_shape() {
+        let (gtid, bqual) = xid();
+        let tpc_xid = TpcXid {
+            format_id: 4400,
+            global_transaction_id: &gtid,
+            branch_qualifier: &bqual,
+        };
+        let payload = build_tpc_change_state_payload_with_seq(
+            8,
+            TNS_TPC_TXN_PREPARE,
+            TNS_TPC_TXN_STATE_PREPARE,
+            0,
+            Some(&tpc_xid),
+            None,
+        );
+        assert_eq!(&payload[..3], &[3, TNS_FUNC_TPC_TXN_CHANGE_STATE, 8]);
+        let body = &payload[4..];
+        // operation ub4(PREPARE=3)=[1,3]; context ptr u8(0)=[0]; len ub4(0)=[0]
+        assert_eq!(&body[..4], &[1, 3, 0, 0]);
+    }
+
+    #[test]
+    fn switch_response_captures_context_and_txn_bit() {
+        // PARAMETER(8): app_value ub4(0) + context_len ub2(4) + 4 context bytes;
+        // STATUS(9): call_status ub4 = 3 (TXN bit set) + seq ub2(0); EOR(29).
+        let mut payload = Vec::new();
+        payload.push(TNS_MSG_TYPE_PARAMETER);
+        payload.push(0); // app value ub4(0)
+        payload.extend_from_slice(&[2, 0, 4]); // context_len ub2 = 4
+        payload.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        payload.push(TNS_MSG_TYPE_STATUS);
+        payload.extend_from_slice(&[1, 3]); // call_status ub4 = 3
+        payload.extend_from_slice(&[0]); // seq ub2 = 0
+        payload.push(TNS_MSG_TYPE_END_OF_RESPONSE);
+
+        let response =
+            parse_tpc_switch_response(&payload, ClientCapabilities::default()).expect("decode");
+        assert_eq!(response.context, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        assert!(response.txn_in_progress);
+    }
+
+    #[test]
+    fn switch_response_end_status_clears_txn_bit() {
+        // STATUS call_status = 1 (TXN bit clear) -> txn_in_progress == false.
+        let mut payload = Vec::new();
+        payload.push(TNS_MSG_TYPE_STATUS);
+        payload.extend_from_slice(&[1, 1]); // call_status ub4 = 1
+        payload.extend_from_slice(&[0]); // seq ub2 = 0
+        payload.push(TNS_MSG_TYPE_END_OF_RESPONSE);
+
+        let response =
+            parse_tpc_switch_response(&payload, ClientCapabilities::default()).expect("decode");
+        assert!(!response.txn_in_progress);
+    }
+
+    #[test]
+    fn change_state_response_reads_out_state() {
+        // PARAMETER out state ub4 = 1 (REQUIRES_COMMIT); STATUS txn bit clear.
+        let mut payload = Vec::new();
+        payload.push(TNS_MSG_TYPE_PARAMETER);
+        payload.extend_from_slice(&[1, 1]); // state ub4 = 1
+        payload.push(TNS_MSG_TYPE_STATUS);
+        payload.extend_from_slice(&[1, 1]); // call_status ub4 = 1
+        payload.extend_from_slice(&[0]); // seq ub2 = 0
+        payload.push(TNS_MSG_TYPE_END_OF_RESPONSE);
+
+        let response = parse_tpc_change_state_response(&payload, ClientCapabilities::default())
+            .expect("decode");
+        assert_eq!(response.state, TNS_TPC_TXN_STATE_REQUIRES_COMMIT);
+        assert!(!response.txn_in_progress);
+    }
 }

@@ -1521,11 +1521,10 @@ impl ThinCursorImpl {
                 Some(&lob_context),
             )
         })?;
-        self.state.lock().map_err(runtime_error)?.record_statement(
-            statement,
-            is_query,
-            should_commit,
-        );
+        self.state
+            .lock()
+            .map_err(runtime_error)?
+            .record_statement(statement);
         self.record_implicit_resultsets(&mut result);
         self.columns = result.columns;
         self.reset_fetch_define_state();
@@ -1706,11 +1705,10 @@ impl ThinCursorImpl {
                 .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
             BlockingConnection::commit(connection).map_err(runtime_error)?;
         }
-        self.state.lock().map_err(runtime_error)?.record_statement(
-            statement,
-            is_query,
-            should_commit,
-        );
+        self.state
+            .lock()
+            .map_err(runtime_error)?
+            .record_statement(statement);
         self.record_implicit_resultsets(&mut result);
         self.columns = result.columns;
         self.reset_fetch_define_state();
