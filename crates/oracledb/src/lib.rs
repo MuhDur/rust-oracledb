@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::process;
 use std::sync::Arc;
 use std::time::Duration;
@@ -277,6 +277,20 @@ pub struct Connection {
     /// LRU statement cache: SQL text -> open server cursor id (reference
     /// thin/statement_cache.pyx, default size 20).
     statement_cache: Vec<(String, u32)>,
+    /// Server cursor ids currently held by a live cursor (reference
+    /// `Statement._in_use`). A cached cursor whose id is in this set must NOT
+    /// be reused by a second cursor: `get_statement` returns a fresh
+    /// (re-parsed) cursor instead, so interleaved fetches on different cursors
+    /// of the same connection cannot reset each other's server-side fetch
+    /// position (ORA-01002 fetch out of sequence). Cleared when the owning
+    /// cursor releases the id (close / re-prepare to a different statement).
+    in_use_cursors: HashSet<u32>,
+    /// Server cursor ids that were parsed as a fresh copy because the cached
+    /// statement was in use (reference statement with `_return_to_cache =
+    /// False`). These are never returned to the statement cache; when the
+    /// owning cursor releases the id it is queued for close instead of being
+    /// kept open (reference `return_statement` -> `_add_cursor_to_close`).
+    copied_cursors: HashSet<u32>,
     /// Server cursor ids queued for the close-cursors piggyback (reference
     /// `_cursors_to_close`).
     cursors_to_close: Vec<u32>,
@@ -464,6 +478,8 @@ impl Connection {
             user: options.user,
             combo_key: encrypted.combo_key,
             statement_cache: Vec::new(),
+            in_use_cursors: HashSet::new(),
+            copied_cursors: HashSet::new(),
             cursors_to_close: Vec::new(),
             sessionless_data: None,
         })
@@ -953,9 +969,19 @@ impl Connection {
             self.prepare_sessionless_suspend_on_success()?;
         }
         let use_cache = exec_options.cache_statement && !exec_options.parse_only;
+        // Whether the cursor produced by this execute may be returned to the
+        // statement cache (reference `Statement._return_to_cache`). A statement
+        // that had to be copied because the cached cursor was in use is NOT
+        // returnable: returning it would evict the still-live original from the
+        // cache and reset its fetch position (ORA-01002).
+        let mut is_copy = false;
         if exec_options.cursor_id == 0 && !exec_options.parse_only {
             if use_cache {
-                if let Some(cursor_id) = self.statement_cache_get(sql) {
+                if self.statement_is_in_use(sql) {
+                    // cached cursor busy: this execute parses a fresh (copy)
+                    // cursor that must not be returned to the cache
+                    is_copy = true;
+                } else if let Some(cursor_id) = self.statement_cache_get(sql) {
                     exec_options.cursor_id = cursor_id;
                 }
             } else if let Some(cursor_id) = self.statement_cache_take(sql) {
@@ -1047,8 +1073,24 @@ impl Connection {
                 // a deferred begin/resume or a suspend-on-success reports its
                 // outcome through the response's SYNC piggyback
                 self.apply_sessionless_state(result.sessionless_txn_state);
-                if use_cache {
+                if is_copy {
+                    // a copied cursor is never returned to the statement cache;
+                    // it is closed when its owning cursor releases it (reference
+                    // `_return_to_cache = False` -> `_add_cursor_to_close`).
+                    if result.cursor_id != 0 {
+                        self.copied_cursors.insert(result.cursor_id);
+                    }
+                } else if use_cache {
                     self.statement_cache_put(sql, result.cursor_id);
+                }
+                // Mark the open query cursor as in use so a concurrent execute
+                // of the same SQL on another cursor of this connection does not
+                // reuse it (and reset its server-side fetch position). Released
+                // by `release_cursor` when the owning cursor closes or
+                // re-prepares (reference `Statement._in_use`). Only query
+                // cursors hold a fetch position vulnerable to ORA-01002.
+                if result.cursor_id != 0 && statement_is_query(sql) && !exec_options.parse_only {
+                    self.in_use_cursors.insert(result.cursor_id);
                 }
                 // A cursor passed as an IN REF CURSOR bind may be closed
                 // server-side by the called PL/SQL (e.g. `close a_cursor`); its
@@ -1878,14 +1920,22 @@ impl Connection {
     }
 
     /// Looks up an open server cursor for the SQL text, refreshing its LRU
-    /// position (reference `_statement_cache.get_statement`).
+    /// position (reference `_statement_cache.get_statement`). A cached cursor
+    /// that is currently `_in_use` by another live cursor is NOT handed out:
+    /// the reference makes a `stmt.copy()` (fresh cursor id) in that case, so
+    /// concurrent cursors over identical SQL each drive their own server
+    /// cursor and cannot reset each other's fetch position (ORA-01002). We
+    /// model the copy by returning `None`, which forces a fresh PARSE.
     fn statement_cache_get(&mut self, sql: &str) -> Option<u32> {
         let index = self
             .statement_cache
             .iter()
             .position(|(cached_sql, _)| cached_sql == sql)?;
+        let cursor_id = self.statement_cache[index].1;
+        if cursor_id != 0 && self.in_use_cursors.contains(&cursor_id) {
+            return None;
+        }
         let entry = self.statement_cache.remove(index);
-        let cursor_id = entry.1;
         self.statement_cache.push(entry);
         Some(cursor_id)
     }
@@ -1948,6 +1998,38 @@ impl Connection {
         }
     }
 
+    /// Releases a server cursor id previously marked in use by an executing
+    /// query cursor (reference `_return_statement` clearing `Statement._in_use`).
+    /// Called when the owning cursor closes or re-prepares; once released the
+    /// cached cursor may be reused by the next execute of the same SQL. The
+    /// cursor id stays in the statement cache (the open server cursor is kept
+    /// for reuse, mirroring `_return_to_cache`).
+    pub fn release_cursor(&mut self, cursor_id: u32) {
+        if cursor_id == 0 {
+            return;
+        }
+        self.in_use_cursors.remove(&cursor_id);
+        // A copied cursor (parsed because the cached statement was busy) is not
+        // kept open: queue it for the close-cursors piggyback now that its
+        // owning cursor is done with it (reference `_add_cursor_to_close`).
+        if self.copied_cursors.remove(&cursor_id) {
+            self.cursors_to_close.push(cursor_id);
+            self.cursor_columns.remove(&cursor_id);
+        }
+    }
+
+    /// Returns true when the SQL text has a cached open cursor that is
+    /// currently in use by another live cursor (reference `Statement._in_use`
+    /// checked in `get_statement`).
+    fn statement_is_in_use(&self, sql: &str) -> bool {
+        self.statement_cache
+            .iter()
+            .find(|(cached_sql, _)| cached_sql == sql)
+            .is_some_and(|(_, cursor_id)| {
+                *cursor_id != 0 && self.in_use_cursors.contains(cursor_id)
+            })
+    }
+
     /// Drops the cached cursor for the SQL text after a server error so the
     /// next execute re-parses (reference `_statement_cache.clear_cursor`).
     fn statement_cache_invalidate(&mut self, sql: &str, cursor_id: u32) {
@@ -1961,6 +2043,8 @@ impl Connection {
         if cursor_id != 0 {
             self.cursors_to_close.push(cursor_id);
             self.cursor_columns.remove(&cursor_id);
+            self.in_use_cursors.remove(&cursor_id);
+            self.copied_cursors.remove(&cursor_id);
         }
     }
 
