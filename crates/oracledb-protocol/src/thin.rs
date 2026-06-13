@@ -4163,7 +4163,7 @@ pub(crate) fn encode_binary_float(value: f32) -> [u8; 4] {
     bytes
 }
 
-fn decode_binary_float(bytes: &[u8]) -> Result<f32> {
+pub(crate) fn decode_binary_float(bytes: &[u8]) -> Result<f32> {
     let bytes: [u8; 4] = bytes
         .try_into()
         .map_err(|_| ProtocolError::TtcDecode("invalid BINARY_FLOAT length"))?;
@@ -4181,7 +4181,7 @@ fn decode_binary_float(bytes: &[u8]) -> Result<f32> {
 const TNS_DURATION_MID: i64 = 0x8000_0000;
 const TNS_DURATION_OFFSET: i32 = 60;
 
-fn encode_interval_ds(days: i32, seconds: i32, microseconds: i32) -> Result<[u8; 11]> {
+pub(crate) fn encode_interval_ds(days: i32, seconds: i32, microseconds: i32) -> Result<[u8; 11]> {
     let mut bytes = [0u8; 11];
     let wire_days = u32::try_from(i64::from(days) + TNS_DURATION_MID)
         .map_err(|_| ProtocolError::TtcDecode("INTERVAL DS days out of range"))?;
@@ -4200,7 +4200,7 @@ fn encode_interval_ds(days: i32, seconds: i32, microseconds: i32) -> Result<[u8;
     Ok(bytes)
 }
 
-fn decode_interval_ds(bytes: &[u8]) -> Result<QueryValue> {
+pub(crate) fn decode_interval_ds(bytes: &[u8]) -> Result<QueryValue> {
     if bytes.len() < 11 {
         return Err(ProtocolError::TtcDecode("invalid INTERVAL DS length"));
     }
@@ -4247,7 +4247,7 @@ fn decode_interval_ym(bytes: &[u8]) -> Result<QueryValue> {
     })
 }
 
-fn decode_binary_double(bytes: &[u8]) -> Result<f64> {
+pub(crate) fn decode_binary_double(bytes: &[u8]) -> Result<f64> {
     let bytes: [u8; 8] = bytes
         .try_into()
         .map_err(|_| ProtocolError::TtcDecode("invalid BINARY_DOUBLE length"))?;
