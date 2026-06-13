@@ -1292,6 +1292,10 @@ impl ThinCursorImpl {
             bind_params,
             &self.named_input_sizes,
         )?;
+        // a VECTOR column whose rows mix array.array and plain lists infers
+        // incompatible bind types per row (vector vs PL/SQL array); coerce the
+        // list rows to vectors so the array DML is homogeneous (ORA-64219)
+        coerce_array_columns_to_vectors(&mut self.many_bind_rows)?;
         // Arrow timestamp columns must encode as TIMESTAMP (not the DATE that
         // value inference picks for a `datetime`) so fractional seconds survive.
         // Re-read the original Python datetime objects to recover the nanosecond
