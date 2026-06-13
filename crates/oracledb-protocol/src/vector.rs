@@ -344,15 +344,25 @@ fn read_u32be(reader: &mut TtcReader<'_>) -> Result<u32> {
 /// pre-encoded image, mirroring `write_vector` -> `write_qlocator` +
 /// `_write_raw_bytes_and_length` in `packet.pyx`.
 pub fn write_vector_image(writer: &mut TtcWriter, image: &[u8]) -> Result<()> {
-    write_qlocator(writer, image.len() as u64);
+    write_qlocator(writer, image.len() as u64, true);
+    writer.write_bytes_with_length(image)?;
+    Ok(())
+}
+
+/// Writes an OSON image as an AQ JSON payload (reference `write_oson` with
+/// `write_length=False`): a QLocator without the 1-byte chunk-length prefix,
+/// followed by the OSON bytes as `_write_raw_bytes_and_length`.
+pub fn write_oson_aq_payload(writer: &mut TtcWriter, image: &[u8]) -> Result<()> {
+    write_qlocator(writer, image.len() as u64, false);
     writer.write_bytes_with_length(image)?;
     Ok(())
 }
 
 /// Writes a 40-byte QLocator carrying the data length (reference
-/// `write_qlocator` in `packet.pyx`). VECTOR binds always include the
-/// 1-byte chunk-length prefix.
-fn write_qlocator(writer: &mut TtcWriter, data_length: u64) {
+/// `write_qlocator` in `packet.pyx`). `write_length` controls the 1-byte
+/// chunk-length prefix (present for VECTOR/JSON binds, absent for the AQ JSON
+/// payload path).
+fn write_qlocator(writer: &mut TtcWriter, data_length: u64, write_length: bool) {
     const TNS_LOB_QLOCATOR_VERSION: u16 = 4;
     const TNS_LOB_LOC_FLAGS_VALUE_BASED: u8 = 0x20;
     const TNS_LOB_LOC_FLAGS_BLOB: u8 = 0x01;
@@ -360,7 +370,9 @@ fn write_qlocator(writer: &mut TtcWriter, data_length: u64) {
     const TNS_LOB_LOC_FLAGS_INIT: u8 = 0x08;
 
     writer.write_ub4(40); // QLocator length
-    writer.write_u8(40); // chunk length
+    if write_length {
+        writer.write_u8(40); // chunk length
+    }
     writer.write_u16be(38); // QLocator length less 2 bytes
     writer.write_u16be(TNS_LOB_QLOCATOR_VERSION);
     writer.write_u8(
