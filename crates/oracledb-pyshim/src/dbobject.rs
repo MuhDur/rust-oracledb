@@ -372,6 +372,29 @@ impl DbObjectImpl {
         })
     }
 
+    /// Replaces the object's state with a freshly returned packed image,
+    /// lazily unpacked on next access. Used by OUT/IN-OUT object binds so the
+    /// originally bound Python DbObject reflects the server-modified value
+    /// in place (reference reuses the bound `_impl` and resets `packed_data`).
+    pub(crate) fn reset_packed_data(
+        &mut self,
+        py: Python<'_>,
+        packed_data: Vec<u8>,
+        lob_context: Option<ThinLobContext>,
+    ) -> PyResult<()> {
+        *self.packed_data.lock().map_err(runtime_error)? = Some(packed_data);
+        self.attr_values.lock().map_err(runtime_error)?.clear();
+        self.collection_values
+            .lock()
+            .map_err(runtime_error)?
+            .clear();
+        self.assoc_values.lock().map_err(runtime_error)?.clear();
+        self.lob_context = lob_context;
+        // touch py to keep the GIL-bound signature uniform with callers
+        let _ = py;
+        Ok(())
+    }
+
     pub(crate) fn with_packed_data(
         object_type: DbObjectTypeImpl,
         packed_data: Vec<u8>,
