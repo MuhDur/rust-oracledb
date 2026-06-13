@@ -408,9 +408,9 @@ fn array_bind_values_to_dense_vector(values: &[Option<BindValue>]) -> PyResult<V
     let mut floats = Vec::with_capacity(values.len());
     for value in values {
         let float = match value {
-            Some(BindValue::Number(text)) => text
-                .parse::<f64>()
-                .map_err(|_| raise_invalid_vector())?,
+            Some(BindValue::Number(text)) => {
+                text.parse::<f64>().map_err(|_| raise_invalid_vector())?
+            }
             Some(BindValue::BinaryDouble(value) | BindValue::BinaryFloat(value)) => *value,
             Some(BindValue::BinaryInteger(text)) => {
                 text.parse::<f64>().map_err(|_| raise_invalid_vector())?

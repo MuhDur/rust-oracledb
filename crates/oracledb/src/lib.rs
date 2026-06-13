@@ -972,12 +972,9 @@ impl Connection {
         // the define-fetch runs, raising ORA-01002 on the next fetch.
         if exec_options.cursor_id != 0 && statement_is_query(sql) {
             if let Some(columns) = self.cursor_columns.get(&exec_options.cursor_id) {
-                if columns
-                    .iter()
-                    .any(|column| {
-                        column.ora_type_num == oracledb_protocol::thin::ORA_TYPE_NUM_VECTOR
-                    })
-                {
+                if columns.iter().any(|column| {
+                    column.ora_type_num == oracledb_protocol::thin::ORA_TYPE_NUM_VECTOR
+                }) {
                     exec_options.no_prefetch = true;
                 }
             }

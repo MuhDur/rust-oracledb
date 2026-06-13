@@ -645,7 +645,11 @@ fn pyerr_full_code(py: Python<'_>, err: &PyErr) -> Option<String> {
     let value = err.value(py);
     let args = value.getattr("args").ok()?;
     let error_obj = args.get_item(0).ok()?;
-    error_obj.getattr("full_code").ok()?.extract::<String>().ok()
+    error_obj
+        .getattr("full_code")
+        .ok()?
+        .extract::<String>()
+        .ok()
 }
 
 pub(crate) fn raise_unsupported_type_set(db_type_name: &str) -> PyErr {
