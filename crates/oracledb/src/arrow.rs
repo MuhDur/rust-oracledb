@@ -61,6 +61,11 @@ pub enum ArrowConversionError {
     )]
     UnsupportedVectorFormat,
     #[error(
+        "DPY-2065: Apache Arrow format does not support sparse vectors with \
+         flexible dimensions"
+    )]
+    SparseVectorNotAllowed,
+    #[error(
         "DPY-2069: requested schema has {num_schema_columns} columns defined \
          but {num_fetched_columns} are being fetched"
     )]
@@ -1065,10 +1070,11 @@ fn build_vector_list_column<'a>(
                 push_vector_values(column, &mut builder, values)?;
             }
             Some(QueryValue::Vector(Vector::Sparse { .. })) => {
-                return Err(invalid_value(
-                    column,
-                    "expected a dense vector but received a sparse vector",
-                ));
+                // A sparse vector value reaching a dense `List` column means the
+                // column described with flexible dimensions (mixed num_dimensions
+                // across rows) so could not be typed as a fixed sparse struct.
+                // Reference: append_sparse_vector -> ERR_ARROW_SPARSE_VECTOR_NOT_ALLOWED.
+                return Err(ArrowConversionError::SparseVectorNotAllowed);
             }
             Some(_) => return Err(invalid_value(column, "expected a vector value")),
         }
