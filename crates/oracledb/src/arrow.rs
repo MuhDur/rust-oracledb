@@ -15,17 +15,22 @@ use std::sync::Arc;
 use arrow_array::builder::{
     BinaryBuilder, BooleanBuilder, Date32Builder, Date64Builder, Decimal128Builder,
     FixedSizeBinaryBuilder, Float32Builder, Float64Builder, Int16Builder, Int32Builder,
-    Int64Builder, Int8Builder, LargeBinaryBuilder, LargeStringBuilder, StringBuilder,
+    Int64Builder, Int8Builder, LargeBinaryBuilder, LargeStringBuilder, ListBuilder, StringBuilder,
     UInt16Builder, UInt32Builder, UInt64Builder, UInt8Builder,
 };
 use arrow_array::types::{
     ArrowTimestampType, TimestampMicrosecondType, TimestampMillisecondType,
     TimestampNanosecondType, TimestampSecondType,
 };
-use arrow_array::{Array, ArrayRef, PrimitiveArray, RecordBatch};
-use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use arrow_array::{Array, ArrayRef, PrimitiveArray, RecordBatch, StructArray};
+use arrow_buffer::NullBuffer;
+use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef, TimeUnit};
 
 use oracledb_protocol::dpl::DirectPathColumnValue;
+use oracledb_protocol::vector::{
+    Vector, VectorValues, VECTOR_FORMAT_BINARY, VECTOR_FORMAT_FLOAT32, VECTOR_FORMAT_FLOAT64,
+    VECTOR_FORMAT_INT8,
+};
 use oracledb_protocol::thin::{
     ColumnMetadata, QueryValue, CS_FORM_NCHAR, ORA_TYPE_NUM_BINARY_DOUBLE,
     ORA_TYPE_NUM_BINARY_FLOAT, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_BOOLEAN, ORA_TYPE_NUM_CHAR,
@@ -143,6 +148,30 @@ pub fn vector_arrow_type(format: VectorFormat, sparse: bool) -> DataType {
     } else {
         DataType::List(values)
     }
+}
+
+/// describe `vector_flags` bit set for sparse vectors (reference
+/// `VECTOR_META_FLAG_SPARSE_VECTOR`, constants.py:96). `0x01` is
+/// `VECTOR_META_FLAG_FLEXIBLE_DIM` (handled by `List` allowing varying lengths).
+const VECTOR_META_FLAG_SPARSE_VECTOR: u8 = 0x02;
+
+/// Maps a VECTOR column's describe metadata to its Arrow `DataType`
+/// (metadata.pyx `_create_arrow_schema`, lines 83-97).
+///
+/// `vector_format == 0` is the flexible (unspecified) format Oracle reports
+/// when a query produces vectors of differing element formats; the reference
+/// raises `ERR_ARROW_UNSUPPORTED_VECTOR_FORMAT` (our DPY-3031).
+fn vector_data_type(column: &ColumnMetadata) -> Result<DataType> {
+    let format = match column.vector_format {
+        VECTOR_FORMAT_FLOAT32 => VectorFormat::Float32,
+        VECTOR_FORMAT_FLOAT64 => VectorFormat::Float64,
+        VECTOR_FORMAT_INT8 => VectorFormat::Int8,
+        VECTOR_FORMAT_BINARY => VectorFormat::Binary,
+        // 0 == flexible format -> DPY-3031.
+        _ => return Err(ArrowConversionError::UnsupportedVectorFormat),
+    };
+    let sparse = column.vector_flags & VECTOR_META_FLAG_SPARSE_VECTOR != 0;
+    Ok(vector_arrow_type(format, sparse))
 }
 
 /// Reference-style `DB_TYPE_*` name for a fetched column (used in DPY-3030 /
@@ -267,10 +296,7 @@ fn default_arrow_type(column: &ColumnMetadata, options: &ArrowFetchOptions) -> R
             };
             Ok(DataType::Timestamp(unit, None))
         }
-        ORA_TYPE_NUM_VECTOR => Err(ArrowConversionError::NotImplemented(
-            "VECTOR columns require vector format metadata that the describe \
-             parser does not yet capture; see vector_arrow_type for the mapping",
-        )),
+        ORA_TYPE_NUM_VECTOR => vector_data_type(column),
         _ => Err(ArrowConversionError::UnsupportedDataType {
             db_type_name: db_type_name(column),
         }),
@@ -935,11 +961,181 @@ fn build_column_array<'a>(
             }
             Ok(Arc::new(builder.finish()))
         }
+        // VECTOR columns are the only Oracle type mapping to List / Struct
+        // (dense -> List<child>, sparse -> Struct{num_dimensions,indices,values}).
+        DataType::List(item) => build_vector_list_column(item, column, cells, capacity),
+        DataType::Struct(fields) => build_vector_struct_column(fields, column, cells, capacity),
         other => Err(ArrowConversionError::CannotConvertToArrow {
             arrow_type: arrow_type_name(other),
             db_type: db_type_name(column),
         }),
     }
+}
+
+/// Pushes one row of dense VECTOR element values into a typed `ListBuilder`
+/// (converters.pyx `convert_vector_to_arrow` -> array.pyx `append_vector`).
+/// The list's child arrow type is decided by `vector_data_type`; a values
+/// variant that disagrees with it is a server inconsistency (DPY message via
+/// `invalid_value`). For BINARY each stored byte is one UInt8 element (the
+/// reference does not bit-unpack — test_9103 expects `[3,2,3]` from 3 bytes).
+fn push_vector_values(
+    column: &ColumnMetadata,
+    builder: &mut VectorListBuilder,
+    values: &VectorValues,
+) -> Result<()> {
+    match (builder, values) {
+        (VectorListBuilder::Float32(b), VectorValues::Float32(v)) => {
+            b.values().append_slice(v);
+            b.append(true);
+        }
+        (VectorListBuilder::Float64(b), VectorValues::Float64(v)) => {
+            b.values().append_slice(v);
+            b.append(true);
+        }
+        (VectorListBuilder::Int8(b), VectorValues::Int8(v)) => {
+            b.values().append_slice(v);
+            b.append(true);
+        }
+        (VectorListBuilder::UInt8(b), VectorValues::Binary(v)) => {
+            b.values().append_slice(v);
+            b.append(true);
+        }
+        _ => return Err(invalid_value(column, "vector format mismatch")),
+    }
+    Ok(())
+}
+
+/// A `ListBuilder` specialized to the VECTOR element type, so dense lists and
+/// the sparse `values` list share a single push path.
+enum VectorListBuilder {
+    Float32(ListBuilder<Float32Builder>),
+    Float64(ListBuilder<Float64Builder>),
+    Int8(ListBuilder<Int8Builder>),
+    UInt8(ListBuilder<UInt8Builder>),
+}
+
+impl VectorListBuilder {
+    /// Builder for the child arrow type carried by a vector `List` field.
+    fn for_item(item: &DataType) -> Result<Self> {
+        Ok(match item {
+            DataType::Float32 => VectorListBuilder::Float32(ListBuilder::new(Float32Builder::new())),
+            DataType::Float64 => VectorListBuilder::Float64(ListBuilder::new(Float64Builder::new())),
+            DataType::Int8 => VectorListBuilder::Int8(ListBuilder::new(Int8Builder::new())),
+            DataType::UInt8 => VectorListBuilder::UInt8(ListBuilder::new(UInt8Builder::new())),
+            _ => {
+                return Err(ArrowConversionError::NotImplemented(
+                    "unsupported vector list element type",
+                ))
+            }
+        })
+    }
+
+    fn append_null(&mut self) {
+        match self {
+            VectorListBuilder::Float32(b) => b.append(false),
+            VectorListBuilder::Float64(b) => b.append(false),
+            VectorListBuilder::Int8(b) => b.append(false),
+            VectorListBuilder::UInt8(b) => b.append(false),
+        }
+    }
+
+    fn finish(&mut self) -> ArrayRef {
+        match self {
+            VectorListBuilder::Float32(b) => Arc::new(b.finish()),
+            VectorListBuilder::Float64(b) => Arc::new(b.finish()),
+            VectorListBuilder::Int8(b) => Arc::new(b.finish()),
+            VectorListBuilder::UInt8(b) => Arc::new(b.finish()),
+        }
+    }
+}
+
+/// Builds the Arrow `List<child>` array for a dense VECTOR column. A NULL cell
+/// (or a SQL NULL vector) becomes a NULL list element.
+fn build_vector_list_column<'a>(
+    item: &Arc<Field>,
+    column: &ColumnMetadata,
+    cells: impl Iterator<Item = Option<&'a QueryValue>>,
+    _capacity: usize,
+) -> Result<ArrayRef> {
+    let mut builder = VectorListBuilder::for_item(item.data_type())?;
+    for cell in cells {
+        match cell {
+            None => builder.append_null(),
+            Some(QueryValue::Vector(Vector::Dense(values))) => {
+                push_vector_values(column, &mut builder, values)?;
+            }
+            Some(QueryValue::Vector(Vector::Sparse { .. })) => {
+                return Err(invalid_value(
+                    column,
+                    "expected a dense vector but received a sparse vector",
+                ));
+            }
+            Some(_) => return Err(invalid_value(column, "expected a vector value")),
+        }
+    }
+    Ok(builder.finish())
+}
+
+/// Builds the Arrow `Struct{num_dimensions,indices,values}` array for a sparse
+/// VECTOR column (converters.pyx `append_sparse_vector`). The three children
+/// are built in lockstep and a NULL cell yields a NULL struct element with all
+/// three children NULL at that row.
+fn build_vector_struct_column<'a>(
+    fields: &Fields,
+    column: &ColumnMetadata,
+    cells: impl Iterator<Item = Option<&'a QueryValue>>,
+    _capacity: usize,
+) -> Result<ArrayRef> {
+    // The child arrow type of the `values` list (fields[2]) decides the element
+    // builder; `vector_arrow_type` always lays the struct out as
+    // [num_dimensions: Int64, indices: List<UInt32>, values: List<child>].
+    let values_item = match fields[2].data_type() {
+        DataType::List(item) => item.data_type().clone(),
+        _ => return Err(invalid_value(column, "sparse vector values must be a list")),
+    };
+
+    let mut num_dimensions = Int64Builder::new();
+    let mut indices = ListBuilder::new(UInt32Builder::new());
+    let mut values = VectorListBuilder::for_item(&values_item)?;
+    let mut validity: Vec<bool> = Vec::new();
+
+    for cell in cells {
+        match cell {
+            None => {
+                num_dimensions.append_null();
+                indices.append(false);
+                values.append_null();
+                validity.push(false);
+            }
+            Some(QueryValue::Vector(Vector::Sparse {
+                num_dimensions: dims,
+                indices: idx,
+                values: vals,
+            })) => {
+                num_dimensions.append_value(i64::from(*dims));
+                indices.values().append_slice(idx);
+                indices.append(true);
+                push_vector_values(column, &mut values, vals)?;
+                validity.push(true);
+            }
+            Some(QueryValue::Vector(Vector::Dense(_))) => {
+                return Err(invalid_value(
+                    column,
+                    "expected a sparse vector but received a dense vector",
+                ));
+            }
+            Some(_) => return Err(invalid_value(column, "expected a vector value")),
+        }
+    }
+
+    let children: Vec<ArrayRef> = vec![
+        Arc::new(num_dimensions.finish()) as ArrayRef,
+        Arc::new(indices.finish()) as ArrayRef,
+        values.finish(),
+    ];
+    let nulls = NullBuffer::from(validity);
+    let array = StructArray::try_new(fields.clone(), children, Some(nulls))?;
+    Ok(Arc::new(array) as ArrayRef)
 }
 
 /// Reference conversion matrix for the ingestion direction
@@ -1425,7 +1621,7 @@ mod tests {
     use arrow_array::cast::AsArray;
     use arrow_array::types::{
         Date32Type, Decimal128Type, Float32Type, Float64Type, Int64Type, TimestampMicrosecondType,
-        TimestampSecondType, UInt16Type,
+        TimestampSecondType, UInt16Type, UInt32Type, UInt8Type,
     };
 
     fn column(name: &str, ora_type_num: u8, precision: i8, scale: i8) -> ColumnMetadata {
@@ -1732,12 +1928,134 @@ mod tests {
         }
     }
 
+    fn vector_column(name: &str, vector_format: u8, vector_flags: u8) -> ColumnMetadata {
+        ColumnMetadata {
+            vector_format,
+            vector_flags,
+            ..column(name, 127, 0, 0)
+        }
+    }
+
     #[test]
-    fn vector_columns_error_until_describe_captures_format() {
-        let columns = vec![column("V", 127, 0, 0)];
+    fn flexible_vector_format_raises_dpy_3031() {
+        // vector_format == 0 is the flexible format Oracle reports when a query
+        // yields vectors of differing element formats (test_9107).
+        let columns = vec![vector_column("V", 0, 0)];
         let err = build_record_batch(&columns, &[], &ArrowFetchOptions::default())
-            .expect_err("vector must error for now");
-        assert!(matches!(err, ArrowConversionError::NotImplemented(_)));
+            .expect_err("flexible vector format must error");
+        assert!(
+            matches!(err, ArrowConversionError::UnsupportedVectorFormat),
+            "expected DPY-3031, got {err}"
+        );
+        assert!(err.to_string().starts_with("DPY-3031:"));
+    }
+
+    #[test]
+    fn dense_float32_vector_builds_list_array_with_nulls() {
+        let columns = vec![vector_column("V", VECTOR_FORMAT_FLOAT32, 0)];
+        let rows = vec![
+            vec![Some(QueryValue::Vector(Vector::Dense(VectorValues::Float32(
+                vec![34.6, 77.8],
+            ))))],
+            vec![None],
+            vec![Some(QueryValue::Vector(Vector::Dense(VectorValues::Float32(
+                vec![34.6, 77.8, 55.9],
+            ))))],
+        ];
+        let batch =
+            build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
+        assert_eq!(
+            batch.schema().field(0).data_type(),
+            &DataType::List(Arc::new(Field::new("item", DataType::Float32, true)))
+        );
+        let list = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow_array::ListArray>()
+            .expect("list array");
+        assert_eq!(list.len(), 3);
+        assert!(list.is_null(1));
+        let row0 = list.value(0);
+        let row0 = row0.as_primitive::<Float32Type>();
+        assert_eq!(row0.values(), &[34.6_f32, 77.8]);
+        let row2 = list.value(2);
+        let row2 = row2.as_primitive::<Float32Type>();
+        assert_eq!(row2.values(), &[34.6_f32, 77.8, 55.9]);
+    }
+
+    #[test]
+    fn sparse_float64_vector_builds_struct_array_with_nulls() {
+        let columns = vec![vector_column(
+            "V",
+            VECTOR_FORMAT_FLOAT64,
+            VECTOR_META_FLAG_SPARSE_VECTOR,
+        )];
+        let rows = vec![
+            vec![Some(QueryValue::Vector(Vector::Sparse {
+                num_dimensions: 8,
+                indices: vec![0, 7],
+                values: VectorValues::Float64(vec![34.6, 77.8]),
+            }))],
+            vec![None],
+            vec![Some(QueryValue::Vector(Vector::Sparse {
+                num_dimensions: 8,
+                indices: vec![0, 7],
+                values: VectorValues::Float64(vec![34.6, 9.1]),
+            }))],
+        ];
+        let batch =
+            build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
+        let st = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .expect("struct array");
+        assert_eq!(st.len(), 3);
+        assert!(st.is_null(1));
+        let dims = st
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow_array::Int64Array>()
+            .expect("num_dimensions");
+        assert_eq!(dims.value(0), 8);
+        assert!(dims.is_null(1));
+        let idx = st
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow_array::ListArray>()
+            .expect("indices");
+        let idx0 = idx.value(0);
+        assert_eq!(idx0.as_primitive::<UInt32Type>().values(), &[0_u32, 7]);
+        let vals = st
+            .column(2)
+            .as_any()
+            .downcast_ref::<arrow_array::ListArray>()
+            .expect("values");
+        let vals2 = vals.value(2);
+        assert_eq!(vals2.as_primitive::<Float64Type>().values(), &[34.6, 9.1]);
+    }
+
+    #[test]
+    fn binary_vector_builds_uint8_list_per_byte() {
+        // BINARY vector bytes are NOT bit-unpacked: 3 bytes -> 3 UInt8 elements
+        // (test_9103 expects [3, 2, 3] from a 24-bit binary vector).
+        let columns = vec![vector_column("V", VECTOR_FORMAT_BINARY, 0)];
+        let rows = vec![vec![Some(QueryValue::Vector(Vector::Dense(
+            VectorValues::Binary(vec![3, 2, 3]),
+        )))]];
+        let batch =
+            build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
+        assert_eq!(
+            batch.schema().field(0).data_type(),
+            &DataType::List(Arc::new(Field::new("item", DataType::UInt8, true)))
+        );
+        let list = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow_array::ListArray>()
+            .expect("list array");
+        let row0 = list.value(0);
+        assert_eq!(row0.as_primitive::<UInt8Type>().values(), &[3_u8, 2, 3]);
     }
 
     #[test]
