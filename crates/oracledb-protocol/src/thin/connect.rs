@@ -101,7 +101,9 @@ pub fn build_function_payload_with_seq_and_token(
     writer.into_bytes()
 }
 
-pub(crate) fn skip_protocol_message(reader: &mut TtcReader<'_>) -> Result<Option<ClientCapabilities>> {
+pub(crate) fn skip_protocol_message(
+    reader: &mut TtcReader<'_>,
+) -> Result<Option<ClientCapabilities>> {
     let _server_version = reader.read_u8()?;
     reader.skip(1)?;
     loop {

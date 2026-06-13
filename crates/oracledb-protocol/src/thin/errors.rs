@@ -29,7 +29,12 @@ impl ServerErrorInfo {
 
 /// Encodes a physical rowid the way the reference driver does
 /// (impl/thin/utils.pyx `_encode_rowid`/`_convert_base64`).
-pub(crate) fn encode_rowid(rba: u32, partition_id: u16, block_num: u32, slot_num: u16) -> Option<String> {
+pub(crate) fn encode_rowid(
+    rba: u32,
+    partition_id: u16,
+    block_num: u32,
+    slot_num: u16,
+) -> Option<String> {
     if rba == 0 && partition_id == 0 && block_num == 0 && slot_num == 0 {
         return None;
     }
@@ -41,7 +46,10 @@ pub(crate) fn encode_rowid(rba: u32, partition_id: u16, block_num: u32, slot_num
     Some(out)
 }
 
-pub(crate) fn parse_server_error(reader: &mut TtcReader<'_>, ttc_field_version: u8) -> Result<Option<String>> {
+pub(crate) fn parse_server_error(
+    reader: &mut TtcReader<'_>,
+    ttc_field_version: u8,
+) -> Result<Option<String>> {
     let info = parse_server_error_info(reader, ttc_field_version)?;
     if info.number == 0 {
         Ok(None)

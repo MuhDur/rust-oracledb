@@ -860,7 +860,12 @@ pub(crate) fn encode_rowid_component(mut value: u32, size: usize, output: &mut S
     output.extend(encoded.into_iter().map(char::from));
 }
 
-pub(crate) fn encode_physical_rowid(rba: u32, partition_id: u16, block_num: u32, slot_num: u16) -> String {
+pub(crate) fn encode_physical_rowid(
+    rba: u32,
+    partition_id: u16,
+    block_num: u32,
+    slot_num: u16,
+) -> String {
     let mut output = String::with_capacity(ORA_TYPE_SIZE_ROWID as usize);
     encode_rowid_component(rba, 6, &mut output);
     encode_rowid_component(u32::from(partition_id), 3, &mut output);

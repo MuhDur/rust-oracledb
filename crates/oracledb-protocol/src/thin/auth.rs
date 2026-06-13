@@ -251,7 +251,12 @@ pub(crate) fn write_auth_header(
     Ok(())
 }
 
-pub(crate) fn write_key_value(writer: &mut TtcWriter, key: &str, value: &str, flags: u32) -> Result<()> {
+pub(crate) fn write_key_value(
+    writer: &mut TtcWriter,
+    key: &str,
+    value: &str,
+    flags: u32,
+) -> Result<()> {
     writer.write_str_two_lengths(key)?;
     writer.write_str_two_lengths(value)?;
     writer.write_ub4(flags);
