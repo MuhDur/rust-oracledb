@@ -1292,6 +1292,10 @@ impl ThinCursorImpl {
             bind_params,
             &self.named_input_sizes,
         )?;
+        // a VECTOR column whose rows mix array.array and plain lists infers
+        // incompatible bind types per row (vector vs PL/SQL array); coerce the
+        // list rows to vectors so the array DML is homogeneous (ORA-64219)
+        coerce_array_columns_to_vectors(&mut self.many_bind_rows)?;
         // Arrow timestamp columns must encode as TIMESTAMP (not the DATE that
         // value inference picks for a `datetime`) so fractional seconds survive.
         // Re-read the original Python datetime objects to recover the nanosecond
@@ -1495,13 +1499,17 @@ impl ThinCursorImpl {
         self.columns = result.columns;
         self.reset_fetch_define_state();
         self.requires_define = columns_require_define(&self.columns);
-        // VECTOR columns set the reference's stmt._no_prefetch: rows prefetched
-        // during execute (before a client-side define is sent) are unreliable,
-        // so discard them and re-fetch through the define path (reference
-        // base.pyx:1159-1164 + execute.pyx:99). Scoped to VECTOR only so JSON
-        // and LOB fetch paths keep their existing prefetch behavior.
+        // VECTOR columns set the reference's stmt._no_prefetch: on the FIRST
+        // execute the server returns describe-only (no rows), so the rows must be
+        // retrieved through the client-side define-fetch path (reference
+        // base.pyx:1159-1164 + execute.pyx:99). On a re-execute of an open cursor
+        // the connection suppresses server prefetch (ExecuteOptions::no_prefetch)
+        // yet the active server define still streams the row inline together with
+        // the end-of-data marker; those rows are authoritative and must be kept
+        // (discarding them and re-fetching exhausts the cursor -> ORA-01002).
         if self.requires_define
             && result.cursor_id != 0
+            && result.rows.is_empty()
             && self
                 .columns
                 .iter()
@@ -1510,8 +1518,16 @@ impl ThinCursorImpl {
             self.rows = Vec::new();
             self.more_rows = true;
         } else {
+            let execute_returned_rows = !result.rows.is_empty();
             self.rows = result.rows;
             self.more_rows = result.more_rows;
+            // when an open cursor's active server define already streamed rows in
+            // the execute response, the define is satisfied: clear requires_define
+            // so any remaining rows are retrieved with a plain fetch instead of a
+            // define-fetch that would land out of sequence (ORA-01002)
+            if execute_returned_rows && self.requires_define {
+                self.requires_define = false;
+            }
         }
         self.row_index = 0;
         self.cursor_id = result.cursor_id;
@@ -1662,13 +1678,17 @@ impl ThinCursorImpl {
         self.columns = result.columns;
         self.reset_fetch_define_state();
         self.requires_define = columns_require_define(&self.columns);
-        // VECTOR columns set the reference's stmt._no_prefetch: rows prefetched
-        // during execute (before a client-side define is sent) are unreliable,
-        // so discard them and re-fetch through the define path (reference
-        // base.pyx:1159-1164 + execute.pyx:99). Scoped to VECTOR only so JSON
-        // and LOB fetch paths keep their existing prefetch behavior.
+        // VECTOR columns set the reference's stmt._no_prefetch: on the FIRST
+        // execute the server returns describe-only (no rows), so the rows must be
+        // retrieved through the client-side define-fetch path (reference
+        // base.pyx:1159-1164 + execute.pyx:99). On a re-execute of an open cursor
+        // the connection suppresses server prefetch (ExecuteOptions::no_prefetch)
+        // yet the active server define still streams the row inline together with
+        // the end-of-data marker; those rows are authoritative and must be kept
+        // (discarding them and re-fetching exhausts the cursor -> ORA-01002).
         if self.requires_define
             && result.cursor_id != 0
+            && result.rows.is_empty()
             && self
                 .columns
                 .iter()
@@ -1677,8 +1697,16 @@ impl ThinCursorImpl {
             self.rows = Vec::new();
             self.more_rows = true;
         } else {
+            let execute_returned_rows = !result.rows.is_empty();
             self.rows = result.rows;
             self.more_rows = result.more_rows;
+            // when an open cursor's active server define already streamed rows in
+            // the execute response, the define is satisfied: clear requires_define
+            // so any remaining rows are retrieved with a plain fetch instead of a
+            // define-fetch that would land out of sequence (ORA-01002)
+            if execute_returned_rows && self.requires_define {
+                self.requires_define = false;
+            }
         }
         self.row_index = 0;
         self.cursor_id = result.cursor_id;

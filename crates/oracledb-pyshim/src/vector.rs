@@ -80,9 +80,11 @@ pub(crate) fn py_to_vector(value: &Bound<'_, PyAny>, allow_list: bool) -> PyResu
             .map(|item| item?.extract::<u32>())
             .collect::<PyResult<Vec<u32>>>()?;
         let values = array_to_vector_values(&value.getattr("values")?)?;
-        if values.is_empty() {
-            return Err(raise_invalid_vector());
-        }
+        // a SparseVector is never rejected client-side for emptiness: an empty
+        // sparse vector with positive num_dimensions is a valid all-zero vector,
+        // and a zero-dimension sparse vector is left to the server to reject
+        // (ORA-51803/51862). The reference `_check_value` passes SparseVector
+        // through unconditionally (connection.pyx:153-154).
         return Ok(Vector::Sparse {
             num_dimensions,
             indices,

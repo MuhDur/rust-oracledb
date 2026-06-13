@@ -1439,6 +1439,13 @@ pub struct ExecuteOptions {
     /// post-detach into the sessionless piggyback. Does not affect the execute
     /// wire body itself.
     pub suspend_on_success: bool,
+    /// Suppress the FETCH execute option so the server does not prefetch any
+    /// rows during the execute round trip (reference `stmt._no_prefetch`,
+    /// execute.pyx:99). Set when re-executing an open cursor whose columns
+    /// require a client-side define (VECTOR): a prefetched row would otherwise
+    /// exhaust the cursor before the define-fetch runs, yielding ORA-01002 on
+    /// the subsequent fetch.
+    pub no_prefetch: bool,
 }
 
 impl Default for ExecuteOptions {
@@ -1455,6 +1462,7 @@ impl Default for ExecuteOptions {
             fetch_pos: 0,
             scroll_operation: false,
             suspend_on_success: false,
+            no_prefetch: false,
         }
     }
 }
@@ -1569,7 +1577,10 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     if is_query {
         if parse_only {
             options |= TNS_EXEC_OPTION_DESCRIBE;
-        } else {
+        } else if !exec_options.no_prefetch {
+            // reference execute.pyx:99 gates FETCH on `not stmt._no_prefetch`;
+            // a no-prefetch statement (VECTOR columns) leaves the rows to be
+            // retrieved by the follow-up define-fetch instead.
             options |= TNS_EXEC_OPTION_FETCH;
         }
     }
@@ -2327,6 +2338,25 @@ pub fn check_fetch_conversion(
                     | ORA_TYPE_NUM_BINARY_DOUBLE
                     | ORA_TYPE_NUM_BINARY_FLOAT
             ) || CHAR_TYPES.contains(&to)
+        }
+        ORA_TYPE_NUM_VECTOR => {
+            // VECTOR fetched as a character type streams its JSON text via a
+            // LONG wire define; VECTOR fetched as a CLOB streams via a CLOB
+            // locator (reference var.pyx:234-243).
+            if CHAR_TYPES.contains(&to) {
+                let mut metadata = source.clone();
+                metadata.ora_type_num = ORA_TYPE_NUM_LONG;
+                metadata.csfrm = CS_FORM_IMPLICIT;
+                metadata.buffer_size = TNS_MAX_LONG_LENGTH;
+                metadata.max_size = 0;
+                return Some(metadata);
+            }
+            if to == ORA_TYPE_NUM_CLOB {
+                let mut metadata = source.clone();
+                metadata.ora_type_num = ORA_TYPE_NUM_CLOB;
+                return Some(metadata);
+            }
+            false
         }
         _ => false,
     };

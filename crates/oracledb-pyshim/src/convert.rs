@@ -11,6 +11,7 @@ use oracledb::protocol::thin::{
     ORA_TYPE_NUM_JSON, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
     ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR, ORA_TYPE_NUM_VECTOR,
 };
+use oracledb::protocol::vector::{Vector, VectorValues};
 use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -360,6 +361,65 @@ pub(crate) fn py_list_to_array_bind_values(
             }
         })
         .collect()
+}
+
+/// Enforces column-type coherence for VECTOR executemany binds. Without
+/// setinputsizes the per-value type inference maps an `array.array` to a vector
+/// but a plain Python list to a PL/SQL array bind, so a column whose first row
+/// is a vector and a later row is a list mixes incompatible bind types and the
+/// server rejects the array DML (ORA-64219). The reference establishes the bind
+/// variable type from the first row and coerces subsequent list values through
+/// `_check_value` (DB_TYPE_VECTOR -> array('d')). This mirrors that: for any
+/// column that already carries a `BindValue::Vector`, re-encode a numeric list
+/// (currently a `BindValue::Array`) in the same column as a dense float64
+/// vector.
+pub(crate) fn coerce_array_columns_to_vectors(rows: &mut [Vec<BindValue>]) -> PyResult<()> {
+    let Some(width) = rows.iter().map(Vec::len).max() else {
+        return Ok(());
+    };
+    for col in 0..width {
+        let column_is_vector = rows
+            .iter()
+            .any(|row| matches!(row.get(col), Some(BindValue::Vector(_))));
+        if !column_is_vector {
+            continue;
+        }
+        for row in rows.iter_mut() {
+            let Some(slot) = row.get_mut(col) else {
+                continue;
+            };
+            if let BindValue::Array { values, .. } = slot {
+                let vector = array_bind_values_to_dense_vector(values)?;
+                *slot = BindValue::Vector(vector);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Converts the element binds of a list-derived array bind into a dense float64
+/// vector, matching the reference list -> array('d') coercion for DB_TYPE_VECTOR
+/// (connection.pyx `_check_value`). A null element or a non-numeric element is
+/// not representable in a vector and raises DPY-4031 (empty/invalid vector).
+fn array_bind_values_to_dense_vector(values: &[Option<BindValue>]) -> PyResult<Vector> {
+    if values.is_empty() {
+        return Err(raise_invalid_vector());
+    }
+    let mut floats = Vec::with_capacity(values.len());
+    for value in values {
+        let float = match value {
+            Some(BindValue::Number(text)) => {
+                text.parse::<f64>().map_err(|_| raise_invalid_vector())?
+            }
+            Some(BindValue::BinaryDouble(value) | BindValue::BinaryFloat(value)) => *value,
+            Some(BindValue::BinaryInteger(text)) => {
+                text.parse::<f64>().map_err(|_| raise_invalid_vector())?
+            }
+            _ => return Err(raise_invalid_vector()),
+        };
+        floats.push(float);
+    }
+    Ok(Vector::Dense(VectorValues::Float64(floats)))
 }
 
 pub(crate) fn py_db_object_type_impl(

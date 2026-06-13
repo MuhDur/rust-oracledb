@@ -626,6 +626,32 @@ pub(crate) fn raise_unsupported_python_type_for_db_type(
     })
 }
 
+/// Returns true when `err` is one of the "value type is not acceptable for
+/// this database type" bind errors (DPY-3013 / DPY-3004). Only these signal the
+/// reference `was_set = False` fallback in which a setinputsizes variable is
+/// discarded and the bind is re-derived from the value itself; hard validation
+/// errors such as DPY-4031 (empty vector) must propagate (reference
+/// connection.pyx `_check_value`: `is_ok` is set only on a type mismatch).
+pub(crate) fn is_setinputsizes_fallback_error(py: Python<'_>, err: &PyErr) -> bool {
+    let Some(full_code) = pyerr_full_code(py, err) else {
+        return false;
+    };
+    matches!(full_code.as_str(), "DPY-3013" | "DPY-3004")
+}
+
+/// Extracts the `full_code` of an oracledb error (`exc.args[0].full_code`),
+/// returning None when the exception is not an oracledb `_Error` carrier.
+fn pyerr_full_code(py: Python<'_>, err: &PyErr) -> Option<String> {
+    let value = err.value(py);
+    let args = value.getattr("args").ok()?;
+    let error_obj = args.get_item(0).ok()?;
+    error_obj
+        .getattr("full_code")
+        .ok()?
+        .extract::<String>()
+        .ok()
+}
+
 pub(crate) fn raise_unsupported_type_set(db_type_name: &str) -> PyErr {
     Python::attach(|py| -> PyResult<PyErr> {
         let errors = PyModule::import(py, "oracledb.errors")?;
