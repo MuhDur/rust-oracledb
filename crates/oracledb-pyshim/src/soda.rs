@@ -82,7 +82,7 @@ impl ThinSodaDbImpl {
     fn create_collection(
         &self,
         py: Python<'_>,
-        name: String,
+        name: Option<String>,
         metadata: Option<String>,
         map_mode: bool,
     ) -> PyResult<ThinSodaCollImpl> {
@@ -92,7 +92,7 @@ impl ThinSodaDbImpl {
             let metadata = metadata.clone();
             Box::pin(async move {
                 SodaDatabase::new()
-                    .create_collection(c, cx, &name, metadata.as_deref(), map_mode)
+                    .create_collection(c, cx, name.as_deref(), metadata.as_deref(), map_mode)
                     .await
                     .map_err(soda_task_error)
             })
@@ -159,6 +159,14 @@ impl ThinSodaDbImpl {
         value: &Bound<'_, PyAny>,
         key: Option<String>,
     ) -> PyResult<ThinSodaDocImpl> {
+        // The shared OSON encoder accepts tuples as arrays, but SODA (like the
+        // reference) treats a tuple as an unsupported document type (DPY-3003).
+        if value.is_instance_of::<pyo3::types::PyTuple>() {
+            return Err(runtime_error(format!(
+                "DPY-3003: Python type {} is not supported in a SODA document",
+                value.get_type().name()?
+            )));
+        }
         let oson = py_value_to_oson(value)?;
         Ok(ThinSodaDocImpl {
             inner: SodaDocument::from_oson(oson, key),

@@ -95,7 +95,7 @@ fn soda_create_open_drop_collection() {
             drop_if_exists(&db, conn, cx, "RustSodaCreate").await;
 
             let coll = db
-                .create_collection(conn, cx, "RustSodaCreate", None, false)
+                .create_collection(conn, cx, Some("RustSodaCreate"), None, false)
                 .await
                 .expect("create");
             assert_eq!(coll.name(), "RustSodaCreate");
@@ -138,7 +138,7 @@ fn soda_insert_and_find_by_key() {
             let db = SodaDatabase::new();
             drop_if_exists(&db, conn, cx, "RustSodaInsertFind").await;
             let coll = db
-                .create_collection(conn, cx, "RustSodaInsertFind", None, false)
+                .create_collection(conn, cx, Some("RustSodaInsertFind"), None, false)
                 .await
                 .expect("create");
 
@@ -197,7 +197,7 @@ fn soda_insert_many_and_qbe_filter() {
             let db = SodaDatabase::new();
             drop_if_exists(&db, conn, cx, "RustSodaQbe").await;
             let coll = db
-                .create_collection(conn, cx, "RustSodaQbe", None, false)
+                .create_collection(conn, cx, Some("RustSodaQbe"), None, false)
                 .await
                 .expect("create");
 
@@ -270,7 +270,7 @@ fn soda_replace_and_remove() {
             let db = SodaDatabase::new();
             drop_if_exists(&db, conn, cx, "RustSodaReplace").await;
             let coll = db
-                .create_collection(conn, cx, "RustSodaReplace", None, false)
+                .create_collection(conn, cx, Some("RustSodaReplace"), None, false)
                 .await
                 .expect("create");
 
@@ -353,14 +353,14 @@ fn soda_truncate_and_index_and_names() {
             }
 
             // getCollectionNames ordering + start/limit
-            db.create_collection(conn, cx, "RustSodaB", None, false)
+            db.create_collection(conn, cx, Some("RustSodaB"), None, false)
                 .await
                 .expect("b");
-            db.create_collection(conn, cx, "RustSodaA", None, false)
+            db.create_collection(conn, cx, Some("RustSodaA"), None, false)
                 .await
                 .expect("a");
             let coll = db
-                .create_collection(conn, cx, "RustSodaT", None, false)
+                .create_collection(conn, cx, Some("RustSodaT"), None, false)
                 .await
                 .expect("t");
             conn.commit(cx).await.expect("commit");

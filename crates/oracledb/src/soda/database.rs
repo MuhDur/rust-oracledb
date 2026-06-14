@@ -31,7 +31,7 @@ impl SodaDatabase {
         &self,
         conn: &mut Connection,
         cx: &Cx,
-        name: &str,
+        name: Option<&str>,
         metadata: Option<&str>,
         map_mode: bool,
     ) -> Result<SodaCollection> {
@@ -40,8 +40,13 @@ impl SodaDatabase {
         let create_mode = if map_mode { 2 } else { 1 };
         let sql = "DECLARE c SODA_COLLECTION_T; \
                    BEGIN c := DBMS_SODA.CREATE_COLLECTION(:1, :2, :3); END;";
+        // A NULL name lets the server raise ORA-40658 (collection name cannot be
+        // null), matching the reference error contract.
         let binds = vec![
-            BindValue::Text(name.to_string()),
+            match name {
+                Some(n) => BindValue::Text(n.to_string()),
+                None => BindValue::Null,
+            },
             match metadata {
                 Some(m) => BindValue::Text(m.to_string()),
                 None => BindValue::Null,
@@ -53,6 +58,7 @@ impl SodaDatabase {
             .map_err(SodaError::Driver)?;
 
         // Read the descriptor back.
+        let name = name.unwrap_or_default();
         self.open_collection(conn, cx, name).await?.ok_or_else(|| {
             SodaError::InvalidMetadata(format!("collection {name} not found after create"))
         })
