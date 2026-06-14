@@ -2401,7 +2401,17 @@ impl Connection {
             .unwrap_or_default();
         let parsed =
             parse_query_response_borrowed(&response, self.capabilities, &columns, previous_row);
-        self.note_parse(parsed)
+        let result = self.note_parse(parsed)?;
+        // Mirror the owned `fetch_rows` path: if the server re-described the
+        // cursor mid-paging (the type-change refetch path emits DESCRIBE_INFO),
+        // persist the adjusted column list under this cursor id so subsequent
+        // pages decode with the new schema. Keyed on the known `cursor_id`
+        // (the response's own cursor_id is 0 on an ordinary fetch).
+        if cursor_id != 0 && !result.batch.columns().is_empty() {
+            self.cursor_columns
+                .insert(cursor_id, result.batch.columns().to_vec());
+        }
+        Ok(result)
     }
 
     /// Execute `sql` and drive every fetched row through `callback` as a slice

@@ -1378,6 +1378,21 @@ pub fn parse_query_response_borrowed(
             TNS_MSG_TYPE_TOKEN => {
                 let _token = reader.read_ub8()?;
             }
+            TNS_MSG_TYPE_IMPLICIT_RESULTSET => {
+                // Mirror the owned parser's framing walk so the reader advances
+                // past the implicit-resultset block identically (the borrowed
+                // fetch API does not surface child cursors, but it must still
+                // consume the bytes). reference messages/base.pyx
+                // `_process_implicit_result`.
+                let num_results = reader.read_ub4()?;
+                for _ in 0..num_results.min(reader.remaining() as u32) {
+                    let num_bytes = reader.read_u8()?;
+                    reader.skip(usize::from(num_bytes))?;
+                    let mut child = QueryResult::default();
+                    parse_describe_info(&mut reader, capabilities, &mut child)?;
+                    let _child_cursor_id = reader.read_ub2()?;
+                }
+            }
             TNS_MSG_TYPE_ERROR => {
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
                 if info.cursor_id != 0 {
