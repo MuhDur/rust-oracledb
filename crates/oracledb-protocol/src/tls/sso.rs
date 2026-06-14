@@ -63,8 +63,8 @@ mod imp {
         }
         let magic_version = data[3];
         let auto_login_local = match magic_version {
-            54 | 55 => false,           // '6' / '7'
-            56 => true,                 // '8' — machine-bound auto-login-local
+            54 | 55 => false, // '6' / '7'
+            56 => true,       // '8' — machine-bound auto-login-local
             other => {
                 return Err(WalletError::Sso(format!(
                     "invalid SSO magic version: {other}"

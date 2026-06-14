@@ -103,9 +103,7 @@ pub fn resolve_wallet_dir(
             return None;
         }
     }
-    tns_admin
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
+    tns_admin.filter(|s| !s.is_empty()).map(PathBuf::from)
 }
 
 /// Returns the path to `ewallet.pem` inside a wallet directory.
@@ -202,6 +200,17 @@ pub fn parse_ewallet_pem(
     }
 
     Ok(contents)
+}
+
+/// Parse all `CERTIFICATE` blocks from a PEM reader into DER byte vectors.
+///
+/// Exposed so the I/O crate can load OS root bundles (for the no-wallet TCPS
+/// path) without taking its own `rustls-pemfile` dependency.
+pub fn parse_pem_certificates(reader: &mut dyn BufRead) -> Vec<Vec<u8>> {
+    rustls_pemfile::certs(reader)
+        .filter_map(Result::ok)
+        .map(|der| der.as_ref().to_vec())
+        .collect()
 }
 
 /// Heuristic: does this PEM buffer contain an encrypted private-key block?

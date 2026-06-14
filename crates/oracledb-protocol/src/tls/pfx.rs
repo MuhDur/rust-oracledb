@@ -302,8 +302,7 @@ fn pbkdf2_derive(
     let mut out = vec![0u8; key_len];
     match prf {
         PrfHash::Sha1 => {
-            pbkdf2::pbkdf2::<Hmac<sha1::Sha1>>(password, salt, iters, &mut out)
-                .unwrap_or_default();
+            pbkdf2::pbkdf2::<Hmac<sha1::Sha1>>(password, salt, iters, &mut out).unwrap_or_default();
         }
         PrfHash::Sha256 => {
             pbkdf2::pbkdf2::<Hmac<sha2::Sha256>>(password, salt, iters, &mut out)
@@ -319,8 +318,7 @@ fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ct: &[u8]) -> Result<Vec<u8>, WalletEr
     macro_rules! run {
         ($aes:ty) => {{
             type Dec = cbc::Decryptor<$aes>;
-            let dec = Dec::new_from_slices(key, iv)
-                .map_err(|e| sso(format!("AES init: {e}")))?;
+            let dec = Dec::new_from_slices(key, iv).map_err(|e| sso(format!("AES init: {e}")))?;
             let pt = dec
                 .decrypt_padded_mut::<Pkcs7>(&mut buf)
                 .map_err(|e| sso(format!("AES decrypt/unpad: {e}")))?;

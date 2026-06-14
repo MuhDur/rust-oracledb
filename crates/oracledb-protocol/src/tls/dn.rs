@@ -336,22 +336,12 @@ mod tests {
 
     #[test]
     fn check_server_name_san_first() {
-        assert!(check_server_name(
-            "db.example.com",
-            &["db.example.com".to_string()],
-            &[]
-        )
-        .is_ok());
+        assert!(check_server_name("db.example.com", &["db.example.com".to_string()], &[]).is_ok());
     }
 
     #[test]
     fn check_server_name_falls_back_to_cn() {
-        assert!(check_server_name(
-            "db.example.com",
-            &[],
-            &["db.example.com".to_string()]
-        )
-        .is_ok());
+        assert!(check_server_name("db.example.com", &[], &["db.example.com".to_string()]).is_ok());
     }
 
     #[test]

@@ -13,14 +13,22 @@ categories.workspace = true
 [features]
 default = []
 arrow = ["dep:arrow-array", "dep:arrow-buffer", "dep:arrow-data", "dep:arrow-schema"]
+# Enables the experimental cwallet.sso (SSO auto-login wallet) reader.
+experimental = ["oracledb-protocol/experimental"]
 
 [dependencies]
 arrow-array = { workspace = true, optional = true }
 arrow-buffer = { workspace = true, optional = true }
 arrow-data = { workspace = true, optional = true }
 arrow-schema = { workspace = true, optional = true }
-asupersync.workspace = true
+# asupersync's `tls` feature wraps rustls; we drive its sans-io ClientConnection
+# over the async TCP socket and supply our own Oracle ServerCertVerifier.
+asupersync = { workspace = true, features = ["tls"] }
 oracledb-protocol = { path = "../oracledb-protocol" }
+rustls.workspace = true
+rustls-pki-types.workspace = true
+rustls-webpki.workspace = true
+x509-cert.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

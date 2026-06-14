@@ -63,10 +63,7 @@ mod tests {
 
     #[test]
     fn sni_with_server_type_uses_first_char() {
-        assert_eq!(
-            build_sni("svc", Some("dedicated")),
-            "S3.svc.T1.d.V3.319"
-        );
+        assert_eq!(build_sni("svc", Some("dedicated")), "S3.svc.T1.d.V3.319");
     }
 
     #[test]
