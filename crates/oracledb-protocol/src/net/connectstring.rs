@@ -1089,6 +1089,15 @@ fn is_container_param(name: &str) -> bool {
 /// Recursive-descent parser for TNS connect descriptors. Mirrors the reference
 /// `ConnectStringParser` (`_parse_descriptor_key_value_pair`): it tokenises
 /// keywords, simple values, and quoted strings while tracking nested parens.
+/// Maximum nesting depth for a TNS connect descriptor. Real topologies
+/// (DESCRIPTION_LIST > DESCRIPTION > ADDRESS_LIST > ADDRESS / CONNECT_DATA >
+/// SECURITY ...) are well under 10 deep; 128 is far beyond any legitimate
+/// descriptor. The cap converts an attacker/garbage deeply-nested input into a
+/// clean `Result::Err` instead of unbounded recursion that overflows the stack
+/// and ABORTS the process (an uncatchable crash, not a recoverable panic) —
+/// bead rust-oracledb-uf8.
+const MAX_DESCRIPTOR_DEPTH: usize = 128;
+
 struct DescriptorParser<'a> {
     chars: &'a [char],
     raw: &'a str,
@@ -1096,6 +1105,8 @@ struct DescriptorParser<'a> {
     pos: usize,
     /// Lookahead cursor.
     temp_pos: usize,
+    /// Current parenthesis nesting depth (guards against stack overflow).
+    depth: usize,
 }
 
 impl<'a> DescriptorParser<'a> {
@@ -1105,6 +1116,7 @@ impl<'a> DescriptorParser<'a> {
             raw,
             pos: 0,
             temp_pos: 0,
+            depth: 0,
         }
     }
 
@@ -1232,7 +1244,17 @@ impl<'a> DescriptorParser<'a> {
                     Some(ArgValue::Node(n)) => n,
                     _ => ArgMap::default(),
                 };
-                self.parse_key_value_pair(&mut node)?;
+                self.depth += 1;
+                if self.depth > MAX_DESCRIPTOR_DEPTH {
+                    return Err(err_descriptor(
+                        self.raw,
+                        self.temp_pos,
+                        "connect descriptor nesting too deep",
+                    ));
+                }
+                let result = self.parse_key_value_pair(&mut node);
+                self.depth -= 1;
+                result?;
                 value = Some(ArgValue::Node(node));
                 continue;
             } else if ch == ')' {
@@ -2607,5 +2629,37 @@ mod tnsnames_tests {
         write_file(&dir, "tnsnames.ora", "IFILE = missing.ora\n");
         let err = TnsnamesReader::read(&dir).unwrap_err();
         assert!(format!("{err}").contains("missing or unreadable"));
+    }
+
+    // bead rust-oracledb-uf8: a deeply-nested descriptor must return a clean
+    // Err, never recurse until the stack overflows and ABORTS the process.
+    #[test]
+    fn deeply_nested_descriptor_errors_not_crashes() {
+        // 5000 levels of "(A=" + "1" + 5000 ")" — far past MAX_DESCRIPTOR_DEPTH
+        // but small enough that the depth guard fires long before any real
+        // stack pressure. Without the guard this overflows the stack.
+        let depth = 5000;
+        let mut s = String::with_capacity(depth * 4);
+        for _ in 0..depth {
+            s.push_str("(A=");
+        }
+        s.push('1');
+        for _ in 0..depth {
+            s.push(')');
+        }
+        let err = parse(&s).unwrap_err();
+        assert!(
+            format!("{err}").contains("nesting too deep"),
+            "expected a nesting-depth error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn legitimately_deep_descriptor_still_parses() {
+        // A realistic DESCRIPTION_LIST topology (~5 deep) must NOT be rejected.
+        let ok = "(DESCRIPTION_LIST=(DESCRIPTION=(ADDRESS_LIST=\
+                  (ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1521)))\
+                  (CONNECT_DATA=(SERVICE_NAME=svc))))";
+        assert!(parse(ok).is_ok(), "a real ~5-deep descriptor must parse");
     }
 }
