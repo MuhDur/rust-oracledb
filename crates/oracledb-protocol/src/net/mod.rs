@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod connectstring;
+
 use crate::{ProtocolError, Result};
 
 /// Transport protocol for the connection (the EZConnect `protocol://` prefix).

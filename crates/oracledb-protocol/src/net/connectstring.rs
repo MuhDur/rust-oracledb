@@ -1,0 +1,1943 @@
+#![forbid(unsafe_code)]
+//! Real, full-fidelity Oracle connect-string parsing.
+//!
+//! This module parses the three connect-string forms understood by
+//! python-oracledb thin mode, matching the reference parser
+//! (`impl/base/parsers.pyx` / `connect_params.pyx`) semantics:
+//!
+//!   1. **TNS connect descriptors** —
+//!      `(DESCRIPTION=(ADDRESS_LIST=(ADDRESS=(PROTOCOL=tcp)(HOST=..)(PORT=..)))
+//!      (CONNECT_DATA=(SERVICE_NAME=..)))`, including `DESCRIPTION_LIST`,
+//!      multiple `ADDRESS_LIST`/`ADDRESS`, `LOAD_BALANCE`/`FAILOVER`/
+//!      `SOURCE_ROUTE`, `RETRY_COUNT`/`RETRY_DELAY`, `EXPIRE_TIME`,
+//!      `TRANSPORT_CONNECT_TIMEOUT`, `SDU`, `SECURITY` (wallet / cert DN), and
+//!      arbitrary pass-through keys. Case-insensitive keywords, nested parens,
+//!      quoted values, and whitespace tolerance.
+//!
+//!   2. **EZConnect / EZConnect-Plus** —
+//!      `[proto://]host[,host2][:port][/service][:server][/instance][?k=v&..]`,
+//!      including multiple hosts, multiple address lists (`;`), IPv6 `[::1]`,
+//!      and the extended `?key=value` parameters.
+//!
+//!   3. **tnsnames.ora** — alias -> descriptor maps with comments (`#`),
+//!      multi-line entries, comma-separated alias lists, and `IFILE` includes
+//!      (with cycle detection), resolved relative to `TNS_ADMIN` / a config dir.
+//!
+//! Beyond parity, the parser produces **rich diagnostics**: every error points
+//! at the offending byte offset with surrounding context, and [`Descriptor`]
+//! offers a [`Descriptor::describe`] troubleshooting dump of the resolved
+//! address list and connect data.
+
+use crate::{ProtocolError, Result};
+
+/// Default listener port when none is given (reference `DEFAULT_PORT`).
+pub const DEFAULT_PORT: u16 = 1521;
+/// Default TCPS listener port.
+pub const DEFAULT_TCPS_PORT: u16 = 2484;
+/// Default SDU in bytes (reference `DEFAULT_SDU`).
+pub const DEFAULT_SDU: u32 = 8192;
+/// Minimum SDU after sanitisation.
+pub const MIN_SDU: u32 = 512;
+/// Maximum SDU after sanitisation.
+pub const MAX_SDU: u32 = 2_097_152;
+/// Default retry delay (reference `DEFAULT_RETRY_DELAY`).
+pub const DEFAULT_RETRY_DELAY: u32 = 1;
+/// Default transport connect timeout in seconds.
+pub const DEFAULT_TCP_CONNECT_TIMEOUT: f64 = 20.0;
+
+/// Transport protocol parsed from an `ADDRESS` `PROTOCOL=` or an EZConnect
+/// `proto://` prefix.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum Protocol {
+    /// Plain TCP (default); default port 1521.
+    #[default]
+    Tcp,
+    /// TLS-encrypted TCP; default port 2484.
+    Tcps,
+}
+
+impl Protocol {
+    /// Default listener port for this protocol.
+    #[must_use]
+    pub fn default_port(self) -> u16 {
+        match self {
+            Self::Tcp => DEFAULT_PORT,
+            Self::Tcps => DEFAULT_TCPS_PORT,
+        }
+    }
+
+    /// Returns whether this protocol requires a TLS handshake.
+    #[must_use]
+    pub fn is_tls(self) -> bool {
+        matches!(self, Self::Tcps)
+    }
+
+    /// Lower-case keyword as it appears in a connect string.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Tcps => "tcps",
+        }
+    }
+
+    fn from_keyword(value: &str) -> Result<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "tcp" => Ok(Self::Tcp),
+            "tcps" => Ok(Self::Tcps),
+            other => Err(ProtocolError::InvalidConnectDescriptor(format!(
+                "invalid protocol \"{other}\""
+            ))),
+        }
+    }
+}
+
+/// Database server connection mode (`(SERVER=..)` / `:server` in EZConnect).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServerType {
+    /// A dedicated server process.
+    Dedicated,
+    /// A shared (multi-threaded) server.
+    Shared,
+    /// A DRCP pooled server.
+    Pooled,
+}
+
+impl ServerType {
+    /// Lower-case keyword as it appears in a connect string.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dedicated => "dedicated",
+            Self::Shared => "shared",
+            Self::Pooled => "pooled",
+        }
+    }
+
+    fn from_keyword(value: &str) -> Result<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "dedicated" => Ok(Self::Dedicated),
+            "shared" => Ok(Self::Shared),
+            "pooled" => Ok(Self::Pooled),
+            other => Err(ProtocolError::InvalidConnectDescriptor(format!(
+                "invalid server_type: {other}"
+            ))),
+        }
+    }
+}
+
+/// DRCP connection-pool purity (`(POOL_PURITY=..)`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Purity {
+    /// Reuse a session from the pool as-is.
+    Self_,
+    /// Force a brand-new session.
+    New,
+}
+
+impl Purity {
+    fn from_keyword(value: &str) -> Result<Self> {
+        match value.to_ascii_uppercase().as_str() {
+            "SELF" => Ok(Self::Self_),
+            "NEW" => Ok(Self::New),
+            other => Err(ProtocolError::InvalidConnectDescriptor(format!(
+                "invalid value for enum Purity: {other}"
+            ))),
+        }
+    }
+}
+
+/// A single resolved network endpoint (one `ADDRESS` node).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Address {
+    /// Host name or IP literal.
+    pub host: Option<String>,
+    /// Listener port.
+    pub port: u16,
+    /// Transport protocol.
+    pub protocol: Protocol,
+    /// Optional forward proxy host.
+    pub https_proxy: Option<String>,
+    /// Optional forward proxy port (0 = unset).
+    pub https_proxy_port: u16,
+}
+
+impl Default for Address {
+    fn default() -> Self {
+        Self {
+            host: None,
+            port: DEFAULT_PORT,
+            protocol: Protocol::Tcp,
+            https_proxy: None,
+            https_proxy_port: 0,
+        }
+    }
+}
+
+/// A group of [`Address`]es (one `ADDRESS_LIST` node) plus its navigation flags.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AddressList {
+    /// Member addresses.
+    pub addresses: Vec<Address>,
+    /// `LOAD_BALANCE=ON` randomises address order.
+    pub load_balance: bool,
+    /// `FAILOVER=OFF` disables trying alternate addresses.
+    pub failover: bool,
+    /// `SOURCE_ROUTE=ON` chains through the addresses in order.
+    pub source_route: bool,
+}
+
+/// Resolved `CONNECT_DATA` settings.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ConnectData {
+    /// `SERVICE_NAME=`.
+    pub service_name: Option<String>,
+    /// `SID=`.
+    pub sid: Option<String>,
+    /// `INSTANCE_NAME=`.
+    pub instance_name: Option<String>,
+    /// `SERVER=` (dedicated / shared / pooled).
+    pub server_type: Option<ServerType>,
+    /// `POOL_CONNECTION_CLASS=`.
+    pub cclass: Option<String>,
+    /// `POOL_PURITY=`.
+    pub purity: Option<Purity>,
+    /// `POOL_BOUNDARY=`.
+    pub pool_boundary: Option<String>,
+    /// `POOL_NAME=`.
+    pub pool_name: Option<String>,
+    /// `CONNECTION_ID_PREFIX=`.
+    pub connection_id_prefix: Option<String>,
+    /// `USE_TCP_FAST_OPEN=ON`.
+    pub use_tcp_fast_open: bool,
+    /// Unrecognised CONNECT_DATA keys, passed through to the listener verbatim
+    /// (uppercased key -> reconstructed value).
+    pub extra: Vec<(String, String)>,
+}
+
+/// Resolved `SECURITY` settings (only meaningful for TCPS addresses).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Security {
+    /// `SSL_SERVER_DN_MATCH` (defaults to true).
+    pub ssl_server_dn_match: bool,
+    /// `SSL_SERVER_CERT_DN=`.
+    pub ssl_server_cert_dn: Option<String>,
+    /// `MY_WALLET_DIRECTORY=` / `WALLET_LOCATION=`.
+    pub wallet_location: Option<String>,
+    /// Unrecognised SECURITY keys, passed through verbatim.
+    pub extra: Vec<(String, String)>,
+}
+
+impl Default for Security {
+    fn default() -> Self {
+        Self {
+            ssl_server_dn_match: true,
+            ssl_server_cert_dn: None,
+            wallet_location: None,
+            extra: Vec::new(),
+        }
+    }
+}
+
+/// A single resolved `DESCRIPTION` node.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Description {
+    /// Address lists belonging to this description.
+    pub address_lists: Vec<AddressList>,
+    /// `CONNECT_DATA` settings.
+    pub connect_data: ConnectData,
+    /// `SECURITY` settings.
+    pub security: Security,
+    /// `RETRY_COUNT=`.
+    pub retry_count: u32,
+    /// `RETRY_DELAY=` (seconds).
+    pub retry_delay: u32,
+    /// `EXPIRE_TIME=` (minutes; TCP keepalive).
+    pub expire_time: u32,
+    /// `TRANSPORT_CONNECT_TIMEOUT` / `CONNECT_TIMEOUT` (seconds).
+    pub tcp_connect_timeout: f64,
+    /// `SDU=` (sanitised into [`MIN_SDU`]..=[`MAX_SDU`]).
+    pub sdu: u32,
+    /// `LOAD_BALANCE=ON`.
+    pub load_balance: bool,
+    /// `FAILOVER=OFF`.
+    pub failover: bool,
+    /// `SOURCE_ROUTE=ON`.
+    pub source_route: bool,
+    /// `USE_SNI=ON`.
+    pub use_sni: bool,
+    /// Unrecognised DESCRIPTION keys, passed through verbatim.
+    pub extra: Vec<(String, String)>,
+}
+
+impl Default for Description {
+    fn default() -> Self {
+        Self {
+            address_lists: Vec::new(),
+            connect_data: ConnectData::default(),
+            security: Security::default(),
+            retry_count: 0,
+            retry_delay: DEFAULT_RETRY_DELAY,
+            expire_time: 0,
+            tcp_connect_timeout: DEFAULT_TCP_CONNECT_TIMEOUT,
+            sdu: DEFAULT_SDU,
+            load_balance: false,
+            failover: true,
+            source_route: false,
+            use_sni: false,
+            extra: Vec::new(),
+        }
+    }
+}
+
+impl Description {
+    /// Iterator over every [`Address`] across all address lists, in order.
+    pub fn addresses(&self) -> impl Iterator<Item = &Address> {
+        self.address_lists
+            .iter()
+            .flat_map(|list| list.addresses.iter())
+    }
+}
+
+/// A fully parsed connect string: one or more [`Description`]s.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Descriptor {
+    /// Member descriptions (one for a plain `DESCRIPTION`, several for a
+    /// `DESCRIPTION_LIST` or multi-address-list EZConnect).
+    pub descriptions: Vec<Description>,
+    /// `DESCRIPTION_LIST` `LOAD_BALANCE=ON`.
+    pub load_balance: bool,
+    /// `DESCRIPTION_LIST` `FAILOVER=OFF`.
+    pub failover: bool,
+    /// `DESCRIPTION_LIST` `SOURCE_ROUTE=ON`.
+    pub source_route: bool,
+}
+
+impl Descriptor {
+    /// The first description (always present for a successfully parsed string).
+    #[must_use]
+    pub fn first_description(&self) -> &Description {
+        &self.descriptions[0]
+    }
+
+    /// Iterator over every [`Address`] across all descriptions, in order.
+    pub fn addresses(&self) -> impl Iterator<Item = &Address> {
+        self.descriptions.iter().flat_map(Description::addresses)
+    }
+
+    /// The first address that has a host, if any.
+    #[must_use]
+    pub fn first_address(&self) -> Option<&Address> {
+        self.addresses().find(|addr| addr.host.is_some())
+    }
+
+    /// Human-readable troubleshooting dump of the resolved address list and
+    /// connect data — the differentiator over python-oracledb's terse errors.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let mut out = String::new();
+        out.push_str("Descriptor {\n");
+        if self.descriptions.len() > 1 || self.load_balance || self.source_route || !self.failover {
+            out.push_str(&format!(
+                "  description_list: load_balance={}, failover={}, source_route={}\n",
+                self.load_balance, self.failover, self.source_route
+            ));
+        }
+        for (di, desc) in self.descriptions.iter().enumerate() {
+            out.push_str(&format!("  description[{di}]:\n"));
+            for (li, list) in desc.address_lists.iter().enumerate() {
+                out.push_str(&format!(
+                    "    address_list[{li}]: load_balance={}, failover={}, source_route={}\n",
+                    list.load_balance, list.failover, list.source_route
+                ));
+                for addr in &list.addresses {
+                    out.push_str(&format!(
+                        "      {}://{}:{}\n",
+                        addr.protocol.as_str(),
+                        addr.host.as_deref().unwrap_or("<none>"),
+                        addr.port
+                    ));
+                }
+            }
+            let cd = &desc.connect_data;
+            out.push_str("    connect_data:");
+            if let Some(s) = &cd.service_name {
+                out.push_str(&format!(" service_name={s}"));
+            }
+            if let Some(s) = &cd.sid {
+                out.push_str(&format!(" sid={s}"));
+            }
+            if let Some(s) = &cd.instance_name {
+                out.push_str(&format!(" instance_name={s}"));
+            }
+            if let Some(s) = cd.server_type {
+                out.push_str(&format!(" server={}", s.as_str()));
+            }
+            out.push('\n');
+            if desc.retry_count != 0 {
+                out.push_str(&format!(
+                    "    retry_count={}, retry_delay={}\n",
+                    desc.retry_count, desc.retry_delay
+                ));
+            }
+        }
+        out.push('}');
+        out
+    }
+}
+
+/// Parses a connect string into a [`Descriptor`].
+///
+/// Accepts a TNS connect descriptor (when the first non-space character is `(`)
+/// or an EZConnect / EZConnect-Plus string otherwise. Returns
+/// [`ProtocolError::InvalidConnectDescriptor`] with offset/context diagnostics
+/// on malformed input, or `Ok(None)` when the string is neither (i.e. it is a
+/// tnsnames.ora alias to be resolved separately).
+pub fn parse(connect_string: &str) -> Result<Option<Descriptor>> {
+    let trimmed = connect_string.trim();
+    if trimmed.is_empty() {
+        return Err(err_descriptor(
+            connect_string,
+            0,
+            "connect string must not be empty",
+        ));
+    }
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars[0] == '(' {
+        let mut parser = DescriptorParser::new(&chars, connect_string);
+        parser.pos = 1;
+        parser.temp_pos = 1;
+        let args = parser.parse_descriptor()?;
+        let descriptor = build_descriptor(connect_string, &args)?;
+        // The whole input must be consumed; mirror the reference's trailing
+        // check (it raises ERR_CANNOT_PARSE_CONNECT_STRING).
+        if parser.pos != chars.len() {
+            return Err(err_cannot_parse(connect_string));
+        }
+        Ok(Some(descriptor))
+    } else {
+        easy_connect::parse(&chars, connect_string)
+    }
+}
+
+/// EZConnect / EZConnect-Plus parsing.
+///
+/// Mirrors the reference `_parse_easy_connect*` methods: it parses an optional
+/// `proto://` prefix, one or more comma/semicolon-separated hosts (with IPv6
+/// brackets), an optional `:port`, an optional `/service[:server]`, an optional
+/// `/instance`, and an optional `?key=value&...` extended-parameter section.
+mod easy_connect {
+    use super::*;
+
+    /// Private sentinel keys used to stash `https_proxy` host/port until the
+    /// address lists are assembled (these never reach the public `extra` list).
+    const PROXY_HOST_KEY: &str = "\0https_proxy_host";
+    const PROXY_PORT_KEY: &str = "\0https_proxy_port";
+
+    /// Common EZConnect-Plus parameters recognised by all drivers (reference
+    /// `COMMON_PARAM_NAMES`); the value is the canonical name.
+    fn is_common_param(name: &str) -> bool {
+        matches!(
+            name,
+            "expire_time"
+                | "failover"
+                | "https_proxy"
+                | "https_proxy_port"
+                | "load_balance"
+                | "pool_boundary"
+                | "pool_name"
+                | "pool_connection_class"
+                | "pool_purity"
+                | "retry_count"
+                | "retry_delay"
+                | "sdu"
+                | "source_route"
+                | "ssl_server_cert_dn"
+                | "ssl_server_dn_match"
+                | "transport_connect_timeout"
+                | "use_sni"
+                | "wallet_location"
+        )
+    }
+
+    /// Extra DESCRIPTION params passed through when seen in an easy connect
+    /// string (reference `EXTRA_DESCRIPTION_PARAM_NAMES`).
+    fn is_extra_description_param(name: &str) -> bool {
+        matches!(name, "enable" | "recv_buf_size" | "send_buf_size")
+    }
+
+    fn is_host_or_service_char(ch: char) -> bool {
+        ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.')
+    }
+
+    /// Parser state for an EZConnect string.
+    struct Ez<'a> {
+        chars: &'a [char],
+        pos: usize,
+        temp_pos: usize,
+    }
+
+    impl<'a> Ez<'a> {
+        fn current(&self) -> char {
+            self.chars[self.temp_pos]
+        }
+
+        fn skip_spaces(&mut self) {
+            while self.temp_pos < self.chars.len() && self.chars[self.temp_pos].is_whitespace() {
+                self.temp_pos += 1;
+            }
+        }
+
+        fn parse_keyword(&mut self) {
+            while self.temp_pos < self.chars.len() {
+                let ch = self.current();
+                if !ch.is_alphanumeric() && ch != '_' && ch != '.' {
+                    break;
+                }
+                self.temp_pos += 1;
+            }
+        }
+
+        /// Parses an optional `proto://` prefix. Returns the protocol keyword
+        /// (lower-cased) if one was found, advancing `pos` past the `//`.
+        /// Mirrors `_parse_easy_connect_protocol`.
+        fn parse_protocol(&mut self) -> Option<String> {
+            let mut start_sep_pos = self.pos;
+            let mut num_sep_chars = 0i32;
+            let mut protocol: Option<String> = None;
+            self.temp_pos = self.pos;
+            while self.temp_pos < self.chars.len() {
+                let ch = self.current();
+                if ch == ':' {
+                    protocol = Some(
+                        self.chars[self.pos..self.temp_pos]
+                            .iter()
+                            .collect::<String>()
+                            .to_ascii_lowercase(),
+                    );
+                    start_sep_pos = self.temp_pos + 1;
+                } else if ch == '/' && (self.temp_pos - start_sep_pos) as i32 == num_sep_chars {
+                    num_sep_chars += 1;
+                    if num_sep_chars == 2 {
+                        self.temp_pos += 1;
+                        self.pos = self.temp_pos;
+                        break;
+                    }
+                } else if !ch.is_alphabetic() && ch != '-' && ch != '_' {
+                    break;
+                }
+                self.temp_pos += 1;
+            }
+            if protocol.is_some() && num_sep_chars == 2 {
+                protocol
+            } else {
+                None
+            }
+        }
+
+        /// Parses one host (optionally bracketed IPv6). Mirrors
+        /// `_parse_easy_connect_host`.
+        fn parse_host(&mut self, address: &mut Address) {
+            let mut found_bracket = false;
+            let mut found_host = false;
+            let mut start_pos = self.temp_pos;
+            while self.temp_pos < self.chars.len() {
+                let ch = self.current();
+                if !found_bracket && !found_host && ch == '[' {
+                    found_bracket = true;
+                    start_pos = self.temp_pos + 1;
+                } else if found_bracket && ch == ']' {
+                    address.host = Some(self.chars[start_pos..self.temp_pos].iter().collect());
+                    self.temp_pos += 1;
+                    self.pos = self.temp_pos;
+                    break;
+                } else if found_bracket || is_host_or_service_char(ch) {
+                    self.temp_pos += 1;
+                    found_host = true;
+                } else {
+                    if found_host {
+                        address.host = Some(self.chars[start_pos..self.temp_pos].iter().collect());
+                        self.pos = self.temp_pos;
+                    }
+                    break;
+                }
+            }
+            // Handle a host that runs to end-of-string.
+            if found_host && self.temp_pos == self.chars.len() && address.host.is_none() {
+                address.host = Some(self.chars[start_pos..self.temp_pos].iter().collect());
+                self.pos = self.temp_pos;
+            }
+        }
+
+        /// Parses a port number. Mirrors `_parse_easy_connect_port`.
+        fn parse_port(&mut self, address: &mut Address) {
+            let start = self.temp_pos;
+            let mut found = false;
+            while self.temp_pos < self.chars.len() && self.current().is_ascii_digit() {
+                found = true;
+                self.temp_pos += 1;
+            }
+            if found {
+                let digits: String = self.chars[start..self.temp_pos].iter().collect();
+                if let Ok(port) = digits.parse::<u16>() {
+                    address.port = port;
+                }
+            }
+        }
+    }
+
+    /// Builds the host/address-list portion of an EZConnect string into a list
+    /// of address lists, plus the description that owns them. Mirrors
+    /// `_parse_easy_connect_hosts`.
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn parse(chars: &[char], connect_string: &str) -> Result<Option<Descriptor>> {
+        let mut ez = Ez {
+            chars,
+            pos: 0,
+            temp_pos: 0,
+        };
+
+        // protocol prefix
+        let template_protocol = match ez.parse_protocol() {
+            Some(protocol) => Protocol::from_keyword(&protocol)?,
+            None => Protocol::Tcp,
+        };
+
+        // Hosts: a series of host names separated by commas (same list) or
+        // semicolons (new list).
+        let mut address_lists: Vec<Vec<Address>> = Vec::new();
+        let mut current_list: Vec<Address> = Vec::new();
+        ez.temp_pos = ez.pos;
+        let mut port_index = 0usize;
+        loop {
+            let mut address = Address {
+                protocol: template_protocol,
+                port: template_protocol.default_port(),
+                ..Address::default()
+            };
+            ez.parse_host(&mut address);
+            // No host consumed and not at end: stop (no more hosts).
+            if ez.temp_pos != ez.pos || ez.pos >= chars.len() {
+                // If a host was parsed and we're at end, it was committed by
+                // parse_host setting pos == temp_pos == len.
+                if ez.pos >= chars.len() && address.host.is_some() {
+                    current_list.push(address);
+                }
+                break;
+            }
+            ez.pos = ez.temp_pos;
+            current_list.push(address);
+            if ez.temp_pos >= chars.len() {
+                break;
+            }
+            let mut ch = ez.current();
+            if ch == ':' {
+                ez.temp_pos += 1;
+                if let Some(last) = current_list.last_mut() {
+                    ez.parse_port(last);
+                    let port = last.port;
+                    ez.pos = ez.temp_pos;
+                    if ez.pos >= chars.len() {
+                        break;
+                    }
+                    // Back-fill the port onto earlier hosts in this list that
+                    // had no explicit port (reference port_index loop).
+                    let upper = current_list.len() - 1;
+                    for addr in current_list.iter_mut().take(upper).skip(port_index) {
+                        addr.port = port;
+                    }
+                    port_index = current_list.len();
+                }
+                ch = ez.current();
+            }
+            if ch == ';' {
+                address_lists.push(std::mem::take(&mut current_list));
+                port_index = 0;
+            } else if ch != ',' {
+                break;
+            }
+            ez.temp_pos += 1;
+        }
+        address_lists.push(current_list);
+
+        // service name / server type, then instance name, then parameters.
+        let mut description = Description::default();
+        let mut found_service_section = false;
+        parse_service_name(&mut ez, chars, &mut description, &mut found_service_section);
+        if found_service_section {
+            parse_instance_name(&mut ez, chars, &mut description);
+        }
+
+        // If no `/` was ever seen, this is not a valid EZConnect string — it is
+        // a tnsnames.ora alias to resolve separately (reference returns None).
+        if !found_service_section {
+            return Ok(None);
+        }
+
+        parse_parameters(&mut ez, chars, connect_string, &mut description)?;
+
+        // Trailing data after a successful parse is an error.
+        if ez.pos != chars.len() {
+            if ez.pos > 0 {
+                return Err(err_cannot_parse(connect_string));
+            }
+            return Ok(None);
+        }
+
+        // Assemble the descriptor: each non-empty host group becomes an address
+        // list; a lone single list collapses into the description directly.
+        let mut lists: Vec<AddressList> = Vec::new();
+        for hosts in address_lists {
+            if hosts.is_empty() {
+                continue;
+            }
+            lists.push(AddressList {
+                addresses: hosts,
+                failover: true,
+                ..AddressList::default()
+            });
+        }
+        if lists.is_empty() {
+            return Ok(None);
+        }
+        description.address_lists = lists;
+
+        // Apply any stashed https_proxy host/port onto every address, then drop
+        // the sentinel entries from `extra`.
+        let proxy_host = description
+            .extra
+            .iter()
+            .find(|(k, _)| k == PROXY_HOST_KEY)
+            .map(|(_, v)| v.clone());
+        let proxy_port = description
+            .extra
+            .iter()
+            .find(|(k, _)| k == PROXY_PORT_KEY)
+            .and_then(|(_, v)| v.parse::<u16>().ok());
+        description
+            .extra
+            .retain(|(k, _)| k != PROXY_HOST_KEY && k != PROXY_PORT_KEY);
+        if proxy_host.is_some() || proxy_port.is_some() {
+            for list in &mut description.address_lists {
+                for addr in &mut list.addresses {
+                    if let Some(host) = &proxy_host {
+                        addr.https_proxy = Some(host.clone());
+                    }
+                    if let Some(port) = proxy_port {
+                        addr.https_proxy_port = port;
+                    }
+                }
+            }
+        }
+
+        Ok(Some(Descriptor {
+            descriptions: vec![description],
+            load_balance: false,
+            failover: true,
+            source_route: false,
+        }))
+    }
+
+    /// Mirrors `_parse_easy_connect_service_name`.
+    fn parse_service_name(
+        ez: &mut Ez,
+        chars: &[char],
+        description: &mut Description,
+        found_slash_out: &mut bool,
+    ) {
+        let mut found_service_name = false;
+        let mut found_server_type = false;
+        let mut found_slash = false;
+        let mut found_colon = false;
+        let mut service_name_end_pos = 0usize;
+        ez.temp_pos = ez.pos;
+        while ez.temp_pos < chars.len() {
+            let ch = ez.current();
+            if !found_slash && ch == '/' {
+                found_slash = true;
+            } else if found_service_name && !found_colon && ch == ':' {
+                found_colon = true;
+            } else if found_slash && !found_colon && is_host_or_service_char(ch) {
+                found_service_name = true;
+                service_name_end_pos = ez.temp_pos + 1;
+            } else if found_colon && ch.is_alphabetic() {
+                found_server_type = true;
+            } else {
+                break;
+            }
+            ez.temp_pos += 1;
+        }
+        if found_service_name {
+            description.connect_data.service_name =
+                Some(chars[ez.pos + 1..service_name_end_pos].iter().collect());
+        }
+        if found_slash {
+            ez.pos = ez.temp_pos;
+            *found_slash_out = true;
+        }
+        if found_server_type {
+            let value: String = chars[service_name_end_pos + 1..ez.temp_pos]
+                .iter()
+                .collect();
+            if let Ok(server_type) = ServerType::from_keyword(&value) {
+                description.connect_data.server_type = Some(server_type);
+            }
+        }
+    }
+
+    /// Mirrors `_parse_easy_connect_instance_name`.
+    fn parse_instance_name(ez: &mut Ez, chars: &[char], description: &mut Description) {
+        let mut found_instance_name = false;
+        let mut found_slash = false;
+        let mut instance_name_end_pos = 0usize;
+        ez.temp_pos = ez.pos;
+        while ez.temp_pos < chars.len() {
+            let ch = ez.current();
+            if !found_slash && ch == '/' {
+                found_slash = true;
+            } else if found_slash && is_host_or_service_char(ch) {
+                found_instance_name = true;
+                instance_name_end_pos = ez.temp_pos + 1;
+            } else {
+                break;
+            }
+            ez.temp_pos += 1;
+        }
+        if found_instance_name {
+            description.connect_data.instance_name =
+                Some(chars[ez.pos + 1..instance_name_end_pos].iter().collect());
+            ez.pos = ez.temp_pos;
+        }
+    }
+
+    /// Mirrors `_parse_easy_connect_parameters` + `_parse_easy_connect_parameter`.
+    fn parse_parameters(
+        ez: &mut Ez,
+        chars: &[char],
+        connect_string: &str,
+        description: &mut Description,
+    ) -> Result<()> {
+        let mut expected_sep = '?';
+        ez.temp_pos = ez.pos;
+        while ez.temp_pos < chars.len() {
+            let ch = ez.current();
+            if ch != expected_sep {
+                break;
+            }
+            expected_sep = '&';
+            ez.temp_pos += 1;
+            parse_one_parameter(ez, chars, connect_string, description)?;
+        }
+        Ok(())
+    }
+
+    fn parse_one_parameter(
+        ez: &mut Ez,
+        chars: &[char],
+        connect_string: &str,
+        description: &mut Description,
+    ) -> Result<()> {
+        // parameter name
+        ez.skip_spaces();
+        let start = ez.temp_pos;
+        ez.parse_keyword();
+        if ez.temp_pos == start || ez.temp_pos >= chars.len() {
+            return Ok(());
+        }
+        let raw_name: String = chars[start..ez.temp_pos]
+            .iter()
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let (name, keep) = if let Some(stripped) = raw_name.strip_prefix("pyo.") {
+            (stripped.to_string(), true)
+        } else {
+            let keep = is_common_param(&raw_name) || is_extra_description_param(&raw_name);
+            (canonical_param_name(&raw_name).to_string(), keep)
+        };
+
+        // equals sign
+        ez.skip_spaces();
+        if ez.temp_pos >= chars.len() {
+            return Ok(());
+        }
+        if ez.current() != '=' {
+            return Ok(());
+        }
+        ez.temp_pos += 1;
+
+        // value
+        ez.skip_spaces();
+        let mut start_pos = ez.temp_pos;
+        let mut end_pos = ez.temp_pos;
+        while ez.temp_pos < chars.len() {
+            let ch = ez.current();
+            if ch == '"' {
+                if ez.temp_pos > start_pos {
+                    return Ok(());
+                }
+                ez.temp_pos += 1;
+                start_pos = ez.temp_pos;
+                // parse quoted string
+                let mut closed = false;
+                while ez.temp_pos < chars.len() {
+                    let qc = ez.current();
+                    ez.temp_pos += 1;
+                    if qc == '"' {
+                        closed = true;
+                        break;
+                    }
+                }
+                if !closed {
+                    return Err(err_descriptor(
+                        connect_string,
+                        ez.temp_pos,
+                        "missing ending quote (\")",
+                    ));
+                }
+                end_pos = ez.temp_pos - 1;
+                break;
+            } else if ch == '&' {
+                end_pos = ez.temp_pos;
+                break;
+            }
+            ez.temp_pos += 1;
+            end_pos = ez.temp_pos;
+        }
+        if end_pos > start_pos && keep {
+            let value: String = chars[start_pos..end_pos].iter().collect();
+            apply_easy_param(connect_string, description, &name, &value)?;
+        }
+        ez.skip_spaces();
+        ez.pos = ez.temp_pos;
+        Ok(())
+    }
+
+    /// Applies a recognised EZConnect-Plus parameter onto the description.
+    fn apply_easy_param(
+        connect_string: &str,
+        description: &mut Description,
+        name: &str,
+        value: &str,
+    ) -> Result<()> {
+        match name {
+            "expire_time" => {
+                description.expire_time = parse_uint(connect_string, "EXPIRE_TIME", value)?
+            }
+            "retry_count" => {
+                description.retry_count = parse_uint(connect_string, "RETRY_COUNT", value)?
+            }
+            "retry_delay" => {
+                description.retry_delay = parse_uint(connect_string, "RETRY_DELAY", value)?
+            }
+            "sdu" => {
+                description.sdu = parse_uint(connect_string, "SDU", value)?.clamp(MIN_SDU, MAX_SDU);
+            }
+            "tcp_connect_timeout" => {
+                description.tcp_connect_timeout =
+                    parse_duration(connect_string, "TRANSPORT_CONNECT_TIMEOUT", value)?;
+            }
+            "failover" => description.failover = parse_bool(value),
+            "load_balance" => description.load_balance = parse_bool(value),
+            "source_route" => description.source_route = parse_bool(value),
+            "use_sni" => description.use_sni = parse_bool(value),
+            "ssl_server_dn_match" => description.security.ssl_server_dn_match = parse_bool(value),
+            "ssl_server_cert_dn" => {
+                description.security.ssl_server_cert_dn = Some(value.to_string());
+            }
+            "wallet_location" => description.security.wallet_location = Some(value.to_string()),
+            // https_proxy / https_proxy_port are applied to every address after
+            // the address lists are assembled; they are stashed in `extra` under
+            // a private sentinel key and consumed in `parse`.
+            "https_proxy" => description
+                .extra
+                .push((PROXY_HOST_KEY.to_string(), value.to_string())),
+            "https_proxy_port" => description
+                .extra
+                .push((PROXY_PORT_KEY.to_string(), value.to_string())),
+            "pool_boundary" => description.connect_data.pool_boundary = Some(value.to_string()),
+            "pool_name" => description.connect_data.pool_name = Some(value.to_string()),
+            "cclass" => {
+                if !value.is_empty() {
+                    description.connect_data.cclass = Some(value.to_string());
+                }
+            }
+            "purity" => {
+                description.connect_data.purity = Some(Purity::from_keyword(value)?);
+            }
+            "enable" | "recv_buf_size" | "send_buf_size" => {
+                description
+                    .extra
+                    .push((name.to_ascii_uppercase(), value.to_string()));
+            }
+            // Extended (`pyo.`) params not affecting the descriptor topology are
+            // accepted but not modelled here (e.g. stmtcachesize, edition).
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics helpers
+// ---------------------------------------------------------------------------
+
+/// The raw connect string is included so the message is self-describing; a
+/// caret-context snippet is appended pointing at `offset` (a char index into
+/// the trimmed string) so the operator can see exactly where parsing failed.
+fn err_descriptor(connect_string: &str, char_offset: usize, reason: &str) -> ProtocolError {
+    let trimmed = connect_string.trim();
+    let snippet = context_snippet(trimmed, char_offset);
+    ProtocolError::InvalidConnectDescriptor(format!(
+        "invalid connect descriptor \"{connect_string}\": {reason} at offset {char_offset}\n{snippet}"
+    ))
+}
+
+fn err_cannot_parse(connect_string: &str) -> ProtocolError {
+    ProtocolError::InvalidConnectDescriptor(format!(
+        "cannot parse connect string \"{connect_string}\""
+    ))
+}
+
+/// Builds a two-line snippet: a window of the input around `char_offset` and a
+/// caret `^` underneath the offending character.
+fn context_snippet(trimmed: &str, char_offset: usize) -> String {
+    let chars: Vec<char> = trimmed.chars().collect();
+    let start = char_offset.saturating_sub(20);
+    let end = (char_offset + 20).min(chars.len());
+    let window: String = chars[start..end].iter().collect();
+    let caret_pos = char_offset - start;
+    let mut caret = String::new();
+    for _ in 0..caret_pos {
+        caret.push(' ');
+    }
+    caret.push('^');
+    format!("  {window}\n  {caret}")
+}
+
+// ---------------------------------------------------------------------------
+// Descriptor argument tree
+// ---------------------------------------------------------------------------
+
+/// A parsed value in the descriptor argument tree: either a simple string or a
+/// nested key/value map (a parenthesised sub-node).
+#[derive(Clone, Debug)]
+enum ArgValue {
+    Simple(String),
+    Node(ArgMap),
+}
+
+/// A descriptor node: maps lower-cased keys to one or more values. The reference
+/// stores repeated keys as a Python list; we model that as a `Vec` per key.
+#[derive(Clone, Debug, Default)]
+struct ArgMap {
+    entries: Vec<(String, Vec<ArgValue>)>,
+}
+
+impl ArgMap {
+    fn get(&self, key: &str) -> Option<&Vec<ArgValue>> {
+        self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    fn take(&mut self, key: &str) -> Option<Vec<ArgValue>> {
+        if let Some(idx) = self.entries.iter().position(|(k, _)| k == key) {
+            Some(self.entries.remove(idx).1)
+        } else {
+            None
+        }
+    }
+
+    fn push(&mut self, key: String, value: ArgValue) {
+        if let Some((_, values)) = self.entries.iter_mut().find(|(k, _)| *k == key) {
+            values.push(value);
+        } else {
+            self.entries.push((key, vec![value]));
+        }
+    }
+}
+
+/// Alternative parameter names accepted inside descriptors (reference
+/// `ALTERNATIVE_PARAM_NAMES`): the listener keyword maps to the canonical key.
+fn canonical_param_name(name: &str) -> &str {
+    match name {
+        "pool_connection_class" => "cclass",
+        "pool_purity" => "purity",
+        "server" => "server_type",
+        "transport_connect_timeout" => "tcp_connect_timeout",
+        "my_wallet_directory" => "wallet_location",
+        other => other,
+    }
+}
+
+/// Container keywords that may not take a simple (non-parenthesised) value
+/// (reference `CONTAINER_PARAM_NAMES`).
+fn is_container_param(name: &str) -> bool {
+    matches!(
+        name,
+        "address"
+            | "address_list"
+            | "connect_data"
+            | "description"
+            | "description_list"
+            | "security"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Descriptor tokenizer / recursive-descent parser
+// ---------------------------------------------------------------------------
+
+/// Recursive-descent parser for TNS connect descriptors. Mirrors the reference
+/// `ConnectStringParser` (`_parse_descriptor_key_value_pair`): it tokenises
+/// keywords, simple values, and quoted strings while tracking nested parens.
+struct DescriptorParser<'a> {
+    chars: &'a [char],
+    raw: &'a str,
+    /// Confirmed cursor (chars consumed).
+    pos: usize,
+    /// Lookahead cursor.
+    temp_pos: usize,
+}
+
+impl<'a> DescriptorParser<'a> {
+    fn new(chars: &'a [char], raw: &'a str) -> Self {
+        Self {
+            chars,
+            raw,
+            pos: 0,
+            temp_pos: 0,
+        }
+    }
+
+    fn current(&self) -> char {
+        self.chars[self.temp_pos]
+    }
+
+    fn skip_spaces(&mut self) {
+        while self.temp_pos < self.chars.len() && self.chars[self.temp_pos].is_whitespace() {
+            self.temp_pos += 1;
+        }
+    }
+
+    /// Parses a keyword: alphanumeric plus `_` and `.` (reference
+    /// `parse_keyword`).
+    fn parse_keyword(&mut self) {
+        while self.temp_pos < self.chars.len() {
+            let ch = self.current();
+            if !ch.is_alphanumeric() && ch != '_' && ch != '.' {
+                break;
+            }
+            self.temp_pos += 1;
+        }
+    }
+
+    /// Parses a quoted string body, consuming the closing quote (reference
+    /// `parse_quoted_string`). On entry `temp_pos` is just past the opening
+    /// quote.
+    fn parse_quoted_string(&mut self, quote: char) -> Result<()> {
+        while self.temp_pos < self.chars.len() {
+            let ch = self.current();
+            self.temp_pos += 1;
+            if ch == quote {
+                self.pos = self.temp_pos;
+                return Ok(());
+            }
+        }
+        let reason = if quote == '\'' {
+            "missing ending quote (')"
+        } else {
+            "missing ending quote (\")"
+        };
+        Err(err_descriptor(self.raw, self.temp_pos, reason))
+    }
+
+    /// Parses a top-level descriptor node. On entry the opening `(` has already
+    /// been consumed (reference `_parse_descriptor` calls
+    /// `_parse_descriptor_key_value_pair` once on the implicit root).
+    fn parse_descriptor(&mut self) -> Result<ArgMap> {
+        let mut args = ArgMap::default();
+        self.parse_key_value_pair(&mut args)?;
+        Ok(args)
+    }
+
+    /// Parses one `(KEY=VALUE)` pair into `args`. Assumes the opening `(` for
+    /// this pair was already consumed. Directly mirrors the reference
+    /// `_parse_descriptor_key_value_pair`.
+    fn parse_key_value_pair(&mut self, args: &mut ArgMap) -> Result<()> {
+        let mut is_simple_value = false;
+        let mut simple_start = 0usize;
+        let mut value: Option<ArgValue> = None;
+
+        // parse keyword
+        self.skip_spaces();
+        let start_pos = self.temp_pos;
+        self.parse_keyword();
+        if self.temp_pos == start_pos {
+            return Err(err_descriptor(
+                self.raw,
+                self.temp_pos,
+                "expected a keyword",
+            ));
+        }
+        let raw_name: String = self.chars[start_pos..self.temp_pos]
+            .iter()
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let name = canonical_param_name(&raw_name).to_string();
+
+        // look for equals sign
+        self.skip_spaces();
+        let mut ch = '\0';
+        if self.temp_pos < self.chars.len() {
+            ch = self.current();
+        }
+        if ch != '=' {
+            return Err(err_descriptor(
+                self.raw,
+                self.temp_pos,
+                "expected '=' after keyword",
+            ));
+        }
+        self.temp_pos += 1;
+        self.skip_spaces();
+
+        // parse value
+        while self.temp_pos < self.chars.len() {
+            ch = self.current();
+            if ch == '"' {
+                if is_simple_value {
+                    return Err(err_descriptor(
+                        self.raw,
+                        self.temp_pos,
+                        "unexpected quote inside a simple value",
+                    ));
+                }
+                self.temp_pos += 1;
+                let q_start = self.temp_pos;
+                self.parse_quoted_string('"')?;
+                if self.temp_pos > q_start + 1 {
+                    let v: String = self.chars[q_start..self.temp_pos - 1].iter().collect();
+                    value = Some(ArgValue::Simple(v));
+                }
+                break;
+            } else if ch == '(' {
+                if is_simple_value {
+                    return Err(err_descriptor(
+                        self.raw,
+                        self.temp_pos,
+                        "unexpected '(' inside a simple value",
+                    ));
+                }
+                self.temp_pos += 1;
+                let mut node = match value.take() {
+                    Some(ArgValue::Node(n)) => n,
+                    _ => ArgMap::default(),
+                };
+                self.parse_key_value_pair(&mut node)?;
+                value = Some(ArgValue::Node(node));
+                continue;
+            } else if ch == ')' {
+                break;
+            } else if !is_simple_value && !ch.is_whitespace() {
+                if value.is_some() || is_container_param(&name) {
+                    return Err(err_descriptor(
+                        self.raw,
+                        self.temp_pos,
+                        "unexpected simple value for a container keyword",
+                    ));
+                }
+                simple_start = self.temp_pos;
+                is_simple_value = true;
+            }
+            self.temp_pos += 1;
+        }
+        if is_simple_value {
+            let v: String = self.chars[simple_start..self.temp_pos]
+                .iter()
+                .collect::<String>()
+                .trim()
+                .to_string();
+            value = Some(ArgValue::Simple(v));
+        }
+        self.skip_spaces();
+        if self.temp_pos < self.chars.len() {
+            ch = self.current();
+            if ch != ')' {
+                return Err(err_descriptor(
+                    self.raw,
+                    self.temp_pos,
+                    "expected ')' to close the keyword",
+                ));
+            }
+            self.temp_pos += 1;
+        } else {
+            return Err(err_descriptor(
+                self.raw,
+                self.temp_pos,
+                "unbalanced parenthesis: expected ')'",
+            ));
+        }
+        self.skip_spaces();
+        self.pos = self.temp_pos;
+
+        if let Some(value) = value {
+            self.set_descriptor_arg(args, name, value);
+        }
+        Ok(())
+    }
+
+    /// Stores a value in `args`, mirroring the reference `_set_descriptor_arg`
+    /// special handling for `address` vs `address_list` interleaving.
+    fn set_descriptor_arg(&self, args: &mut ArgMap, name: String, value: ArgValue) {
+        if args.get(&name).is_none() {
+            if name == "address" && args.get("address_list").is_some() {
+                let mut wrapper = ArgMap::default();
+                wrapper.push("address".to_string(), value);
+                self.set_descriptor_arg(args, "address_list".to_string(), ArgValue::Node(wrapper));
+                return;
+            } else if name == "address_list" && args.get("address").is_some() {
+                let addresses = args.take("address").unwrap_or_default();
+                // existing addresses become their own address_list nodes,
+                // preserving order before the new list.
+                for addr in addresses {
+                    let mut wrapper = ArgMap::default();
+                    wrapper.push("address".to_string(), addr);
+                    args.push("address_list".to_string(), ArgValue::Node(wrapper));
+                }
+                args.push(name, value);
+                return;
+            }
+            args.push(name, value);
+        } else {
+            args.push(name, value);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Argument-tree -> Descriptor builder
+// ---------------------------------------------------------------------------
+
+/// Returns the first simple value for `key`, if present and simple.
+fn simple(map: &ArgMap, key: &str) -> Option<String> {
+    match map.get(key)?.first()? {
+        ArgValue::Simple(s) => Some(s.clone()),
+        ArgValue::Node(_) => None,
+    }
+}
+
+/// Parses a connect-string boolean (reference `_set_bool_param`): the strings
+/// `on` / `yes` / `true` (case-insensitive) are true; everything else is false.
+fn parse_bool(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "on" | "yes" | "true"
+    )
+}
+
+/// Parses a connect-string unsigned int (reference `_set_uint_param`). The
+/// reference uses Python `int()`, which rejects non-numeric strings; we mirror
+/// that by surfacing a diagnostic.
+fn parse_uint(connect_string: &str, key: &str, value: &str) -> Result<u32> {
+    value.trim().parse::<u32>().map_err(|_| {
+        ProtocolError::InvalidConnectDescriptor(format!(
+            "invalid connect descriptor \"{connect_string}\": {key} value \"{value}\" is not a \
+             non-negative integer"
+        ))
+    })
+}
+
+/// Parses a duration (reference `_set_duration_param`): a float with an
+/// optional `ms` / `sec` / `min` unit suffix, normalised to seconds.
+fn parse_duration(connect_string: &str, key: &str, value: &str) -> Result<f64> {
+    let v = value.trim().to_ascii_lowercase();
+    let (num, scale) = if let Some(stripped) = v.strip_suffix("sec") {
+        (stripped.trim(), 1.0)
+    } else if let Some(stripped) = v.strip_suffix("ms") {
+        (stripped.trim(), 0.001)
+    } else if let Some(stripped) = v.strip_suffix("min") {
+        (stripped.trim(), 60.0)
+    } else {
+        (v.as_str(), 1.0)
+    };
+    num.parse::<f64>().map(|n| n * scale).map_err(|_| {
+        ProtocolError::InvalidConnectDescriptor(format!(
+            "invalid connect descriptor \"{connect_string}\": {key} value \"{value}\" is not a \
+             valid duration"
+        ))
+    })
+}
+
+/// Reconstructs the listener-form string for a pass-through (extra) value,
+/// mirroring the reference `_value_repr`: simple values are kept verbatim;
+/// nested nodes become `(KEY=value)` chains with upper-cased keys.
+fn value_repr(value: &ArgValue) -> String {
+    match value {
+        ArgValue::Simple(s) => s.clone(),
+        ArgValue::Node(node) => {
+            let mut out = String::new();
+            for (key, values) in &node.entries {
+                for v in values {
+                    out.push('(');
+                    out.push_str(&key.to_ascii_uppercase());
+                    out.push('=');
+                    out.push_str(&value_repr(v));
+                    out.push(')');
+                }
+            }
+            out
+        }
+    }
+}
+
+/// Iterates `(key, value)` pairs not in `allowed`, collecting them as
+/// reconstructed pass-through strings (reference `_process_args_with_extras`).
+fn collect_extras(map: &ArgMap, allowed: &[&str]) -> Vec<(String, String)> {
+    let mut extras = Vec::new();
+    for (key, values) in &map.entries {
+        if allowed.contains(&key.as_str()) {
+            continue;
+        }
+        for v in values {
+            extras.push((key.to_ascii_uppercase(), value_repr(v)));
+        }
+    }
+    extras
+}
+
+/// Builds a [`Descriptor`] from the parsed argument tree, mirroring the
+/// reference `_parse_descriptor`.
+fn build_descriptor(connect_string: &str, args: &ArgMap) -> Result<Descriptor> {
+    let mut descriptor = Descriptor {
+        descriptions: Vec::new(),
+        load_balance: false,
+        failover: true,
+        source_route: false,
+    };
+
+    // DESCRIPTION_LIST flags, if present.
+    let list_node = args.get("description_list").and_then(|v| match v.first() {
+        Some(ArgValue::Node(n)) => Some(n),
+        _ => None,
+    });
+    let description_container = if let Some(list_node) = list_node {
+        descriptor.load_balance = list_node.get("load_balance").is_some()
+            && simple(list_node, "load_balance").is_some_and(|v| parse_bool(&v));
+        if let Some(v) = simple(list_node, "failover") {
+            descriptor.failover = parse_bool(&v);
+        }
+        descriptor.source_route = simple(list_node, "source_route").is_some_and(|v| parse_bool(&v));
+        list_node
+    } else {
+        args
+    };
+
+    // Descriptions: the reference takes list_args.get("description", list_args)
+    // — i.e. if there's no explicit "description" key, the container itself is
+    // treated as a single description.
+    let descriptions: Vec<&ArgMap> = match description_container.get("description") {
+        Some(values) => {
+            let mut out = Vec::new();
+            for v in values {
+                if let ArgValue::Node(n) = v {
+                    out.push(n);
+                }
+            }
+            out
+        }
+        None => vec![description_container],
+    };
+
+    for desc_args in descriptions {
+        let description = build_description(connect_string, desc_args)?;
+        descriptor.descriptions.push(description);
+    }
+
+    if descriptor.addresses().next().is_none() {
+        return Err(ProtocolError::InvalidConnectDescriptor(format!(
+            "no addresses are defined in connect descriptor: {connect_string}"
+        )));
+    }
+    Ok(descriptor)
+}
+
+const DESCRIPTION_PARAM_NAMES: &[&str] = &[
+    "address",
+    "address_list",
+    "connect_data",
+    "expire_time",
+    "failover",
+    "load_balance",
+    "source_route",
+    "retry_count",
+    "retry_delay",
+    "sdu",
+    "tcp_connect_timeout",
+    "use_sni",
+    "security",
+];
+
+const CONNECT_DATA_PARAM_NAMES: &[&str] = &[
+    "cclass",
+    "connection_id_prefix",
+    "instance_name",
+    "pool_boundary",
+    "pool_name",
+    "purity",
+    "server_type",
+    "service_name",
+    "sid",
+    "use_tcp_fast_open",
+];
+
+const SECURITY_PARAM_NAMES: &[&str] = &[
+    "ssl_server_cert_dn",
+    "ssl_server_dn_match",
+    "ssl_version",
+    "wallet_location",
+];
+
+fn build_description(connect_string: &str, desc_args: &ArgMap) -> Result<Description> {
+    let mut description = Description::default();
+
+    // DESCRIPTION-level args.
+    if let Some(v) = simple(desc_args, "expire_time") {
+        description.expire_time = parse_uint(connect_string, "EXPIRE_TIME", &v)?;
+    }
+    if let Some(v) = simple(desc_args, "failover") {
+        description.failover = parse_bool(&v);
+    }
+    if let Some(v) = simple(desc_args, "load_balance") {
+        description.load_balance = parse_bool(&v);
+    }
+    if let Some(v) = simple(desc_args, "source_route") {
+        description.source_route = parse_bool(&v);
+    }
+    if let Some(v) = simple(desc_args, "retry_count") {
+        description.retry_count = parse_uint(connect_string, "RETRY_COUNT", &v)?;
+    }
+    if let Some(v) = simple(desc_args, "retry_delay") {
+        description.retry_delay = parse_uint(connect_string, "RETRY_DELAY", &v)?;
+    }
+    if let Some(v) = simple(desc_args, "use_sni") {
+        description.use_sni = parse_bool(&v);
+    }
+    if let Some(v) = simple(desc_args, "sdu") {
+        description.sdu = parse_uint(connect_string, "SDU", &v)?.clamp(MIN_SDU, MAX_SDU);
+    }
+    if let Some(v) = simple(desc_args, "tcp_connect_timeout") {
+        description.tcp_connect_timeout =
+            parse_duration(connect_string, "TRANSPORT_CONNECT_TIMEOUT", &v)?;
+    }
+    description.extra = collect_extras(desc_args, DESCRIPTION_PARAM_NAMES);
+
+    // CONNECT_DATA.
+    if let Some(ArgValue::Node(cd)) = desc_args.get("connect_data").and_then(|v| v.first()) {
+        description.connect_data = build_connect_data(connect_string, cd)?;
+    }
+
+    // SECURITY.
+    if let Some(ArgValue::Node(sec)) = desc_args.get("security").and_then(|v| v.first()) {
+        description.security = build_security(sec);
+    }
+
+    // Address lists. The reference takes desc_args.get("address_list", desc_args)
+    // and if that is not a list, sets source_route=False and wraps it.
+    let address_list_nodes: Vec<&ArgMap> = match desc_args.get("address_list") {
+        Some(values) => values
+            .iter()
+            .filter_map(|v| match v {
+                ArgValue::Node(n) => Some(n),
+                ArgValue::Simple(_) => None,
+            })
+            .collect(),
+        None => {
+            description.source_route = false;
+            vec![desc_args]
+        }
+    };
+
+    for list_args in address_list_nodes {
+        let mut address_list = AddressList {
+            failover: true,
+            ..AddressList::default()
+        };
+        if let Some(v) = simple(list_args, "failover") {
+            address_list.failover = parse_bool(&v);
+        }
+        if let Some(v) = simple(list_args, "load_balance") {
+            address_list.load_balance = parse_bool(&v);
+        }
+        if let Some(v) = simple(list_args, "source_route") {
+            address_list.source_route = parse_bool(&v);
+        }
+        if let Some(addresses) = list_args.get("address") {
+            for addr in addresses {
+                if let ArgValue::Node(addr_node) = addr {
+                    address_list.addresses.push(build_address(addr_node)?);
+                }
+            }
+        }
+        description.address_lists.push(address_list);
+    }
+
+    Ok(description)
+}
+
+fn build_address(addr: &ArgMap) -> Result<Address> {
+    let mut address = Address::default();
+    if let Some(host) = simple(addr, "host") {
+        address.host = Some(host);
+    }
+    if let Some(port) = simple(addr, "port") {
+        address.port = port.trim().parse::<u16>().map_err(|_| {
+            ProtocolError::InvalidConnectDescriptor(format!("invalid port: {port}"))
+        })?;
+    }
+    if let Some(protocol) = simple(addr, "protocol") {
+        address.protocol = Protocol::from_keyword(&protocol)?;
+    }
+    if let Some(proxy) = simple(addr, "https_proxy") {
+        address.https_proxy = Some(proxy);
+    }
+    if let Some(proxy_port) = simple(addr, "https_proxy_port") {
+        address.https_proxy_port = proxy_port.trim().parse::<u16>().unwrap_or(0);
+    }
+    Ok(address)
+}
+
+fn build_connect_data(connect_string: &str, cd: &ArgMap) -> Result<ConnectData> {
+    let mut data = ConnectData {
+        service_name: simple(cd, "service_name"),
+        instance_name: simple(cd, "instance_name"),
+        sid: simple(cd, "sid"),
+        ..ConnectData::default()
+    };
+    if let Some(server) = simple(cd, "server_type") {
+        data.server_type = Some(ServerType::from_keyword(&server)?);
+    }
+    if let Some(cclass) = simple(cd, "cclass") {
+        if !cclass.is_empty() {
+            data.cclass = Some(cclass);
+        }
+    }
+    if let Some(purity) = simple(cd, "purity") {
+        data.purity = Some(Purity::from_keyword(&purity).map_err(|_| {
+            ProtocolError::InvalidConnectDescriptor(format!(
+                "invalid connect descriptor \"{connect_string}\": invalid POOL_PURITY \"{purity}\""
+            ))
+        })?);
+    }
+    data.pool_boundary = simple(cd, "pool_boundary");
+    data.pool_name = simple(cd, "pool_name");
+    data.connection_id_prefix = simple(cd, "connection_id_prefix");
+    if let Some(v) = simple(cd, "use_tcp_fast_open") {
+        data.use_tcp_fast_open = parse_bool(&v);
+    }
+    data.extra = collect_extras(cd, CONNECT_DATA_PARAM_NAMES);
+    Ok(data)
+}
+
+fn build_security(sec: &ArgMap) -> Security {
+    let mut security = Security::default();
+    if let Some(v) = simple(sec, "ssl_server_dn_match") {
+        security.ssl_server_dn_match = parse_bool(&v);
+    }
+    security.ssl_server_cert_dn = simple(sec, "ssl_server_cert_dn");
+    security.wallet_location = simple(sec, "wallet_location");
+    security.extra = collect_extras(sec, SECURITY_PARAM_NAMES);
+    security
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_ok(input: &str) -> Descriptor {
+        parse(input)
+            .unwrap_or_else(|e| panic!("parse({input:?}) should succeed but failed: {e}"))
+            .unwrap_or_else(|| panic!("parse({input:?}) should be a descriptor, not a tns alias"))
+    }
+
+    /// Flattened host list across all descriptions/lists (host order),
+    /// mirroring python-oracledb's `params.host` for the multi-address case.
+    fn hosts(d: &Descriptor) -> Vec<String> {
+        d.addresses().filter_map(|a| a.host.clone()).collect()
+    }
+
+    fn ports(d: &Descriptor) -> Vec<u16> {
+        d.addresses().map(|a| a.port).collect()
+    }
+
+    fn protocols(d: &Descriptor) -> Vec<Protocol> {
+        d.addresses().map(|a| a.protocol).collect()
+    }
+
+    #[test]
+    fn parses_simple_name_value_descriptor() {
+        // reference test_4503
+        let d = parse_ok(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=my_host4)(PORT=1589))\
+             (CONNECT_DATA=(SERVICE_NAME=my_service_name4)))",
+        );
+        let addr = d.first_address().expect("descriptor has an address");
+        assert_eq!(addr.host.as_deref(), Some("my_host4"));
+        assert_eq!(addr.port, 1589);
+        assert_eq!(addr.protocol, Protocol::Tcp);
+        assert_eq!(
+            d.first_description().connect_data.service_name.as_deref(),
+            Some("my_service_name4")
+        );
+    }
+
+    // --- EZConnect / EZConnect-Plus -------------------------------------
+
+    #[test]
+    fn parses_easy_connect_with_port() {
+        // reference test_4500
+        let d = parse_ok("my_host:1578/my_service_name");
+        let a = d.first_address().unwrap();
+        assert_eq!(a.host.as_deref(), Some("my_host"));
+        assert_eq!(a.port, 1578);
+        assert_eq!(
+            d.first_description().connect_data.service_name.as_deref(),
+            Some("my_service_name")
+        );
+    }
+
+    #[test]
+    fn parses_easy_connect_default_port() {
+        // reference test_4501
+        let d = parse_ok("my_host2/my_service_name2");
+        let a = d.first_address().unwrap();
+        assert_eq!(a.host.as_deref(), Some("my_host2"));
+        assert_eq!(a.port, 1521);
+    }
+
+    #[test]
+    fn parses_easy_connect_drcp_server_type() {
+        // reference test_4502
+        let d = parse_ok("my_host3.org/my_service_name3:pooled");
+        assert_eq!(
+            d.first_description().connect_data.server_type,
+            Some(ServerType::Pooled)
+        );
+        let d = parse_ok("my_host3/my_service_name3:ShArEd");
+        assert_eq!(
+            d.first_description().connect_data.server_type,
+            Some(ServerType::Shared)
+        );
+    }
+
+    #[test]
+    fn parses_easy_connect_tcps_protocol() {
+        // reference test_4504
+        let d = parse_ok("tcps://my_host6/my_service_name6");
+        assert_eq!(d.first_address().unwrap().protocol, Protocol::Tcps);
+    }
+
+    #[test]
+    fn parses_easy_connect_no_service() {
+        // reference test_4512
+        let d = parse_ok("my_host15:1578/");
+        let a = d.first_address().unwrap();
+        assert_eq!(a.host.as_deref(), Some("my_host15"));
+        assert_eq!(a.port, 1578);
+        assert!(d.first_description().connect_data.service_name.is_none());
+    }
+
+    #[test]
+    fn parses_easy_connect_missing_port_value() {
+        // reference test_4513
+        let d = parse_ok("my_host17:/my_service_name17");
+        let a = d.first_address().unwrap();
+        assert_eq!(a.host.as_deref(), Some("my_host17"));
+        assert_eq!(a.port, 1521);
+        assert_eq!(
+            d.first_description().connect_data.service_name.as_deref(),
+            Some("my_service_name17")
+        );
+    }
+
+    #[test]
+    fn parses_easy_connect_ipv6() {
+        // reference test_4547
+        let d = parse_ok("[::1]:4547/service_name_4547");
+        let a = d.first_address().unwrap();
+        assert_eq!(a.host.as_deref(), Some("::1"));
+        assert_eq!(a.port, 4547);
+        assert_eq!(
+            d.first_description().connect_data.service_name.as_deref(),
+            Some("service_name_4547")
+        );
+    }
+
+    #[test]
+    fn parses_easy_connect_multiple_hosts_different_ports() {
+        // reference test_4548
+        let d = parse_ok("host4548a,host4548b:4548,host4548c,host4548d:4549/service_name_4548");
+        assert_eq!(
+            hosts(&d),
+            vec!["host4548a", "host4548b", "host4548c", "host4548d"]
+        );
+        assert_eq!(ports(&d), vec![4548, 4548, 4549, 4549]);
+    }
+
+    #[test]
+    fn parses_easy_connect_multiple_address_lists() {
+        // reference test_4549
+        let d = parse_ok("host4549a;host4549b,host4549c:4549;host4549d/service_name_4549");
+        assert_eq!(
+            hosts(&d),
+            vec!["host4549a", "host4549b", "host4549c", "host4549d"]
+        );
+        assert_eq!(ports(&d), vec![1521, 4549, 4549, 1521]);
+    }
+
+    #[test]
+    fn parses_easy_connect_degenerate_protocol() {
+        // reference test_4552
+        let d = parse_ok("//host_4552:4552/service_name_4552");
+        let a = d.first_address().unwrap();
+        assert_eq!(a.host.as_deref(), Some("host_4552"));
+        assert_eq!(a.port, 4552);
+    }
+
+    #[test]
+    fn parses_easy_connect_instance_name() {
+        // reference test_4571
+        let d = parse_ok("host_4571:4571/service_4571/instance_4571");
+        assert_eq!(
+            d.first_description().connect_data.instance_name.as_deref(),
+            Some("instance_4571")
+        );
+        assert_eq!(
+            d.first_description().connect_data.service_name.as_deref(),
+            Some("service_4571")
+        );
+    }
+
+    #[test]
+    fn parses_easy_connect_extended_params() {
+        // reference test_4517
+        let d = parse_ok(
+            "my_host21/my_server_name21?expire_time=5&retry_delay=10&retry_count=12&transport_connect_timeout=2.5",
+        );
+        let desc = d.first_description();
+        assert_eq!(desc.expire_time, 5);
+        assert_eq!(desc.retry_delay, 10);
+        assert_eq!(desc.retry_count, 12);
+        assert!((desc.tcp_connect_timeout - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parses_easy_connect_security_params() {
+        // reference test_4582
+        let d = parse_ok(
+            "tcps://host_4580:4580/service_4580?ssl_server_dn_match=true&ssl_server_cert_dn='cn=sales'&wallet_location='/tmp/oracle'",
+        );
+        // Single quotes are preserved verbatim in EZConnect-Plus params
+        // (only double quotes are stripped) — matches reference test_4582,
+        // whose get_connect_string() keeps the single quotes.
+        let sec = &d.first_description().security;
+        assert!(sec.ssl_server_dn_match);
+        assert_eq!(sec.ssl_server_cert_dn.as_deref(), Some("'cn=sales'"));
+        assert_eq!(sec.wallet_location.as_deref(), Some("'/tmp/oracle'"));
+    }
+
+    #[test]
+    fn rejects_invalid_protocol_in_easy_connect() {
+        // reference test_4505
+        let err = parse("invalid_proto://my_host7/my_service_name7").unwrap_err();
+        assert!(format!("{err}").contains("invalid protocol"));
+    }
+
+    // --- diagnostics ----------------------------------------------------
+
+    #[test]
+    fn diagnostic_points_at_unbalanced_paren() {
+        let err = parse("(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1521))").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("offset"), "expected offset in: {msg}");
+        assert!(msg.contains('^'), "expected caret context in: {msg}");
+    }
+
+    #[test]
+    fn diagnostic_for_missing_addresses() {
+        // reference test_4546 (wrong container names -> no addresses)
+        let err = parse(
+            "(DESRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=h)(PORT=1))(CONNECT_DATA=(SERVICE_NAME=s)))",
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("no addresses are defined"));
+    }
+
+    #[test]
+    fn protocol_default_port_resolves_for_unported_address() {
+        let d = parse_ok("tcps://h/svc");
+        assert_eq!(d.first_address().unwrap().port, 2484);
+    }
+
+    #[test]
+    fn describe_dumps_addresses() {
+        let d = parse_ok(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=h1)(PORT=1521))\
+             (CONNECT_DATA=(SERVICE_NAME=svc)))",
+        );
+        let text = d.describe();
+        assert!(text.contains("tcp://h1:1521"));
+        assert!(text.contains("service_name=svc"));
+    }
+
+    #[test]
+    fn keeps_protocols_for_multi_list_descriptor() {
+        // reference test_4522
+        let d = parse_ok(
+            "(DESCRIPTION=(LOAD_BALANCE=ON)(RETRY_COUNT=5)(RETRY_DELAY=2)\
+             (ADDRESS_LIST=(LOAD_BALANCE=ON)\
+             (ADDRESS=(PROTOCOL=tcp)(PORT=1521)(HOST=my_host26))\
+             (ADDRESS=(PROTOCOL=tcp)(PORT=222)(HOST=my_host27)))\
+             (ADDRESS_LIST=(LOAD_BALANCE=ON)\
+             (ADDRESS=(PROTOCOL=tcps)(PORT=5555)(HOST=my_host28))\
+             (ADDRESS=(PROTOCOL=tcps)(PORT=444)(HOST=my_host29)))\
+             (CONNECT_DATA=(SERVICE_NAME=my_service_name26)))",
+        );
+        assert_eq!(
+            hosts(&d),
+            vec!["my_host26", "my_host27", "my_host28", "my_host29"]
+        );
+        assert_eq!(ports(&d), vec![1521, 222, 5555, 444]);
+        assert_eq!(
+            protocols(&d),
+            vec![Protocol::Tcp, Protocol::Tcp, Protocol::Tcps, Protocol::Tcps]
+        );
+    }
+
+    #[test]
+    fn parses_multiple_descriptions() {
+        // reference test_4523 (host ordering across descriptions)
+        let d = parse_ok(
+            "(DESCRIPTION_LIST=(FAIL_OVER=ON)(LOAD_BALANCE=OFF)\
+             (DESCRIPTION=(ADDRESS_LIST=(ADDRESS=(PROTOCOL=tcp)(PORT=5001)(HOST=my_host30))\
+             (ADDRESS=(PROTOCOL=tcp)(PORT=1521)(HOST=my_host31)))\
+             (CONNECT_DATA=(SERVICE_NAME=svc27)))\
+             (DESCRIPTION=(ADDRESS_LIST=(ADDRESS=(PROTOCOL=tcp)(PORT=5002)(HOST=my_host34)))\
+             (CONNECT_DATA=(SERVICE_NAME=svc28))))",
+        );
+        assert_eq!(hosts(&d), vec!["my_host30", "my_host31", "my_host34"]);
+        assert_eq!(d.descriptions.len(), 2);
+    }
+
+    #[test]
+    fn interleaves_address_and_address_list_small_first() {
+        // reference test_4529
+        let d = parse_ok(
+            "(DESCRIPTION=\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=host1)(PORT=1521))\
+             (ADDRESS_LIST=(ADDRESS=(PROTOCOL=tcp)(HOST=host2a)(PORT=1522))\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=host2b)(PORT=1523)))\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=host3)(PORT=1524))\
+             (CONNECT_DATA=(SERVICE_NAME=svc)))",
+        );
+        assert_eq!(hosts(&d), vec!["host1", "host2a", "host2b", "host3"]);
+    }
+}
