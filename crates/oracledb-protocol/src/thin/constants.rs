@@ -90,6 +90,39 @@ pub const EVENT_AQ: u32 = 100;
 /// Table operation flag: rows are summarised (no per-row records follow).
 pub const OPCODE_ALLROWS: u32 = 0x01;
 
+// Advanced Queuing function codes (reference constants.pxi).
+pub const TNS_FUNC_AQ_ENQ: u8 = 121;
+pub const TNS_FUNC_AQ_DEQ: u8 = 122;
+pub const TNS_FUNC_AQ_ARRAY: u8 = 145;
+
+// AQ delivery modes (reference constants.pxi).
+pub const TNS_AQ_MSG_PERSISTENT: u16 = 1;
+pub const TNS_AQ_MSG_BUFFERED: u16 = 2;
+pub const TNS_AQ_MSG_PERSISTENT_OR_BUFFERED: u16 = 3;
+
+// AQ array operations.
+pub const TNS_AQ_ARRAY_ENQ: i32 = 1;
+pub const TNS_AQ_ARRAY_DEQ: i32 = 2;
+pub const TNS_AQ_ARRAY_FLAGS_RETURN_MESSAGE_ID: u32 = 0x01;
+
+// AQ message defaults / misc.
+pub const TNS_AQ_MESSAGE_ID_LENGTH: usize = 16;
+pub const TNS_AQ_MESSAGE_VERSION: u16 = 1;
+
+// AQ enqueue/dequeue flag bits (delivery-mode plumbing).
+pub const TNS_KPD_AQ_BUFMSG: u32 = 0x02;
+pub const TNS_KPD_AQ_EITHER: u32 = 0x10;
+
+// AQ extension keywords (reference constants.pxi).
+pub const TNS_AQ_EXT_KEYWORD_AGENT_NAME: u16 = 64;
+pub const TNS_AQ_EXT_KEYWORD_AGENT_ADDRESS: u16 = 65;
+pub const TNS_AQ_EXT_KEYWORD_AGENT_PROTOCOL: u16 = 66;
+pub const TNS_AQ_EXT_KEYWORD_ORIGINAL_MSGID: u16 = 69;
+
+/// ORA-25228: dequeue from an empty queue with NO_WAIT returns this; the thin
+/// driver clears it and surfaces `None` instead (reference aq_base.pyx).
+pub const TNS_ERR_NO_MESSAGES_FOUND: i32 = 25228;
+
 // Sessionless / TPC transaction switch operations (reference constants.pxi:597).
 pub const TNS_TPC_TXN_START: u32 = 0x01;
 pub const TNS_TPC_TXN_DETACH: u32 = 0x02;
@@ -216,6 +249,7 @@ pub(crate) const TNS_SERVER_PIGGYBACK_SESS_SIGNATURE: u8 = 10;
 pub(crate) const TNS_CCAP_FIELD_VERSION: usize = 7;
 pub(crate) const TNS_CCAP_FIELD_VERSION_12_2: u8 = 8;
 pub(crate) const TNS_CCAP_FIELD_VERSION_20_1: u8 = 14;
+pub(crate) const TNS_CCAP_FIELD_VERSION_21_1: u8 = 16;
 pub(crate) const TNS_CCAP_FIELD_VERSION_23_1: u8 = 17;
 pub(crate) const TNS_CCAP_FIELD_VERSION_23_1_EXT_1: u8 = 18;
 pub(crate) const TNS_CCAP_FIELD_VERSION_23_1_EXT_3: u8 = 20;

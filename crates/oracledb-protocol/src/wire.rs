@@ -146,6 +146,45 @@ impl TtcWriter {
         self.write_bytes_with_two_lengths(Some(value.as_bytes()))
     }
 
+    /// Writes a 32-bit signed integer in Oracle universal (sign-magnitude)
+    /// format: a length byte whose high bit (`0x80`) is set for negatives,
+    /// followed by the big-endian magnitude bytes. Mirrors the reference
+    /// `WriteBuffer.write_sb4` (impl/base/buffer.pyx).
+    pub fn write_sb4(&mut self, value: i32) {
+        let (sign, magnitude) = if value < 0 {
+            (0x80u8, value.unsigned_abs())
+        } else {
+            (0u8, value as u32)
+        };
+        if magnitude == 0 {
+            self.write_u8(0);
+        } else if magnitude <= u32::from(u8::MAX) {
+            self.write_u8(1 | sign);
+            self.write_u8(magnitude as u8);
+        } else if magnitude <= u32::from(u16::MAX) {
+            self.write_u8(2 | sign);
+            self.write_u16be(magnitude as u16);
+        } else {
+            self.write_u8(4 | sign);
+            self.write_u32be(magnitude);
+        }
+    }
+
+    /// Writes a keyword/value pair (text and binary values plus a ub2 keyword)
+    /// as used by the AQ message-property extension list. Mirrors the reference
+    /// `WriteBuffer.write_keyword_value_pair` (impl/thin/packet.pyx:859).
+    pub fn write_keyword_value_pair(
+        &mut self,
+        text_value: Option<&[u8]>,
+        binary_value: Option<&[u8]>,
+        keyword: u16,
+    ) -> Result<()> {
+        self.write_bytes_with_two_lengths(text_value)?;
+        self.write_bytes_with_two_lengths(binary_value)?;
+        self.write_ub2(keyword);
+        Ok(())
+    }
+
     pub fn write_function_code(&mut self, function_code: u8) {
         self.write_u8(crate::thin::TNS_MSG_TYPE_FUNCTION);
         self.write_u8(function_code);

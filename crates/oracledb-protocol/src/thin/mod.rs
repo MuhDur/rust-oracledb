@@ -12,6 +12,7 @@ pub(crate) use crate::wire::{TtcReader, TtcWriter};
 pub(crate) use crate::{ProtocolError, Result, TNS_VERSION_DESIRED, TNS_VERSION_MIN};
 pub(crate) use hex::FromHex;
 
+pub mod aq;
 mod auth;
 mod bind;
 mod codecs;

@@ -1756,6 +1756,14 @@ impl ThinConnImpl {
         Py::new(py, impl_)
     }
 
+    fn create_queue_impl(&self) -> crate::aq::ThinQueueImpl {
+        crate::aq::ThinQueueImpl::new()
+    }
+
+    fn create_msg_props_impl(&self) -> crate::aq::ThinMsgPropsImpl {
+        crate::aq::ThinMsgPropsImpl::new()
+    }
+
     pub(crate) fn create_cursor_impl(
         &self,
         py: Python<'_>,

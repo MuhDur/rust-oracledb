@@ -5,6 +5,7 @@
 
 use pyo3::prelude::*;
 
+mod aq;
 mod arrow_capsule;
 mod async_bridge;
 mod async_conn;
@@ -79,5 +80,10 @@ fn oracledb_pyshim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AsyncDataFrameBatchIter>()?;
     m.add_class::<ImmediateAwaitable>()?;
     m.add_class::<ThinSubscrImpl>()?;
+    m.add_class::<aq::ThinQueueImpl>()?;
+    m.add_class::<aq::AsyncThinQueueImpl>()?;
+    m.add_class::<aq::ThinDeqOptionsImpl>()?;
+    m.add_class::<aq::ThinEnqOptionsImpl>()?;
+    m.add_class::<aq::ThinMsgPropsImpl>()?;
     Ok(())
 }
