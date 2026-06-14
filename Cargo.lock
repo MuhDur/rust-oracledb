@@ -1483,6 +1483,7 @@ dependencies = [
  "asupersync",
  "chrono",
  "criterion",
+ "oracledb-derive",
  "oracledb-protocol",
  "rust_decimal",
  "rustls",
@@ -1493,6 +1494,15 @@ dependencies = [
  "thiserror",
  "uuid",
  "x509-cert",
+]
+
+[[package]]
+name = "oracledb-derive"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

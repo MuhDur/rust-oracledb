@@ -184,7 +184,32 @@ mod sql_convert;
 pub mod tls;
 pub mod transport;
 
-pub use sql_convert::{ConversionError, FromSql, IntoBinds, QueryResultExt, ToSql, TypedRow};
+pub use sql_convert::{
+    ConversionError, FromRow, FromSql, IntoBinds, QueryResultExt, ToSql, TypedRow,
+};
+
+/// Derive a [`FromRow`] implementation that maps a query row into a struct with
+/// compile-time-checked field types.
+///
+/// Available with the default-on `derive` feature. The derive and the
+/// [`FromRow`] trait share a name, so a single `use oracledb::FromRow;` brings
+/// both into scope.
+///
+/// ```no_run
+/// use oracledb::FromRow;
+///
+/// #[derive(FromRow)]
+/// struct Emp {
+///     id: i64,
+///     name: String,
+///     manager_id: Option<i64>,
+/// }
+/// ```
+///
+/// See the [`FromRow`] trait docs for the supported shapes and `#[oracledb(...)]`
+/// attributes.
+#[cfg(feature = "derive")]
+pub use oracledb_derive::FromRow;
 
 use transport::{OracleReadHalf, OracleWriteHalf};
 
