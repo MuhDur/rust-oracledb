@@ -35,6 +35,11 @@ proptest.workspace = true
 serde_json.workspace = true
 x509-cert.workspace = true
 pkcs8 = "0.10"
+# Allocation counting for the borrowed-fetch perf test. Including it installs a
+# tracking global allocator (its unsafe lives inside that crate, so our code and
+# the whole workspace stay `#![forbid(unsafe_code)]`-clean). dev-dependency only:
+# it never affects the shipped library or any dependent crate.
+allocation-counter = "0.8"
 
 [lints]
 workspace = true

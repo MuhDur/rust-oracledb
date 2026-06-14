@@ -899,21 +899,29 @@ enum ColumnSlot<'buf> {
 /// hot scalar cases and appending to the per-row arenas for the deferred ones.
 /// Mirrors [`parse_column_value`] type-for-type; the produced owned value (via
 /// [`QueryValueRef::to_owned_value`]) is identical to the owned path.
+///
+/// `digits` is a caller-owned scratch buffer reused across all cells so the
+/// per-cell `NUMBER` decode allocates nothing of its own (it writes straight
+/// into `number_arena`). The hot scalar grid (Text/Raw) borrows the wire buffer
+/// directly with zero allocation.
 fn parse_column_slot<'buf>(
     reader: &mut TtcReader<'buf>,
     metadata: &ColumnMetadata,
     number_arena: &mut String,
     owned_arena: &mut Vec<QueryValue>,
+    digits: &mut Vec<u8>,
 ) -> Result<ColumnSlot<'buf>> {
     // Park an owned QueryValue in the arena and return the deferred slot. Used
     // for the cold / non-borrowable variants so the hot grid stays borrowed.
-    let park = |owned_arena: &mut Vec<QueryValue>, value: Option<QueryValue>| match value {
-        None => ColumnSlot::Null,
-        Some(value) => {
-            owned_arena.push(value);
-            ColumnSlot::Owned(owned_arena.len() - 1)
+    fn park(owned_arena: &mut Vec<QueryValue>, value: Option<QueryValue>) -> ColumnSlot<'static> {
+        match value {
+            None => ColumnSlot::Null,
+            Some(value) => {
+                owned_arena.push(value);
+                ColumnSlot::Owned(owned_arena.len() - 1)
+            }
         }
-    };
+    }
 
     if metadata.buffer_size == 0
         && !matches!(
@@ -928,7 +936,7 @@ fn parse_column_slot<'buf>(
             match reader.read_bytes_borrowed()? {
                 BorrowedBytes::Null => Ok(ColumnSlot::Null),
                 // Borrow the wire bytes directly when they are valid UTF-8 and
-                // not the UTF-16 NCHAR form (which needs re-encoding).
+                // not the UTF-16 NCHAR form (which needs re-encoding). Zero copy.
                 BorrowedBytes::Slice(slice) if metadata.csfrm != CS_FORM_NCHAR => {
                     match core::str::from_utf8(slice) {
                         Ok(text) => Ok(ColumnSlot::Wire(QueryValueRef::Text(text))),
@@ -944,7 +952,7 @@ fn parse_column_slot<'buf>(
                 // NCHAR (UTF-16) or chunked long text: fall back to the owned
                 // decode, which re-encodes to UTF-8 / reassembles chunks.
                 other => {
-                    let bytes = borrowed_bytes_to_vec(other);
+                    let bytes = other.into_vec();
                     let value = match decode_text_value(&bytes, metadata.csfrm) {
                         Ok(text) => QueryValue::Text(text),
                         Err(ProtocolError::TtcDecode(_)) => QueryValue::TextRaw {
@@ -963,102 +971,87 @@ fn parse_column_slot<'buf>(
             BorrowedBytes::Chunked(bytes) => Ok(park(owned_arena, Some(QueryValue::Raw(bytes)))),
         },
         ORA_TYPE_NUM_NUMBER | ORA_TYPE_NUM_BINARY_INTEGER => {
-            match reader.read_bytes_borrowed()? {
-                BorrowedBytes::Null => Ok(ColumnSlot::Null),
-                other => {
-                    let bytes = borrowed_bytes_to_vec(other);
-                    // The wire NUMBER is binary; its canonical decimal text is
-                    // synthesized, so it cannot be borrowed from the buffer. We
-                    // synthesize it into the per-row number arena and borrow
-                    // from there (one amortized arena, zero per-cell alloc).
-                    match decode_number_value(&bytes)? {
-                        QueryValue::Number { text, is_integer } => {
-                            let start = number_arena.len();
-                            number_arena.push_str(&text);
-                            Ok(ColumnSlot::Number {
-                                range: start..number_arena.len(),
-                                is_integer,
-                            })
-                        }
-                        other => Ok(park(owned_arena, Some(other))),
-                    }
+            // The wire NUMBER is binary; its canonical decimal text is
+            // synthesized, so it cannot be borrowed from the buffer. We
+            // synthesize it *directly* into the per-row number arena (reusing the
+            // `digits` scratch), borrowing from the arena — zero per-cell heap
+            // allocation for the common in-range NUMBER.
+            with_small_bytes(reader, |bytes| match bytes {
+                None => Ok(ColumnSlot::Null),
+                Some(bytes) => {
+                    let start = number_arena.len();
+                    let is_integer = decode_number_text_into(bytes, digits, number_arena)?;
+                    Ok(ColumnSlot::Number {
+                        range: start..number_arena.len(),
+                        is_integer,
+                    })
                 }
-            }
+            })
         }
-        ORA_TYPE_NUM_BOOLEAN => match reader.read_bytes_borrowed()? {
-            BorrowedBytes::Null => Ok(ColumnSlot::Null),
-            other => {
-                let bytes = borrowed_bytes_to_vec(other);
-                let is_true = matches!(bytes.last(), Some(&1));
-                Ok(ColumnSlot::Wire(QueryValueRef::Boolean(is_true)))
-            }
-        },
-        ORA_TYPE_NUM_INTERVAL_DS => match reader.read_bytes_borrowed()? {
-            BorrowedBytes::Null => Ok(ColumnSlot::Null),
-            other => {
-                let bytes = borrowed_bytes_to_vec(other);
-                match decode_interval_ds(&bytes)? {
-                    QueryValue::IntervalDS {
-                        days,
-                        hours,
-                        minutes,
-                        seconds,
-                        fseconds,
-                    } => Ok(ColumnSlot::Wire(QueryValueRef::IntervalDS {
-                        days,
-                        hours,
-                        minutes,
-                        seconds,
-                        fseconds,
-                    })),
-                    other => Ok(park(owned_arena, Some(other))),
+        ORA_TYPE_NUM_BOOLEAN => with_small_bytes(reader, |bytes| match bytes {
+            None => Ok(ColumnSlot::Null),
+            Some(bytes) => Ok(ColumnSlot::Wire(QueryValueRef::Boolean(matches!(
+                bytes.last(),
+                Some(&1)
+            )))),
+        }),
+        ORA_TYPE_NUM_INTERVAL_DS => with_small_bytes(reader, |bytes| match bytes {
+            None => Ok(ColumnSlot::Null),
+            Some(bytes) => match decode_interval_ds(bytes)? {
+                QueryValue::IntervalDS {
+                    days,
+                    hours,
+                    minutes,
+                    seconds,
+                    fseconds,
+                } => Ok(ColumnSlot::Wire(QueryValueRef::IntervalDS {
+                    days,
+                    hours,
+                    minutes,
+                    seconds,
+                    fseconds,
+                })),
+                other => Ok(park(owned_arena, Some(other))),
+            },
+        }),
+        ORA_TYPE_NUM_INTERVAL_YM => with_small_bytes(reader, |bytes| match bytes {
+            None => Ok(ColumnSlot::Null),
+            Some(bytes) => match decode_interval_ym(bytes)? {
+                QueryValue::IntervalYM { years, months } => {
+                    Ok(ColumnSlot::Wire(QueryValueRef::IntervalYM {
+                        years,
+                        months,
+                    }))
                 }
-            }
-        },
-        ORA_TYPE_NUM_INTERVAL_YM => match reader.read_bytes_borrowed()? {
-            BorrowedBytes::Null => Ok(ColumnSlot::Null),
-            other => {
-                let bytes = borrowed_bytes_to_vec(other);
-                match decode_interval_ym(&bytes)? {
-                    QueryValue::IntervalYM { years, months } => {
-                        Ok(ColumnSlot::Wire(QueryValueRef::IntervalYM {
-                            years,
-                            months,
-                        }))
-                    }
-                    other => Ok(park(owned_arena, Some(other))),
-                }
-            }
-        },
+                other => Ok(park(owned_arena, Some(other))),
+            },
+        }),
         ORA_TYPE_NUM_DATE
         | ORA_TYPE_NUM_TIMESTAMP
         | ORA_TYPE_NUM_TIMESTAMP_LTZ
-        | ORA_TYPE_NUM_TIMESTAMP_TZ => match reader.read_bytes_borrowed()? {
-            BorrowedBytes::Null => Ok(ColumnSlot::Null),
-            other => {
-                let bytes = borrowed_bytes_to_vec(other);
-                match decode_datetime_value(&bytes)? {
-                    QueryValue::DateTime {
-                        year,
-                        month,
-                        day,
-                        hour,
-                        minute,
-                        second,
-                        nanosecond,
-                    } => Ok(ColumnSlot::Wire(QueryValueRef::DateTime {
-                        year,
-                        month,
-                        day,
-                        hour,
-                        minute,
-                        second,
-                        nanosecond,
-                    })),
-                    other => Ok(park(owned_arena, Some(other))),
-                }
-            }
-        },
+        | ORA_TYPE_NUM_TIMESTAMP_TZ => with_small_bytes(reader, |bytes| match bytes {
+            None => Ok(ColumnSlot::Null),
+            Some(bytes) => match decode_datetime_value(bytes)? {
+                QueryValue::DateTime {
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    nanosecond,
+                } => Ok(ColumnSlot::Wire(QueryValueRef::DateTime {
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    nanosecond,
+                })),
+                other => Ok(park(owned_arena, Some(other))),
+            },
+        }),
         // Everything else (Rowid, BinaryDouble/Float, Clob/Blob/Bfile, Vector,
         // Json, Cursor, Object, UROWID) goes through the owned decode and is
         // parked in the owned arena. These are the cold / non-borrowable cases.
@@ -1069,15 +1062,31 @@ fn parse_column_slot<'buf>(
     }
 }
 
-/// Reassemble a [`BorrowedBytes`] into an owned `Vec` for the codec functions
-/// that need a contiguous owned (or borrowed) byte run. The `Slice` arm copies
-/// (used only for the small fixed-size decodes — interval/datetime/number — that
-/// allocate anyway); the `Chunked` arm reuses the already-owned `Vec`.
-fn borrowed_bytes_to_vec(bytes: BorrowedBytes<'_>) -> Vec<u8> {
-    match bytes {
-        BorrowedBytes::Null => Vec::new(),
-        BorrowedBytes::Slice(slice) => slice.to_vec(),
-        BorrowedBytes::Chunked(owned) => owned,
+/// Read one TTC byte field and hand the body to `f` as a borrowed `&[u8]`
+/// without allocating in the common contiguous case. `None` is SQL NULL. The
+/// rare chunked long form is reassembled into a temporary `Vec` (these small
+/// fixed-size scalar types — number/boolean/interval/datetime — are never sent
+/// chunked in practice, so this fallback is effectively dead weight).
+fn with_small_bytes<'buf, T>(
+    reader: &mut TtcReader<'buf>,
+    f: impl FnOnce(Option<&[u8]>) -> Result<T>,
+) -> Result<T> {
+    match reader.read_bytes_borrowed()? {
+        BorrowedBytes::Null => f(None),
+        BorrowedBytes::Slice(slice) => f(Some(slice)),
+        BorrowedBytes::Chunked(owned) => f(Some(&owned)),
+    }
+}
+
+impl BorrowedBytes<'_> {
+    /// Reassemble into an owned `Vec` (zero-copy `Slice` still copies; `Chunked`
+    /// reuses its already-owned `Vec`). Used by the non-borrowable text fallback.
+    fn into_vec(self) -> Vec<u8> {
+        match self {
+            BorrowedBytes::Null => Vec::new(),
+            BorrowedBytes::Slice(slice) => slice.to_vec(),
+            BorrowedBytes::Chunked(owned) => owned,
+        }
     }
 }
 
@@ -1172,16 +1181,25 @@ impl BorrowedRowBatch {
         // soundness — happy.
         let mut number_arena = String::new();
         let mut owned_arena: Vec<QueryValue> = Vec::new();
+        // Reusable scratch: `digits` for the NUMBER decode, `slots` for pass 1,
+        // `row` for the borrowed cells handed to the callback. All cleared and
+        // reused across rows so the steady-state per-row decode allocates only
+        // when an arena/scratch genuinely grows (amortized). `slots`/`row`/
+        // `digits` borrow nothing across iterations beyond the stable buffer.
+        let mut digits: Vec<u8> = Vec::new();
+        let mut slots: Vec<Option<ColumnSlot<'_>>> = Vec::with_capacity(self.columns.len());
         // Owned snapshot of the previous row, used only to resolve duplicate
         // (bit-vector-compressed) columns, which carry no wire bytes. Empty when
         // the batch has no bit vectors (the common case), so it costs nothing.
         // Seeded from the caller's prior-page row for the first compressed row.
         let mut previous_owned: Vec<Option<QueryValue>> =
             self.previous_row_seed.clone().unwrap_or_default();
+        let uses_bit_vectors = !self.row_bit_vectors.is_empty();
 
         for (row_index, &start) in self.row_starts.iter().enumerate() {
             number_arena.clear();
             owned_arena.clear();
+            slots.clear();
             let bit_vector = self
                 .row_bit_vectors
                 .get(row_index)
@@ -1192,7 +1210,6 @@ impl BorrowedRowBatch {
             // range/index into the arenas, never a borrow of them). Duplicate
             // columns carry no wire bytes — their owned previous value is parked
             // in the owned arena.
-            let mut slots: Vec<Option<ColumnSlot<'_>>> = Vec::with_capacity(self.columns.len());
             let mut reader = TtcReader::new(&self.buffer[start..]);
             for (index, metadata) in self.columns.iter().enumerate() {
                 if is_duplicate_column(bit_vector, index) {
@@ -1206,8 +1223,13 @@ impl BorrowedRowBatch {
                     }
                     continue;
                 }
-                let slot =
-                    parse_column_slot(&mut reader, metadata, &mut number_arena, &mut owned_arena)?;
+                let slot = parse_column_slot(
+                    &mut reader,
+                    metadata,
+                    &mut number_arena,
+                    &mut owned_arena,
+                    &mut digits,
+                )?;
                 slots.push(match slot {
                     ColumnSlot::Null => None,
                     other => Some(other),
@@ -1225,6 +1247,11 @@ impl BorrowedRowBatch {
 
             // Pass 2: arenas are now frozen — resolve deferred slots into
             // borrowed refs. No arena is mutated here, so the borrows are sound.
+            // `row` is allocated per row: it carries the per-row arena lifetime,
+            // which (unlike `slots`/`digits`, that borrow only the stable buffer)
+            // cannot be reused across an arena `clear()`. This is the single
+            // remaining per-row allocation, versus the owned path's per-row Vec
+            // *plus* a String per scalar cell.
             let row: Vec<Option<QueryValueRef<'_>>> = slots
                 .iter()
                 .map(|slot| {
@@ -1248,11 +1275,9 @@ impl BorrowedRowBatch {
             // Snapshot the just-emitted row as owned values for the next row's
             // duplicate-column resolution — but only when the batch actually uses
             // bit-vector compression, so the zero-copy common path pays nothing.
-            if !self.row_bit_vectors.is_empty() {
-                previous_owned = row
-                    .iter()
-                    .map(|cell| cell.map(|v| v.to_owned_value()))
-                    .collect();
+            if uses_bit_vectors {
+                previous_owned.clear();
+                previous_owned.extend(row.iter().map(|cell| cell.map(|v| v.to_owned_value())));
             }
         }
         Ok(())
@@ -1412,11 +1437,15 @@ pub fn parse_query_response_borrowed(
     })
 }
 
-/// Advance `reader` past one ROW_DATA row without materializing owned values.
-/// Mirrors [`parse_row_data`]'s consumption exactly: duplicate (bit-vector)
-/// columns carry no wire bytes and are skipped; every other column is consumed
-/// via [`parse_column_value`] (the decode advances the reader identically), and
-/// `LONG`/`LONG RAW` status trailers are consumed when `fetch_long_status`.
+/// Advance `reader` past one ROW_DATA row **without materializing owned values**
+/// — this is the offset-capture pass, so it must allocate nothing for the hot
+/// scalar grid. Mirrors [`parse_row_data`]'s consumption exactly: duplicate
+/// (bit-vector) columns carry no wire bytes and are skipped; the hot byte-field
+/// scalar types are skipped with a zero-allocation length-prefixed skip; the
+/// rare cold types (LOB / Vector / JSON / Cursor / Object / ROWID), whose wire
+/// framing is non-trivial, fall back to [`parse_column_value`] (which may
+/// allocate, but those are uncommon). `LONG`/`LONG RAW` status trailers are
+/// consumed when `fetch_long_status`.
 fn skip_row_data(
     reader: &mut TtcReader<'_>,
     columns: &[ColumnMetadata],
@@ -1427,7 +1456,33 @@ fn skip_row_data(
         if is_duplicate_column(bit_vector, index) {
             continue;
         }
-        let _ = parse_column_value(reader, metadata)?;
+        let consumed_byte_field = metadata.buffer_size != 0
+            && matches!(
+                metadata.ora_type_num,
+                ORA_TYPE_NUM_VARCHAR
+                    | ORA_TYPE_NUM_CHAR
+                    | ORA_TYPE_NUM_LONG
+                    | ORA_TYPE_NUM_RAW
+                    | ORA_TYPE_NUM_LONG_RAW
+                    | ORA_TYPE_NUM_NUMBER
+                    | ORA_TYPE_NUM_BINARY_INTEGER
+                    | ORA_TYPE_NUM_BINARY_DOUBLE
+                    | ORA_TYPE_NUM_BINARY_FLOAT
+                    | ORA_TYPE_NUM_BOOLEAN
+                    | ORA_TYPE_NUM_INTERVAL_DS
+                    | ORA_TYPE_NUM_INTERVAL_YM
+                    | ORA_TYPE_NUM_DATE
+                    | ORA_TYPE_NUM_TIMESTAMP
+                    | ORA_TYPE_NUM_TIMESTAMP_LTZ
+                    | ORA_TYPE_NUM_TIMESTAMP_TZ
+            );
+        if consumed_byte_field {
+            reader.skip_bytes_field()?;
+        } else {
+            // Cold / non-byte-field type, or a zero-buffer-size column: defer to
+            // the full owned decode purely to advance the reader correctly.
+            let _ = parse_column_value(reader, metadata)?;
+        }
         if fetch_long_status
             && matches!(
                 metadata.ora_type_num,

@@ -421,6 +421,28 @@ impl<'a> TtcReader<'a> {
         }
     }
 
+    /// Advance past one length-prefixed TTC byte field (short, NULL, or chunked
+    /// long form) **without allocating** — the zero-copy skip used by the
+    /// borrowed fetch offset-capture pass. Consumes exactly the bytes
+    /// [`read_bytes`](Self::read_bytes) would.
+    pub fn skip_bytes_field(&mut self) -> Result<()> {
+        let len = self.read_u8()?;
+        if len == TNS_LONG_LENGTH_INDICATOR {
+            loop {
+                let chunk_len = self.read_ub4()?;
+                if chunk_len == 0 {
+                    break;
+                }
+                self.skip(chunk_len as usize)?;
+            }
+            Ok(())
+        } else if len == 0 || len == TNS_NULL_LENGTH_INDICATOR {
+            Ok(())
+        } else {
+            self.skip(usize::from(len))
+        }
+    }
+
     pub fn read_bytes(&mut self) -> Result<Option<Vec<u8>>> {
         let len = self.read_u8()?;
         if len == TNS_LONG_LENGTH_INDICATOR {
