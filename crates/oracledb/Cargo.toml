@@ -104,5 +104,9 @@ harness = false
 name = "concurrent_throughput"
 harness = false
 
+[[bench]]
+name = "single_packet_passthrough"
+harness = false
+
 [lints]
 workspace = true
