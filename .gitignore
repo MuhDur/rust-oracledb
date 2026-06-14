@@ -38,6 +38,9 @@ reference/
 harness/.baseline/
 harness/.results/
 
+# PARITY-RIGOR lane run artifacts (scripts/parity_rigor.sh; regenerable)
+.lane-logs/
+
 # NTM runtime artifacts
 .ntm/
 
