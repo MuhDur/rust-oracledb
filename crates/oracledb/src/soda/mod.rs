@@ -14,7 +14,21 @@
 //! for the honest list of supported operations vs. python-oracledb thick and
 //! the documented gaps.
 
+mod collection;
+mod cursor;
+mod database;
+mod document;
 mod error;
+mod metadata;
+mod operation;
 pub mod qbe;
 
+pub use collection::SodaCollection;
+pub use cursor::SodaCursor;
+pub use database::SodaDatabase;
+pub use document::SodaDocument;
 pub use error::{Result as SodaResult, SodaError};
+pub use metadata::{
+    parse_metadata, ContentSqlType, KeyAssignment, SodaCollectionMetadata, VersionMethod,
+};
+pub use operation::{SelectColumns, SodaOperation};

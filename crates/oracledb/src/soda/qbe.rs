@@ -128,11 +128,7 @@ fn translate_field_predicate(field: &str, val: &Value, content_col: &str) -> Res
                 // {"field": {}} -> field exists
                 return Ok(json_exists(content_col, &path, ""));
             }
-            if parts.len() == 1 {
-                Ok(parts.pop().unwrap())
-            } else {
-                Ok(format!("({})", parts.join(" AND ")))
-            }
+            Ok(join_and(parts))
         }
         _ => {
             let lit = scalar_to_path_literal(val)?;
@@ -240,11 +236,7 @@ fn translate_not(path: &str, operand: &Value, content_col: &str) -> Result<Strin
             for (op, inner) in ops {
                 parts.push(translate_operator(path, op, inner, content_col)?);
             }
-            if parts.len() == 1 {
-                Ok(parts.pop().unwrap())
-            } else {
-                Ok(format!("({})", parts.join(" AND ")))
-            }
+            Ok(join_and(parts))
         }
         _ => {
             let lit = scalar_to_path_literal(operand)?;
@@ -293,10 +285,16 @@ fn fold_case(path: &str, operand: &Value, content_col: &str, func: &str) -> Resu
         };
         parts.push(json_exists(content_col, path, &pred));
     }
+    Ok(join_and(parts))
+}
+
+/// Join one-or-more boolean fragments with ` AND `, wrapping in parentheses
+/// only when there is more than one.
+fn join_and(parts: Vec<String>) -> String {
     if parts.len() == 1 {
-        Ok(parts.pop().unwrap())
+        parts.into_iter().next().unwrap_or_default()
     } else {
-        Ok(format!("({})", parts.join(" AND ")))
+        format!("({})", parts.join(" AND "))
     }
 }
 

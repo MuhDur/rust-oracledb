@@ -1,0 +1,734 @@
+//! A SODA collection and the document operations that run against it.
+//!
+//! All operations are async and take `&mut Connection` plus the Asupersync
+//! `&Cx`, mirroring the rest of the driver. They generate SQL/PL-SQL and run it
+//! through the existing execute/fetch surface.
+
+use asupersync::Cx;
+use oracledb_protocol::oson::{decode_oson, encode_oson, OsonValue};
+use oracledb_protocol::thin::{BindValue, QueryValue};
+
+use crate::Connection;
+
+use super::cursor::SodaCursor;
+use super::document::SodaDocument;
+use super::error::{Result, SodaError};
+use super::metadata::{ContentSqlType, SodaCollectionMetadata, VersionMethod};
+use super::operation::{SelectColumns, SodaOperation};
+
+/// A handle to a SODA collection: its name plus parsed metadata.
+#[derive(Debug, Clone)]
+pub struct SodaCollection {
+    pub name: String,
+    pub metadata: SodaCollectionMetadata,
+}
+
+impl SodaCollection {
+    pub fn new(name: String, metadata: SodaCollectionMetadata) -> Self {
+        SodaCollection { name, metadata }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn metadata(&self) -> &SodaCollectionMetadata {
+        &self.metadata
+    }
+
+    // --- inserts -----------------------------------------------------------
+
+    /// Insert one document. When `return_doc` is true the inserted key/version/
+    /// timestamps are read back via RETURNING and returned in a metadata-only
+    /// document (no content, matching python-oracledb).
+    pub async fn insert_one(
+        &self,
+        conn: &mut Connection,
+        cx: &Cx,
+        doc: &SodaDocument,
+        hint: Option<&str>,
+        return_doc: bool,
+    ) -> Result<Option<SodaDocument>> {
+        if self.metadata.read_only {
+            return Err(read_only_err());
+        }
+        let content_bind = self.content_bind(doc)?;
+        let (sql, _, ret_layout) = self.build_insert_sql(hint, return_doc);
+        // Bind order: content is :1, then the RETURNING outputs.
+        let mut binds = vec![content_bind];
+        if return_doc {
+            self.push_returning_binds(&mut binds, ret_layout.bind_count);
+        }
+
+        let result = conn
+            .execute_query_with_binds(cx, &sql, 0, &binds)
+            .await
+            .map_err(SodaError::Driver)?;
+
+        if return_doc {
+            let doc = self.returning_to_doc(&result, &ret_layout)?;
+            Ok(Some(doc))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Insert many documents in a single batch.
+    pub async fn insert_many(
+        &self,
+        conn: &mut Connection,
+        cx: &Cx,
+        docs: &[SodaDocument],
+        hint: Option<&str>,
+        return_docs: bool,
+    ) -> Result<Option<Vec<SodaDocument>>> {
+        if self.metadata.read_only {
+            return Err(read_only_err());
+        }
+        if docs.is_empty() {
+            return Err(SodaError::NotSupported(
+                "insertMany requires at least one document".to_string(),
+            ));
+        }
+
+        if return_docs {
+            // RETURNING with array binds is awkward across drivers; run one
+            // INSERT ... RETURNING per document to collect metadata reliably.
+            let mut out = Vec::with_capacity(docs.len());
+            for doc in docs {
+                if let Some(d) = self.insert_one(conn, cx, doc, hint, true).await? {
+                    out.push(d);
+                }
+            }
+            Ok(Some(out))
+        } else {
+            let (sql, _binds, _ret) = self.build_insert_sql(hint, false);
+            let mut bind_rows = Vec::with_capacity(docs.len());
+            for doc in docs {
+                bind_rows.push(vec![self.content_bind(doc)?]);
+            }
+            conn.execute_query_with_bind_rows(cx, &sql, 0, &bind_rows)
+                .await
+                .map_err(SodaError::Driver)?;
+            Ok(None)
+        }
+    }
+
+    // --- reads -------------------------------------------------------------
+
+    /// Count matching documents.
+    pub async fn get_count(
+        &self,
+        conn: &mut Connection,
+        cx: &Cx,
+        op: &SodaOperation,
+    ) -> Result<u64> {
+        let (sql, binds) = op.build_count_sql(&self.metadata)?;
+        let result = conn
+            .execute_query_with_binds(cx, &sql, 1, &binds)
+            .await
+            .map_err(SodaError::Driver)?;
+        let count = result
+            .cell(0, 0)
+            .and_then(QueryValue::as_i64)
+            .unwrap_or(0)
+            .max(0) as u64;
+        Ok(count)
+    }
+
+    /// Fetch the first matching document, if any.
+    pub async fn get_one(
+        &self,
+        conn: &mut Connection,
+        cx: &Cx,
+        op: &SodaOperation,
+    ) -> Result<Option<SodaDocument>> {
+        // getOne returns the first row; cap the fetch to one row.
+        let mut op = op.clone();
+        if op.limit.is_none() {
+            op.limit = Some(1);
+        }
+        let (sql, binds, layout) = op.build_select_sql(&self.metadata)?;
+        let result = conn
+            .execute_query_with_binds(cx, &sql, 1, &binds)
+            .await
+            .map_err(SodaError::Driver)?;
+        if result.rows.is_empty() {
+            return Ok(None);
+        }
+        let doc = self.row_to_document(&result.rows[0], &layout)?;
+        Ok(Some(doc))
+    }
+
+    /// Fetch all matching documents (used by getDocuments).
+    pub async fn get_documents(
+        &self,
+        conn: &mut Connection,
+        cx: &Cx,
+        op: &SodaOperation,
+    ) -> Result<Vec<SodaDocument>> {
+        let mut cursor = self.open_cursor(conn, cx, op).await?;
+        let mut out = Vec::new();
+        while let Some(doc) = cursor.next_doc(conn, cx).await? {
+            out.push(doc);
+        }
+        Ok(out)
+    }
+
+    /// Open a streaming cursor over matching documents.
+    pub async fn open_cursor(
+        &self,
+        conn: &mut Connection,
+        cx: &Cx,
+        op: &SodaOperation,
+    ) -> Result<SodaCursor> {
+        let (sql, binds, layout) = op.build_select_sql(&self.metadata)?;
+        let array_size = op.fetch_array_size();
+        let result = conn
+            .execute_query_with_binds(cx, &sql, array_size, &binds)
+            .await
+            .map_err(SodaError::Driver)?;
+        Ok(SodaCursor::new(self.clone(), result, layout, array_size))
+    }
+
+    // --- writes ------------------------------------------------------------
+
+    /// Remove matching documents; returns the number removed.
+    pub async fn remove(
+        &self,
+        conn: &mut Connection,
+        cx: &Cx,
+        op: &SodaOperation,
+    ) -> Result<u64> {
+        let (sql, binds) = op.build_delete_sql(&self.metadata)?;
+        let result = conn
+            .execute_query_with_binds(cx, &sql, 0, &binds)
+            .await
+            .map_err(SodaError::Driver)?;
+        Ok(result.row_count)
+    }
+
+    /// Replace a single document identified by the operation's key. Returns
+    /// whether a row was replaced; when `return_doc` is true the new key/
+    /// version is returned too.
+    pub async fn replace_one(
+        &self,
+        conn: &mut Connection,
+        cx: &Cx,
+        op: &SodaOperation,
+        doc: &SodaDocument,
+        return_doc: bool,
+    ) -> Result<(bool, Option<SodaDocument>)> {
+        if self.metadata.read_only {
+            return Err(read_only_err());
+        }
+        // replaceOne requires key() per the reference; keys() is rejected.
+        if op.keys.is_some() {
+            return Err(SodaError::Driver(server_like_err(
+                "ORA-40734: key not specified for SODA replaceOne",
+            )));
+        }
+        let key = op.key.as_ref().ok_or_else(|| {
+            SodaError::Driver(server_like_err(
+                "ORA-40734: key not specified for SODA replaceOne",
+            ))
+        })?;
+
+        let content_bind = self.content_bind(doc)?;
+        let meta = &self.metadata;
+        let mut binds = vec![content_bind];
+        let mut set_parts = vec![format!("{} = :1", meta.content_column)];
+
+        // bump last_modified if present
+        if let Some(lm) = &meta.last_modified_column {
+            set_parts.push(format!("{lm} = SYSTIMESTAMP"));
+        }
+        // version: regenerate UUID for UUID method; leave server-managed otherwise
+        if let (Some(vc), VersionMethod::Uuid) = (&meta.version_column, &meta.version_method) {
+            set_parts.push(format!("{vc} = SYS_GUID()"));
+        }
+
+        let mut next_bind = 2;
+        let key_pred = if meta.key_sql_type.eq_ignore_ascii_case("RAW") {
+            binds.push(BindValue::Text(key.clone()));
+            let p = format!("{} = HEXTORAW(:{next_bind})", meta.key_column);
+            next_bind += 1;
+            p
+        } else {
+            binds.push(BindValue::Text(key.clone()));
+            let p = format!("{} = :{next_bind}", meta.key_column);
+            next_bind += 1;
+            p
+        };
+        let mut where_clause = key_pred;
+        if let Some(version) = &op.version {
+            if let Some(vc) = &meta.version_column {
+                if matches!(meta.version_method, VersionMethod::None) && meta.native {
+                    binds.push(BindValue::Text(version.clone()));
+                    where_clause.push_str(&format!(" AND {vc} = HEXTORAW(:{next_bind})"));
+                } else {
+                    binds.push(BindValue::Text(version.clone()));
+                    where_clause.push_str(&format!(" AND {vc} = :{next_bind}"));
+                }
+            }
+        }
+
+        let mut sql = format!(
+            "UPDATE {} SET {} WHERE {}",
+            meta.table_name,
+            set_parts.join(", "),
+            where_clause
+        );
+
+        let ret_layout = if return_doc {
+            let (clause, layout) = self.returning_clause(binds.len());
+            sql.push_str(&clause);
+            self.push_returning_binds(&mut binds, layout.bind_count);
+            Some(layout)
+        } else {
+            None
+        };
+
+        let result = conn
+            .execute_query_with_binds(cx, &sql, 0, &binds)
+            .await
+            .map_err(SodaError::Driver)?;
+
+        let replaced = result.row_count > 0;
+        let out = if return_doc && replaced {
+            if let Some(layout) = ret_layout {
+                Some(self.returning_to_doc(&result, &layout)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        Ok((replaced, out))
+    }
+
+    // --- DDL / admin -------------------------------------------------------
+
+    /// Truncate the collection (remove all documents).
+    pub async fn truncate(&self, conn: &mut Connection, cx: &Cx) -> Result<()> {
+        let sql = format!("TRUNCATE TABLE {}", self.metadata.table_name);
+        conn.execute_query(cx, &sql, 0)
+            .await
+            .map_err(SodaError::Driver)?;
+        Ok(())
+    }
+
+    /// Create an index from a SODA index spec via DBMS_SODA_ADMIN.CREATE_INDEX.
+    pub async fn create_index(&self, conn: &mut Connection, cx: &Cx, spec: &str) -> Result<()> {
+        let sql = "BEGIN DBMS_SODA_ADMIN.CREATE_INDEX(P_URI_NAME => :1, P_INDEX_SPEC => :2); END;";
+        let binds = vec![
+            BindValue::Text(self.name.clone()),
+            BindValue::Text(spec.to_string()),
+        ];
+        conn.execute_query_with_binds(cx, sql, 0, &binds)
+            .await
+            .map_err(SodaError::Driver)?;
+        Ok(())
+    }
+
+    /// Drop an index by name. Returns whether the index existed and was dropped.
+    pub async fn drop_index(
+        &self,
+        conn: &mut Connection,
+        cx: &Cx,
+        index_name: &str,
+        force: bool,
+    ) -> Result<bool> {
+        let sql = "BEGIN DBMS_SODA_ADMIN.DROP_INDEX(P_URI_NAME => :1, P_IDX_NAME => :2, \
+                   P_FORCE => :3, P_DROPPED => :4); END;";
+        let binds = vec![
+            BindValue::Text(self.name.clone()),
+            BindValue::Text(index_name.to_string()),
+            BindValue::Number(if force { "1".into() } else { "0".into() }),
+            BindValue::Output {
+                ora_type_num: 2, // NUMBER
+                csfrm: 0,
+                buffer_size: 22,
+            },
+        ];
+        let result = conn
+            .execute_query_with_binds(cx, sql, 0, &binds)
+            .await
+            .map_err(SodaError::Driver)?;
+        let dropped = result
+            .out_values
+            .first()
+            .and_then(|(_, v)| v.as_ref())
+            .and_then(QueryValue::as_i64)
+            .map(|n| n != 0)
+            .unwrap_or(false);
+        Ok(dropped)
+    }
+
+    // --- helpers -----------------------------------------------------------
+
+    /// Build the content bind value appropriate to the content column type.
+    fn content_bind(&self, doc: &SodaDocument) -> Result<BindValue> {
+        match self.metadata.content_sql_type {
+            ContentSqlType::Json => {
+                let oson = self.doc_to_oson(doc)?;
+                let image = encode_oson(&oson, true).map_err(|e| {
+                    SodaError::Driver(crate::Error::Protocol(e))
+                })?;
+                Ok(BindValue::Json(image))
+            }
+            ContentSqlType::Blob | ContentSqlType::Clob | ContentSqlType::Raw => {
+                let bytes = self.doc_to_bytes(doc)?;
+                Ok(BindValue::Raw(bytes))
+            }
+            ContentSqlType::Varchar2 => {
+                let bytes = self.doc_to_bytes(doc)?;
+                let text = String::from_utf8(bytes).map_err(|_| {
+                    SodaError::InvalidMetadata("VARCHAR2 content must be UTF-8".to_string())
+                })?;
+                Ok(BindValue::Text(text))
+            }
+        }
+    }
+
+    /// Produce an OsonValue for a document destined for a native JSON column.
+    fn doc_to_oson(&self, doc: &SodaDocument) -> Result<OsonValue> {
+        if let Some(oson) = &doc.content_oson {
+            return Ok(oson.clone());
+        }
+        if let Some(bytes) = &doc.content_bytes {
+            // Bytes could be an OSON image already, or raw JSON text. Try to
+            // decode as OSON first; fall back to parsing as JSON text.
+            if let Ok(v) = decode_oson(bytes) {
+                return Ok(v);
+            }
+            let text = std::str::from_utf8(bytes).map_err(|_| {
+                SodaError::Qbe("content is neither OSON nor UTF-8 JSON".to_string())
+            })?;
+            let value: serde_json::Value = serde_json::from_str(text)
+                .map_err(|e| SodaError::Qbe(format!("content is not valid JSON: {e}")))?;
+            return Ok(json_to_oson(&value));
+        }
+        Err(SodaError::Qbe("document has no content".to_string()))
+    }
+
+    /// Produce raw bytes for a document destined for a BLOB/CLOB column.
+    fn doc_to_bytes(&self, doc: &SodaDocument) -> Result<Vec<u8>> {
+        if let Some(bytes) = &doc.content_bytes {
+            return Ok(bytes.clone());
+        }
+        if let Some(oson) = &doc.content_oson {
+            let value = oson_to_json(oson);
+            return serde_json::to_vec(&value)
+                .map_err(|e| SodaError::Qbe(format!("could not serialize content: {e}")));
+        }
+        Err(SodaError::Qbe("document has no content".to_string()))
+    }
+
+    /// Build the INSERT statement and the RETURNING column layout.
+    fn build_insert_sql(
+        &self,
+        hint: Option<&str>,
+        with_returning: bool,
+    ) -> (String, Vec<BindValue>, ReturningLayout) {
+        let meta = &self.metadata;
+        let mut columns = vec![meta.content_column.clone()];
+        let mut values = vec![":1".to_string()];
+
+        // SYSTIMESTAMP for created/last-modified columns on non-native legacy
+        // collections (native collections fill these automatically).
+        if !meta.native {
+            if let Some(c) = &meta.creation_time_column {
+                columns.push(c.clone());
+                values.push("SYSTIMESTAMP".to_string());
+            }
+            if let Some(c) = &meta.last_modified_column {
+                columns.push(c.clone());
+                values.push("SYSTIMESTAMP".to_string());
+            }
+        }
+
+        let hint_str = hint.map(|h| format!("/*+ {h} */ ")).unwrap_or_default();
+        let mut sql = format!(
+            "INSERT {hint_str}INTO {} ({}) VALUES ({})",
+            meta.table_name,
+            columns.join(", "),
+            values.join(", ")
+        );
+
+        let layout = if with_returning {
+            let (clause, layout) = self.returning_clause(1);
+            sql.push_str(&clause);
+            layout
+        } else {
+            ReturningLayout::default()
+        };
+
+        (sql, Vec::new(), layout)
+    }
+
+    /// Build a `RETURNING key[,version][,created][,lastmod] INTO ...` clause,
+    /// numbering bind placeholders starting after `existing_binds`.
+    fn returning_clause(&self, existing_binds: usize) -> (String, ReturningLayout) {
+        let meta = &self.metadata;
+        let mut ret_cols = Vec::new();
+        let mut into = Vec::new();
+        let mut layout = ReturningLayout::default();
+        let mut n = existing_binds;
+        let mut idx = 0;
+
+        // key
+        n += 1;
+        if meta.key_sql_type.eq_ignore_ascii_case("RAW") {
+            ret_cols.push(format!("RAWTOHEX({})", meta.key_column));
+        } else {
+            ret_cols.push(meta.key_column.clone());
+        }
+        into.push(format!(":{n}"));
+        layout.key_idx = Some(idx);
+        idx += 1;
+
+        if let Some(vc) = &meta.version_column {
+            n += 1;
+            if matches!(meta.version_method, VersionMethod::None) && meta.native {
+                ret_cols.push(format!("RAWTOHEX({vc})"));
+            } else {
+                ret_cols.push(vc.clone());
+            }
+            into.push(format!(":{n}"));
+            layout.version_idx = Some(idx);
+            idx += 1;
+        }
+        if let Some(cc) = &meta.creation_time_column {
+            n += 1;
+            ret_cols.push(format!(
+                "TO_CHAR({cc}, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6')"
+            ));
+            into.push(format!(":{n}"));
+            layout.created_idx = Some(idx);
+            idx += 1;
+        }
+        if let Some(lm) = &meta.last_modified_column {
+            n += 1;
+            ret_cols.push(format!(
+                "TO_CHAR({lm}, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6')"
+            ));
+            into.push(format!(":{n}"));
+            layout.last_modified_idx = Some(idx);
+            idx += 1;
+        }
+
+        let _ = idx;
+        let clause = format!(
+            " RETURNING {} INTO {}",
+            ret_cols.join(", "),
+            into.join(", ")
+        );
+        // Append the matching ReturnOutput binds onto the layout for the caller.
+        layout.bind_count = ret_cols.len();
+        (clause, layout)
+    }
+
+    /// Decode a fetched row into a SodaDocument per the select layout.
+    pub(crate) fn row_to_document(
+        &self,
+        row: &[Option<QueryValue>],
+        layout: &SelectColumns,
+    ) -> Result<SodaDocument> {
+        let key = row
+            .get(layout.key_idx)
+            .and_then(|c| c.as_ref())
+            .and_then(QueryValue::as_text)
+            .map(str::to_string);
+
+        let mut doc = SodaDocument {
+            key,
+            content_bytes: None,
+            content_oson: None,
+            media_type: "application/json".to_string(),
+            version: None,
+            created_on: None,
+            last_modified: None,
+        };
+
+        // content
+        if let Some(cell) = row.get(layout.content_idx).and_then(|c| c.as_ref()) {
+            match cell {
+                QueryValue::Json(oson) => doc.content_oson = Some((**oson).clone()),
+                QueryValue::Raw(bytes) => doc.content_bytes = Some(bytes.clone()),
+                QueryValue::Text(s) => doc.content_bytes = Some(s.clone().into_bytes()),
+                other => {
+                    if let Some(bytes) = other.as_raw() {
+                        doc.content_bytes = Some(bytes.to_vec());
+                    }
+                }
+            }
+        }
+
+        if let Some(i) = layout.version_idx {
+            doc.version = row
+                .get(i)
+                .and_then(|c| c.as_ref())
+                .and_then(QueryValue::as_text)
+                .map(str::to_string);
+        }
+        if let Some(i) = layout.created_idx {
+            doc.created_on = row
+                .get(i)
+                .and_then(|c| c.as_ref())
+                .and_then(QueryValue::as_text)
+                .map(str::to_string);
+        }
+        if let Some(i) = layout.last_modified_idx {
+            doc.last_modified = row
+                .get(i)
+                .and_then(|c| c.as_ref())
+                .and_then(QueryValue::as_text)
+                .map(str::to_string);
+        }
+        if let Some(i) = layout.media_type_idx {
+            if let Some(mt) = row
+                .get(i)
+                .and_then(|c| c.as_ref())
+                .and_then(QueryValue::as_text)
+            {
+                doc.media_type = mt.to_string();
+            }
+        }
+        Ok(doc)
+    }
+
+    /// Build a metadata-only document from a RETURNING result.
+    fn returning_to_doc(
+        &self,
+        result: &oracledb_protocol::thin::QueryResult,
+        layout: &ReturningLayout,
+    ) -> Result<SodaDocument> {
+        let mut doc = SodaDocument {
+            key: None,
+            content_bytes: None,
+            content_oson: None,
+            media_type: "application/json".to_string(),
+            version: None,
+            created_on: None,
+            last_modified: None,
+        };
+        // return_values: Vec<(col_idx, Vec<rows>)> in declaration order.
+        let get = |pos: usize| -> Option<String> {
+            result
+                .return_values
+                .get(pos)
+                .and_then(|(_, rows)| rows.first())
+                .and_then(|c| c.as_ref())
+                .and_then(QueryValue::as_text)
+                .map(str::to_string)
+        };
+        if let Some(i) = layout.key_idx {
+            doc.key = get(i);
+        }
+        if let Some(i) = layout.version_idx {
+            doc.version = get(i);
+        }
+        if let Some(i) = layout.created_idx {
+            doc.created_on = get(i);
+        }
+        if let Some(i) = layout.last_modified_idx {
+            doc.last_modified = get(i);
+        }
+        Ok(doc)
+    }
+}
+
+/// Bind/column layout for a RETURNING clause.
+#[derive(Debug, Default, Clone)]
+struct ReturningLayout {
+    key_idx: Option<usize>,
+    version_idx: Option<usize>,
+    created_idx: Option<usize>,
+    last_modified_idx: Option<usize>,
+    bind_count: usize,
+}
+
+fn read_only_err() -> SodaError {
+    SodaError::Driver(server_like_err(
+        "ORA-40663: cannot modify a read-only SODA collection",
+    ))
+}
+
+/// Wrap a message as a server-style error so the shim error path can surface
+/// the ORA code.
+fn server_like_err(message: &str) -> crate::Error {
+    crate::Error::Protocol(oracledb_protocol::ProtocolError::ServerError(
+        message.to_string(),
+    ))
+}
+
+// Re-export for the collection's insert path: ReturningLayout's bind binds are
+// appended by the caller (database/collection) using these helpers.
+impl SodaCollection {
+    /// Append the ReturnOutput binds for a RETURNING clause to `binds`.
+    pub(crate) fn push_returning_binds(&self, binds: &mut Vec<BindValue>, count: usize) {
+        for _ in 0..count {
+            binds.push(BindValue::ReturnOutput {
+                ora_type_num: 1, // VARCHAR2
+                csfrm: 0,
+                buffer_size: 4000,
+            });
+        }
+    }
+}
+
+// --- OSON <-> serde_json bridges ------------------------------------------
+
+/// Convert a serde_json value into an OsonValue (for binding JSON text content
+/// to a native column).
+pub(crate) fn json_to_oson(v: &serde_json::Value) -> OsonValue {
+    match v {
+        serde_json::Value::Null => OsonValue::Null,
+        serde_json::Value::Bool(b) => OsonValue::Bool(*b),
+        serde_json::Value::Number(n) => OsonValue::Number(n.to_string()),
+        serde_json::Value::String(s) => OsonValue::String(s.clone()),
+        serde_json::Value::Array(a) => OsonValue::Array(a.iter().map(json_to_oson).collect()),
+        serde_json::Value::Object(o) => {
+            OsonValue::Object(o.iter().map(|(k, v)| (k.clone(), json_to_oson(v))).collect())
+        }
+    }
+}
+
+/// Convert an OsonValue into a serde_json value (for serializing native content
+/// to JSON text for a BLOB column).
+pub(crate) fn oson_to_json(v: &OsonValue) -> serde_json::Value {
+    match v {
+        OsonValue::Null => serde_json::Value::Null,
+        OsonValue::Bool(b) => serde_json::Value::Bool(*b),
+        OsonValue::Number(n) => n
+            .parse::<serde_json::Number>()
+            .map(serde_json::Value::Number)
+            .unwrap_or_else(|_| serde_json::Value::String(n.clone())),
+        OsonValue::BinaryFloat(f) => serde_json::Number::from_f64(f64::from(*f))
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        OsonValue::BinaryDouble(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        OsonValue::String(s) => serde_json::Value::String(s.clone()),
+        OsonValue::Raw(bytes) => serde_json::Value::String(hex_encode(bytes)),
+        OsonValue::DateTime { .. } => serde_json::Value::String(format!("{v:?}")),
+        OsonValue::IntervalDS { .. } => serde_json::Value::String(format!("{v:?}")),
+        OsonValue::Vector(_) => serde_json::Value::Null,
+        OsonValue::Array(a) => serde_json::Value::Array(a.iter().map(oson_to_json).collect()),
+        OsonValue::Object(o) => serde_json::Value::Object(
+            o.iter()
+                .map(|(k, v)| (k.clone(), oson_to_json(v)))
+                .collect(),
+        ),
+    }
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
