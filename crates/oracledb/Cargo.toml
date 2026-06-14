@@ -19,22 +19,32 @@ chrono = ["dep:chrono"]
 uuid = ["dep:uuid"]
 serde_json = ["dep:serde_json"]
 rust_decimal = ["dep:rust_decimal"]
+# Enables the experimental cwallet.sso (SSO auto-login wallet) reader.
+experimental = ["oracledb-protocol/experimental"]
 
 [dependencies]
 arrow-array = { workspace = true, optional = true }
 arrow-buffer = { workspace = true, optional = true }
 arrow-data = { workspace = true, optional = true }
 arrow-schema = { workspace = true, optional = true }
-asupersync.workspace = true
+# asupersync's `tls` feature wraps rustls; we drive its sans-io ClientConnection
+# over the async TCP socket and supply our own Oracle ServerCertVerifier.
+asupersync = { workspace = true, features = ["tls"] }
 chrono = { version = "0.4", optional = true, default-features = false, features = ["std"] }
 oracledb-protocol = { path = "../oracledb-protocol" }
 rust_decimal = { version = "1", optional = true, default-features = false, features = ["std"] }
+rustls.workspace = true
+rustls-pki-types.workspace = true
+rustls-webpki.workspace = true
 serde_json = { workspace = true, optional = true }
+x509-cert.workspace = true
 thiserror.workspace = true
 uuid = { version = "1", optional = true, default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# TLS handshake integration test: a blocking rustls server stub + PEM loading.
+rustls-pemfile.workspace = true
 
 [[bench]]
 name = "thin_driver"

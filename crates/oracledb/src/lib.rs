@@ -121,7 +121,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use asupersync::net::{OwnedReadHalf, OwnedWriteHalf, TcpStream};
+use asupersync::net::TcpStream;
 use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
 use asupersync::sync::Mutex as AsyncMutex;
 use asupersync::{time, Cx};
@@ -181,10 +181,14 @@ pub use oracledb_protocol as protocol;
 pub mod arrow;
 pub mod pool;
 mod sql_convert;
+pub mod tls;
+pub mod transport;
 
 pub use sql_convert::{ConversionError, FromSql, IntoBinds, QueryResultExt, ToSql, TypedRow};
 
-type SharedWriteHalf = Arc<AsyncMutex<OwnedWriteHalf>>;
+use transport::{OracleReadHalf, OracleWriteHalf};
+
+type SharedWriteHalf = Arc<AsyncMutex<OracleWriteHalf>>;
 
 /// Oracle error codes that python-oracledb maps to DPY-4011 (connection
 /// closed); seeing one of these marks the connection as dead so pools can
@@ -327,6 +331,10 @@ pub enum Error {
     MissingSessionField(&'static str),
     #[error("call timeout of {0} ms exceeded")]
     CallTimeout(u32),
+    /// A TCPS/TLS transport error (wallet load, handshake, or server-cert /
+    /// DN-match failure).
+    #[error("TLS/TCPS error: {0}")]
+    Tls(String),
     /// A sessionless transaction client-API misuse (reference
     /// ERR_SESSIONLESS_* / DPY-3034/3035/3036). The payload is the DPY full
     /// code so the shim can raise the matching DatabaseError.
@@ -538,6 +546,26 @@ pub struct ConnectOptions {
     /// used to push CQN notifications (reference `subscr.pyx` rewrites
     /// `description.server_type = "emon"` for the background connection).
     pub server_type_emon: bool,
+    /// TCPS wallet directory (`MY_WALLET_DIRECTORY` / `wallet_location`). The
+    /// directory should contain `ewallet.pem` (or, with the `experimental`
+    /// feature, `cwallet.sso`). When `None`, `TNS_ADMIN` is consulted; the
+    /// special value `SYSTEM` (case-insensitive) forces the system trust store.
+    /// Only consulted for TCPS connections.
+    pub wallet_location: Option<String>,
+    /// Password for an encrypted wallet (mTLS key). `None` for auto-login or
+    /// verify-only wallets.
+    pub wallet_password: Option<String>,
+    /// Run the Oracle server-DN match after the TLS handshake
+    /// (`ssl_server_dn_match`, reference default `true`).
+    pub ssl_server_dn_match: bool,
+    /// Explicit expected server-certificate distinguished name
+    /// (`ssl_server_cert_dn`). When set, the server's subject DN must equal
+    /// this exactly; when `None`, the host name is matched against the
+    /// certificate's SAN DNS names and common names.
+    pub ssl_server_cert_dn: Option<String>,
+    /// Send the Oracle TCPS SNI string (`use_sni`, reference default `false`).
+    /// See [`tls::TlsParams::use_sni`] for the rustls-name-validity caveat.
+    pub use_sni: bool,
 }
 
 impl ConnectOptions {
@@ -560,7 +588,50 @@ impl ConnectOptions {
             sdu: 8192,
             proxy_user: None,
             server_type_emon: false,
+            wallet_location: None,
+            wallet_password: None,
+            ssl_server_dn_match: true,
+            ssl_server_cert_dn: None,
+            use_sni: false,
         }
+    }
+
+    /// Enable sending the Oracle TCPS SNI string (`use_sni`, default off).
+    #[must_use]
+    pub fn with_use_sni(mut self, use_sni: bool) -> Self {
+        self.use_sni = use_sni;
+        self
+    }
+
+    /// Set the TCPS wallet directory (`wallet_location` /
+    /// `MY_WALLET_DIRECTORY`). Only used for TCPS connections.
+    #[must_use]
+    pub fn with_wallet_location(mut self, location: impl Into<String>) -> Self {
+        self.wallet_location = Some(location.into());
+        self
+    }
+
+    /// Set the wallet password (for an encrypted mTLS key).
+    #[must_use]
+    pub fn with_wallet_password(mut self, password: impl Into<String>) -> Self {
+        self.wallet_password = Some(password.into());
+        self
+    }
+
+    /// Enable or disable the Oracle server-DN match (`ssl_server_dn_match`,
+    /// default enabled).
+    #[must_use]
+    pub fn with_ssl_server_dn_match(mut self, enabled: bool) -> Self {
+        self.ssl_server_dn_match = enabled;
+        self
+    }
+
+    /// Set the explicit expected server-certificate DN
+    /// (`ssl_server_cert_dn`).
+    #[must_use]
+    pub fn with_ssl_server_cert_dn(mut self, dn: impl Into<String>) -> Self {
+        self.ssl_server_cert_dn = Some(dn.into());
+        self
     }
 
     /// Route this connection to the database EMON process by injecting
@@ -606,7 +677,7 @@ impl ConnectOptions {
 pub struct Connection {
     descriptor: EasyConnect,
     identity: ClientIdentity,
-    read: OwnedReadHalf,
+    read: OracleReadHalf,
     write: SharedWriteHalf,
     session_id: u32,
     serial_num: u16,
@@ -755,9 +826,34 @@ impl Connection {
         )
         .await?;
         stream.set_nodelay(true)?;
-        let (mut read, write) = stream.into_split();
-        let write = Arc::new(AsyncMutex::with_name("oracle_tcp_write", write));
         trace_connect_step("tcp connected");
+
+        // TCPS: complete the TLS handshake on the whole socket before splitting
+        // and before any TNS bytes are sent (implicit TLS, matching
+        // python-oracledb thin's _connect_tcp ordering).
+        let (mut read, write) = if descriptor.protocol.is_tls() {
+            trace_connect_step("tls handshake");
+            let server_type = if options.server_type_emon {
+                Some("emon")
+            } else {
+                None
+            };
+            let tls_params = tls::resolve_tls_params(
+                &descriptor,
+                options.wallet_location.as_deref(),
+                options.wallet_password.as_deref(),
+                options.ssl_server_dn_match,
+                options.ssl_server_cert_dn.as_deref(),
+                options.use_sni,
+            )?;
+            let tls_stream =
+                tls::tls_handshake(&descriptor, server_type, &tls_params, stream).await?;
+            trace_connect_step("tls established");
+            transport::tls_split(tls_stream)
+        } else {
+            transport::plain_split(stream)
+        };
+        let write = Arc::new(AsyncMutex::with_name("oracle_tcp_write", write));
 
         let connect_descriptor = listener_connect_descriptor_with_server(
             &descriptor,
@@ -4269,7 +4365,7 @@ struct IncomingPacket {
 async fn lock_write<'a>(
     cx: &Cx,
     write: &'a SharedWriteHalf,
-) -> Result<asupersync::sync::MutexGuard<'a, OwnedWriteHalf>> {
+) -> Result<asupersync::sync::MutexGuard<'a, OracleWriteHalf>> {
     write
         .lock(cx)
         .await
@@ -4375,7 +4471,7 @@ struct DataResponse {
 }
 
 async fn read_data_response(
-    read: &mut OwnedReadHalf,
+    read: &mut OracleReadHalf,
     cx: &Cx,
     write: &SharedWriteHalf,
 ) -> Result<Vec<u8>> {
@@ -4385,7 +4481,7 @@ async fn read_data_response(
 }
 
 async fn read_data_response_flushing_out_binds(
-    read: &mut OwnedReadHalf,
+    read: &mut OracleReadHalf,
     cx: &Cx,
     write: &SharedWriteHalf,
     sdu: usize,
@@ -4410,7 +4506,7 @@ async fn read_data_response_flushing_out_binds(
 /// server emits a marker alongside an in-pipeline error without expecting a
 /// reset exchange.
 async fn read_data_response_boundary(
-    read: &mut OwnedReadHalf,
+    read: &mut OracleReadHalf,
     cx: &Cx,
     write: &SharedWriteHalf,
     in_pipeline: bool,
@@ -4469,7 +4565,7 @@ const TNS_MARKER_TYPE_BREAK: u8 = 1;
 const TNS_MARKER_TYPE_RESET: u8 = 2;
 
 async fn reset_after_marker(
-    read: &mut OwnedReadHalf,
+    read: &mut OracleReadHalf,
     cx: &Cx,
     write: &SharedWriteHalf,
     initial_marker: &IncomingPacket,
@@ -4780,7 +4876,7 @@ mod tests {
         let runtime = build_io_runtime().expect("asupersync runtime");
         let mut handle = runtime.block_on(async {
             let stream = TcpStream::connect(addr).await.expect("connect to listener");
-            let (_read, write) = stream.into_split();
+            let (_read, write) = transport::plain_split(stream);
             CancelHandle {
                 write: Arc::new(AsyncMutex::with_name("oracle_tcp_write_test", write)),
             }

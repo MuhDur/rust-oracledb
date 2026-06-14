@@ -8,6 +8,7 @@ pub mod oson;
 pub mod packet;
 pub mod sql;
 pub mod thin;
+pub mod tls;
 pub mod vector;
 pub mod wire;
 
