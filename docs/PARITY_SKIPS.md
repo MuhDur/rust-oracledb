@@ -86,8 +86,8 @@ the python-oracledb **thin driver does not implement** (so the reference's own
 (b) an authentication mechanism thin-over-TCP **cannot perform** (proven below by
 un-gating it and watching the reference thin driver fail all 17), (c) a deliberately
 inverted "older client" interop check, or (d) a hardcoded upstream skip independent of
-any environment. This is the strongest possible parity result: every skip is forced by
-the thin-mode contract, none hides a Rust engine defect.
+any environment. Every skip is forced by the thin-mode contract; none hides a Rust
+engine defect.
 
 ## Per-test table
 

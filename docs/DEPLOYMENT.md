@@ -192,8 +192,7 @@ $ docker run --rm --entrypoint /smoke rust-oracledb-smoke:scratch --help 2>/dev/
 ```
 
 There is no package manager, no libc, no CA store, no `/etc`, no `/tmp`, no
-users database — just `/smoke`. That minimalism is the whole pitch: the
-deployable surface area is exactly the code you wrote plus the Rust driver,
-statically linked, and nothing else.
+users database, just `/smoke`. The deployable surface area is exactly the code
+you wrote plus the Rust driver, statically linked, and nothing else.
 
 [`BlockingConnection`]: https://docs.rs/oracledb/latest/oracledb/struct.BlockingConnection.html
