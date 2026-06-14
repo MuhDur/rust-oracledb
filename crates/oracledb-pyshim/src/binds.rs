@@ -936,23 +936,9 @@ pub(crate) enum ExecutemanyRowStyle {
     Positional,
 }
 
-pub(crate) fn bind_value_is_output(value: &BindValue) -> bool {
-    matches!(
-        value,
-        BindValue::Output { .. } | BindValue::ReturnOutput { .. } | BindValue::ObjectOutput { .. }
-    )
-}
-
-// d49: migrate to oracledb (iterative PL/SQL executemany policy belongs on driver)
-pub(crate) fn bind_rows_need_iterative_plsql(
-    statement: &str,
-    bind_rows: &[Vec<BindValue>],
-) -> bool {
-    statement_is_plsql(statement)
-        && bind_rows
-            .iter()
-            .any(|row| row.iter().any(bind_value_is_output))
-}
+// The iterative-PL/SQL executemany policy lives on the driver crate now; the
+// shim calls it through this re-export so existing call sites resolve unchanged.
+pub(crate) use oracledb::bind_rows_need_iterative_plsql;
 
 pub(crate) fn clear_input_size_var_values(
     py: Python<'_>,
