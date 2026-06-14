@@ -4499,6 +4499,43 @@ async fn read_data_response_flushing_out_binds(
     Ok(payload)
 }
 
+/// Returns whether this DATA packet carries the end of the TTC response, given
+/// the packet's 2-byte data flags and its post-flags payload.
+///
+/// This mirrors the reference `Packet.has_end_of_response`
+/// (impl/thin/packet.pyx:58-73). The end of a response is signalled either by
+/// the `END_OF_RESPONSE` / `EOF` data flag, or by a trailing
+/// `TNS_MSG_TYPE_END_OF_RESPONSE` (29 / 0x1d) byte that arrives **as its own
+/// minimal packet** -- a packet whose entire post-flags payload is exactly that
+/// one byte (reference condition `packet_size == PACKET_HEADER_SIZE + 3`).
+///
+/// The size guard is load-bearing for multi-packet wide-row results. Without it,
+/// any DATA packet whose payload merely *happens to end* in byte 0x1d -- an
+/// utterly ordinary value inside a NUMBER mantissa, a length prefix, or a text
+/// byte -- would be misread as the end of the response. A wide (e.g. 20-column
+/// NUMBER/VARCHAR2) single fetch of ~1500+ rows spans several network packets,
+/// and a mid-stream packet boundary lands on a 0x1d byte often enough that the
+/// reassembly loop terminated early, truncating the buffer. The TTC decoder then
+/// mis-framed the continuation, surfacing as "encoded NUMBER too long" /
+/// "truncated TTC payload" (bead rust-oracledb-n2s).
+fn data_packet_ends_response(flags: u16, payload: &[u8]) -> bool {
+    if flags
+        & (oracledb_protocol::thin::TNS_DATA_FLAGS_END_OF_RESPONSE
+            | oracledb_protocol::thin::TNS_DATA_FLAGS_EOF)
+        != 0
+    {
+        return true;
+    }
+    // Fallback for servers that did not negotiate END_OF_RESPONSE framing: a
+    // response that is a single minimal packet whose entire post-flags payload
+    // is just the END_OF_RESPONSE marker, or just the FLUSH_OUT_BINDS marker
+    // (which the reference also treats as end_of_response,
+    // messages/base.pyx:1267-1269). The exact-length match is the load-bearing
+    // guard: a multi-packet body packet that merely *ends* in one of these bytes
+    // must NOT terminate the response.
+    payload == [TNS_MSG_TYPE_END_OF_RESPONSE] || payload == [TNS_MSG_TYPE_FLUSH_OUT_BINDS]
+}
+
 /// Reads one boundary-delimited TTC response. While `in_pipeline` is set,
 /// marker packets are silently dropped instead of triggering the
 /// send-reset/await-reset dance -- the reference does the same while reading
@@ -4512,7 +4549,6 @@ async fn read_data_response_boundary(
     in_pipeline: bool,
 ) -> Result<DataResponse> {
     let mut response = Vec::new();
-    let mut flush_out_binds = false;
     let mut pending_packet = None;
     loop {
         let packet = match pending_packet.take() {
@@ -4543,17 +4579,16 @@ async fn read_data_response_boundary(
                 .map_err(|_| oracledb_protocol::ProtocolError::TtcDecode("invalid flags"))?,
         );
         response.extend_from_slice(payload);
-        if matches!(payload.last(), Some(&TNS_MSG_TYPE_FLUSH_OUT_BINDS)) {
-            flush_out_binds = true;
-            break;
-        }
-        if flags & oracledb_protocol::thin::TNS_DATA_FLAGS_END_OF_RESPONSE != 0 {
-            break;
-        }
-        if matches!(payload.last(), Some(&TNS_MSG_TYPE_END_OF_RESPONSE)) {
+        if data_packet_ends_response(flags, payload) {
             break;
         }
     }
+    // A flush-out-binds response ends with the FLUSH_OUT_BINDS message byte
+    // (reference messages/base.pyx:1267-1269, which also sets end_of_response).
+    // Detect it from the terminal message byte of the fully reassembled stream
+    // rather than mid-stream, so an ordinary data byte 0x13 at a packet boundary
+    // is never mistaken for it.
+    let flush_out_binds = matches!(response.last(), Some(&TNS_MSG_TYPE_FLUSH_OUT_BINDS));
     Ok(DataResponse {
         payload: response,
         flush_out_binds,
@@ -4842,6 +4877,134 @@ mod tests {
         assert!(io.is_connection_lost());
         assert!(io.is_retryable());
         assert!(Error::CallTimeout(1000).is_connection_lost());
+    }
+
+    // Regression (bead rust-oracledb-n2s): the multi-packet wide-row response
+    // reassembler must NOT treat a non-final DATA packet that merely ends in the
+    // byte 0x1d (TNS_MSG_TYPE_END_OF_RESPONSE, 29) as the end of the response.
+    // Only a packet carrying the END_OF_RESPONSE/EOF data flag, or a minimal
+    // packet whose entire post-flags payload is exactly the single byte 0x1d,
+    // ends the response. Before the fix the `0x1d` check was unguarded and a
+    // mid-stream wide-row packet boundary that happened to land on 0x1d
+    // truncated the buffer ("encoded NUMBER too long" / "truncated TTC payload").
+    #[test]
+    fn data_packet_ends_response_requires_flag_or_lone_marker_byte() {
+        const EOR: u8 = TNS_MSG_TYPE_END_OF_RESPONSE; // 29 / 0x1d
+        const FOB: u8 = TNS_MSG_TYPE_FLUSH_OUT_BINDS; // 19 / 0x13
+        let eor_flag = oracledb_protocol::thin::TNS_DATA_FLAGS_END_OF_RESPONSE;
+        let eof_flag = oracledb_protocol::thin::TNS_DATA_FLAGS_EOF;
+
+        // The END_OF_RESPONSE data flag ends the response regardless of payload.
+        assert!(data_packet_ends_response(eor_flag, &[0x01, 0x02, EOR]));
+        assert!(data_packet_ends_response(eor_flag, &[]));
+        // The EOF data flag (final packet of legacy framing) likewise ends it.
+        assert!(data_packet_ends_response(eof_flag, &[0x01, 0x02, 0x03]));
+
+        // A lone marker byte arriving as its own minimal packet is a real
+        // end-of-response (END_OF_RESPONSE or FLUSH_OUT_BINDS) -- the no-EOR
+        // framing fallback.
+        assert!(data_packet_ends_response(0x0000, &[EOR]));
+        assert!(data_packet_ends_response(0x0000, &[FOB]));
+
+        // THE BUG: a flagless (mid-stream) wide-row packet whose payload merely
+        // ENDS in a marker byte (0x1d END_OF_RESPONSE, or 0x13 FLUSH_OUT_BINDS) is
+        // NOT the end of the response. These must all be false so reassembly keeps
+        // reading the following packets.
+        assert!(!data_packet_ends_response(0x0000, &[0xc1, 0x02, EOR]));
+        assert!(!data_packet_ends_response(0x0000, &[0x00, EOR]));
+        assert!(!data_packet_ends_response(0x0000, &[EOR, 0x05, 0x06, EOR]));
+        assert!(!data_packet_ends_response(0x0000, &[0xc1, 0x02, FOB]));
+        assert!(!data_packet_ends_response(0x0000, &[0x00, FOB]));
+        // A flagless packet that does not end in a marker byte also keeps reading.
+        assert!(!data_packet_ends_response(0x0000, &[0x01, 0x02, 0x03]));
+        assert!(!data_packet_ends_response(0x0000, &[]));
+    }
+
+    /// Pure replay of the `read_data_response_boundary` decision logic over a
+    /// hand-built packet sequence, returning the reassembled bytes, the index it
+    /// stopped at, and whether flush-out-binds was detected. Mirrors the async
+    /// loop's break conditions exactly (minus I/O).
+    fn replay_boundary(packets: &[(u16, Vec<u8>)]) -> (Vec<u8>, Option<usize>, bool) {
+        let mut reassembled = Vec::new();
+        let mut stopped_at = None;
+        for (index, (flags, payload)) in packets.iter().enumerate() {
+            reassembled.extend_from_slice(payload);
+            if data_packet_ends_response(*flags, payload) {
+                stopped_at = Some(index);
+                break;
+            }
+        }
+        let flush_out_binds = matches!(reassembled.last(), Some(&TNS_MSG_TYPE_FLUSH_OUT_BINDS));
+        (reassembled, stopped_at, flush_out_binds)
+    }
+
+    // End-to-end of the boundary loop over a hand-built multi-packet sequence:
+    // body packets that END in the marker bytes 0x1d (END_OF_RESPONSE) and 0x13
+    // (FLUSH_OUT_BINDS) -- the old false-positive triggers -- followed by the
+    // real END_OF_RESPONSE-flagged tail. The reassembled payload must concatenate
+    // every body packet's bytes (after its 2-byte data flags) in order, proving
+    // no early break and no byte loss.
+    #[test]
+    fn boundary_loop_reassembles_packets_ending_in_marker_byte() {
+        const EOR: u8 = TNS_MSG_TYPE_END_OF_RESPONSE;
+        const FOB: u8 = TNS_MSG_TYPE_FLUSH_OUT_BINDS;
+        let packets: [(u16, Vec<u8>); 5] = [
+            (0x0000, vec![0x10, 0x11, EOR]), // ends in 0x1d -> must NOT stop
+            (0x0000, vec![0x20, 0x21, 0x22, FOB]), // ends in 0x13 -> must NOT stop
+            (0x0000, vec![0x30, 0x31, 0x32, EOR]), // ends in 0x1d -> must NOT stop
+            (0x0000, vec![0x33, 0x34, 0x35]), // ordinary body packet
+            (
+                oracledb_protocol::thin::TNS_DATA_FLAGS_END_OF_RESPONSE,
+                vec![0x40, 0x41, EOR], // real end: carries the EOR flag
+            ),
+        ];
+
+        let (reassembled, stopped_at, flush_out_binds) = replay_boundary(&packets);
+
+        assert_eq!(
+            stopped_at,
+            Some(4),
+            "reassembly must stop only on the flagged final packet, not on a body packet ending in a marker byte"
+        );
+        assert!(
+            !flush_out_binds,
+            "the response ended in END_OF_RESPONSE, not FLUSH_OUT_BINDS"
+        );
+        assert_eq!(
+            reassembled,
+            vec![
+                0x10, 0x11, EOR, // packet 0
+                0x20, 0x21, 0x22, FOB, // packet 1
+                0x30, 0x31, 0x32, EOR, // packet 2
+                0x33, 0x34, 0x35, // packet 3
+                0x40, 0x41, EOR, // packet 4 (final)
+            ],
+            "every body packet's bytes must be concatenated in order with none dropped"
+        );
+    }
+
+    // A genuine flush-out-binds response (the EOR-flagged final packet ends in
+    // the FLUSH_OUT_BINDS byte) must set the flag -- AND a mid-stream body packet
+    // ending in that same byte must not have ended the response prematurely.
+    #[test]
+    fn boundary_loop_detects_flush_out_binds_only_at_true_boundary() {
+        const FOB: u8 = TNS_MSG_TYPE_FLUSH_OUT_BINDS;
+        let packets: [(u16, Vec<u8>); 2] = [
+            (0x0000, vec![0x01, 0x02, FOB]), // body packet ending in 0x13 -> keep reading
+            (
+                oracledb_protocol::thin::TNS_DATA_FLAGS_END_OF_RESPONSE,
+                vec![0x03, FOB], // EOR-flagged tail whose last message is FLUSH_OUT_BINDS
+            ),
+        ];
+
+        let (reassembled, stopped_at, flush_out_binds) = replay_boundary(&packets);
+
+        assert_eq!(stopped_at, Some(1), "stop on the EOR-flagged tail");
+        assert!(
+            flush_out_binds,
+            "flush-out-binds must be detected from the terminal FLUSH_OUT_BINDS message byte"
+        );
+        assert_eq!(reassembled, vec![0x01, 0x02, FOB, 0x03, FOB]);
     }
 
     #[test]
