@@ -179,6 +179,83 @@ const TNS_DATA_PACKET_OVERHEAD: usize = 10;
 
 pub use oracledb_protocol as protocol;
 
+/// Profiling-only read/decode attribution counters for the fetch paging loop.
+///
+/// **This is measurement-only instrumentation, not part of the optimization.**
+/// When the `ORACLEDB_PROFILE_FETCH` environment variable is set (checked once,
+/// lazily), [`fetch_rows_with_columns`](Connection::fetch_rows_with_columns)
+/// accumulates the wall time spent in the socket read (`read_response`) vs the
+/// CPU decode (`parse_fetch_response`) into these atomics. A bench / example can
+/// read the split with [`fetch_profile_read_decode_ns`] to attribute how much of
+/// a paged fetch is socket-bound (overlap candidate) vs CPU-bound. The flag is
+/// off by default, so the production path pays one relaxed atomic load per page
+/// and nothing else.
+mod fetch_profile {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::OnceLock;
+
+    static READ_NS: AtomicU64 = AtomicU64::new(0);
+    static DECODE_NS: AtomicU64 = AtomicU64::new(0);
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    /// Lets a bench arm/disarm attribution without an env var (so a single
+    /// process can measure a clean window).
+    static FORCE: AtomicBool = AtomicBool::new(false);
+
+    #[inline]
+    pub(crate) fn enabled() -> bool {
+        FORCE.load(Ordering::Relaxed)
+            || *ENABLED.get_or_init(|| std::env::var_os("ORACLEDB_PROFILE_FETCH").is_some())
+    }
+
+    #[inline]
+    pub(crate) fn add_read(ns: u64) {
+        READ_NS.fetch_add(ns, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub(crate) fn add_decode(ns: u64) {
+        DECODE_NS.fetch_add(ns, Ordering::Relaxed);
+    }
+
+    pub(crate) fn snapshot() -> (u64, u64) {
+        (
+            READ_NS.load(Ordering::Relaxed),
+            DECODE_NS.load(Ordering::Relaxed),
+        )
+    }
+
+    pub(crate) fn reset() {
+        READ_NS.store(0, Ordering::Relaxed);
+        DECODE_NS.store(0, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_force(on: bool) {
+        FORCE.store(on, Ordering::Relaxed);
+    }
+}
+
+/// Profiling-only: snapshot the cumulative `(read_ns, decode_ns)` split that the
+/// fetch paging loop has accumulated since the last [`fetch_profile_reset`].
+///
+/// Only populated when fetch profiling is armed (the `ORACLEDB_PROFILE_FETCH`
+/// env var is set, or [`fetch_profile_arm(true)`](fetch_profile_arm) was called).
+/// This is benchmark/diagnostic instrumentation; it is not part of the normal
+/// data path.
+pub fn fetch_profile_read_decode_ns() -> (u64, u64) {
+    fetch_profile::snapshot()
+}
+
+/// Profiling-only: zero the fetch read/decode attribution counters.
+pub fn fetch_profile_reset() {
+    fetch_profile::reset();
+}
+
+/// Profiling-only: arm or disarm fetch read/decode attribution for this process
+/// without setting an environment variable.
+pub fn fetch_profile_arm(on: bool) {
+    fetch_profile::set_force(on);
+}
+
 #[cfg(feature = "arrow")]
 pub mod arrow;
 pub mod cursor_logic;
@@ -2523,15 +2600,24 @@ impl Connection {
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
         // Read under a cancel-on-drop guard: if THIS fetch future is dropped
         // mid-read, the next operation will break + drain the stranded call.
+        let profile = fetch_profile::enabled();
+        let read_start = profile.then(time::wall_now);
         let response = self.read_response_cancellable(cx).await?;
+        if let Some(start) = read_start {
+            fetch_profile::add_read(time::wall_now().duration_since(start));
+        }
         trace_query_bytes("FETCH response", &response);
         let columns = self
             .cursor_columns
             .get(&cursor_id)
             .cloned()
             .unwrap_or_else(|| known_columns.to_vec());
+        let decode_start = profile.then(time::wall_now);
         let parsed =
             parse_fetch_response_with_context(&response, self.capabilities, &columns, previous_row);
+        if let Some(start) = decode_start {
+            fetch_profile::add_decode(time::wall_now().duration_since(start));
+        }
         let result = self.note_parse(parsed)?;
         obs_record!(_span, db.rows_fetched = result.rows.len() as u64);
         self.remember_cursor_columns(&result);
@@ -2562,21 +2648,122 @@ impl Connection {
         let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
         trace_query_bytes("FETCH payload", &payload);
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let profile = fetch_profile::enabled();
+        let read_start = profile.then(time::wall_now);
         let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        if let Some(start) = read_start {
+            fetch_profile::add_read(time::wall_now().duration_since(start));
+        }
         trace_query_bytes("FETCH response", &response);
         let columns = self
             .cursor_columns
             .get(&cursor_id)
             .cloned()
             .unwrap_or_default();
+        let decode_start = profile.then(time::wall_now);
         let parsed =
             parse_query_response_borrowed(&response, self.capabilities, &columns, previous_row);
+        if let Some(start) = decode_start {
+            fetch_profile::add_decode(time::wall_now().duration_since(start));
+        }
         let result = self.note_parse(parsed)?;
         // Mirror the owned `fetch_rows` path: if the server re-described the
         // cursor mid-paging (the type-change refetch path emits DESCRIBE_INFO),
         // persist the adjusted column list under this cursor id so subsequent
         // pages decode with the new schema. Keyed on the known `cursor_id`
         // (the response's own cursor_id is 0 on an ordinary fetch).
+        if cursor_id != 0 && !result.batch.columns().is_empty() {
+            self.cursor_columns
+                .insert(cursor_id, result.batch.columns().to_vec());
+        }
+        Ok(result)
+    }
+
+    /// Send a FETCH request for the next page on an open cursor **without**
+    /// reading its response — the *request* half of the speculative next-page
+    /// prefetch that overlaps page K+1's wire round trip with page K's decode
+    /// (bead rust-oracledb-xad / 3oi). Pair it with
+    /// [`fetch_rows_ref_response`](Self::fetch_rows_ref_response), which reads +
+    /// decodes the outstanding page.
+    ///
+    /// ## Cancellation safety
+    ///
+    /// Issuing this request leaves a server response in flight on the wire. So
+    /// it **arms** `cancel_drain_pending` for the entire window until that
+    /// response is consumed: if the owning future is dropped while the response
+    /// is in flight — whether during the prior page's decode (no read yet) or
+    /// during the response read itself — the next operation breaks + drains the
+    /// stranded page before issuing its own request (the same machinery that
+    /// protects a dropped fetch, see [`CancelDrainGuard`]). A request can only be
+    /// issued from a clean wire boundary, so it first drains any *previously*
+    /// stranded call.
+    pub async fn fetch_rows_request(
+        &mut self,
+        cx: &Cx,
+        cursor_id: u32,
+        arraysize: u32,
+    ) -> Result<()> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        // A request must start from a clean boundary: if a prior cancelled op
+        // left a drain pending, break + drain it first.
+        self.drain_pending_cancel(cx).await?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
+        trace_query_bytes("FETCH payload (prefetch)", &payload);
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        // A speculative response is now outstanding: arm the pending-drain flag
+        // for the WHOLE window until it is consumed by `fetch_rows_ref_response`,
+        // so a drop anywhere in {decode prior page, read this response} cleans it
+        // up before the next op runs.
+        self.cancel_drain_pending.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Read + decode the response to a FETCH request previously issued by
+    /// [`fetch_rows_request`](Self::fetch_rows_request) — the *response* half of
+    /// the speculative next-page prefetch. Returns the same
+    /// [`BorrowedFetchResult`] as [`fetch_rows_ref`](Self::fetch_rows_ref).
+    ///
+    /// Must be called exactly once per `fetch_rows_request`, with the request's
+    /// `cursor_id` and the `previous_row` seed for duplicate-column decoding
+    /// (the last row of the prior page — known by now because the prior page is
+    /// fully decoded). The read runs under a [`CancelDrainGuard`] (a mid-read
+    /// drop re-arms the pending drain); a clean read disarms the
+    /// `fetch_rows_request` arming, leaving no stranded page.
+    pub async fn fetch_rows_ref_response(
+        &mut self,
+        cx: &Cx,
+        cursor_id: u32,
+        previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
+    ) -> Result<BorrowedFetchResult> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        // Read under the cancel-on-drop guard. NOTE: do NOT `drain_pending_cancel`
+        // here — the pending flag is set by our own `fetch_rows_request` and
+        // marks the response we are about to read legitimately, not a stranded
+        // call to discard.
+        let profile = fetch_profile::enabled();
+        let read_start = profile.then(time::wall_now);
+        let response = self.read_response_cancellable(cx).await?;
+        if let Some(start) = read_start {
+            fetch_profile::add_read(time::wall_now().duration_since(start));
+        }
+        // Consumed cleanly: the speculative response is no longer outstanding.
+        self.cancel_drain_pending.store(false, Ordering::SeqCst);
+        trace_query_bytes("FETCH response (prefetch)", &response);
+        let columns = self
+            .cursor_columns
+            .get(&cursor_id)
+            .cloned()
+            .unwrap_or_default();
+        let decode_start = profile.then(time::wall_now);
+        let parsed =
+            parse_query_response_borrowed(&response, self.capabilities, &columns, previous_row);
+        if let Some(start) = decode_start {
+            fetch_profile::add_decode(time::wall_now().duration_since(start));
+        }
+        let result = self.note_parse(parsed)?;
         if cursor_id != 0 && !result.batch.columns().is_empty() {
             self.cursor_columns
                 .insert(cursor_id, result.batch.columns().to_vec());
@@ -2638,12 +2825,45 @@ impl Connection {
         let mut previous_row: Option<Vec<Option<oracledb_protocol::thin::QueryValue>>> =
             first.rows.last().cloned();
 
-        // Subsequent batches use the genuinely zero-copy borrowed fetch.
+        // Speculative next-page prefetch (bead xad / 3oi): overlap the wire round
+        // trip of page K+1 with the CPU decode of page K. The trick is that a
+        // FETCH *request* needs only the cursor id + arraysize (not page K's
+        // rows), while `previous_row` — page K's last row, the duplicate-column
+        // seed — is needed only when *decoding* K+1, by which point K is done.
+        //
+        // So the loop keeps one page of look-ahead outstanding on the wire:
+        //   1. request page K+1   (just the send; arms the prefetch drain guard)
+        //   2. read+decode page K (callback) — overlaps with K+1 in flight
+        //   3. read+decode page K+1 next iteration, immediately request K+2, ...
+        //
+        // Cancellation: `fetch_rows_request` arms `cancel_drain_pending` until
+        // the response is consumed, so a drop anywhere in this loop (including
+        // inside the callback, with a page in flight) leaves the stranded page to
+        // be broken + drained by the next op on this connection. Decode stays on
+        // this task, so the borrowed batch buffer never crosses a thread/await
+        // boundary that outlives it — the borrowed-fetch guarantee is preserved
+        // and `#![forbid(unsafe_code)]` holds.
+
+        // Prime the pipeline: request the first paged batch ahead of decoding.
+        if more_rows && cursor_id != 0 {
+            self.fetch_rows_request(cx, cursor_id, arraysize).await?;
+        }
+
         while more_rows && cursor_id != 0 {
+            // Read + decode the page whose request is already in flight.
             let result = self
-                .fetch_rows_ref(cx, cursor_id, arraysize, previous_row.as_deref())
+                .fetch_rows_ref_response(cx, cursor_id, previous_row.as_deref())
                 .await?;
-            more_rows = result.more_rows;
+            let next_more = result.more_rows;
+
+            // Speculatively request the NEXT page BEFORE running the callback, so
+            // its round trip overlaps this page's decode + the callback's work.
+            // The request needs no data from `result`, so `result`'s buffer stays
+            // alive and untouched across this send.
+            if next_more {
+                self.fetch_rows_request(cx, cursor_id, arraysize).await?;
+            }
+
             // Snapshot the last row for the next page's duplicate-column seed
             // before consuming the batch in the callback.
             let mut last_owned: Option<Vec<Option<oracledb_protocol::thin::QueryValue>>> = None;
@@ -2658,6 +2878,7 @@ impl Connection {
             if let Some(last) = last_owned {
                 previous_row = Some(last);
             }
+            more_rows = next_more;
         }
 
         self.release_cursor(cursor_id);
