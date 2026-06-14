@@ -32,7 +32,7 @@
 //! borrowed `QueryValueRef::Number` arena path — routes through it, so the owned
 //! and borrowed decode paths can never diverge by even one byte.
 
-use crate::{ProtocolError, Result};
+use crate::Result;
 
 /// Upper bound on the significant decimal digits the wire NUMBER digit walk can
 /// emit into a stack buffer. Oracle NUMBER carries at most 40 significant
@@ -447,8 +447,72 @@ impl std::fmt::Display for OracleNumber {
     }
 }
 
-/// Map a [`ProtocolError`] kind into the decode error used for malformed wire.
-#[allow(dead_code)]
-fn _decode_err() -> ProtocolError {
-    ProtocolError::TtcDecode("invalid NUMBER")
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inline_form_fits_the_size_budget() {
+        // The inline carrier must stay <= 24 bytes (8-byte aligned via the
+        // [u8;16] coefficient) so `QueryValue` holds its 32-byte budget.
+        assert!(core::mem::size_of::<OracleNumber>() <= 24);
+        assert_eq!(core::mem::align_of::<OracleNumber>(), 8);
+    }
+
+    #[test]
+    fn formatter_matches_known_canonical_text() {
+        // coefficient × 10^-scale -> canonical text, spot checks.
+        let cases: &[(i128, i16, bool, &str)] = &[
+            (0, 0, true, "0"),
+            (1, 0, true, "1"),
+            (-1, 0, true, "-1"),
+            (5, 1, false, "0.5"),
+            (-5, 1, false, "-0.5"),
+            (314159, 5, false, "3.14159"),
+            (1, -2, true, "100"), // 1 × 10^2
+            (12, 0, true, "12"),
+            (100001, 3, false, "100.001"),
+            (15, 1, false, "1.5"),
+        ];
+        for &(coeff, scale, is_int, expect) in cases {
+            let n = OracleNumber::inline(coeff, scale, is_int);
+            assert_eq!(
+                n.to_canonical_string(),
+                expect,
+                "coeff={coeff} scale={scale}"
+            );
+            assert_eq!(n.is_integer(), is_int);
+        }
+    }
+
+    #[test]
+    fn from_canonical_text_round_trips() {
+        for text in [
+            "0",
+            "1",
+            "-1",
+            "0.5",
+            "100",
+            "0.001",
+            "12345678901234567890",
+        ] {
+            let n = OracleNumber::from_canonical_text(text);
+            assert_eq!(n.to_canonical_string(), text);
+        }
+    }
+
+    #[test]
+    fn overflow_value_falls_back_to_text_losslessly() {
+        // A 40-digit integer exceeds i128 (39 digits max); the canonical text
+        // round-trips through the boxed fallback exactly. Built via from_wire of
+        // a synthetic value would require the encoder, so assert the fallback
+        // constructor preserves the text verbatim.
+        let big = "1234567890123456789012345678901234567890"; // 40 digits
+        let n = OracleNumber::from_canonical_text(big);
+        assert!(
+            matches!(n, OracleNumber::Text { .. }),
+            "40-digit -> text fallback"
+        );
+        assert_eq!(n.to_canonical_string(), big);
+    }
 }
