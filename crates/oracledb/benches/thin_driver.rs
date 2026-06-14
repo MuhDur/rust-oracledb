@@ -535,6 +535,85 @@ fn bench_thin_driver(c: &mut Criterion) {
         group.finish();
     }
 
+    // ----------------------------------------------------------------------
+    // (g) COLUMNAR fetch->Arrow (bead rust-oracledb-wf7): the row-materialize
+    //     `fetch_all_record_batch` vs the columnar `fetch_all_record_batch_columnar`
+    //     over the SAME wide analytics result. Both produce a byte-identical
+    //     RecordBatch (asserted by tests/arrow_columnar_diff.rs); the columnar
+    //     path streams each borrowed cell straight into the column builders, so
+    //     it skips the per-row Vec<Option<QueryValue>>, the per-text-cell String,
+    //     and the transpose pass (95.3% fewer allocations — see
+    //     tests/arrow_columnar_alloc.rs). On loopback the wall delta is bounded
+    //     by the client decode/build share (~27% of a wide fetch; the rest is
+    //     server read-wait), so this measures the beatable client-CPU slice.
+    //     Only compiled with the `arrow` feature.
+    // ----------------------------------------------------------------------
+    #[cfg(feature = "arrow")]
+    {
+        use oracledb::arrow::ArrowFetchOptions;
+        let sql = "select \
+                   level as id, \
+                   cast(level * 1.25 as number(18,4)) as amount, \
+                   rpad('row', 32, to_char(mod(level, 9))) as label, \
+                   mod(level, 1000) as bucket, \
+                   to_char(level) as code, \
+                   cast(level as number(18,2)) as price \
+                   from dual connect by level <= 20000";
+        let arraysize = 1000u32;
+        let arrow_options = ArrowFetchOptions::default();
+
+        // Each arm gets its OWN fresh connection so neither inherits the cursors
+        // the shared warm connection accumulated across the earlier setup (CLOB
+        // temp LOBs, executemany DDL), and so the two arms cannot interact
+        // through one session's statement cache / open_cursors ceiling. Both
+        // methods release their drained cursor (verified by the leak-probe tests
+        // in tests/arrow_columnar_diff.rs), so each session reuses a single
+        // server cursor across all iterations.
+        let mut row_conn = block_on(&runtime, async |cx| {
+            Connection::connect(cx, options.clone())
+                .await
+                .expect("row-path df connection")
+        });
+        let mut col_conn = block_on(&runtime, async |cx| {
+            Connection::connect(cx, options.clone())
+                .await
+                .expect("columnar df connection")
+        });
+
+        let mut group = c.benchmark_group("oracledb_columnar");
+        group.sample_size(30);
+        group.bench_function("fetch_df_row_path", |b| {
+            b.iter(|| {
+                let batch = block_on(&runtime, async |cx| {
+                    row_conn
+                        .fetch_all_record_batch(cx, sql, arraysize, &arrow_options)
+                        .await
+                        .expect("row-path fetch_df_all")
+                });
+                assert_eq!(batch.num_rows(), 20_000);
+            });
+        });
+        group.bench_function("fetch_df_columnar", |b| {
+            b.iter(|| {
+                let batch = block_on(&runtime, async |cx| {
+                    col_conn
+                        .fetch_all_record_batch_columnar(cx, sql, arraysize, &arrow_options)
+                        .await
+                        .expect("columnar fetch_df_all")
+                });
+                assert_eq!(batch.num_rows(), 20_000);
+            });
+        });
+        group.finish();
+        block_on(&runtime, async |cx| {
+            row_conn.close(cx).await.expect("close row df connection");
+            col_conn
+                .close(cx)
+                .await
+                .expect("close columnar df connection");
+        });
+    }
+
     // Cleanup: drop scratch objects and close the warm connection. Only
     // PERFTEST_* objects this harness created are touched.
     ddl_best_effort(

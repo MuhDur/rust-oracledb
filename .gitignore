@@ -52,3 +52,6 @@ harness/.results/
 
 # reference may also be a symlink in lane worktrees
 reference
+
+# perf-push lane-local env helper (container name + target dir)
+.lane-perf-env.sh

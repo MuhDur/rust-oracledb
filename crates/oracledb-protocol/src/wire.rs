@@ -23,6 +23,20 @@ impl TtcWriter {
         Self::default()
     }
 
+    /// A writer whose backing buffer is preallocated to `capacity` bytes. A
+    /// `TtcWriter::new()` starts at zero capacity, so a payload built from many
+    /// small `write_*` pushes grows the `Vec` through several doublings — each a
+    /// separate heap allocation. Sizing the buffer once (to a small-payload
+    /// default or an exact known length) collapses those growth reallocs to a
+    /// single allocation. The written bytes are byte-identical either way; this
+    /// is a pure allocation optimization.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(capacity),
+            seq_num: 0,
+        }
+    }
+
     pub fn into_bytes(self) -> Vec<u8> {
         self.bytes
     }
