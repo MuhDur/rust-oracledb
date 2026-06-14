@@ -203,6 +203,55 @@ pub mod fuzz_api {
         let _ = crate::thin::decode_binary_float(data);
         let _ = crate::thin::decode_binary_double(data);
     }
+
+    /// Fuzz the Advanced Queuing response decoders (enqueue / dequeue / array).
+    /// The first input byte selects the negotiated TTC field version and the
+    /// payload kind so the fuzzer can reach the RAW / JSON / Object branches;
+    /// the rest is the adversarial server payload. All three AQ parsers must
+    /// fail closed on any malformed input (they only `read_*` from a bounded
+    /// `TtcReader`, never index raw bytes).
+    pub fn fuzz_aq_responses(data: &[u8]) {
+        use crate::thin::aq::{
+            parse_aq_array_response, parse_aq_deq_response, parse_aq_enq_response, AqPayloadKind,
+        };
+        let (selector, payload) = data.split_first().map_or((0u8, data), |(v, r)| (*v, r));
+        let caps = crate::thin::ClientCapabilities {
+            ttc_field_version: 24 - (selector & 0x07),
+            ..crate::thin::ClientCapabilities::default()
+        };
+        let kind = match (selector >> 3) % 3 {
+            0 => AqPayloadKind::Raw,
+            1 => AqPayloadKind::Json,
+            _ => AqPayloadKind::Object,
+        };
+        let _ = parse_aq_enq_response(payload, caps);
+        let _ = parse_aq_deq_response(payload, caps, &kind);
+        // `operation` and `props_count` are derived from the selector so the
+        // array decoder explores both the dequeue-array and enqueue-array shapes.
+        let operation = i32::from(selector >> 6);
+        let props_count = u32::from(selector & 0x0f);
+        let _ = parse_aq_array_response(payload, caps, operation, props_count, &kind);
+    }
+
+    /// Fuzz the subscription (CQN/AQ-notification) response + notification
+    /// stream decoders. The first input byte drives the TTC field version, the
+    /// namespace, and the QoS flags so the fuzzer reaches the OAC-record and
+    /// grouping-notification branches. Both parsers must fail closed.
+    pub fn fuzz_subscr_responses(data: &[u8]) {
+        use crate::thin::{
+            parse_notification_stream, parse_subscribe_response, ClientCapabilities,
+        };
+        let (selector, payload) = data.split_first().map_or((0u8, data), |(v, r)| (*v, r));
+        let caps = ClientCapabilities {
+            ttc_field_version: 24 - (selector & 0x07),
+            ..ClientCapabilities::default()
+        };
+        let _ = parse_subscribe_response(payload, caps);
+        let namespace = u32::from(selector >> 4);
+        let public_qos = u32::from((selector >> 2) & 0x03);
+        let _ = parse_notification_stream(payload, namespace, public_qos, None);
+        let _ = parse_notification_stream(payload, namespace, public_qos, Some("FUZZDB"));
+    }
 }
 
 #[cfg(test)]
