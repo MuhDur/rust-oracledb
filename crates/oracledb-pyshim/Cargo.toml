@@ -17,8 +17,9 @@ arrow-array = { workspace = true, features = ["ffi"] }
 arrow-data = { workspace = true, features = ["ffi"] }
 arrow-schema = { workspace = true, features = ["ffi"] }
 asupersync.workspace = true
-oracledb = { path = "../oracledb", features = ["arrow"] }
+oracledb = { path = "../oracledb", features = ["arrow", "soda"] }
 pyo3.workspace = true
+serde_json.workspace = true
 
 # The workspace forbids `unsafe_code`; the pyshim relaxes it to `deny` so a
 # single, audited module (src/arrow_capsule.rs) can carry `#[allow(unsafe_code)]`

@@ -1545,6 +1545,7 @@ dependencies = [
  "asupersync",
  "oracledb",
  "pyo3",
+ "serde_json",
 ]
 
 [[package]]

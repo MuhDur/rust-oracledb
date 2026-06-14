@@ -22,6 +22,7 @@ mod metadata;
 mod pipeline;
 mod pool;
 mod pyutil;
+mod soda;
 mod subscr;
 mod typehandler;
 mod var;
@@ -85,5 +86,9 @@ fn oracledb_pyshim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<aq::ThinDeqOptionsImpl>()?;
     m.add_class::<aq::ThinEnqOptionsImpl>()?;
     m.add_class::<aq::ThinMsgPropsImpl>()?;
+    m.add_class::<soda::ThinSodaDbImpl>()?;
+    m.add_class::<soda::ThinSodaCollImpl>()?;
+    m.add_class::<soda::ThinSodaDocImpl>()?;
+    m.add_class::<soda::ThinSodaDocCursorImpl>()?;
     Ok(())
 }

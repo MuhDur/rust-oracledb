@@ -182,6 +182,8 @@ pub use oracledb_protocol as protocol;
 pub mod arrow;
 pub mod cursor_logic;
 pub mod pool;
+#[cfg(feature = "soda")]
+pub mod soda;
 mod sql_convert;
 pub mod tls;
 pub mod transport;
