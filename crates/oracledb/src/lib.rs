@@ -117,6 +117,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -362,6 +363,17 @@ pub enum Error {
     MissingSessionField(&'static str),
     #[error("call timeout of {0} ms exceeded")]
     CallTimeout(u32),
+    /// The in-flight operation was explicitly cancelled by the user (via
+    /// [`Connection::cancel`] or by dropping a cancellable fetch future), the
+    /// driver's analog of the server-side `ORA-01013` "user requested cancel of
+    /// current operation". Like a [`Self::CallTimeout`] (`DPY-4024`), a cancel
+    /// drains the wire and leaves the session ALIVE and the connection clean and
+    /// reusable: it is therefore **not** [`Self::is_connection_lost`] and **is**
+    /// [`Self::is_transient`] (re-run the idempotent call on the same
+    /// connection). It is distinguished from `CallTimeout` only so callers can
+    /// tell a deliberate cancel apart from a deadline overrun.
+    #[error("ORA-01013: user requested cancel of current operation")]
+    Cancelled,
     /// The connection was closed because recovery from a prior failure could
     /// not complete: most commonly a **second** timeout while draining the
     /// server's response after a [`Self::CallTimeout`] break (mirroring the
@@ -438,6 +450,9 @@ impl Error {
     pub fn ora_code(&self) -> Option<i32> {
         match self {
             Error::Protocol(err) => protocol_error_ora_code(err).map(|code| code as i32),
+            // A user cancel is the client-side shape of the server's ORA-01013
+            // "user requested cancel of current operation".
+            Error::Cancelled => Some(1013),
             _ => None,
         }
     }
@@ -492,8 +507,10 @@ impl Error {
     /// [`Error::CallTimeout`] is transient: after the driver drains the wire the
     /// connection is clean and reusable, so re-running the (idempotent) call on
     /// the same connection — e.g. with a longer timeout — is the natural retry.
+    /// [`Error::Cancelled`] is transient for the same reason: an explicit cancel
+    /// also drains the wire and leaves the session alive.
     pub fn is_transient(&self) -> bool {
-        matches!(self, Error::CallTimeout(_))
+        matches!(self, Error::CallTimeout(_) | Error::Cancelled)
             || self
                 .ora_code()
                 .is_some_and(|code| TRANSIENT_ORA_CODES.contains(&(code as u32)))
@@ -745,6 +762,18 @@ pub struct Connection {
     ttc_seq_num: u8,
     sdu: usize,
     supports_end_of_response: bool,
+    /// Whether the server negotiated out-of-band (urgent-TCP) break support
+    /// (`protocol_options & TNS_GSO_CAN_RECV_ATTENTION`, reference
+    /// `Capabilities.supports_oob`). Surfaced via [`Connection::supports_oob`];
+    /// [`Connection::cancel`] always uses the in-band BREAK marker regardless,
+    /// because the transport does not expose `MSG_OOB`.
+    supports_oob: bool,
+    /// Set when a cancellable round-trip future was dropped mid-read (its
+    /// [`CancelDrainGuard`] fired). The next operation breaks + drains the
+    /// stranded server call before issuing its own request, so a cancelled
+    /// fetch cannot poison the stream for the next one. `Arc` so the guard,
+    /// which outlives the borrow, can flip it from its `Drop`.
+    cancel_drain_pending: Arc<AtomicBool>,
     cursor_columns: BTreeMap<u32, Vec<ColumnMetadata>>,
     /// Fetch metadata of the most recent execution keyed by SQL text,
     /// mirroring the reference statement cache's per-statement
@@ -1033,6 +1062,8 @@ impl Connection {
             ttc_seq_num,
             sdu,
             supports_end_of_response: accept_info.supports_end_of_response,
+            supports_oob: accept_info.supports_oob,
+            cancel_drain_pending: Arc::new(AtomicBool::new(false)),
             cursor_columns: BTreeMap::new(),
             fetch_metadata_by_sql: HashMap::new(),
             fetch_metadata_order: VecDeque::new(),
@@ -1863,6 +1894,9 @@ impl Connection {
     ) -> Result<QueryResult> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
+        // If a prior cancellable round trip was dropped mid-read, break + drain
+        // the stranded call before issuing this execute (Scope cancel-on-drop).
+        self.drain_pending_cancel(cx).await?;
         // Flush any cursors queued for close (via `close_cursor`) ahead of this
         // execute: the close-cursors piggyback carries its own sequence number
         // and is prepended to the execute payload, mirroring the bind-rows
@@ -1877,7 +1911,9 @@ impl Connection {
         }
         trace_query_bytes("EXECUTE query payload", &payload);
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        // Read under a cancel-on-drop guard: a dropped execute future arms the
+        // next operation's break + drain.
+        let response = self.read_response_cancellable(cx).await?;
         trace_query_bytes("EXECUTE query response", &response);
         let parsed = parse_query_response(&response, self.capabilities);
         let result = self.note_parse(parsed)?;
@@ -2115,6 +2151,9 @@ impl Connection {
     ) -> Result<QueryResult> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
+        // If a prior cancellable round trip was dropped mid-read, break + drain
+        // the stranded call before issuing this execute (Scope cancel-on-drop).
+        self.drain_pending_cancel(cx).await?;
         let mut exec_options = exec_options;
         // a `suspend_on_success` execute folds a post-detach into the pending
         // sessionless piggyback; validate (DPY-3034/3036) before any wire work
@@ -2203,9 +2242,9 @@ impl Connection {
         }
         trace_query_bytes("EXECUTE query payload", &payload);
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response =
-            read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, self.sdu)
-                .await?;
+        // Read under a cancel-on-drop guard: a dropped execute future arms the
+        // next operation's break + drain.
+        let response = self.read_flushing_out_binds_cancellable(cx).await?;
         trace_query_bytes("EXECUTE query response", &response);
         let known_columns = if exec_options.cursor_id != 0 {
             self.cursor_columns
@@ -2334,6 +2373,62 @@ impl Connection {
         }
     }
 
+    /// If a previous cancellable fetch future was dropped mid-read (its
+    /// [`CancelDrainGuard`] armed `cancel_drain_pending`), break + drain the
+    /// stranded server call now — before this round trip sends its own request —
+    /// so the leftover bytes / still-running call cannot poison this response.
+    /// Clears the flag once the wire is clean. A failed drain marks the
+    /// connection dead and surfaces [`Error::ConnectionClosed`].
+    async fn drain_pending_cancel(&mut self, cx: &Cx) -> Result<()> {
+        if !self.cancel_drain_pending.swap(false, Ordering::SeqCst) {
+            return Ok(());
+        }
+        match cancel_and_drain_wire(
+            &mut self.read,
+            cx,
+            &self.write,
+            BREAK_DRAIN_RECOVERY_TIMEOUT,
+        )
+        .await
+        {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.dead = true;
+                Err(err)
+            }
+        }
+    }
+
+    /// Read one TTC response under a [`CancelDrainGuard`]: if THIS read future is
+    /// dropped mid-flight (the fetch was cancelled / raced), the guard arms
+    /// `cancel_drain_pending` so the next operation breaks + drains the stranded
+    /// call. A normal completion disarms the guard, so the uncancelled path costs
+    /// nothing beyond an `Arc::clone`.
+    async fn read_response_cancellable(&mut self, cx: &Cx) -> Result<Vec<u8>> {
+        // Clone the Arc so the guard owns a handle independent of the `&mut self`
+        // read borrow (the two touch disjoint state but the borrow checker can't
+        // prove it across the guard's lifetime).
+        let pending = Arc::clone(&self.cancel_drain_pending);
+        let mut guard = CancelDrainGuard::arm(&pending);
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        guard.disarm();
+        Ok(response)
+    }
+
+    /// [`Self::read_response_cancellable`] for the bind/execute path, which reads
+    /// via [`read_data_response_flushing_out_binds`] (it answers FLUSH_OUT_BINDS
+    /// requests). Same cancel-on-drop semantics: a dropped execute future arms
+    /// the next operation's break + drain.
+    async fn read_flushing_out_binds_cancellable(&mut self, cx: &Cx) -> Result<Vec<u8>> {
+        let pending = Arc::clone(&self.cancel_drain_pending);
+        let mut guard = CancelDrainGuard::arm(&pending);
+        let response =
+            read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, self.sdu)
+                .await?;
+        guard.disarm();
+        Ok(response)
+    }
+
     pub async fn fetch_rows(
         &mut self,
         cx: &Cx,
@@ -2355,11 +2450,16 @@ impl Connection {
     ) -> Result<QueryResult> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
+        // If a prior fetch future was cancelled mid-read, break + drain the
+        // stranded call before issuing this fetch (Scope-based cancel-on-drop).
+        self.drain_pending_cancel(cx).await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
         trace_query_bytes("FETCH payload", &payload);
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        // Read under a cancel-on-drop guard: if THIS fetch future is dropped
+        // mid-read, the next operation will break + drain the stranded call.
+        let response = self.read_response_cancellable(cx).await?;
         trace_query_bytes("FETCH response", &response);
         let columns = self
             .cursor_columns
@@ -3254,21 +3354,86 @@ impl Connection {
         }
     }
 
+    /// Cleans the wire after a two-thread cancel: a [`CancelHandle`] on another
+    /// thread already sent the BREAK while this thread was blocked in a query, so
+    /// the socket now holds the full multi-stage cancel response. Drains it with
+    /// the SAME machinery the call-timeout path uses ([`drain_cancel_wire`] ->
+    /// [`drain_break_response`]) — the cancelled call's in-flight DATA response,
+    /// the break-ack MARKER, the RESET handshake, and the trailing ORA-01013 —
+    /// leaving the connection clean and reusable.
+    ///
+    /// Before this used the proper drain it ran a single `read_data_response`
+    /// that stopped at the in-flight response's end-of-response boundary, leaking
+    /// the MARKER + ORA-01013 into the socket where the NEXT operation misread
+    /// them (bead rust-oracledb-wnz). A failed drain marks the connection dead
+    /// and surfaces [`Error::ConnectionClosed`].
     async fn drain_cancel_response(&mut self, cx: &Cx) -> Result<()> {
-        match time::timeout(
-            time::wall_now(),
-            Duration::from_secs(5),
-            read_data_response(&mut self.read, cx, &self.write),
+        match drain_cancel_wire(
+            &mut self.read,
+            cx,
+            &self.write,
+            BREAK_DRAIN_RECOVERY_TIMEOUT,
         )
         .await
         {
-            Ok(response) => {
-                let response = response?;
-                trace_query_bytes("CANCEL drain response", &response);
-                Ok(())
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.dead = true;
+                Err(err)
             }
-            Err(_) => Ok(()),
         }
+    }
+
+    /// Explicitly cancel the in-flight operation on this connection and leave the
+    /// connection in a clean, reusable state.
+    ///
+    /// This sends a BREAK to the server and then **drains** the entire cancel
+    /// response (any in-flight DATA response of the cancelled call, the break-ack
+    /// MARKER, the RESET handshake, and the trailing `ORA-01013`) so the wire is
+    /// left at a clean message boundary — exactly the recovery python-oracledb
+    /// performs in `Connection.cancel()` (`_break_external()` + `_reset()`,
+    /// protocol.pyx:533-557). The reference would send an out-of-band urgent-TCP
+    /// break when `supports_oob` is negotiated and fall back to this in-band
+    /// BREAK marker otherwise (protocol.pyx:56-69); asupersync's transport does
+    /// not expose `MSG_OOB`, so the portable in-band path is always taken (the
+    /// server handles it identically — see [`Self::supports_oob`]).
+    ///
+    /// On success the connection is **usable for the next operation** (the cancel
+    /// mirrors `DPY-4024` semantics: the session is alive, the wire is clean).
+    /// `Ok(())` means the cancel completed and the connection survives. If the
+    /// drain fails (a second timeout or a wire error) the connection is marked
+    /// dead and [`Error::ConnectionClosed`] is returned instead.
+    ///
+    /// Unlike [`Self::cancel_handle`] (which only fires a bare BREAK from another
+    /// thread, leaving the drain to a later [`Self::drain_cancel_response`]),
+    /// this is the single-call, self-contained cancel: break **and** drain in one
+    /// place.
+    pub async fn cancel(&mut self, cx: &Cx) -> Result<()> {
+        match cancel_and_drain_wire(
+            &mut self.read,
+            cx,
+            &self.write,
+            BREAK_DRAIN_RECOVERY_TIMEOUT,
+        )
+        .await
+        {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.dead = true;
+                Err(err)
+            }
+        }
+    }
+
+    /// Whether the server negotiated out-of-band (urgent-TCP) break support at
+    /// accept time (`protocol_options & TNS_GSO_CAN_RECV_ATTENTION`, the
+    /// reference `Capabilities.supports_oob`, capabilities.pyx:120). This driver
+    /// always uses the in-band BREAK marker for [`Self::cancel`] regardless,
+    /// because asupersync's `TcpStream` does not expose `send(MSG_OOB)`; the bit
+    /// is surfaced for diagnostics and parity with the reference capability
+    /// negotiation. The server accepts the in-band break on every connection.
+    pub fn supports_oob(&self) -> bool {
+        self.supports_oob
     }
 
     fn remember_cursor_columns(&mut self, result: &QueryResult) {
@@ -4761,6 +4926,121 @@ async fn break_and_drain_wire(
     }
 }
 
+/// Sends a BREAK and drains the server's cancel response so the wire is left at
+/// a clean boundary, for an **explicit** user cancel (rather than a call
+/// timeout). This is the wire half of [`Connection::cancel`].
+///
+/// The wire sequence a user cancel triggers is byte-for-byte the same as a call
+/// timeout — python-oracledb routes both through `_break_external()` +
+/// `_reset()` (`cancel()` is `connection.pyx:291` -> `_break_external`;
+/// `protocol.pyx:533-557`). So this delegates straight to
+/// [`break_and_drain_wire`] (no duplicated drain loop): the BREAK marker, the
+/// discard of any in-flight DATA responses, the RESET handshake, and the
+/// consumption of the trailing ORA-01013 error all happen there.
+///
+/// The reference would send an out-of-band (urgent-TCP) break first when
+/// `supports_oob` is negotiated; when OOB is unavailable it falls back to this
+/// in-band INTERRUPT/BREAK marker (`protocol.pyx:56-69`). Asupersync's
+/// `TcpStream` does not expose `send(MSG_OOB)`, so we always take the in-band
+/// path — which the reference itself uses on every platform where OOB is off
+/// (e.g. Windows, or `disable_oob`), and which the server handles identically.
+///
+/// `Ok(())` means the wire is clean and the connection is reusable; the caller
+/// surfaces [`Error::Cancelled`]. On a failed drain the error is
+/// [`Error::ConnectionClosed`] and the connection must be discarded.
+async fn cancel_and_drain_wire(
+    read: &mut OracleReadHalf,
+    cx: &Cx,
+    write: &SharedWriteHalf,
+    recovery_timeout: Duration,
+) -> Result<()> {
+    break_and_drain_wire(read, cx, write, recovery_timeout).await
+}
+
+/// Drains the server's cancel response **without** sending a BREAK first.
+///
+/// Used by the two-thread cancel path: a [`CancelHandle`] on a *separate* thread
+/// has already sent the BREAK marker while the main thread was blocked inside a
+/// query round trip. The wire now carries the same multi-stage cancel response a
+/// timeout break would (the cancelled call's in-flight DATA response, the
+/// break-ack MARKER, the RESET handshake, and the trailing ORA-01013), so this
+/// reuses [`drain_break_response`] — the SAME drain `break_and_drain_wire` runs —
+/// under the same bounded recovery timeout. It just omits the `send_marker`
+/// BREAK that the handle thread already issued; sending a second BREAK here would
+/// inject an extra marker the server answers with an extra reset, desyncing the
+/// reused connection.
+///
+/// `Ok(())` leaves the wire clean and the connection reusable. A drain error or
+/// a secondary timeout yields [`Error::ConnectionClosed`] (the connection must
+/// be discarded), matching the break+drain failure semantics.
+async fn drain_cancel_wire(
+    read: &mut OracleReadHalf,
+    cx: &Cx,
+    write: &SharedWriteHalf,
+    recovery_timeout: Duration,
+) -> Result<()> {
+    match time::timeout(
+        time::wall_now(),
+        recovery_timeout,
+        drain_break_response(read, cx, write),
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(Error::ConnectionClosed(format!(
+            "wire error while draining cancel response: {err}"
+        ))),
+        Err(_) => Err(Error::ConnectionClosed(
+            "socket timed out while draining cancel response".to_string(),
+        )),
+    }
+}
+
+/// Drop-guard that arms a connection's `cancel_drain_pending` flag if a
+/// cancellable round-trip read future is **dropped while still in flight**.
+///
+/// This is the Scope-based cancel-on-drop half of the cancellation story: when a
+/// fetch/execute future is raced by a `select!` or a `time::timeout` and the
+/// losing branch is dropped, the request has already gone out but its response
+/// is still arriving (or the server is still mid-call). Dropping the future ends
+/// the `&mut Connection` borrow but leaves those bytes / that running call on the
+/// wire. The guard's `Drop` records that the next operation must first send a
+/// BREAK and drain (via [`cancel_and_drain_wire`]) before issuing its own
+/// request — so a cancelled fetch never poisons the stream for the next one.
+///
+/// A read that completes normally calls [`CancelDrainGuard::disarm`] first, so
+/// the common (uncancelled) path never arms the flag and pays nothing.
+struct CancelDrainGuard<'a> {
+    pending: &'a Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl<'a> CancelDrainGuard<'a> {
+    /// Arm a guard over `pending` for the duration of a cancellable read.
+    fn arm(pending: &'a Arc<AtomicBool>) -> Self {
+        Self {
+            pending,
+            armed: true,
+        }
+    }
+
+    /// Disarm the guard after the read completed normally, so its `Drop` is a
+    /// no-op and the next operation does not needlessly break + drain.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancelDrainGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            // The future was dropped mid-read (cancelled): tell the next
+            // operation to break + drain the stranded server call first.
+            self.pending.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
 /// Reads and discards the full server response to a BREAK: any in-flight DATA
 /// response(s) of the cancelled call, then the break-acknowledge MARKER, the
 /// RESET handshake, and the trailing error packet — leaving the reader at a
@@ -5924,5 +6204,230 @@ mod tests {
             "the reassembled response must end with the ORA-12899 error payload, got {payload:?}"
         );
         server.join().expect("server thread joins");
+    }
+
+    // ---- explicit cancel (bead rust-oracledb-wnz) -----------------------------
+    //
+    // Connection::cancel() must do for an EXPLICIT user cancel exactly what the
+    // call-timeout path does for a timeout: send the BREAK, drain the server's
+    // in-flight response + the break-ack MARKER + the RESET handshake + the
+    // trailing ORA-01013 error, then leave the wire at a clean boundary so the
+    // SAME connection is reusable for the next operation. It reuses the proven
+    // `break_and_drain_wire` machinery (no duplicate drain loop). The only thing
+    // that differs from the timeout path is the surfaced error semantics: a
+    // successful cancel is `Ok(())` (the connection is clean), and the in-flight
+    // operation observes `Error::Cancelled` (ORA-01013 user-requested-cancel),
+    // which — like DPY-4024 — is NOT connection-lost (the session survives).
+
+    #[test]
+    fn cancel_and_drain_wire_leaves_connection_reusable() {
+        // The cancelled call's in-flight response (its own end-of-response): the
+        // stale bytes that must be discarded, never mistaken for the next result.
+        const INFLIGHT_BODY: &[u8] = &[0xCA, 0xFE];
+        // The trailing ORA-01013-shaped error packet ending the cancel response.
+        const ERROR_BODY: &[u8] = &[0x04, 0x01, 0x0d];
+        // The genuine response to `select 7+5` on the reused connection.
+        const FRESH_BODY: &[u8] = &[0x07, 0x05, 0x0c];
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            use std::io::Write as _;
+
+            // 1) Client sends BREAK to cancel the in-flight slow query.
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_BREAK,
+                "cancel must send a BREAK marker first"
+            );
+            // 2) Server flushes the cancelled call's in-flight response FIRST.
+            socket
+                .write_all(&data_packet(INFLIGHT_BODY, true))
+                .expect("write in-flight response");
+            // 3) Server's break-ack MARKER drives the client's RESET dance.
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))
+                .expect("write break-ack marker");
+            // 4) Client answers with RESET; server confirms.
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_RESET,
+                "cancel must answer the marker with a RESET"
+            );
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_RESET))
+                .expect("write reset-confirm marker");
+            // 5) Trailing ORA-01013 error ending the cancel response.
+            socket
+                .write_all(&data_packet(ERROR_BODY, true))
+                .expect("write trailing error packet");
+            // 6) The FRESH response to the next operation (select 7+5 -> 12).
+            socket
+                .write_all(&data_packet(FRESH_BODY, true))
+                .expect("write fresh response");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let next = runtime.block_on(async {
+            let cx = Cx::current().expect("ambient Cx");
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (mut read, write) = transport::plain_split(stream);
+            let write: SharedWriteHalf =
+                Arc::new(AsyncMutex::with_name("cancel_test_write", write));
+
+            // The cancel: break + drain leaves the stream clean and reusable.
+            cancel_and_drain_wire(&mut read, &cx, &write, Duration::from_secs(5))
+                .await
+                .expect("cancel drain must succeed and leave the stream clean");
+
+            // The next operation reads its OWN response on the SAME connection.
+            read_data_response(&mut read, &cx, &write)
+                .await
+                .expect("next read after cancel must decode cleanly")
+        });
+
+        assert_eq!(
+            next, FRESH_BODY,
+            "after cancel the reused connection must read the FRESH response, not the \
+             stale in-flight response ({INFLIGHT_BODY:?}) or error body ({ERROR_BODY:?})"
+        );
+        server.join().expect("server thread joins");
+    }
+
+    // The two-thread cancel path (a `CancelHandle` on another thread already
+    // sent the BREAK while the main thread is blocked in the query) needs a
+    // DRAIN-ONLY clean-up: it must NOT send a second BREAK, but it must still
+    // consume the in-flight response + break-ack MARKER + RESET handshake +
+    // trailing ORA-01013, exactly like the full break+drain. `drain_cancel_wire`
+    // is that drain-only half, sharing `drain_break_response` with the
+    // break+drain path. The server here sends NO marker before its in-flight
+    // response is flushed and does NOT expect a BREAK from us (the handle thread
+    // already sent it) — only the RESET in answer to the break-ack marker.
+    #[test]
+    fn drain_cancel_wire_drains_without_sending_a_break() {
+        const INFLIGHT_BODY: &[u8] = &[0xCA, 0xFE];
+        const ERROR_BODY: &[u8] = &[0x04, 0x01, 0x0d];
+        const FRESH_BODY: &[u8] = &[0x07, 0x05, 0x0c];
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            use std::io::Write as _;
+
+            // The drain-only path sends NO BREAK first (the handle thread did).
+            // Server flushes the in-flight response then the break-ack MARKER.
+            socket
+                .write_all(&data_packet(INFLIGHT_BODY, true))
+                .expect("write in-flight response");
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))
+                .expect("write break-ack marker");
+            // The drain answers the marker with a RESET.
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_RESET,
+                "drain must answer the break-ack marker with a RESET"
+            );
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_RESET))
+                .expect("write reset-confirm marker");
+            socket
+                .write_all(&data_packet(ERROR_BODY, true))
+                .expect("write trailing error packet");
+            socket
+                .write_all(&data_packet(FRESH_BODY, true))
+                .expect("write fresh response");
+            // No BREAK marker may ever arrive on this path.
+            socket
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("set short read timeout");
+            let mut extra = [0u8; 11];
+            if let Ok(()) = socket.read_exact(&mut extra) {
+                assert_ne!(
+                    extra[10], TNS_MARKER_TYPE_BREAK,
+                    "drain-only cancel must NOT send a BREAK marker"
+                );
+            }
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let next = runtime.block_on(async {
+            let cx = Cx::current().expect("ambient Cx");
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (mut read, write) = transport::plain_split(stream);
+            let write: SharedWriteHalf =
+                Arc::new(AsyncMutex::with_name("drain_cancel_test_write", write));
+
+            drain_cancel_wire(&mut read, &cx, &write, Duration::from_secs(5))
+                .await
+                .expect("drain-only cancel must succeed and leave the stream clean");
+
+            read_data_response(&mut read, &cx, &write)
+                .await
+                .expect("next read after drain must decode cleanly")
+        });
+
+        assert_eq!(
+            next, FRESH_BODY,
+            "after drain-only cancel the reused connection must read the FRESH response"
+        );
+        server.join().expect("server thread joins");
+    }
+
+    // The Scope-based cancel-on-drop guard. While a cancellable round trip's
+    // read future is in flight the guard is ARMED; if the future is dropped
+    // (cancelled — e.g. by a `select!`/`timeout` racing it) before the read
+    // completes, the guard's Drop arms the shared `cancel_drain_pending` flag, so
+    // the NEXT operation on the connection breaks + drains the stranded server
+    // call rather than reassembling its leftover bytes as its own response. A
+    // CLEAN completion calls `disarm()` first, so a normal read never arms it.
+    #[test]
+    fn cancel_drain_guard_arms_pending_flag_only_when_dropped_in_flight() {
+        let pending = Arc::new(AtomicBool::new(false));
+
+        // A guard dropped WITHOUT disarming (the future was cancelled mid-read):
+        // the pending-drain flag is armed.
+        {
+            let _guard = CancelDrainGuard::arm(&pending);
+        }
+        assert!(
+            pending.load(Ordering::SeqCst),
+            "dropping an armed guard (cancelled in flight) must arm the drain flag"
+        );
+
+        // Reset, then a guard that DISARMS before drop (the read completed
+        // normally): the flag stays clear.
+        pending.store(false, Ordering::SeqCst);
+        {
+            let mut guard = CancelDrainGuard::arm(&pending);
+            guard.disarm();
+        }
+        assert!(
+            !pending.load(Ordering::SeqCst),
+            "a disarmed guard (clean completion) must NOT arm the drain flag"
+        );
+    }
+
+    #[test]
+    fn cancelled_error_is_not_connection_lost_but_is_transient() {
+        let cancelled = Error::Cancelled;
+        assert!(
+            !cancelled.is_connection_lost(),
+            "a user cancel leaves the session alive (ORA-01013 / DPY-4024 semantics)"
+        );
+        assert!(
+            cancelled.is_transient(),
+            "a cancelled operation may be retried on the same clean connection"
+        );
+        // ORA-01013 is the server-side code for user-requested cancel.
+        assert_eq!(cancelled.ora_code(), Some(1013));
     }
 }

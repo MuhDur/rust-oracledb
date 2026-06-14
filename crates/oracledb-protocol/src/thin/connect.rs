@@ -60,6 +60,9 @@ pub fn parse_accept_payload(payload: &[u8]) -> Result<AcceptInfo> {
         sdu,
         supports_fast_auth: has_u32_flag(flags2, TNS_ACCEPT_FLAG_FAST_AUTH),
         supports_oob_check: has_u32_flag(flags2, TNS_ACCEPT_FLAG_CHECK_OOB),
+        // Reference: Capabilities.supports_oob = protocol_options &
+        // TNS_GSO_CAN_RECV_ATTENTION (capabilities.pyx:121).
+        supports_oob: protocol_options & TNS_GSO_CAN_RECV_ATTENTION != 0,
         supports_end_of_response: protocol_version >= 319
             && has_u32_flag(flags2, TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE),
     })
