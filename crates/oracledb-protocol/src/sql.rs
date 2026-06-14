@@ -191,6 +191,70 @@ pub fn plsql_assignment_bind_names(statement: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// The complete set of PL/SQL output bind names: the assignment targets plus,
+/// for PL/SQL statements, the binds in `SELECT ... INTO` and `RETURNING ... INTO`
+/// clauses. For non-PL/SQL statements this is just `plsql_assignment_bind_names`
+/// (which is empty). Names are deduplicated case-insensitively in occurrence
+/// order, mirroring the reference's PL/SQL output-bind detection.
+pub fn plsql_output_bind_names(statement: &str) -> Result<Vec<String>> {
+    let mut names = plsql_assignment_bind_names(statement)?;
+    if !statement_is_plsql(statement) {
+        return Ok(names);
+    }
+    let lower = statement.to_ascii_lowercase();
+    let bytes = statement.as_bytes();
+    let mut into_search_start = 0;
+    while let Some(into_relative_pos) = lower[into_search_start..].find("into") {
+        let into_pos = into_search_start + into_relative_pos;
+        let mut bind_start = into_pos + "into".len();
+        while bytes
+            .get(bind_start)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            bind_start += 1;
+        }
+        if matches!(bytes.get(bind_start), Some(b':')) {
+            let tail = &lower[bind_start..];
+            let end = tail
+                .find(" from ")
+                .map(|relative| bind_start + relative)
+                .or_else(|| tail.find(';').map(|relative| bind_start + relative))
+                .unwrap_or(statement.len());
+            for name in scan_bind_names(&statement[bind_start..end])? {
+                if !names
+                    .iter()
+                    .any(|existing| bind_names_equal(existing, &name))
+                {
+                    names.push(name);
+                }
+            }
+        }
+        into_search_start = bind_start.saturating_add(1);
+    }
+    let mut search_start = 0;
+    while let Some(returning_relative_pos) = lower[search_start..].find("returning") {
+        let returning_pos = search_start + returning_relative_pos;
+        let Some(into_relative_pos) = lower[returning_pos..].find("into") else {
+            break;
+        };
+        let into_pos = returning_pos + into_relative_pos + "into".len();
+        let end = statement[into_pos..]
+            .find(';')
+            .map(|relative| into_pos + relative)
+            .unwrap_or(statement.len());
+        for name in scan_bind_names(&statement[into_pos..end])? {
+            if !names
+                .iter()
+                .any(|existing| bind_names_equal(existing, &name))
+            {
+                names.push(name);
+            }
+        }
+        search_start = end;
+    }
+    Ok(names)
+}
+
 pub fn statement_is_plsql(statement: &str) -> bool {
     statement
         .trim_start()
@@ -680,6 +744,43 @@ mod tests {
         let names = plsql_assignment_bind_names("begin :out := func(:in_value); :OUT := 1; end;")
             .expect("assignment bind names");
         assert_eq!(names, vec!["out".to_string()]);
+    }
+
+    #[test]
+    fn plsql_output_binds_combine_assignment_into_and_returning_into() {
+        // Non-PL/SQL: identical to plsql_assignment_bind_names (empty here).
+        assert!(plsql_output_bind_names("select :a from dual")
+            .expect("scan")
+            .is_empty());
+
+        // PL/SQL assignment binds are included.
+        assert_eq!(
+            plsql_output_bind_names("begin :out := func(:in_value); end;").expect("scan"),
+            vec!["out".to_string()]
+        );
+
+        // PL/SQL SELECT ... INTO binds are appended (and deduplicated).
+        assert_eq!(
+            plsql_output_bind_names("begin select c1, c2 into :a, :b from t; end;").expect("scan"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+
+        // RETURNING ... INTO inside PL/SQL contributes its INTO binds.
+        assert_eq!(
+            plsql_output_bind_names("begin update t set c = 1 returning id into :rid; end;")
+                .expect("scan"),
+            vec!["rid".to_string()]
+        );
+
+        // Assignment + INTO + RETURNING-INTO together, deduplicated case-insensitively.
+        assert_eq!(
+            plsql_output_bind_names(
+                "begin :out := 1; select c into :a from t; \
+                 update t set c = 2 returning id into :A; end;"
+            )
+            .expect("scan"),
+            vec!["out".to_string(), "a".to_string()]
+        );
     }
 
     #[test]
