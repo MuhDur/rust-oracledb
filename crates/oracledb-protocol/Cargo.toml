@@ -31,6 +31,7 @@ der = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
 
 [dev-dependencies]
+proptest.workspace = true
 serde_json.workspace = true
 x509-cert.workspace = true
 pkcs8 = "0.10"

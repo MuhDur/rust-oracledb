@@ -45,6 +45,10 @@ asupersync = "0.3.4"
 hex = "0.4"
 md-5 = "0.10"
 pbkdf2 = "0.12"
+# Property-based testing for the sans-io codecs (round-trip / metamorphic /
+# boundary suites in crates/oracledb-protocol). Dev-dependency only; gated
+# behind nothing — plain `cargo test`.
+proptest = "1.11"
 pyo3 = { version = "0.28.3", features = ["extension-module", "abi3-py310", "experimental-async"] }
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
