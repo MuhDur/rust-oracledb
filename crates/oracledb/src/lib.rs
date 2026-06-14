@@ -331,6 +331,16 @@ pub enum Error {
     MissingSessionField(&'static str),
     #[error("call timeout of {0} ms exceeded")]
     CallTimeout(u32),
+    /// The connection was closed because recovery from a prior failure could
+    /// not complete: most commonly a **second** timeout while draining the
+    /// server's response after a [`Self::CallTimeout`] break (mirroring the
+    /// reference `ERR_CONNECTION_CLOSED` raised when the post-break
+    /// `_receive_packet` itself times out, protocol.pyx:454-458). Unlike
+    /// [`Self::CallTimeout`], the wire stream could not be left clean, so the
+    /// connection is dead and must be discarded — [`Self::is_connection_lost`]
+    /// is `true` for this variant. The payload is the human-readable reason.
+    #[error("DPY-4011: the database or network closed the connection: {0}")]
+    ConnectionClosed(String),
     /// A TCPS/TLS transport error (wallet load, handshake, or server-cert /
     /// DN-match failure).
     #[error("TLS/TCPS error: {0}")]
@@ -418,11 +428,22 @@ impl Error {
     /// and (if the operation was idempotent) retry. See
     /// [`CONNECTION_LOST_ORA_CODES`] for the exact codes.
     ///
-    /// Raw I/O errors ([`Error::Io`]) and call timeouts ([`Error::CallTimeout`])
-    /// also count as connection-lost: the transport is no longer usable.
+    /// Raw I/O errors ([`Error::Io`]) and the recovery-failure
+    /// [`Error::ConnectionClosed`] also count as connection-lost: the transport
+    /// is no longer usable.
+    ///
+    /// A plain [`Error::CallTimeout`] is deliberately **not** connection-lost.
+    /// On a call timeout the driver sends a BREAK, then drains the server's
+    /// in-flight response and the RESET handshake, leaving the wire stream
+    /// clean and the connection reusable — exactly as python-oracledb does for
+    /// `DPY-4024` (`ERR_CALL_TIMEOUT_EXCEEDED`), which, unlike `DPY-4011`
+    /// (`ERR_CONNECTION_CLOSED`), does **not** set `is_session_dead`
+    /// (errors.py:124-125). The connection survives; retry on the same one. Only
+    /// when that drain itself fails (a *second* timeout) does the driver give up
+    /// and surface [`Error::ConnectionClosed`], which *is* connection-lost.
     pub fn is_connection_lost(&self) -> bool {
         match self {
-            Error::Io(_) | Error::CallTimeout(_) => true,
+            Error::Io(_) | Error::ConnectionClosed(_) => true,
             _ => self
                 .ora_code()
                 .is_some_and(|code| CONNECTION_LOST_ORA_CODES.contains(&(code as u32))),
@@ -431,14 +452,20 @@ impl Error {
 
     /// Whether this error is *transient*: the operation failed for a reason
     /// expected to clear on its own (lock contention, deadlock victim, listener
-    /// hand-off congestion, resource-manager throttle), so the same call may be
-    /// retried on the same connection after a short back-off. See
-    /// [`TRANSIENT_ORA_CODES`] for the exact codes. Does **not** include
-    /// connection-lost codes (those need a reconnect first — use
+    /// hand-off congestion, resource-manager throttle, or a call timeout), so
+    /// the same call may be retried on the **same** connection after a short
+    /// back-off. See [`TRANSIENT_ORA_CODES`] for the exact codes. Does **not**
+    /// include connection-lost codes (those need a reconnect first — use
     /// [`Self::is_connection_lost`]).
+    ///
+    /// [`Error::CallTimeout`] is transient: after the driver drains the wire the
+    /// connection is clean and reusable, so re-running the (idempotent) call on
+    /// the same connection — e.g. with a longer timeout — is the natural retry.
     pub fn is_transient(&self) -> bool {
-        self.ora_code()
-            .is_some_and(|code| TRANSIENT_ORA_CODES.contains(&(code as u32)))
+        matches!(self, Error::CallTimeout(_))
+            || self
+                .ora_code()
+                .is_some_and(|code| TRANSIENT_ORA_CODES.contains(&(code as u32)))
     }
 
     /// Whether retrying is reasonable at all: the union of [`Self::is_transient`]
@@ -1337,7 +1364,10 @@ impl Connection {
         .await
         {
             Ok(result) => result,
-            Err(_) => Err(Error::CallTimeout(timeout_ms)),
+            // Previously this returned bare CallTimeout without even sending a
+            // BREAK, leaving the half-sent ping round trip on the wire to poison
+            // the next reuse. Break + drain like every other timeout path.
+            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -2269,10 +2299,7 @@ impl Connection {
         .await
         {
             Ok(result) => result,
-            Err(_) => {
-                let _ = send_marker_shared(cx, &self.write, TNS_MARKER_TYPE_BREAK).await;
-                Err(Error::CallTimeout(timeout_ms))
-            }
+            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -2725,10 +2752,7 @@ impl Connection {
         .await
         {
             Ok(result) => result,
-            Err(_) => {
-                let _ = send_marker_shared(cx, &self.write, TNS_MARKER_TYPE_BREAK).await;
-                Err(Error::CallTimeout(timeout_ms))
-            }
+            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -2753,10 +2777,7 @@ impl Connection {
         .await
         {
             Ok(result) => result,
-            Err(_) => {
-                let _ = send_marker_shared(cx, &self.write, TNS_MARKER_TYPE_BREAK).await;
-                Err(Error::CallTimeout(timeout_ms))
-            }
+            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -2781,10 +2802,7 @@ impl Connection {
         .await
         {
             Ok(result) => result,
-            Err(_) => {
-                let _ = send_marker_shared(cx, &self.write, TNS_MARKER_TYPE_BREAK).await;
-                Err(Error::CallTimeout(timeout_ms))
-            }
+            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -2807,10 +2825,7 @@ impl Connection {
         .await
         {
             Ok(result) => result,
-            Err(_) => {
-                let _ = send_marker_shared(cx, &self.write, TNS_MARKER_TYPE_BREAK).await;
-                Err(Error::CallTimeout(timeout_ms))
-            }
+            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -2833,10 +2848,7 @@ impl Connection {
         .await
         {
             Ok(result) => result,
-            Err(_) => {
-                let _ = send_marker_shared(cx, &self.write, TNS_MARKER_TYPE_BREAK).await;
-                Err(Error::CallTimeout(timeout_ms))
-            }
+            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -2858,10 +2870,7 @@ impl Connection {
         .await
         {
             Ok(result) => result,
-            Err(_) => {
-                let _ = send_marker_shared(cx, &self.write, TNS_MARKER_TYPE_BREAK).await;
-                Err(Error::CallTimeout(timeout_ms))
-            }
+            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -2882,10 +2891,7 @@ impl Connection {
         .await
         {
             Ok(result) => result,
-            Err(_) => {
-                let _ = send_marker_shared(cx, &self.write, TNS_MARKER_TYPE_BREAK).await;
-                Err(Error::CallTimeout(timeout_ms))
-            }
+            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -3045,6 +3051,50 @@ impl Connection {
             state.next_batch();
         }
         Ok(())
+    }
+
+    /// On a call timeout, send a BREAK and drain the server's in-flight
+    /// response so the wire stream is left clean and the connection stays
+    /// reusable — the parity-faithful recovery python-oracledb performs before
+    /// raising `DPY-4024` (`_break_external` + `_receive_packet`/`_reset`,
+    /// protocol.pyx:449-451). Delegates to [`break_and_drain_wire`].
+    ///
+    /// `Ok(())` means the drain succeeded and the connection is usable; the
+    /// caller then returns [`Error::CallTimeout`]. If the drain fails (a second
+    /// timeout or a wire error), the connection is marked [`Self::dead`] and the
+    /// returned [`Error::ConnectionClosed`] is propagated instead — mirroring
+    /// the reference's disconnect-on-second-timeout (protocol.pyx:454-458).
+    async fn break_and_drain(&mut self, cx: &Cx) -> Result<()> {
+        match break_and_drain_wire(
+            &mut self.read,
+            cx,
+            &self.write,
+            BREAK_DRAIN_RECOVERY_TIMEOUT,
+        )
+        .await
+        {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                // Recovery failed: the stream is poisoned, the connection is
+                // dead. Pools must discard it (see `is_dead` / `is_connection_lost`).
+                self.dead = true;
+                Err(err)
+            }
+        }
+    }
+
+    /// Common tail for every `*_call_timeout` arm: the in-flight operation hit
+    /// the user's `call_timeout`, so break + drain the wire and then surface the
+    /// right error. On a clean drain the connection survives and we return
+    /// [`Error::CallTimeout`] (`DPY-4024`); on a failed drain the connection is
+    /// dead and [`Error::ConnectionClosed`] (`DPY-4011`) is propagated. Always
+    /// returns `Err`, so it composes as the `Err(_)` branch of the timeout
+    /// `match`.
+    async fn recover_from_call_timeout<T>(&mut self, cx: &Cx, timeout_ms: u32) -> Result<T> {
+        match self.break_and_drain(cx).await {
+            Ok(()) => Err(Error::CallTimeout(timeout_ms)),
+            Err(closed) => Err(closed),
+        }
     }
 
     async fn drain_cancel_response(&mut self, cx: &Cx) -> Result<()> {
@@ -4480,6 +4530,126 @@ async fn read_data_response(
         .payload)
 }
 
+/// Upper bound on how long the post-break recovery drain may take before the
+/// driver gives up and declares the connection dead. Mirrors the reference's
+/// "second timeout while recovering" disconnect (protocol.pyx:454-458): the
+/// first timeout was the user's `call_timeout`; this guards the *recovery*
+/// read so a server that never answers the BREAK cannot hang the caller
+/// forever. Reuses the same 5 s ceiling as [`Connection::drain_cancel_response`].
+const BREAK_DRAIN_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Sends a BREAK marker and then **drains** the server's entire break response
+/// so the wire stream is left at a clean message boundary, exactly as
+/// python-oracledb does on a call timeout (`_break_external()` then
+/// `_receive_packet()` / `_reset()`, protocol.pyx:449-451, 507-557).
+///
+/// The break response is multi-stage and racy on the wire (confirmed by live
+/// trace against Oracle 23/26ai): when the server is mid-call it may flush the
+/// **in-flight response** of the timed-out call *first* — a complete DATA
+/// response carrying its own end-of-response flag — and only *then* send the
+/// break-acknowledge **MARKER**, the **RESET** handshake, and the **trailing
+/// error packet** (ORA-01013 "user requested cancel"). A naive
+/// `read_data_response` stops at the in-flight response's end-of-response and
+/// leaves the MARKER + ORA-01013 in the socket, where the *next* operation
+/// misreads them (it surfaces ORA-01013 / desyncs). The reference avoids this
+/// because its `_reset()` is what clears `_break_in_progress`, and it always
+/// runs `_reset()` (consuming the MARKER, the RESET marker, and the trailing
+/// error packet) before the connection is considered recovered.
+///
+/// So this drain does NOT stop at the first end-of-response: it discards any
+/// in-flight DATA responses until it meets the break-acknowledge MARKER, runs
+/// the RESET dance via [`reset_after_marker`] (send RESET, discard packets until
+/// the server RESET marker), and then consumes the trailing error response to
+/// its end-of-response boundary. Everything read here is discarded — it is the
+/// dead remains of the cancelled call, not a result for any caller.
+///
+/// On success (`Ok(())`) the stream is clean and the connection is reusable. If
+/// the drain errors or its bounded *secondary* timeout fires, the wire could not
+/// be left clean, so the connection must be discarded — the error is surfaced as
+/// [`Error::ConnectionClosed`], which is [`Error::is_connection_lost`].
+async fn break_and_drain_wire(
+    read: &mut OracleReadHalf,
+    cx: &Cx,
+    write: &SharedWriteHalf,
+    recovery_timeout: Duration,
+) -> Result<()> {
+    // 1) Send the BREAK marker (reference `_break_external`).
+    send_marker_shared(cx, write, TNS_MARKER_TYPE_BREAK)
+        .await
+        .map_err(|err| {
+            Error::ConnectionClosed(format!(
+                "failed to send break marker on call timeout: {err}"
+            ))
+        })?;
+    // 2) Drain the whole break response under a bounded secondary timeout.
+    match time::timeout(
+        time::wall_now(),
+        recovery_timeout,
+        drain_break_response(read, cx, write),
+    )
+    .await
+    {
+        // Drained to a clean boundary: connection stays usable.
+        Ok(Ok(())) => Ok(()),
+        // The recovery read errored (socket reset, decode failure): the stream
+        // is poisoned and cannot be trusted; the connection is dead.
+        Ok(Err(err)) => Err(Error::ConnectionClosed(format!(
+            "wire error while recovering from call timeout: {err}"
+        ))),
+        // A SECOND timeout while recovering — the reference disconnects here and
+        // raises ERR_CONNECTION_CLOSED (protocol.pyx:454-458).
+        Err(_) => Err(Error::ConnectionClosed(
+            "socket timed out while recovering from previous call timeout".to_string(),
+        )),
+    }
+}
+
+/// Reads and discards the full server response to a BREAK: any in-flight DATA
+/// response(s) of the cancelled call, then the break-acknowledge MARKER, the
+/// RESET handshake, and the trailing error packet — leaving the reader at a
+/// clean boundary. See [`break_and_drain_wire`] for why stopping at the first
+/// end-of-response is insufficient.
+async fn drain_break_response(
+    read: &mut OracleReadHalf,
+    cx: &Cx,
+    write: &SharedWriteHalf,
+) -> Result<()> {
+    // Phase A: discard whole DATA responses until the break-acknowledge MARKER.
+    // The server flushes the cancelled call's in-flight response first; each is
+    // a complete DATA response (its own end-of-response) that we drop on the
+    // floor. The MARKER is what drives the RESET handshake.
+    let initial_marker = loop {
+        let packet = read_packet(read, PacketLengthWidth::Large32).await?;
+        match packet.packet_type {
+            TNS_PACKET_TYPE_MARKER => break packet,
+            TNS_PACKET_TYPE_DATA => {
+                trace_connect_bytes("BREAK drain: discarded in-flight packet", &packet.payload);
+                continue;
+            }
+            other => {
+                return Err(oracledb_protocol::ProtocolError::UnknownMessageType {
+                    message_type: other,
+                    position: 4,
+                }
+                .into())
+            }
+        }
+    };
+
+    // Phase B: run the RESET dance (send RESET, discard packets until the server
+    // RESET marker). `reset_after_marker` returns the first non-marker packet
+    // after the RESET confirmation, if any — that is the head of the trailing
+    // error response (ORA-01013).
+    let pending = reset_after_marker(read, cx, write, &initial_marker).await?;
+
+    // Phase C: consume the trailing error response to its end-of-response
+    // boundary and discard it. Reuses the same boundary loop the normal read
+    // path uses, seeded with the packet `reset_after_marker` already pulled.
+    let trailing = read_data_response_boundary_from(read, cx, write, pending).await?;
+    trace_connect_bytes("BREAK drain: trailing error response", &trailing.payload);
+    Ok(())
+}
+
 async fn read_data_response_flushing_out_binds(
     read: &mut OracleReadHalf,
     cx: &Cx,
@@ -4548,8 +4718,32 @@ async fn read_data_response_boundary(
     write: &SharedWriteHalf,
     in_pipeline: bool,
 ) -> Result<DataResponse> {
+    read_data_response_boundary_seeded(read, cx, write, in_pipeline, None).await
+}
+
+/// Like [`read_data_response_boundary`] but seeds the reassembly loop with an
+/// already-read `seed` packet (e.g. the trailing packet `reset_after_marker`
+/// pulled past a RESET marker) before reading more from the wire. Used by the
+/// break-drain path to consume the trailing error response. Always runs the
+/// non-pipeline (reset-handling) variant.
+async fn read_data_response_boundary_from(
+    read: &mut OracleReadHalf,
+    cx: &Cx,
+    write: &SharedWriteHalf,
+    seed: Option<IncomingPacket>,
+) -> Result<DataResponse> {
+    read_data_response_boundary_seeded(read, cx, write, false, seed).await
+}
+
+async fn read_data_response_boundary_seeded(
+    read: &mut OracleReadHalf,
+    cx: &Cx,
+    write: &SharedWriteHalf,
+    in_pipeline: bool,
+    seed: Option<IncomingPacket>,
+) -> Result<DataResponse> {
     let mut response = Vec::new();
-    let mut pending_packet = None;
+    let mut pending_packet = seed;
     loop {
         let packet = match pending_packet.take() {
             Some(packet) => packet,
@@ -4869,14 +5063,47 @@ mod tests {
                 "ORA-{code:05} is not a transient (retry-in-place) code"
             );
         }
-        // raw I/O and call timeouts also count as the transport being gone
+        // raw I/O counts as the transport being gone
         let io = Error::Io(std::io::Error::new(
             std::io::ErrorKind::ConnectionReset,
             "reset",
         ));
         assert!(io.is_connection_lost());
         assert!(io.is_retryable());
-        assert!(Error::CallTimeout(1000).is_connection_lost());
+
+        // A plain call timeout is NOT connection-lost: on a timeout the driver
+        // breaks + drains the wire and the connection stays reusable, mirroring
+        // python-oracledb's DPY-4024 (ERR_CALL_TIMEOUT_EXCEEDED) which — unlike
+        // DPY-4011 — does not set is_session_dead (errors.py:124-125). It is
+        // transient (retry in place) and therefore retryable.
+        let timeout = Error::CallTimeout(1000);
+        assert!(
+            !timeout.is_connection_lost(),
+            "a call timeout leaves the connection usable after the drain"
+        );
+        assert!(
+            timeout.is_transient(),
+            "a call timeout is a retry-in-place (transient) condition"
+        );
+        assert!(
+            timeout.is_retryable(),
+            "transient implies retryable on the same connection"
+        );
+
+        // ConnectionClosed (raised only when the post-timeout drain itself fails
+        // — a SECOND timeout, the reference's disconnect path) IS connection-lost:
+        // the wire could not be left clean, so the connection must be discarded.
+        let recovery_failed =
+            Error::ConnectionClosed("socket timed out while recovering".to_string());
+        assert!(
+            recovery_failed.is_connection_lost(),
+            "a failed timeout-recovery drain marks the connection lost"
+        );
+        assert!(recovery_failed.is_retryable(), "reconnect, then retry");
+        assert!(
+            !recovery_failed.is_transient(),
+            "ConnectionClosed needs a reconnect first, so it is not retry-in-place"
+        );
     }
 
     // Regression (bead rust-oracledb-n2s): the multi-packet wide-row response
@@ -5064,5 +5291,207 @@ mod tests {
                 TNS_MARKER_TYPE_BREAK
             ]
         );
+    }
+
+    // ---- break_and_drain regression (bead rust-oracledb-2vx) -------------------
+    //
+    // On a call timeout the driver must send a BREAK and then DRAIN the server's
+    // in-flight response + RESET handshake + trailing error packet, leaving the
+    // wire at a clean boundary so the NEXT operation on the reused connection
+    // reads its own response — not the stale bytes left behind by the timed-out
+    // call. The reference does this via `_break_external()` + `_receive_packet()`
+    // (-> `_reset()` on the MARKER), protocol.pyx:449-451, 507-557.
+
+    const EOR_FLAG: u16 = oracledb_protocol::thin::TNS_DATA_FLAGS_END_OF_RESPONSE;
+
+    /// A DATA packet carrying `message` after its 2-byte data flags. When
+    /// `end_of_response` is set it carries the END_OF_RESPONSE data flag, so the
+    /// reassembler treats it as the final packet of a response.
+    fn data_packet(message: &[u8], end_of_response: bool) -> Vec<u8> {
+        let flags = if end_of_response { EOR_FLAG } else { 0 };
+        encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(flags),
+            message,
+            PacketLengthWidth::Large32,
+        )
+        .expect("encode data packet")
+    }
+
+    /// A MARKER packet of the given marker type (`[1, 0, marker_type]` payload,
+    /// matching `send_marker`).
+    fn marker_packet(marker_type: u8) -> Vec<u8> {
+        encode_packet(
+            TNS_PACKET_TYPE_MARKER,
+            0,
+            None,
+            &[1, 0, marker_type],
+            PacketLengthWidth::Large32,
+        )
+        .expect("encode marker packet")
+    }
+
+    /// Reads exactly one 11-byte TNS marker packet from `socket` and returns its
+    /// marker type byte (payload byte 2). Used by the server side of the seam to
+    /// observe the BREAK and RESET markers the client emits.
+    fn read_marker_type(socket: &mut std::net::TcpStream) -> u8 {
+        let mut packet = [0u8; 11];
+        socket.read_exact(&mut packet).expect("read marker packet");
+        assert_eq!(
+            packet[4], TNS_PACKET_TYPE_MARKER,
+            "expected a MARKER packet"
+        );
+        packet[10]
+    }
+
+    // THE FIX: break_and_drain_wire sends BREAK, then consumes the ENTIRE
+    // post-timeout sequence so the stream is left at a clean boundary. The
+    // sequence here matches the live wire trace against Oracle 23/26ai: the
+    // server flushes the cancelled call's IN-FLIGHT RESPONSE *first* (a complete
+    // DATA response carrying its own end-of-response flag) and only THEN sends
+    // the break-ack MARKER, the RESET handshake, and the trailing ORA-01013
+    // error packet. A drain that stopped at the in-flight response's
+    // end-of-response would leave the MARKER + error in the socket; the fix
+    // discards the in-flight response(s), runs the RESET dance, and consumes the
+    // trailing error too. A FOLLOWING read_data_response then decodes the NEXT
+    // response correctly rather than the stale leftovers.
+    #[test]
+    fn break_and_drain_consumes_inflight_response_and_reset_then_next_read_is_fresh() {
+        // The cancelled call's in-flight response (carries end-of-response): the
+        // stale bytes that must be discarded, NOT mistaken for the next result.
+        const INFLIGHT_BODY: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+        // The trailing error packet (ORA-01013-shaped; arbitrary payload here).
+        const ERROR_BODY: &[u8] = &[0x04, 0x01, 0x02];
+        // The genuine response to the NEXT operation on the reused connection.
+        const FRESH_BODY: &[u8] = &[0x11, 0x22, 0x33, 0x44, 0x55];
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            use std::io::Write as _;
+
+            // 1) Client sends BREAK.
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_BREAK,
+                "client must send a BREAK marker first"
+            );
+            // 2) Server flushes the cancelled call's in-flight response FIRST,
+            //    with its OWN end-of-response flag (the exact race that made a
+            //    stop-at-first-boundary drain leak the MARKER + error).
+            socket
+                .write_all(&data_packet(INFLIGHT_BODY, true))
+                .expect("write in-flight response");
+            // 3) Server's break-ack MARKER -> drives the client's RESET dance.
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))
+                .expect("write break-ack marker");
+            // 4) Client replies with RESET; server confirms with a RESET marker.
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_RESET,
+                "client must answer the marker with a RESET"
+            );
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_RESET))
+                .expect("write reset-confirm marker");
+            // 5) Trailing error packet (ORA-01013) that ends the break response.
+            socket
+                .write_all(&data_packet(ERROR_BODY, true))
+                .expect("write trailing error packet");
+            // 6) The FRESH response to the next operation on the reused conn.
+            socket
+                .write_all(&data_packet(FRESH_BODY, true))
+                .expect("write fresh response");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let next = runtime.block_on(async {
+            let cx = Cx::current().expect("ambient Cx");
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (mut read, write) = transport::plain_split(stream);
+            let write: SharedWriteHalf = Arc::new(AsyncMutex::with_name("drain_test_write", write));
+
+            // The fix: break + drain leaves the stream clean.
+            break_and_drain_wire(&mut read, &cx, &write, Duration::from_secs(5))
+                .await
+                .expect("drain must succeed and leave the stream clean");
+
+            // The next operation reads its OWN response, not the stale leftovers.
+            read_data_response(&mut read, &cx, &write)
+                .await
+                .expect("next read after drain must decode cleanly")
+        });
+
+        assert_eq!(
+            next, FRESH_BODY,
+            "after break_and_drain the reused connection must read the FRESH response, \
+             not the stale in-flight response ({INFLIGHT_BODY:?}) or error body ({ERROR_BODY:?})"
+        );
+        server.join().expect("server thread joins");
+    }
+
+    // THE BUG (pre-fix contrast): if the timeout path sends ONLY a BREAK and
+    // does NOT drain, the in-flight response tail is still sitting in the socket.
+    // The next read_data_response then reassembles those STALE bytes as if they
+    // were the next operation's response — the wire is desynced. This test pins
+    // that broken behavior to prove the regression test above is meaningful: it
+    // asserts that without the drain the next read returns the stale tail.
+    #[test]
+    fn break_without_drain_leaves_stale_bytes_for_next_read() {
+        const STALE_BODY: &[u8] = &[0x53, 0x54, 0x41, 0x4c, 0x45]; // "STALE"
+        const FRESH_BODY: &[u8] = &[0x11, 0x22, 0x33];
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            use std::io::Write as _;
+            // Client sends BREAK (the only thing the OLD code did).
+            assert_eq!(read_marker_type(&mut socket), TNS_MARKER_TYPE_BREAK);
+            // The server's in-flight response (end-of-response) was already on
+            // its way when the break fired: it lands in the socket unconsumed.
+            socket
+                .write_all(&data_packet(STALE_BODY, true))
+                .expect("write stale in-flight response");
+            // ... and then the fresh response the caller actually wanted.
+            socket
+                .write_all(&data_packet(FRESH_BODY, true))
+                .expect("write fresh response");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let first_read = runtime.block_on(async {
+            let cx = Cx::current().expect("ambient Cx");
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (mut read, write) = transport::plain_split(stream);
+            let write: SharedWriteHalf =
+                Arc::new(AsyncMutex::with_name("nodrain_test_write", write));
+
+            // Reproduce the OLD timeout path: send BREAK, do NOT drain.
+            send_marker_shared(&cx, &write, TNS_MARKER_TYPE_BREAK)
+                .await
+                .expect("send break");
+
+            // The very next read picks up the STALE in-flight response.
+            read_data_response(&mut read, &cx, &write)
+                .await
+                .expect("read after bare break")
+        });
+
+        assert_eq!(
+            first_read, STALE_BODY,
+            "without the drain, the next read misframes onto the stale in-flight bytes — \
+             this is the bug break_and_drain fixes"
+        );
+        server.join().expect("server thread joins");
     }
 }
