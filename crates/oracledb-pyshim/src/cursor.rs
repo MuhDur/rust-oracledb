@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use oracledb::protocol::sql;
 use oracledb::protocol::thin::{
     check_fetch_conversion, public_dbtype_name_from_column_metadata, BatchServerError, BindValue,
     ColumnMetadata, ExecuteOptions, QueryResult, QueryValue, CS_FORM_IMPLICIT, ORA_TYPE_NUM_BLOB,
@@ -1022,7 +1023,7 @@ impl ThinCursorImpl {
         self.cache_statement = cache_statement.unwrap_or(true);
         self.bind_names = if let Some(statement) = self.statement.as_deref() {
             validate_dml_returning_duplicate_binds(statement)?;
-            unique_sql_bind_names(statement)?
+            sql::unique_bind_names(statement).map_err(sql_parse_error)?
         } else {
             Vec::new()
         };
@@ -1074,7 +1075,7 @@ impl ThinCursorImpl {
         #[allow(clippy::needless_borrow)]
         // pre-existing lint at pre-split HEAD 978491a; not movement-induced
         validate_dml_returning_duplicate_binds(&statement)?;
-        self.bind_names = unique_sql_bind_names(statement)?;
+        self.bind_names = sql::unique_bind_names(statement).map_err(sql_parse_error)?;
         validate_parse_bind_names(statement)?;
         // reference sends a parse-only ExecuteMessage so queries are
         // described and the cursor exposes fetch metadata
@@ -1235,7 +1236,7 @@ impl ThinCursorImpl {
             )?;
             Ok::<_, PyErr>((effective_statement, bind_values, bind_vars))
         })?;
-        self.bind_names = unique_sql_bind_names(&effective_statement)?;
+        self.bind_names = sql::unique_bind_names(&effective_statement).map_err(sql_parse_error)?;
         self.bind_values = bind_values;
         self.bind_vars = bind_vars;
         self.statement = Some(effective_statement);
@@ -1273,7 +1274,9 @@ impl ThinCursorImpl {
                     .statement
                     .as_deref()
                     .ok_or_else(|| raise_oracledb_driver_error("ERR_NO_STATEMENT"))?;
-                if !unique_sql_bind_names(statement)?.is_empty()
+                if !sql::unique_bind_names(statement)
+                    .map_err(sql_parse_error)?
+                    .is_empty()
                     && self.named_input_sizes.is_empty()
                 {
                     if num_iters > self.many_bind_rows.len() {
@@ -1294,7 +1297,7 @@ impl ThinCursorImpl {
             .ok_or_else(|| raise_oracledb_driver_error("ERR_NO_STATEMENT"))?
             .to_string();
         validate_dml_returning_duplicate_binds(&statement)?;
-        self.bind_names = unique_sql_bind_names(&statement)?;
+        self.bind_names = sql::unique_bind_names(&statement).map_err(sql_parse_error)?;
         // DataFrame / pyarrow.Table ingestion (params implement the Arrow
         // PyCapsule stream interface). Materialize the Arrow data into native
         // Python row tuples and feed the existing executemany bind path so the

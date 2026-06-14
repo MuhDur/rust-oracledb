@@ -75,7 +75,10 @@ pub(crate) fn extract_bind_values(
         if has_positional_input_sizes {
             let row_values = positional_bind_items(value)?;
             if row_values.is_empty() {
-                if let Some(name) = unique_sql_bind_names(statement)?.first() {
+                if let Some(name) = sql::unique_bind_names(statement)
+                    .map_err(sql_parse_error)?
+                    .first()
+                {
                     return Err(dpy_bind_error(
                         "DPY-4010",
                         format!(
@@ -253,7 +256,7 @@ pub(crate) fn rewrite_object_bind_dict(
     effective_dict: &Bound<'_, PyDict>,
 ) -> PyResult<(String, bool)> {
     let function_return_name = plsql_function_return_bind_name(statement);
-    let dml_return_names = statement_return_bind_names(statement)?;
+    let dml_return_names = sql::returning_bind_names(statement).map_err(sql_parse_error)?;
     let mut bind_entries = Vec::new();
     for (key, value) in effective_dict.iter() {
         bind_entries.push((key.extract::<String>()?, value.clone().unbind()));
@@ -294,7 +297,7 @@ pub(crate) fn positional_bind_dict_if_complete<'py>(
     value: &Bound<'py, PyAny>,
 ) -> PyResult<Option<Bound<'py, PyDict>>> {
     let row_values = positional_bind_items(value)?;
-    let names = unique_sql_bind_names(statement)?;
+    let names = sql::unique_bind_names(statement).map_err(sql_parse_error)?;
     if row_values.len() != names.len() {
         return Ok(None);
     }
@@ -503,9 +506,9 @@ pub(crate) fn extract_positional_bind_values_for_execute(
     // plain SQL binds each placeholder occurrence; a repeated positional
     // placeholder consumes one supplied value per occurrence (reference
     // `_add_bind`). PL/SQL coalesces duplicates into a single bind.
-    let names = occurrence_sql_bind_names(statement)?;
-    let return_names = statement_return_bind_names(statement)?;
-    let plsql_output_names = statement_plsql_output_bind_names(statement)?;
+    let names = sql::bind_names_per_occurrence(statement).map_err(sql_parse_error)?;
+    let return_names = sql::returning_bind_names(statement).map_err(sql_parse_error)?;
+    let plsql_output_names = sql::plsql_output_bind_names(statement).map_err(sql_parse_error)?;
     let input_count = names
         .iter()
         .filter(|name| {
@@ -657,9 +660,9 @@ pub(crate) fn extract_positional_bind_values_with_input_sizes(
     }
     let row_values = positional_bind_items(value)?;
     // plain SQL binds each placeholder occurrence (reference `_add_bind`)
-    let names = occurrence_sql_bind_names(statement)?;
-    let return_names = statement_return_bind_names(statement)?;
-    let plsql_output_names = statement_plsql_output_bind_names(statement)?;
+    let names = sql::bind_names_per_occurrence(statement).map_err(sql_parse_error)?;
+    let return_names = sql::returning_bind_names(statement).map_err(sql_parse_error)?;
+    let plsql_output_names = sql::plsql_output_bind_names(statement).map_err(sql_parse_error)?;
     let input_count = names
         .iter()
         .filter(|name| {
@@ -751,9 +754,9 @@ pub(crate) fn extract_named_bind_values(
     previous_bind_vars: &[Py<ThinVar>],
     record_input_size_values: bool,
 ) -> PyResult<Vec<BindValue>> {
-    let names = unique_sql_bind_names(statement)?;
-    let return_names = statement_return_bind_names(statement)?;
-    let plsql_output_names = statement_plsql_output_bind_names(statement)?;
+    let names = sql::unique_bind_names(statement).map_err(sql_parse_error)?;
+    let return_names = sql::returning_bind_names(statement).map_err(sql_parse_error)?;
+    let plsql_output_names = sql::plsql_output_bind_names(statement).map_err(sql_parse_error)?;
     if let Some(parameters) = parameters {
         for (key, _) in parameters.iter() {
             let key = key.extract::<String>()?;
@@ -852,7 +855,10 @@ pub(crate) fn extract_bind_rows(
         return Ok(Vec::new());
     }
     if let Ok(num_iters) = parameters.extract::<usize>() {
-        if unique_sql_bind_names(statement)?.is_empty() {
+        if sql::unique_bind_names(statement)
+            .map_err(sql_parse_error)?
+            .is_empty()
+        {
             return Ok(vec![Vec::new(); num_iters]);
         }
         if !named_input_sizes.is_empty() {
@@ -930,23 +936,9 @@ pub(crate) enum ExecutemanyRowStyle {
     Positional,
 }
 
-pub(crate) fn bind_value_is_output(value: &BindValue) -> bool {
-    matches!(
-        value,
-        BindValue::Output { .. } | BindValue::ReturnOutput { .. } | BindValue::ObjectOutput { .. }
-    )
-}
-
-// d49: migrate to oracledb (iterative PL/SQL executemany policy belongs on driver)
-pub(crate) fn bind_rows_need_iterative_plsql(
-    statement: &str,
-    bind_rows: &[Vec<BindValue>],
-) -> bool {
-    statement_is_plsql(statement)
-        && bind_rows
-            .iter()
-            .any(|row| row.iter().any(bind_value_is_output))
-}
+// The iterative-PL/SQL executemany policy lives on the driver crate now; the
+// shim calls it through this re-export so existing call sites resolve unchanged.
+pub(crate) use oracledb::bind_rows_need_iterative_plsql;
 
 pub(crate) fn clear_input_size_var_values(
     py: Python<'_>,
@@ -976,9 +968,9 @@ pub(crate) fn extract_input_size_bind_values(
     statement: &str,
     named_input_sizes: &[(String, Py<PyAny>)],
 ) -> PyResult<Vec<BindValue>> {
-    let names = unique_sql_bind_names(statement)?;
-    let return_names = statement_return_bind_names(statement)?;
-    let plsql_output_names = statement_plsql_output_bind_names(statement)?;
+    let names = sql::unique_bind_names(statement).map_err(sql_parse_error)?;
+    let return_names = sql::returning_bind_names(statement).map_err(sql_parse_error)?;
+    let plsql_output_names = sql::plsql_output_bind_names(statement).map_err(sql_parse_error)?;
     names
         .iter()
         .enumerate()
@@ -1082,9 +1074,9 @@ pub(crate) fn extract_positional_bind_var_objects_for_execute(
 ) -> PyResult<Vec<Py<ThinVar>>> {
     let row_values = positional_bind_items(value)?;
     // plain SQL binds each placeholder occurrence (reference `_add_bind`)
-    let names = occurrence_sql_bind_names(statement)?;
-    let return_names = statement_return_bind_names(statement)?;
-    let plsql_output_names = statement_plsql_output_bind_names(statement)?;
+    let names = sql::bind_names_per_occurrence(statement).map_err(sql_parse_error)?;
+    let return_names = sql::returning_bind_names(statement).map_err(sql_parse_error)?;
+    let plsql_output_names = sql::plsql_output_bind_names(statement).map_err(sql_parse_error)?;
     let input_count = names
         .iter()
         .filter(|name| {
@@ -1160,9 +1152,9 @@ pub(crate) fn extract_named_bind_var_objects(
     previous_bind_vars: &[Py<ThinVar>],
 ) -> PyResult<Vec<Py<ThinVar>>> {
     let mut values = Vec::new();
-    let return_names = statement_return_bind_names(statement)?;
-    let plsql_output_names = statement_plsql_output_bind_names(statement)?;
-    for name in unique_sql_bind_names(statement)? {
+    let return_names = sql::returning_bind_names(statement).map_err(sql_parse_error)?;
+    let plsql_output_names = sql::plsql_output_bind_names(statement).map_err(sql_parse_error)?;
+    for name in sql::unique_bind_names(statement).map_err(sql_parse_error)? {
         let input_size_var = named_input_size_value(py, named_input_sizes, &name);
         let is_return_bind = return_names
             .iter()
@@ -1301,7 +1293,8 @@ pub(crate) fn extract_executemany_bind_var_objects(
             }
         }
     }
-    unique_sql_bind_names(statement)?
+    sql::unique_bind_names(statement)
+        .map_err(sql_parse_error)?
         .iter()
         .enumerate()
         .map(|(position, name)| {
@@ -1335,91 +1328,8 @@ pub(crate) fn get_named_bind_value<'py>(
     Ok(None)
 }
 
-// d49: migrate to oracledb-protocol (sql.rs statement analytics)
-pub(crate) fn unique_sql_bind_names(statement: &str) -> PyResult<Vec<String>> {
-    sql::unique_bind_names(statement).map_err(sql_parse_error)
-}
-
-/// One bind name per placeholder occurrence for plain SQL (duplicates counted),
-/// unique names for PL/SQL — the positional bind surface the reference builds
-/// in `_add_bind`. Used so a repeated positional placeholder (e.g. `:1` used in
-/// two columns) consumes one supplied value per occurrence.
-pub(crate) fn occurrence_sql_bind_names(statement: &str) -> PyResult<Vec<String>> {
-    sql::bind_names_per_occurrence(statement).map_err(sql_parse_error)
-}
-
 pub(crate) fn public_bind_name(name: &str) -> String {
     sql::public_bind_name(name)
-}
-
-pub(crate) fn statement_return_bind_names(statement: &str) -> PyResult<Vec<String>> {
-    sql::returning_bind_names(statement).map_err(sql_parse_error)
-}
-
-// d49: migrate to oracledb-protocol (sql.rs statement analytics)
-pub(crate) fn statement_plsql_assignment_bind_names(statement: &str) -> PyResult<Vec<String>> {
-    sql::plsql_assignment_bind_names(statement).map_err(sql_parse_error)
-}
-
-pub(crate) fn statement_plsql_output_bind_names(statement: &str) -> PyResult<Vec<String>> {
-    let mut names = statement_plsql_assignment_bind_names(statement)?;
-    if !statement_is_plsql(statement) {
-        return Ok(names);
-    }
-    let lower = statement.to_ascii_lowercase();
-    let bytes = statement.as_bytes();
-    let mut into_search_start = 0;
-    while let Some(into_relative_pos) = lower[into_search_start..].find("into") {
-        let into_pos = into_search_start + into_relative_pos;
-        let mut bind_start = into_pos + "into".len();
-        while bytes
-            .get(bind_start)
-            .is_some_and(|byte| byte.is_ascii_whitespace())
-        {
-            bind_start += 1;
-        }
-        if matches!(bytes.get(bind_start), Some(b':')) {
-            let tail = &lower[bind_start..];
-            let end = tail
-                .find(" from ")
-                .map(|relative| bind_start + relative)
-                .or_else(|| tail.find(';').map(|relative| bind_start + relative))
-                .unwrap_or(statement.len());
-            for name in
-                sql::scan_bind_names(&statement[bind_start..end]).map_err(sql_parse_error)?
-            {
-                if !names
-                    .iter()
-                    .any(|existing| bind_names_equal(existing, &name))
-                {
-                    names.push(name);
-                }
-            }
-        }
-        into_search_start = bind_start.saturating_add(1);
-    }
-    let mut search_start = 0;
-    while let Some(returning_relative_pos) = lower[search_start..].find("returning") {
-        let returning_pos = search_start + returning_relative_pos;
-        let Some(into_relative_pos) = lower[returning_pos..].find("into") else {
-            break;
-        };
-        let into_pos = returning_pos + into_relative_pos + "into".len();
-        let end = statement[into_pos..]
-            .find(';')
-            .map(|relative| into_pos + relative)
-            .unwrap_or(statement.len());
-        for name in sql::scan_bind_names(&statement[into_pos..end]).map_err(sql_parse_error)? {
-            if !names
-                .iter()
-                .any(|existing| bind_names_equal(existing, &name))
-            {
-                names.push(name);
-            }
-        }
-        search_start = end;
-    }
-    Ok(names)
 }
 
 pub(crate) fn statement_is_plsql(statement: &str) -> bool {
@@ -1436,7 +1346,7 @@ pub(crate) fn is_quoted_bind_name(name: &str) -> bool {
 
 // d49: migrate to oracledb-protocol (sql.rs statement analytics)
 pub(crate) fn validate_parse_bind_names(statement: &str) -> PyResult<()> {
-    for name in unique_sql_bind_names(statement)? {
+    for name in sql::unique_bind_names(statement).map_err(sql_parse_error)? {
         if !is_quoted_bind_name(&name) && name.eq_ignore_ascii_case("ROWID") {
             return Err(ora_database_error(
                 "ORA-01745: invalid host/bind variable name",
@@ -1454,8 +1364,9 @@ pub(crate) fn validate_dml_returning_duplicate_binds(statement: &str) -> PyResul
     let Some(returning_pos) = lower.find("returning") else {
         return Ok(());
     };
-    let input_names = unique_sql_bind_names(&statement[..returning_pos])?;
-    let return_names = statement_return_bind_names(statement)?;
+    let input_names =
+        sql::unique_bind_names(&statement[..returning_pos]).map_err(sql_parse_error)?;
+    let return_names = sql::returning_bind_names(statement).map_err(sql_parse_error)?;
     for return_name in return_names {
         if input_names
             .iter()

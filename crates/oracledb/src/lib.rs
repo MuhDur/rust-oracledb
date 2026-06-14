@@ -179,10 +179,13 @@ pub use oracledb_protocol as protocol;
 
 #[cfg(feature = "arrow")]
 pub mod arrow;
+pub mod cursor_logic;
 pub mod pool;
 mod sql_convert;
 pub mod tls;
 pub mod transport;
+
+pub use cursor_logic::bind_rows_need_iterative_plsql;
 
 pub use sql_convert::{
     ConversionError, FromRow, FromSql, IntoBinds, QueryResultExt, ToSql, TypedRow,
