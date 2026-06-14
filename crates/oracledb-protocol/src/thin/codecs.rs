@@ -387,7 +387,15 @@ pub(crate) fn encode_number_text(value: &str) -> Result<Vec<u8>> {
         if exponent_is_negative {
             exponent = -exponent;
         }
-        decimal_point_index += exponent;
+        // `exponent` is parsed as a full i32 (the sign is stripped before
+        // parsing, so it is in [0, i32::MAX] before negation) while the
+        // reference treats it as int16_t. A crafted bind such as
+        // "1"*160 + "e+2147483647" (within NUMBER_AS_TEXT_CHARS) would overflow
+        // this add — panicking in debug builds — so add checked and reject
+        // out-of-range like the reference's range check does (encoders.pyx).
+        decimal_point_index = decimal_point_index
+            .checked_add(exponent)
+            .ok_or(ProtocolError::TtcDecode("NUMBER bind out of range"))?;
     }
 
     if pos < value.len() {
@@ -559,5 +567,34 @@ pub(crate) fn decode_text_value(bytes: &[u8], csfrm: u8) -> Result<String> {
     } else {
         String::from_utf8(bytes.to_vec())
             .map_err(|_| ProtocolError::TtcDecode("invalid UTF-8 text"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression: bead rust-oracledb-jmc. A crafted BindValue::Number whose
+    // text packs many leading digits and a huge exponent (within the
+    // NUMBER_AS_TEXT_CHARS cap) used to overflow `decimal_point_index +=
+    // exponent`, panicking in debug builds. The reference rejects such values;
+    // we must too (clean Err, never a panic).
+    #[test]
+    fn number_text_huge_exponent_rejected_not_panicked() {
+        // 160 digits + "e+2147483647" == 172 bytes == NUMBER_AS_TEXT_CHARS.
+        let crafted = format!("{}e+2147483647", "1".repeat(160));
+        assert_eq!(crafted.len(), NUMBER_AS_TEXT_CHARS);
+        assert!(encode_number_text(&crafted).is_err());
+
+        // Negative-exponent counterpart must also reject without panicking.
+        let crafted_neg = format!("0.{}e-2147483647", "0".repeat(158));
+        assert!(encode_number_text(&crafted_neg).is_err());
+    }
+
+    #[test]
+    fn number_text_ordinary_values_still_encode() {
+        for ok in ["0", "1", "-1", "3.14159", "1e10", "-2.5e-3", "12345678901234567890"] {
+            assert!(encode_number_text(ok).is_ok(), "expected {ok} to encode");
+        }
     }
 }
