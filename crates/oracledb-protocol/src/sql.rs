@@ -191,11 +191,60 @@ pub fn plsql_assignment_bind_names(statement: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// Byte positions where `keyword` (ASCII lowercase) occurs as a standalone
+/// token OUTSIDE single/double-quoted strings, q-strings, and `--` / `/* */`
+/// comments — mirroring `scan_bind_names`' tokenizer so keyword detection is
+/// consistent with bind discovery and the reference (statement.pyx). Word-
+/// bounded: a leading/trailing ASCII alphanumeric or `_` disqualifies a match,
+/// so `pinto` / `into_x` never match `into`. A naive substring search would
+/// otherwise match `into` inside a literal like `'into :x'` and misclassify an
+/// ordinary bind as a PL/SQL output bind (bead rust-oracledb-l3z).
+fn keyword_token_positions(statement: &str, keyword: &str) -> Result<Vec<usize>> {
+    let bytes = statement.as_bytes();
+    let kw = keyword.as_bytes();
+    let klen = kw.len();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut positions = Vec::new();
+    let mut index = 0;
+    let mut last_ch = '\0';
+    while index < statement.len() {
+        let Some((ch, ch_len)) = char_at(statement, index) else {
+            break;
+        };
+        if ch == '\'' {
+            index = if matches!(last_ch, 'q' | 'Q') {
+                qstring_end(statement, index)?
+            } else {
+                quoted_string_end(statement, index, '\'')?
+            };
+        } else if ch == '"' {
+            index = quoted_string_end(statement, index, '"')?;
+        } else if ch == '-' {
+            index = single_line_comment_end(statement, index).unwrap_or(index + ch_len);
+        } else if ch == '/' {
+            index = multiple_line_comment_end(statement, index).unwrap_or(index + ch_len);
+        } else {
+            if index + klen <= bytes.len() && bytes[index..index + klen].eq_ignore_ascii_case(kw) {
+                let before_ok = index == 0 || !is_ident(bytes[index - 1]);
+                let after_ok = bytes.get(index + klen).is_none_or(|&b| !is_ident(b));
+                if before_ok && after_ok {
+                    positions.push(index);
+                }
+            }
+            index += ch_len;
+        }
+        last_ch = ch;
+    }
+    Ok(positions)
+}
+
 /// The complete set of PL/SQL output bind names: the assignment targets plus,
 /// for PL/SQL statements, the binds in `SELECT ... INTO` and `RETURNING ... INTO`
 /// clauses. For non-PL/SQL statements this is just `plsql_assignment_bind_names`
 /// (which is empty). Names are deduplicated case-insensitively in occurrence
-/// order, mirroring the reference's PL/SQL output-bind detection.
+/// order, mirroring the reference's PL/SQL output-bind detection. The INTO /
+/// RETURNING keywords are located with `keyword_token_positions` so a keyword
+/// appearing inside a string literal or comment is never mistaken for a clause.
 pub fn plsql_output_bind_names(statement: &str) -> Result<Vec<String>> {
     let mut names = plsql_assignment_bind_names(statement)?;
     if !statement_is_plsql(statement) {
@@ -203,9 +252,8 @@ pub fn plsql_output_bind_names(statement: &str) -> Result<Vec<String>> {
     }
     let lower = statement.to_ascii_lowercase();
     let bytes = statement.as_bytes();
-    let mut into_search_start = 0;
-    while let Some(into_relative_pos) = lower[into_search_start..].find("into") {
-        let into_pos = into_search_start + into_relative_pos;
+    let into_positions = keyword_token_positions(statement, "into")?;
+    for &into_pos in &into_positions {
         let mut bind_start = into_pos + "into".len();
         while bytes
             .get(bind_start)
@@ -229,20 +277,17 @@ pub fn plsql_output_bind_names(statement: &str) -> Result<Vec<String>> {
                 }
             }
         }
-        into_search_start = bind_start.saturating_add(1);
     }
-    let mut search_start = 0;
-    while let Some(returning_relative_pos) = lower[search_start..].find("returning") {
-        let returning_pos = search_start + returning_relative_pos;
-        let Some(into_relative_pos) = lower[returning_pos..].find("into") else {
-            break;
+    for returning_pos in keyword_token_positions(statement, "returning")? {
+        let Some(&into_pos) = into_positions.iter().find(|&&p| p > returning_pos) else {
+            continue;
         };
-        let into_pos = returning_pos + into_relative_pos + "into".len();
-        let end = statement[into_pos..]
+        let after_into = into_pos + "into".len();
+        let end = statement[after_into..]
             .find(';')
-            .map(|relative| into_pos + relative)
+            .map(|relative| after_into + relative)
             .unwrap_or(statement.len());
-        for name in scan_bind_names(&statement[into_pos..end])? {
+        for name in scan_bind_names(&statement[after_into..end])? {
             if !names
                 .iter()
                 .any(|existing| bind_names_equal(existing, &name))
@@ -250,7 +295,6 @@ pub fn plsql_output_bind_names(statement: &str) -> Result<Vec<String>> {
                 names.push(name);
             }
         }
-        search_start = end;
     }
     Ok(names)
 }
@@ -780,6 +824,34 @@ mod tests {
             )
             .expect("scan"),
             vec!["out".to_string(), "a".to_string()]
+        );
+    }
+
+    #[test]
+    fn plsql_output_ignores_into_inside_string_literal() {
+        // bead rust-oracledb-l3z: an INTO/RETURNING keyword appearing inside a
+        // string literal must NOT be mistaken for a real clause. Before the
+        // tokenizer-aware fix, the substring search matched "into" inside the
+        // literal and misclassified an ordinary bind as a PL/SQL output bind.
+        assert!(
+            plsql_output_bind_names("begin proc('into :x', :realbind); end;")
+                .expect("scan")
+                .is_empty(),
+            "an INTO inside a string literal must not produce an output bind"
+        );
+        // A genuine INTO alongside a literal containing 'into' yields only the
+        // real bind.
+        assert_eq!(
+            plsql_output_bind_names("begin select 'into :x', c into :real from t; end;")
+                .expect("scan"),
+            vec!["real".to_string()]
+        );
+        // 'returning' inside a literal must not start a RETURNING-INTO scan.
+        assert!(
+            plsql_output_bind_names("begin proc('returning id into :x', :y); end;")
+                .expect("scan")
+                .is_empty(),
+            "a RETURNING inside a string literal must not produce an output bind"
         );
     }
 
