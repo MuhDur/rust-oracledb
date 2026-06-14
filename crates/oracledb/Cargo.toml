@@ -33,6 +33,8 @@ thiserror.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# TLS handshake integration test: a blocking rustls server stub + PEM loading.
+rustls-pemfile.workspace = true
 
 [[bench]]
 name = "thin_driver"

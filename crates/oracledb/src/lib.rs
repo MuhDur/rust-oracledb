@@ -174,7 +174,7 @@ pub use oracledb_protocol as protocol;
 pub mod arrow;
 pub mod pool;
 pub mod tls;
-mod transport;
+pub mod transport;
 
 use transport::{OracleReadHalf, OracleWriteHalf};
 
@@ -379,6 +379,9 @@ pub struct ConnectOptions {
     /// this exactly; when `None`, the host name is matched against the
     /// certificate's SAN DNS names and common names.
     pub ssl_server_cert_dn: Option<String>,
+    /// Send the Oracle TCPS SNI string (`use_sni`, reference default `false`).
+    /// See [`tls::TlsParams::use_sni`] for the rustls-name-validity caveat.
+    pub use_sni: bool,
 }
 
 impl ConnectOptions {
@@ -405,7 +408,15 @@ impl ConnectOptions {
             wallet_password: None,
             ssl_server_dn_match: true,
             ssl_server_cert_dn: None,
+            use_sni: false,
         }
+    }
+
+    /// Enable sending the Oracle TCPS SNI string (`use_sni`, default off).
+    #[must_use]
+    pub fn with_use_sni(mut self, use_sni: bool) -> Self {
+        self.use_sni = use_sni;
+        self
     }
 
     /// Set the TCPS wallet directory (`wallet_location` /
@@ -639,6 +650,7 @@ impl Connection {
                 options.wallet_password.as_deref(),
                 options.ssl_server_dn_match,
                 options.ssl_server_cert_dn.as_deref(),
+                options.use_sni,
             )?;
             let tls_stream =
                 tls::tls_handshake(&descriptor, server_type, &tls_params, stream).await?;

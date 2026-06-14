@@ -45,6 +45,16 @@ pub struct TlsParams {
     pub server_cert_dn: Option<String>,
     /// The expected host (the descriptor `HOST`) for the name-match branch.
     pub expected_host: String,
+    /// Send the Oracle TCPS SNI string (`use_sni`, reference default `false`).
+    ///
+    /// python-oracledb only emits the `S{len}.{service}.V3.{version}` SNI when
+    /// `use_sni=True` is explicitly requested; by default no SNI is sent and the
+    /// server is identified purely by the post-handshake DN match. rustls's
+    /// `ServerName` is RFC-strict and rejects the Oracle SNI's trailing
+    /// all-numeric label (e.g. `.V3.319`), so when `use_sni` is set we send the
+    /// SNI only if rustls accepts it; otherwise we proceed without SNI and the
+    /// DN match still secures the connection. See `docs/TLS_SETUP.md`.
+    pub use_sni: bool,
 }
 
 /// The Oracle server-certificate verifier.
@@ -317,12 +327,14 @@ fn rustls_pemfile_certs(reader: &mut dyn std::io::BufRead) -> Vec<Vec<u8>> {
 /// # Errors
 /// Returns [`Error::Tls`] when a configured wallet directory is missing or its
 /// wallet file cannot be parsed.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_tls_params(
     descriptor: &EasyConnect,
     wallet_location: Option<&str>,
     wallet_password: Option<&str>,
     ssl_server_dn_match: bool,
     ssl_server_cert_dn: Option<&str>,
+    use_sni: bool,
 ) -> Result<TlsParams, Error> {
     let tns_admin = std::env::var("TNS_ADMIN").ok();
     let wallet = match resolve_wallet_dir(wallet_location, tns_admin.as_deref()) {
@@ -334,6 +346,7 @@ pub(crate) fn resolve_tls_params(
         dn_match: ssl_server_dn_match,
         server_cert_dn: ssl_server_cert_dn.map(str::to_string),
         expected_host: descriptor.host.clone(),
+        use_sni,
     })
 }
 
@@ -357,24 +370,58 @@ fn load_wallet(dir: &std::path::Path, password: Option<&str>) -> Result<WalletCo
     )))
 }
 
+/// A `ServerName` that is always a valid rustls DNS name, used when no SNI is
+/// being sent (SNI disabled). The value is never transmitted: `enable_sni` is
+/// `false` in that path, and the Oracle verifier ignores `server_name`.
+const SNI_PLACEHOLDER: &str = "oracle.invalid";
+
+/// Whether the Oracle SNI string is a valid rustls `ServerName`. The Oracle
+/// format ends in an all-numeric label (`.V3.319`), which RFC-strict rustls
+/// rejects; this helper lets the handshake fall back to no-SNI cleanly.
+fn sni_is_rustls_valid(sni: &str) -> bool {
+    rustls::pki_types::ServerName::try_from(sni.to_string()).is_ok()
+}
+
 /// Perform the TCPS TLS handshake over a connected TCP stream, returning the
-/// established [`TlsStream`]. The SNI value is the Oracle
-/// `S{len}.{service}.V3.{version}` string.
+/// established [`TlsStream`].
+///
+/// SNI handling mirrors python-oracledb: the Oracle `S{len}.{service}.V3.{ver}`
+/// SNI is only emitted when [`TlsParams::use_sni`] is set; by default no SNI is
+/// sent and the server is identified by the post-handshake DN match. Because
+/// rustls rejects the Oracle SNI's trailing numeric label, the SNI is sent only
+/// if it is a valid rustls name; otherwise the handshake proceeds without SNI.
 ///
 /// # Errors
 /// Returns [`Error::Tls`] on configuration or handshake failure.
-pub(crate) async fn tls_handshake(
+pub async fn tls_handshake(
     descriptor: &EasyConnect,
     server_type: Option<&str>,
     params: &TlsParams,
     tcp: TcpStream,
 ) -> Result<TlsStream<TcpStream>, Error> {
-    let config = build_client_config(params)?;
+    let mut config = build_client_config(params)?;
+
+    // Decide the SNI name. Default (and the common case) is no SNI.
+    let server_name = if params.use_sni {
+        let sni = build_sni(&descriptor.service_name, server_type);
+        if sni_is_rustls_valid(&sni) {
+            config.enable_sni = true;
+            sni
+        } else {
+            // rustls cannot encode the Oracle SNI (numeric final label); fall
+            // back to no SNI — the DN match still secures the connection.
+            config.enable_sni = false;
+            SNI_PLACEHOLDER.to_string()
+        }
+    } else {
+        config.enable_sni = false;
+        SNI_PLACEHOLDER.to_string()
+    };
+
     let connector =
         TlsConnector::new(config).with_handshake_timeout(std::time::Duration::from_secs(20));
-    let sni = build_sni(&descriptor.service_name, server_type);
     connector
-        .connect(&sni, tcp)
+        .connect(&server_name, tcp)
         .await
         .map_err(|e| Error::Tls(format!("TCPS handshake failed: {e}")))
 }
@@ -394,8 +441,18 @@ mod tests {
             dn_match: true,
             server_cert_dn: None,
             expected_host: "db.example.com".to_string(),
+            use_sni: false,
         };
         // Empty wallet => falls back to system roots; result depends on host.
         let _ = build_client_config(&params);
+    }
+
+    #[test]
+    fn oracle_sni_is_rejected_by_rustls_servername() {
+        // The Oracle SNI ends in an all-numeric label which RFC-strict rustls
+        // rejects; this is why use_sni falls back to no-SNI. Document it as a
+        // test so a future rustls relaxation is noticed.
+        assert!(!sni_is_rustls_valid("S8.FREEPDB1.V3.319"));
+        assert!(sni_is_rustls_valid("db.example.com"));
     }
 }

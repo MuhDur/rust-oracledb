@@ -1373,6 +1373,7 @@ dependencies = [
  "criterion",
  "oracledb-protocol",
  "rustls",
+ "rustls-pemfile",
  "rustls-pki-types",
  "rustls-webpki",
  "thiserror",
