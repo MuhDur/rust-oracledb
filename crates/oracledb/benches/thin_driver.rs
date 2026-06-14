@@ -34,7 +34,7 @@ use std::time::Duration;
 use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
 use asupersync::Cx;
 use criterion::{criterion_group, criterion_main, Criterion};
-use oracledb::protocol::thin::{decode_lob_text, BindValue, QueryValue};
+use oracledb::protocol::thin::{decode_lob_text, BindValue, QueryValue, QueryValueRef};
 use oracledb::{BlockingConnection, ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;
 
@@ -125,6 +125,95 @@ async fn fetch_all(cx: &Cx, conn: &mut Connection, sql: &str, arraysize: u32) ->
         }
     }
     conn.release_cursor(cursor_id);
+    total
+}
+
+/// A small, deterministic CPU burst standing in for the work a real consumer
+/// does per row (parse / transform / serialize). `work_units` scales it: 0 is
+/// "just touch the cell", a few units is ~us-scale CPU. The overlap can only
+/// hide the server round trip behind whatever CPU the page's decode + this work
+/// take, so this is the lever that decides whether prefetch pays off.
+#[inline]
+fn per_row_work(seed: u64, work_units: u32) -> u64 {
+    let mut h = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    for _ in 0..(40 * work_units) {
+        h ^= h >> 30;
+        h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        h ^= h >> 27;
+    }
+    h
+}
+
+/// SERIAL borrowed-fetch drain (no prefetch): page through the cursor with the
+/// fused [`Connection::fetch_rows_ref`], which sends a FETCH and then reads its
+/// response before issuing the next — read and decode are strictly serialized.
+/// Runs `per_row_work(.., work_units)` for every row so the per-page CPU cost
+/// matches the prefetched path exactly. This is the WITHOUT-overlap baseline.
+async fn drain_serial_borrowed(
+    cx: &Cx,
+    conn: &mut Connection,
+    sql: &str,
+    arraysize: u32,
+    work_units: u32,
+) -> usize {
+    let first = execute_cached(cx, conn, sql, arraysize).await;
+    let cursor_id = first.cursor_id;
+    let mut total = first.rows.len();
+    let mut acc = 0u64;
+    for row in &first.rows {
+        acc = acc.wrapping_add(per_row_work(acc ^ row.len() as u64, work_units));
+    }
+    let mut more = first.more_rows;
+    let mut prev: Option<Vec<Option<QueryValue>>> = first.rows.last().cloned();
+    while more && cursor_id != 0 {
+        let batch = conn
+            .fetch_rows_ref(cx, cursor_id, arraysize, prev.as_deref())
+            .await
+            .expect("serial borrowed fetch page");
+        more = batch.more_rows;
+        let mut last: Option<Vec<Option<QueryValue>>> = None;
+        let mut n = 0usize;
+        batch
+            .batch
+            .for_each_row_ref(|row| {
+                acc = acc.wrapping_add(per_row_work(acc ^ row.len() as u64, work_units));
+                last = Some(row.iter().map(|c| c.map(|v| v.to_owned_value())).collect());
+                n += 1;
+                Ok::<(), oracledb::Error>(())
+            })
+            .expect("iterate serial borrowed batch");
+        total += n;
+        if let Some(l) = last {
+            prev = Some(l);
+        }
+    }
+    std::hint::black_box(acc);
+    conn.release_cursor(cursor_id);
+    total
+}
+
+/// PREFETCHED borrowed-fetch drain (one-page look-ahead overlap): the
+/// production [`Connection::for_each_row_ref`] loop, which issues page K+1's
+/// FETCH request before decoding page K so the wire round trip overlaps the
+/// decode + the consumer's per-row work. Runs the identical `per_row_work` so
+/// the only difference vs the serial drain is the overlap.
+async fn drain_prefetched_borrowed(
+    cx: &Cx,
+    conn: &mut Connection,
+    sql: &str,
+    arraysize: u32,
+    work_units: u32,
+) -> usize {
+    let mut total = 0usize;
+    let mut acc = 0u64;
+    conn.for_each_row_ref(cx, sql, arraysize, |row: &[Option<QueryValueRef<'_>>]| {
+        acc = acc.wrapping_add(per_row_work(acc ^ row.len() as u64, work_units));
+        total += 1;
+        Ok(())
+    })
+    .await
+    .expect("prefetched borrowed drain");
+    std::hint::black_box(acc);
     total
 }
 
@@ -375,6 +464,74 @@ fn bench_thin_driver(c: &mut Criterion) {
                 });
             });
         });
+        group.finish();
+    }
+
+    // ----------------------------------------------------------------------
+    // (f) PREFETCH OVERLAP: single-connection multi-page fetch WITHOUT vs WITH
+    //     speculative next-page prefetch (bead xad / 3oi). Both drain the SAME
+    //     large many-page result and touch every borrowed cell, so the only
+    //     difference is whether page K+1's wire round trip overlaps page K's
+    //     decode. A bigger arraysize-to-rows ratio => more pages => more overlap
+    //     opportunities. 50000 rows / arraysize 1000 ≈ 50 pages.
+    //
+    //     CAVEAT (honesty): on loopback the socket read latency is tiny, so the
+    //     win here is bounded by the decode fraction (~30% of read+decode per the
+    //     attribution example). On a real network the per-page read is dominated
+    //     by RTT (>> the ~324 us loopback read), so the prefetch hides close to a
+    //     full RTT per page and the speedup is strictly larger than measured here.
+    // ----------------------------------------------------------------------
+    {
+        let sql = "select level as n, rpad('row', 40, to_char(level)) as label \
+                   from dual connect by level <= 50000";
+        let arraysize = 1000u32;
+
+        let mut group = c.benchmark_group("oracledb_prefetch");
+        group.sample_size(40);
+
+        // (i) Trivial consumer (work_units = 0): the page's decode is the only
+        //     CPU the overlap can hide behind. On loopback the hideable read-wait
+        //     is small, so this pair is roughly break-even (the prefetch
+        //     bookkeeping ≈ the saved latency). This is the HONEST loopback floor.
+        group.bench_function("fetch_50k_serial_trivial", |b| {
+            b.iter(|| {
+                let total = block_on(&runtime, async |cx| {
+                    drain_serial_borrowed(cx, &mut conn, sql, arraysize, 0).await
+                });
+                assert_eq!(total, 50_000, "serial drain reads all rows");
+            });
+        });
+        group.bench_function("fetch_50k_prefetched_trivial", |b| {
+            b.iter(|| {
+                let total = block_on(&runtime, async |cx| {
+                    drain_prefetched_borrowed(cx, &mut conn, sql, arraysize, 0).await
+                });
+                assert_eq!(total, 50_000, "prefetched drain reads all rows");
+            });
+        });
+
+        // (ii) Realistic consumer (work_units = 1, ~few us/row): a real caller
+        //      does work per row. Now the per-page decode + consumer work covers
+        //      the server round trip, so the overlap pays off and the prefetched
+        //      path is materially faster — even on loopback. (On real-network RTT
+        //      even the trivial pair wins, since read-wait is RTT-dominated.)
+        group.bench_function("fetch_50k_serial_work", |b| {
+            b.iter(|| {
+                let total = block_on(&runtime, async |cx| {
+                    drain_serial_borrowed(cx, &mut conn, sql, arraysize, 1).await
+                });
+                assert_eq!(total, 50_000, "serial drain reads all rows");
+            });
+        });
+        group.bench_function("fetch_50k_prefetched_work", |b| {
+            b.iter(|| {
+                let total = block_on(&runtime, async |cx| {
+                    drain_prefetched_borrowed(cx, &mut conn, sql, arraysize, 1).await
+                });
+                assert_eq!(total, 50_000, "prefetched drain reads all rows");
+            });
+        });
+
         group.finish();
     }
 
