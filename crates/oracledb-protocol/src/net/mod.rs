@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod connectstring;
+
 use crate::{ProtocolError, Result};
 
 /// Transport protocol for the connection (the EZConnect `protocol://` prefix).
@@ -39,50 +41,65 @@ pub struct EasyConnect {
     pub protocol: Protocol,
 }
 
-impl EasyConnect {
-    pub fn parse(input: &str) -> Result<Self> {
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
-            return Err(ProtocolError::InvalidConnectDescriptor(
-                "connect descriptor must not be empty".to_string(),
-            ));
+impl From<connectstring::Protocol> for Protocol {
+    fn from(value: connectstring::Protocol) -> Self {
+        match value {
+            connectstring::Protocol::Tcp => Self::Tcp,
+            connectstring::Protocol::Tcps => Self::Tcps,
         }
+    }
+}
 
-        // Optional `protocol://` prefix (python-oracledb EZConnect syntax).
-        let (protocol, rest) = if let Some(after) = trimmed.strip_prefix("tcps://") {
-            (Protocol::Tcps, after)
-        } else if let Some(after) = trimmed.strip_prefix("tcp://") {
-            (Protocol::Tcp, after)
-        } else {
-            (Protocol::Tcp, trimmed)
-        };
+impl EasyConnect {
+    /// Resolves a connect string into the single primary endpoint used by the
+    /// thin connection path: host, port, service name, and transport protocol.
+    ///
+    /// This now delegates to the full [`connectstring`] parser, so it accepts
+    /// not only EZConnect / EZConnect-Plus strings but also complete TNS
+    /// connect descriptors (`(DESCRIPTION=...)`), `DESCRIPTION_LIST`s, and
+    /// multi-address `ADDRESS_LIST`s — selecting the first address that has a
+    /// host and the first description's `SERVICE_NAME`.
+    pub fn parse(input: &str) -> Result<Self> {
+        let descriptor = connectstring::parse(input)?.ok_or_else(|| {
+            ProtocolError::InvalidConnectDescriptor(format!(
+                "\"{input}\" is not a connect descriptor or EZConnect string \
+                 (it may be a tnsnames.ora alias requiring a config directory)"
+            ))
+        })?;
 
-        let (host_port, service_name) = rest.split_once('/').ok_or_else(|| {
+        let address = descriptor.first_address().ok_or_else(|| {
             ProtocolError::InvalidConnectDescriptor(
-                "EZConnect descriptor must contain a service name".to_string(),
+                "connect descriptor defines no usable address (host is required)".to_string(),
             )
         })?;
-        let (host, port) = match host_port.rsplit_once(':') {
-            Some((host, port)) => {
-                let parsed_port = port.parse::<u16>().map_err(|_| {
-                    ProtocolError::InvalidConnectDescriptor(format!("invalid port: {port}"))
-                })?;
-                (host, parsed_port)
-            }
-            None => (host_port, protocol.default_port()),
-        };
-
-        if host.is_empty() || service_name.is_empty() {
-            return Err(ProtocolError::InvalidConnectDescriptor(
-                "host and service name are required".to_string(),
-            ));
-        }
+        let host = address.host.clone().ok_or_else(|| {
+            ProtocolError::InvalidConnectDescriptor("host is required".to_string())
+        })?;
+        let service_name = descriptor
+            .first_description()
+            .connect_data
+            .service_name
+            .clone()
+            .ok_or_else(|| {
+                ProtocolError::InvalidConnectDescriptor("service name is required".to_string())
+            })?;
 
         Ok(Self {
-            host: host.to_string(),
-            port,
-            service_name: service_name.to_string(),
-            protocol,
+            host,
+            port: address.port,
+            service_name,
+            protocol: address.protocol.into(),
+        })
+    }
+
+    /// Parses a connect string into the full resolved [`connectstring::Descriptor`],
+    /// exposing the entire address topology and connect data (for diagnostics or
+    /// callers that need more than the single primary endpoint).
+    pub fn parse_descriptor(input: &str) -> Result<connectstring::Descriptor> {
+        connectstring::parse(input)?.ok_or_else(|| {
+            ProtocolError::InvalidConnectDescriptor(format!(
+                "\"{input}\" is not a connect descriptor or EZConnect string"
+            ))
         })
     }
 }
@@ -133,5 +150,33 @@ mod tests {
         let parsed = EasyConnect::parse("tcp://host/svc").expect("should parse");
         assert_eq!(parsed.port, 1521);
         assert_eq!(parsed.protocol, Protocol::Tcp);
+    }
+
+    #[test]
+    fn parses_full_tns_descriptor_via_easy_connect() {
+        // EasyConnect::parse now delegates to the real connect-string parser,
+        // so it must resolve the first address of a full TNS descriptor.
+        let parsed = EasyConnect::parse(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=db.example.test)(PORT=2484))\
+             (CONNECT_DATA=(SERVICE_NAME=FREEPDB1)))",
+        )
+        .expect("full TNS descriptor should parse via EasyConnect");
+        assert_eq!(parsed.host, "db.example.test");
+        assert_eq!(parsed.port, 2484);
+        assert_eq!(parsed.service_name, "FREEPDB1");
+        assert_eq!(parsed.protocol, Protocol::Tcps);
+    }
+
+    #[test]
+    fn picks_first_address_of_address_list() {
+        let parsed = EasyConnect::parse(
+            "(DESCRIPTION=(ADDRESS_LIST=\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=primary)(PORT=1521))\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=standby)(PORT=1522)))\
+             (CONNECT_DATA=(SERVICE_NAME=svc)))",
+        )
+        .expect("address-list descriptor should parse");
+        assert_eq!(parsed.host, "primary");
+        assert_eq!(parsed.port, 1521);
     }
 }
