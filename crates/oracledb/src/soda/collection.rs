@@ -55,10 +55,9 @@ impl SodaCollection {
         if self.metadata.read_only {
             return Err(read_only_err());
         }
-        let content_bind = self.content_bind(doc)?;
-        let (sql, _, ret_layout) = self.build_insert_sql(hint, return_doc);
-        // Bind order: content is :1, then the RETURNING outputs.
-        let mut binds = vec![content_bind];
+        let (sql, mut binds, ret_layout) = self.build_insert_sql(doc, hint, return_doc)?;
+        // Bind order: input binds (content [+ client key] [+ media type]), then
+        // the RETURNING outputs.
         if return_doc {
             self.push_returning_binds(&mut binds, ret_layout.bind_count);
         }
@@ -89,9 +88,9 @@ impl SodaCollection {
             return Err(read_only_err());
         }
         if docs.is_empty() {
-            return Err(SodaError::NotSupported(
-                "insertMany requires at least one document".to_string(),
-            ));
+            return Err(SodaError::Driver(server_like_err(
+                "DPI-1031: no documents were provided to insertMany",
+            )));
         }
 
         if return_docs {
@@ -105,10 +104,14 @@ impl SodaCollection {
             }
             Ok(Some(out))
         } else {
-            let (sql, _binds, _ret) = self.build_insert_sql(hint, false);
+            // Build the statement from the first document (the column shape is
+            // identical for every document) and a bind row per document.
+            let (sql, first_binds, _ret) = self.build_insert_sql(&docs[0], hint, false)?;
             let mut bind_rows = Vec::with_capacity(docs.len());
-            for doc in docs {
-                bind_rows.push(vec![self.content_bind(doc)?]);
+            bind_rows.push(first_binds);
+            for doc in &docs[1..] {
+                let (_, binds, _) = self.build_insert_sql(doc, hint, false)?;
+                bind_rows.push(binds);
             }
             conn.execute_query_with_bind_rows(cx, &sql, 0, &bind_rows)
                 .await
@@ -361,10 +364,28 @@ impl SodaCollection {
     fn content_bind(&self, doc: &SodaDocument) -> Result<BindValue> {
         match self.metadata.content_sql_type {
             ContentSqlType::Json => {
-                let oson = self.doc_to_oson(doc)?;
-                let image = encode_oson(&oson, true)
-                    .map_err(|e| SodaError::Driver(crate::Error::Protocol(e)))?;
-                Ok(BindValue::Json(image))
+                // A decoded value (create_json_document) is OSON-encoded. Raw
+                // bytes (create_document) are bound as text so the server parses
+                // and VALIDATES them — invalid JSON then raises a server error
+                // (ORA-40441) instead of failing client-side, matching how the
+                // database is the source of truth for JSON validity.
+                if let Some(oson) = &doc.content_oson {
+                    let image = encode_oson(oson, true)
+                        .map_err(|e| SodaError::Driver(crate::Error::Protocol(e)))?;
+                    return Ok(BindValue::Json(image));
+                }
+                if let Some(bytes) = &doc.content_bytes {
+                    if let Ok(v) = decode_oson(bytes) {
+                        let image = encode_oson(&v, true)
+                            .map_err(|e| SodaError::Driver(crate::Error::Protocol(e)))?;
+                        return Ok(BindValue::Json(image));
+                    }
+                    let text = String::from_utf8(bytes.clone()).map_err(|_| {
+                        SodaError::Driver(server_like_err("ORA-40441: JSON syntax error"))
+                    })?;
+                    return Ok(BindValue::Text(text));
+                }
+                Err(SodaError::Qbe("document has no content".to_string()))
             }
             ContentSqlType::Blob | ContentSqlType::Clob | ContentSqlType::Raw => {
                 let bytes = self.doc_to_bytes(doc)?;
@@ -380,27 +401,6 @@ impl SodaCollection {
         }
     }
 
-    /// Produce an OsonValue for a document destined for a native JSON column.
-    fn doc_to_oson(&self, doc: &SodaDocument) -> Result<OsonValue> {
-        if let Some(oson) = &doc.content_oson {
-            return Ok(oson.clone());
-        }
-        if let Some(bytes) = &doc.content_bytes {
-            // Bytes could be an OSON image already, or raw JSON text. Try to
-            // decode as OSON first; fall back to parsing as JSON text.
-            if let Ok(v) = decode_oson(bytes) {
-                return Ok(v);
-            }
-            let text = std::str::from_utf8(bytes).map_err(|_| {
-                SodaError::Qbe("content is neither OSON nor UTF-8 JSON".to_string())
-            })?;
-            let value: serde_json::Value = serde_json::from_str(text)
-                .map_err(|e| SodaError::Qbe(format!("content is not valid JSON: {e}")))?;
-            return Ok(json_to_oson(&value));
-        }
-        Err(SodaError::Qbe("document has no content".to_string()))
-    }
-
     /// Produce raw bytes for a document destined for a BLOB/CLOB column.
     fn doc_to_bytes(&self, doc: &SodaDocument) -> Result<Vec<u8>> {
         if let Some(bytes) = &doc.content_bytes {
@@ -414,19 +414,50 @@ impl SodaCollection {
         Err(SodaError::Qbe("document has no content".to_string()))
     }
 
-    /// Build the INSERT statement and the RETURNING column layout.
+    /// Build the INSERT statement, its input binds, and the RETURNING layout.
+    ///
+    /// Input binds always start with the content (`:1`). For legacy collections
+    /// a client-assigned key and/or a media type are appended as further binds.
+    /// Server-generated key/version/timestamp columns use SQL expressions
+    /// (SYS_GUID / SYSTIMESTAMP), not binds.
     fn build_insert_sql(
         &self,
+        doc: &SodaDocument,
         hint: Option<&str>,
         with_returning: bool,
-    ) -> (String, Vec<BindValue>, ReturningLayout) {
+    ) -> Result<(String, Vec<BindValue>, ReturningLayout)> {
         let meta = &self.metadata;
         let mut columns = vec![meta.content_column.clone()];
         let mut values = vec![":1".to_string()];
+        let mut input_binds: Vec<BindValue> = vec![self.content_bind(doc)?];
 
-        // SYSTIMESTAMP for created/last-modified columns on non-native legacy
-        // collections (native collections fill these automatically).
+        // Non-native (legacy) collections have explicit key/version/timestamp
+        // columns with no server-side default or trigger, so the driver fills
+        // them. Native 23ai collections populate these automatically.
         if !meta.native {
+            use super::metadata::KeyAssignment;
+            match meta.key_assignment {
+                KeyAssignment::Uuid | KeyAssignment::Guid => {
+                    columns.push(meta.key_column.clone());
+                    values.push("RAWTOHEX(SYS_GUID())".to_string());
+                }
+                KeyAssignment::Client => {
+                    // Client must supply the key; bind it.
+                    let key = doc.key.clone().ok_or_else(|| {
+                        SodaError::Driver(server_like_err(
+                            "ORA-40646: client-assigned key required",
+                        ))
+                    })?;
+                    columns.push(meta.key_column.clone());
+                    values.push(format!(":{}", input_binds.len() + 1));
+                    input_binds.push(BindValue::Text(key));
+                }
+                KeyAssignment::Sequence | KeyAssignment::EmbeddedOid => {}
+            }
+            if let (Some(vc), VersionMethod::Uuid) = (&meta.version_column, &meta.version_method) {
+                columns.push(vc.clone());
+                values.push("RAWTOHEX(SYS_GUID())".to_string());
+            }
             if let Some(c) = &meta.creation_time_column {
                 columns.push(c.clone());
                 values.push("SYSTIMESTAMP".to_string());
@@ -435,6 +466,15 @@ impl SodaCollection {
                 columns.push(c.clone());
                 values.push("SYSTIMESTAMP".to_string());
             }
+        }
+
+        // Media-type column (mixed-media collections): bind the document's media
+        // type so non-JSON content is round-tripped with its type. The column
+        // name may be mixed-case, so quote it.
+        if let Some(mt_col) = &meta.media_type_column {
+            columns.push(super::metadata::quote_ident(mt_col));
+            values.push(format!(":{}", input_binds.len() + 1));
+            input_binds.push(BindValue::Text(doc.media_type.clone()));
         }
 
         let hint_str = hint.map(|h| format!("/*+ {h} */ ")).unwrap_or_default();
@@ -446,14 +486,14 @@ impl SodaCollection {
         );
 
         let layout = if with_returning {
-            let (clause, layout) = self.returning_clause(1);
+            let (clause, layout) = self.returning_clause(input_binds.len());
             sql.push_str(&clause);
             layout
         } else {
             ReturningLayout::default()
         };
 
-        (sql, Vec::new(), layout)
+        Ok((sql, input_binds, layout))
     }
 
     /// Build a `RETURNING key[,version][,created][,lastmod] INTO ...` clause,
@@ -640,12 +680,31 @@ fn read_only_err() -> SodaError {
     ))
 }
 
-/// Wrap a message as a server-style error so the shim error path can surface
-/// the ORA code.
+/// Wrap a message as a structured server-style error so the shim error path can
+/// surface the ORA/DPI/DPY code as the exception's `full_code`. The numeric code
+/// is parsed from a leading `ORA-NNNNN` if present.
 fn server_like_err(message: &str) -> crate::Error {
-    crate::Error::Protocol(oracledb_protocol::ProtocolError::ServerError(
-        message.to_string(),
-    ))
+    let code = parse_ora_code(message).unwrap_or(0);
+    crate::Error::Protocol(oracledb_protocol::ProtocolError::ServerErrorInfo(Box::new(
+        oracledb_protocol::ServerErrorDetails {
+            message: message.to_string(),
+            code,
+            pos: 0,
+            row_count: 0,
+            rowid: None,
+            array_dml_row_counts: None,
+        },
+    )))
+}
+
+/// Parse the `ORA-NNNNN` code from a message, if present.
+fn parse_ora_code(message: &str) -> Option<u32> {
+    let start = message.find("ORA-")? + "ORA-".len();
+    let digits: String = message[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse::<u32>().ok()
 }
 
 // Re-export for the collection's insert path: ReturningLayout's bind binds are
@@ -664,23 +723,6 @@ impl SodaCollection {
 }
 
 // --- OSON <-> serde_json bridges ------------------------------------------
-
-/// Convert a serde_json value into an OsonValue (for binding JSON text content
-/// to a native column).
-pub(crate) fn json_to_oson(v: &serde_json::Value) -> OsonValue {
-    match v {
-        serde_json::Value::Null => OsonValue::Null,
-        serde_json::Value::Bool(b) => OsonValue::Bool(*b),
-        serde_json::Value::Number(n) => OsonValue::Number(n.to_string()),
-        serde_json::Value::String(s) => OsonValue::String(s.clone()),
-        serde_json::Value::Array(a) => OsonValue::Array(a.iter().map(json_to_oson).collect()),
-        serde_json::Value::Object(o) => OsonValue::Object(
-            o.iter()
-                .map(|(k, v)| (k.clone(), json_to_oson(v)))
-                .collect(),
-        ),
-    }
-}
 
 /// Convert an OsonValue into a serde_json value (for serializing native content
 /// to JSON text for a BLOB column).

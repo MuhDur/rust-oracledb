@@ -452,13 +452,22 @@ impl ThinSodaCollImpl {
         ))
     }
 
-    /// save / saveAndGet are documented thin gaps (UPSERT semantics).
+    /// save / saveAndGet are documented thin gaps (UPSERT semantics). A
+    /// read-only collection still reports ORA-40663 first, matching the
+    /// reference write-method contract.
+    #[pyo3(signature = (_doc, hint=None, return_doc=false))]
     fn save(
         &self,
         _doc: &ThinSodaDocImpl,
-        _hint: Option<String>,
-        _return_doc: bool,
+        hint: Option<String>,
+        return_doc: bool,
     ) -> PyResult<Option<ThinSodaDocImpl>> {
+        let _ = (hint, return_doc);
+        if self.collection.metadata().read_only {
+            return Err(soda_ora_error(
+                "ORA-40663: this operation is not permitted on read-only collections",
+            ));
+        }
         Err(runtime_error(
             "DPY-3001: save()/saveAndGet() is not supported by thin-mode SODA",
         ))
@@ -596,6 +605,14 @@ fn op_from_py(op: &Bound<'_, PyAny>) -> PyResult<SodaOperation> {
         hint: get_str("_hint")?,
         lock: get_bool("_lock"),
     })
+}
+
+/// Raise a proper oracledb `DatabaseError` from an `ORA-`prefixed message so the
+/// exception carries the right `full_code` (used for shim-side checks like the
+/// read-only guard).
+fn soda_ora_error(message: &str) -> PyErr {
+    Python::attach(|py| crate::errors::database_error(py, message))
+        .unwrap_or_else(|_| runtime_error(message))
 }
 
 /// Map a SODA domain error to a shim TaskError, preserving server error details

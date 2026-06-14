@@ -143,9 +143,12 @@ impl SodaOperation {
         meta: &SodaCollectionMetadata,
     ) -> Result<(String, Vec<BindValue>)> {
         if self.skip.is_some() || self.limit.is_some() {
-            return Err(SodaError::NotSupported(
-                "count() cannot be combined with skip() or limit()".to_string(),
-            ));
+            return Err(SodaError::Driver(crate::Error::Protocol(
+                oracledb_protocol::ProtocolError::ServerError(
+                    "ORA-40748: SKIP and LIMIT cannot be specified with count operation"
+                        .to_string(),
+                ),
+            )));
         }
         let (where_clause, binds) = self.build_where(meta)?;
         let sql = format!(
@@ -199,7 +202,26 @@ pub(crate) fn select_column_list(meta: &SodaCollectionMetadata) -> (String, Sele
     };
     let key_idx = take(key_expr, &mut cols, &mut next);
 
-    let content_idx = take(meta.content_column.clone(), &mut cols, &mut next);
+    // Content projection: native JSON comes back inline. BLOB/CLOB-stored JSON
+    // is a LOB locator on a plain SELECT, so we serialize it to inline text via
+    // JSON_SERIALIZE(... RETURNING VARCHAR2) — small SODA documents fit, and the
+    // row decoder treats the text as JSON content bytes. This is only valid for
+    // JSON-only collections; a media-type column means non-JSON content may be
+    // present, which JSON_SERIALIZE would reject (those need a raw LOB read,
+    // which is a documented thin-SODA gap).
+    let json_only = meta.media_type_column.is_none();
+    let content_expr = match meta.content_sql_type {
+        super::metadata::ContentSqlType::Blob | super::metadata::ContentSqlType::Clob
+            if json_only =>
+        {
+            format!(
+                "JSON_SERIALIZE({} RETURNING VARCHAR2(32767))",
+                meta.content_column
+            )
+        }
+        _ => meta.content_column.clone(),
+    };
+    let content_idx = take(content_expr, &mut cols, &mut next);
 
     let version_idx = meta.version_column.as_ref().map(|c| {
         let expr =
@@ -222,7 +244,8 @@ pub(crate) fn select_column_list(meta: &SodaCollectionMetadata) -> (String, Sele
     let media_type_idx = meta
         .media_type_column
         .as_ref()
-        .map(|c| take(c.clone(), &mut cols, &mut next));
+        // Media-type column names may be mixed-case (case-sensitive), so quote.
+        .map(|c| take(super::metadata::quote_ident(c), &mut cols, &mut next));
 
     (
         cols.join(", "),
@@ -423,10 +446,9 @@ mod tests {
             limit: Some(5),
             ..Default::default()
         };
-        assert!(matches!(
-            op.build_count_sql(&legacy_meta()),
-            Err(SodaError::NotSupported(_))
-        ));
+        let err = op.build_count_sql(&legacy_meta()).unwrap_err();
+        // Surfaces as an ORA-40748 server-style error.
+        assert!(err.to_string().contains("ORA-40748"), "{err}");
     }
 
     #[test]
