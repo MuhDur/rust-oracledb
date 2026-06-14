@@ -182,12 +182,31 @@ pub use oracledb_protocol as protocol;
 #[cfg(feature = "arrow")]
 pub mod arrow;
 pub mod cursor_logic;
+/// Feature-gated observability seam (bead rust-oracledb-lv6). Always compiled so
+/// the `obs_span!` / `obs_record!` macros resolve, but its `tracing`-touching
+/// items are themselves `#[cfg(feature = "tracing")]`, so the off-build pulls in
+/// no `tracing` dependency. See `docs/OBSERVABILITY.md`.
+#[macro_use]
+mod obs;
 pub mod pool;
 #[cfg(feature = "soda")]
 pub mod soda;
 mod sql_convert;
 pub mod tls;
 pub mod transport;
+
+/// Re-export of the `tracing` crate for the `obs_span!` / `obs_record!` macros
+/// (`$crate::__tracing::…`). Hidden and feature-gated; not part of the public
+/// API. Only exists when the `tracing` feature is on.
+#[cfg(feature = "tracing")]
+#[doc(hidden)]
+pub use tracing as __tracing;
+
+/// Off-build no-op span guard the `obs_span!` macro yields when the `tracing`
+/// feature is off (hoisted to crate root for `$crate::ObsSpanGuard`).
+#[cfg(not(feature = "tracing"))]
+#[doc(hidden)]
+pub use obs::ObsSpanGuard;
 
 pub use cursor_logic::bind_rows_need_iterative_plsql;
 
@@ -905,6 +924,15 @@ impl Connection {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
         let descriptor = EasyConnect::parse(&options.connect_string)?;
+        // Connect span (feature-gated, zero-cost when off). Carries only the
+        // server address / port / service — never the password.
+        let _span = obs_span!(
+            "oracledb.connect",
+            db.system = "oracle",
+            server.address = %descriptor.host,
+            server.port = descriptor.port as u64,
+            db.name = %descriptor.service_name,
+        );
         let identity = options.identity;
         trace_connect_step("tcp connect");
         let stream = TcpStream::connect_timeout(
@@ -1436,6 +1464,7 @@ impl Connection {
     /// Commit the current transaction. DML on a connection is not durable
     /// until committed.
     pub async fn commit(&mut self, cx: &Cx) -> Result<()> {
+        let _span = obs_span!("oracledb.commit");
         self.send_function(cx, TNS_FUNC_COMMIT).await?;
         // a commit ends any active sessionless transaction on the server
         // (reference clears `_sessionless_data` via the SYNC piggyback)
@@ -1445,6 +1474,7 @@ impl Connection {
 
     /// Roll back the current transaction, discarding uncommitted DML.
     pub async fn rollback(&mut self, cx: &Cx) -> Result<()> {
+        let _span = obs_span!("oracledb.rollback");
         self.send_function(cx, TNS_FUNC_ROLLBACK).await?;
         self.sessionless_data = None;
         Ok(())
@@ -1892,6 +1922,16 @@ impl Connection {
         sql: &str,
         prefetch_rows: u32,
     ) -> Result<QueryResult> {
+        // Per-round-trip observability span (feature-gated, zero-cost when off).
+        // Carries the SQL DIGEST (statement shape, never literal values) and a
+        // bind count of 0 (no binds on this path); `db.rows_fetched` is filled
+        // after the response. See `docs/OBSERVABILITY.md`.
+        let _span = obs_span!(
+            "oracledb.execute",
+            db.statement = %crate::obs::sql_digest(sql),
+            db.bind_count = 0u64,
+            db.rows_fetched = tracing::field::Empty,
+        );
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
         // If a prior cancellable round trip was dropped mid-read, break + drain
@@ -1917,6 +1957,7 @@ impl Connection {
         trace_query_bytes("EXECUTE query response", &response);
         let parsed = parse_query_response(&response, self.capabilities);
         let result = self.note_parse(parsed)?;
+        obs_record!(_span, db.rows_fetched = result.rows.len() as u64);
         self.remember_cursor_columns(&result);
         Ok(result)
     }
@@ -2149,6 +2190,17 @@ impl Connection {
         bind_rows: &[Vec<BindValue>],
         exec_options: ExecuteOptions,
     ) -> Result<QueryResult> {
+        // Bind/execute round-trip span (feature-gated, zero-cost when off).
+        // Carries the SQL digest, the bind count (binds per row — NEVER any bind
+        // value), and the executemany row count; `db.rows_fetched` is filled
+        // after the response.
+        let _span = obs_span!(
+            "oracledb.execute",
+            db.statement = %crate::obs::sql_digest(sql),
+            db.bind_count = bind_rows.first().map_or(0, Vec::len) as u64,
+            db.bind_rows = bind_rows.len() as u64,
+            db.rows_fetched = tracing::field::Empty,
+        );
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
         // If a prior cancellable round trip was dropped mid-read, break + drain
@@ -2300,6 +2352,7 @@ impl Connection {
                 // closed one (ORA-01001). Test 1315 / 5815.
                 self.invalidate_bound_ref_cursors(bind_rows);
                 self.remember_cursor_columns(&result);
+                obs_record!(_span, db.rows_fetched = result.rows.len() as u64);
                 if exec_options.parse_only {
                     return Ok(result);
                 }
@@ -2448,6 +2501,15 @@ impl Connection {
         known_columns: &[ColumnMetadata],
         previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
     ) -> Result<QueryResult> {
+        // Fetch round-trip span (feature-gated, zero-cost when off). Carries the
+        // cursor id and the requested arraysize; `db.rows_fetched` is filled
+        // after the response.
+        let _span = obs_span!(
+            "oracledb.fetch",
+            db.cursor_id = cursor_id as u64,
+            db.arraysize = arraysize as u64,
+            db.rows_fetched = tracing::field::Empty,
+        );
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
         // If a prior fetch future was cancelled mid-read, break + drain the
@@ -2469,6 +2531,7 @@ impl Connection {
         let parsed =
             parse_fetch_response_with_context(&response, self.capabilities, &columns, previous_row);
         let result = self.note_parse(parsed)?;
+        obs_record!(_span, db.rows_fetched = result.rows.len() as u64);
         self.remember_cursor_columns(&result);
         Ok(result)
     }
@@ -2703,6 +2766,14 @@ impl Connection {
         offset: u64,
         amount: u64,
     ) -> Result<LobReadResult> {
+        // LOB read span (feature-gated, zero-cost when off). Carries the offset
+        // and requested amount — never the locator bytes or the LOB data.
+        let _span = obs_span!(
+            "oracledb.lob",
+            db.operation = "read",
+            db.lob_offset = offset,
+            db.lob_amount = amount,
+        );
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
@@ -2887,6 +2958,14 @@ impl Connection {
         offset: u64,
         data: &[u8],
     ) -> Result<LobReadResult> {
+        // LOB write span (feature-gated, zero-cost when off). Carries the offset
+        // and the byte count written — never the locator bytes or the LOB data.
+        let _span = obs_span!(
+            "oracledb.lob",
+            db.operation = "write",
+            db.lob_offset = offset,
+            db.lob_bytes = data.len() as u64,
+        );
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
