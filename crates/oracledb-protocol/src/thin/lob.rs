@@ -287,18 +287,22 @@ pub fn parse_lob_free_temp_response(
 /// Scan a plain function response (ping/commit/rollback) for a server error.
 /// Unknown message types end the scan without error so payload shapes that
 /// were previously tolerated (responses used to go unparsed) keep working.
+/// Returns whether a server-side transaction is in progress, sampled from the
+/// final end-of-call status bit (reference protocol.pyx `_process_call_status`).
 pub fn parse_plain_function_response(
     payload: &[u8],
     capabilities: ClientCapabilities,
-) -> Result<()> {
+) -> Result<bool> {
     let mut reader = TtcReader::new(payload);
+    let mut txn_in_progress = false;
     while reader.remaining() > 0 {
         let message_type = reader.read_u8()?;
         match message_type {
             0 => {}
             TNS_MSG_TYPE_STATUS => {
-                let _call_status = reader.read_ub4()?;
+                let call_status = reader.read_ub4()?;
                 let _seq = reader.read_ub2()?;
+                txn_in_progress = call_status & TNS_EOCS_FLAGS_TXN_IN_PROGRESS != 0;
             }
             TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => {
                 let _ = skip_server_side_piggyback(&mut reader)?;
@@ -306,6 +310,9 @@ pub fn parse_plain_function_response(
             TNS_MSG_TYPE_END_OF_RESPONSE => break,
             TNS_MSG_TYPE_ERROR => {
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
+                // The end-of-call ERROR (number 0 on success) carries the
+                // end-of-call status; sample the transaction-in-progress bit.
+                txn_in_progress = info.call_status & TNS_EOCS_FLAGS_TXN_IN_PROGRESS != 0;
                 if info.number != 0 {
                     return Err(ProtocolError::ServerError(info.message));
                 }
@@ -313,7 +320,7 @@ pub fn parse_plain_function_response(
             _ => break,
         }
     }
-    Ok(())
+    Ok(txn_in_progress)
 }
 
 pub(crate) fn parse_lob_op_response(

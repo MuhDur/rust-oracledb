@@ -229,15 +229,6 @@ pub(crate) fn sql_identifier(value: &str) -> PyResult<String> {
     }
 }
 
-pub(crate) fn first_sql_keyword(statement: &str) -> String {
-    statement
-        .trim_start()
-        .split(|ch: char| !ch.is_ascii_alphabetic())
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-}
-
 pub(crate) fn parse_alter_session_value(statement: &str, key: &str) -> Option<String> {
     let trimmed = statement.trim().trim_end_matches(';').trim();
     let lower = trimmed.to_ascii_lowercase();

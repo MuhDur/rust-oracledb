@@ -179,11 +179,6 @@ impl AsyncThinConnImpl {
             },
         );
         task.await.map_err(runtime_error)?;
-        self.inner
-            .state
-            .lock()
-            .map_err(runtime_error)?
-            .transaction_in_progress = false;
         Ok(())
     }
 
@@ -196,11 +191,6 @@ impl AsyncThinConnImpl {
             },
         );
         task.await.map_err(runtime_error)?;
-        self.inner
-            .state
-            .lock()
-            .map_err(runtime_error)?
-            .transaction_in_progress = false;
         Ok(())
     }
 
@@ -230,11 +220,6 @@ impl AsyncThinConnImpl {
             },
         );
         task.await.map_err(runtime_error)?;
-        self.inner
-            .state
-            .lock()
-            .map_err(runtime_error)?
-            .transaction_in_progress = true;
         Ok(())
     }
 
@@ -264,11 +249,6 @@ impl AsyncThinConnImpl {
             },
         );
         task.await.map_err(runtime_error)?;
-        self.inner
-            .state
-            .lock()
-            .map_err(runtime_error)?
-            .transaction_in_progress = true;
         Ok(())
     }
 
@@ -288,6 +268,115 @@ impl AsyncThinConnImpl {
             },
         );
         task.await.map_err(runtime_error)
+    }
+
+    /// Async begin of an XA global transaction (reference async `tpc_begin`).
+    #[pyo3(signature = (xid, flags, timeout))]
+    async fn tpc_begin(&self, xid: Py<PyAny>, flags: u32, timeout: u32) -> PyResult<()> {
+        let (format_id, gtid, bqual) = Python::attach(|py| extract_xid(xid.bind(py)))?;
+        let task = spawn_async_connection_task(
+            "oracledb-pyshim-async-tpc-begin",
+            Arc::clone(&self.inner.connection),
+            move |cx, connection| {
+                Box::pin(async move {
+                    connection
+                        .tpc_begin(cx, format_id, &gtid, &bqual, flags, timeout)
+                        .await
+                        .map_err(TaskError::from)
+                })
+            },
+        );
+        task.await.map_err(runtime_error)
+    }
+
+    /// Async end (detach) of an XA global transaction branch (reference async
+    /// `tpc_end`).
+    #[pyo3(signature = (xid, flags))]
+    async fn tpc_end(&self, xid: Py<PyAny>, flags: u32) -> PyResult<()> {
+        let xid = Python::attach(|py| extract_optional_xid(xid.bind(py)))?;
+        let task = spawn_async_connection_task(
+            "oracledb-pyshim-async-tpc-end",
+            Arc::clone(&self.inner.connection),
+            move |cx, connection| {
+                Box::pin(async move {
+                    connection
+                        .tpc_end(cx, xid_as_refs(&xid), flags)
+                        .await
+                        .map_err(TaskError::from)
+                })
+            },
+        );
+        task.await.map_err(runtime_error)
+    }
+
+    /// Async prepare of an XA global transaction (reference async
+    /// `tpc_prepare`). Returns `True` when a commit is needed.
+    #[pyo3(signature = (xid))]
+    async fn tpc_prepare(&self, xid: Py<PyAny>) -> PyResult<bool> {
+        let xid = Python::attach(|py| extract_optional_xid(xid.bind(py)))?;
+        let task = spawn_async_connection_task(
+            "oracledb-pyshim-async-tpc-prepare",
+            Arc::clone(&self.inner.connection),
+            move |cx, connection| {
+                Box::pin(async move {
+                    connection
+                        .tpc_prepare(cx, xid_as_refs(&xid))
+                        .await
+                        .map_err(TaskError::from)
+                })
+            },
+        );
+        task.await.map_err(runtime_error)
+    }
+
+    /// Async commit of an XA global transaction (reference async `tpc_commit`).
+    #[pyo3(signature = (xid, one_phase))]
+    async fn tpc_commit(&self, xid: Py<PyAny>, one_phase: bool) -> PyResult<()> {
+        let xid = Python::attach(|py| extract_optional_xid(xid.bind(py)))?;
+        let task = spawn_async_connection_task(
+            "oracledb-pyshim-async-tpc-commit",
+            Arc::clone(&self.inner.connection),
+            move |cx, connection| {
+                Box::pin(async move {
+                    connection
+                        .tpc_commit(cx, xid_as_refs(&xid), one_phase)
+                        .await
+                        .map_err(TaskError::from)
+                })
+            },
+        );
+        task.await.map_err(runtime_error)
+    }
+
+    /// Async rollback of an XA global transaction (reference async
+    /// `tpc_rollback`).
+    #[pyo3(signature = (xid))]
+    async fn tpc_rollback(&self, xid: Py<PyAny>) -> PyResult<()> {
+        let xid = Python::attach(|py| extract_optional_xid(xid.bind(py)))?;
+        let task = spawn_async_connection_task(
+            "oracledb-pyshim-async-tpc-rollback",
+            Arc::clone(&self.inner.connection),
+            move |cx, connection| {
+                Box::pin(async move {
+                    connection
+                        .tpc_rollback(cx, xid_as_refs(&xid))
+                        .await
+                        .map_err(TaskError::from)
+                })
+            },
+        );
+        task.await.map_err(runtime_error)
+    }
+
+    /// Async forget of an XA global transaction. Thin mode does not support it;
+    /// raises DPY-3001 (NotSupportedError) without a round trip (reference base
+    /// impl `tpc_forget`).
+    #[pyo3(signature = (xid))]
+    async fn tpc_forget(&self, xid: Py<PyAny>) -> PyResult<()> {
+        Python::attach(|py| extract_xid(xid.bind(py)))?;
+        Err(raise_not_supported(
+            "forgetting a TPC (two-phase commit) transaction",
+        ))
     }
 
     /// Async Direct Path Load (reference thin/connection.pyx:1179). Mirrors the
@@ -358,11 +447,6 @@ impl AsyncThinConnImpl {
         // DatabaseErrors carrying the embedded code, not a bare RuntimeError.
         task.await
             .map_err(|err| ora_database_error(&err.to_string()))?;
-        self.inner
-            .state
-            .lock()
-            .map_err(runtime_error)?
-            .transaction_in_progress = false;
         Ok(())
     }
 

@@ -356,8 +356,17 @@ impl ShimPool {
     /// roll back an in-progress transaction; failures propagate (and leave
     /// the connection busy) unless called from `__del__`.
     fn release_blocking(&self, refs: &PoolConnRefs, in_del: bool) -> PyResult<()> {
-        let (id, connection, state) = refs;
-        let in_txn = state.lock().map_err(runtime_error)?.transaction_in_progress;
+        let (id, connection, _state) = refs;
+        // Read the wire-derived transaction-in-progress flag from the driver
+        // (reference protocol.pyx `_txn_in_progress`) to decide whether to roll
+        // back a transaction before returning the connection to the pool.
+        let in_txn = {
+            let guard = connection.lock().map_err(runtime_error)?;
+            guard
+                .as_ref()
+                .map(|conn| conn.transaction_in_progress())
+                .unwrap_or(false)
+        };
         if in_txn {
             let rollback_result = {
                 let mut guard = connection.lock().map_err(runtime_error)?;
@@ -367,9 +376,7 @@ impl ShimPool {
                 }
             };
             match rollback_result {
-                Ok(()) => {
-                    state.lock().map_err(runtime_error)?.transaction_in_progress = false;
-                }
+                Ok(()) => {}
                 Err(err) => {
                     if !in_del {
                         return Err(err);

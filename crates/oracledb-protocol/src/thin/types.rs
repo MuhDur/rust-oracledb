@@ -339,6 +339,11 @@ pub struct QueryResult {
     /// base.pyx:1300-1309). `Some(0)` when the server returned no query id
     /// (qos without SUBSCR_QOS_QUERY); `None` when the block was absent.
     pub query_id: Option<u64>,
+    /// Whether a server-side transaction is in progress, sampled from the final
+    /// end-of-call status bit `TNS_EOCS_FLAGS_TXN_IN_PROGRESS` (reference
+    /// protocol.pyx `_process_call_status`). `None` when the response carried no
+    /// STATUS message (the caller then leaves the flag unchanged).
+    pub txn_in_progress: Option<bool>,
 }
 
 impl QueryResult {
@@ -378,6 +383,35 @@ pub enum SessionlessTxnState {
     /// The active sessionless transaction was suspended or ended
     /// (`TXNID_SYNC_UNSET`).
     Unset,
+}
+
+/// Outcome of a TPC transaction-switch (func 103) round trip used by
+/// `tpc_begin` (START) and `tpc_end` (DETACH). Reference tpc_switch.pyx
+/// `_process_return_parameters` captures the application value and the returned
+/// transaction context; the txn-in-progress bit is sampled from the final call
+/// status (reference protocol.pyx `_process_call_status`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TpcSwitchResponse {
+    /// The transaction context returned by the server on begin; must be stored
+    /// verbatim and echoed on end/prepare/commit/rollback.
+    pub context: Vec<u8>,
+    /// `call_status & TNS_EOCS_FLAGS_TXN_IN_PROGRESS` from the last status.
+    pub txn_in_progress: bool,
+    /// Any sessionless-state update carried by a transaction-id key/value pair
+    /// (only relevant on the sessionless path, retained for shared parsing).
+    pub sessionless_state: Option<SessionlessTxnState>,
+}
+
+/// Outcome of a TPC transaction change-state (func 104) round trip used by
+/// `tpc_prepare` / `tpc_commit` / `tpc_rollback`. Reference tpc_change_state.pyx
+/// `_process_return_parameters` reads the out state (ub4) from the PARAMETER
+/// message; the txn-in-progress bit is sampled from the final call status.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TpcChangeStateResponse {
+    /// The out state returned by the server (one of the `TNS_TPC_TXN_STATE_*`).
+    pub state: u32,
+    /// `call_status & TNS_EOCS_FLAGS_TXN_IN_PROGRESS` from the last status.
+    pub txn_in_progress: bool,
 }
 
 /// Optional execute modes (reference ExecuteMessage attributes).

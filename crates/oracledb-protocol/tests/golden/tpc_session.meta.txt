@@ -1,0 +1,9 @@
+connected 23.26.1.0.0
+table ready
+=== capture A: tpc_begin (START) ===
+=== capture B: insert (DML keeps txn in progress) ===
+=== capture C: tpc_prepare (PREPARE) ===
+needs_commit True
+=== capture D: two-phase tpc_commit (COMMIT) ===
+=== capture E: begin/insert/end + rollback (ABORT) ===
+done

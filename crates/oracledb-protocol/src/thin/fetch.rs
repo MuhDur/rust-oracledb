@@ -332,8 +332,9 @@ pub(crate) fn parse_query_response_with_context_binds_and_options(
                 }
             }
             TNS_MSG_TYPE_STATUS => {
-                let _call_status = reader.read_ub4()?;
+                let call_status = reader.read_ub4()?;
                 let _seq = reader.read_ub2()?;
+                result.txn_in_progress = Some(call_status & TNS_EOCS_FLAGS_TXN_IN_PROGRESS != 0);
             }
             TNS_MSG_TYPE_IO_VECTOR => {
                 out_bind_indexes = parse_io_vector(&mut reader, bind_columns.len())?
@@ -379,6 +380,11 @@ pub(crate) fn parse_query_response_with_context_binds_and_options(
             }
             TNS_MSG_TYPE_ERROR => {
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
+                // The end-of-call ERROR message (number 0 on success) carries
+                // the end-of-call status; sample the transaction-in-progress bit
+                // (reference protocol.pyx `_process_call_status`).
+                result.txn_in_progress =
+                    Some(info.call_status & TNS_EOCS_FLAGS_TXN_IN_PROGRESS != 0);
                 if info.cursor_id != 0 {
                     result.cursor_id = u32::from(info.cursor_id);
                 }

@@ -146,12 +146,15 @@ use oracledb_protocol::thin::{
     parse_lob_write_response, parse_plain_function_response, parse_query_response,
     parse_query_response_with_binds_options_and_columns, parse_tpc_txn_switch_response, BindValue,
     ClientCapabilities, ColumnMetadata, ExecuteOptions, LobReadResult, QueryResult,
-    SessionlessTxnState, TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST,
-    TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK,
-    TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT,
-    TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT,
-    TNS_PACKET_TYPE_REFUSE, TNS_PIPELINE_MODE_ABORT_ON_ERROR, TNS_PIPELINE_MODE_CONTINUE_ON_ERROR,
-    TNS_TPC_TXN_DETACH, TNS_TPC_TXN_POST_DETACH, TNS_TPC_TXN_START, TPC_TXN_FLAGS_NEW,
+    SessionlessTxnState, TpcChangeStateResponse, TpcSwitchResponse, TpcXid,
+    TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF,
+    TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS,
+    TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA,
+    TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE, TNS_PIPELINE_MODE_ABORT_ON_ERROR,
+    TNS_PIPELINE_MODE_CONTINUE_ON_ERROR, TNS_TPC_TXN_ABORT, TNS_TPC_TXN_COMMIT, TNS_TPC_TXN_DETACH,
+    TNS_TPC_TXN_POST_DETACH, TNS_TPC_TXN_PREPARE, TNS_TPC_TXN_START, TNS_TPC_TXN_STATE_ABORTED,
+    TNS_TPC_TXN_STATE_COMMITTED, TNS_TPC_TXN_STATE_FORGOTTEN, TNS_TPC_TXN_STATE_PREPARE,
+    TNS_TPC_TXN_STATE_READ_ONLY, TNS_TPC_TXN_STATE_REQUIRES_COMMIT, TPC_TXN_FLAGS_NEW,
     TPC_TXN_FLAGS_RESUME, TPC_TXN_FLAGS_SESSIONLESS,
 };
 use oracledb_protocol::thin::{
@@ -159,7 +162,11 @@ use oracledb_protocol::thin::{
     parse_subscribe_response, try_parse_oac_record, NotificationRecord, SubscribeResult,
     TNS_SUBSCR_OP_REGISTER, TNS_SUBSCR_OP_UNREGISTER,
 };
-use oracledb_protocol::thin::{build_sessionless_piggyback, build_tpc_txn_switch_payload_with_seq};
+use oracledb_protocol::thin::{
+    build_sessionless_piggyback, build_tpc_change_state_payload_with_seq,
+    build_tpc_switch_payload_with_seq, build_tpc_txn_switch_payload_with_seq,
+    parse_tpc_change_state_response, parse_tpc_switch_response,
+};
 use oracledb_protocol::thin::{TNS_AQ_ARRAY_DEQ, TNS_AQ_ARRAY_ENQ};
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};
@@ -252,6 +259,11 @@ pub enum Error {
     /// code so the shim can raise the matching DatabaseError.
     #[error("{0}")]
     SessionlessTransaction(SessionlessError),
+    /// A TPC (two-phase commit) state machine returned an unexpected out state
+    /// (reference `ERR_UNKNOWN_TRANSACTION_STATE` / DPY-5010). The payload is
+    /// the unexpected state value.
+    #[error("DPY-5010: internal error: unknown transaction state {0}")]
+    UnknownTransactionState(u32),
     #[cfg(feature = "arrow")]
     #[error(transparent)]
     ArrowConversion(#[from] arrow::ArrowConversionError),
@@ -479,6 +491,16 @@ pub struct Connection {
     /// has been consumed (the reference reads it once via the outer
     /// `process()` loop before delivering any record).
     notification_header_consumed: bool,
+    /// The TPC (two-phase commit) transaction context returned by `tpc_begin`,
+    /// echoed back on `tpc_end`/`tpc_prepare`/`tpc_commit`/`tpc_rollback`
+    /// (reference `BaseThinConnImpl._transaction_context`). `None` when no XA
+    /// transaction context has been captured.
+    transaction_context: Option<Vec<u8>>,
+    /// Whether a server-side transaction is in progress, derived from the wire
+    /// end-of-call status bit `TNS_EOCS_FLAGS_TXN_IN_PROGRESS` on every round
+    /// trip (reference protocol.pyx `_process_call_status` /
+    /// `_txn_in_progress`).
+    txn_in_progress: bool,
 }
 
 /// Mirrors the reference `_SessionlessData` (impl/thin/connection.pyx): the
@@ -698,6 +720,8 @@ impl Connection {
             sessionless_data: None,
             notification_buffer: Vec::new(),
             notification_header_consumed: false,
+            transaction_context: None,
+            txn_in_progress: false,
         })
     }
 
@@ -1188,6 +1212,218 @@ impl Connection {
         Ok(())
     }
 
+    /// Run a TPC transaction-switch (func 103) round trip and capture its
+    /// response. Shared by `tpc_begin` (START) and `tpc_end` (DETACH).
+    async fn tpc_switch_round_trip(
+        &mut self,
+        cx: &Cx,
+        operation: u32,
+        flags: u32,
+        timeout: u32,
+        xid: Option<&TpcXid<'_>>,
+        context: Option<&[u8]>,
+    ) -> Result<TpcSwitchResponse> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload =
+            build_tpc_switch_payload_with_seq(seq_num, operation, flags, timeout, xid, context);
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.note_parse(parse_tpc_switch_response(&response, self.capabilities))
+    }
+
+    /// Run a TPC change-state (func 104) round trip and capture its response.
+    /// Shared by `tpc_prepare` (PREPARE), `tpc_commit` (COMMIT) and
+    /// `tpc_rollback` (ABORT).
+    async fn tpc_change_state_round_trip(
+        &mut self,
+        cx: &Cx,
+        operation: u32,
+        requested_state: u32,
+        xid: Option<&TpcXid<'_>>,
+        context: Option<&[u8]>,
+    ) -> Result<TpcChangeStateResponse> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = build_tpc_change_state_payload_with_seq(
+            seq_num,
+            operation,
+            requested_state,
+            0,
+            xid,
+            context,
+        );
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.note_parse(parse_tpc_change_state_response(
+            &response,
+            self.capabilities,
+        ))
+    }
+
+    /// Begin (or resume/promote, via `flags`) an XA global transaction
+    /// (reference impl/thin/connection.pyx `tpc_begin`). The server returns a
+    /// transaction context which is captured for the subsequent
+    /// end/prepare/commit/rollback round trips.
+    pub async fn tpc_begin(
+        &mut self,
+        cx: &Cx,
+        format_id: u32,
+        global_transaction_id: &[u8],
+        branch_qualifier: &[u8],
+        flags: u32,
+        timeout: u32,
+    ) -> Result<()> {
+        let xid = TpcXid {
+            format_id,
+            global_transaction_id,
+            branch_qualifier,
+        };
+        let response = self
+            .tpc_switch_round_trip(cx, TNS_TPC_TXN_START, flags, timeout, Some(&xid), None)
+            .await?;
+        self.transaction_context = Some(response.context);
+        self.txn_in_progress = response.txn_in_progress;
+        Ok(())
+    }
+
+    /// End (detach) an XA global transaction branch (reference `tpc_end`). The
+    /// retained transaction context is echoed back; `xid` is `None` to detach
+    /// the implicit current transaction. The context is cleared afterwards.
+    pub async fn tpc_end(
+        &mut self,
+        cx: &Cx,
+        xid: Option<(u32, &[u8], &[u8])>,
+        flags: u32,
+    ) -> Result<()> {
+        let xid = xid.map(|(format_id, gtid, bqual)| TpcXid {
+            format_id,
+            global_transaction_id: gtid,
+            branch_qualifier: bqual,
+        });
+        let context = self.transaction_context.clone();
+        let response = self
+            .tpc_switch_round_trip(
+                cx,
+                TNS_TPC_TXN_DETACH,
+                flags,
+                0,
+                xid.as_ref(),
+                context.as_deref(),
+            )
+            .await?;
+        self.txn_in_progress = response.txn_in_progress;
+        self.transaction_context = None;
+        Ok(())
+    }
+
+    /// Prepare an XA global transaction for commit (reference `tpc_prepare`).
+    /// Returns `true` when the transaction requires a commit, `false` when it
+    /// is read-only; an unexpected out state raises DPY-5010.
+    pub async fn tpc_prepare(&mut self, cx: &Cx, xid: Option<(u32, &[u8], &[u8])>) -> Result<bool> {
+        let xid = xid.map(|(format_id, gtid, bqual)| TpcXid {
+            format_id,
+            global_transaction_id: gtid,
+            branch_qualifier: bqual,
+        });
+        let context = self.transaction_context.clone();
+        let response = self
+            .tpc_change_state_round_trip(
+                cx,
+                TNS_TPC_TXN_PREPARE,
+                TNS_TPC_TXN_STATE_PREPARE,
+                xid.as_ref(),
+                context.as_deref(),
+            )
+            .await?;
+        self.txn_in_progress = response.txn_in_progress;
+        match response.state {
+            TNS_TPC_TXN_STATE_REQUIRES_COMMIT => Ok(true),
+            TNS_TPC_TXN_STATE_READ_ONLY => Ok(false),
+            other => Err(Error::UnknownTransactionState(other)),
+        }
+    }
+
+    /// Commit an XA global transaction (reference `tpc_commit`). `one_phase`
+    /// requests a single-phase (read-only) commit; two-phase requests a
+    /// committed state and expects the server to return FORGOTTEN. The retained
+    /// context is sent and cleared. An unexpected out state raises DPY-5010.
+    pub async fn tpc_commit(
+        &mut self,
+        cx: &Cx,
+        xid: Option<(u32, &[u8], &[u8])>,
+        one_phase: bool,
+    ) -> Result<()> {
+        let xid = xid.map(|(format_id, gtid, bqual)| TpcXid {
+            format_id,
+            global_transaction_id: gtid,
+            branch_qualifier: bqual,
+        });
+        let requested_state = if one_phase {
+            TNS_TPC_TXN_STATE_READ_ONLY
+        } else {
+            TNS_TPC_TXN_STATE_COMMITTED
+        };
+        let context = self.transaction_context.clone();
+        let response = self
+            .tpc_change_state_round_trip(
+                cx,
+                TNS_TPC_TXN_COMMIT,
+                requested_state,
+                xid.as_ref(),
+                context.as_deref(),
+            )
+            .await?;
+        self.txn_in_progress = response.txn_in_progress;
+        // reference `_check_tpc_commit_state`: one-phase must be READ_ONLY or
+        // COMMITTED; two-phase must be FORGOTTEN.
+        let state = response.state;
+        let ok = if one_phase {
+            state == TNS_TPC_TXN_STATE_READ_ONLY || state == TNS_TPC_TXN_STATE_COMMITTED
+        } else {
+            state == TNS_TPC_TXN_STATE_FORGOTTEN
+        };
+        if !ok {
+            return Err(Error::UnknownTransactionState(state));
+        }
+        self.transaction_context = None;
+        Ok(())
+    }
+
+    /// Roll back an XA global transaction (reference `tpc_rollback`). The
+    /// retained context is sent; the server is expected to return ABORTED. An
+    /// unexpected out state raises DPY-5010.
+    pub async fn tpc_rollback(&mut self, cx: &Cx, xid: Option<(u32, &[u8], &[u8])>) -> Result<()> {
+        let xid = xid.map(|(format_id, gtid, bqual)| TpcXid {
+            format_id,
+            global_transaction_id: gtid,
+            branch_qualifier: bqual,
+        });
+        let context = self.transaction_context.clone();
+        let response = self
+            .tpc_change_state_round_trip(
+                cx,
+                TNS_TPC_TXN_ABORT,
+                TNS_TPC_TXN_STATE_ABORTED,
+                xid.as_ref(),
+                context.as_deref(),
+            )
+            .await?;
+        self.txn_in_progress = response.txn_in_progress;
+        if response.state != TNS_TPC_TXN_STATE_ABORTED {
+            return Err(Error::UnknownTransactionState(response.state));
+        }
+        Ok(())
+    }
+
+    /// Whether a server-side transaction is in progress (reference
+    /// `get_transaction_in_progress` -> `_txn_in_progress`).
+    pub fn transaction_in_progress(&self) -> bool {
+        self.txn_in_progress
+    }
+
     /// Validate that a `suspend_on_success` request is legal and fold the
     /// post-detach into the pending sessionless piggyback (reference
     /// execute.pyx `_handle_sessionless_suspend`). Called by the cursor execute
@@ -1246,14 +1482,19 @@ impl Connection {
     fn apply_sessionless_state(&mut self, state: Option<SessionlessTxnState>) {
         match state {
             // transaction ended/suspended on the server (reference clears
-            // `_sessionless_data`)
-            Some(SessionlessTxnState::Unset) => self.sessionless_data = None,
+            // `_sessionless_data` and sets `_txn_in_progress = False`,
+            // base.pyx:152/161)
+            Some(SessionlessTxnState::Unset) => {
+                self.sessionless_data = None;
+                self.txn_in_progress = false;
+            }
             // transaction started/resumed (reference replaces `_sessionless_data`
             // with a fresh `_SessionlessData`). This also covers a transaction
             // started via DBMS_TRANSACTION on the server, where no client-side
             // data existed yet: the server SET carries `started_on_server` so a
             // later client suspend/resume correctly raises DPY-3034.
             Some(SessionlessTxnState::Set { started_on_server }) => {
+                self.txn_in_progress = true;
                 match self.sessionless_data.as_mut() {
                     Some(data) => {
                         data.started_on_server = started_on_server;
@@ -1600,6 +1841,13 @@ impl Connection {
                 // a deferred begin/resume or a suspend-on-success reports its
                 // outcome through the response's SYNC piggyback
                 self.apply_sessionless_state(result.sessionless_txn_state);
+                // refresh the transaction-in-progress flag from the wire
+                // end-of-call status (reference protocol.pyx
+                // `_process_call_status`); leave unchanged if the response
+                // carried no STATUS message.
+                if let Some(txn_in_progress) = result.txn_in_progress {
+                    self.txn_in_progress = txn_in_progress;
+                }
                 if is_copy {
                     // a copied cursor is never returned to the statement cache;
                     // it is closed when its owning cursor releases it (reference
@@ -2896,8 +3144,12 @@ impl Connection {
         let response = read_data_response(&mut self.read, cx, &self.write).await?;
         // Surface server errors (e.g. ORA-01012 after a killed session) that
         // arrive on plain function round trips; pool ping health checks and
-        // commit/rollback depend on these not being silently swallowed.
-        self.note_parse(parse_plain_function_response(&response, self.capabilities))?;
+        // commit/rollback depend on these not being silently swallowed. The
+        // returned bit refreshes `txn_in_progress` from the wire end-of-call
+        // status (reference protocol.pyx `_process_call_status`).
+        let txn_in_progress =
+            self.note_parse(parse_plain_function_response(&response, self.capabilities))?;
+        self.txn_in_progress = txn_in_progress;
         Ok(())
     }
 }
@@ -3130,6 +3382,82 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection.suspend_sessionless_transaction(&cx).await
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn tpc_begin(
+        connection: &mut Connection,
+        format_id: u32,
+        global_transaction_id: &[u8],
+        branch_qualifier: &[u8],
+        flags: u32,
+        timeout: u32,
+    ) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .tpc_begin(
+                    &cx,
+                    format_id,
+                    global_transaction_id,
+                    branch_qualifier,
+                    flags,
+                    timeout,
+                )
+                .await
+        })
+    }
+
+    pub fn tpc_end(
+        connection: &mut Connection,
+        xid: Option<(u32, &[u8], &[u8])>,
+        flags: u32,
+    ) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.tpc_end(&cx, xid, flags).await
+        })
+    }
+
+    pub fn tpc_prepare(
+        connection: &mut Connection,
+        xid: Option<(u32, &[u8], &[u8])>,
+    ) -> Result<bool> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.tpc_prepare(&cx, xid).await
+        })
+    }
+
+    pub fn tpc_commit(
+        connection: &mut Connection,
+        xid: Option<(u32, &[u8], &[u8])>,
+        one_phase: bool,
+    ) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.tpc_commit(&cx, xid, one_phase).await
+        })
+    }
+
+    pub fn tpc_rollback(
+        connection: &mut Connection,
+        xid: Option<(u32, &[u8], &[u8])>,
+    ) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.tpc_rollback(&cx, xid).await
         })
     }
 

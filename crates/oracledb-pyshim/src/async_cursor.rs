@@ -15,7 +15,6 @@ use crate::*;
 
 pub(crate) struct AsyncExecuteOutcome {
     result: QueryResult,
-    should_commit: bool,
 }
 
 // d49: migrate to oracledb (driver async futures)
@@ -112,10 +111,7 @@ pub(crate) fn spawn_async_executemany_task(
                     if should_commit {
                         connection.commit(cx).await.map_err(TaskError::from)?;
                     }
-                    return Ok(AsyncExecuteOutcome {
-                        result,
-                        should_commit,
-                    });
+                    return Ok(AsyncExecuteOutcome { result });
                 }
                 let mut result = connection
                     .execute_query_with_bind_rows_options_and_timeout(
@@ -146,10 +142,7 @@ pub(crate) fn spawn_async_executemany_task(
                 if should_commit {
                     connection.commit(cx).await.map_err(TaskError::from)?;
                 }
-                Ok(AsyncExecuteOutcome {
-                    result,
-                    should_commit,
-                })
+                Ok(AsyncExecuteOutcome { result })
             })
         },
     )
@@ -226,10 +219,7 @@ pub(crate) fn spawn_async_execute_task(
             if should_commit {
                 connection.commit(&cx).await.map_err(TaskError::from)?;
             }
-            Ok(AsyncExecuteOutcome {
-                result,
-                should_commit,
-            })
+            Ok(AsyncExecuteOutcome { result })
         })
     })
 }
@@ -637,7 +627,6 @@ impl AsyncThinCursorImpl {
             return Err(ora_cancel_error());
         }
         let mut result = outcome.result;
-        let should_commit = outcome.should_commit;
         self.inner.batch_errors_state =
             batcherrors.then(|| std::mem::take(&mut result.batch_errors));
         if arraydmlrowcounts {
@@ -664,7 +653,7 @@ impl AsyncThinCursorImpl {
             .state
             .lock()
             .map_err(runtime_error)?
-            .record_statement(&statement, is_query, should_commit);
+            .record_statement(&statement);
         self.inner.record_implicit_resultsets(&mut result);
         self.inner.columns = result.columns;
         self.inner.reset_fetch_define_state();
@@ -768,7 +757,6 @@ impl AsyncThinCursorImpl {
             Err(err) => return Err(self.inner.raise_execute_task_error(&err, is_plsql)),
         };
         let mut result = outcome.result;
-        let should_commit = outcome.should_commit;
         if self.inner.cancel_requested.swap(false, Ordering::SeqCst) {
             self.inner.drain_cancel_response()?;
             return Err(ora_cancel_error());
@@ -794,7 +782,7 @@ impl AsyncThinCursorImpl {
             .state
             .lock()
             .map_err(runtime_error)?
-            .record_statement(&statement, is_query, should_commit);
+            .record_statement(&statement);
         self.inner.record_implicit_resultsets(&mut result);
         self.inner.columns = result.columns;
         self.inner.reset_fetch_define_state();
