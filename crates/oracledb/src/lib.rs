@@ -218,22 +218,92 @@ fn decode_server_version_number(full: u32, new_format: bool) -> (u8, u8, u8, u8,
     }
 }
 
-fn protocol_error_is_session_dead(err: &oracledb_protocol::ProtocolError) -> bool {
-    let message = match err {
-        oracledb_protocol::ProtocolError::ServerError(message) => message,
-        oracledb_protocol::ProtocolError::ServerErrorWithRowCount { message, .. } => message,
-        _ => return false,
-    };
-    let Some(start) = message.find("ORA-") else {
-        return false;
-    };
-    let digits = message[start + 4..]
+/// Curated set of Oracle error codes that are *transient*: the request failed
+/// for a reason that is expected to clear on its own, so a caller may safely
+/// retry the same operation after a short back-off without changing anything.
+///
+/// This is the list every production shop hand-rolls on top of python-oracledb's
+/// bare `.code` int; we ship it curated and documented. Codes covered:
+///
+/// - `ORA-00054` resource busy / `NOWAIT` lock contention
+/// - `ORA-00060` deadlock detected while waiting for a resource
+/// - `ORA-00104`/`ORA-00257` instance/archiver hung — resource starvation
+/// - `ORA-12516`/`ORA-12520`/`ORA-12526`/`ORA-12528` listener could not hand
+///   off a handler / all appropriate handlers busy or restricted (TAF retry)
+/// - `ORA-30006` resource busy waiting for a `WAIT POLICY`
+/// - `ORA-51535` concurrency limit exceeded (database resource manager)
+///
+/// Connection-lost codes ([`CONNECTION_LOST_ORA_CODES`]) are *also* retryable
+/// (after re-establishing the connection); [`Error::is_retryable`] reports the
+/// union of both sets.
+const TRANSIENT_ORA_CODES: &[u32] = &[54, 60, 104, 257, 12516, 12520, 12526, 12528, 30006, 51535];
+
+/// Curated set of Oracle error codes that mean the *connection itself was
+/// lost* (the session is gone, the socket was reset, or the listener/server
+/// dropped the link). These are a subset of [`SESSION_DEAD_ORA_CODES`] —
+/// the codes that specifically signal a severed network/session link rather
+/// than an internal server fault. Reconnect, then retry.
+///
+/// Codes covered:
+///
+/// - `ORA-00028` your session has been killed
+/// - `ORA-01012` not logged on (session terminated server-side)
+/// - `ORA-01041`/`ORA-01089` internal error / immediate shutdown in progress
+/// - `ORA-02396` exceeded maximum idle time, session reconnected
+/// - `ORA-03113` end-of-file on communication channel
+/// - `ORA-03114` not connected to Oracle
+/// - `ORA-03135` connection lost contact
+/// - `ORA-12537` TNS: connection closed
+/// - `ORA-12547` TNS: lost contact
+/// - `ORA-12570` TNS: packet reader failure
+/// - `ORA-28511` lost RPC connection to heterogeneous remote agent
+const CONNECTION_LOST_ORA_CODES: &[u32] = &[
+    28, 1012, 1041, 1089, 2396, 3113, 3114, 3135, 12537, 12547, 12570, 28511,
+];
+
+/// Extract the leading `ORA-NNNNN` numeric code from an Oracle error message,
+/// if the message carries one. Used as the fallback when a structured
+/// [`ServerErrorDetails`] code is not available (string-only error variants).
+fn parse_ora_code_from_message(message: &str) -> Option<u32> {
+    let start = message.find("ORA-")?;
+    let digits: String = message[start + 4..]
         .chars()
         .take_while(|ch| ch.is_ascii_digit())
-        .collect::<String>();
-    digits
-        .parse::<u32>()
-        .is_ok_and(|code| SESSION_DEAD_ORA_CODES.contains(&code))
+        .collect();
+    digits.parse::<u32>().ok()
+}
+
+fn protocol_error_is_session_dead(err: &oracledb_protocol::ProtocolError) -> bool {
+    protocol_error_ora_code(err).is_some_and(|code| SESSION_DEAD_ORA_CODES.contains(&code))
+}
+
+/// The Oracle error number carried by a [`ProtocolError`], whether it is the
+/// structured [`ServerErrorInfo`] variant (read directly from `.code`) or a
+/// string variant (parsed from the `ORA-NNNNN` prefix). `None` for protocol
+/// errors that are not server errors (truncated packets, decode failures, ...).
+fn protocol_error_ora_code(err: &oracledb_protocol::ProtocolError) -> Option<u32> {
+    match err {
+        oracledb_protocol::ProtocolError::ServerError(message) => {
+            parse_ora_code_from_message(message)
+        }
+        oracledb_protocol::ProtocolError::ServerErrorWithRowCount { message, .. } => {
+            parse_ora_code_from_message(message)
+        }
+        oracledb_protocol::ProtocolError::ServerErrorInfo(details) => Some(details.code),
+        _ => None,
+    }
+}
+
+/// The server-reported error position / parse offset carried by a
+/// [`ProtocolError`], if any. Only the structured [`ServerErrorInfo`] variant
+/// retains the offset; the string variants drop it on the wire path.
+fn protocol_error_offset(err: &oracledb_protocol::ProtocolError) -> Option<i32> {
+    match err {
+        oracledb_protocol::ProtocolError::ServerErrorInfo(details) if details.pos != 0 => {
+            Some(details.pos)
+        }
+        _ => None,
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -270,6 +340,100 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Structured classification of an [`Error`].
+///
+/// These accessors promote the driver's *internal* retry knowledge (which ORA
+/// codes mean "the session died", "the resource was busy", "the cached plan is
+/// stale") into a public, matchable taxonomy. python-oracledb gives you a bare
+/// `.code` integer and leaves the classification to you; here the curated lists
+/// ship with the driver so production retry / circuit-breaker code is trivial:
+///
+/// ```no_run
+/// # use oracledb::Error;
+/// # fn classify(err: &Error) {
+/// if err.is_connection_lost() {
+///     // reconnect, then retry
+/// } else if err.is_retryable() {
+///     // back off and retry on the same connection
+/// }
+/// # }
+/// ```
+///
+/// The classification sources, in priority order:
+///
+/// 1. The structured server error code (`ServerErrorInfo.code`) when present.
+/// 2. Otherwise the `ORA-NNNNN` prefix parsed from the error message.
+///
+/// The curated code sets are documented on [`TRANSIENT_ORA_CODES`] and
+/// [`CONNECTION_LOST_ORA_CODES`].
+impl Error {
+    /// The Oracle error number (`ORA-NNNNN`) this error carries, if any.
+    ///
+    /// Returns the structured `ServerErrorInfo.code` when the error came back
+    /// on the structured path; otherwise it parses the `ORA-` prefix out of the
+    /// server message. `None` for non-server errors (I/O, timeouts, protocol
+    /// decode failures) and server messages with no `ORA-` code.
+    ///
+    /// The value is an `i32` (rather than `u32`) so it composes directly with
+    /// the `i32`-typed codes most retry tables and logging layers already use;
+    /// every real Oracle code fits comfortably.
+    pub fn ora_code(&self) -> Option<i32> {
+        match self {
+            Error::Protocol(err) => protocol_error_ora_code(err).map(|code| code as i32),
+            _ => None,
+        }
+    }
+
+    /// The server-reported parse offset / error position for this error, if the
+    /// server provided one (1-based character offset into the SQL text for a
+    /// parse error). Only the structured server-error path retains the offset;
+    /// `None` everywhere else, and `None` when the server reported offset 0.
+    pub fn offset(&self) -> Option<i32> {
+        match self {
+            Error::Protocol(err) => protocol_error_offset(err),
+            _ => None,
+        }
+    }
+
+    /// Whether this error means the underlying connection was lost: the session
+    /// was killed, the socket was reset, or the listener/server dropped the
+    /// link. A caller seeing this should discard the connection, re-establish,
+    /// and (if the operation was idempotent) retry. See
+    /// [`CONNECTION_LOST_ORA_CODES`] for the exact codes.
+    ///
+    /// Raw I/O errors ([`Error::Io`]) and call timeouts ([`Error::CallTimeout`])
+    /// also count as connection-lost: the transport is no longer usable.
+    pub fn is_connection_lost(&self) -> bool {
+        match self {
+            Error::Io(_) | Error::CallTimeout(_) => true,
+            _ => self
+                .ora_code()
+                .is_some_and(|code| CONNECTION_LOST_ORA_CODES.contains(&(code as u32))),
+        }
+    }
+
+    /// Whether this error is *transient*: the operation failed for a reason
+    /// expected to clear on its own (lock contention, deadlock victim, listener
+    /// hand-off congestion, resource-manager throttle), so the same call may be
+    /// retried on the same connection after a short back-off. See
+    /// [`TRANSIENT_ORA_CODES`] for the exact codes. Does **not** include
+    /// connection-lost codes (those need a reconnect first — use
+    /// [`Self::is_connection_lost`]).
+    pub fn is_transient(&self) -> bool {
+        self.ora_code()
+            .is_some_and(|code| TRANSIENT_ORA_CODES.contains(&(code as u32)))
+    }
+
+    /// Whether retrying is reasonable at all: the union of [`Self::is_transient`]
+    /// and [`Self::is_connection_lost`]. A `true` here means "retry is sensible"
+    /// (back off and retry, reconnecting first if the connection was lost); a
+    /// `false` means the error is permanent for this input (syntax error,
+    /// constraint violation, missing object) and retrying will not help.
+    pub fn is_retryable(&self) -> bool {
+        self.is_transient() || self.is_connection_lost()
+    }
+}
 
 /// Client-API misuse of the sessionless transaction API, mirroring the
 /// reference `ERR_SESSIONLESS_*` errors (impl/oracledb/errors.py:338-340).
@@ -4400,6 +4564,90 @@ mod tests {
     fn identity() -> ClientIdentity {
         ClientIdentity::new("program", "machine", "osuser", "terminal", "driver")
             .expect("test identity should be valid")
+    }
+
+    fn server_error(message: &str) -> Error {
+        Error::Protocol(oracledb_protocol::ProtocolError::ServerError(
+            message.to_string(),
+        ))
+    }
+
+    fn structured_error(code: u32, pos: i32) -> Error {
+        Error::Protocol(oracledb_protocol::ProtocolError::ServerErrorInfo(Box::new(
+            oracledb_protocol::ServerErrorDetails {
+                message: format!("ORA-{code:05}: synthetic"),
+                code,
+                pos,
+                ..Default::default()
+            },
+        )))
+    }
+
+    #[test]
+    fn ora_code_parses_from_message_and_struct() {
+        // string path: parsed from the ORA- prefix
+        assert_eq!(
+            server_error("ORA-00060: deadlock detected").ora_code(),
+            Some(60)
+        );
+        // structured path: read straight from .code
+        assert_eq!(structured_error(942, 0).ora_code(), Some(942));
+        // no ORA- code present
+        assert_eq!(server_error("listener problem").ora_code(), None);
+        // non-server errors have no code
+        assert_eq!(Error::CallTimeout(500).ora_code(), None);
+    }
+
+    #[test]
+    fn offset_only_from_structured_nonzero() {
+        assert_eq!(structured_error(942, 14).offset(), Some(14));
+        assert_eq!(structured_error(942, 0).offset(), None);
+        assert_eq!(
+            server_error("ORA-00942: table or view does not exist").offset(),
+            None
+        );
+    }
+
+    #[test]
+    fn transient_classification() {
+        for &code in TRANSIENT_ORA_CODES {
+            let err = server_error(&format!("ORA-{code:05}: transient"));
+            assert!(err.is_transient(), "ORA-{code:05} should be transient");
+            assert!(err.is_retryable(), "transient implies retryable");
+            assert!(
+                !err.is_connection_lost(),
+                "ORA-{code:05} is not connection-lost"
+            );
+        }
+        // a permanent error: table or view does not exist
+        let perm = server_error("ORA-00942: table or view does not exist");
+        assert!(!perm.is_transient());
+        assert!(!perm.is_connection_lost());
+        assert!(!perm.is_retryable());
+    }
+
+    #[test]
+    fn connection_lost_classification() {
+        for &code in CONNECTION_LOST_ORA_CODES {
+            let err = server_error(&format!("ORA-{code:05}: lost"));
+            assert!(
+                err.is_connection_lost(),
+                "ORA-{code:05} should be connection-lost"
+            );
+            assert!(err.is_retryable(), "connection-lost implies retryable");
+            assert!(
+                !err.is_transient(),
+                "ORA-{code:05} is not a transient (retry-in-place) code"
+            );
+        }
+        // raw I/O and call timeouts also count as the transport being gone
+        let io = Error::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset",
+        ));
+        assert!(io.is_connection_lost());
+        assert!(io.is_retryable());
+        assert!(Error::CallTimeout(1000).is_connection_lost());
     }
 
     #[test]
