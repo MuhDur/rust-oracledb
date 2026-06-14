@@ -83,18 +83,24 @@ fn promote_timestamp_bind_columns(
     Ok(())
 }
 
+/// Maps the crate-side construction error to the same Python exception the shim
+/// raised when this struct owned the batch arithmetic: `TypeError` for a zero
+/// batch size, `RuntimeError` for a row count that overflows `u32`.
+fn executemany_manager_error(err: oracledb::ExecutemanyManagerError) -> PyErr {
+    match err {
+        oracledb::ExecutemanyManagerError::ZeroBatchSize => {
+            PyTypeError::new_err("batch_size must be greater than zero")
+        }
+        oracledb::ExecutemanyManagerError::RowCountOverflow => runtime_error(err),
+    }
+}
+
+/// PyO3 adapter over [`oracledb::ExecutemanyManager`]: the Python-visible object
+/// the batch loop drives. The batch-windowing arithmetic lives on the crate; the
+/// shim only exposes the getters / `next_batch` to Python.
 #[pyclass(module = "oracledb.thin_impl", name = "ExecutemanyManager")]
-// d49: migrate to oracledb (executemany manager belongs on driver)
 pub(crate) struct ExecutemanyManager {
-    total_rows: u32,
-    batch_size: u32,
-    num_rows: u32,
-    message_offset: u32,
-    /// Cumulative row offsets of chunk boundaries (DataFrame ingestion of an
-    /// Arrow chunked array). A batch never spans a boundary, so each chunk's
-    /// trailing partial batch becomes its own round trip — matching the
-    /// reference BatchLoadManager. Empty for plain (single-chunk) binds.
-    chunk_ends: Vec<u32>,
+    inner: oracledb::ExecutemanyManager,
 }
 
 impl ExecutemanyManager {
@@ -107,36 +113,10 @@ impl ExecutemanyManager {
         batch_size: u32,
         chunk_lengths: Vec<usize>,
     ) -> PyResult<Self> {
-        let total_rows = u32::try_from(total_rows).map_err(runtime_error)?;
-        if batch_size == 0 {
-            return Err(PyTypeError::new_err("batch_size must be greater than zero"));
-        }
-        let mut chunk_ends = Vec::with_capacity(chunk_lengths.len());
-        let mut acc: u32 = 0;
-        for len in chunk_lengths {
-            acc = acc.saturating_add(u32::try_from(len).map_err(runtime_error)?);
-            chunk_ends.push(acc);
-        }
-        let mut manager = Self {
-            total_rows,
-            batch_size,
-            num_rows: 0,
-            message_offset: 0,
-            chunk_ends,
-        };
-        manager.num_rows = manager.batch_len_from(0);
-        Ok(manager)
-    }
-
-    /// Number of rows in the batch starting at `offset`: at most `batch_size`,
-    /// and never crossing the next chunk boundary.
-    fn batch_len_from(&self, offset: u32) -> u32 {
-        let remaining = self.total_rows.saturating_sub(offset);
-        let mut len = remaining.min(self.batch_size);
-        if let Some(next_end) = self.chunk_ends.iter().find(|&&end| end > offset) {
-            len = len.min(next_end.saturating_sub(offset));
-        }
-        len
+        let inner =
+            oracledb::ExecutemanyManager::with_chunks(total_rows, batch_size, chunk_lengths)
+                .map_err(executemany_manager_error)?;
+        Ok(Self { inner })
     }
 }
 
@@ -144,17 +124,16 @@ impl ExecutemanyManager {
 impl ExecutemanyManager {
     #[getter]
     fn num_rows(&self) -> u32 {
-        self.num_rows
+        self.inner.num_rows()
     }
 
     #[getter]
     fn message_offset(&self) -> u32 {
-        self.message_offset
+        self.inner.message_offset()
     }
 
     fn next_batch(&mut self) {
-        self.message_offset = self.message_offset.saturating_add(self.num_rows);
-        self.num_rows = self.batch_len_from(self.message_offset);
+        self.inner.next_batch();
     }
 }
 

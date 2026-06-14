@@ -188,7 +188,9 @@ mod sql_convert;
 pub mod tls;
 pub mod transport;
 
-pub use cursor_logic::bind_rows_need_iterative_plsql;
+pub use cursor_logic::{
+    bind_rows_need_iterative_plsql, ExecutemanyManager, ExecutemanyManagerError,
+};
 
 pub use sql_convert::{
     ConversionError, FromRow, FromSql, IntoBinds, QueryResultExt, ToSql, TypedRow,
