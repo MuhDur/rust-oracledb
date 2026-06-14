@@ -28,21 +28,31 @@ then `select 7+5 -> 12` on the SAME connection + a follow-up multi-row fetch).
 
 ## Measured (AMD EPYC 7713, loopback Oracle 23ai container, 50k rows, arraysize 1000, ~49 pages)
 
-### Direct read-wait attribution (example profile_fetch_attribution, median of 15 rounds)
-| metric            | serial   | prefetched | delta            |
-|-------------------|----------|------------|------------------|
-| read-wait / page  | ~306-318us | ~241-280us | **-8% .. -24%**  (overlap hides the server round trip) |
+### PRIMARY signal — direct read-wait attribution (example profile_fetch_attribution)
+The read counter measures the read-wait: how long the response read `.await` blocks
+ONCE REACHED. If the prefetch overlaps the server round trip with the prior page's
+decode + callback, the bytes are already in the kernel buffer by the time we await,
+so read-wait DROPS. This isolates the overlap and excludes the fixed per-iter
+execute cost — the robust, repeatable number (6 runs):
+| metric            | serial     | prefetched | delta            |
+|-------------------|------------|------------|------------------|
+| read-wait / page  | ~294-318us | ~241-280us | **-5.6% .. -24%** (consistently negative) |
 
-### Criterion (cargo bench thin_driver -- oracledb_prefetch, 40 samples)
-| scenario                         | serial    | prefetched | delta    |
-|----------------------------------|-----------|------------|----------|
-| trivial consumer (loopback floor)| 52.84 ms  | 51.66 ms   | **-2.2%** |
-| realistic consumer (work/row)    | 56.08 ms  | 52.84 ms   | **-5.8%** |
+### Isolated A/B wall with a REALISTIC per-row consumer (6 runs, median of 15 rounds each)
+A real caller does work per row; the per-page decode + that work then covers the
+server round trip, so the overlap pays off in wall time too:
+| metric          | serial    | prefetched | delta             |
+|-----------------|-----------|------------|-------------------|
+| wall / iter     | ~27-29 ms | ~23-24 ms  | **-12.5% .. -19.5%** |
 
-### Example wall (median of 15 rounds, realistic per-row CPU work)
-| metric          | serial    | prefetched | delta            |
-|-----------------|-----------|------------|------------------|
-| wall / iter     | ~28-29 ms | ~23-24 ms  | **-15% .. -19%** |
+### Criterion (cargo bench thin_driver -- oracledb_prefetch, 40 samples) — NOISY on loopback
+Criterion's measured op includes the fixed per-iter execute round trip + cursor
+reuse, which dilutes and adds variance to the overlap on loopback. Observed runs
+for the realistic-work pair ranged from break-even to -6% (e.g. 56.08->52.84 ms =
+-5.8%; another run 53.76->53.40 ms = -0.7%). HONEST READ: on loopback criterion's
+end-to-end wall sits in the noise-to-modest-win band; the clean overlap evidence is
+the read-wait attribution above. The bench is retained because it is the right
+vehicle on real-network RTT, where the read-wait term dominates and the win grows.
 
 ## Honest caveats (methodology)
 - The read-wait reduction (-8%..-24%) is the ROBUST, directly-measured signal: it
