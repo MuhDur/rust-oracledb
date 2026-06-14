@@ -279,6 +279,85 @@ map ends with the same content.
 so it moves only with host-load noise — this trims the client CPU the shim pays per
 call, not the server round trip.
 
+### 5. Decode-path micro-opts (measure-first bundle)
+
+A measure-first bundle of small decode-path optimizations. Each was gated on a
+real measurement (criterion / counting-allocator) and a byte-identical proof;
+levers that did **not** prove out were dropped and are recorded as such. All
+parity sentinels stayed byte-identical (`test_2200_number_var` 39p — the NUMBER
+gate — `test_1100` 57p/5s, `test_8000_dataframe` 82p, `test_2300` 48p/2s,
+`test_6700` 13p).
+
+**5a. Fused NUMBER coefficient walk (KEPT).** `OracleNumber::from_wire` walked
+the wire base-100 digits once to format/scale them, then walked the produced
+digit buffer a *second* time (`digits_to_i128`) to fold the `i128` coefficient.
+The second walk is now fused into the first: the coefficient is accumulated
+inline as each significant digit is emitted, spilling to the boxed-text fallback
+only on the same `i128`-overflow boundary as before. Byte-identity is proven by
+the existing `number_inline_byte_identical` differential corpus (a 4096-case
+proptest over the full NUMBER domain) plus a new direct differential test
+(`fused_coefficient_matches_reference_walk`) that asserts the fused coefficient
+equals the retained reference walk across the inline range and the overflow
+boundary. **Result (criterion, release, 1000-cell pages, fused vs the unfused
+two-pass):** small integers −14 %, mid-range integers −33 %, decimals −16 %,
+38-digit max-precision values −38 % decode time; the win scales with digit count
+because the eliminated walk is `O(digits)`. End-to-end this trims client decode
+CPU on every NUMBER cell; on the loopback concurrent scan (50 % NUMBER columns)
+the aggregate throughput moves within run-to-run noise (the workload is bounded
+by other terms there), so the honest headline is the isolated decode-CPU delta.
+
+**5b. Single-packet response passthrough (KEPT).** When a data response is ONE
+terminal DATA packet, the reassembly loop now **moves** the packet's owned
+buffer into the response and strips the 2 flag bytes in place, instead of
+allocating a fresh `Vec` and copying the whole payload into it. The flag strip,
+the end-of-response decision, and the `FLUSH_OUT_BINDS` terminal-byte detection
+are all preserved exactly (proven byte-identical by a unit test against the
+legacy extend path, plus the existing boundary suite; live-verified on both the
+single-packet and multi-packet paths). SDU/arraysize are untouched (no framing
+perturbation). **Result (criterion + counting allocator):** the reassembly
+allocates **zero** response `Vec`s (vs one per single-packet response) and the
+operation is 1.4×–5.2× faster — 5.2× at 64 B, 2.1× at 512 B, 1.7× at 2 KB,
+1.4× at 8 KB — biggest for small packets (login / small-query / single-row
+fetches), where the `malloc`+copy dominates. The multi-packet path is unchanged,
+so the concurrent multi-packet scan is unaffected (no regression).
+
+**5c. SIMD UTF-8 validation, feature-gated (KEPT, off by default).** The
+borrowed VARCHAR/CHAR text path validates each cell as UTF-8 before lending it
+as `&str`. Under the optional `simd-decode` feature this routes through
+`simdutf8` (whose accept/reject decision is byte-for-byte identical to
+`core::str::from_utf8`; an isomorphism test pins this, and the crate stays
+`#![forbid(unsafe_code)]` — the SIMD `unsafe` lives inside the dependency). It is
+**off by default** because the microbench is decisive about when it helps:
+VARCHAR2(40) ASCII is actually ~13 % *slower* (per-call SIMD setup cost), while
+VARCHAR2(2000) is +30 % (ASCII) to ~10× (mixed/non-ASCII). The feature is
+worthwhile only for wide-text workloads, which is documented on the feature.
+
+**5d. Per-row `Vec` reuse (DROPPED — negative result).** A fully-safe two-pass
+restructure of `for_each_row_ref` eliminated the per-row `Vec<Option<
+QueryValueRef>>` allocation (counting allocator: **1.01 → 0.01 allocs/row,
+−99.9 %**). But the allocation win did **not** translate: a direct hoist of the
+typed buffer cannot compile under `#![forbid(unsafe_code)]` (lifetime
+invariance), and the safe two-pass form traded the cheap amortized per-row alloc
+for worse cache locality and a row×col slot grid (+8.9 % bytes). The single-batch
+microbench wall time *regressed* (1.52 → 1.68 ms) and the live concurrent
+throughput (the lever's stated target) moved only within ±3 % noise at every
+worker count. Dropped per the measure-first rule; reverted to baseline.
+
+**5e. Once-per-column `ColumnDecodePlan` (DROPPED — negative result).** Hoisting
+the per-cell `ora_type_num` match + NULL guard + `csfrm` read into a
+resolved-once-per-column plan (dispatched on a dense `#[repr(u8)]` kind) was
+value-identical but **+3 % slower** on the wide-analytics decode (criterion,
+20k×10 mixed, +0.81 %…+5.12 %, p=0.01). This is the predicted collapse: modern
+out-of-order branch prediction already nails the stable per-column dispatch
+target every row, so pre-resolving it only adds overhead (the plan vector + a
+bounds-checked per-cell index) with no miss-rate to recover. (The hardware
+`perf stat` branch-miss/cache-miss counters could not be read in the build
+environment — `kernel.perf_event_paranoid` was locked high — but the wall-time
+A/B is the aligned, decisive proxy: a real miss-rate win would show as faster,
+not slower.) Not a clarity win either, so dropped; reverted to baseline. The
+`borrowed_decode` criterion harness built for this A/B is kept as a permanent
+decode-path benchmark.
+
 ## Honest caveats
 
 - **The five operations above are a single-connection, serial-call benchmark,
