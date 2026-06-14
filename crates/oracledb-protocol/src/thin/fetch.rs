@@ -1981,4 +1981,51 @@ mod fuzz_regression_tests {
             "expected fail-closed TtcDecode, got {err:?}"
         );
     }
+
+    // BoundedReader invariant (l2p), query-columns family: a DESCRIBE_INFO
+    // message (16) declaring a huge num_columns (ub4 ~620M) with no column
+    // metadata bytes following must fail closed, not pre-allocate one
+    // ColumnMetadata per declared column. parse_describe_info grows the column
+    // Vec via push (no speculative with_capacity), and the first
+    // parse_column_metadata read past the end errors.
+    #[test]
+    fn describe_info_oversized_column_count_fails_closed_not_oom() {
+        // type=16 DESCRIBE_INFO; describe_name read_bytes len byte 0 (null);
+        // max_row_size ub4 = 0; num_columns ub4 (len byte 4) = 0x25000000
+        // (~620M); then EOF before the skip(1)/column records.
+        let payload = [16u8, 0, 0, 4, 0x25, 0x00, 0x00, 0x00];
+        let err = parse_query_response(&payload, ClientCapabilities::default())
+            .expect_err("oversized column count must fail closed");
+        assert!(
+            matches!(err, ProtocolError::TtcDecode(_)),
+            "expected fail-closed TtcDecode, got {err:?}"
+        );
+    }
+
+    // BoundedReader invariant (l2p), out-bind array family: an array OUT bind
+    // whose ub4 num_elements is enormous (~620M) but carries no element bytes
+    // must fail closed via with_capacity_bounded + the per-element read, not
+    // reserve gigabytes of Option<QueryValue>.
+    #[test]
+    fn out_bind_array_oversized_element_count_fails_closed_not_oom() {
+        let metadata = ColumnMetadata {
+            name: "ARR".to_string(),
+            ora_type_num: ORA_TYPE_NUM_NUMBER,
+            is_array: true,
+            ..ColumnMetadata::default()
+        };
+        let bind_columns = [metadata];
+        let out_bind_indexes = [0usize];
+        // ub4 num_elements: len byte 4, value 0x25000000, then no elements.
+        let payload = [4u8, 0x25, 0x00, 0x00, 0x00];
+        let mut reader = TtcReader::new(&payload);
+        let mut result = QueryResult::default();
+        let err =
+            parse_out_bind_row_data(&mut reader, &mut result, &bind_columns, &out_bind_indexes)
+                .expect_err("oversized array OUT bind count must fail closed");
+        assert!(
+            matches!(err, ProtocolError::TtcDecode(_)),
+            "expected fail-closed TtcDecode, got {err:?}"
+        );
+    }
 }

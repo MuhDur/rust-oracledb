@@ -600,6 +600,25 @@ impl crate::wire::BoundedReader for ByteCursor<'_> {
 mod tests {
     use super::*;
 
+    // BoundedReader invariant (l2p), CQN array family: a notification table
+    // record declaring the maximum num_tables (0xFFFF) but carrying no table
+    // bytes must fail closed via the bounded reservation + the per-record read,
+    // not pre-allocate 65535 MsgTable structs from the count. (num_tables is a
+    // u16 so this was never a multi-GB OOM, but routing it through the bound
+    // keeps the whole class uniform and regression-proof.)
+    #[test]
+    fn cqn_oversized_table_count_fails_closed_not_oom() {
+        // num_tables = 0xFFFF (u16), then nothing.
+        let bytes = [0xFFu8, 0xFF];
+        let mut cur = ByteCursor::new(&bytes);
+        let err = process_tables(&mut cur).expect_err("oversized table count must fail closed");
+        assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
+        // The pre-allocation never exceeds remaining()/6 even for the max count.
+        let cur2 = ByteCursor::new(&bytes);
+        let v: Vec<MsgTable> = cur2.with_capacity_bounded(0xFFFF, 6);
+        assert!(v.capacity() <= 1, "reservation capped by remaining bytes");
+    }
+
     fn caps_12_1() -> ClientCapabilities {
         ClientCapabilities {
             ttc_field_version: 24,

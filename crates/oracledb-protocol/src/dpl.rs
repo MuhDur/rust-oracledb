@@ -891,6 +891,20 @@ impl BatchLoadState {
 mod tests {
     use super::*;
 
+    // BoundedReader invariant (l2p), direct-path columns family: a PARAMETER
+    // message declaring a huge num_columns (ub4 ~620M) with no column-metadata
+    // bytes following must fail closed via with_capacity_bounded + the per-
+    // column parse, not reserve one ColumnMetadata per declared column. (This
+    // replaces the old arbitrary `.min(1024)` cap with a buffer-anchored bound.)
+    #[test]
+    fn direct_path_oversized_column_count_fails_closed_not_oom() {
+        // type=8 PARAMETER; num_columns ub4 (len byte 4) = 0x25000000, then EOF.
+        let payload = [TNS_MSG_TYPE_PARAMETER, 4, 0x25, 0x00, 0x00, 0x00];
+        let err = parse_direct_path_prepare_response(&payload, ClientCapabilities::default())
+            .expect_err("oversized direct-path column count must fail closed");
+        assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
+    }
+
     fn column(name: &str, ora_type_num: u8, max_size: u32, nulls_allowed: bool) -> ColumnMetadata {
         ColumnMetadata {
             name: name.to_string(),

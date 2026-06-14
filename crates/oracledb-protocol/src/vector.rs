@@ -498,6 +498,33 @@ mod tests {
         assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
     }
 
+    // BoundedReader invariant (l2p), VECTOR sparse family: a sparse image
+    // declaring a huge num_sparse_elements (0xFFFF u16) but carrying none of the
+    // 0xFFFF * 4 = 256 KiB of index bytes must fail closed, not pre-allocate
+    // from the count. The `with_capacity_bounded(num_sparse, 4)` cap keeps the
+    // reservation at remaining()/4 and the per-index read_u32be then errors.
+    #[test]
+    fn sparse_oversized_index_count_fails_closed_not_oom() {
+        // magic, version=2 (sparse), flags=0x0020 (SPARSE), format=3 (f64),
+        // num_elements/num_dimensions = 0 (u32), then num_sparse = 0xFFFF (u16)
+        // with NO index/value bytes following.
+        let input = [
+            TNS_VECTOR_MAGIC_BYTE,
+            TNS_VECTOR_VERSION_WITH_SPARSE,
+            0x00,
+            0x20, // flags: SPARSE
+            VECTOR_FORMAT_FLOAT64,
+            0x00,
+            0x00,
+            0x00,
+            0x00, // num_elements (u32) = 0
+            0xFF,
+            0xFF, // num_sparse = 65535, but no indices follow
+        ];
+        let err = decode_vector(&input).expect_err("oversized sparse count must fail closed");
+        assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
+    }
+
     #[test]
     fn binary_dense_bit_count_header() {
         // 2 bytes => 16 dimensions encoded in the header
