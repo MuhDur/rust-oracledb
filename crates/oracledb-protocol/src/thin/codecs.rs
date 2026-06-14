@@ -306,7 +306,11 @@ pub(crate) fn decode_binary_double(bytes: &[u8]) -> Result<f64> {
     Ok(f64::from_bits(u64::from_be_bytes(decoded)))
 }
 
-pub(crate) fn encode_number_text(value: &str) -> Result<Vec<u8>> {
+/// Encode a canonical decimal `value` into the Oracle `NUMBER` wire form
+/// (the inverse of [`decode_number_value`]). Public so benches / parity
+/// harnesses can synthesize fetch payloads. Reference
+/// impl/base/encoders.pyx.
+pub fn encode_number_text(value: &str) -> Result<Vec<u8>> {
     let value = value.as_bytes();
     if value.is_empty() {
         return Err(ProtocolError::TtcDecode("empty NUMBER bind"));
@@ -466,6 +470,23 @@ pub(crate) fn encode_number_text(value: &str) -> Result<Vec<u8>> {
 }
 
 pub fn decode_number_value(bytes: &[u8]) -> Result<QueryValue> {
+    let mut text = String::new();
+    let mut digits = Vec::new();
+    let is_integer = decode_number_text_into(bytes, &mut digits, &mut text)?;
+    Ok(QueryValue::Number { text, is_integer })
+}
+
+/// Decode the Oracle `NUMBER` wire form into canonical decimal text, **appending
+/// to `text`** and returning whether the value is integral. `digits` is a
+/// caller-owned scratch buffer (cleared on entry) so a tight decode loop can
+/// reuse one allocation across many values — this is the allocation-free core
+/// the borrowed fetch path drives, writing straight into its per-row arena.
+/// [`decode_number_value`] is the owning convenience wrapper.
+pub fn decode_number_text_into(
+    bytes: &[u8],
+    digits: &mut Vec<u8>,
+    text: &mut String,
+) -> Result<bool> {
     if bytes.len() > 21 {
         return Err(ProtocolError::TtcDecode("encoded NUMBER too long"));
     }
@@ -475,15 +496,11 @@ pub fn decode_number_value(bytes: &[u8]) -> Result<QueryValue> {
     let is_positive = first & 0x80 != 0;
     if bytes.len() == 1 {
         if is_positive {
-            return Ok(QueryValue::Number {
-                text: "0".into(),
-                is_integer: true,
-            });
+            text.push('0');
+        } else {
+            text.push_str("-1e126");
         }
-        return Ok(QueryValue::Number {
-            text: "-1e126".into(),
-            is_integer: true,
-        });
+        return Ok(true);
     }
 
     let exponent_byte = if is_positive { first } else { !first };
@@ -494,7 +511,7 @@ pub fn decode_number_value(bytes: &[u8]) -> Result<QueryValue> {
         end -= 1;
     }
 
-    let mut digits = Vec::with_capacity((end.saturating_sub(1)) * 2);
+    digits.clear();
     for (index, encoded) in bytes.iter().enumerate().take(end).skip(1) {
         let value = if is_positive {
             encoded.saturating_sub(1)
@@ -519,7 +536,6 @@ pub fn decode_number_value(bytes: &[u8]) -> Result<QueryValue> {
         }
     }
 
-    let mut text = String::with_capacity(digits.len() + 4);
     let mut is_integer = true;
     if !is_positive {
         text.push('-');
@@ -551,7 +567,7 @@ pub fn decode_number_value(bytes: &[u8]) -> Result<QueryValue> {
         }
     }
 
-    Ok(QueryValue::Number { text, is_integer })
+    Ok(is_integer)
 }
 
 pub(crate) fn decode_text_value(bytes: &[u8], csfrm: u8) -> Result<String> {

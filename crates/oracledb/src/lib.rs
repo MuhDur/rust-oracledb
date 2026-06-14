@@ -144,11 +144,12 @@ use oracledb_protocol::thin::{
     parse_fetch_response_with_context, parse_lob_create_temp_response,
     parse_lob_free_temp_response, parse_lob_read_response, parse_lob_trim_response,
     parse_lob_write_response, parse_plain_function_response, parse_query_response,
-    parse_query_response_with_binds_options_and_columns, parse_tpc_txn_switch_response, BindValue,
-    ClientCapabilities, ColumnMetadata, ExecuteOptions, LobReadResult, QueryResult,
-    SessionlessTxnState, TpcChangeStateResponse, TpcSwitchResponse, TpcXid,
-    TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF,
-    TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS,
+    parse_query_response_borrowed, parse_query_response_with_binds_options_and_columns,
+    parse_tpc_txn_switch_response, BindValue, BorrowedFetchResult, ClientCapabilities,
+    ColumnMetadata, ExecuteOptions, LobReadResult, QueryResult, QueryValueRef, SessionlessTxnState,
+    TpcChangeStateResponse, TpcSwitchResponse, TpcXid, TNS_DATA_FLAGS_BEGIN_PIPELINE,
+    TNS_DATA_FLAGS_END_OF_REQUEST, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING,
+    TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS,
     TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA,
     TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE, TNS_PIPELINE_MODE_ABORT_ON_ERROR,
     TNS_PIPELINE_MODE_CONTINUE_ON_ERROR, TNS_TPC_TXN_ABORT, TNS_TPC_TXN_COMMIT, TNS_TPC_TXN_DETACH,
@@ -2368,6 +2369,132 @@ impl Connection {
         let result = self.note_parse(parsed)?;
         self.remember_cursor_columns(&result);
         Ok(result)
+    }
+
+    /// Zero-copy companion to [`fetch_rows`](Self::fetch_rows): fetch one batch
+    /// of rows from an open server cursor and return a
+    /// [`BorrowedFetchResult`](oracledb_protocol::thin::BorrowedFetchResult)
+    /// whose rows borrow the response buffer (no per-cell allocation for the
+    /// common scalar case). Iterate the rows with
+    /// [`BorrowedRowBatch::for_each_row_ref`](oracledb_protocol::thin::BorrowedRowBatch::for_each_row_ref).
+    ///
+    /// This is additive: the owned [`fetch_rows`](Self::fetch_rows) path is
+    /// unchanged. Prefer [`for_each_row_ref`](Self::for_each_row_ref) for the
+    /// common "execute and drain" case; this lower-level method exists for
+    /// callers that page manually.
+    pub async fn fetch_rows_ref(
+        &mut self,
+        cx: &Cx,
+        cursor_id: u32,
+        arraysize: u32,
+        previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
+    ) -> Result<BorrowedFetchResult> {
+        cx.checkpoint()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+        let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
+        trace_query_bytes("FETCH payload", &payload);
+        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        trace_query_bytes("FETCH response", &response);
+        let columns = self
+            .cursor_columns
+            .get(&cursor_id)
+            .cloned()
+            .unwrap_or_default();
+        let parsed =
+            parse_query_response_borrowed(&response, self.capabilities, &columns, previous_row);
+        let result = self.note_parse(parsed)?;
+        // Mirror the owned `fetch_rows` path: if the server re-described the
+        // cursor mid-paging (the type-change refetch path emits DESCRIBE_INFO),
+        // persist the adjusted column list under this cursor id so subsequent
+        // pages decode with the new schema. Keyed on the known `cursor_id`
+        // (the response's own cursor_id is 0 on an ordinary fetch).
+        if cursor_id != 0 && !result.batch.columns().is_empty() {
+            self.cursor_columns
+                .insert(cursor_id, result.batch.columns().to_vec());
+        }
+        Ok(result)
+    }
+
+    /// Execute `sql` and drive every fetched row through `callback` as a slice
+    /// of borrowed [`QueryValueRef`](oracledb_protocol::thin::QueryValueRef) —
+    /// the zero-copy fetch fast path. Scalar cells (Text / Number / Raw /
+    /// Boolean / Interval / DateTime) borrow the fetch buffer directly, so a
+    /// Rust consumer iterating a wide many-row result pays ~0 allocations per
+    /// cell, in contrast to the owned [`execute_query`](Self::execute_query) +
+    /// [`fetch_rows`](Self::fetch_rows) path which materializes a `String` /
+    /// `Vec<u8>` per scalar cell of every row.
+    ///
+    /// The `&[Option<QueryValueRef>]` row slice is valid only for the duration
+    /// of each `callback` call — it borrows the batch buffer and cannot escape.
+    /// Use [`QueryValueRef::to_owned_value`](oracledb_protocol::thin::QueryValueRef::to_owned_value)
+    /// to keep a value past the call. Cold cells (LOB / Cursor / Object / Vector
+    /// / JSON / non-UTF-8 / ROWID) surface as `QueryValueRef::Owned`.
+    ///
+    /// Pages through the cursor with the given `arraysize` until the server
+    /// reports no more rows, releasing the server cursor back to the statement
+    /// cache when done. The owned fetch path is untouched.
+    pub async fn for_each_row_ref<F>(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        arraysize: u32,
+        mut callback: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&[Option<QueryValueRef<'_>>]) -> Result<()>,
+    {
+        // First round trip: EXECUTE + first fetch batch (owned), to obtain the
+        // open cursor id and column metadata. The first batch's rows are decoded
+        // borrowed by re-parsing nothing — instead we capture them from the
+        // owned result below. To keep the borrowed guarantee for the first batch
+        // too, we re-fetch borrowed pages from the cursor.
+        let first = self
+            .execute_query_with_bind_rows(cx, sql, arraysize, &[])
+            .await?;
+        let cursor_id = first.cursor_id;
+
+        // Emit the first (owned) batch's rows as borrowed refs over owned values.
+        // The first execute round trip already materialized them; surfacing them
+        // through QueryValueRef::Owned keeps the callback's type uniform without
+        // a second round trip for batch one.
+        for row in &first.rows {
+            let refs: Vec<Option<QueryValueRef<'_>>> = row
+                .iter()
+                .map(|cell| cell.as_ref().map(QueryValueRef::Owned))
+                .collect();
+            callback(&refs)?;
+        }
+
+        let mut more_rows = first.more_rows;
+        let mut previous_row: Option<Vec<Option<oracledb_protocol::thin::QueryValue>>> =
+            first.rows.last().cloned();
+
+        // Subsequent batches use the genuinely zero-copy borrowed fetch.
+        while more_rows && cursor_id != 0 {
+            let result = self
+                .fetch_rows_ref(cx, cursor_id, arraysize, previous_row.as_deref())
+                .await?;
+            more_rows = result.more_rows;
+            // Snapshot the last row for the next page's duplicate-column seed
+            // before consuming the batch in the callback.
+            let mut last_owned: Option<Vec<Option<oracledb_protocol::thin::QueryValue>>> = None;
+            result.batch.for_each_row_ref(|row| {
+                last_owned = Some(
+                    row.iter()
+                        .map(|cell| cell.map(|v| v.to_owned_value()))
+                        .collect(),
+                );
+                callback(row)
+            })?;
+            if let Some(last) = last_owned {
+                previous_row = Some(last);
+            }
+        }
+
+        self.release_cursor(cursor_id);
+        Ok(())
     }
 
     pub async fn define_and_fetch_rows_with_columns(

@@ -204,6 +204,20 @@ pub struct TtcReader<'a> {
     pos: usize,
 }
 
+/// Outcome of [`TtcReader::read_bytes_borrowed`]: a borrowed run of the wire
+/// buffer for the common contiguous short-value case, an owned fallback for the
+/// non-contiguous chunked long form, or NULL.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BorrowedBytes<'a> {
+    /// SQL NULL (length byte `0` or `0xff`).
+    Null,
+    /// A contiguous run borrowed directly from the buffer (zero-copy).
+    Slice(&'a [u8]),
+    /// The chunked long form (`0xfe`), reassembled into an owned `Vec` because
+    /// the chunks are not contiguous on the wire. The rare path.
+    Chunked(Vec<u8>),
+}
+
 impl<'a> TtcReader<'a> {
     pub fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, pos: 0 }
@@ -377,6 +391,58 @@ impl<'a> TtcReader<'a> {
         Ok(value)
     }
 
+    /// Zero-copy companion to [`read_bytes`](Self::read_bytes) for the borrowed
+    /// fetch path. The common short-value form (length byte 1..=253) is a single
+    /// contiguous run in the buffer, so it is returned as a borrowed slice with
+    /// no allocation. The chunked long form (`0xfe`) is *not* contiguous on the
+    /// wire (it is a sequence of length-prefixed chunks), so it cannot be
+    /// borrowed and falls back to an owned `Vec` — the rare path. `0`/`0xff`
+    /// signal SQL NULL.
+    ///
+    /// Consumes exactly the same number of bytes as `read_bytes` for every
+    /// input, so the two are interchangeable mid-stream.
+    pub fn read_bytes_borrowed(&mut self) -> Result<BorrowedBytes<'a>> {
+        let len = self.read_u8()?;
+        if len == TNS_LONG_LENGTH_INDICATOR {
+            let mut out = Vec::new();
+            loop {
+                let chunk_len = self.read_ub4()?;
+                if chunk_len == 0 {
+                    break;
+                }
+                let chunk = self.read_raw(chunk_len as usize)?;
+                out.extend_from_slice(chunk);
+            }
+            Ok(BorrowedBytes::Chunked(out))
+        } else if len == 0 || len == TNS_NULL_LENGTH_INDICATOR {
+            Ok(BorrowedBytes::Null)
+        } else {
+            Ok(BorrowedBytes::Slice(self.read_raw(usize::from(len))?))
+        }
+    }
+
+    /// Advance past one length-prefixed TTC byte field (short, NULL, or chunked
+    /// long form) **without allocating** — the zero-copy skip used by the
+    /// borrowed fetch offset-capture pass. Consumes exactly the bytes
+    /// [`read_bytes`](Self::read_bytes) would.
+    pub fn skip_bytes_field(&mut self) -> Result<()> {
+        let len = self.read_u8()?;
+        if len == TNS_LONG_LENGTH_INDICATOR {
+            loop {
+                let chunk_len = self.read_ub4()?;
+                if chunk_len == 0 {
+                    break;
+                }
+                self.skip(chunk_len as usize)?;
+            }
+            Ok(())
+        } else if len == 0 || len == TNS_NULL_LENGTH_INDICATOR {
+            Ok(())
+        } else {
+            self.skip(usize::from(len))
+        }
+    }
+
     pub fn read_bytes(&mut self) -> Result<Option<Vec<u8>>> {
         let len = self.read_u8()?;
         if len == TNS_LONG_LENGTH_INDICATOR {
@@ -520,6 +586,53 @@ mod tests {
             assert_eq!(reader.read_ub4().expect("ub4 should decode"), value);
             assert_eq!(reader.remaining(), 0);
         }
+    }
+
+    // `read_bytes_borrowed` must borrow the contiguous short-value bytes
+    // directly out of the buffer (the zero-copy hot path), signal `Null` for
+    // 0/0xff length, and fall back to an owned `Chunked` Vec for the
+    // 0xfe long-value form (which is not contiguous on the wire). The borrowed
+    // slice must equal what `read_bytes` would return, and consume exactly the
+    // same number of bytes.
+    #[test]
+    fn read_bytes_borrowed_borrows_short_values_and_owns_chunked() {
+        // Short value: length byte 3 + "abc".
+        let short = [0x03u8, b'a', b'b', b'c'];
+        let mut reader = TtcReader::new(&short);
+        match reader.read_bytes_borrowed().expect("short decode") {
+            BorrowedBytes::Slice(slice) => assert_eq!(slice, b"abc"),
+            other => panic!("expected borrowed slice, got {other:?}"),
+        }
+        assert_eq!(reader.remaining(), 0);
+
+        // NULL value: 0xff.
+        let null = [TNS_NULL_LENGTH_INDICATOR];
+        let mut reader = TtcReader::new(&null);
+        assert!(matches!(
+            reader.read_bytes_borrowed().expect("null decode"),
+            BorrowedBytes::Null
+        ));
+
+        // Zero-length value: 0x00 (also NULL in TTC).
+        let zero = [0x00u8];
+        let mut reader = TtcReader::new(&zero);
+        assert!(matches!(
+            reader.read_bytes_borrowed().expect("zero decode"),
+            BorrowedBytes::Null
+        ));
+
+        // Long/chunked value: 0xfe then ub4 chunk lengths terminated by 0.
+        let mut writer = TtcWriter::new();
+        writer
+            .write_bytes_with_length(&vec![0x5au8; 600]) // forces the 0xfe chunked form
+            .expect("chunked encode");
+        let long = writer.into_bytes();
+        let mut reader = TtcReader::new(&long);
+        match reader.read_bytes_borrowed().expect("chunked decode") {
+            BorrowedBytes::Chunked(bytes) => assert_eq!(bytes, vec![0x5au8; 600]),
+            other => panic!("expected owned chunked bytes, got {other:?}"),
+        }
+        assert_eq!(reader.remaining(), 0);
     }
 
     #[test]
