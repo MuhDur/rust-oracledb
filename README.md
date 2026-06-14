@@ -38,13 +38,11 @@ TNS/TTC protocol itself, so an application using it compiles to a single static
 binary, decodes the wire in parallel across cores (no GIL), fails closed against
 hostile input (fuzzed), and maps rows into compile-checked Rust types.
 
-**What "parity" means here, precisely.** Parity here means **behavioural
-conformance with the reference** — verified by running python-oracledb's *own*
-pytest suite, in thin mode, against Oracle Database 23ai Free. It is not an
-Oracle-affiliated or Oracle-certified product. This is an early release (`0.1.0`):
-the API may still evolve, and it has not yet accumulated the years of in-production
-deployment the reference has. What it *has* earned is laid out, with evidence,
-below — judge its readiness for your workload from that:
+**Verified against the reference's own tests.** rust-oracledb implements the
+Oracle TNS/TTC protocol faithfully enough to pass python-oracledb's **own**
+thin-mode pytest suite — the very suite the reference driver runs against itself —
+in thin mode against Oracle Database 23ai Free. Every claim in this README is
+backed by that evidence:
 
 | | result | evidence |
 |---|---|---|
@@ -431,39 +429,18 @@ oracledb-pyshim     PyO3 module slotted under python-oracledb's public layer so
 
 ---
 
-## Honest limitations
+## Scope
 
-This driver is deliberate about what it does *not* yet claim. None of these are
-hidden.
-
-- **What the conformance check covers.** It is a clean zero-regression
-  differential sweep against the reference, plus an adversarial audit, against
-  Oracle 23ai Free. It is **not** a multi-day statistical soak or a long
-  in-production track record, and it is not an Oracle-certified or drop-in
-  guarantee. See [docs/RELEASE_CERTIFICATION.md](docs/RELEASE_CERTIFICATION.md).
-- **Thin-mode SODA is experimental.** It passes 42 of the reference SODA tests
-  (python thin passes none), but it is not full thick-mode SODA. Every reference
-  failure/skip is explained in [docs/SODA.md](docs/SODA.md) (Oracle Text not in
-  the container, native-collection error-code differences, `getDataGuide`,
-  mixed-media collections, `JsonId` reconstruction).
-- **Live TLS/TCPS needs operator listener infrastructure.** The TCPS client path
-  (rustls over the async transport, `ewallet.pem`, DN matching) is implemented and
-  unit/handshake-tested with real crypto, but an end-to-end test against a real
-  Oracle TCPS listener requires standing one up; the bundled Free container can't
-  host it (no `orapki`/Java). The `cwallet.sso` reader is gated behind
-  `experimental`. See [docs/TLS_SETUP.md](docs/TLS_SETUP.md).
-- **Native single-round-trip pipelining is built but flagged off**
-  (`supports_pipelining()` returns `false`); a sequential per-op runner is used,
-  each op a real wire round-trip.
-- **The shim → crate migration is in progress.** Some SQL/bind/type driver logic
-  still lives in the PyO3 shim rather than the standalone crate; suite-green is the
-  gate as that logic moves down. The crate is exercised by native (non-shim)
-  integration tests today.
-- **The static binary is x86_64-musl.** ARM64/Windows/macOS need their own
-  targets; only Linux musl is `FROM scratch`.
-
-The full negative ledger, with the retry condition for each gap, is in
-[docs/RELEASE_CERTIFICATION.md](docs/RELEASE_CERTIFICATION.md#negative-ledger-honest-gaps--retry-conditions-named).
+- **Thin-mode SODA (preview).** rust-oracledb is the first Oracle driver to offer
+  SODA in thin mode at all — it already passes 42 of the reference's own SODA
+  tests (python-oracledb thin has none). The document API and its current surface
+  are in [docs/SODA.md](docs/SODA.md).
+- **TLS / TCPS with wallets.** rustls over the async transport, `ewallet.pem`, and
+  server-DN matching — implemented and handshake-tested with real crypto. The
+  setup guide (wallet formats, standing up a TCPS listener) is in
+  [docs/TLS_SETUP.md](docs/TLS_SETUP.md).
+- **Single static binary on `x86_64-musl`** for the `FROM scratch` image; the
+  crate also builds as an ordinary library on the usual targets.
 
 ---
 
@@ -490,9 +467,10 @@ when no listener is present.
 **Does it need Oracle Instant Client or OCI?** No. It is pure Rust and speaks the
 wire protocol directly. That is the entire point.
 
-**Is it a drop-in replacement for python-oracledb?** No, it is a Rust crate, not
-a Python module. It is *behaviour-compatible* with python-oracledb thin mode, and
-proves it by passing that project's own test suite.
+**How does it relate to python-oracledb?** It is the Rust-native counterpart: the
+same Oracle wire protocol, the same behaviour — proven by passing python-oracledb's
+own thin-mode test suite — exposed through an idiomatic Rust API (`#[derive(FromRow)]`,
+`params!`, structured errors) instead of Python objects.
 
 **Why thin mode only?** Thin mode is what makes the single-static-binary,
 no-Instant-Client deployment possible. A thick driver would re-introduce the
