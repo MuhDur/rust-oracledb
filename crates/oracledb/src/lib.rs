@@ -4082,6 +4082,18 @@ impl Connection {
             let mut payload = Vec::new();
             let mut first_packet_flags = 0u16;
             if index == 0 {
+                // Flush any pending close-cursors piggyback on the first op so
+                // server cursors retired since the last round trip (evicted from
+                // the statement cache or released by a closed cursor) are
+                // actually closed — otherwise a sequence of pipelines that open
+                // query cursors leaks them server-side (ORA-01000). The
+                // reference likewise rides queued closes as a piggyback on the
+                // next message; it is consumed before the begin-pipeline
+                // piggyback's sequence number, matching the ordinary execute
+                // path where the close-cursors piggyback is prepended first.
+                if let Some(close_piggyback) = self.take_close_cursors_piggyback() {
+                    payload.extend_from_slice(&close_piggyback);
+                }
                 let piggyback_seq = next_ttc_sequence(&mut self.ttc_seq_num);
                 payload.extend_from_slice(&build_begin_pipeline_piggyback(
                     piggyback_seq,
@@ -4137,6 +4149,84 @@ impl Connection {
             responses.push(response.payload);
         }
         Ok(responses)
+    }
+
+    /// Runs a batch as a true single-round-trip pipeline (like [`run_pipeline`])
+    /// and decodes each per-operation response into a [`QueryResult`], reusing
+    /// the same `parse_query_response_*` decoders the ordinary execute path uses
+    /// — no result-layer reimplementation. The end-pipeline response (the N+1th
+    /// raw payload) is consumed for framing but not returned.
+    ///
+    /// Each operation is decoded with its own bind row and prefetch (carried by
+    /// [`PipelineRequest::Execute`]); the returned vector has one entry per
+    /// request, in token order. A per-operation server error is captured as
+    /// `Err` for that slot rather than aborting the batch, so the caller can
+    /// implement both abort-on-error and continue-on-error semantics over the
+    /// decoded results (the wire batch already ran to completion — the server
+    /// answers every message in both pipeline modes).
+    ///
+    /// The connection's `txn_in_progress` flag is refreshed from the last
+    /// successfully decoded operation that carried an end-of-call STATUS, so a
+    /// pipeline ending in commit/DML leaves the flag consistent with the
+    /// sequential path (test_7614). No extra round trips are issued here: a
+    /// query whose rows did not all fit in the prefetch returns its open
+    /// `cursor_id` + `columns` + `more_rows` in the [`QueryResult`] so the
+    /// caller can finish the fetch over the ordinary public cursor API, exactly
+    /// as the reference `_complete_pipeline_op` does.
+    pub async fn run_pipeline_decoded(
+        &mut self,
+        cx: &Cx,
+        requests: &[PipelineRequest],
+        continue_on_error: bool,
+    ) -> Result<Vec<Result<QueryResult>>> {
+        let raw = self.run_pipeline(cx, requests, continue_on_error).await?;
+        // raw has requests.len() + 1 entries (the last is the end-pipeline
+        // response, consumed for framing only).
+        let mut decoded = Vec::with_capacity(requests.len());
+        for (index, request) in requests.iter().enumerate() {
+            let payload = &raw[index];
+            let outcome = match request {
+                PipelineRequest::Commit => {
+                    // A commit op answers with a plain function response; decode
+                    // it the same way the standalone commit path does so the
+                    // txn-in-progress bit is sampled identically.
+                    match parse_plain_function_response(payload, self.capabilities) {
+                        Ok(txn_in_progress) => Ok(QueryResult {
+                            txn_in_progress: Some(txn_in_progress),
+                            ..QueryResult::default()
+                        }),
+                        Err(err) => Err(Error::Protocol(err)),
+                    }
+                }
+                PipelineRequest::Execute { sql, bind_rows, .. } => {
+                    parse_query_response_with_binds_options_and_columns(
+                        payload,
+                        self.capabilities,
+                        bind_rows.first().map(Vec::as_slice).unwrap_or(&[]),
+                        ExecuteOptions::default(),
+                        &[],
+                    )
+                    .map_err(Error::Protocol)
+                    .inspect(|result| {
+                        // Track open query cursors so a later op or a follow-up
+                        // fetch on this connection does not collide with them.
+                        self.remember_cursor_columns(result);
+                        if result.cursor_id != 0 && statement_is_query(sql) {
+                            self.in_use_cursors.insert(result.cursor_id);
+                        }
+                    })
+                }
+            };
+            // Refresh txn-in-progress from any op that carried a STATUS message,
+            // mirroring the sequential per-op execute bookkeeping.
+            if let Ok(result) = &outcome {
+                if let Some(txn_in_progress) = result.txn_in_progress {
+                    self.txn_in_progress = txn_in_progress;
+                }
+            }
+            decoded.push(outcome);
+        }
+        Ok(decoded)
     }
 
     async fn send_function(&mut self, cx: &Cx, function_code: u8) -> Result<()> {
@@ -4956,6 +5046,21 @@ impl BlockingConnection {
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection
                 .run_pipeline(&cx, requests, continue_on_error)
+                .await
+        })
+    }
+
+    pub fn run_pipeline_decoded(
+        connection: &mut Connection,
+        requests: &[PipelineRequest],
+        continue_on_error: bool,
+    ) -> Result<Vec<Result<QueryResult>>> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .run_pipeline_decoded(&cx, requests, continue_on_error)
                 .await
         })
     }
