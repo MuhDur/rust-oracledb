@@ -403,6 +403,24 @@ mod tests {
         assert_eq!(decoded, vector);
     }
 
+    // BoundedReader invariant (l2p), behavior-preservation: a legitimately
+    // large vector (where count * element_size really fits the buffer) must
+    // still decode in full. The bound is "can't exceed what's in the buffer,"
+    // not an arbitrary small cap, so real large results are unaffected.
+    #[test]
+    fn legitimate_large_vector_still_decodes_fully() {
+        let big_f32: Vec<f32> = (0..4096).map(|i| i as f32 * 0.5 - 1024.0).collect();
+        roundtrip(Vector::Dense(VectorValues::Float32(big_f32)));
+        let big_f64: Vec<f64> = (0..2048).map(|i| i as f64 * 0.25).collect();
+        roundtrip(Vector::Dense(VectorValues::Float64(big_f64)));
+        // A large sparse vector exercises the bounded sparse-index path.
+        roundtrip(Vector::Sparse {
+            num_dimensions: 100_000,
+            indices: (0..1000).map(|i| i * 7).collect(),
+            values: VectorValues::Float32((0..1000).map(|i| i as f32).collect()),
+        });
+    }
+
     #[test]
     fn roundtrips_every_dense_format() {
         roundtrip(Vector::Dense(VectorValues::Float32(vec![
