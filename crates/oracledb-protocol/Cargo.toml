@@ -5,7 +5,20 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/oracledb-protocol"
 description = "Sans-I/O Oracle TNS/TTC protocol core for the oracledb crate."
+keywords = ["oracle", "database", "protocol", "tns", "ttc"]
+categories = ["database", "network-programming"]
+# Internal protocol crate; the user-facing docs live on the `oracledb` crate.
+readme = false
+# Keep the published tarball lean. The golden/ wire-trace corpus and the fuzz
+# sub-crate are sizable dev-time assets not needed to build or use the crate.
+exclude = [
+    "tests/",
+    "fuzz/",
+    "proptest-regressions/",
+]
 
 [features]
 default = []

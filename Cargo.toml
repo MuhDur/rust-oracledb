@@ -8,12 +8,15 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.83"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/MuhDur/rust-oracledb"
 homepage = "https://github.com/MuhDur/rust-oracledb"
+# docs.rs builds and hosts documentation automatically from the published crate;
+# leaving `documentation` pointing at it is the conventional default.
+documentation = "https://docs.rs/oracledb"
 description = "Pure-Rust async Oracle Database thin-mode driver."
 keywords = ["oracle", "database", "driver", "async", "tns"]
 categories = ["database", "asynchronous"]

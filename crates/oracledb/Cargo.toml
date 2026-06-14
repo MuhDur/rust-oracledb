@@ -6,9 +6,20 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+documentation.workspace = true
 description.workspace = true
 keywords.workspace = true
 categories.workspace = true
+# Crate front page on crates.io / docs.rs. A crate-local README is required
+# because cargo will not package a readme that lives outside the crate dir.
+readme = "README.md"
+# Keep the published tarball lean: ship src/ + README + LICENSE files only.
+# Integration tests and golden/cassette fixtures are dev-time assets not needed
+# to build or use the published crate. (benches/ and examples/ are kept so the
+# [[bench]] targets and doc examples remain resolvable.)
+exclude = [
+    "tests/",
+]
 
 [features]
 # `derive` is on by default: it pulls in the `oracledb-derive` proc-macro crate
@@ -58,8 +69,8 @@ arrow-schema = { workspace = true, optional = true }
 # over the async TCP socket and supply our own Oracle ServerCertVerifier.
 asupersync = { workspace = true, features = ["tls"] }
 chrono = { version = "0.4", optional = true, default-features = false, features = ["std"] }
-oracledb-derive = { path = "../oracledb-derive", version = "0.0.0", optional = true }
-oracledb-protocol = { path = "../oracledb-protocol" }
+oracledb-derive = { path = "../oracledb-derive", version = "0.1.0", optional = true }
+oracledb-protocol = { path = "../oracledb-protocol", version = "0.1.0" }
 rust_decimal = { version = "1", optional = true, default-features = false, features = ["std"] }
 rustls.workspace = true
 rustls-pki-types.workspace = true
