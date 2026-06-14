@@ -1155,9 +1155,15 @@ impl BorrowedRowBatch {
     /// `&[Option<QueryValueRef>]` slice borrows the batch buffer and per-row
     /// arenas; it is valid only for the duration of the call (it cannot escape).
     /// `None` cells are SQL NULL. Returns the first decode/callback error.
-    pub fn for_each_row_ref<F>(&self, mut callback: F) -> Result<()>
+    ///
+    /// Generic over the callback's error type `E` (any error a decode failure
+    /// can convert into, e.g. the driver crate's own error) so callers are not
+    /// forced through [`ProtocolError`]; a decode failure is surfaced via
+    /// `E: From<ProtocolError>`.
+    pub fn for_each_row_ref<F, E>(&self, mut callback: F) -> std::result::Result<(), E>
     where
-        F: FnMut(&[Option<QueryValueRef<'_>>]) -> Result<()>,
+        F: FnMut(&[Option<QueryValueRef<'_>>]) -> std::result::Result<(), E>,
+        E: From<ProtocolError>,
     {
         // The two arenas are reused across rows (cleared, not reallocated). They
         // are mutated only in pass 1; pass 2 borrows them immutably and that
@@ -1804,7 +1810,7 @@ mod borrowed_fetch_tests {
                         .map(|cell| cell.map(|v| v.to_owned_value()))
                         .collect(),
                 );
-                Ok(())
+                Ok::<(), ProtocolError>(())
             })
             .unwrap();
 
@@ -1873,7 +1879,7 @@ mod borrowed_fetch_tests {
                         .map(|cell| cell.map(|v| v.to_owned_value()))
                         .collect(),
                 );
-                Ok(())
+                Ok::<(), ProtocolError>(())
             })
             .expect("iterate borrowed rows");
 
