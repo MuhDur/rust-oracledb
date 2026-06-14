@@ -436,11 +436,11 @@ oracledb-pyshim     PyO3 module slotted under python-oracledb's public layer so
 This driver is deliberate about what it does *not* yet claim. None of these are
 hidden.
 
-- **Conformance parity ≠ production-ready.** The certification is a clean
-  zero-regression differential sweep plus an adversarial audit against Oracle
-  23ai Free. It is **not** a multi-day statistical soak, and not an
-  Oracle-certified or drop-in guarantee. See
-  [docs/RELEASE_CERTIFICATION.md](docs/RELEASE_CERTIFICATION.md).
+- **What the conformance check covers.** It is a clean zero-regression
+  differential sweep against the reference, plus an adversarial audit, against
+  Oracle 23ai Free. It is **not** a multi-day statistical soak or a long
+  in-production track record, and it is not an Oracle-certified or drop-in
+  guarantee. See [docs/RELEASE_CERTIFICATION.md](docs/RELEASE_CERTIFICATION.md).
 - **Thin-mode SODA is experimental.** It passes 42 of the reference SODA tests
   (python thin passes none), but it is not full thick-mode SODA. Every reference
   failure/skip is explained in [docs/SODA.md](docs/SODA.md) (Oracle Text not in
