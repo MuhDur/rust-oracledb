@@ -4082,6 +4082,18 @@ impl Connection {
             let mut payload = Vec::new();
             let mut first_packet_flags = 0u16;
             if index == 0 {
+                // Flush any pending close-cursors piggyback on the first op so
+                // server cursors retired since the last round trip (evicted from
+                // the statement cache or released by a closed cursor) are
+                // actually closed — otherwise a sequence of pipelines that open
+                // query cursors leaks them server-side (ORA-01000). The
+                // reference likewise rides queued closes as a piggyback on the
+                // next message; it is consumed before the begin-pipeline
+                // piggyback's sequence number, matching the ordinary execute
+                // path where the close-cursors piggyback is prepended first.
+                if let Some(close_piggyback) = self.take_close_cursors_piggyback() {
+                    payload.extend_from_slice(&close_piggyback);
+                }
                 let piggyback_seq = next_ttc_sequence(&mut self.ttc_seq_num);
                 payload.extend_from_slice(&build_begin_pipeline_piggyback(
                     piggyback_seq,

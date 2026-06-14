@@ -379,22 +379,35 @@ async def run_pipeline_native(conn, results, continue_on_error):
         )
 
         # Phase 3: per-op error attribution + result materialization.
-        for (result, cursor, op_type, num_rows), op_error in zip(
-            prepared, op_errors
-        ):
-            if op_error is not None:
-                if not continue_on_error:
-                    raise op_error
-                result._impl._capture_err(op_error)
-                continue
-            try:
-                await _materialize_native_op(
-                    result._impl, cursor, op_type, num_rows
-                )
-            except Exception as exc:
-                if not continue_on_error:
-                    raise
-                result._impl._capture_err(exc)
+        try:
+            for (result, cursor, op_type, num_rows), op_error in zip(
+                prepared, op_errors
+            ):
+                if op_error is not None:
+                    if not continue_on_error:
+                        raise op_error
+                    result._impl._capture_err(op_error)
+                    continue
+                try:
+                    await _materialize_native_op(
+                        result._impl, cursor, op_type, num_rows
+                    )
+                except Exception as exc:
+                    if not continue_on_error:
+                        raise
+                    result._impl._capture_err(exc)
+        finally:
+            # Retire each op's open server query cursor. The native decode path
+            # does not route these cursor_ids through the statement cache, so
+            # without an explicit close a run of pipelines that open query
+            # cursors leaks them server-side (ORA-01000). _pipeline_close_cursors
+            # only queues the ids (the close-cursors piggyback flushes on the
+            # next pipeline's first op — no extra round trip here). This runs
+            # AFTER all per-op fetches, and LOB locators in fetched rows stay
+            # valid after their cursor closes (they are bound to the
+            # connection/transaction), so lazy LOB reads after run_pipeline
+            # still work.
+            conn_impl._pipeline_close_cursors(cursors)
     finally:
         conn_impl.set_call_timeout(call_timeout)
 "#;

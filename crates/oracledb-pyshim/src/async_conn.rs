@@ -719,6 +719,39 @@ impl AsyncThinConnImpl {
         self.inner.autocommit
     }
 
+    /// Queue the native pipeline's open query cursors for close. The native
+    /// decode path does not route these cursor_ids through the statement cache,
+    /// so they must be explicitly retired or a run of pipelines that open query
+    /// cursors leaks them server-side (ORA-01000). `close_cursor` only queues
+    /// the id (no round trip); the close-cursors piggyback flushes on the next
+    /// pipeline's first op. Called once at the end of the native runner, after
+    /// all per-op fetches have completed. A `None` entry (COMMIT op) is skipped.
+    fn _pipeline_close_cursors(
+        &self,
+        py: Python<'_>,
+        cursors: Vec<Option<Py<PyAny>>>,
+    ) -> PyResult<()> {
+        let mut cursor_ids = Vec::new();
+        for cursor in cursors.iter().flatten() {
+            let impl_obj = cursor.bind(py).getattr("_impl")?;
+            let cursor_impl = impl_obj.extract::<PyRef<'_, AsyncThinCursorImpl>>()?;
+            let cursor_id = cursor_impl.inner.cursor_id;
+            if cursor_id != 0 {
+                cursor_ids.push(cursor_id);
+            }
+        }
+        if cursor_ids.is_empty() {
+            return Ok(());
+        }
+        let mut guard = self.inner.connection.lock().map_err(runtime_error)?;
+        if let Some(connection) = guard.as_mut() {
+            for cursor_id in cursor_ids {
+                connection.close_cursor(cursor_id);
+            }
+        }
+        Ok(())
+    }
+
     /// Phase 2 of the native pipeline runner: drive `Connection::run_pipeline`
     /// for the prepared per-op cursors in ONE round trip and decode each
     /// response onto the matching cursor impl, returning a per-op error (or
