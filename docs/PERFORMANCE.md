@@ -213,6 +213,72 @@ is I/O-bound (≈16 packet reads), not buffer management: a micro-benchmark show
 preallocating the chunked-bytes accumulator does not beat `Vec`'s amortized
 growth, so that path was left unchanged.
 
+### 3. Columnar fetch → Arrow (decode straight into Arrow builders)
+
+**Problem (profiled).** The `fetch_df_all` path materialised every fetched row
+into a `Vec<Option<QueryValue>>` (one `Vec` per row, a `String` per text cell, an
+`OracleNumber` per number cell), then `build_record_batch` ran a second pass that
+transposed those owned rows column-by-column into the Arrow builders. A wide
+analytics fetch (the kind dataframes are for) is decode-and-allocation heavy: the
+STEP-1 attribution map measured a 20 000-row × 10-column fetch at ~73 % socket
+read-wait and ~27 % client decode-CPU, and on top of that the row path allocated
+~22 heap allocations **per row**.
+
+**Fix.** A columnar fetch path (`Connection::fetch_all_record_batch_columnar`,
+gated behind the `arrow` feature) that decodes the borrowed fetch batch
+(`QueryValueRef`, zero-copy for VARCHAR2/RAW, an amortised arena for NUMBER text)
+**directly** into per-column Arrow builders — transpose-during-parse. No per-row
+`Vec` is materialised, no per-text-cell `String` is allocated, and the separate
+transpose pass is gone. NUMBER → Decimal128/Int64/Float64 goes through the same
+canonical-text helpers the row path uses, so the produced `RecordBatch` is
+**byte-identical** to the row path. VECTOR (List/Struct) columns transparently
+fall back to the fully-tested row path.
+
+**Correctness.** A differential test asserts the columnar `RecordBatch` equals the
+row path cell-for-cell — both on a synthetic mixed-type frame (NUMBER/VARCHAR/RAW/
+NULL, default and `fetch_decimals`) and **live** against the container on a
+12 000-row mixed-type result (NUMBER int, NUMBER decimal, VARCHAR2, DATE, NULLs).
+
+**Result (counting allocator + criterion, 5 000 rows × 10 typed columns).**
+Row path **109 961 allocations (21.99 / row)** → columnar **5 163 (1.03 / row)** —
+a **95.3 % reduction** in allocation count (27 % fewer bytes), and decode+build
+~5.85 ms → ~4.29 ms per batch (release, ~27 % faster). End-to-end live
+`fetch_df_all` of a 20 000-row × 6-column result over loopback: **45.55 ms → 42.79
+ms**, ~6 % wall. The end-to-end wall delta is bounded — honestly — by the client
+decode/build share: the ~73 % socket read-wait is server/network and unbeatable on
+loopback; off-loopback the read term grows with RTT, so the smaller client-CPU
+footprint is strictly additive and the allocation win holds regardless. The drastic,
+build-independent headline is the **95 % fewer allocations**.
+
+A latent cursor leak was fixed in passing: a repeated `fetch_df_all` previously
+parsed-and-never-released a copy cursor each call (ORA-01000 over a long run); both
+the row and columnar `fetch_all_record_batch` now release the drained cursor. The
+PyO3 shim drives its own cursor management and is unaffected (`test_8000_dataframe`
+parity unchanged at 82 passed).
+
+### 4. Trim per-call client allocations on the `select_one_row` hot path
+
+**Problem (profiled).** `select 1 from dual` is round-trip-bound (~120–150 us /
+call, ≈ all the one server round trip), so the only beatable surface is the
+per-call CLIENT allocations. A counting-allocator probe of the warm
+`BlockingConnection` execute path measured **33 allocations / call**, of which two
+sources were pure waste: the EXECUTE-payload `TtcWriter` started at zero capacity
+(its small `write_*` pushes grew the buffer through ~5 doublings = 5 allocations
+for an 87-byte payload), and `remember_cursor_columns` re-cloned the column
+metadata into the cursor map on every cache-hit execute even when it was already
+present and unchanged.
+
+**Fix.** Add `TtcWriter::with_capacity` and presize the execute (96 + SQL length)
+and fetch (32) payload writers; guard the cursor-columns clone with a cheap
+equality check. Both are byte/behaviour-preserving — the wire payloads are
+identical (all 246 protocol wire-correctness tests pass unchanged) and the cursor
+map ends with the same content.
+
+**Result.** Execute-payload build **5 → 1 allocation**; warm select-1 client work
+**33 → 27 allocations / call (−18 %)**. The per-call wall stays round-trip-bound,
+so it moves only with host-load noise — this trims the client CPU the shim pays per
+call, not the server round trip.
+
 ## Honest caveats
 
 - **The five operations above are a single-connection, serial-call benchmark,
