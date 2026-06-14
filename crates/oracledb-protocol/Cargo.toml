@@ -29,6 +29,14 @@ experimental = ["dep:cbc", "dep:der", "dep:hmac"]
 # Enables the `.tns-cassette` record/replay wire format (net::cassette). Pure,
 # sans-I/O framing; off by default so the standard build is byte-identical.
 cassette = []
+# Routes the borrowed VARCHAR/CHAR UTF-8 validation in the hot fetch decode path
+# (parse_column_slot) through the SIMD-accelerated `simdutf8` crate instead of
+# `core::str::from_utf8`. IDENTICAL accept/reject semantics (the TextRaw fallback
+# on invalid UTF-8 is unchanged); `simdutf8`'s unsafe lives entirely inside that
+# dependency, so this crate stays `#![forbid(unsafe_code)]`-clean. Off by default:
+# the microbench (benches/utf8_validate.rs) shows the win is meaningful only for
+# wide text (VARCHAR2(2000)+); short VARCHAR2(40) cells see little to no gain.
+simd-decode = ["dep:simdutf8"]
 
 [dependencies]
 aes.workspace = true
@@ -45,6 +53,11 @@ thiserror.workspace = true
 cbc = { workspace = true, optional = true }
 der = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
+# SIMD-accelerated UTF-8 validation for the borrowed fetch text path (gated by
+# the `simd-decode` feature). Its `unsafe` SIMD intrinsics are encapsulated
+# inside the crate; we only call its safe `basic::from_utf8` API, so this crate
+# stays `#![forbid(unsafe_code)]`-clean.
+simdutf8 = { version = "0.1.5", optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
@@ -56,6 +69,13 @@ pkcs8 = "0.10"
 # the whole workspace stay `#![forbid(unsafe_code)]`-clean). dev-dependency only:
 # it never affects the shipped library or any dependent crate.
 allocation-counter = "0.8"
+# Microbenchmark harness for the UTF-8 validation decode-path bench
+# (benches/utf8_validate.rs). Dev-only; never ships in the library.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "utf8_validate"
+harness = false
 
 [lints]
 workspace = true
