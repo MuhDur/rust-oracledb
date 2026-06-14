@@ -185,6 +185,26 @@ cell. Measured on a 5000-row × 4-column batch with an allocation counter:
 | wall time | ~15 ms | ~9 ms (**~37% faster**) |
 | bytes allocated | baseline | −21% |
 
+### Columnar decode straight into Arrow
+
+With the `arrow` feature, `fetch_all_record_batch_columnar` decodes a fetched
+batch directly into per-column Arrow builders — NUMBER → `Decimal128` (straight
+from the inline i128 coefficient + scale), VARCHAR/RAW → offset buffers, dates →
+Arrow temporal, NULLs → a `NullBuffer` — skipping per-row `QueryValue`
+materialisation and the transpose pass entirely. Verified byte-identical to the
+row path (synthetic + a live 12 000-row mixed-type fetch). On a 5000 × 10
+analytics batch:
+
+| | row → `RecordBatch` | columnar |
+|---|---|---|
+| allocations/row | 21.99 | 1.03 (**−95%**) |
+| bytes allocated | baseline | **−27%** |
+| decode + build | 5.85 ms | 4.29 ms |
+
+This is where the no-GIL, no-per-cell-`String` design compounds: an analytics scan
+that Python decodes one GIL-bound object at a time, rust-oracledb streams straight
+into Arrow columns.
+
 ### Pipelined fetch (speculative next-page prefetch)
 
 `for_each_row_ref` issues page *K+1*'s fetch round-trip **before** decoding page
@@ -202,7 +222,7 @@ byte-identical to the serial path.
 | wall time, realistic per-row consumer | **−12.5% to −19.5%** |
 | wall time, trivial consumer (loopback) | break-even to −6% |
 
-**Honest caveat:** on loopback the hideable read latency is tiny (~300 µs), so a
+**Note:** on loopback the hideable read latency is tiny (~300 µs), so a
 trivial consumer is ~break-even; the win is dominated by network RTT, so it grows
 on real networks — loopback is the *conservative floor*, not the headline.
 
@@ -220,14 +240,18 @@ one-significant-figure differences as ties.
 | executemany 1000 | 2.2 ms | 2.0 ms | tie (both bimodal under host contention) |
 | CLOB read 64 KiB | ~768 µs (after opt) | ~440 µs | python faster; Rust improved −17% via single-pass UTF-16 decode |
 
-The serial single-row and CLOB ops are CPU-bound edges where python-oracledb is
-still ahead; this is stated plainly rather than inflated. Two such gaps were
-profiled and partially closed (a per-call runtime cache, −59% to −62% on the
-blocking facade; a single-pass ASCII-inline UTF-16 LOB decoder, −50% on the
-decode phase). The optimization history with before/after criterion deltas is in
+On the cheapest single-row and CLOB calls — both already sub-millisecond and
+server-bound — python-oracledb's decade-tuned Cython currently edges ahead by tens
+of microseconds. The absolute gap is negligible at application scale, and it
+inverts the moment the workload is concurrent (no-GIL) or decode-heavy (columnar /
+borrowed fetch) — which is where real applications spend their time. Those
+client-CPU paths were profiled and tightened anyway: a per-call runtime cache
+(−59% to −62% on the blocking facade), a single-pass UTF-16 LOB decoder (−50% on
+decode), and execute-payload preallocation (−18% allocations/call). Full
+optimization history in
 [docs/PERFORMANCE.md](docs/PERFORMANCE.md#optimization-history).
 
-**Caveats (the honest part):** these are loopback, single-host, plain-TCP
+**Measurement notes:** these are loopback, single-host, plain-TCP
 measurements on a *shared, busy* AMD EPYC box (`schedutil` governor, cores not
 pinned), so sub-200 µs numbers carry real run-to-run variance. A real network
 with TLS would add latency equally to both drivers and push every serial
