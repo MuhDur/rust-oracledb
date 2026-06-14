@@ -13,6 +13,12 @@ categories.workspace = true
 [features]
 default = []
 arrow = ["dep:arrow-array", "dep:arrow-buffer", "dep:arrow-data", "dep:arrow-schema"]
+# Typed-conversion bridges for FromSql / ToSql. Each external crate sits behind
+# its own feature so the default build pulls in nothing extra.
+chrono = ["dep:chrono"]
+uuid = ["dep:uuid"]
+serde_json = ["dep:serde_json"]
+rust_decimal = ["dep:rust_decimal"]
 
 [dependencies]
 arrow-array = { workspace = true, optional = true }
@@ -20,8 +26,12 @@ arrow-buffer = { workspace = true, optional = true }
 arrow-data = { workspace = true, optional = true }
 arrow-schema = { workspace = true, optional = true }
 asupersync.workspace = true
+chrono = { version = "0.4", optional = true, default-features = false, features = ["std"] }
 oracledb-protocol = { path = "../oracledb-protocol" }
+rust_decimal = { version = "1", optional = true, default-features = false, features = ["std"] }
+serde_json = { workspace = true, optional = true }
 thiserror.workspace = true
+uuid = { version = "1", optional = true, default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
