@@ -4863,6 +4863,34 @@ fn data_packet_ends_response(flags: u16, payload: &[u8]) -> bool {
     payload == [TNS_MSG_TYPE_END_OF_RESPONSE] || payload == [TNS_MSG_TYPE_FLUSH_OUT_BINDS]
 }
 
+/// Whether a DATA packet read **after a RESET dance** ends the response, based
+/// on its terminal TTC message byte alone.
+///
+/// After a BREAK/RESET the server stops using request-boundary framing: the
+/// trailing packets of the break-recovery response do NOT carry the
+/// `END_OF_RESPONSE` data flag (confirmed by live wire trace against Oracle
+/// 23ai on the DML-RETURNING error path, test_1600 test_1612 / ORA-12899). The
+/// server instead sends message-byte-framed packets — e.g. a `FLUSH_OUT_BINDS`
+/// *request* (a DATA packet ending in byte 0x13) that expects a
+/// `FLUSH_OUT_BINDS` reply, then the real error packet. The reference detects
+/// the boundary while *processing* the message (`TNS_MSG_TYPE_FLUSH_OUT_BINDS`
+/// and `TNS_MSG_TYPE_END_OF_RESPONSE` both set `end_of_response`,
+/// messages/base.pyx:1267-1269), because its `_check_request_boundary` is off
+/// for post-reset packets (protocol.pyx:896-906).
+///
+/// Unlike [`data_packet_ends_response`], this does NOT require the marker byte
+/// to be the packet's sole byte — the FLUSH_OUT_BINDS request arrives as
+/// `07 00 00 13`, the marker as the *last* byte. That is safe here precisely
+/// because it is gated on the post-reset context, which carries no multi-packet
+/// wide-row body (the bead rust-oracledb-n2s false-positive only arises on the
+/// normal request-boundary-framed read path, which never sets `after_reset`).
+fn post_reset_packet_ends_response(payload: &[u8]) -> bool {
+    matches!(
+        payload.last(),
+        Some(&TNS_MSG_TYPE_FLUSH_OUT_BINDS) | Some(&TNS_MSG_TYPE_END_OF_RESPONSE)
+    )
+}
+
 /// Reads one boundary-delimited TTC response. While `in_pipeline` is set,
 /// marker packets are silently dropped instead of triggering the
 /// send-reset/await-reset dance -- the reference does the same while reading
@@ -4901,6 +4929,17 @@ async fn read_data_response_boundary_seeded(
 ) -> Result<DataResponse> {
     let mut response = Vec::new();
     let mut pending_packet = seed;
+    // Set once this loop has run a RESET dance (reference `_reset`). After a
+    // RESET the server stops using request-boundary (END_OF_RESPONSE data flag)
+    // framing for the trailing error response: it sends message-byte-framed
+    // packets, exactly like the reference's `message.process()` after
+    // `_reset()`, where `_check_request_boundary` is off (protocol.pyx:819-821,
+    // 896-906). So a post-reset packet whose payload ends in a terminal message
+    // byte (FLUSH_OUT_BINDS / END_OF_RESPONSE) ends the response even without
+    // the data flag. This relaxation is gated on `after_reset` so the wide-row
+    // false-positive guard (bead rust-oracledb-n2s) on the normal framing path
+    // is left entirely intact.
+    let mut after_reset = false;
     loop {
         let packet = match pending_packet.take() {
             Some(packet) => packet,
@@ -4912,6 +4951,7 @@ async fn read_data_response_boundary_seeded(
                 continue;
             }
             pending_packet = reset_after_marker(read, cx, write, &packet).await?;
+            after_reset = true;
             continue;
         }
         if packet.packet_type != TNS_PACKET_TYPE_DATA {
@@ -4930,7 +4970,9 @@ async fn read_data_response_boundary_seeded(
                 .map_err(|_| oracledb_protocol::ProtocolError::TtcDecode("invalid flags"))?,
         );
         response.extend_from_slice(payload);
-        if data_packet_ends_response(flags, payload) {
+        if data_packet_ends_response(flags, payload)
+            || (after_reset && post_reset_packet_ends_response(payload))
+        {
             break;
         }
     }
@@ -5744,6 +5786,142 @@ mod tests {
             first_read, STALE_BODY,
             "without the drain, the next read misframes onto the stale in-flight bytes — \
              this is the bug break_and_drain fixes"
+        );
+        server.join().expect("server thread joins");
+    }
+
+    // bead rust-oracledb-zhm: the DML-RETURNING error path (test_1600 test_1612,
+    // ORA-12899) deadlocked. Confirmed by live wire trace against Oracle 23ai:
+    // a RETURNING statement that errors does NOT come back as a plain DATA
+    // response. The server signals it out-of-band, exactly as on a call-timeout
+    // BREAK: it sends a BREAK marker, the client runs the RESET dance, and the
+    // server then sends a FLUSH_OUT_BINDS *request* — a DATA packet whose data
+    // flags are 0x0000 (NO end-of-response flag, because the break-recovery path
+    // does not use request-boundary framing) and whose payload ends in the
+    // FLUSH_OUT_BINDS message byte (0x13). The reference recognises this as
+    // end-of-response while *processing* the message (messages/base.pyx:1267-1269
+    // sets end_of_response on TNS_MSG_TYPE_FLUSH_OUT_BINDS) and replies with a
+    // FLUSH_OUT_BINDS message; the server then sends another BREAK/RESET pair and
+    // finally the real ORA-12899 error packet.
+    //
+    // THE BUG: our `read_data_response_boundary` fed the post-RESET trailing
+    // packet back through `data_packet_ends_response`, which (correctly, for the
+    // wide-row false-positive guard, bead n2s) returns false for a flagless
+    // packet that merely *ends* in 0x13. So the boundary loop tried to read
+    // another packet that the server never sends (it is waiting for our
+    // FLUSH_OUT_BINDS reply) and we blocked forever in recvfrom/epoll.
+    //
+    // THE FIX: a packet that arrives *after a RESET* inside the boundary loop is
+    // message-byte framed, not request-boundary framed (mirroring the reference,
+    // whose `_check_request_boundary` is off for post-reset packets). So once the
+    // loop has run a RESET, a trailing FLUSH_OUT_BINDS / END_OF_RESPONSE message
+    // byte terminates the response. The wide-row guard is untouched because it
+    // applies only to the normal (no-reset) framing.
+    //
+    // This hermetic test replays that exact sequence and drives the real
+    // execute-path reader (`read_data_response_flushing_out_binds`). Pre-fix it
+    // hangs at step (4) below; the bounded timeout converts the hang into a test
+    // failure instead of stalling the whole suite.
+    #[test]
+    fn dml_returning_error_flush_out_binds_after_reset_completes_without_hang() {
+        // The real ORA-12899 error payload tail (end-of-response flagged).
+        const ERROR_BODY: &[u8] = &[0x04, 0x01, 0x02, 0x37];
+        // The FLUSH_OUT_BINDS *request* the server sends after the first reset:
+        // flagless DATA packet whose payload ends in the FLUSH_OUT_BINDS byte.
+        // Matches the live trace body `07 00 00 13`.
+        const FLUSH_REQUEST_BODY: &[u8] = &[0x07, 0x00, 0x00, TNS_MSG_TYPE_FLUSH_OUT_BINDS];
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            use std::io::Write as _;
+
+            // 1) Server signals the RETURNING error out-of-band with a BREAK.
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))
+                .expect("write break marker");
+            // 2) Client answers with RESET; server confirms with a RESET marker.
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_RESET,
+                "client must answer the BREAK with a RESET"
+            );
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_RESET))
+                .expect("write reset-confirm marker");
+            // 3) Server sends the FLUSH_OUT_BINDS request: flagless DATA packet
+            //    ending in 0x13. THIS is the packet the pre-fix loop refused to
+            //    treat as a boundary, then blocked reading the next packet.
+            socket
+                .write_all(&data_packet(FLUSH_REQUEST_BODY, false))
+                .expect("write flush-out-binds request");
+            // 4) Client must reply with a FLUSH_OUT_BINDS message of its own
+            //    (a DATA packet whose single-byte payload is 0x13).
+            let mut header = [0u8; 8];
+            socket
+                .read_exact(&mut header)
+                .expect("read flush-out-binds reply header");
+            assert_eq!(
+                header[4], TNS_PACKET_TYPE_DATA,
+                "client's flush-out-binds reply must be a DATA packet"
+            );
+            let len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+            let mut body = vec![0u8; len - 8];
+            socket
+                .read_exact(&mut body)
+                .expect("read flush-out-binds reply body");
+            assert_eq!(
+                body.last().copied(),
+                Some(TNS_MSG_TYPE_FLUSH_OUT_BINDS),
+                "client must reply with a FLUSH_OUT_BINDS message"
+            );
+            // 5) Server sends another BREAK/RESET pair before the real error.
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))
+                .expect("write second break marker");
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_RESET,
+                "client must answer the second BREAK with a RESET"
+            );
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_RESET))
+                .expect("write second reset-confirm marker");
+            // 6) Finally, the genuine ORA-12899 error packet (end-of-response).
+            socket
+                .write_all(&data_packet(ERROR_BODY, true))
+                .expect("write trailing ORA-12899 error packet");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let payload = runtime.block_on(async {
+            let cx = Cx::current().expect("ambient Cx");
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (mut read, write) = transport::plain_split(stream);
+            let write: SharedWriteHalf =
+                Arc::new(AsyncMutex::with_name("returning_err_test_write", write));
+
+            // Drive the real execute-path reader. Bound it so the pre-fix hang
+            // surfaces as a timeout error rather than stalling the whole suite.
+            time::timeout(
+                time::wall_now(),
+                Duration::from_secs(10),
+                read_data_response_flushing_out_binds(&mut read, &cx, &write, 8192),
+            )
+            .await
+            .expect("must NOT hang on the DML-RETURNING error path (flush-out-binds after reset)")
+            .expect("read must complete and yield the trailing error payload")
+        });
+
+        // The fully reassembled response ends with the real error packet's bytes
+        // (the FLUSH_OUT_BINDS request body is consumed/popped, not surfaced).
+        assert!(
+            payload.ends_with(ERROR_BODY),
+            "the reassembled response must end with the ORA-12899 error payload, got {payload:?}"
         );
         server.join().expect("server thread joins");
     }
