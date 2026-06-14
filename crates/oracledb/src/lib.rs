@@ -5723,10 +5723,24 @@ async fn read_data_response_boundary_seeded(
                 .try_into()
                 .map_err(|_| oracledb_protocol::ProtocolError::TtcDecode("invalid flags"))?,
         );
+        let ends = data_packet_ends_response(flags, payload)
+            || (after_reset && post_reset_packet_ends_response(payload));
+        // Single-packet passthrough (bead rust-oracledb-0n0): when the whole
+        // response is ONE DATA packet (nothing accumulated yet AND this packet
+        // ends the response), move the packet's owned buffer into `response` and
+        // strip the 2 flag bytes in place, instead of allocating a fresh Vec and
+        // copying the entire payload into it. The flag-strip is preserved (drain
+        // removes the same 2 leading bytes), the end-of-response decision is the
+        // exact same `ends` computed above, and the FLUSH_OUT_BINDS terminal-byte
+        // detection below sees an identical byte stream. The multi-packet path is
+        // unchanged (it must reassemble, so it extends).
+        if ends && response.is_empty() {
+            response = packet.payload;
+            response.drain(..2);
+            break;
+        }
         response.extend_from_slice(payload);
-        if data_packet_ends_response(flags, payload)
-            || (after_reset && post_reset_packet_ends_response(payload))
-        {
+        if ends {
             break;
         }
     }
@@ -6162,13 +6176,24 @@ mod tests {
     /// Pure replay of the `read_data_response_boundary` decision logic over a
     /// hand-built packet sequence, returning the reassembled bytes, the index it
     /// stopped at, and whether flush-out-binds was detected. Mirrors the async
-    /// loop's break conditions exactly (minus I/O).
+    /// loop's break conditions exactly (minus I/O), INCLUDING the single-packet
+    /// passthrough (bead rust-oracledb-0n0): when the response is one terminal
+    /// packet, the owned buffer is moved instead of copied. The `payload` here is
+    /// already flag-stripped, so the passthrough is a plain move of the same bytes
+    /// — proving the optimization is byte-identical to the extend path.
     fn replay_boundary(packets: &[(u16, Vec<u8>)]) -> (Vec<u8>, Option<usize>, bool) {
         let mut reassembled = Vec::new();
         let mut stopped_at = None;
         for (index, (flags, payload)) in packets.iter().enumerate() {
+            let ends = data_packet_ends_response(*flags, payload);
+            if ends && reassembled.is_empty() {
+                // Passthrough: move the (already flag-stripped) owned buffer.
+                reassembled = payload.clone();
+                stopped_at = Some(index);
+                break;
+            }
             reassembled.extend_from_slice(payload);
-            if data_packet_ends_response(*flags, payload) {
+            if ends {
                 stopped_at = Some(index);
                 break;
             }
@@ -6244,6 +6269,52 @@ mod tests {
             "flush-out-binds must be detected from the terminal FLUSH_OUT_BINDS message byte"
         );
         assert_eq!(reassembled, vec![0x01, 0x02, FOB, 0x03, FOB]);
+    }
+
+    // Single-packet passthrough (bead rust-oracledb-0n0): a response that is ONE
+    // terminal DATA packet must produce byte-identical reassembled output whether
+    // it takes the passthrough (move the owned buffer) or the legacy extend path,
+    // and FLUSH_OUT_BINDS detection on its terminal byte must be unchanged.
+    #[test]
+    fn single_packet_passthrough_is_byte_identical_to_extend() {
+        const EOR: u8 = TNS_MSG_TYPE_END_OF_RESPONSE;
+        const FOB: u8 = TNS_MSG_TYPE_FLUSH_OUT_BINDS;
+        let eor_flag = oracledb_protocol::thin::TNS_DATA_FLAGS_END_OF_RESPONSE;
+
+        // Helper: the legacy extend-only reassembly, for the equivalence oracle.
+        fn replay_extend_only(packets: &[(u16, Vec<u8>)]) -> (Vec<u8>, Option<usize>, bool) {
+            let mut reassembled = Vec::new();
+            let mut stopped_at = None;
+            for (index, (flags, payload)) in packets.iter().enumerate() {
+                reassembled.extend_from_slice(payload);
+                if data_packet_ends_response(*flags, payload) {
+                    stopped_at = Some(index);
+                    break;
+                }
+            }
+            let flush = matches!(reassembled.last(), Some(&TNS_MSG_TYPE_FLUSH_OUT_BINDS));
+            (reassembled, stopped_at, flush)
+        }
+
+        // Several single-terminal-packet shapes, including one ending in the
+        // FLUSH_OUT_BINDS byte (so the flag-detection path is exercised).
+        let cases: &[(u16, Vec<u8>)] = &[
+            (eor_flag, vec![0x40, 0x41, EOR]),
+            (eor_flag, vec![0x03, FOB]), // terminal FLUSH_OUT_BINDS
+            (eor_flag, vec![0xde, 0xad, 0xbe, 0xef]),
+            (eor_flag, vec![0x00]),
+        ];
+        for (flags, payload) in cases {
+            let one = [(*flags, payload.clone())];
+            let passthrough = replay_boundary(&one);
+            let extend = replay_extend_only(&one);
+            assert_eq!(
+                passthrough, extend,
+                "passthrough must equal extend for single packet {payload:02x?}"
+            );
+            // And the bytes are exactly the (already flag-stripped) payload.
+            assert_eq!(&passthrough.0, payload);
+        }
     }
 
     #[test]

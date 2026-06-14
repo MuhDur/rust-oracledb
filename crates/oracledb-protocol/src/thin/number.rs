@@ -55,6 +55,13 @@ pub(crate) enum DecodedNumberStack {
         is_negative: bool,
         decimal_point_index: i16,
         is_integer: bool,
+        /// The i128 coefficient FUSED during the digit walk (bead
+        /// rust-oracledb-shh): `Some(coeff)` is byte-identical to a second
+        /// `digits_to_i128(&digit_buf[..digit_len], is_negative)` pass; `None`
+        /// signals i128 overflow (39–40 digit values), in which case the caller
+        /// spills to boxed text using the still-filled `digit_buf` exactly as
+        /// before. The sign is already applied.
+        coefficient: Option<i128>,
     },
 }
 
@@ -142,11 +149,15 @@ impl OracleNumber {
                 is_negative,
                 decimal_point_index,
                 is_integer,
+                coefficient,
             } => {
                 let digits = &digit_buf[..digit_len];
-                // Fold the decimal digits into an i128 coefficient. `digits` is
-                // the significant-digit run (up to 40); >38 may overflow i128.
-                match digits_to_i128(digits, is_negative) {
+                // The i128 coefficient was FUSED during the digit walk (bead
+                // rust-oracledb-shh): `Some` is byte-identical to the old second
+                // `digits_to_i128(digits, is_negative)` pass; `None` is the same
+                // i128-overflow signal (39–40 digit value), which spills to text
+                // using the still-filled `digits` exactly as before.
+                match coefficient {
                     Some(coefficient) => {
                         // scale = len - decimal_point_index (implied fractional
                         // positions; may be negative for trailing-zero integers).
@@ -306,6 +317,12 @@ pub(crate) enum DecodedNumber {
 /// Fold the significant decimal `digits` (each 0..=9) into an `i128` coefficient
 /// with the given sign, returning `None` on overflow (39–40 digit values that
 /// exceed `i128`).
+///
+/// This is the reference the FUSED in-walk accumulator (bead rust-oracledb-shh,
+/// `decode_number_parts_stack`) must reproduce byte-for-byte. It is retained as
+/// the differential oracle for that fusion (see the `fused_coefficient_matches_
+/// reference_walk` test) and is otherwise unused in production code.
+#[cfg(test)]
 fn digits_to_i128(digits: &[u8], is_negative: bool) -> Option<i128> {
     let mut acc: i128 = 0;
     for &d in digits {
@@ -450,6 +467,73 @@ impl std::fmt::Display for OracleNumber {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::thin::codecs::{decode_number_parts_stack, encode_number_text};
+
+    /// Differential proof for the fused i128 accumulator (bead rust-oracledb-shh):
+    /// the `coefficient` fused during `decode_number_parts_stack`'s digit walk
+    /// MUST equal the reference second pass `digits_to_i128(digits, is_negative)`
+    /// over the still-filled digit buffer — including the overflow (`None`)
+    /// boundary. If these ever diverge, the inline NUMBER coefficient (and thus
+    /// the canonical text, the i64/i128 reconstruct, the whole parity surface)
+    /// would silently drift, so this is the gate for the optimization.
+    fn assert_fused_matches_reference(wire: &[u8], label: &str) {
+        let mut digit_buf = [0u8; MAX_DIGITS];
+        let parts = decode_number_parts_stack(wire, &mut digit_buf).expect("decode valid wire");
+        if let DecodedNumberStack::Parts {
+            digit_len,
+            is_negative,
+            coefficient,
+            ..
+        } = parts
+        {
+            let reference = digits_to_i128(&digit_buf[..digit_len], is_negative);
+            assert_eq!(
+                coefficient, reference,
+                "{label}: fused coefficient {coefficient:?} != reference walk {reference:?} \
+                 (wire={wire:02x?})"
+            );
+        }
+    }
+
+    #[test]
+    fn fused_coefficient_matches_reference_walk_corpus() {
+        // Spans the inline domain plus the i128-overflow boundary (39–40 digits).
+        let corpus: &[&str] = &[
+            "0",
+            "1",
+            "-1",
+            "9",
+            "-9",
+            "10",
+            "99",
+            "-99",
+            "100",
+            "12345",
+            "-12345",
+            "0.5",
+            "-0.5",
+            "3.14159",
+            "100.001",
+            "0.0001",
+            "1000000000000000000",
+            "12345678901234567890",
+            "123456789012345678901234567890",
+            // 38 significant digits (max inline precision).
+            "12345678901234567890123456789012345678",
+            "-12345678901234567890123456789012345678",
+            "0.12345678901234567890123456789012345678",
+            // 39+ digits: i128 overflow -> fused must latch None, same as ref.
+            "123456789012345678901234567890123456789",
+            "9999999999999999999999999999999999999999", // 40 nines
+            "1e125",
+            "-1e125",
+            "1e-120",
+        ];
+        for text in corpus {
+            let wire = encode_number_text(text).unwrap_or_else(|e| panic!("encode {text}: {e:?}"));
+            assert_fused_matches_reference(&wire, text);
+        }
+    }
 
     #[test]
     fn inline_form_fits_the_size_budget() {

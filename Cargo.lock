@@ -1521,6 +1521,7 @@ dependencies = [
  "aes",
  "allocation-counter",
  "cbc",
+ "criterion",
  "der",
  "hex",
  "hmac 0.12.1",
@@ -1534,6 +1535,7 @@ dependencies = [
  "serde_json",
  "sha1 0.10.6",
  "sha2 0.10.9",
+ "simdutf8",
  "thiserror",
  "x509-cert",
 ]

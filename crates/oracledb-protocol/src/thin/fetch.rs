@@ -2,6 +2,28 @@
 
 use super::*;
 
+/// Validate `slice` as UTF-8 for the hot borrowed-text decode path, returning the
+/// borrowed `&str` on success or `()` on rejection (the caller falls back to the
+/// owned `TextRaw` carrier — semantics identical regardless of validator).
+///
+/// With the `simd-decode` feature this uses `simdutf8::basic::from_utf8`, whose
+/// accept/reject decision is byte-for-byte identical to `core::str::from_utf8`
+/// (it validates the exact same UTF-8 grammar — it only declines to compute the
+/// error *position*, which this path never uses). The crate stays
+/// `#![forbid(unsafe_code)]`-clean: `simdutf8`'s SIMD `unsafe` is encapsulated
+/// inside that dependency and we call only its safe API.
+#[inline]
+fn validate_utf8(slice: &[u8]) -> core::result::Result<&str, ()> {
+    #[cfg(feature = "simd-decode")]
+    {
+        simdutf8::basic::from_utf8(slice).map_err(|_| ())
+    }
+    #[cfg(not(feature = "simd-decode"))]
+    {
+        core::str::from_utf8(slice).map_err(|_| ())
+    }
+}
+
 pub fn build_fetch_payload(cursor_id: u32, arraysize: u32) -> Vec<u8> {
     build_fetch_payload_with_seq(cursor_id, arraysize, 1)
 }
@@ -942,7 +964,7 @@ fn parse_column_slot<'buf>(
                 // Borrow the wire bytes directly when they are valid UTF-8 and
                 // not the UTF-16 NCHAR form (which needs re-encoding). Zero copy.
                 BorrowedBytes::Slice(slice) if metadata.csfrm != CS_FORM_NCHAR => {
-                    match core::str::from_utf8(slice) {
+                    match validate_utf8(slice) {
                         Ok(text) => Ok(ColumnSlot::Wire(QueryValueRef::Text(text))),
                         Err(_) => Ok(park(
                             owned_arena,
@@ -1786,6 +1808,41 @@ pub(crate) fn parse_query_return_parameters(
 mod borrowed_fetch_tests {
     use super::*;
     use crate::thin::codecs::encode_number_text;
+
+    // Isomorphism proof for the `simd-decode` feature (bead rust-oracledb-63o):
+    // `validate_utf8` must make the SAME accept/reject decision as the canonical
+    // `core::str::from_utf8`, AND return the same `&str` on accept, for every
+    // input — whether or not the SIMD validator is compiled in. This guards the
+    // hot text path against any divergence in UTF-8 grammar handling.
+    #[test]
+    fn validate_utf8_matches_core_accept_reject() {
+        let cases: &[&[u8]] = &[
+            b"",
+            b"a",
+            b"hello world",
+            "VARCHAR2 cell".as_bytes(),
+            "中文 mixed \u{1f600}".as_bytes(), // CJK + emoji (4-byte)
+            "naïve café".as_bytes(),
+            &[0x80],                   // lone continuation byte -> reject
+            &[0xC0, 0x80],             // overlong NUL -> reject
+            &[0xED, 0xA0, 0x80],       // UTF-16 surrogate -> reject
+            &[0xF4, 0x90, 0x80, 0x80], // > U+10FFFF -> reject
+            &[0xFF],                   // invalid lead -> reject
+            &[0xE2, 0x82],             // truncated 3-byte -> reject
+        ];
+        for &bytes in cases {
+            let core = core::str::from_utf8(bytes);
+            let ours = validate_utf8(bytes);
+            assert_eq!(
+                core.is_ok(),
+                ours.is_ok(),
+                "accept/reject diverged for {bytes:02x?}"
+            );
+            if let (Ok(a), Ok(b)) = (core, ours) {
+                assert_eq!(a, b, "accepted text diverged for {bytes:02x?}");
+            }
+        }
+    }
 
     // Build a synthetic column metadata for a scalar type.
     fn col(name: &str, ora_type_num: u8, csfrm: u8, buffer_size: u32) -> ColumnMetadata {
