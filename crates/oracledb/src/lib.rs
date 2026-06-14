@@ -3686,6 +3686,47 @@ impl Connection {
         self.txn_in_progress = txn_in_progress;
         Ok(())
     }
+
+    /// Mark CLOB/BLOB result columns that actually hold JSON.
+    ///
+    /// A column described over the wire as CLOB or BLOB can be a JSON column
+    /// (`IS JSON` storage); the fetch metadata does not say so directly. For each
+    /// such candidate this runs a catalog probe against `ALL_JSON_COLUMNS` in the
+    /// current schema and flips `is_json` when the column is registered as JSON.
+    /// Columns already flagged JSON, non-LOB columns, and unnamed (expression)
+    /// columns are skipped. `timeout_ms` bounds each probe (the call timeout).
+    ///
+    /// The reference fires the same `ALL_JSON_COLUMNS` lookup after describing a
+    /// LOB result column so JSON-in-LOB values decode correctly.
+    pub async fn supplement_json_column_metadata(
+        &mut self,
+        cx: &Cx,
+        columns: &mut [ColumnMetadata],
+        timeout_ms: Option<u32>,
+    ) -> Result<()> {
+        let candidates = json_lob_probe_candidates(columns);
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        for (index, column_name) in candidates {
+            let result = self
+                .execute_query_with_binds_and_timeout(
+                    cx,
+                    "select 1 \
+                     from all_json_columns \
+                     where owner = sys_context('USERENV', 'CURRENT_SCHEMA') \
+                       and column_name = :1",
+                    1,
+                    &[BindValue::Text(column_name)],
+                    timeout_ms,
+                )
+                .await?;
+            if !result.rows.is_empty() {
+                columns[index].is_json = true;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl CancelHandle {
@@ -4485,6 +4526,22 @@ impl BlockingConnection {
         })
     }
 
+    /// Blocking wrapper for [`Connection::supplement_json_column_metadata`].
+    pub fn supplement_json_column_metadata(
+        connection: &mut Connection,
+        columns: &mut [ColumnMetadata],
+        timeout_ms: Option<u32>,
+    ) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .supplement_json_column_metadata(&cx, columns, timeout_ms)
+                .await
+        })
+    }
+
     pub fn close(connection: Connection) -> Result<()> {
         let runtime = build_io_runtime()?;
         runtime.block_on(async {
@@ -5149,6 +5206,25 @@ fn columns_require_define(columns: &[ColumnMetadata]) -> bool {
     })
 }
 
+/// Columns that warrant an `ALL_JSON_COLUMNS` probe to learn whether a CLOB/BLOB
+/// actually stores JSON: not already flagged JSON, of LOB type, and named (an
+/// unnamed expression column cannot be looked up by name). Returns each
+/// candidate's index paired with its upper-cased name (the catalog stores names
+/// upper-cased) so the caller can flip `is_json` in place after the probe.
+fn json_lob_probe_candidates(columns: &[ColumnMetadata]) -> Vec<(usize, String)> {
+    use oracledb_protocol::thin::{ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB};
+    columns
+        .iter()
+        .enumerate()
+        .filter(|(_, metadata)| {
+            !metadata.is_json
+                && matches!(metadata.ora_type_num, ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB)
+                && !metadata.name.is_empty()
+        })
+        .map(|(index, metadata)| (index, metadata.name.to_ascii_uppercase()))
+        .collect()
+}
+
 fn trace_connect_step(step: &'static str) {
     if std::env::var_os("ORACLEDB_TRACE_CONNECT").is_some() {
         eprintln!("oracledb::connect: {step}");
@@ -5211,6 +5287,40 @@ mod tests {
                 ..Default::default()
             },
         )))
+    }
+
+    fn column(name: &str, ora_type_num: u8, is_json: bool) -> ColumnMetadata {
+        ColumnMetadata {
+            name: name.to_string(),
+            ora_type_num,
+            is_json,
+            ..ColumnMetadata::default()
+        }
+    }
+
+    #[test]
+    fn json_lob_probe_candidates_selects_named_non_json_lobs() {
+        use oracledb_protocol::thin::{ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_VARCHAR};
+        let columns = vec![
+            column("doc", ORA_TYPE_NUM_CLOB, false),         // candidate
+            column("blob_doc", ORA_TYPE_NUM_BLOB, false),    // candidate
+            column("already_json", ORA_TYPE_NUM_CLOB, true), // skipped: is_json
+            column("name", ORA_TYPE_NUM_VARCHAR, false),     // skipped: not a LOB
+            column("", ORA_TYPE_NUM_CLOB, false),            // skipped: unnamed expression
+        ];
+        // Names come back upper-cased (the catalog stores them upper-cased) and
+        // only the two named, non-JSON LOB columns are probed, by original index.
+        assert_eq!(
+            json_lob_probe_candidates(&columns),
+            vec![(0, "DOC".to_string()), (1, "BLOB_DOC".to_string())]
+        );
+    }
+
+    #[test]
+    fn json_lob_probe_candidates_empty_when_no_lobs() {
+        use oracledb_protocol::thin::ORA_TYPE_NUM_VARCHAR;
+        let columns = vec![column("name", ORA_TYPE_NUM_VARCHAR, false)];
+        assert!(json_lob_probe_candidates(&columns).is_empty());
     }
 
     #[test]
