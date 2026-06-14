@@ -215,15 +215,16 @@ growth, so that path was left unchanged.
 
 ## Honest caveats
 
-- **This is a single-connection, serial-call benchmark, not a throughput or
-  concurrency benchmark.** It says nothing about how either driver scales across
-  many concurrent sessions, where the Rust async model and the absence of a GIL
-  could matter and where this comparison is silent. Do not read these numbers as
-  a throughput claim.
-- **GIL note.** python-oracledb thin holds the CPython GIL during its
-  pure-Python protocol handling. That does not affect these serial,
-  single-threaded medians, but it is the obvious axis on which a multi-connection
-  comparison would diverge, and that comparison has not been run here.
+- **The five operations above are a single-connection, serial-call benchmark,
+  not a throughput or concurrency benchmark.** They say nothing about how either
+  driver scales across many concurrent sessions. That axis is measured separately
+  in [Concurrent throughput](#concurrent-throughput) below; do not read the
+  serial medians as a throughput claim.
+- **GIL note.** python-oracledb thin holds the CPython GIL while it decodes the
+  wire protocol in Python. That does not affect the serial, single-threaded
+  medians above, but it is the axis on which a multi-connection comparison
+  diverges — see [Concurrent throughput](#concurrent-throughput), which measures
+  exactly that.
 - **Warm vs cold.** All operations except `connect` are warm: warmed-up
   statement and cursor caches on both sides. Cold-start parse cost is not
   measured.
@@ -235,6 +236,156 @@ growth, so that path was left unchanged.
 - **Loopback, no TLS.** The data connection is plain TCP over loopback. A real
   network with TLS would add latency that is identical for both drivers and would
   push every operation further toward "network-dominated, therefore a tie".
+
+## Concurrent throughput
+
+The serial benchmark above deliberately measures one connection making one call
+at a time. This section measures the other axis: aggregate decode throughput
+when N workers each drive their own connection in parallel. This is where the
+absence of a GIL in the Rust driver is supposed to matter, so it is measured
+rather than asserted.
+
+Harnesses: `crates/oracledb/benches/concurrent_throughput.rs` (Rust, N worker OS
+threads) and `benches/compare_concurrent_python.py` (python-oracledb, the same
+workload under two concurrency models, `threading` threads and `asyncio`
+coroutines). Both self-skip when the container is absent.
+
+### The workload, and why it is decode-bound
+
+A concurrency comparison is only meaningful if the bottleneck is client-side
+codec CPU, the thing the GIL serializes, rather than the server or the wire,
+which are identical for both drivers. Getting there took one correction worth
+recording.
+
+The first attempt generated rows with `connect by level` (20 expression columns
+over 5000 generated rows). That was a trap: generating those rows is *server*
+CPU, and on a single container it serialized. Rust throughput peaked at 4 workers
+and then fell while the container, not the client, sat pinned at three-plus
+cores. That measures the database, not the driver, so it was discarded.
+
+The honest workload instead pre-populates a small wide table once
+(`PERFTEST_CONC`, 1000 rows × 20 columns: 10 `NUMBER`, 10 `VARCHAR2(40)`), warms
+it into the server buffer cache, and then each worker repeatedly runs
+`select * from PERFTEST_CONC`. The server side is now a buffer-cache block read
+plus wire serialization, which is cheap and which scales: a no-GIL multi-process
+probe (separate OS processes, so no shared interpreter) drove the same table to
+~6× throughput at 8 sessions before the single container began to tail off, so
+the server can feed several parallel clients. The expensive part is on the
+client. Every `NUMBER` cell parses Oracle's base-100 mantissa/exponent bytes
+into lossless decimal text, and every `VARCHAR2` cell is a UTF-8 validation plus
+a `String`/`str` build. With the server able to feed parallel clients, the codec
+is the bottleneck, which is exactly where the GIL decides whether throughput
+scales. Each worker decodes every cell it fetches so the work cannot be
+optimized away.
+
+Each worker scans in a loop for a 6 s window (after a 2 s warmup) at N = 1, 2, 4,
+8, 16; aggregate throughput is the summed rows/sec, and the scaling factor is
+throughput(N) / throughput(1).
+
+### Results
+
+Representative aggregate throughput (rows/sec) across three passes per side, and
+the scaling factor versus that side's own single-worker number.
+
+| N  | rust (threads)      | python (threads)   | python (asyncio)   |
+|----|---------------------|--------------------|--------------------|
+| 1  | 185,000  (1.0×)     | 202,000  (1.0×)    | 177,000  (1.0×)    |
+| 2  | 420,000  (2.3×)     | 252,000  (1.3×)    | 207,000  (1.2×)    |
+| 4  | 870,000  (4.6×)     | 118,000  (0.6×)    | 216,000  (1.2×)    |
+| 8  | 870,000  (4.7×)     | 109,000  (0.5×)    | 207,000  (1.2×)    |
+| 16 | 780,000  (4.2×)     | 101,000  (0.5×)    | 207,000  (1.2×)    |
+
+Scaling factor at N = 8 versus N = 1, the headline number:
+
+| Driver / model      | throughput(8) / throughput(1) |
+|---------------------|-------------------------------|
+| rust (threads)      | **4.7×**                      |
+| python (threads)    | **0.5×** (worse than serial)  |
+| python (asyncio)    | **1.2×**                      |
+
+### The verdict
+
+The no-GIL advantage shows up clearly, and the shape matches the prediction.
+
+- **Rust scales until the server caps it.** Aggregate throughput rises roughly
+  linearly to ~870k rows/sec at 4 workers (4.6×) and holds there through 8. The
+  plateau past 4 is not the GIL, which Rust does not have; it is the single
+  container reaching its own serialization ceiling (~870k rows/sec for this
+  workload), the same ceiling the no-GIL multi-process probe hit. N workers
+  genuinely decode in parallel: each `BlockingConnection` runs on its own
+  current-thread runtime and decodes on its own OS thread, sharing nothing.
+- **python-oracledb threads do not scale; they regress.** Throughput peaks at 2
+  workers (1.3×) and then falls *below* the single-worker number at 4+ (0.5×).
+  This is the textbook GIL signature on a CPU-bound workload: the decode cannot
+  run on two threads at once, and adding threads only adds GIL hand-off and
+  contention, so more workers make it slower.
+- **python-oracledb asyncio plateaus.** It overlaps connection I/O on one event
+  loop, which buys a little over serial (1.2×) by hiding wait, but the decode
+  still runs on the single event-loop thread under the GIL, so it cannot scale a
+  decode-bound workload with N. Flat from 2 workers on.
+
+At 8 workers, then, **Rust delivers ~4.7× its single-worker throughput where
+python-oracledb threads deliver ~0.5× and asyncio ~1.2×**. In absolute terms
+Rust's aggregate at that point is about 8× the Python-threads aggregate and about
+4× the asyncio aggregate (~870k vs ~109k vs ~207k rows/sec).
+
+Two honest qualifiers, neither of which dents the conclusion:
+
+- **Single-thread, python-oracledb is competitive and sometimes ahead.** At
+  N = 1, python-oracledb threads (~202k) edged out Rust (~185k). The Rust win is
+  entirely in *scaling*, not in raw single-connection speed; some of the serial
+  gap is the `BlockingConnection` facade's per-call cost discussed in the serial
+  section. Selling this as "Rust decodes faster" would be dishonest. Rust decodes
+  *in parallel*, which is a different claim.
+- **The ceiling is the test database, not the driver.** A single free-tier
+  container caps the absolute numbers around 870k rows/sec. A larger or clustered
+  database would raise that ceiling and let Rust's parallel decode keep climbing,
+  while the GIL would still hold both Python models flat, so this is, if
+  anything, a conservative measurement of the gap.
+
+### A driver limitation this surfaced
+
+The scan table is capped at 1000 rows on purpose. Past roughly 1500 of these
+20-column rows, the `select *` result spans several network packets, and the
+current thin decoder mis-frames that multi-packet wide-row continuation
+(`encoded NUMBER too long` or `truncated TTC payload`, depending on whether the
+break lands in the single-batch or the paged-fetch path). That is a real bug in
+the wide-row multi-packet reassembly, distinct from anything the concurrency
+benchmark is testing; the bench stays inside the single-batch envelope so it
+measures decode throughput rather than that defect. It is recorded here so it is
+not lost, and is out of scope for an additive benchmark to fix.
+
+### Methodology
+
+- **Host:** AMD EPYC 7713 (64 cores / 128 threads), kernel 6.17, `schedutil`
+  governor (not pinned; the host was shared, which shows up as the run-to-run
+  spread the three-pass medians average over).
+- **Database:** the same local `gvenzl/oracle-free:23-slim` container as the
+  serial benchmark, here on `localhost:1526`. Loopback TCP, no TLS.
+- **CPU vs network:** the workload is client-decode-bound by construction (cached
+  table, cheap server scan that the multi-process probe showed scales to ~6× at
+  8 sessions; the expensive work is the NUMBER/VARCHAR2 decode on the client).
+  That is what makes the GIL the deciding factor and the comparison meaningful.
+- **Rust:** N `std::thread` workers, each its own `BlockingConnection`; a barrier
+  aligns the measured window and a shared flag ends it. `cargo bench` release
+  profile.
+- **Python:** python-oracledb 4.0.1, CPython 3.13.12, thin mode. Threads model:
+  N `threading.Thread`, one connection each, barrier-aligned. Asyncio model: N
+  `connect_async` connections driven by `asyncio.gather` on one event loop.
+
+Reproduce:
+
+```sh
+eval "$(ORACLEDB_CONTAINER_NAME=rust-oracledb-lane-1526 \
+        ORACLEDB_HOST_PORT=1526 scripts/container.sh env)"
+
+# Rust
+CARGO_TARGET_DIR=/path/to/target \
+  cargo bench -p oracledb --bench concurrent_throughput
+
+# python-oracledb (threads + asyncio)
+.venv-py313/bin/python benches/compare_concurrent_python.py
+```
 
 ## Why rust-oracle (thick / ODPI-C) is not in this comparison
 
