@@ -4195,14 +4195,13 @@ impl Connection {
                         &[],
                     )
                     .map_err(Error::Protocol)
-                    .map(|result| {
+                    .inspect(|result| {
                         // Track open query cursors so a later op or a follow-up
                         // fetch on this connection does not collide with them.
-                        self.remember_cursor_columns(&result);
+                        self.remember_cursor_columns(result);
                         if result.cursor_id != 0 && statement_is_query(sql) {
                             self.in_use_cursors.insert(result.cursor_id);
                         }
-                        result
                     })
                 }
             };

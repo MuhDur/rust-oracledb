@@ -159,3 +159,131 @@ fn pipeline_round_trips_against_local_container() {
         .expect("cleanup ddl");
     BlockingConnection::close(conn).expect("close connection");
 }
+
+/// `run_pipeline_decoded` must produce results byte-identical to manually
+/// parsing the raw `run_pipeline` payloads with the same per-op binds — the
+/// decode wrapper that the pyshim native runner builds on top of the raw
+/// transport must introduce no drift.
+#[test]
+fn pipeline_decoded_matches_raw_parse() {
+    let Some(options) = connect_options() else {
+        eprintln!("skipped: PYO_TEST_* environment not configured");
+        return;
+    };
+    let mut conn = BlockingConnection::connect(options).expect("connect to test container");
+    assert!(conn.supports_pipelining());
+
+    for ddl in [
+        "drop table if exists pipe_dec_rust purge",
+        "create table pipe_dec_rust (id number(9), val varchar2(50))",
+    ] {
+        BlockingConnection::execute_query(&mut conn, ddl, 1).expect("setup ddl");
+    }
+
+    let requests = [
+        PipelineRequest::Execute {
+            sql: "insert into pipe_dec_rust values (1, 'one')".to_string(),
+            bind_rows: Vec::new(),
+            prefetch_rows: 1,
+        },
+        PipelineRequest::Execute {
+            sql: "insert into pipe_dec_rust values (:1, :2)".to_string(),
+            bind_rows: vec![vec![
+                BindValue::Number("2".to_string()),
+                BindValue::Text("two".to_string()),
+            ]],
+            prefetch_rows: 1,
+        },
+        PipelineRequest::Commit,
+        PipelineRequest::Execute {
+            sql: "select id, val from pipe_dec_rust order by id".to_string(),
+            bind_rows: Vec::new(),
+            prefetch_rows: 100,
+        },
+    ];
+
+    // Reference: raw payloads parsed by hand with each op's binds.
+    let raw = BlockingConnection::run_pipeline(&mut conn, &requests, false).expect("raw pipeline");
+    let capabilities = oracledb_protocol::thin::ClientCapabilities::default();
+    let mut expected: Vec<oracledb::protocol::thin::QueryResult> = Vec::new();
+    for (index, request) in requests.iter().enumerate() {
+        let parsed = match request {
+            PipelineRequest::Commit => {
+                // a commit reports no rows; its parsed shape is an empty result
+                oracledb::protocol::thin::QueryResult::default()
+            }
+            PipelineRequest::Execute { bind_rows, .. } => {
+                oracledb::protocol::thin::parse_query_response_with_binds(
+                    &raw[index],
+                    capabilities,
+                    bind_rows.first().map(Vec::as_slice).unwrap_or(&[]),
+                )
+                .expect("parse raw op")
+            }
+        };
+        expected.push(parsed);
+    }
+
+    // Reset the table so the decoded pipeline starts from the same empty state
+    // the raw pipeline did (both insert the same two rows).
+    BlockingConnection::execute_query(&mut conn, "truncate table pipe_dec_rust", 1)
+        .expect("reset table");
+
+    // Candidate: the decoded wrapper, fresh pipeline (same statements).
+    let decoded = BlockingConnection::run_pipeline_decoded(&mut conn, &requests, false)
+        .expect("decoded pipeline");
+    assert_eq!(decoded.len(), requests.len());
+
+    for (index, (request, outcome)) in requests.iter().zip(&decoded).enumerate() {
+        let got = outcome.as_ref().expect("op decoded ok");
+        match request {
+            PipelineRequest::Commit => {
+                assert!(got.rows.is_empty(), "commit op {index} returned rows");
+            }
+            PipelineRequest::Execute { .. } => {
+                // rows + row_count + columns are the load-bearing per-op result
+                // attributes the pyshim materializes; assert them equal to the
+                // hand-parsed reference.
+                assert_eq!(got.rows, expected[index].rows, "rows mismatch op {index}");
+                assert_eq!(
+                    got.row_count, expected[index].row_count,
+                    "row_count mismatch op {index}"
+                );
+                assert_eq!(
+                    got.columns.len(),
+                    expected[index].columns.len(),
+                    "column count mismatch op {index}"
+                );
+            }
+        }
+    }
+
+    // The query op returns both inserted rows.
+    let query = decoded[3].as_ref().expect("query op ok");
+    let rows: Vec<(String, String)> = query
+        .rows
+        .iter()
+        .map(|row| {
+            let id = match &row[0] {
+                Some(v @ QueryValue::Number(_)) => v.as_number_text().unwrap().into_owned(),
+                other => panic!("unexpected id: {other:?}"),
+            };
+            let val = match &row[1] {
+                Some(QueryValue::Text(text)) => text.clone(),
+                other => panic!("unexpected val: {other:?}"),
+            };
+            (id, val)
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("1".to_string(), "one".to_string()),
+            ("2".to_string(), "two".to_string())
+        ]
+    );
+
+    BlockingConnection::execute_query(&mut conn, "drop table pipe_dec_rust purge", 1)
+        .expect("cleanup ddl");
+    BlockingConnection::close(conn).expect("close connection");
+}
