@@ -24,7 +24,7 @@
 
   <!-- Wordmark -->
   <text x="80" y="138" font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace" font-size="74" font-weight="700" fill="#e8f0ff">oracle<tspan fill="url(#accent)">db</tspan></text>
-  <text x="82" y="184" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="26" font-weight="500" fill="#9fb3d1">Pure-Rust async thin-mode Oracle Database driver &#183; no OCI, no Instant Client</text>
+  <text x="82" y="184" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="25" font-weight="500" fill="#9fb3d1">Pure-Rust async thin-mode Oracle Database driver</text>
 
   <!-- Feature chips -->
   <g font-family="ui-monospace, monospace" font-size="16" fill="#bfe9e0">

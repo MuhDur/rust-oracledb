@@ -22,12 +22,12 @@
   <rect width="1200" height="630" fill="url(#glow)"/>
   <rect x="0" y="0" width="1200" height="6" fill="url(#accent)"/>
 
-  <!-- Large database-cylinder motif, right -->
-  <g transform="translate(815,150) scale(2.05)" opacity="0.95">
-    <path d="M10 22 L10 120 A60 20 0 0 0 130 120 L130 22" fill="url(#shield)" stroke="url(#accent)" stroke-width="2"/>
-    <ellipse cx="70" cy="22" rx="60" ry="20" fill="url(#shield)" stroke="url(#accent)" stroke-width="2"/>
-    <path d="M10 56 A60 20 0 0 0 130 56" fill="none" stroke="url(#accent)" stroke-width="1.6" opacity="0.75"/>
-    <path d="M10 88 A60 20 0 0 0 130 88" fill="none" stroke="url(#accent)" stroke-width="1.6" opacity="0.5"/>
+  <!-- Database-cylinder motif, top-right corner (clear of the wordmark + bullets) -->
+  <g transform="translate(1012,58) scale(1.28)" opacity="0.95">
+    <path d="M10 22 L10 120 A60 20 0 0 0 130 120 L130 22" fill="url(#shield)" stroke="url(#accent)" stroke-width="2.6"/>
+    <ellipse cx="70" cy="22" rx="60" ry="20" fill="url(#shield)" stroke="url(#accent)" stroke-width="2.6"/>
+    <path d="M10 56 A60 20 0 0 0 130 56" fill="none" stroke="url(#accent)" stroke-width="2.2" opacity="0.75"/>
+    <path d="M10 88 A60 20 0 0 0 130 88" fill="none" stroke="url(#accent)" stroke-width="2.2" opacity="0.5"/>
   </g>
 
   <!-- Wordmark -->
