@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" role="img" aria-label="rust-oracledb — pure-Rust async thin-mode Oracle Database driver">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a0f1c"/>
+      <stop offset="1" stop-color="#10203a"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#34d399"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+    <linearGradient id="shield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0e2a44"/>
+      <stop offset="1" stop-color="#0a1830"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.8" cy="0.35" r="0.7">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+  <rect x="0" y="0" width="1200" height="6" fill="url(#accent)"/>
+
+  <!-- Large database-cylinder motif, right -->
+  <g transform="translate(815,150) scale(2.05)" opacity="0.95">
+    <path d="M10 22 L10 120 A60 20 0 0 0 130 120 L130 22" fill="url(#shield)" stroke="url(#accent)" stroke-width="2"/>
+    <ellipse cx="70" cy="22" rx="60" ry="20" fill="url(#shield)" stroke="url(#accent)" stroke-width="2"/>
+    <path d="M10 56 A60 20 0 0 0 130 56" fill="none" stroke="url(#accent)" stroke-width="1.6" opacity="0.75"/>
+    <path d="M10 88 A60 20 0 0 0 130 88" fill="none" stroke="url(#accent)" stroke-width="1.6" opacity="0.5"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="88" y="232" font-family="ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace" font-size="108" font-weight="700" fill="#e8f0ff">oracle<tspan fill="url(#accent)">db</tspan></text>
+  <text x="92" y="296" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="31" font-weight="500" fill="#9fb3d1">Pure-Rust async thin-mode Oracle Database driver</text>
+
+  <!-- Highlights -->
+  <g font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="27" fill="#cfe3ff">
+    <circle cx="100" cy="384" r="6" fill="url(#accent)"/><text x="124" y="392">Passes python-oracledb&#8217;s own thin-mode test suite</text>
+    <circle cx="100" cy="432" r="6" fill="url(#accent)"/><text x="124" y="440">no-GIL: ~4.7&#215; concurrent throughput where Python threads regress</text>
+    <circle cx="100" cy="480" r="6" fill="url(#accent)"/><text x="124" y="488">One 4.26 MB static binary &#183; no OCI &#183; no Instant Client</text>
+    <circle cx="100" cy="528" r="6" fill="url(#accent)"/><text x="124" y="536">#![forbid(unsafe_code)] &#183; fuzz-hardened &#183; fail-closed</text>
+  </g>
+
+  <!-- Footer -->
+  <text x="90" y="590" font-family="ui-monospace, monospace" font-size="22" fill="#6b88b3">github.com/MuhDur/rust-oracledb</text>
+</svg>

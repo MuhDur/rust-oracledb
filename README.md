@@ -1,12 +1,17 @@
-# rust-oracledb
+<p align="center">
+  <img src=".github/assets/hero.svg" alt="rust-oracledb — pure-Rust async thin-mode Oracle Database driver" width="100%">
+</p>
+
+<p align="center">
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License: MIT OR Apache-2.0"></a>
+  <a href="https://crates.io/crates/oracledb"><img src="https://img.shields.io/crates/v/oracledb.svg" alt="crates.io"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.83%2B-orange.svg" alt="Rust 1.83+"></a>
+  <a href="#robustness"><img src="https://img.shields.io/badge/unsafe-forbidden-success.svg" alt="unsafe: forbidden"></a>
+</p>
 
 **A pure-Rust, async, thin-mode Oracle Database driver. A clean-room port of
 python-oracledb v4.0.1 thin mode that passes the reference's own test suite, with
 no Oracle Instant Client, no OCI, and no C library at runtime.**
-
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![Rust 1.83+](https://img.shields.io/badge/rust-1.83%2B-orange.svg)](https://www.rust-lang.org)
-[![unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](#robustness)
 
 `rust-oracledb` speaks the Oracle TNS/TTC wire protocol directly over TCP. You
 add the crate, point it at a listener, and connect; no Instant Client to
