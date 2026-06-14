@@ -256,6 +256,13 @@ pub const CS_FORM_IMPLICIT: u8 = 1;
 pub const CS_FORM_NCHAR: u8 = 2;
 
 pub(crate) const TNS_GSO_DONT_CARE: u16 = 0x0001;
+/// Service-option bit advertising that the endpoint can receive an out-of-band
+/// "attention" (urgent-TCP break). The server echoes it in the accept's
+/// `protocol_options` when OOB breaks are negotiated (reference
+/// `TNS_GSO_CAN_RECV_ATTENTION`, constants.pxi:396); the reference derives
+/// `Capabilities.supports_oob` from `protocol_options & this`
+/// (capabilities.pyx:121).
+pub(crate) const TNS_GSO_CAN_RECV_ATTENTION: u16 = 0x0400;
 pub(crate) const TNS_NSI_DISABLE_NA: u8 = 0x04;
 pub(crate) const TNS_NSI_NA_REQUIRED: u8 = 0x10;
 pub(crate) const TNS_NSI_SUPPORT_SECURITY_RENEG: u8 = 0x80;

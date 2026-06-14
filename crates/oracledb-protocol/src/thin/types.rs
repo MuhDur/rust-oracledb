@@ -9,6 +9,10 @@ pub struct AcceptInfo {
     pub sdu: u32,
     pub supports_fast_auth: bool,
     pub supports_oob_check: bool,
+    /// Whether the server advertised out-of-band (urgent-TCP) break support in
+    /// the accept's `protocol_options` (`& TNS_GSO_CAN_RECV_ATTENTION`), the
+    /// reference `Capabilities.supports_oob` (capabilities.pyx:121).
+    pub supports_oob: bool,
     pub supports_end_of_response: bool,
 }
 
