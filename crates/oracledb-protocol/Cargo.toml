@@ -13,6 +13,9 @@ default = []
 # format is a proprietary Oracle container and only the AES/PBES2 branch is
 # implemented; ewallet.pem is fully supported without this feature.
 experimental = ["dep:cbc", "dep:der", "dep:hmac"]
+# Enables the `.tns-cassette` record/replay wire format (net::cassette). Pure,
+# sans-I/O framing; off by default so the standard build is byte-identical.
+cassette = []
 
 [dependencies]
 aes.workspace = true

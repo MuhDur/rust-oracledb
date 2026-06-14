@@ -2,6 +2,11 @@
 
 pub mod connectstring;
 
+/// `.tns-cassette` record/replay wire format (sans-I/O framing). Gated behind
+/// the `cassette` feature so the default build is byte-identical.
+#[cfg(feature = "cassette")]
+pub mod cassette;
+
 use crate::{ProtocolError, Result};
 
 /// Transport protocol for the connection (the EZConnect `protocol://` prefix).
