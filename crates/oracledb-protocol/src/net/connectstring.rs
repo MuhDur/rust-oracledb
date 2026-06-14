@@ -2216,6 +2216,193 @@ mod tests {
         );
         assert_eq!(hosts(&d), vec!["host1", "host2a", "host2b", "host3"]);
     }
+
+    // --- corpus-differential table (valid inputs) -----------------------
+
+    /// Each row: (connect_string, first_host, first_port, service_name option,
+    /// first_protocol). Drives a broad differential sweep matching the
+    /// reference's parse results across EZConnect and descriptor forms.
+    #[test]
+    fn corpus_valid_inputs() {
+        let cases: &[(&str, &str, u16, Option<&str>, Protocol)] = &[
+            // EZConnect family
+            ("h/s", "h", 1521, Some("s"), Protocol::Tcp),
+            ("h:1600/s", "h", 1600, Some("s"), Protocol::Tcp),
+            ("tcp://h/s", "h", 1521, Some("s"), Protocol::Tcp),
+            ("tcps://h/s", "h", 2484, Some("s"), Protocol::Tcps),
+            ("tcps://h:9999/s", "h", 9999, Some("s"), Protocol::Tcps),
+            ("h.example.org/s.dom", "h.example.org", 1521, Some("s.dom"), Protocol::Tcp),
+            ("h:1521/", "h", 1521, None, Protocol::Tcp),
+            ("h:/s", "h", 1521, Some("s"), Protocol::Tcp),
+            ("[2001:db8::1]:1521/s", "2001:db8::1", 1521, Some("s"), Protocol::Tcp),
+            ("[::1]/s", "::1", 1521, Some("s"), Protocol::Tcp),
+            ("//h:1521/s", "h", 1521, Some("s"), Protocol::Tcp),
+            ("h1,h2:1700/s", "h1", 1700, Some("s"), Protocol::Tcp),
+            ("h/s:dedicated", "h", 1521, Some("s"), Protocol::Tcp),
+            ("h/s/inst", "h", 1521, Some("s"), Protocol::Tcp),
+            ("h/s?sdu=16384", "h", 1521, Some("s"), Protocol::Tcp),
+            ("h/s?pyo.stmtcachesize=40", "h", 1521, Some("s"), Protocol::Tcp),
+            // descriptor family
+            (
+                "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=dh)(PORT=1599))(CONNECT_DATA=(SERVICE_NAME=ds)))",
+                "dh",
+                1599,
+                Some("ds"),
+                Protocol::Tcp,
+            ),
+            (
+                "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=sh)(PORT=2484))(CONNECT_DATA=(SID=mysid)))",
+                "sh",
+                2484,
+                None,
+                Protocol::Tcps,
+            ),
+            (
+                "(DESCRIPTION =(ADDRESS=(PROTOCOL=tcp) (HOST = wh) (PORT = 1521))(CONNECT_DATA=(SERVICE_NAME=ws)))",
+                "wh",
+                1521,
+                Some("ws"),
+                Protocol::Tcp,
+            ),
+            (
+                "(DESCRIPTION=(ADDRESS=(HTTPS_PROXY=px)(HTTPS_PROXY_PORT=8080)(PROTOCOL=tcps)(HOST=ph)(PORT=443))(CONNECT_DATA=(SERVICE_NAME=ps)))",
+                "ph",
+                443,
+                Some("ps"),
+                Protocol::Tcps,
+            ),
+        ];
+        for (cs, host, port, service, protocol) in cases {
+            let d = parse_ok(cs);
+            let a = d
+                .first_address()
+                .unwrap_or_else(|| panic!("no address for {cs:?}"));
+            assert_eq!(a.host.as_deref(), Some(*host), "host mismatch for {cs:?}");
+            assert_eq!(a.port, *port, "port mismatch for {cs:?}");
+            assert_eq!(a.protocol, *protocol, "protocol mismatch for {cs:?}");
+            assert_eq!(
+                d.first_description().connect_data.service_name.as_deref(),
+                *service,
+                "service mismatch for {cs:?}"
+            );
+        }
+    }
+
+    /// Each row: (connect_string, expected substring in the diagnostic).
+    #[test]
+    fn corpus_malformed_inputs() {
+        let cases: &[(&str, &str)] = &[
+            // unbalanced / structural
+            (
+                "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1)",
+                "offset",
+            ),
+            ("(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp", "offset"),
+            // missing addresses (reference DPY-2049)
+            (
+                "(DESRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=h)(PORT=1))(CONNECT_DATA=(SERVICE_NAME=s)))",
+                "no addresses are defined",
+            ),
+            // invalid protocol (reference DPY-4021)
+            ("badproto://h/s", "invalid protocol"),
+            (
+                "(DESCRIPTION=(ADDRESS=(PROTOCOL=ipc)(KEY=k))(CONNECT_DATA=(SERVICE_NAME=s)))",
+                "invalid protocol",
+            ),
+            // invalid server type (reference DPY-4028)
+            (
+                "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1))(CONNECT_DATA=(SERVER=BOGUS)(SERVICE_NAME=s)))",
+                "invalid server_type",
+            ),
+            // non-numeric RETRY_COUNT (reference DPY-4018)
+            (
+                "(DESCRIPTION=(RETRY_COUNT=wrong)(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1))(CONNECT_DATA=(SERVICE_NAME=s)))",
+                "not a non-negative integer",
+            ),
+            // simple value for a container keyword (reference DPY-4017)
+            ("(address=5)", "container"),
+            // mixed complex/simple data (reference DPY-4017)
+            (
+                "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=h)(PORT=1))(CONNECT_DATA=(SERVER=DEDICATED) SERVICE_NAME=s))",
+                "offset",
+            ),
+            // empty
+            ("", "must not be empty"),
+        ];
+        for (cs, needle) in cases {
+            let err = parse(cs)
+                .err()
+                .unwrap_or_else(|| panic!("expected error for {cs:?}"));
+            let msg = format!("{err}");
+            assert!(
+                msg.contains(needle),
+                "diagnostic for {cs:?} = {msg:?} should contain {needle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tns_alias_returns_none() {
+        // A bare alphanumeric name is neither a descriptor nor an EZConnect
+        // string; it must resolve via tnsnames.ora (parse returns None).
+        assert!(parse("my_tns_alias")
+            .expect("alias is not an error")
+            .is_none());
+    }
+
+    #[test]
+    fn sdu_is_clamped() {
+        // reference: SDU sanitised into 512..=2097152
+        let d = parse_ok("(DESCRIPTION=(SDU=1)(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1))(CONNECT_DATA=(SERVICE_NAME=s)))");
+        assert_eq!(d.first_description().sdu, 512);
+        let d = parse_ok("(DESCRIPTION=(SDU=99999999)(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1))(CONNECT_DATA=(SERVICE_NAME=s)))");
+        assert_eq!(d.first_description().sdu, 2_097_152);
+    }
+
+    #[test]
+    fn duration_units_parse() {
+        // reference test_4511
+        let base = "(DESCRIPTION=(TRANSPORT_CONNECT_TIMEOUT=UNIT)(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1))(CONNECT_DATA=(SERVICE_NAME=s)))";
+        let cases = [
+            ("500 ms", 0.5_f64),
+            ("15 SEC", 15.0),
+            ("5 min", 300.0),
+            ("34", 34.0),
+        ];
+        for (unit, expected) in cases {
+            let d = parse_ok(&base.replace("UNIT", unit));
+            assert!(
+                (d.first_description().tcp_connect_timeout - expected).abs() < 1e-9,
+                "duration {unit:?} -> {}",
+                d.first_description().tcp_connect_timeout
+            );
+        }
+    }
+
+    #[test]
+    fn passthrough_extras_preserved_in_connect_data() {
+        // reference test_4579 — unknown CONNECT_DATA keys are passed through.
+        let d = parse_ok(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1))(CONNECT_DATA=(SERVICE_NAME=s)(COLOCATION_TAG=Tag1)))",
+        );
+        let extra = &d.first_description().connect_data.extra;
+        assert!(extra
+            .iter()
+            .any(|(k, v)| k == "COLOCATION_TAG" && v == "Tag1"));
+    }
+
+    #[test]
+    fn wallet_and_cert_dn_in_security() {
+        // reference test_4515
+        let d = parse_ok(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=h)(PORT=1))(CONNECT_DATA=(SERVICE_NAME=s))\
+             (SECURITY=(SSL_SERVER_CERT_DN=\"CN=unknown\")(SSL_SERVER_DN_MATCH=Off)(MY_WALLET_DIRECTORY=\"/tmp/w\")))",
+        );
+        let sec = &d.first_description().security;
+        assert_eq!(sec.ssl_server_cert_dn.as_deref(), Some("CN=unknown"));
+        assert_eq!(sec.wallet_location.as_deref(), Some("/tmp/w"));
+        assert!(!sec.ssl_server_dn_match);
+    }
 }
 
 #[cfg(test)]
