@@ -152,12 +152,15 @@ honest framing each deserves.
 
 **The mental model (Amdahl, plainly).** A database query is roughly **95% network
 + server round-trip** — identical for every client, and unbeatable — and **~5%
-client CPU**. Rust crushes that 5%, but 50× on 5% of the total is ~5% off the
-whole, which is invisible on one small query. This is not a Rust limit; it is
-physics. *No* driver, in any language, out-computes a server round-trip. The Rust
-win therefore appears exactly where the client-CPU fraction grows: when many
-connections decode at once (no GIL), or when one query returns a lot of rows to
-decode. Those are the numbers to lead with.
+client CPU**. Even a large speedup on that 5% is only a few percent off the whole,
+which is invisible on one small query. And the gap on that slice is *modest* to
+begin with: python-oracledb's decoder is compiled **Cython**, not pure Python, so
+single-threaded it is genuinely competitive — we measure ~1.2× below, not 50×.
+This is not a Rust limit; it is physics. *No* driver, in any language, out-computes
+a server round-trip. The Rust win appears, and grows, exactly where the
+client-CPU fraction does: when **many connections decode at once** (no GIL kills
+Python here), or when **one query returns a lot of rows**. Those are the numbers to
+lead with.
 
 All numbers below are measured; the methodology, host details, and the raw
 per-pass spread are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Both drivers
