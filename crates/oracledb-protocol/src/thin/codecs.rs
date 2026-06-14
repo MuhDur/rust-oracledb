@@ -593,7 +593,15 @@ mod tests {
 
     #[test]
     fn number_text_ordinary_values_still_encode() {
-        for ok in ["0", "1", "-1", "3.14159", "1e10", "-2.5e-3", "12345678901234567890"] {
+        for ok in [
+            "0",
+            "1",
+            "-1",
+            "3.14159",
+            "1e10",
+            "-2.5e-3",
+            "12345678901234567890",
+        ] {
             assert!(encode_number_text(ok).is_ok(), "expected {ok} to encode");
         }
     }
