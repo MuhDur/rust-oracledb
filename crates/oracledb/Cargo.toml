@@ -13,6 +13,12 @@ categories.workspace = true
 [features]
 default = []
 arrow = ["dep:arrow-array", "dep:arrow-buffer", "dep:arrow-data", "dep:arrow-schema"]
+# Transport record/replay seam: tee the raw wire stream to a .tns-cassette
+# (record) and serve a cassette to the decoder with no socket (replay). Pulls
+# in the protocol crate's cassette wire format. Off by default; when off the
+# OracleReadHalf/OracleWriteHalf transport path is byte-identical to the
+# pre-seam build (the Recording/Replay enum variants do not exist).
+cassette = ["oracledb-protocol/cassette"]
 # Typed-conversion bridges for FromSql / ToSql. Each external crate sits behind
 # its own feature so the default build pulls in nothing extra.
 chrono = ["dep:chrono"]
