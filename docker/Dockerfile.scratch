@@ -1,0 +1,36 @@
+# FROM-scratch image for the rust-oracledb static smoke binary.
+#
+# This image contains ONE file: the fully-static, musl-linked `smoke` binary.
+# No base OS, no glibc, no Instant Client, no Python interpreter — the entire
+# deployment artifact is the single executable the Rust driver compiles to.
+# This is the deployment story python-oracledb cannot match: Python always
+# needs an interpreter plus its shared libraries, and OCI/thick mode needs the
+# Oracle Instant Client on top.
+#
+# The binary is built on the host (musl cross toolchain) and copied in, because
+# the static build needs the x86_64-linux-musl C toolchain for ring (rustls'
+# crypto backend) which we keep out of the image. See scripts/smoke-static.sh
+# for the full reproducible build + run, and docs/DEPLOYMENT.md for the story.
+#
+# Build context expects the static binary at ./smoke (the build script stages
+# it). Override with --build-arg BIN=<path-relative-to-context>.
+#
+#   # built + staged by scripts/smoke-static.sh:
+#   docker build -f docker/Dockerfile.scratch -t rust-oracledb-smoke:scratch <ctx>
+#
+# Plain TCP connections (the default for this smoke test) need NO CA certs in
+# the image. TLS/TCPS connections DO need /etc/ssl/certs mounted or COPYed in;
+# see the commented block below and docs/DEPLOYMENT.md for the honest caveat.
+
+FROM scratch
+
+# The one and only layer payload: the static binary.
+ARG BIN=smoke
+COPY ${BIN} /smoke
+
+# TLS/TCPS only: uncomment to bake a CA bundle into the image. For plain TCP
+# (this smoke test) it is unnecessary and deliberately omitted to keep the
+# image at ~binary size.
+# COPY ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+ENTRYPOINT ["/smoke"]
