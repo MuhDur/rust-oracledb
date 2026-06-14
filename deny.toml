@@ -1,0 +1,128 @@
+# cargo-deny configuration for rust-oracledb.
+#
+# Runnable locally and ready for CI:
+#     cargo deny check
+#
+# NOTE: this repo has no `.github/workflows/` yet, so there is no CI step to
+# wire this into. When CI lands, add a `cargo deny check` step (a `taiki-e/
+# install-action@cargo-deny` + `cargo deny check` job). The gate is exit-0
+# clean today, so adding it will not introduce a red build.
+#
+# Scope: this is a pure-Rust async Oracle driver workspace (oracledb-protocol,
+# oracledb, oracledb-pyshim). The license allow-list and advisory policy below
+# were derived from the *actual* dependency tree (`cargo metadata`), not a
+# generic template — every allowed license atom and every `bans`/`sources`
+# rule corresponds to a crate currently in the graph.
+
+# ---------------------------------------------------------------------------
+# Security advisories (RustSec). Vulnerabilities are denied; unmaintained /
+# yanked surface as warnings so they are visible without blocking the build.
+# ---------------------------------------------------------------------------
+[advisories]
+version = 2
+# Vulnerabilities are denied (cargo-deny's non-overridable default in v2).
+# Yanked crates are denied. Unmaintained/unsound surface as warnings so they
+# are visible in CI logs without blocking — these are advisories, not CVEs.
+yanked = "deny"
+# `unmaintained = "all"` (the v2 default) also fails the build on transitive
+# unmaintained deps; we scope it to `"workspace"` so a first-party direct dep
+# going unmaintained still fails, but a deep transitive one (e.g. the
+# rustls-pemfile RUSTSEC-2025-0134 advisory pulled in via asupersync/rustls)
+# only warns. This is an unmaintained note, not a vulnerability.
+unmaintained = "workspace"
+# The pyo3 advisories RUSTSEC-2026-0176 / 0177 were resolved for real by the
+# 0.29 bump (bead rust-oracledb-aaf) and need NO entry here.
+#
+# The single documented allow-list entry below is for an *unmaintained* note
+# (not a vulnerability) on a transitively-required PEM parser:
+ignore = [
+    # rustls-pemfile is unmaintained (repo archived 2025-08); upstream points
+    # to rustls-pki-types' PemObject. It is pulled in directly by
+    # oracledb-protocol and transitively by asupersync/rustls for TLS/TCPS PEM
+    # loading. No vulnerability, no safe upgrade yet — tracked for migration to
+    # rustls-pki-types::pem. Allow-listed so the gate stays green while the
+    # migration is pending; remove once oracledb-protocol drops rustls-pemfile.
+    "RUSTSEC-2025-0134",
+]
+
+# ---------------------------------------------------------------------------
+# Licenses. The allow-list is the exact union of SPDX atoms present in the
+# dependency tree as of the pky bead. Confidence threshold is high so a crate
+# whose license text doesn't cleanly match its declared SPDX id is flagged
+# rather than silently accepted.
+# ---------------------------------------------------------------------------
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    # Permissive core — covers the overwhelming majority of the tree
+    # (MIT, MIT OR Apache-2.0, Apache-2.0 OR MIT, dual variants, etc.).
+    "MIT",
+    "Apache-2.0",
+    # Apache-2.0 WITH LLVM-exception (rustix, wasi/wit-* toolchain crates).
+    "Apache-2.0 WITH LLVM-exception",
+    # ISC: required as a conjunct by `ring` (Apache-2.0 AND ISC) and as the
+    # sole license of `rustls-webpki` / `untrusted`.
+    "ISC",
+    # BSD family: curve25519-/ed25519-dalek, subtle (BSD-3); zerocopy (BSD-2);
+    # fiat-crypto (BSD-1 as a disjunct).
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    # Public-domain-equivalent disjuncts: aho-corasick/memchr/walkdir
+    # (Unlicense OR MIT), tiny-keccak (CC0-1.0).
+    "Unlicense",
+    "CC0-1.0",
+    # foldhash.
+    "Zlib",
+    # unicode-ident: (MIT OR Apache-2.0) AND Unicode-3.0.
+    "Unicode-3.0",
+]
+# First-party / sibling crates published under a custom MIT-derived license
+# reference (asupersync, asupersync-macros, franken-kernel/-evidence/-decision).
+# cargo-deny cannot resolve a `LicenseRef-*` against the SPDX list, so it is
+# allow-listed by exception here. These are the project's own async runtime and
+# evidence-kernel crates; the underlying grant is MIT-equivalent.
+[[licenses.exceptions]]
+name = "asupersync"
+allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"]
+[[licenses.exceptions]]
+name = "asupersync-macros"
+allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"]
+[[licenses.exceptions]]
+name = "franken-kernel"
+allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"]
+[[licenses.exceptions]]
+name = "franken-evidence"
+allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"]
+[[licenses.exceptions]]
+name = "franken-decision"
+allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"]
+
+# ---------------------------------------------------------------------------
+# Bans. Duplicate versions of the same crate are warned (not denied) — the
+# tree currently carries a couple of dual rand/getrandom lineages pulled in by
+# transitive deps; surfacing them keeps the graph honest without blocking.
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+# Intra-workspace path dependencies (e.g. `oracledb-protocol = { path = ... }`)
+# carry no version requirement and so read as a `*` wildcard. `allow-wildcard-
+# paths` covers path deps of `publish = false` crates but, by design, NOT of a
+# publishable crate (`oracledb` -> `oracledb-protocol`), because crates.io
+# rejects pure path deps. That is a real pre-publish task (the path deps must
+# gain a version before the first crates.io release), so we surface it as a
+# warning rather than either hiding it or hard-failing the workspace gate.
+wildcards = "warn"
+allow-wildcard-paths = true
+# No crates are banned and none are explicitly skipped: the duplicate-version
+# warnings are informational and reviewed, not suppressed.
+
+# ---------------------------------------------------------------------------
+# Sources. Only the public crates.io registry is permitted; no git or
+# alternative-registry dependencies are allowed.
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
