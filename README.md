@@ -179,6 +179,27 @@ cell. Measured on a 5000-row × 4-column batch with an allocation counter:
 | wall time | ~15 ms | ~9 ms (**~37% faster**) |
 | bytes allocated | baseline | −21% |
 
+### Pipelined fetch (speculative next-page prefetch)
+
+`for_each_row_ref` issues page *K+1*'s fetch round-trip **before** decoding page
+*K*, so the server processes the next page and the kernel buffers its bytes while
+the client is still decoding the current one — overlapping wire I/O with decode
+on a single connection (something the CPython GIL structurally prevents). Bounded
+to one page of look-ahead, and cancellation-safe: a drop mid-prefetch leaves the
+stranded page to be broken-and-drained by the next operation (proven by a
+deterministic test with a negative control), and the prefetched rows are
+byte-identical to the serial path.
+
+| metric (50k rows, arraysize 1000, ~49 pages) | result |
+|---|---|
+| per-page read-wait | **−5.6% to −24%** (the robust signal) |
+| wall time, realistic per-row consumer | **−12.5% to −19.5%** |
+| wall time, trivial consumer (loopback) | break-even to −6% |
+
+**Honest caveat:** on loopback the hideable read latency is tiny (~300 µs), so a
+trivial consumer is ~break-even; the win is dominated by network RTT, so it grows
+on real networks — loopback is the *conservative floor*, not the headline.
+
 ### Serial single-call operations
 
 Single connection, serial calls, warm caches. Ratio is python / rust (above 1.0
