@@ -3740,6 +3740,16 @@ impl Connection {
 
     fn remember_cursor_columns(&mut self, result: &QueryResult) {
         if result.cursor_id != 0 && !result.columns.is_empty() {
+            // On a statement-cache hit the same cursor re-executes with identical
+            // columns, so the map already holds an equal value. Cloning the
+            // `Vec<ColumnMetadata>` (and each column's `name`/object/domain
+            // `String`) every call would be pure waste on that hot path. Skip the
+            // clone when the cached value already matches; the map ends with the
+            // same content either way (behavior-preserving). The equality check is
+            // a cheap field compare versus the String allocations a clone makes.
+            if self.cursor_columns.get(&result.cursor_id) == Some(&result.columns) {
+                return;
+            }
             self.cursor_columns
                 .insert(result.cursor_id, result.columns.clone());
         }
