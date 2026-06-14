@@ -57,6 +57,10 @@ fn init_thin_impl(_package: &Bound<'_, PyAny>) -> PyResult<()> {
 #[pymodule]
 fn oracledb_pyshim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(init_thin_impl, m)?)?;
+    // native-pipeline diagnostics (test/measurement introspection)
+    m.add_function(wrap_pyfunction!(set_force_pipeline_path_py, m)?)?;
+    m.add_function(wrap_pyfunction!(last_pipeline_path_py, m)?)?;
+    m.add_function(wrap_pyfunction!(reset_pipeline_path_log_py, m)?)?;
     m.add_function(wrap_pyfunction!(record_next_connect_args, m)?)?;
     m.add_function(wrap_pyfunction!(discard_pending_connect_args, m)?)?;
     m.add_function(wrap_pyfunction!(record_next_pool_args, m)?)?;
