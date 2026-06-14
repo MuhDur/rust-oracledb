@@ -77,5 +77,9 @@ criterion = { version = "0.5", default-features = false, features = ["cargo_benc
 name = "utf8_validate"
 harness = false
 
+[[bench]]
+name = "number_decode"
+harness = false
+
 [lints]
 workspace = true

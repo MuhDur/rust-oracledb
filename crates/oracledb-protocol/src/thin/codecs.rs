@@ -619,13 +619,24 @@ pub(crate) fn decode_number_parts_stack(
     }
 
     let mut len = 0usize;
+    // FUSED i128 coefficient (bead rust-oracledb-shh): folded as each significant
+    // digit is emitted, removing the second `digits_to_i128` walk over the digit
+    // buffer for the common in-range NUMBER. `Some(acc)` accumulates `acc*10 + d`
+    // over the SAME digit sequence, in the SAME order, that `digits_to_i128`
+    // walks — so the result is byte-identical. On overflow it latches to `None`
+    // and the digit buffer (still filled below) drives the unchanged spill path.
+    let mut coeff: Option<i128> = Some(0);
     // The digit count is provably <= MAX_DIGITS for valid wire forms; guard
-    // defensively so a crafted oversize input cannot index out of bounds.
-    let push = |buf: &mut [u8], d: u8, len: &mut usize| {
+    // defensively so a crafted oversize input cannot index out of bounds. Each
+    // emitted digit is also folded into the i128 accumulator.
+    let push = |buf: &mut [u8], d: u8, len: &mut usize, coeff: &mut Option<i128>| {
         if *len < buf.len() {
             buf[*len] = d;
             *len += 1;
         }
+        *coeff = coeff
+            .and_then(|acc| acc.checked_mul(10))
+            .and_then(|acc| acc.checked_add(i128::from(d)));
     };
 
     for (index, encoded) in bytes.iter().enumerate().take(end).skip(1) {
@@ -639,27 +650,34 @@ pub(crate) fn decode_number_parts_stack(
         if first_digit == 0 && len == 0 {
             decimal_point_index -= 1;
         } else if first_digit == 10 {
-            push(digit_buf, 1, &mut len);
-            push(digit_buf, 0, &mut len);
+            push(digit_buf, 1, &mut len, &mut coeff);
+            push(digit_buf, 0, &mut len, &mut coeff);
             decimal_point_index += 1;
         } else if first_digit != 0 || index > 0 {
-            push(digit_buf, first_digit, &mut len);
+            push(digit_buf, first_digit, &mut len, &mut coeff);
         }
 
         let second_digit = value % 10;
         if second_digit != 0 || index < end - 1 {
-            push(digit_buf, second_digit, &mut len);
+            push(digit_buf, second_digit, &mut len, &mut coeff);
         }
     }
 
     let len_i16 = i16::try_from(len).unwrap_or(i16::MAX);
     let is_integer = decimal_point_index > 0 && decimal_point_index >= len_i16;
 
+    // Apply the sign to the fused coefficient, matching `digits_to_i128`'s
+    // `if is_negative { -acc }`. Negating a non-overflowed magnitude can itself
+    // never overflow i128 here (the magnitude already fit), so this preserves the
+    // exact spill boundary.
+    let coefficient = coeff.map(|acc| if is_positive { acc } else { -acc });
+
     Ok(DecodedNumberStack::Parts {
         digit_len: len,
         is_negative: !is_positive,
         decimal_point_index,
         is_integer,
+        coefficient,
     })
 }
 
