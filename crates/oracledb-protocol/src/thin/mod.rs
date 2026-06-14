@@ -27,6 +27,13 @@ mod sessionless;
 mod subscr;
 mod types;
 
+// Property / metamorphic / boundary suites for the `pub(crate)` scalar codecs
+// (NUMBER, DATE/TIMESTAMP/TSTZ, INTERVAL YM/DS, BINARY_FLOAT/DOUBLE, text).
+// Compiled only under `cfg(test)`; reaches the crate-internal encoders that the
+// integration `tests/` directory cannot see. See `proptests.rs`.
+#[cfg(test)]
+mod proptests;
+
 pub use auth::*;
 pub use bind::*;
 pub use codecs::*;
