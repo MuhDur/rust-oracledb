@@ -307,12 +307,17 @@ across thousands of generated values. See [docs/FUZZING.md](docs/FUZZING.md).
 
 ## Installation
 
-`rust-oracledb` targets Rust 1.83+. It is not yet published to crates.io; depend
-on it via git until the first release:
+`rust-oracledb` targets Rust 1.83+ and is published on crates.io as
+[`oracledb`](https://crates.io/crates/oracledb):
+
+```bash
+cargo add oracledb
+```
 
 ```toml
 [dependencies]
-oracledb = { git = "https://github.com/MuhDur/rust-oracledb" }
+oracledb = "0.1"
+# optional features: arrow, chrono, uuid, serde_json, rust_decimal, tracing, soda, experimental
 ```
 
 ### Single static binary (`FROM scratch`)
