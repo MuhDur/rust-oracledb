@@ -180,6 +180,9 @@ pub use oracledb_protocol as protocol;
 #[cfg(feature = "arrow")]
 pub mod arrow;
 pub mod pool;
+mod sql_convert;
+
+pub use sql_convert::{ConversionError, FromSql, IntoBinds, QueryResultExt, ToSql, TypedRow};
 
 type SharedWriteHalf = Arc<AsyncMutex<OwnedWriteHalf>>;
 
@@ -334,6 +337,11 @@ pub enum Error {
     /// the unexpected state value.
     #[error("DPY-5010: internal error: unknown transaction state {0}")]
     UnknownTransactionState(u32),
+    /// A typed [`FromSql`] conversion failed: the fetched value did not match
+    /// the requested Rust type, was out of range, or could not be parsed. The
+    /// payload describes the mismatch.
+    #[error("type conversion failed: {0}")]
+    Conversion(ConversionError),
     #[cfg(feature = "arrow")]
     #[error(transparent)]
     ArrowConversion(#[from] arrow::ArrowConversionError),
@@ -1815,6 +1823,63 @@ impl Connection {
     ) -> Result<QueryResult> {
         self.execute_query_with_binds_call_timeout(cx, sql, prefetch_rows, binds, timeout_ms)
             .await
+    }
+
+    /// Ergonomic execute: bind typed Rust values positionally and return the
+    /// first batch. `params` is anything that implements
+    /// [`IntoBinds`](crate::IntoBinds) — a tuple `(40, "alice")`, a homogeneous
+    /// slice/array `[1, 2, 3]`, a `Vec<T: ToSql>`, or a raw `Vec<BindValue>`:
+    ///
+    /// ```no_run
+    /// # use oracledb::Connection;
+    /// # use asupersync::Cx;
+    /// # async fn demo(conn: &mut Connection, cx: &Cx) -> Result<(), oracledb::Error> {
+    /// let rows = conn
+    ///     .query(cx, "select :1 + :2 from dual", (40, 2))
+    ///     .await?;
+    /// # let _ = rows; Ok(()) }
+    /// ```
+    ///
+    /// This is sugar over [`Self::execute_query_with_binds`]; the prefetch size
+    /// defaults to 1 (one batch).
+    pub async fn query(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        params: impl crate::IntoBinds,
+    ) -> Result<QueryResult> {
+        let binds = params.into_binds();
+        self.execute_query_with_binds(cx, sql, 1, &binds).await
+    }
+
+    /// Ergonomic execute with *named* binds. Pass the
+    /// [`params!`](crate::params) named form
+    /// (`params!{ ":id" => 40, ":name" => "alice" }`), which yields a
+    /// `Vec<(String, BindValue)>`. The names are reordered to match the
+    /// first-appearance order of the placeholders in `sql`, so the caller never
+    /// has to track bind positions:
+    ///
+    /// ```no_run
+    /// # use oracledb::{Connection, params};
+    /// # use asupersync::Cx;
+    /// # async fn demo(conn: &mut Connection, cx: &Cx) -> Result<(), oracledb::Error> {
+    /// let rows = conn
+    ///     .query_named(
+    ///         cx,
+    ///         "select * from emp where id = :id and name = :name",
+    ///         params!{ ":id" => 40, ":name" => "alice" },
+    ///     )
+    ///     .await?;
+    /// # let _ = rows; Ok(()) }
+    /// ```
+    pub async fn query_named(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        named_params: Vec<(String, BindValue)>,
+    ) -> Result<QueryResult> {
+        let binds = crate::sql_convert::order_named_binds(sql, named_params);
+        self.execute_query_with_binds(cx, sql, 1, &binds).await
     }
 
     /// Execute `sql` once per bind row (array DML / `executemany`). Each inner
@@ -3702,6 +3767,39 @@ impl BlockingConnection {
             connection
                 .execute_query_with_binds_call_timeout(&cx, sql, prefetch_rows, binds, timeout_ms)
                 .await
+        })
+    }
+
+    /// Blocking wrapper for [`Connection::query`]: bind typed Rust values
+    /// positionally (a tuple `(40, "alice")`, a slice/array, a `Vec<T: ToSql>`,
+    /// or a raw `Vec<BindValue>`) and return the first batch.
+    pub fn query(
+        connection: &mut Connection,
+        sql: &str,
+        params: impl crate::IntoBinds,
+    ) -> Result<QueryResult> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.query(&cx, sql, params).await
+        })
+    }
+
+    /// Blocking wrapper for [`Connection::query_named`]: bind the
+    /// [`params!`](crate::params) named form
+    /// (`params!{ ":id" => 40 }`); names are reordered to the placeholder
+    /// first-appearance order in `sql`.
+    pub fn query_named(
+        connection: &mut Connection,
+        sql: &str,
+        named_params: Vec<(String, BindValue)>,
+    ) -> Result<QueryResult> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.query_named(&cx, sql, named_params).await
         })
     }
 
