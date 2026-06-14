@@ -179,6 +179,83 @@ const TNS_DATA_PACKET_OVERHEAD: usize = 10;
 
 pub use oracledb_protocol as protocol;
 
+/// Profiling-only read/decode attribution counters for the fetch paging loop.
+///
+/// **This is measurement-only instrumentation, not part of the optimization.**
+/// When the `ORACLEDB_PROFILE_FETCH` environment variable is set (checked once,
+/// lazily), [`fetch_rows_with_columns`](Connection::fetch_rows_with_columns)
+/// accumulates the wall time spent in the socket read (`read_response`) vs the
+/// CPU decode (`parse_fetch_response`) into these atomics. A bench / example can
+/// read the split with [`fetch_profile_read_decode_ns`] to attribute how much of
+/// a paged fetch is socket-bound (overlap candidate) vs CPU-bound. The flag is
+/// off by default, so the production path pays one relaxed atomic load per page
+/// and nothing else.
+mod fetch_profile {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::OnceLock;
+
+    static READ_NS: AtomicU64 = AtomicU64::new(0);
+    static DECODE_NS: AtomicU64 = AtomicU64::new(0);
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    /// Lets a bench arm/disarm attribution without an env var (so a single
+    /// process can measure a clean window).
+    static FORCE: AtomicBool = AtomicBool::new(false);
+
+    #[inline]
+    pub(crate) fn enabled() -> bool {
+        FORCE.load(Ordering::Relaxed)
+            || *ENABLED.get_or_init(|| std::env::var_os("ORACLEDB_PROFILE_FETCH").is_some())
+    }
+
+    #[inline]
+    pub(crate) fn add_read(ns: u64) {
+        READ_NS.fetch_add(ns, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub(crate) fn add_decode(ns: u64) {
+        DECODE_NS.fetch_add(ns, Ordering::Relaxed);
+    }
+
+    pub(crate) fn snapshot() -> (u64, u64) {
+        (
+            READ_NS.load(Ordering::Relaxed),
+            DECODE_NS.load(Ordering::Relaxed),
+        )
+    }
+
+    pub(crate) fn reset() {
+        READ_NS.store(0, Ordering::Relaxed);
+        DECODE_NS.store(0, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_force(on: bool) {
+        FORCE.store(on, Ordering::Relaxed);
+    }
+}
+
+/// Profiling-only: snapshot the cumulative `(read_ns, decode_ns)` split that the
+/// fetch paging loop has accumulated since the last [`fetch_profile_reset`].
+///
+/// Only populated when fetch profiling is armed (the `ORACLEDB_PROFILE_FETCH`
+/// env var is set, or [`fetch_profile_arm(true)`](fetch_profile_arm) was called).
+/// This is benchmark/diagnostic instrumentation; it is not part of the normal
+/// data path.
+pub fn fetch_profile_read_decode_ns() -> (u64, u64) {
+    fetch_profile::snapshot()
+}
+
+/// Profiling-only: zero the fetch read/decode attribution counters.
+pub fn fetch_profile_reset() {
+    fetch_profile::reset();
+}
+
+/// Profiling-only: arm or disarm fetch read/decode attribution for this process
+/// without setting an environment variable.
+pub fn fetch_profile_arm(on: bool) {
+    fetch_profile::set_force(on);
+}
+
 #[cfg(feature = "arrow")]
 pub mod arrow;
 pub mod cursor_logic;
@@ -2523,15 +2600,24 @@ impl Connection {
         send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
         // Read under a cancel-on-drop guard: if THIS fetch future is dropped
         // mid-read, the next operation will break + drain the stranded call.
+        let profile = fetch_profile::enabled();
+        let read_start = profile.then(time::wall_now);
         let response = self.read_response_cancellable(cx).await?;
+        if let Some(start) = read_start {
+            fetch_profile::add_read(time::wall_now().duration_since(start));
+        }
         trace_query_bytes("FETCH response", &response);
         let columns = self
             .cursor_columns
             .get(&cursor_id)
             .cloned()
             .unwrap_or_else(|| known_columns.to_vec());
+        let decode_start = profile.then(time::wall_now);
         let parsed =
             parse_fetch_response_with_context(&response, self.capabilities, &columns, previous_row);
+        if let Some(start) = decode_start {
+            fetch_profile::add_decode(time::wall_now().duration_since(start));
+        }
         let result = self.note_parse(parsed)?;
         obs_record!(_span, db.rows_fetched = result.rows.len() as u64);
         self.remember_cursor_columns(&result);
