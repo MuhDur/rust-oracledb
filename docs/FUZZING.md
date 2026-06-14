@@ -14,10 +14,12 @@ lockfile and the normal `cargo build --workspace` is unaffected.
 
 ## Targets
 
-Seven libFuzzer targets, one per untrusted decode boundary. Each takes
-`data: &[u8]`, guards the input size, and calls the decoder asserting only that
+Ten libFuzzer targets, one per untrusted decode/parse boundary. Most take
+`data: &[u8]`, guard the input size, and call the decoder asserting only that
 it returns a `Result` (an `Err` is a perfectly good outcome — a panic / OOM /
-hang is the bug).
+hang is the bug). The connect-string target (#10) is **structure-aware**: it
+takes an `Arbitrary`-shaped input rather than raw bytes, because a grammar this
+deep is unreachable by byte-level mutation alone (see its row below).
 
 | # | Target | Entry point | What it stresses |
 |---|--------|-------------|------------------|
@@ -28,13 +30,43 @@ hang is the bug).
 | 5 | `scalar_codecs` | `fuzz_api::fuzz_scalar_codecs` | NUMBER / DATE / TIMESTAMP(+TZ) / INTERVAL DS+YM / BINARY_FLOAT+DOUBLE raw-byte codecs |
 | 6 | `server_error_info` | `fuzz_api::fuzz_parse_server_error_info` + piggyback skip | TTC error trailer (batch error / offset / message sub-arrays, version-gated 20.1+ tail), server-side piggyback opcodes |
 | 7 | `dpl_response` | `dpl::parse_direct_path_{prepare,simple}_response` | Direct Path Load response dispatch + column metadata + return parameters |
+| 8 | `aq_response` | `fuzz_api::fuzz_aq_responses` | Advanced Queuing enqueue / dequeue / array response decoders (RAW / JSON / Object payloads) |
+| 9 | `subscr_response` | `fuzz_api::fuzz_subscr_responses` | Subscription (CQN / AQ-notification) subscribe-response + notification-stream decoders (OAC records, grouping notifications) |
+| 10 | `connect_string` | `fuzz_api::fuzz_connect_string` | TNS connect-descriptor / EZConnect-Plus parser (`net::connectstring::parse`) + in-memory tnsnames.ora lexer; **structure-aware** (nested-paren `Arbitrary` generator) |
 
-Targets 5 and 6 reach `pub(crate)` functions through a tiny, **`#[cfg(fuzzing)]`-only**
-shim module `oracledb_protocol::fuzz_api` (see `crates/oracledb-protocol/src/lib.rs`).
+Targets 5, 6, 8, 9, and 10 reach `pub(crate)` (or `#[cfg(fuzzing)] pub`)
+functions through a tiny, **`#[cfg(fuzzing)]`-only** shim module
+`oracledb_protocol::fuzz_api` (see `crates/oracledb-protocol/src/lib.rs`).
 The shim is compiled only under `--cfg fuzzing` (which `cargo-fuzz` sets
 automatically), so it never widens the crate's normal public API. The
 `cfg(fuzzing)` flag is registered in the workspace `[workspace.lints.rust]`
 `check-cfg` so the `-D warnings` clippy gate stays quiet for the normal build.
+
+### Target #10: the connect-string parser (structure-aware)
+
+`net::connectstring::parse` and the tnsnames.ora reader consume **untrusted env
+/ config / user input** (a `TNS_ADMIN` file, an `ORACLE_CONNECT_STRING`, a DSN
+typed by an operator) and, before this lane, had only unit tests. A hostile or
+fat-fingered connect string must fail closed (`Err`) — never panic, OOM, or
+overflow the stack. The descriptor recursion-depth DoS was fixed in bead `uf8`
+(`MAX_DESCRIPTOR_DEPTH = 128`); this target **guards that fix and hunts
+siblings** in the EZConnect host/port/quote lexer and the tnsnames comment /
+multi-line / paren-balancing tokenizer.
+
+Dumb random bytes almost never reach the interesting states here: the very first
+byte must be `(` to enter the descriptor parser, and every deep branch is gated
+behind balanced parens and `KEY=` tokens. So the target is **structure-aware**
+(`fuzz_targets/connect_string.rs` implements `Arbitrary` for a `ConnectInput`):
+a selector byte chooses among (1) a recursive nested-`(KEY=VALUE)` generator
+drawing keywords/atoms from the real descriptor grammar (reaching quoted values,
+container keywords, and the EZConnect host/port/service forms); (2) a
+deliberately over-deep nest (100–400 levels) that drives the
+`MAX_DESCRIPTOR_DEPTH` fail-closed path on every run; (3) a valid descriptor
+*prefix* + arbitrary garbage tail (the "good so far, then malformed" transition
+states); and (4) the raw bytes verbatim (so libFuzzer's byte mutation and the
+saved corpus still feed the parser directly). The in-memory tnsnames lexer is
+reached through `#[cfg(fuzzing)] pub fn tnsnames::fuzz_parse_file` (the `IFILE`
+recursion itself is I/O-bound and is covered by the `ifile_*` unit tests).
 
 ## How to run
 
@@ -252,8 +284,92 @@ session tail:
 Done 86977255 runs in 121 second(s)        # packet_framing, 0 crashes
 ```
 
+### `connect_string` (fuzz-harden lane, bead 5dd)
+
+The structure-aware connect-string target was run for a bounded **180 s**
+session (`-max_total_time=180 -rss_limit_mb=2048 -timeout=10`, ASan + UBSan +
+overflow-checks):
+
+| Target | Executions | exec/s | Coverage (edges / features) | Crashes |
+|--------|-----------:|-------:|----------------------------|:-------:|
+| `connect_string` | 2,462,830 | ~13,600 | 2015 / 7964 | 0 |
+
+```
+Done 2462830 runs in 181 second(s)         # connect_string, 0 crashes
+```
+
+`fuzz/artifacts/connect_string/` is empty (no crash inputs were saved). The
+2015 edges / 7964 features confirm the `Arbitrary` generator drives the
+descriptor recursion, the EZConnect quote/host/port lexer, and the tnsnames
+tokenizer — far past what raw-byte mutation reaches. ~13.6k exec/s is well above
+the 1000 exec/s parser floor (the structured generator allocates `String`s, so
+it is slower than the raw-`&[u8]` decode targets, by design).
+
 Gate status alongside the fuzzing: `cargo fmt --check` clean,
 `cargo clippy --workspace --no-deps -- -D warnings` clean,
-`cargo test --workspace` green (177 tests passing, including the four new
-fuzz-regression tests). The fuzz crate is excluded from the workspace and adds
-no dependencies to the `oracledb-protocol` dependency tree.
+`cargo test --workspace` green (460 tests passing). The fuzz crate is excluded
+from the workspace and adds no dependencies to the `oracledb-protocol`
+dependency tree.
+
+## Differential fuzz oracle: rust decoder vs python-oracledb decoder (bead rcn)
+
+No-panic fuzzing and example tests prove the decoder *fails closed*, but they
+structurally miss **silent value divergence** — the decoder returns `Ok`, but
+the *wrong value*. That is the exact bug class the project's 8 hand-found bugs
+came from (an off-by-one in a date field, a sign/exponent slip in NUMBER, a
+fractional-second truncation). A differential oracle is the highest-confidence
+guard against it: feed the same input to two independent decoders and assert
+they agree.
+
+**What was built** (`harness/differential/diff_oracle.py`): a **container
+round-trip differential**. For a proptest-style corpus of extreme / boundary
+values (NUMBER and DATE/TIMESTAMP — the two highest-divergence-risk codecs), each
+value is INSERTed once; the Oracle server is then the *encoder*, and the SAME
+server wire bytes for each column are decoded by **both**:
+
+* the reference python-oracledb thin decoder (`impl/base/decoders.pyx`), and
+* rust-oracledb's decoder, surfaced through the `oracledb_pyshim` PyO3 module
+  that swaps in for `oracledb.thin_impl` (the same shim the conformance harness
+  uses).
+
+The two engines run in **separate subprocesses** (the `oracledb.thin_impl` swap
+is process-global, so one interpreter cannot host both decoders). Each fetches
+the identical rows and emits canonical JSON; the driver asserts byte/semantic
+identity. NUMBER is fetched through an output type handler returning the **exact
+decimal string** (not a lossy `float`), so the full decoded digit/sign/exponent
+sequence from `decode_number_value` is compared; DATE/TIMESTAMP is compared as
+both the `datetime` (microsecond) and the canonical `TO_CHAR(...FF9)`
+(nanosecond) rendering, so a fractional-second or civil-field carry bug surfaces.
+
+**Fidelity (stated honestly).** A container round-trip differential is *weaker*
+than a pure in-process decoder differential, for two reasons: (1) the server
+produces the wire bytes, so only *well-formed* payloads the server actually
+emits are exercised — an adversarial / hand-crafted wire image cannot be fed to
+both decoders; and (2) both engines share one server, so a server-side quirk is
+invisible. A pure decoder differential was investigated and is **impractical**:
+python-oracledb's decoders are Cython `cdef` functions taking a C
+`OracleDataBuffer*` (e.g. `decode_oracle_number`, `decode_date`), not callable
+on raw bytes from Python without re-exporting the Cython layer. What the
+round-trip differential *does* prove with high confidence: for every value
+Oracle can store and emit, the rust and python-oracledb decoders recover the
+**same Python value** — the parity property that actually matters. (The pure
+*round-trip* property `decode(encode(x)) == x` for these same codecs is already
+covered in-crate by `thin/proptests.rs`; this differential adds the
+cross-*engine* dimension the round-trip cannot.)
+
+**Run it:**
+
+```bash
+eval "$(ORACLEDB_CONTAINER_NAME=... ORACLEDB_HOST_PORT=... scripts/container.sh env)"
+ORACLEDB_VENV_DIR=$PWD/.venv-py313 scripts/setup-python-env.sh   # one-time
+# build the rust shim into the venv:
+.venv-py313/bin/python -m maturin develop -m crates/oracledb-pyshim/Cargo.toml
+.venv-py313/bin/python harness/differential/diff_oracle.py --cases 2000 --seed 0xc0ffee
+```
+
+**Result:** run over 3 seeds × 2000 generated cases, **5,944 cases compared**
+(3,960 NUMBER + 2,984 DATE/TIMESTAMP after the server rejected ~3% of the most
+extreme magnitudes — not decode cases), **0 divergences**. A negative-control
+check confirms the comparator is not a tautology: injecting a one-digit NUMBER
+change and a one-second timestamp shift is detected, while cosmetic numeric forms
+(`1` vs `1.0` vs `1.00`) correctly compare equal.
