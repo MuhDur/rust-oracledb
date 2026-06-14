@@ -284,3 +284,65 @@ fn connection_is_reusable_after_drop_mid_prefetch() {
         conn.close(&cx).await.expect("close");
     });
 }
+
+#[test]
+#[ignore = "requires local Oracle listener from scripts/container.sh up"]
+fn stranded_prefetch_request_is_drained_before_reuse() {
+    // Deterministic (timing-free) version of the soundness proof: explicitly
+    // issue a speculative FETCH request and then ABANDON it without reading the
+    // response — the exact stranded-page state a drop-mid-prefetch leaves. The
+    // request armed `cancel_drain_pending`, so the next op must break + drain the
+    // stranded page; `select 7 + 5 -> 12` then proves the wire is clean.
+    let Some(options) = live_options() else {
+        eprintln!("skipped: PYO_TEST_* not set");
+        return;
+    };
+    let reactor = reactor::create_reactor().expect("reactor");
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .expect("runtime");
+
+    runtime.block_on(async {
+        let cx = Cx::current().expect("cx");
+        let mut conn = Connection::connect(&cx, options).await.expect("connect");
+
+        // Open a cursor with more rows than one page, then read one page so the
+        // cursor is mid-stream (more_rows = true) and a further FETCH is valid.
+        let first = conn
+            .execute_query_with_bind_rows(
+                &cx,
+                "select level as n from dual connect by level <= 4000",
+                500,
+                &[],
+            )
+            .await
+            .expect("execute");
+        let cursor_id = first.cursor_id;
+        assert!(
+            first.more_rows && cursor_id != 0,
+            "cursor must have more pages"
+        );
+
+        // Issue the speculative request for the next page... and DO NOT read its
+        // response. This is the stranded-page state. (We intentionally drop the
+        // returned future's effect by simply not calling fetch_rows_ref_response.)
+        conn.fetch_rows_request(&cx, cursor_id, 500)
+            .await
+            .expect("speculative request sent");
+
+        // Reuse the SAME connection immediately. The pending-drain flag is armed,
+        // so this execute breaks + drains the stranded page first.
+        let reuse = conn
+            .execute_query(&cx, "select 7 + 5 from dual", 2)
+            .await
+            .expect("connection must be reusable after a stranded prefetch request");
+        assert_eq!(
+            reuse.cell(0, 0).and_then(QueryValue::as_i64),
+            Some(12),
+            "the reused connection must return 7 + 5 = 12, not the stranded page"
+        );
+
+        conn.close(&cx).await.expect("close");
+    });
+}
