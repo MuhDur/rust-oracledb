@@ -254,6 +254,157 @@ impl QueryValue {
     }
 }
 
+/// A borrowed, zero-copy mirror of the hot scalar [`QueryValue`] variants whose
+/// payload lives **inside the fetch decode buffer** (the network response
+/// `Vec<u8>`). A consumer iterating a fetched row batch via the borrowed path
+/// receives `QueryValueRef<'buf>` values that point straight at the wire bytes —
+/// the common scalar case pays *zero* per-cell allocations, in contrast to the
+/// owned [`QueryValue`] path which materializes a `String`/`Vec<u8>` for every
+/// column of every row.
+///
+/// ## What is and is not borrowed
+///
+/// - `Text` / `Raw` borrow a contiguous slice of the wire buffer directly: the
+///   common single-chunk `VARCHAR2`/`CHAR`/`RAW` value costs nothing.
+/// - `Number` borrows the **canonically reformatted** decimal text. Oracle's
+///   `NUMBER` is not stored as ASCII on the wire, so the borrowed path decodes
+///   it into a scratch arena the batch owns (see the borrowed fetch API) and
+///   borrows from there — still zero per-cell heap allocation, the arena grows
+///   amortized across the batch.
+/// - `Boolean` / `IntervalDS` / `IntervalYM` / `DateTime` are tiny `Copy`
+///   values decoded from the wire bytes; they never touched the heap on the
+///   owned path either.
+/// - The cold variants (`Cursor`, `Object`, `Lob`, `Vector`, `Json`) and the
+///   rare UTF-16 (`NCHAR`) text / synthesized `ROWID` / `BinaryDouble` cases
+///   cannot be borrowed losslessly from the wire, so they fall back to an owned
+///   boxed [`QueryValue`] (the [`QueryValueRef::Owned`] variant). These are the
+///   uncommon path; the hot scalar grid stays borrowed.
+///
+/// `Copy` + small: the enum holds borrowed scalars and small `Copy` payloads
+/// only (cold values live behind the boxed `Owned` pointer), so a row of
+/// `QueryValueRef` is a flat, cache-friendly slice. Convert to the owned form
+/// with [`QueryValueRef::to_owned_value`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum QueryValueRef<'buf> {
+    /// Decoded text borrowing the wire buffer (single-chunk `VARCHAR2` / `CHAR`
+    /// / `LONG` that decoded as valid UTF-8).
+    Text(&'buf str),
+    /// `RAW` / `LONG_RAW` bytes borrowing the wire buffer (single chunk).
+    Raw(&'buf [u8]),
+    /// Canonical decimal text of a `NUMBER`, borrowed from the batch's number
+    /// scratch arena (the wire form is binary, so it is reformatted once).
+    Number {
+        text: &'buf str,
+        is_integer: bool,
+    },
+    /// Native `DB_TYPE_BOOLEAN`.
+    Boolean(bool),
+    IntervalDS {
+        days: i32,
+        hours: i32,
+        minutes: i32,
+        seconds: i32,
+        fseconds: i32,
+    },
+    IntervalYM {
+        years: i32,
+        months: i32,
+    },
+    DateTime {
+        year: i32,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        nanosecond: u32,
+    },
+    /// Fallback for the cold / non-borrowable variants (Cursor / Object / Lob /
+    /// Vector / Json, UTF-16 `NCHAR` text, synthesized `ROWID`, `BinaryDouble`).
+    /// Boxed so the borrowed enum stays small. This is the rare path.
+    Owned(&'buf QueryValue),
+}
+
+impl QueryValueRef<'_> {
+    /// Materialize an owned [`QueryValue`] from this borrowed reference,
+    /// allocating exactly as the owned decode path would. Use this when a
+    /// borrowed row must outlive the batch buffer (e.g. crossing the Python
+    /// boundary), or to compare borrowed and owned paths in tests.
+    pub fn to_owned_value(&self) -> QueryValue {
+        match *self {
+            QueryValueRef::Text(text) => QueryValue::Text(text.to_string()),
+            QueryValueRef::Raw(bytes) => QueryValue::Raw(bytes.to_vec()),
+            QueryValueRef::Number { text, is_integer } => QueryValue::Number {
+                text: text.to_string(),
+                is_integer,
+            },
+            QueryValueRef::Boolean(value) => QueryValue::Boolean(value),
+            QueryValueRef::IntervalDS {
+                days,
+                hours,
+                minutes,
+                seconds,
+                fseconds,
+            } => QueryValue::IntervalDS {
+                days,
+                hours,
+                minutes,
+                seconds,
+                fseconds,
+            },
+            QueryValueRef::IntervalYM { years, months } => QueryValue::IntervalYM { years, months },
+            QueryValueRef::DateTime {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+            } => QueryValue::DateTime {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+            },
+            QueryValueRef::Owned(value) => value.clone(),
+        }
+    }
+
+    /// Borrow this value as decoded text when it is a borrowed `Text`, otherwise
+    /// `None`. Mirror of [`QueryValue::as_text`] for the borrowed path.
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            QueryValueRef::Text(value) => Some(value),
+            QueryValueRef::Owned(QueryValue::Text(value)) => Some(value.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Borrow the canonical decimal text of a `NUMBER` value, otherwise `None`.
+    /// Mirror of [`QueryValue::as_number_text`] for the borrowed path.
+    pub fn as_number_text(&self) -> Option<&str> {
+        match self {
+            QueryValueRef::Number { text, .. } => Some(text),
+            QueryValueRef::Owned(QueryValue::Number { text, .. }) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Borrow the bytes of a `RAW` value, otherwise `None`. Mirror of
+    /// [`QueryValue::as_raw`] for the borrowed path.
+    pub fn as_raw(&self) -> Option<&[u8]> {
+        match self {
+            QueryValueRef::Raw(bytes) => Some(bytes),
+            QueryValueRef::Owned(QueryValue::Raw(bytes)) => Some(bytes.as_slice()),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum BindValue {
     Null,
@@ -592,5 +743,71 @@ mod accessor_tests {
         assert!(result.cell(1, 0).is_none(), "out-of-range row is None");
         assert_eq!(result.column_index("name"), Some(1));
         assert_eq!(result.column_index("missing"), None);
+    }
+}
+
+#[cfg(test)]
+mod query_value_ref_tests {
+    use super::*;
+
+    // A `QueryValueRef` borrowing scalar bytes out of a `buf` round-trips to the
+    // exact owned `QueryValue` the owned decode path would have produced.
+    #[test]
+    fn borrowed_scalars_to_owned_equal_owned_values() {
+        let buf = String::from("héllo");
+        let text = QueryValueRef::Text(buf.as_str());
+        assert_eq!(text.to_owned_value(), QueryValue::Text("héllo".to_string()));
+
+        let raw_buf = [0xDEu8, 0xAD, 0xBE, 0xEF];
+        let raw = QueryValueRef::Raw(&raw_buf);
+        assert_eq!(
+            raw.to_owned_value(),
+            QueryValue::Raw(vec![0xDE, 0xAD, 0xBE, 0xEF])
+        );
+
+        let num_buf = String::from("-12.5");
+        let number = QueryValueRef::Number {
+            text: num_buf.as_str(),
+            is_integer: false,
+        };
+        assert_eq!(
+            number.to_owned_value(),
+            QueryValue::Number {
+                text: "-12.5".to_string(),
+                is_integer: false,
+            }
+        );
+
+        let boolean = QueryValueRef::Boolean(true);
+        assert_eq!(boolean.to_owned_value(), QueryValue::Boolean(true));
+
+        let ds = QueryValueRef::IntervalDS {
+            days: 1,
+            hours: 2,
+            minutes: 3,
+            seconds: 4,
+            fseconds: 5,
+        };
+        assert_eq!(
+            ds.to_owned_value(),
+            QueryValue::IntervalDS {
+                days: 1,
+                hours: 2,
+                minutes: 3,
+                seconds: 4,
+                fseconds: 5,
+            }
+        );
+    }
+
+    // `QueryValueRef` is a small `Copy` value: it carries borrowed scalars only,
+    // never owned heap payloads. Hold the line at 32 bytes (the owned enum's
+    // footprint) so the borrowed row `Vec` stays cache-friendly. Cold variants
+    // are boxed-owned behind a pointer.
+    #[test]
+    fn query_value_ref_is_small_and_copy() {
+        const fn is_copy<T: Copy>() {}
+        is_copy::<QueryValueRef<'static>>();
+        assert!(core::mem::size_of::<QueryValueRef<'static>>() <= 32);
     }
 }
