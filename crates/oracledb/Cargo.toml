@@ -25,6 +25,11 @@ chrono = ["dep:chrono"]
 uuid = ["dep:uuid"]
 serde_json = ["dep:serde_json"]
 rust_decimal = ["dep:rust_decimal"]
+# Thin-mode SODA (Simple Oracle Document Access). Experimental surpass feature:
+# python-oracledb's thin mode has no SODA. Implemented over SQL + DBMS_SODA
+# PL/SQL on the existing execute/fetch/OSON primitives. Requires serde_json for
+# QBE filter parsing.
+soda = ["dep:serde_json"]
 # Enables the experimental cwallet.sso (SSO auto-login wallet) reader.
 experimental = ["oracledb-protocol/experimental"]
 

@@ -180,6 +180,8 @@ pub use oracledb_protocol as protocol;
 #[cfg(feature = "arrow")]
 pub mod arrow;
 pub mod pool;
+#[cfg(feature = "soda")]
+pub mod soda;
 mod sql_convert;
 pub mod tls;
 pub mod transport;
