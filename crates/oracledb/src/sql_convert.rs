@@ -567,16 +567,69 @@ pub trait QueryResultExt {
     /// Borrow row `row` as a [`TypedRow`] for repeated typed `get` calls
     /// without re-passing the row index.
     fn typed_row(&self, row: usize) -> TypedRow<'_>;
+
+    /// Map **every** fetched row into a value of `T` (a struct deriving
+    /// [`FromRow`]), returning them in order.
+    ///
+    /// Each row is converted through `T::from_row`, which goes through the real
+    /// [`FromSql`] conversion per field. A conversion failure on any row aborts
+    /// with that row's [`ConversionError`] (surfaced as [`crate::Error`]).
+    ///
+    /// ```no_run
+    /// use oracledb::{FromRow, QueryResultExt};
+    /// # use oracledb::protocol::thin::QueryResult;
+    ///
+    /// #[derive(FromRow)]
+    /// struct Emp { id: i64, name: String, hired: Option<String> }
+    ///
+    /// # fn demo(result: QueryResult) -> oracledb::Result<()> {
+    /// let emps: Vec<Emp> = result.rows_as::<Emp>()?;
+    /// # let _ = emps;
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn rows_as<T: FromRow>(&self) -> crate::Result<Vec<T>>;
 }
 
 fn convert_cell<T: FromSql>(cell: Option<&Option<QueryValue>>, what: String) -> crate::Result<T> {
+    convert_cell_ce(cell, what).map_err(crate::Error::Conversion)
+}
+
+/// Like [`convert_cell`] but yields the bare [`ConversionError`] rather than
+/// wrapping it in [`crate::Error`]. The `#[derive(FromRow)]` code maps each
+/// **non-nullable** field through this, so a `NULL` cell is a hard
+/// [`ConversionError::UnexpectedNull`]. `Option<T>` fields take the dedicated
+/// NULL-tolerant path below instead.
+fn convert_cell_ce<T: FromSql>(
+    cell: Option<&Option<QueryValue>>,
+    what: String,
+) -> Result<T, ConversionError> {
     match cell {
-        None => Err(crate::Error::Conversion(ConversionError::OutOfRange {
+        None => Err(ConversionError::OutOfRange {
             expected: std::any::type_name::<T>(),
             detail: what,
-        })),
-        Some(None) => Err(crate::Error::Conversion(ConversionError::UnexpectedNull)),
-        Some(Some(value)) => Ok(T::from_sql(value)?),
+        }),
+        Some(None) => Err(ConversionError::UnexpectedNull),
+        Some(Some(value)) => T::from_sql(value),
+    }
+}
+
+/// Like [`convert_cell_ce`] but turns a SQL `NULL` cell into `None` rather than
+/// erroring. This is the path `#[derive(FromRow)]` takes for `Option<T>` fields,
+/// so a nullable column maps to `Option<T>` with `NULL` -> `None`. A *missing*
+/// column is still an error (a mistyped `#[oracledb(column = ...)]` should not
+/// silently become `None`).
+fn convert_cell_opt_ce<T: FromSql>(
+    cell: Option<&Option<QueryValue>>,
+    what: String,
+) -> Result<Option<T>, ConversionError> {
+    match cell {
+        None => Err(ConversionError::OutOfRange {
+            expected: std::any::type_name::<Option<T>>(),
+            detail: what,
+        }),
+        Some(None) => Ok(None),
+        Some(Some(value)) => T::from_sql(value).map(Some),
     }
 }
 
@@ -599,6 +652,14 @@ impl QueryResultExt for QueryResult {
     fn typed_row(&self, row: usize) -> TypedRow<'_> {
         TypedRow { result: self, row }
     }
+
+    fn rows_as<T: FromRow>(&self) -> crate::Result<Vec<T>> {
+        let mut out = Vec::with_capacity(self.rows.len());
+        for row in 0..self.rows.len() {
+            out.push(T::from_row(&self.typed_row(row))?);
+        }
+        Ok(out)
+    }
 }
 
 /// A borrowed view of one row of a [`QueryResult`] that converts cells to typed
@@ -620,6 +681,118 @@ impl TypedRow<'_> {
     pub fn get_by_name<T: FromSql>(&self, name: &str) -> crate::Result<T> {
         self.result.get_by_name(self.row, name)
     }
+
+    /// Borrow the raw cell at column index `col` of this row: `None` if the
+    /// index is out of range, `Some(None)` for a SQL `NULL`, `Some(Some(v))`
+    /// for a present value.
+    fn cell_at(&self, col: usize) -> Option<&Option<QueryValue>> {
+        self.result.rows.get(self.row).and_then(|r| r.get(col))
+    }
+
+    /// Convert the cell in this row at column index `col` into `T`, yielding the
+    /// bare [`ConversionError`] on failure (unlike [`TypedRow::get`], which
+    /// wraps it in [`crate::Error`]). A SQL `NULL` cell is rejected with
+    /// [`ConversionError::UnexpectedNull`]; use [`TypedRow::try_get_opt`] for a
+    /// nullable column.
+    ///
+    /// This is the accessor the `#[derive(FromRow)]`-generated code uses for
+    /// non-`Option` tuple-struct fields. It is `pub` so generated code can call
+    /// it; hand-written code usually wants [`TypedRow::get`].
+    pub fn try_get<T: FromSql>(&self, col: usize) -> Result<T, ConversionError> {
+        convert_cell_ce(
+            self.cell_at(col),
+            format!("no cell at (row {}, col {col})", self.row),
+        )
+    }
+
+    /// Like [`TypedRow::try_get`] but for an `Option<T>` field: a SQL `NULL`
+    /// cell becomes `None`. The accessor `#[derive(FromRow)]` uses for
+    /// `Option<T>` tuple-struct fields.
+    pub fn try_get_opt<T: FromSql>(&self, col: usize) -> Result<Option<T>, ConversionError> {
+        convert_cell_opt_ce(
+            self.cell_at(col),
+            format!("no cell at (row {}, col {col})", self.row),
+        )
+    }
+
+    /// Convert the cell in this row at column `name` (case-insensitive) into
+    /// `T`, yielding the bare [`ConversionError`] on failure (unlike
+    /// [`TypedRow::get_by_name`], which wraps it in [`crate::Error`]). A SQL
+    /// `NULL` cell is rejected with [`ConversionError::UnexpectedNull`]; use
+    /// [`TypedRow::try_get_by_name_opt`] for a nullable column.
+    ///
+    /// This is the accessor the `#[derive(FromRow)]`-generated code uses for
+    /// non-`Option` named-field structs. It is `pub` so generated code can call
+    /// it; hand-written code usually wants [`TypedRow::get_by_name`].
+    pub fn try_get_by_name<T: FromSql>(&self, name: &str) -> Result<T, ConversionError> {
+        match self.result.column_index(name) {
+            Some(col) => self.try_get(col),
+            None => Err(ConversionError::OutOfRange {
+                expected: std::any::type_name::<T>(),
+                detail: format!("no column named {name:?}"),
+            }),
+        }
+    }
+
+    /// Like [`TypedRow::try_get_by_name`] but for an `Option<T>` field: a SQL
+    /// `NULL` cell becomes `None`. The accessor `#[derive(FromRow)]` uses for
+    /// `Option<T>` named-field structs.
+    pub fn try_get_by_name_opt<T: FromSql>(
+        &self,
+        name: &str,
+    ) -> Result<Option<T>, ConversionError> {
+        match self.result.column_index(name) {
+            Some(col) => self.try_get_opt(col),
+            None => Err(ConversionError::OutOfRange {
+                expected: std::any::type_name::<Option<T>>(),
+                detail: format!("no column named {name:?}"),
+            }),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FromRow: a whole row -> a user struct (bead 4bv, the #[derive(FromRow)] target)
+// ---------------------------------------------------------------------------
+
+/// Map a fetched query row into a concrete Rust struct, with compile-time
+/// checked field types.
+///
+/// You almost never implement this by hand. Instead derive it:
+///
+/// ```no_run
+/// use oracledb::FromRow;
+///
+/// #[derive(FromRow)]
+/// struct Emp {
+///     id: i64,
+///     name: String,
+///     // a nullable column maps to Option<T>; a NULL cell becomes None
+///     manager_id: Option<i64>,
+/// }
+/// ```
+///
+/// The derive maps each field **by column name** (the field name by default;
+/// override per field with `#[oracledb(column = "...")]` or rename the whole
+/// struct with `#[oracledb(rename_all = "...")]`), pulling it out through the
+/// real [`FromSql`] conversion. Tuple structs map their fields **by position**.
+/// Then [`QueryResultExt::rows_as`] turns a whole result set into a `Vec<T>`:
+///
+/// ```no_run
+/// # use oracledb::{FromRow, QueryResultExt};
+/// # use oracledb::protocol::thin::QueryResult;
+/// # #[derive(FromRow)]
+/// # struct Emp { id: i64, name: String }
+/// # fn demo(result: QueryResult) -> oracledb::Result<()> {
+/// let emps: Vec<Emp> = result.rows_as::<Emp>()?;
+/// # let _ = emps;
+/// # Ok(())
+/// # }
+/// ```
+pub trait FromRow: Sized {
+    /// Build `Self` from one borrowed [`TypedRow`], or fail with a
+    /// [`ConversionError`].
+    fn from_row(row: &TypedRow<'_>) -> Result<Self, ConversionError>;
 }
 
 // ===========================================================================
