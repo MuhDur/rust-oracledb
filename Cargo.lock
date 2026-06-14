@@ -1480,7 +1480,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "oracledb"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "arrow-array",
  "arrow-buffer",
@@ -1506,7 +1506,7 @@ dependencies = [
 
 [[package]]
 name = "oracledb-derive"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1515,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "oracledb-protocol"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "aes",
  "allocation-counter",
@@ -1539,7 +1539,7 @@ dependencies = [
 
 [[package]]
 name = "oracledb-pyshim"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "arrow-array",
  "arrow-data",
