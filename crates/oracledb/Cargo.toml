@@ -104,5 +104,9 @@ harness = false
 name = "concurrent_throughput"
 harness = false
 
+[[bench]]
+name = "decode_throughput"
+harness = false
+
 [lints]
 workspace = true

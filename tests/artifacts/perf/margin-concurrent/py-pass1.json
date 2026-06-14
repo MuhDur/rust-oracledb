@@ -1,0 +1,76 @@
+{
+  "threads": [
+    {
+      "workers": 1,
+      "rows_per_sec": 187064.83095048004,
+      "rows_per_sec_per_worker": 187064.83095048004,
+      "scaling": 1.0,
+      "efficiency": 1.0
+    },
+    {
+      "workers": 2,
+      "rows_per_sec": 239776.19054091844,
+      "rows_per_sec_per_worker": 119888.09527045922,
+      "scaling": 1.2817812376736502,
+      "efficiency": 0.6408906188368251
+    },
+    {
+      "workers": 4,
+      "rows_per_sec": 121570.21668009405,
+      "rows_per_sec_per_worker": 30392.55417002351,
+      "scaling": 0.6498828029961239,
+      "efficiency": 0.16247070074903097
+    },
+    {
+      "workers": 8,
+      "rows_per_sec": 111172.21886551745,
+      "rows_per_sec_per_worker": 13896.527358189682,
+      "scaling": 0.5942978073465186,
+      "efficiency": 0.07428722591831483
+    },
+    {
+      "workers": 16,
+      "rows_per_sec": 104548.69741172854,
+      "rows_per_sec_per_worker": 6534.293588233034,
+      "scaling": 0.5588901819787,
+      "efficiency": 0.03493063637366875
+    }
+  ],
+  "asyncio": [
+    {
+      "workers": 1,
+      "rows_per_sec": 175867.8216560238,
+      "rows_per_sec_per_worker": 175867.8216560238,
+      "scaling": 1.0,
+      "efficiency": 1.0
+    },
+    {
+      "workers": 2,
+      "rows_per_sec": 209499.51586466382,
+      "rows_per_sec_per_worker": 104749.75793233191,
+      "scaling": 1.1912327900121464,
+      "efficiency": 0.5956163950060732
+    },
+    {
+      "workers": 4,
+      "rows_per_sec": 218101.69980529265,
+      "rows_per_sec_per_worker": 54525.42495132316,
+      "scaling": 1.240145569278007,
+      "efficiency": 0.31003639231950175
+    },
+    {
+      "workers": 8,
+      "rows_per_sec": 208365.95012313637,
+      "rows_per_sec_per_worker": 26045.743765392046,
+      "scaling": 1.1847872348738986,
+      "efficiency": 0.14809840435923732
+    },
+    {
+      "workers": 16,
+      "rows_per_sec": 206212.51183891506,
+      "rows_per_sec_per_worker": 12888.281989932191,
+      "scaling": 1.1725425941889576,
+      "efficiency": 0.07328391213680985
+    }
+  ]
+}
