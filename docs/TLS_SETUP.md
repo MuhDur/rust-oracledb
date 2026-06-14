@@ -32,7 +32,8 @@ use oracledb::{Connection, ConnectOptions, ClientIdentity};
 let options = ConnectOptions::new(
         "tcps://db.example.com:2484/FREEPDB1", // tcps:// => TLS, default port 2484
         "scott", "tiger",
-        ClientIdentity::for_current_process("myapp")?,
+        // program, machine, osuser, terminal, driver — caller-chosen identity
+        ClientIdentity::new("myapp", "host", "appuser", "term", "rust-oracledb")?,
     )
     .with_wallet_location("/etc/oracle/wallets/db1") // dir with ewallet.pem
     .with_ssl_server_dn_match(true)                  // default
