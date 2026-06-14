@@ -57,6 +57,32 @@ END at a `RecordBatch`, so this is the full client-side wire->Arrow cost.
   (host-load sensitive); the headline metric is the allocation count.
 - The CI floor asserts the columnar path cuts allocations at least 3x.
 
+### End-to-end live wall (criterion, `benches/thin_driver.rs::oracledb_columnar`)
+
+Full live `fetch_df_all` of a 20,000-row x 6-typed-column analytics result over
+loopback, row path vs columnar, each on its own warm connection:
+
+| arm | median wall |
+|-----|-------------|
+| `fetch_df_row_path` | 45.55 ms |
+| `fetch_df_columnar` | 42.79 ms |
+
+~6% end-to-end wall improvement on loopback — bounded, as the STEP 1 map
+predicts, by the client decode/build share (the ~73% socket read-wait is
+unbeatable). Off-loopback the read term grows with RTT so the wall delta shrinks
+as a fraction, while the 95.3% allocation reduction holds regardless. This is the
+honest end-to-end number; the drastic, build-independent win is the allocation
+count.
+
+### Latent bug fixed in passing
+
+The row path `Connection::fetch_all_record_batch` (and the new columnar method)
+now `release_cursor` the fully-drained cursor. Previously a repeated `fetch_df_all`
+parsed and never released a copy cursor each call, leaking one server cursor per
+call until ORA-01000. Verified by the `leak_probe` tests (250 calls each, no
+leak). The shim's `fetch_df_all` uses its own cursor management and is unaffected
+(parity unchanged).
+
 ## Honest framing
 
 This is the CLIENT-CPU slice. From the STEP 1 map, a wide analytics fetch is

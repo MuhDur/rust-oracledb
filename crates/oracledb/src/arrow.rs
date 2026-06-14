@@ -1579,6 +1579,11 @@ impl crate::Connection {
             more_rows = fetched.more_rows;
             rows.extend(fetched.rows);
         }
+        // Release the fully-drained cursor back to the statement cache so a
+        // re-execute of the same SQL reuses the open server cursor (a repeated
+        // `fetch_df_all` previously parsed a fresh copy each call and never
+        // released it, leaking one cursor per call -> ORA-01000 over a long run).
+        self.release_cursor(cursor_id);
         Ok(build_record_batch(&columns, &rows, options)?)
     }
 
@@ -1650,6 +1655,11 @@ impl crate::Connection {
                 previous = Some(last);
             }
         }
+        // The cursor is now fully drained (`more_rows == false`): release it back
+        // to the statement cache so a re-execute of the same SQL reuses the open
+        // server cursor instead of parsing a fresh copy (mirrors the `fetch_all`
+        // drain helper; keeps long-running callers from exhausting open_cursors).
+        self.release_cursor(cursor_id);
         Ok(builder.finish()?)
     }
 

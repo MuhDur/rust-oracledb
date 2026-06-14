@@ -247,3 +247,54 @@ mod live {
         });
     }
 }
+
+#[cfg(test)]
+mod leak_probe {
+    use oracledb::arrow::ArrowFetchOptions;
+    use oracledb::protocol::ClientIdentity;
+    use oracledb::{BlockingConnection, ConnectOptions};
+
+    fn opts() -> Option<ConnectOptions> {
+        let cs = std::env::var("PYO_TEST_CONNECT_STRING").ok()?;
+        let u = std::env::var("PYO_TEST_MAIN_USER").ok()?;
+        let p = std::env::var("PYO_TEST_MAIN_PASSWORD").ok()?;
+        let id =
+            ClientIdentity::new("leakprobe", "m", "o", "t", "rust-oracledb thn : 0.0.0").ok()?;
+        Some(ConnectOptions::new(cs, u, p, id))
+    }
+
+    #[test]
+    fn columnar_does_not_leak_cursors_over_250_calls() {
+        let Some(o) = opts() else {
+            eprintln!("skip leak probe");
+            return;
+        };
+        let mut conn = BlockingConnection::connect(o).expect("connect");
+        let sql = "select level as id, to_char(level) as code from dual connect by level <= 3000";
+        let options = ArrowFetchOptions::default();
+        for i in 0..250 {
+            let b =
+                BlockingConnection::fetch_all_record_batch_columnar(&mut conn, sql, 1000, &options)
+                    .unwrap_or_else(|e| panic!("columnar call {i} failed (cursor leak?): {e}"));
+            assert_eq!(b.num_rows(), 3000);
+        }
+        BlockingConnection::close(conn).expect("close");
+    }
+
+    #[test]
+    fn row_path_does_not_leak_cursors_over_250_calls() {
+        let Some(o) = opts() else {
+            eprintln!("skip leak probe");
+            return;
+        };
+        let mut conn = BlockingConnection::connect(o).expect("connect");
+        let sql = "select level as id, to_char(level) as code from dual connect by level <= 3000";
+        let options = ArrowFetchOptions::default();
+        for i in 0..250 {
+            let b = BlockingConnection::fetch_all_record_batch(&mut conn, sql, 1000, &options)
+                .unwrap_or_else(|e| panic!("row-path call {i} failed (cursor leak?): {e}"));
+            assert_eq!(b.num_rows(), 3000);
+        }
+        BlockingConnection::close(conn).expect("close");
+    }
+}
