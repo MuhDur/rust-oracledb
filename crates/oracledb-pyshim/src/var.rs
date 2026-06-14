@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 use oracledb::protocol::thin::{
     bind_template_from_type_name, is_cursor_bind_template, output_bind as output_only_bind,
     public_dbtype_name_from_bind, public_dbtype_name_from_type_name, public_dbtype_size_info,
-    BindValue, ColumnMetadata, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE,
-    ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_VARCHAR,
+    BindValue, ColumnMetadata, LobValue, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR,
+    ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_VARCHAR,
 };
 use pyo3::exceptions::{PyIndexError, PyRuntimeError};
 use pyo3::prelude::*;
@@ -846,21 +846,20 @@ impl ThinVar {
             // str/bytes so outconverters see the original Python type
             // (reference impl/thin/var.pyx:53-71 wraps the outconverter with
             // a LOB .read())
-            (
-                ThinVarReturnKind::Plain,
-                Some(QueryValue::Lob {
+            (ThinVarReturnKind::Plain, Some(QueryValue::Lob(lob)))
+                if (target_is_char
+                    || matches!(
+                        self.dbtype_name.as_str(),
+                        "DB_TYPE_RAW" | "DB_TYPE_LONG_RAW"
+                    ))
+                    && lob_context.is_some() =>
+            {
+                let LobValue {
                     ora_type_num,
                     csfrm,
                     locator,
                     ..
-                }),
-            ) if (target_is_char
-                || matches!(
-                    self.dbtype_name.as_str(),
-                    "DB_TYPE_RAW" | "DB_TYPE_LONG_RAW"
-                ))
-                && lob_context.is_some() =>
-            {
+                } = lob.as_ref();
                 let context =
                     lob_context.ok_or_else(|| PyRuntimeError::new_err("missing LOB context"))?;
                 direct_lob_value_to_py(py, *ora_type_num, *csfrm, locator, context)
@@ -930,14 +929,10 @@ impl ThinVar {
                 let object = DbObjectImpl::with_attr(py, object_type, &attr_name, value.clone())?;
                 py_db_object_from_impl(py, object)
             }
-            (
-                ThinVarReturnKind::Plain,
-                Some(QueryValue::Object {
-                    packed_data,
-                    schema: _,
-                    type_name: _,
-                }),
-            ) if self.object_type.is_some() => {
+            (ThinVarReturnKind::Plain, Some(QueryValue::Object(object)))
+                if self.object_type.is_some() =>
+            {
+                let packed_data = &object.packed_data;
                 let object_type = self
                     .object_type
                     .clone()
@@ -1262,8 +1257,8 @@ pub(crate) fn apply_out_bind_values(
         let Some(var) = bind_vars.get(*index) else {
             continue;
         };
-        if let Some(QueryValue::Cursor { columns, cursor_id }) = value {
-            apply_cursor_out_bind(py, var, columns, *cursor_id)?;
+        if let Some(QueryValue::Cursor(cursor)) = value {
+            apply_cursor_out_bind(py, var, &cursor.columns, cursor.cursor_id)?;
             continue;
         }
         if let Some(QueryValue::Array(values)) = value {

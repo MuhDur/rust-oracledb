@@ -99,10 +99,10 @@ fn value_kind(value: &QueryValue) -> &'static str {
         QueryValue::IntervalYM { .. } => "INTERVAL YEAR TO MONTH",
         QueryValue::Number { .. } => "NUMBER",
         QueryValue::Boolean(_) => "BOOLEAN",
-        QueryValue::Cursor { .. } => "REF CURSOR",
+        QueryValue::Cursor(_) => "REF CURSOR",
         QueryValue::DateTime { .. } => "DATE/TIMESTAMP",
-        QueryValue::Object { .. } => "object/ADT",
-        QueryValue::Lob { .. } => "LOB locator",
+        QueryValue::Object(_) => "object/ADT",
+        QueryValue::Lob(_) => "LOB locator",
         QueryValue::Vector(_) => "VECTOR",
         QueryValue::Json(_) => "JSON",
         QueryValue::Array(_) => "collection",
@@ -1209,7 +1209,7 @@ mod tests {
                 ]),
             ),
         ]);
-        let value = serde_json::Value::from_sql(&QueryValue::Json(oson)).unwrap();
+        let value = serde_json::Value::from_sql(&QueryValue::Json(Box::new(oson))).unwrap();
         assert_eq!(
             value,
             json!({"id": 7, "name": "bob", "active": true, "tags": ["a", "b"]})
@@ -1250,7 +1250,9 @@ mod tests {
 
     #[test]
     fn vector_from_sql_f32_f64() {
-        let vector = QueryValue::Vector(Vector::Dense(VectorValues::Float32(vec![1.0, 2.0, 3.0])));
+        let vector = QueryValue::Vector(Box::new(Vector::Dense(VectorValues::Float32(vec![
+            1.0, 2.0, 3.0,
+        ]))));
         assert_eq!(Vec::<f32>::from_sql(&vector).unwrap(), vec![1.0, 2.0, 3.0]);
         assert_eq!(Vec::<f64>::from_sql(&vector).unwrap(), vec![1.0, 2.0, 3.0]);
         // ToSql round-trips Vec<f32> into a dense float32 vector bind.

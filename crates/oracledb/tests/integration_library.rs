@@ -417,12 +417,7 @@ fn clob_read_round_trip() {
         )
         .expect("select clob locator");
         let (locator, size, csfrm) = match select.cell(0, 0) {
-            Some(QueryValue::Lob {
-                locator,
-                size,
-                csfrm,
-                ..
-            }) => (locator.clone(), *size, *csfrm),
+            Some(QueryValue::Lob(lob)) => (lob.locator.clone(), lob.size, lob.csfrm),
             other => panic!("expected a LOB locator, got {other:?}"),
         };
         assert!(size > 0, "clob reports a non-zero length");
@@ -482,16 +477,12 @@ fn object_type_fetch() {
         // the value is a packed object image (decoding the pickle is the shim's
         // job; the crate surfaces the schema + raw image)
         match select.cell(0, 0) {
-            Some(QueryValue::Object {
-                type_name,
-                packed_data,
-                ..
-            }) => {
+            Some(QueryValue::Object(object)) => {
                 assert_eq!(
-                    type_name.as_deref().map(str::to_uppercase),
+                    object.type_name.as_deref().map(str::to_uppercase),
                     Some("RUST_ITEST_POINT".to_string())
                 );
-                assert!(!packed_data.is_empty(), "object image carries data");
+                assert!(!object.packed_data.is_empty(), "object image carries data");
             }
             other => panic!("expected an Object value, got {other:?}"),
         }
@@ -539,9 +530,12 @@ fn vector_round_trip() {
         )
         .expect("select vector");
         match select.cell(0, 0) {
-            Some(QueryValue::Vector(Vector::Dense(VectorValues::Float32(values)))) => {
-                assert_eq!(values.as_slice(), &[1.5, -2.0, 3.25]);
-            }
+            Some(QueryValue::Vector(vector)) => match vector.as_ref() {
+                Vector::Dense(VectorValues::Float32(values)) => {
+                    assert_eq!(values.as_slice(), &[1.5, -2.0, 3.25]);
+                }
+                other => panic!("expected a dense float32 vector, got {other:?}"),
+            },
             other => panic!("expected a dense float32 vector, got {other:?}"),
         }
 
@@ -592,12 +586,15 @@ fn json_oson_round_trip() {
         )
         .expect("select json");
         match select.cell(0, 0) {
-            Some(QueryValue::Json(OsonValue::Object(fields))) => {
-                let get = |key: &str| fields.iter().find(|(k, _)| k == key).map(|(_, v)| v);
-                assert_eq!(get("name"), Some(&OsonValue::String("widget".to_string())));
-                assert_eq!(get("qty"), Some(&OsonValue::Number("7".to_string())));
-                assert_eq!(get("active"), Some(&OsonValue::Bool(true)));
-            }
+            Some(QueryValue::Json(json)) => match json.as_ref() {
+                OsonValue::Object(fields) => {
+                    let get = |key: &str| fields.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+                    assert_eq!(get("name"), Some(&OsonValue::String("widget".to_string())));
+                    assert_eq!(get("qty"), Some(&OsonValue::Number("7".to_string())));
+                    assert_eq!(get("active"), Some(&OsonValue::Bool(true)));
+                }
+                other => panic!("expected a JSON object, got {other:?}"),
+            },
             other => panic!("expected a JSON object, got {other:?}"),
         }
 

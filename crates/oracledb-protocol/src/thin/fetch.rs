@@ -364,10 +364,10 @@ pub(crate) fn parse_query_response_with_context_binds_and_options(
                     let mut child = QueryResult::default();
                     parse_describe_info(&mut reader, capabilities, &mut child)?;
                     let child_cursor_id = u32::from(reader.read_ub2()?);
-                    resultsets.push(QueryValue::Cursor {
+                    resultsets.push(QueryValue::Cursor(Box::new(CursorValue {
                         columns: child.columns,
                         cursor_id: child_cursor_id,
-                    });
+                    })));
                 }
                 result.implicit_resultsets = Some(resultsets);
             }
@@ -991,13 +991,13 @@ pub(crate) fn parse_lob_value(
     let Some(locator) = reader.read_bytes()? else {
         return Ok(None);
     };
-    Ok(Some(QueryValue::Lob {
+    Ok(Some(QueryValue::Lob(Box::new(LobValue {
         ora_type_num: metadata.ora_type_num,
         csfrm: metadata.csfrm,
         locator,
         size,
         chunk_size,
-    }))
+    }))))
 }
 
 /// Reads a VECTOR value (reference `ReadBuffer.read_vector` in `packet.pyx`).
@@ -1018,7 +1018,7 @@ pub(crate) fn parse_vector_value(reader: &mut TtcReader<'_>) -> Result<Option<Qu
         return Ok(None);
     }
     let vector = crate::vector::decode_vector(&data)?;
-    Ok(Some(QueryValue::Vector(vector)))
+    Ok(Some(QueryValue::Vector(Box::new(vector))))
 }
 
 /// Parses a native JSON (`DB_TYPE_JSON`) column value. Like VECTOR, OSON is sent
@@ -1039,7 +1039,7 @@ pub(crate) fn parse_json_value(reader: &mut TtcReader<'_>) -> Result<Option<Quer
         return Ok(None);
     }
     let value = crate::oson::decode_oson(&data)?;
-    Ok(Some(QueryValue::Json(value)))
+    Ok(Some(QueryValue::Json(Box::new(value))))
 }
 
 pub(crate) fn parse_object_value(
@@ -1058,11 +1058,11 @@ pub(crate) fn parse_object_value(
     let Some(packed_data) = reader.read_bytes()? else {
         return Ok(None);
     };
-    Ok(Some(QueryValue::Object {
+    Ok(Some(QueryValue::Object(Box::new(ObjectValue {
         schema: metadata.object_schema.clone(),
         type_name: metadata.object_type_name.clone(),
         packed_data,
-    }))
+    }))))
 }
 
 pub(crate) fn parse_cursor_value(reader: &mut TtcReader<'_>) -> Result<QueryValue> {
@@ -1070,10 +1070,10 @@ pub(crate) fn parse_cursor_value(reader: &mut TtcReader<'_>) -> Result<QueryValu
     let mut result = QueryResult::default();
     parse_describe_info(reader, ClientCapabilities::default(), &mut result)?;
     let cursor_id = u32::from(reader.read_ub2()?);
-    Ok(QueryValue::Cursor {
+    Ok(QueryValue::Cursor(Box::new(CursorValue {
         columns: result.columns,
         cursor_id,
-    })
+    })))
 }
 
 pub(crate) struct QueryReturnParameters {

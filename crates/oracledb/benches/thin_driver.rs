@@ -358,12 +358,7 @@ fn bench_thin_driver(c: &mut Criterion) {
                         .expect("select clob locator");
                     let select_cursor = select.cursor_id;
                     let (locator, size, csfrm) = match select.cell(0, 0) {
-                        Some(QueryValue::Lob {
-                            locator,
-                            size,
-                            csfrm,
-                            ..
-                        }) => (locator.clone(), *size, *csfrm),
+                        Some(QueryValue::Lob(lob)) => (lob.locator.clone(), lob.size, lob.csfrm),
                         other => panic!("expected a LOB locator, got {other:?}"),
                     };
                     let read = conn
