@@ -258,28 +258,20 @@ The only `unsafe` in the entire workspace is one audited module
 the **PyO3 test harness**, not in either published crate. Every site is
 FFI-inherent and reviewed sound ([docs/SAFETY_AUDIT.md](docs/SAFETY_AUDIT.md)).
 
-**Eight real bugs** were found and fixed, each with a regression test, through
-multi-pass bug-hunting:
+Every untrusted input path is **fail-closed**: the wire decoder, the TLS wallet
+readers, and the connect-string parser return a structured error on malformed or
+hostile input — never a panic, OOM, or stack overflow.
 
-| class | bug |
-|---|---|
-| Multi-packet framing | the thin decoder mis-framed multi-packet wide-row results past ~1500 rows |
-| Error-path wire deadlock | a DML-RETURNING client-side error (`ORA-12899`) left the connection wedged mid-exchange |
-| Break/drain state | `call_timeout` sent a BREAK without draining the server response, so a reused connection then read stale packets; a second issue did not drain multiple trailing RESET markers |
-| Codec overflow | the NUMBER encoder's `decimal_point_index += exponent` overflowed `i32` on crafted text, panicking under debug assertions |
-| Parser recursion DoS | a deeply-nested TNS descriptor recursed without bound — a stack-overflow process abort — now capped |
-| Wallet DoS | a malicious `cwallet.sso` could drive an unbounded heap allocation via the PBKDF2 `keyLength` field — now bounded |
-| SQL-scan correctness | PL/SQL output-bind detection substring-matched `into`/`returning` inside string literals and comments — now literal/comment-aware |
-
-Separately, the wire decoder is **coverage-guided fuzzed** with 9 cargo-fuzz
-targets (one per untrusted decode boundary: packet framing, query response, OSON,
-VECTOR, scalar codecs, server-error trailer, direct-path, AQ, CQN/subscription).
-Bounded sessions logged billions of executions under ASan/UBSan + overflow-checks
-with **zero crashes**. Fuzzing found four denial-of-service bugs early (three
-unbounded allocations, one negate-overflow panic), all fixed fail-closed; the
-whole OOM-from-wire-length class is now **closed by construction** via the
-`BoundedReader` invariant: an allocation can never exceed the bytes remaining in
-the message buffer. See [docs/FUZZING.md](docs/FUZZING.md).
+The wire decoder is **coverage-guided fuzzed** with 10 cargo-fuzz targets — one
+per untrusted decode boundary (packet framing, query response, OSON, VECTOR,
+scalar codecs, server-error trailer, direct-path, AQ, CQN/subscription) plus the
+connect-string parser. Bounded sessions log billions of executions under
+ASan/UBSan with overflow-checks and **zero crashes**. The entire
+OOM-from-wire-length class is **closed by construction** via the `BoundedReader`
+invariant: an allocation can never exceed the bytes remaining in the message
+buffer. A **differential fuzz oracle** additionally cross-checks the decoder
+against python-oracledb's own decoder on identical wire bytes — 0 divergences
+across thousands of generated values. See [docs/FUZZING.md](docs/FUZZING.md).
 
 ---
 
