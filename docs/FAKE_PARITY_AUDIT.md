@@ -39,10 +39,25 @@ Five independent auditors, each tasked to *disprove* the green for a slice of mo
 
 ## Static scan
 
-`scripts/fake_parity_scan.py` flags only legitimate protocol keywords (`tns`/`ttc`/`oson`/
-`pbkdf2`) inside the *protocol* crate — no shim-side simulation, no local query/result synthesis,
-no hardcoded fixture values. (The earlier dbms_output / v$sql_monitor shim simulations were
-removed during Wave 1.)
+`scripts/fake_parity_scan.py` is a precision guardrail against shim-side result *fabrication*.
+It draws the distinction the port depends on:
+
+- **Allowed everywhere:** protocol routing / codec keywords (`tns`/`ttc`/`oson`/`pbkdf2`/
+  `auth_vfr_data`). The protocol crate *is* the codec layer; naming these is not fake parity.
+- **Allowed in the shim:** SQL strings. The shim has no SQL engine — a SQL literal is data
+  handed to `driver.execute_query*` and executed on the real server (e.g. the `all_tab_columns`
+  metadata probes, or `select dbms_sql_monitor.begin_operation(...) from dual`). Real round-trips.
+- **Flagged (the actual risk):** shim-side construction of server-derived results without a
+  driver round-trip — re-introduced `dbms_output` / `v$sql_monitor` simulation, result rows
+  assembled from literals, a client-side query-result cache, or locally computing a value the
+  server should compute (faking a `select <expr> from dual` answer in Rust).
+
+The detectors are crate-scoped (result-fabrication rules apply to `oracledb-pyshim` only) and
+conservative (high precision). `--self-test` carries documented test vectors: 4 legitimate shim
+shapes that must stay clean and 5 fabrication plants that must be caught (plus a crate-scope check
+that the same plant in the protocol crate is *not* flagged). The earlier dbms_output /
+v$sql_monitor shim simulations were removed during Wave 1; the scanner now runs **clean (exit 0)**
+on the current tree and would catch their re-introduction.
 
 **Conclusion:** the 2236-test suite-green is genuine end-to-end behavior through the Rust engine
 against a real Oracle database. The port passes python-oracledb's own test suite for real.
