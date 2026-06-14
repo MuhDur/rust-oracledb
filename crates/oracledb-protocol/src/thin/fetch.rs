@@ -1102,16 +1102,34 @@ pub struct BorrowedRowBatch {
     columns: Vec<ColumnMetadata>,
     /// Byte offset into `buffer` where each row's column values begin.
     row_starts: Vec<usize>,
+    /// Per-row duplicate-column bit vector (server row-compression). `None` (or
+    /// an absent entry) means every column is present on the wire for that row.
+    /// A zero bit marks a duplicate column whose value repeats the previous
+    /// row's value and carries no wire bytes (reference `bit_vector`).
+    row_bit_vectors: Vec<Option<Vec<u8>>>,
+    /// Whether this batch carried `LONG`/`LONG RAW` status trailers after each
+    /// such column (the fetch path sets this; the plain execute path does not).
+    fetch_long_status: bool,
+    /// The caller's previous (owned) row, used to resolve duplicate columns in
+    /// the *first* compressed row of the batch (whose duplicates repeat the row
+    /// that ended the prior page). `None` outside the compressed-fetch case.
+    previous_row_seed: Option<Vec<Option<QueryValue>>>,
 }
 
 impl BorrowedRowBatch {
     /// Construct a batch from an owned wire `buffer`, the `columns` describing
-    /// each cell, and the per-row start offsets into `buffer`.
+    /// each cell, and the per-row start offsets into `buffer`. Use this for
+    /// batches with no duplicate-column compression and no LONG trailers (the
+    /// common synthetic / test case); the framing-aware
+    /// [`parse_query_response_borrowed`] builds the full form.
     pub fn new(buffer: Vec<u8>, columns: Vec<ColumnMetadata>, row_starts: Vec<usize>) -> Self {
         Self {
             buffer,
             columns,
             row_starts,
+            row_bit_vectors: Vec::new(),
+            fetch_long_status: false,
+            previous_row_seed: None,
         }
     }
 
@@ -1148,23 +1166,55 @@ impl BorrowedRowBatch {
         // soundness — happy.
         let mut number_arena = String::new();
         let mut owned_arena: Vec<QueryValue> = Vec::new();
+        // Owned snapshot of the previous row, used only to resolve duplicate
+        // (bit-vector-compressed) columns, which carry no wire bytes. Empty when
+        // the batch has no bit vectors (the common case), so it costs nothing.
+        // Seeded from the caller's prior-page row for the first compressed row.
+        let mut previous_owned: Vec<Option<QueryValue>> =
+            self.previous_row_seed.clone().unwrap_or_default();
 
-        for &start in &self.row_starts {
+        for (row_index, &start) in self.row_starts.iter().enumerate() {
             number_arena.clear();
             owned_arena.clear();
+            let bit_vector = self
+                .row_bit_vectors
+                .get(row_index)
+                .and_then(|bv| bv.as_deref());
 
             // Pass 1: decode all columns, growing the per-row arenas. `slots`
             // borrows only the buffer (the deferred Number/Owned slots hold a
-            // range/index into the arenas, never a borrow of them).
+            // range/index into the arenas, never a borrow of them). Duplicate
+            // columns carry no wire bytes — their owned previous value is parked
+            // in the owned arena.
             let mut slots: Vec<Option<ColumnSlot<'_>>> = Vec::with_capacity(self.columns.len());
             let mut reader = TtcReader::new(&self.buffer[start..]);
-            for metadata in &self.columns {
+            for (index, metadata) in self.columns.iter().enumerate() {
+                if is_duplicate_column(bit_vector, index) {
+                    let previous = previous_owned.get(index).and_then(Option::as_ref);
+                    match previous {
+                        None => slots.push(None),
+                        Some(value) => {
+                            owned_arena.push(value.clone());
+                            slots.push(Some(ColumnSlot::Owned(owned_arena.len() - 1)));
+                        }
+                    }
+                    continue;
+                }
                 let slot =
                     parse_column_slot(&mut reader, metadata, &mut number_arena, &mut owned_arena)?;
                 slots.push(match slot {
                     ColumnSlot::Null => None,
                     other => Some(other),
                 });
+                if self.fetch_long_status
+                    && matches!(
+                        metadata.ora_type_num,
+                        ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_LONG_RAW
+                    )
+                {
+                    let _null_indicator = reader.read_sb4()?;
+                    let _return_code = reader.read_ub4()?;
+                }
             }
 
             // Pass 2: arenas are now frozen — resolve deferred slots into
@@ -1188,9 +1238,201 @@ impl BorrowedRowBatch {
                 .collect();
 
             callback(&row)?;
+
+            // Snapshot the just-emitted row as owned values for the next row's
+            // duplicate-column resolution — but only when the batch actually uses
+            // bit-vector compression, so the zero-copy common path pays nothing.
+            if !self.row_bit_vectors.is_empty() {
+                previous_owned = row
+                    .iter()
+                    .map(|cell| cell.map(|v| v.to_owned_value()))
+                    .collect();
+            }
         }
         Ok(())
     }
+}
+
+/// The borrowed counterpart of a fetched [`QueryResult`]: a [`BorrowedRowBatch`]
+/// of zero-copy rows plus the response-level fields a caller needs to page and
+/// finalize the cursor. Produced by [`parse_query_response_borrowed`].
+#[derive(Clone, Debug)]
+pub struct BorrowedFetchResult {
+    /// The decoded rows, borrowing the response buffer.
+    pub batch: BorrowedRowBatch,
+    /// Whether the server reports more rows for this cursor.
+    pub more_rows: bool,
+    /// Server cursor id (for paging / release).
+    pub cursor_id: u32,
+    /// Total affected/processed row count from the end-of-call error message.
+    pub row_count: u64,
+}
+
+/// Walk a fetch/query response payload and produce a [`BorrowedFetchResult`]
+/// whose rows borrow `payload` (the caller must keep the owned buffer alive —
+/// [`BorrowedRowBatch`] owns it). This is the zero-copy companion to
+/// [`parse_fetch_response_with_context`]: it walks the exact same message
+/// framing (DESCRIBE_INFO / ROW_HEADER / BIT_VECTOR / ROW_DATA / ERROR /
+/// END_OF_RESPONSE) but, instead of materializing owned rows, records each
+/// row's byte offset and bit vector so [`BorrowedRowBatch::for_each_row_ref`]
+/// can decode them lazily and without per-cell allocation.
+///
+/// Scope: the plain query-row case (the fetch path). Out-bind / DML-returning
+/// rows are not part of a fetch response and are left to the owned path.
+pub fn parse_query_response_borrowed(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    columns: &[ColumnMetadata],
+    previous_row: Option<&[Option<QueryValue>]>,
+) -> Result<BorrowedFetchResult> {
+    let mut reader = TtcReader::new(payload);
+    let mut result_columns = columns.to_vec();
+    let mut more_rows = true;
+    let mut cursor_id = 0u32;
+    let mut row_count = 0u64;
+    let mut row_starts: Vec<usize> = Vec::new();
+    let mut row_bit_vectors: Vec<Option<Vec<u8>>> = Vec::new();
+    let mut any_bit_vector = false;
+    let mut pending_bit_vector: Option<Vec<u8>> = None;
+    // The fetch path always consumes LONG/LONG RAW status trailers.
+    let fetch_long_status = true;
+
+    while reader.remaining() > 0 {
+        let message_type = reader.read_u8()?;
+        match message_type {
+            0 => {}
+            TNS_MSG_TYPE_DESCRIBE_INFO => {
+                let _describe_name = reader.read_bytes()?;
+                let previous = std::mem::take(&mut result_columns);
+                let mut described = QueryResult::default();
+                parse_describe_info(&mut reader, capabilities, &mut described)?;
+                result_columns = described.columns;
+                for (index, column) in result_columns.iter_mut().enumerate() {
+                    if let Some(prev) = previous.get(index) {
+                        adjust_refetch_metadata(prev, column);
+                    }
+                }
+            }
+            TNS_MSG_TYPE_ROW_HEADER => {
+                pending_bit_vector = parse_row_header(&mut reader)?;
+            }
+            TNS_MSG_TYPE_BIT_VECTOR => {
+                pending_bit_vector = Some(parse_bit_vector(&mut reader, result_columns.len())?);
+            }
+            TNS_MSG_TYPE_ROW_DATA => {
+                // Record where this row's column values begin, then advance the
+                // reader past the row (skipping, not materializing).
+                row_starts.push(reader.position());
+                let bit_vector = pending_bit_vector.take();
+                any_bit_vector |= bit_vector.is_some();
+                row_bit_vectors.push(bit_vector.clone());
+                skip_row_data(
+                    &mut reader,
+                    &result_columns,
+                    bit_vector.as_deref(),
+                    fetch_long_status,
+                )?;
+            }
+            TNS_MSG_TYPE_PARAMETER => {
+                let _params = parse_query_return_parameters(&mut reader, false)?;
+            }
+            TNS_MSG_TYPE_STATUS => {
+                let _call_status = reader.read_ub4()?;
+                let _seq = reader.read_ub2()?;
+            }
+            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => {
+                let _ = skip_server_side_piggyback(&mut reader)?;
+            }
+            TNS_MSG_TYPE_FLUSH_OUT_BINDS | TNS_MSG_TYPE_END_OF_RESPONSE => break,
+            TNS_MSG_TYPE_TOKEN => {
+                let _token = reader.read_ub8()?;
+            }
+            TNS_MSG_TYPE_ERROR => {
+                let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
+                if info.cursor_id != 0 {
+                    cursor_id = u32::from(info.cursor_id);
+                }
+                row_count = info.row_count;
+                if info.number == TNS_ERR_NO_DATA_FOUND && !result_columns.is_empty() {
+                    more_rows = false;
+                } else if info.number != 0 && info.number != TNS_ERR_ARRAY_DML_ERRORS {
+                    return Err(ProtocolError::ServerErrorInfo(Box::new(
+                        info.into_details(),
+                    )));
+                }
+            }
+            _ => {
+                let position = reader.position().saturating_sub(1);
+                if let Some(message) =
+                    find_embedded_server_error(payload, capabilities.ttc_field_version, position)
+                {
+                    return Err(ProtocolError::ServerError(message));
+                }
+                return Err(ProtocolError::UnknownMessageType {
+                    message_type,
+                    position,
+                });
+            }
+        }
+    }
+
+    // If the batch never used duplicate-column compression, drop the per-row
+    // bit-vector vector so iteration takes the zero-copy fast path (no owned
+    // previous-row snapshotting).
+    if !any_bit_vector {
+        row_bit_vectors.clear();
+    }
+
+    let batch = BorrowedRowBatch {
+        buffer: payload.to_vec(),
+        columns: result_columns,
+        row_starts,
+        row_bit_vectors,
+        fetch_long_status,
+        // Seed the first compressed row's duplicate resolution from the caller's
+        // prior-page row (only consulted when the batch uses bit vectors).
+        previous_row_seed: any_bit_vector.then(|| {
+            previous_row
+                .map(<[Option<QueryValue>]>::to_vec)
+                .unwrap_or_default()
+        }),
+    };
+
+    Ok(BorrowedFetchResult {
+        batch,
+        more_rows,
+        cursor_id,
+        row_count,
+    })
+}
+
+/// Advance `reader` past one ROW_DATA row without materializing owned values.
+/// Mirrors [`parse_row_data`]'s consumption exactly: duplicate (bit-vector)
+/// columns carry no wire bytes and are skipped; every other column is consumed
+/// via [`parse_column_value`] (the decode advances the reader identically), and
+/// `LONG`/`LONG RAW` status trailers are consumed when `fetch_long_status`.
+fn skip_row_data(
+    reader: &mut TtcReader<'_>,
+    columns: &[ColumnMetadata],
+    bit_vector: Option<&[u8]>,
+    fetch_long_status: bool,
+) -> Result<()> {
+    for (index, metadata) in columns.iter().enumerate() {
+        if is_duplicate_column(bit_vector, index) {
+            continue;
+        }
+        let _ = parse_column_value(reader, metadata)?;
+        if fetch_long_status
+            && matches!(
+                metadata.ora_type_num,
+                ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_LONG_RAW
+            )
+        {
+            let _null_indicator = reader.read_sb4()?;
+            let _return_code = reader.read_ub4()?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn encode_rowid_component(mut value: u32, size: usize, output: &mut String) {
@@ -1570,6 +1812,74 @@ mod borrowed_fetch_tests {
         assert_eq!(
             borrowed_owned, owned_rows,
             "borrowed cells to_owned() must equal the owned-path values"
+        );
+    }
+
+    // The borrowed response parser walks the *same* message framing as the owned
+    // `parse_fetch_response_with_context` (ROW_HEADER / BIT_VECTOR / ROW_DATA /
+    // END_OF_RESPONSE), but instead of building owned rows it captures each
+    // row's byte offset and hands back a `BorrowedRowBatch`. Decoding that batch
+    // must reproduce exactly what the owned fetch path produced — duplicate
+    // columns (bit vector) and all. Fixture is the same one the owned
+    // `fetch_response_decodes_rows_with_previous_cursor_metadata` test uses.
+    #[test]
+    fn borrowed_response_parse_matches_owned_fetch_path() {
+        use hex::FromHex;
+        let payload = Vec::from_hex("06020101000205dc0001010101000702c1041d")
+            .expect("fixture response should be valid hex");
+        let columns = vec![
+            col("INTCOL", ORA_TYPE_NUM_NUMBER, CS_FORM_IMPLICIT, 22),
+            col("NUMBERCOL", ORA_TYPE_NUM_NUMBER, CS_FORM_IMPLICIT, 22),
+        ];
+        let previous_row = vec![
+            Some(QueryValue::Number {
+                text: "2".into(),
+                is_integer: true,
+            }),
+            Some(QueryValue::Number {
+                text: "0.5".into(),
+                is_integer: false,
+            }),
+        ];
+
+        // Owned golden.
+        let owned = parse_query_response_with_context(
+            &payload,
+            ClientCapabilities::default(),
+            &columns,
+            Some(&previous_row),
+        )
+        .expect("owned fetch decode");
+
+        // Borrowed parse.
+        let borrowed = parse_query_response_borrowed(
+            &payload,
+            ClientCapabilities::default(),
+            &columns,
+            Some(&previous_row),
+        )
+        .expect("borrowed fetch decode");
+
+        assert_eq!(borrowed.more_rows, owned.more_rows);
+        assert_eq!(borrowed.cursor_id, owned.cursor_id);
+        assert_eq!(borrowed.batch.row_count(), owned.rows.len());
+
+        let mut borrowed_owned: Vec<Vec<Option<QueryValue>>> = Vec::new();
+        borrowed
+            .batch
+            .for_each_row_ref(|row| {
+                borrowed_owned.push(
+                    row.iter()
+                        .map(|cell| cell.map(|v| v.to_owned_value()))
+                        .collect(),
+                );
+                Ok(())
+            })
+            .expect("iterate borrowed rows");
+
+        assert_eq!(
+            borrowed_owned, owned.rows,
+            "borrowed batch must reproduce the owned fetch rows (incl. duplicate columns)"
         );
     }
 }
