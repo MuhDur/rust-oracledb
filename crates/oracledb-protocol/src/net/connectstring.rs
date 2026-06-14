@@ -1490,6 +1490,21 @@ pub mod tnsnames {
         out
     }
 
+    /// Fuzz-only accessor for the in-memory tnsnames.ora lexer (`parse_file`).
+    ///
+    /// Compiled **only** under `--cfg fuzzing` (set by `cargo-fuzz`); it never
+    /// widens the normal public API. It feeds arbitrary bytes through the
+    /// comment / multi-line / quote / paren-balancing tokenizer that the
+    /// `TnsnamesReader` runs on untrusted config files, so the connect-string
+    /// fuzz target can reach the tnsnames parser without touching the
+    /// filesystem (the `IFILE` recursion itself is I/O-bound and is covered by
+    /// `ifile_cycle_detected` / `ifile_same_directory`). Must never panic: the
+    /// lexer only returns a possibly-empty `(key, value)` list.
+    #[cfg(fuzzing)]
+    pub fn fuzz_parse_file(contents: &str) -> Vec<(String, String)> {
+        parse_file(contents)
+    }
+
     struct FileParser<'a> {
         chars: &'a [char],
         temp_pos: usize,

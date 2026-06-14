@@ -14,10 +14,12 @@ lockfile and the normal `cargo build --workspace` is unaffected.
 
 ## Targets
 
-Seven libFuzzer targets, one per untrusted decode boundary. Each takes
-`data: &[u8]`, guards the input size, and calls the decoder asserting only that
+Ten libFuzzer targets, one per untrusted decode/parse boundary. Most take
+`data: &[u8]`, guard the input size, and call the decoder asserting only that
 it returns a `Result` (an `Err` is a perfectly good outcome — a panic / OOM /
-hang is the bug).
+hang is the bug). The connect-string target (#10) is **structure-aware**: it
+takes an `Arbitrary`-shaped input rather than raw bytes, because a grammar this
+deep is unreachable by byte-level mutation alone (see its row below).
 
 | # | Target | Entry point | What it stresses |
 |---|--------|-------------|------------------|
@@ -28,13 +30,43 @@ hang is the bug).
 | 5 | `scalar_codecs` | `fuzz_api::fuzz_scalar_codecs` | NUMBER / DATE / TIMESTAMP(+TZ) / INTERVAL DS+YM / BINARY_FLOAT+DOUBLE raw-byte codecs |
 | 6 | `server_error_info` | `fuzz_api::fuzz_parse_server_error_info` + piggyback skip | TTC error trailer (batch error / offset / message sub-arrays, version-gated 20.1+ tail), server-side piggyback opcodes |
 | 7 | `dpl_response` | `dpl::parse_direct_path_{prepare,simple}_response` | Direct Path Load response dispatch + column metadata + return parameters |
+| 8 | `aq_response` | `fuzz_api::fuzz_aq_responses` | Advanced Queuing enqueue / dequeue / array response decoders (RAW / JSON / Object payloads) |
+| 9 | `subscr_response` | `fuzz_api::fuzz_subscr_responses` | Subscription (CQN / AQ-notification) subscribe-response + notification-stream decoders (OAC records, grouping notifications) |
+| 10 | `connect_string` | `fuzz_api::fuzz_connect_string` | TNS connect-descriptor / EZConnect-Plus parser (`net::connectstring::parse`) + in-memory tnsnames.ora lexer; **structure-aware** (nested-paren `Arbitrary` generator) |
 
-Targets 5 and 6 reach `pub(crate)` functions through a tiny, **`#[cfg(fuzzing)]`-only**
-shim module `oracledb_protocol::fuzz_api` (see `crates/oracledb-protocol/src/lib.rs`).
+Targets 5, 6, 8, 9, and 10 reach `pub(crate)` (or `#[cfg(fuzzing)] pub`)
+functions through a tiny, **`#[cfg(fuzzing)]`-only** shim module
+`oracledb_protocol::fuzz_api` (see `crates/oracledb-protocol/src/lib.rs`).
 The shim is compiled only under `--cfg fuzzing` (which `cargo-fuzz` sets
 automatically), so it never widens the crate's normal public API. The
 `cfg(fuzzing)` flag is registered in the workspace `[workspace.lints.rust]`
 `check-cfg` so the `-D warnings` clippy gate stays quiet for the normal build.
+
+### Target #10: the connect-string parser (structure-aware)
+
+`net::connectstring::parse` and the tnsnames.ora reader consume **untrusted env
+/ config / user input** (a `TNS_ADMIN` file, an `ORACLE_CONNECT_STRING`, a DSN
+typed by an operator) and, before this lane, had only unit tests. A hostile or
+fat-fingered connect string must fail closed (`Err`) — never panic, OOM, or
+overflow the stack. The descriptor recursion-depth DoS was fixed in bead `uf8`
+(`MAX_DESCRIPTOR_DEPTH = 128`); this target **guards that fix and hunts
+siblings** in the EZConnect host/port/quote lexer and the tnsnames comment /
+multi-line / paren-balancing tokenizer.
+
+Dumb random bytes almost never reach the interesting states here: the very first
+byte must be `(` to enter the descriptor parser, and every deep branch is gated
+behind balanced parens and `KEY=` tokens. So the target is **structure-aware**
+(`fuzz_targets/connect_string.rs` implements `Arbitrary` for a `ConnectInput`):
+a selector byte chooses among (1) a recursive nested-`(KEY=VALUE)` generator
+drawing keywords/atoms from the real descriptor grammar (reaching quoted values,
+container keywords, and the EZConnect host/port/service forms); (2) a
+deliberately over-deep nest (100–400 levels) that drives the
+`MAX_DESCRIPTOR_DEPTH` fail-closed path on every run; (3) a valid descriptor
+*prefix* + arbitrary garbage tail (the "good so far, then malformed" transition
+states); and (4) the raw bytes verbatim (so libFuzzer's byte mutation and the
+saved corpus still feed the parser directly). The in-memory tnsnames lexer is
+reached through `#[cfg(fuzzing)] pub fn tnsnames::fuzz_parse_file` (the `IFILE`
+recursion itself is I/O-bound and is covered by the `ifile_*` unit tests).
 
 ## How to run
 

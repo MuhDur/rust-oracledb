@@ -84,6 +84,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "connect_string"
+path = "fuzz_targets/connect_string.rs"
+test = false
+doc = false
+bench = false
+
 # Release profile with debug assertions on: catches arithmetic overflow panics
 # (the protocol decoder must fail-closed, never panic on overflow) while keeping
 # libFuzzer fast.

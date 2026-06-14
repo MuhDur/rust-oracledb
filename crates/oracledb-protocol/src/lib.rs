@@ -253,6 +253,23 @@ pub mod fuzz_api {
         let _ = parse_notification_stream(payload, namespace, public_qos, None);
         let _ = parse_notification_stream(payload, namespace, public_qos, Some("FUZZDB"));
     }
+
+    /// Fuzz the connect-string parsers on one untrusted string: the TNS
+    /// connect-descriptor / EZConnect-Plus parser
+    /// ([`crate::net::connectstring::parse`]) and the in-memory tnsnames.ora
+    /// lexer (`tnsnames::fuzz_parse_file`).
+    ///
+    /// Both consume untrusted env / config / user input and must *never*
+    /// panic / OOM / overflow the stack — only return `Err` (or, for the
+    /// descriptor case, `Ok(None)` meaning "this is a tnsnames alias"). The
+    /// descriptor recursion-depth DoS was fixed in bead `uf8`
+    /// (`MAX_DESCRIPTOR_DEPTH`); this entry point guards that fix and hunts
+    /// siblings in the EZConnect quote/host/port lexer and the tnsnames
+    /// comment / multi-line / paren-balancing tokenizer.
+    pub fn fuzz_connect_string(input: &str) {
+        let _ = crate::net::connectstring::parse(input);
+        let _ = crate::net::connectstring::tnsnames::fuzz_parse_file(input);
+    }
 }
 
 #[cfg(test)]
