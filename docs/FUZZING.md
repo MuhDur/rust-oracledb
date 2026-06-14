@@ -284,8 +284,92 @@ session tail:
 Done 86977255 runs in 121 second(s)        # packet_framing, 0 crashes
 ```
 
+### `connect_string` (fuzz-harden lane, bead 5dd)
+
+The structure-aware connect-string target was run for a bounded **180 s**
+session (`-max_total_time=180 -rss_limit_mb=2048 -timeout=10`, ASan + UBSan +
+overflow-checks):
+
+| Target | Executions | exec/s | Coverage (edges / features) | Crashes |
+|--------|-----------:|-------:|----------------------------|:-------:|
+| `connect_string` | 2,462,830 | ~13,600 | 2015 / 7964 | 0 |
+
+```
+Done 2462830 runs in 181 second(s)         # connect_string, 0 crashes
+```
+
+`fuzz/artifacts/connect_string/` is empty (no crash inputs were saved). The
+2015 edges / 7964 features confirm the `Arbitrary` generator drives the
+descriptor recursion, the EZConnect quote/host/port lexer, and the tnsnames
+tokenizer — far past what raw-byte mutation reaches. ~13.6k exec/s is well above
+the 1000 exec/s parser floor (the structured generator allocates `String`s, so
+it is slower than the raw-`&[u8]` decode targets, by design).
+
 Gate status alongside the fuzzing: `cargo fmt --check` clean,
 `cargo clippy --workspace --no-deps -- -D warnings` clean,
-`cargo test --workspace` green (177 tests passing, including the four new
-fuzz-regression tests). The fuzz crate is excluded from the workspace and adds
-no dependencies to the `oracledb-protocol` dependency tree.
+`cargo test --workspace` green (460 tests passing). The fuzz crate is excluded
+from the workspace and adds no dependencies to the `oracledb-protocol`
+dependency tree.
+
+## Differential fuzz oracle: rust decoder vs python-oracledb decoder (bead rcn)
+
+No-panic fuzzing and example tests prove the decoder *fails closed*, but they
+structurally miss **silent value divergence** — the decoder returns `Ok`, but
+the *wrong value*. That is the exact bug class the project's 8 hand-found bugs
+came from (an off-by-one in a date field, a sign/exponent slip in NUMBER, a
+fractional-second truncation). A differential oracle is the highest-confidence
+guard against it: feed the same input to two independent decoders and assert
+they agree.
+
+**What was built** (`harness/differential/diff_oracle.py`): a **container
+round-trip differential**. For a proptest-style corpus of extreme / boundary
+values (NUMBER and DATE/TIMESTAMP — the two highest-divergence-risk codecs), each
+value is INSERTed once; the Oracle server is then the *encoder*, and the SAME
+server wire bytes for each column are decoded by **both**:
+
+* the reference python-oracledb thin decoder (`impl/base/decoders.pyx`), and
+* rust-oracledb's decoder, surfaced through the `oracledb_pyshim` PyO3 module
+  that swaps in for `oracledb.thin_impl` (the same shim the conformance harness
+  uses).
+
+The two engines run in **separate subprocesses** (the `oracledb.thin_impl` swap
+is process-global, so one interpreter cannot host both decoders). Each fetches
+the identical rows and emits canonical JSON; the driver asserts byte/semantic
+identity. NUMBER is fetched through an output type handler returning the **exact
+decimal string** (not a lossy `float`), so the full decoded digit/sign/exponent
+sequence from `decode_number_value` is compared; DATE/TIMESTAMP is compared as
+both the `datetime` (microsecond) and the canonical `TO_CHAR(...FF9)`
+(nanosecond) rendering, so a fractional-second or civil-field carry bug surfaces.
+
+**Fidelity (stated honestly).** A container round-trip differential is *weaker*
+than a pure in-process decoder differential, for two reasons: (1) the server
+produces the wire bytes, so only *well-formed* payloads the server actually
+emits are exercised — an adversarial / hand-crafted wire image cannot be fed to
+both decoders; and (2) both engines share one server, so a server-side quirk is
+invisible. A pure decoder differential was investigated and is **impractical**:
+python-oracledb's decoders are Cython `cdef` functions taking a C
+`OracleDataBuffer*` (e.g. `decode_oracle_number`, `decode_date`), not callable
+on raw bytes from Python without re-exporting the Cython layer. What the
+round-trip differential *does* prove with high confidence: for every value
+Oracle can store and emit, the rust and python-oracledb decoders recover the
+**same Python value** — the parity property that actually matters. (The pure
+*round-trip* property `decode(encode(x)) == x` for these same codecs is already
+covered in-crate by `thin/proptests.rs`; this differential adds the
+cross-*engine* dimension the round-trip cannot.)
+
+**Run it:**
+
+```bash
+eval "$(ORACLEDB_CONTAINER_NAME=... ORACLEDB_HOST_PORT=... scripts/container.sh env)"
+ORACLEDB_VENV_DIR=$PWD/.venv-py313 scripts/setup-python-env.sh   # one-time
+# build the rust shim into the venv:
+.venv-py313/bin/python -m maturin develop -m crates/oracledb-pyshim/Cargo.toml
+.venv-py313/bin/python harness/differential/diff_oracle.py --cases 2000 --seed 0xc0ffee
+```
+
+**Result:** run over 3 seeds × 2000 generated cases, **5,944 cases compared**
+(3,960 NUMBER + 2,984 DATE/TIMESTAMP after the server rejected ~3% of the most
+extreme magnitudes — not decode cases), **0 divergences**. A negative-control
+check confirms the comparator is not a tautology: injecting a one-digit NUMBER
+change and a one-second timestamp shift is detected, while cosmetic numeric forms
+(`1` vs `1.0` vs `1.00`) correctly compare equal.
