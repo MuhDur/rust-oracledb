@@ -4801,15 +4801,21 @@ async fn reset_after_marker(
 ) -> Result<Option<IncomingPacket>> {
     trace_connect_bytes("MARKER packet", &initial_marker.payload);
     send_marker_shared(cx, write, TNS_MARKER_TYPE_RESET).await?;
+    // Drain the RESET handshake: consume EVERY trailing marker packet — the
+    // RESET acknowledgement AND any additional markers the server sends after
+    // it (a documented variant: reference _reset's second loop,
+    // protocol.pyx:554-556, "some servers send multiple reset markers"). Return
+    // the first NON-marker packet (the trailing error/data packet) so the caller
+    // is seeded with it. Returning early on the first RESET marker would leave a
+    // following marker in the stream, which the caller mis-reads as a fresh
+    // break and answers with a DUPLICATE RESET, poisoning a reused connection
+    // (bead rust-oracledb-yhz). Exactly one RESET is ever sent, here.
     loop {
         let packet = read_packet(read, PacketLengthWidth::Large32).await?;
         if packet.packet_type != TNS_PACKET_TYPE_MARKER {
             return Ok(Some(packet));
         }
         trace_connect_bytes("MARKER reset response", &packet.payload);
-        if matches!(packet.payload.get(2), Some(&TNS_MARKER_TYPE_RESET)) {
-            return Ok(None);
-        }
     }
 }
 
@@ -5432,6 +5438,96 @@ mod tests {
             next, FRESH_BODY,
             "after break_and_drain the reused connection must read the FRESH response, \
              not the stale in-flight response ({INFLIGHT_BODY:?}) or error body ({ERROR_BODY:?})"
+        );
+        server.join().expect("server thread joins");
+    }
+
+    // bead rust-oracledb-yhz: a compliant-but-non-minimal server may send
+    // MULTIPLE RESET markers after the client's RESET (reference _reset second
+    // loop, protocol.pyx:554-556). The drain must consume ALL of them and send
+    // exactly ONE RESET. The pre-fix reset_after_marker returned on the first
+    // RESET marker, so the caller read the second one, mistook it for a fresh
+    // break, and sent a DUPLICATE RESET — poisoning the reused connection.
+    #[test]
+    fn reset_after_marker_drains_multiple_trailing_markers_no_duplicate_reset() {
+        const INFLIGHT_BODY: &[u8] = &[0xDE, 0xAD];
+        const ERROR_BODY: &[u8] = &[0x04, 0x01, 0x02];
+        const FRESH_BODY: &[u8] = &[0x11, 0x22, 0x33];
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            use std::io::Write as _;
+
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_BREAK,
+                "client must send a BREAK marker first"
+            );
+            socket
+                .write_all(&data_packet(INFLIGHT_BODY, true))
+                .expect("write in-flight response");
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))
+                .expect("write break-ack marker");
+            // The client answers the marker with exactly ONE RESET.
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_RESET,
+                "client must answer with a RESET"
+            );
+            // Server now sends TWO RESET markers (the yhz trigger) before the
+            // trailing error + the fresh response.
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_RESET))
+                .expect("write reset marker #1");
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_RESET))
+                .expect("write reset marker #2");
+            socket
+                .write_all(&data_packet(ERROR_BODY, true))
+                .expect("write trailing error packet");
+            socket
+                .write_all(&data_packet(FRESH_BODY, true))
+                .expect("write fresh response");
+            // No DUPLICATE RESET may arrive. With the bug the client answers the
+            // second RESET marker with a second RESET, which (sent during the
+            // drain) is already in our buffer by now.
+            socket
+                .set_read_timeout(Some(Duration::from_millis(750)))
+                .expect("set short read timeout");
+            let mut extra = [0u8; 11];
+            if socket.read_exact(&mut extra).is_ok() {
+                panic!(
+                    "client sent a DUPLICATE marker (type {}): the drain did not \
+                     consume all trailing RESET markers (bead rust-oracledb-yhz)",
+                    extra[10]
+                );
+            }
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let next = runtime.block_on(async {
+            let cx = Cx::current().expect("ambient Cx");
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (mut read, write) = transport::plain_split(stream);
+            let write: SharedWriteHalf = Arc::new(AsyncMutex::with_name("yhz_test_write", write));
+            break_and_drain_wire(&mut read, &cx, &write, Duration::from_secs(5))
+                .await
+                .expect("drain must succeed even with multiple RESET markers");
+            read_data_response(&mut read, &cx, &write)
+                .await
+                .expect("next read after drain must decode cleanly")
+        });
+
+        assert_eq!(
+            next, FRESH_BODY,
+            "after draining multiple RESET markers the reused connection must read \
+             the FRESH response"
         );
         server.join().expect("server thread joins");
     }
