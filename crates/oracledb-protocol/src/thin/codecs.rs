@@ -470,10 +470,9 @@ pub fn encode_number_text(value: &str) -> Result<Vec<u8>> {
 }
 
 pub fn decode_number_value(bytes: &[u8]) -> Result<QueryValue> {
-    let mut text = String::new();
-    let mut digits = Vec::new();
-    let is_integer = decode_number_text_into(bytes, &mut digits, &mut text)?;
-    Ok(QueryValue::Number { text, is_integer })
+    Ok(QueryValue::Number(super::number::OracleNumber::from_wire(
+        bytes,
+    )?))
 }
 
 /// Decode the Oracle `NUMBER` wire form into canonical decimal text, **appending
@@ -482,11 +481,45 @@ pub fn decode_number_value(bytes: &[u8]) -> Result<QueryValue> {
 /// reuse one allocation across many values — this is the allocation-free core
 /// the borrowed fetch path drives, writing straight into its per-row arena.
 /// [`decode_number_value`] is the owning convenience wrapper.
+///
+/// Implemented in terms of [`decode_number_parts`] + the shared formatter
+/// fragment below, so the borrowed-arena text and the owned inline
+/// [`super::number::OracleNumber`] are byte-identical by construction (they walk
+/// the same digits and format with the same code).
 pub fn decode_number_text_into(
     bytes: &[u8],
     digits: &mut Vec<u8>,
     text: &mut String,
 ) -> Result<bool> {
+    match decode_number_parts(bytes, digits, text)? {
+        // The single-byte sentinels already wrote their canonical text.
+        super::number::DecodedNumber::Text { is_integer } => Ok(is_integer),
+        super::number::DecodedNumber::Parts {
+            is_negative,
+            decimal_point_index,
+            is_integer,
+        } => {
+            format_number_digits(digits, is_negative, decimal_point_index, text);
+            Ok(is_integer)
+        }
+    }
+}
+
+/// Walk the Oracle `NUMBER` wire form into `digits` (significant decimal digits,
+/// each 0..=9) and report the parts needed to format the canonical text and to
+/// build the inline [`super::number::OracleNumber`]. The single-byte sentinels
+/// (positive zero, the `-1e126` negative sentinel) write their canonical text
+/// directly into `text` and return [`super::number::DecodedNumber::Text`].
+///
+/// This is the SINGLE digit-decoding source of truth: both the owned inline
+/// representation and the borrowed-arena text path drive it.
+pub(crate) fn decode_number_parts(
+    bytes: &[u8],
+    digits: &mut Vec<u8>,
+    text: &mut String,
+) -> Result<super::number::DecodedNumber> {
+    use super::number::DecodedNumber;
+
     if bytes.len() > 21 {
         return Err(ProtocolError::TtcDecode("encoded NUMBER too long"));
     }
@@ -494,13 +527,14 @@ pub fn decode_number_text_into(
         return Err(ProtocolError::TtcDecode("empty NUMBER"));
     };
     let is_positive = first & 0x80 != 0;
+    digits.clear();
     if bytes.len() == 1 {
         if is_positive {
             text.push('0');
         } else {
             text.push_str("-1e126");
         }
-        return Ok(true);
+        return Ok(DecodedNumber::Text { is_integer: true });
     }
 
     let exponent_byte = if is_positive { first } else { !first };
@@ -511,7 +545,6 @@ pub fn decode_number_text_into(
         end -= 1;
     }
 
-    digits.clear();
     for (index, encoded) in bytes.iter().enumerate().take(end).skip(1) {
         let value = if is_positive {
             encoded.saturating_sub(1)
@@ -536,13 +569,116 @@ pub fn decode_number_text_into(
         }
     }
 
-    let mut is_integer = true;
-    if !is_positive {
+    // `is_integer` is true unless the canonical text gets a decimal point: that
+    // happens when `decimal_point_index <= 0` (leading "0.") or the point falls
+    // strictly inside the significant digits (`0 < dpi < len`).
+    let len = i16::try_from(digits.len()).unwrap_or(i16::MAX);
+    let is_integer = decimal_point_index > 0 && decimal_point_index >= len;
+
+    Ok(DecodedNumber::Parts {
+        is_negative: !is_positive,
+        decimal_point_index,
+        is_integer,
+    })
+}
+
+/// Stack-buffer twin of [`decode_number_parts`]: walks the wire NUMBER digits
+/// into `digit_buf` (no heap allocation) and reports the parts needed to build
+/// the inline [`super::number::OracleNumber`]. The single-byte sentinels return
+/// their fixed canonical text. The owned per-cell NUMBER decode drives this so a
+/// NUMBER-heavy row allocates nothing per cell.
+///
+/// `digit_buf` MUST be at least [`super::number::MAX_DIGITS`] long. This shares
+/// the exact digit-walk logic with [`decode_number_parts`]; keep them aligned.
+pub(crate) fn decode_number_parts_stack(
+    bytes: &[u8],
+    digit_buf: &mut [u8],
+) -> Result<super::number::DecodedNumberStack> {
+    use super::number::DecodedNumberStack;
+
+    if bytes.len() > 21 {
+        return Err(ProtocolError::TtcDecode("encoded NUMBER too long"));
+    }
+    let Some(&first) = bytes.first() else {
+        return Err(ProtocolError::TtcDecode("empty NUMBER"));
+    };
+    let is_positive = first & 0x80 != 0;
+    if bytes.len() == 1 {
+        return Ok(DecodedNumberStack::Sentinel {
+            text: if is_positive { "0" } else { "-1e126" },
+            is_integer: true,
+        });
+    }
+
+    let exponent_byte = if is_positive { first } else { !first };
+    let exponent = i16::from(exponent_byte) - 193;
+    let mut decimal_point_index = exponent * 2 + 2;
+    let mut end = bytes.len();
+    if !is_positive && bytes[end - 1] == 102 {
+        end -= 1;
+    }
+
+    let mut len = 0usize;
+    // The digit count is provably <= MAX_DIGITS for valid wire forms; guard
+    // defensively so a crafted oversize input cannot index out of bounds.
+    let push = |buf: &mut [u8], d: u8, len: &mut usize| {
+        if *len < buf.len() {
+            buf[*len] = d;
+            *len += 1;
+        }
+    };
+
+    for (index, encoded) in bytes.iter().enumerate().take(end).skip(1) {
+        let value = if is_positive {
+            encoded.saturating_sub(1)
+        } else {
+            101u8.saturating_sub(*encoded)
+        };
+
+        let first_digit = value / 10;
+        if first_digit == 0 && len == 0 {
+            decimal_point_index -= 1;
+        } else if first_digit == 10 {
+            push(digit_buf, 1, &mut len);
+            push(digit_buf, 0, &mut len);
+            decimal_point_index += 1;
+        } else if first_digit != 0 || index > 0 {
+            push(digit_buf, first_digit, &mut len);
+        }
+
+        let second_digit = value % 10;
+        if second_digit != 0 || index < end - 1 {
+            push(digit_buf, second_digit, &mut len);
+        }
+    }
+
+    let len_i16 = i16::try_from(len).unwrap_or(i16::MAX);
+    let is_integer = decimal_point_index > 0 && decimal_point_index >= len_i16;
+
+    Ok(DecodedNumberStack::Parts {
+        digit_len: len,
+        is_negative: !is_positive,
+        decimal_point_index,
+        is_integer,
+    })
+}
+
+/// Append the canonical decimal text for `digits` (significant decimal digits,
+/// each 0..=9) positioned by `decimal_point_index`, with the given sign. This is
+/// the legacy `decode_number_text_into` formatting tail, factored out so the
+/// inline [`super::number::OracleNumber`] formatter is the same logic. Keep it
+/// byte-for-byte aligned with `super::number::fmt_inline_into`.
+pub(crate) fn format_number_digits(
+    digits: &[u8],
+    is_negative: bool,
+    decimal_point_index: i16,
+    text: &mut String,
+) {
+    if is_negative {
         text.push('-');
     }
     if decimal_point_index <= 0 {
         text.push_str("0.");
-        is_integer = false;
         for _ in decimal_point_index..0 {
             text.push('0');
         }
@@ -557,7 +693,6 @@ pub fn decode_number_text_into(
             )
         {
             text.push('.');
-            is_integer = false;
         }
         text.push(char::from(b'0' + *digit));
     }
@@ -566,8 +701,6 @@ pub fn decode_number_text_into(
             text.push('0');
         }
     }
-
-    Ok(is_integer)
 }
 
 pub(crate) fn decode_text_value(bytes: &[u8], csfrm: u8) -> Result<String> {

@@ -27,10 +27,7 @@ fn col(name: &str) -> ColumnMetadata {
 }
 
 fn num(text: &str) -> QueryValue {
-    QueryValue::Number {
-        text: text.to_string(),
-        is_integer: !text.contains('.'),
-    }
+    QueryValue::number_from_text(text, !text.contains('.'))
 }
 
 fn text(value: &str) -> QueryValue {

@@ -19,16 +19,18 @@
 //!
 //! # Lossless NUMBER
 //!
-//! Oracle NUMBER is carried as canonical decimal text end to end. The
-//! `rust_decimal::Decimal` conversions go through that text carrier in both
-//! directions, so a value round-trips *exactly* to the full precision
-//! `rust_decimal::Decimal` can represent (~28-29 significant digits) — no float
-//! rounding anywhere on the path. python-oracledb hands you a lossy `float`
-//! (~15-17 digits) unless you opt into `decimal.Decimal` per column. For values
-//! exceeding `Decimal`'s range, read the raw canonical text with
+//! Oracle NUMBER is carried losslessly as an inline `{ i128 coefficient, i16
+//! scale }` form (see [`oracledb_protocol::thin::OracleNumber`]); its canonical
+//! decimal text is synthesized on demand by a single shared formatter. The
+//! `rust_decimal::Decimal` conversion builds *directly* from the inline
+//! coefficient/scale when it fits, so a value round-trips *exactly* to the full
+//! precision `rust_decimal::Decimal` can represent (~28-29 significant digits) —
+//! no float rounding anywhere on the path. `i64`/`i128` reconstruct directly
+//! from the coefficient with no string parse. python-oracledb hands you a lossy
+//! `float` (~15-17 digits) unless you opt into `decimal.Decimal` per column. For
+//! values exceeding `Decimal`'s range, read the canonical text with
 //! [`QueryValue::as_number_text`](oracledb_protocol::thin::QueryValue::as_number_text)
-//! and bind it back as `BindValue::Number`, which carries Oracle's full 38
-//! digits.
+//! and bind it back as `BindValue::Number`, which carries Oracle's full digits.
 
 use oracledb_protocol::thin::{BindValue, QueryResult, QueryValue};
 
@@ -97,7 +99,7 @@ fn value_kind(value: &QueryValue) -> &'static str {
         QueryValue::BinaryDouble(_) => "BINARY_DOUBLE/BINARY_FLOAT",
         QueryValue::IntervalDS { .. } => "INTERVAL DAY TO SECOND",
         QueryValue::IntervalYM { .. } => "INTERVAL YEAR TO MONTH",
-        QueryValue::Number { .. } => "NUMBER",
+        QueryValue::Number(_) => "NUMBER",
         QueryValue::Boolean(_) => "BOOLEAN",
         QueryValue::Cursor(_) => "REF CURSOR",
         QueryValue::DateTime { .. } => "DATE/TIMESTAMP",
@@ -138,16 +140,34 @@ pub trait FromSql: Sized {
 impl FromSql for i64 {
     fn from_sql(value: &QueryValue) -> Result<Self, ConversionError> {
         match value {
-            QueryValue::Number { text, .. } => {
-                text.trim()
-                    .parse::<i64>()
-                    .map_err(|_| ConversionError::OutOfRange {
-                        expected: "i64",
-                        detail: format!("NUMBER {text:?} is not an integer that fits i64"),
-                    })
-            }
+            // Exact: reconstruct directly from the inline coefficient/scale (no
+            // string parse) when the value is an integer that fits i64.
+            QueryValue::Number(num) => num.to_i64().ok_or_else(|| ConversionError::OutOfRange {
+                expected: "i64",
+                detail: format!(
+                    "NUMBER {:?} is not an integer that fits i64",
+                    num.to_canonical_string()
+                ),
+            }),
             QueryValue::Boolean(b) => Ok(i64::from(*b)),
             other => mismatch("i64", other),
+        }
+    }
+}
+
+impl FromSql for i128 {
+    fn from_sql(value: &QueryValue) -> Result<Self, ConversionError> {
+        match value {
+            // Exact i128 reconstruct from the inline coefficient/scale.
+            QueryValue::Number(num) => num.to_i128().ok_or_else(|| ConversionError::OutOfRange {
+                expected: "i128",
+                detail: format!(
+                    "NUMBER {:?} is not an integer that fits i128",
+                    num.to_canonical_string()
+                ),
+            }),
+            QueryValue::Boolean(b) => Ok(i128::from(*b)),
+            other => mismatch("i128", other),
         }
     }
 }
@@ -175,13 +195,22 @@ impl FromSql for u32 {
 impl FromSql for f64 {
     fn from_sql(value: &QueryValue) -> Result<Self, ConversionError> {
         match value {
-            QueryValue::Number { text, .. } | QueryValue::BinaryDouble(text) => text
-                .trim()
-                .parse::<f64>()
-                .map_err(|_| ConversionError::OutOfRange {
-                    expected: "f64",
-                    detail: format!("{text:?} is not a finite f64"),
-                }),
+            QueryValue::Number(num) => {
+                let text = num.to_canonical_string();
+                text.parse::<f64>()
+                    .map_err(|_| ConversionError::OutOfRange {
+                        expected: "f64",
+                        detail: format!("{text:?} is not a finite f64"),
+                    })
+            }
+            QueryValue::BinaryDouble(text) => {
+                text.trim()
+                    .parse::<f64>()
+                    .map_err(|_| ConversionError::OutOfRange {
+                        expected: "f64",
+                        detail: format!("{text:?} is not a finite f64"),
+                    })
+            }
             other => mismatch("f64", other),
         }
     }
@@ -198,12 +227,12 @@ impl FromSql for bool {
         match value {
             QueryValue::Boolean(b) => Ok(*b),
             // A NUMBER(1) flag column round-trips as 0/1.
-            QueryValue::Number { text, .. } => match text.trim() {
-                "0" => Ok(false),
-                "1" => Ok(true),
-                other => Err(ConversionError::OutOfRange {
+            QueryValue::Number(num) => match num.to_i64() {
+                Some(0) => Ok(false),
+                Some(1) => Ok(true),
+                _ => Err(ConversionError::OutOfRange {
                     expected: "bool",
-                    detail: format!("NUMBER {other:?} is neither 0 nor 1"),
+                    detail: format!("NUMBER {:?} is neither 0 nor 1", num.to_canonical_string()),
                 }),
             },
             other => mismatch("bool", other),
@@ -216,7 +245,7 @@ impl FromSql for String {
         match value {
             QueryValue::Text(s) => Ok(s.clone()),
             QueryValue::Rowid(s) => Ok(s.clone()),
-            QueryValue::Number { text, .. } => Ok(text.clone()),
+            QueryValue::Number(num) => Ok(num.to_canonical_string()),
             QueryValue::BinaryDouble(text) => Ok(text.clone()),
             other => mismatch("String", other),
         }
@@ -466,16 +495,28 @@ mod rust_decimal_impls {
     impl FromSql for Decimal {
         fn from_sql(value: &QueryValue) -> Result<Self, ConversionError> {
             match value {
-                QueryValue::Number { text, .. } => {
-                    Decimal::from_str(text.trim()).or_else(|_| {
-                        // Decimal::from_str rejects scientific notation that
-                        // Oracle never emits for canonical NUMBER text, but be
-                        // defensive and try the scientific parser too.
-                        Decimal::from_scientific(text.trim()).map_err(|err| {
-                            ConversionError::OutOfRange {
-                                expected: "rust_decimal::Decimal",
-                                detail: format!("NUMBER {text:?} does not fit Decimal: {err}"),
+                QueryValue::Number(num) => {
+                    // EXACT path: build directly from the inline coefficient and a
+                    // non-negative scale that `rust_decimal` accepts (0..=28). This
+                    // avoids a string round-trip and is lossless for the full
+                    // 28-significant-digit domain `Decimal` can hold.
+                    if let (Some(coefficient), Some(scale)) = (num.coefficient(), num.scale()) {
+                        if (0..=28).contains(&scale) {
+                            if let Ok(dec) = Decimal::try_from_i128_with_scale(
+                                coefficient,
+                                u32::from(scale as u16),
+                            ) {
+                                return Ok(dec);
                             }
+                        }
+                    }
+                    // Fallback for negative scale / out-of-range / boxed-text: go
+                    // through the canonical text (still lossless for valid values).
+                    let text = num.to_canonical_string();
+                    Decimal::from_str(&text).or_else(|_| {
+                        Decimal::from_scientific(&text).map_err(|err| ConversionError::OutOfRange {
+                            expected: "rust_decimal::Decimal",
+                            detail: format!("NUMBER {text:?} does not fit Decimal: {err}"),
                         })
                     })
                 }
@@ -1182,10 +1223,7 @@ mod tests {
     use oracledb_protocol::thin::ColumnMetadata;
 
     fn num(text: &str) -> QueryValue {
-        QueryValue::Number {
-            text: text.to_string(),
-            is_integer: !text.contains('.'),
-        }
+        QueryValue::number_from_text(text, !text.contains('.'))
     }
 
     #[test]
@@ -1205,6 +1243,35 @@ mod tests {
             Vec::<u8>::from_sql(&QueryValue::Raw(vec![1, 2, 3])).unwrap(),
             vec![1, 2, 3]
         );
+    }
+
+    #[test]
+    fn i128_from_sql_is_exact_beyond_i64() {
+        // A 30-digit integer that exceeds i64 but fits i128 must reconstruct
+        // exactly from the inline coefficient (no string round-trip loss).
+        let big = "123456789012345678901234567890";
+        assert_eq!(
+            i128::from_sql(&num(big)).unwrap(),
+            123_456_789_012_345_678_901_234_567_890_i128
+        );
+        // i64 of the same value is out of range (typed error, not a panic).
+        assert!(matches!(
+            i64::from_sql(&num(big)).unwrap_err(),
+            ConversionError::OutOfRange { .. }
+        ));
+        // A fractional NUMBER is not an integer -> typed OutOfRange.
+        assert!(matches!(
+            i128::from_sql(&num("3.14")).unwrap_err(),
+            ConversionError::OutOfRange { .. }
+        ));
+    }
+
+    #[test]
+    fn string_from_sql_is_canonical_byte_exact() {
+        // The String conversion must yield the exact canonical NUMBER text.
+        for text in ["0", "-1", "2.5", "100", "0.001", "12345678901234567890"] {
+            assert_eq!(String::from_sql(&num(text)).unwrap(), text);
+        }
     }
 
     #[test]

@@ -148,10 +148,11 @@ pub enum QueryValue {
         years: i32,
         months: i32,
     },
-    Number {
-        text: String,
-        is_integer: bool,
-    },
+    /// Oracle `NUMBER` / `BINARY_INTEGER`. The lossless decimal value is carried
+    /// inline as a `{ coefficient: i128, scale: i16 }` form (no per-cell heap
+    /// allocation for the common case), with a boxed text fallback for the rare
+    /// value that does not fit inline. See [`OracleNumber`].
+    Number(OracleNumber),
     /// Native Oracle `DB_TYPE_BOOLEAN` (`ora_type_num` 252, 23ai+): surfaced as
     /// a Python `bool` rather than an integer.
     Boolean(bool),
@@ -182,14 +183,30 @@ pub enum QueryValue {
 // Compile-time guard for the hot per-row fetch path. `Vec<QueryValue>` is
 // allocated once per fetched row, so the enum's stack footprint directly drives
 // cache locality. Boxing the cold variants (Cursor/Object/Lob/Vector/Json)
-// brought this from 72 bytes down to 32 — the niche-optimized footprint of the
-// largest hot scalar variant (`Number { text: String, is_integer: bool }`,
-// where the discriminant tucks into `String`'s spare capacity bytes so it adds
-// no width). Adding a new large *inline* variant must either stay under the
-// bound or be boxed; do not bump N without re-confirming the hot fetch path.
+// brought this from 72 bytes down to 32. The largest hot scalar variant is now
+// `Number(OracleNumber)`: the inline `OracleNumber` form is `{ i128 coefficient
+// (16) + i16 scale (2) + bool + tag }`, and its boxed-text fallback variant is a
+// `Box<str>` (16) + bool — both well within 24 bytes, so `QueryValue` stays at
+// the 32-byte budget (the `Text(String)` / `Array(Vec)` variants remain the
+// 24-byte width drivers; the discriminant tucks into their spare bytes). Adding
+// a new large *inline* variant must either stay under the bound or be boxed; do
+// not bump N without re-confirming the hot fetch path.
 const _: () = assert!(core::mem::size_of::<QueryValue>() <= 32);
+// Explicit guard for the inline NUMBER carrier: it must not by itself push
+// `QueryValue` past budget (it is the perf-critical inline payload).
+const _: () = assert!(core::mem::size_of::<OracleNumber>() <= 24);
 
 impl QueryValue {
+    /// Construct a `NUMBER` value from already-canonical decimal `text` and an
+    /// explicit `is_integer` flag. Convenience for binds / tests that hold the
+    /// canonical text; folds into the inline form when it fits. The text MUST be
+    /// canonical Oracle `NUMBER` text (the form the decoder emits).
+    pub fn number_from_text(text: &str, is_integer: bool) -> Self {
+        QueryValue::Number(OracleNumber::from_canonical_text_with_flag(
+            text, is_integer,
+        ))
+    }
+
     /// Borrow this value as decoded text when it is a `VARCHAR2` / `CHAR` /
     /// `NVARCHAR2` / `CLOB`-inlined string, otherwise `None`. Convenience
     /// accessor for callers that want to avoid matching the full enum.
@@ -206,7 +223,9 @@ impl QueryValue {
     /// other variant, or a `NUMBER` that does not fit / is not integral.
     pub fn as_i64(&self) -> Option<i64> {
         match self {
-            QueryValue::Number { text, .. } => text.parse::<i64>().ok(),
+            QueryValue::Number(num) => num
+                .to_i64()
+                .or_else(|| num.to_canonical_string().parse::<i64>().ok()),
             QueryValue::Boolean(value) => Some(i64::from(*value)),
             _ => None,
         }
@@ -216,17 +235,26 @@ impl QueryValue {
     /// and `BINARY_FLOAT` (all carried as canonical text), otherwise `None`.
     pub fn as_f64(&self) -> Option<f64> {
         match self {
-            QueryValue::Number { text, .. } => text.parse::<f64>().ok(),
+            QueryValue::Number(num) => num.to_canonical_string().parse::<f64>().ok(),
             QueryValue::BinaryDouble(text) => text.parse::<f64>().ok(),
             _ => None,
         }
     }
 
-    /// Borrow the canonical decimal text of a `NUMBER` value (lossless,
-    /// arbitrary precision), otherwise `None`.
-    pub fn as_number_text(&self) -> Option<&str> {
+    /// The canonical decimal text of a `NUMBER` value (lossless, arbitrary
+    /// precision), otherwise `None`. The owned inline form synthesizes the text
+    /// on demand via the shared formatter, so this returns an owned `Cow`.
+    pub fn as_number_text(&self) -> Option<std::borrow::Cow<'_, str>> {
         match self {
-            QueryValue::Number { text, .. } => Some(text.as_str()),
+            QueryValue::Number(num) => Some(num.to_canonical_cow()),
+            _ => None,
+        }
+    }
+
+    /// Borrow the inline `NUMBER` representation, otherwise `None`.
+    pub fn as_number(&self) -> Option<&OracleNumber> {
+        match self {
+            QueryValue::Number(num) => Some(num),
             _ => None,
         }
     }
@@ -338,10 +366,9 @@ impl QueryValueRef<'_> {
         match *self {
             QueryValueRef::Text(text) => QueryValue::Text(text.to_string()),
             QueryValueRef::Raw(bytes) => QueryValue::Raw(bytes.to_vec()),
-            QueryValueRef::Number { text, is_integer } => QueryValue::Number {
-                text: text.to_string(),
-                is_integer,
-            },
+            QueryValueRef::Number { text, is_integer } => QueryValue::Number(
+                OracleNumber::from_canonical_text_with_flag(text, is_integer),
+            ),
             QueryValueRef::Boolean(value) => QueryValue::Boolean(value),
             QueryValueRef::IntervalDS {
                 days,
@@ -389,11 +416,15 @@ impl QueryValueRef<'_> {
     }
 
     /// Borrow the canonical decimal text of a `NUMBER` value, otherwise `None`.
-    /// Mirror of [`QueryValue::as_number_text`] for the borrowed path.
+    /// Mirror of [`QueryValue::as_number_text`] for the borrowed path. The hot
+    /// case borrows the per-row number arena (zero copy). The `Owned` fallback
+    /// only yields a borrow when the inline form spilled to boxed text; the
+    /// inline numeric form has no stored `&str` (it never reaches `Owned` from
+    /// the fetch path — NUMBERs are arena-resident).
     pub fn as_number_text(&self) -> Option<&str> {
         match self {
             QueryValueRef::Number { text, .. } => Some(text),
-            QueryValueRef::Owned(QueryValue::Number { text, .. }) => Some(text.as_str()),
+            QueryValueRef::Owned(QueryValue::Number(num)) => num.as_borrowed_text(),
             _ => None,
         }
     }
@@ -698,13 +729,10 @@ mod accessor_tests {
         assert_eq!(text.as_text(), Some("hello"));
         assert_eq!(text.as_i64(), None);
 
-        let int = QueryValue::Number {
-            text: "42".to_string(),
-            is_integer: true,
-        };
+        let int = QueryValue::number_from_text("42", true);
         assert_eq!(int.as_i64(), Some(42));
         assert_eq!(int.as_f64(), Some(42.0));
-        assert_eq!(int.as_number_text(), Some("42"));
+        assert_eq!(int.as_number_text().as_deref(), Some("42"));
 
         let dbl = QueryValue::BinaryDouble("2.5".to_string());
         assert_eq!(dbl.as_f64(), Some(2.5));
@@ -733,13 +761,7 @@ mod accessor_tests {
                     ..ColumnMetadata::default()
                 },
             ],
-            rows: vec![vec![
-                Some(QueryValue::Number {
-                    text: "7".to_string(),
-                    is_integer: true,
-                }),
-                None,
-            ]],
+            rows: vec![vec![Some(QueryValue::number_from_text("7", true)), None]],
             ..QueryResult::default()
         };
         assert_eq!(result.cell(0, 0).and_then(QueryValue::as_i64), Some(7));
@@ -776,10 +798,7 @@ mod query_value_ref_tests {
         };
         assert_eq!(
             number.to_owned_value(),
-            QueryValue::Number {
-                text: "-12.5".to_string(),
-                is_integer: false,
-            }
+            QueryValue::number_from_text("-12.5", false)
         );
 
         let boolean = QueryValueRef::Boolean(true);

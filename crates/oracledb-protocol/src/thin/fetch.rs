@@ -1909,14 +1909,8 @@ mod borrowed_fetch_tests {
             col("NUMBERCOL", ORA_TYPE_NUM_NUMBER, CS_FORM_IMPLICIT, 22),
         ];
         let previous_row = vec![
-            Some(QueryValue::Number {
-                text: "2".into(),
-                is_integer: true,
-            }),
-            Some(QueryValue::Number {
-                text: "0.5".into(),
-                is_integer: false,
-            }),
+            Some(QueryValue::number_from_text("2", true)),
+            Some(QueryValue::number_from_text("0.5", false)),
         ];
 
         // Owned golden.

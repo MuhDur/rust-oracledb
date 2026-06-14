@@ -1248,7 +1248,10 @@ pub(crate) fn query_value_to_py(
             let value = value.parse::<f64>().map_err(runtime_error)?;
             Ok(value.into_pyobject(py)?.unbind().into())
         }
-        Some(QueryValue::Number { text, is_integer }) => {
+        Some(QueryValue::Number(num)) => {
+            // The canonical decimal text comes from the single shared formatter,
+            // byte-identical to the old text carrier python-oracledb asserts.
+            let text = num.to_canonical_string();
             // base/cursor.pyx:212-214: NUMBER columns fetch as decimal.Decimal
             // when defaults.fetch_decimals (or the per-cursor flag) is set.
             if fetch_decimals {
@@ -1256,8 +1259,8 @@ pub(crate) fn query_value_to_py(
                     .getattr("Decimal")?
                     .call1((text.as_str(),))?
                     .unbind())
-            } else if *is_integer {
-                python_int_from_decimal_text(py, text)
+            } else if num.is_integer() {
+                python_int_from_decimal_text(py, &text)
             } else {
                 let value = text.parse::<f64>().map_err(runtime_error)?;
                 Ok(value.into_pyobject(py)?.unbind().into())

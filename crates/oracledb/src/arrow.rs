@@ -470,13 +470,20 @@ fn invalid_value(column: &ColumnMetadata, reason: impl Into<String>) -> ArrowCon
 }
 
 /// Text form of a numeric value (NUMBER text or BINARY_DOUBLE/FLOAT repr).
-fn numeric_text<'a>(column: &ColumnMetadata, value: &'a QueryValue) -> Result<&'a str> {
+/// NUMBER synthesizes its canonical text on demand from the inline form via the
+/// shared formatter, so this returns a `Cow` (owned for NUMBER, borrowed for the
+/// already-text BINARY_DOUBLE / BOOLEAN cases).
+fn numeric_text<'a>(
+    column: &ColumnMetadata,
+    value: &'a QueryValue,
+) -> Result<std::borrow::Cow<'a, str>> {
+    use std::borrow::Cow;
     match value {
-        QueryValue::Number { text, .. } => Ok(text),
-        QueryValue::BinaryDouble(text) => Ok(text),
+        QueryValue::Number(num) => Ok(Cow::Owned(num.to_canonical_string())),
+        QueryValue::BinaryDouble(text) => Ok(Cow::Borrowed(text)),
         // A native DB_TYPE_BOOLEAN is materialized into an arrow numeric column
         // as 1/0 (it has no dedicated arrow boolean column type here).
-        QueryValue::Boolean(value) => Ok(if *value { "1" } else { "0" }),
+        QueryValue::Boolean(value) => Ok(Cow::Borrowed(if *value { "1" } else { "0" })),
         _ => Err(invalid_value(column, "expected a numeric value")),
     }
 }
@@ -671,7 +678,7 @@ macro_rules! build_int_column {
                     // A non-integer text (fractional / non-numeric) is DPY-4036;
                     // an in-range integer that overflows the narrower Arrow width
                     // is DPY-4038 (matching the reference distinction).
-                    let wide = parse_number_i64(text).ok_or_else(|| {
+                    let wide = parse_number_i64(text.as_ref()).ok_or_else(|| {
                         ArrowConversionError::CannotConvertToInteger {
                             value: text.to_string(),
                         }
@@ -705,12 +712,12 @@ macro_rules! build_uint_column {
                         value: text.to_string(),
                         arrow_type: $arrow_type.to_string(),
                     };
-                    let wide = match parse_number_u64(text) {
+                    let wide = match parse_number_u64(text.as_ref()) {
                         Some(wide) => wide,
                         None => {
                             // A valid integer that is simply out of the unsigned
                             // range is DPY-4038; anything else is DPY-4036.
-                            if parse_number_i64(text).is_some() {
+                            if parse_number_i64(text.as_ref()).is_some() {
                                 return Err(invalid());
                             }
                             return Err(ArrowConversionError::CannotConvertToInteger {
@@ -814,11 +821,9 @@ fn build_column_array<'a>(
                     None => builder.append_null(),
                     Some(value) => {
                         let text = numeric_text(column, value)?;
-                        let unscaled =
-                            decimal128_from_number_text(text, *scale).ok_or_else(|| {
-                                ArrowConversionError::DecimalOutOfRange {
-                                    value: text.to_string(),
-                                }
+                        let unscaled = decimal128_from_number_text(text.as_ref(), *scale)
+                            .ok_or_else(|| ArrowConversionError::DecimalOutOfRange {
+                                value: text.to_string(),
                             })?;
                         builder.append_value(unscaled);
                     }
@@ -834,7 +839,7 @@ fn build_column_array<'a>(
                     Some(value) => {
                         // BOOLEAN columns surface as NUMBER 0/1 in QueryValue
                         let text = numeric_text(column, value)?;
-                        builder.append_value(text != "0");
+                        builder.append_value(text.as_ref() != "0");
                     }
                 }
             }
@@ -1664,10 +1669,7 @@ mod tests {
     }
 
     fn number(text: &str) -> Option<QueryValue> {
-        Some(QueryValue::Number {
-            text: text.to_string(),
-            is_integer: !text.contains('.'),
-        })
+        Some(QueryValue::number_from_text(text, !text.contains('.')))
     }
 
     fn datetime(

@@ -86,16 +86,21 @@ fn borrowed_fetch_cuts_allocations_versus_owned_fetch() {
     );
 
     // --- Owned path: decode the whole batch into owned QueryValues, projecting
-    //     each cell's length so the optimizer cannot elide the decode. ---
+    //     each cell so the optimizer cannot elide the decode. NUMBER cells are
+    //     projected via their inline integer value (no text materialization) so
+    //     this measures the *decode* allocations — the inline NUMBER form no
+    //     longer mallocs a String per cell, which is the win under test. ---
     let mut owned_sum = 0usize;
     let owned = allocation_counter::measure(|| {
         let result = parse_fetch_response_with_context(&payload, caps, &columns, None).unwrap();
         let mut sum = 0usize;
         for row in &result.rows {
             for cell in row.iter().flatten() {
-                sum += cell
-                    .as_number_text()
-                    .map_or_else(|| cell.as_text().map_or(0, str::len), str::len);
+                sum += match cell {
+                    // i64 reconstruct from the inline coefficient/scale: no alloc.
+                    v if v.as_number().is_some() => v.as_i64().unwrap_or(0) as usize,
+                    v => v.as_text().map_or(0, str::len),
+                };
             }
         }
         owned_sum = std::hint::black_box(sum);
@@ -113,7 +118,12 @@ fn borrowed_fetch_cuts_allocations_versus_owned_fetch() {
                 for cell in row.iter().flatten() {
                     sum += match cell {
                         QueryValueRef::Text(t) => t.len(),
-                        QueryValueRef::Number { text, .. } => text.len(),
+                        // Match the owned projection: integer value of the NUMBER,
+                        // parsed from the arena text (the borrowed path already has
+                        // the canonical text, so no extra allocation).
+                        QueryValueRef::Number { text, .. } => {
+                            text.parse::<i64>().unwrap_or(0) as usize
+                        }
                         _ => 0,
                     };
                 }

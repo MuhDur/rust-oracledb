@@ -279,7 +279,7 @@ fn abort_mode_responses_parse_with_tokens() {
         .iter()
         .map(|row| {
             let id = match &row[0] {
-                Some(QueryValue::Number { text, .. }) => text.clone(),
+                Some(v @ QueryValue::Number(_)) => v.as_number_text().unwrap().into_owned(),
                 other => panic!("unexpected id value: {other:?}"),
             };
             let val = match &row[1] {
@@ -338,7 +338,7 @@ fn continue_mode_pipeline_carries_mode_and_surfaces_midstream_error() {
     let count = parse_query_response(&frames.responses[2], caps()).expect("fetchone response");
     assert_eq!(count.token_num, Some(3));
     match &count.rows[0][0] {
-        Some(QueryValue::Number { text, .. }) => assert_eq!(text, "3"),
+        Some(v @ QueryValue::Number(_)) => assert_eq!(v.as_number_text().unwrap(), "3"),
         other => panic!("unexpected count value: {other:?}"),
     }
 
@@ -383,7 +383,7 @@ fn bound_execute_in_pipeline_byte_matches_reference_client() {
         .rows
         .iter()
         .map(|row| match &row[0] {
-            Some(QueryValue::Number { text, .. }) => text.clone(),
+            Some(v @ QueryValue::Number(_)) => v.as_number_text().unwrap().into_owned(),
             other => panic!("unexpected id value: {other:?}"),
         })
         .collect();

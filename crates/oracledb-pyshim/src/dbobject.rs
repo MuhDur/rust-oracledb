@@ -777,8 +777,11 @@ pub(crate) fn dbobject_unpack_value(
         "DB_TYPE_NUMBER" => {
             let value = decode_number_value(&bytes).map_err(runtime_error)?;
             if metadata.scale == -127 && metadata.precision > 0 {
-                if let QueryValue::Number { text, .. } = value {
-                    let value = text.parse::<f64>().map_err(runtime_error)?;
+                if let QueryValue::Number(num) = &value {
+                    let value = num
+                        .to_canonical_string()
+                        .parse::<f64>()
+                        .map_err(runtime_error)?;
                     return Ok(value.into_pyobject(py)?.unbind().into());
                 }
             }

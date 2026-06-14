@@ -89,7 +89,7 @@ fn pipeline_round_trips_against_local_container() {
         .iter()
         .map(|row| {
             let id = match &row[0] {
-                Some(QueryValue::Number { text, .. }) => text.clone(),
+                Some(v @ QueryValue::Number(_)) => v.as_number_text().unwrap().into_owned(),
                 other => panic!("unexpected id: {other:?}"),
             };
             let val = match &row[1] {
@@ -142,7 +142,7 @@ fn pipeline_round_trips_against_local_container() {
     let count = parse_query_response(&responses[2], capabilities).expect("count response");
     assert_eq!(count.token_num, Some(3));
     match &count.rows[0][0] {
-        Some(QueryValue::Number { text, .. }) => assert_eq!(text, "3"),
+        Some(v @ QueryValue::Number(_)) => assert_eq!(v.as_number_text().unwrap(), "3"),
         other => panic!("unexpected count: {other:?}"),
     }
 
@@ -151,7 +151,7 @@ fn pipeline_round_trips_against_local_container() {
         BlockingConnection::execute_query(&mut conn, "select max(id) from pipe_live_rust", 2)
             .expect("plain query after pipelines");
     match &after.rows[0][0] {
-        Some(QueryValue::Number { text, .. }) => assert_eq!(text, "3"),
+        Some(v @ QueryValue::Number(_)) => assert_eq!(v.as_number_text().unwrap(), "3"),
         other => panic!("unexpected max id: {other:?}"),
     }
 
