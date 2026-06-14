@@ -99,7 +99,10 @@ fn new_ffi_capsule<'py, T>(
     // SAFETY: `ptr` is a freshly leaked `Box<T>` (non-null, properly aligned,
     // uniquely owned). `name` is a `'static CStr`. `destructor` reclaims exactly
     // this `Box<T>` under exactly this `name`. Ownership of the box transfers to
-    // the capsule for the rest of its lifetime.
+    // the capsule, whose destructor CPython invokes exactly once on collection.
+    // If capsule creation itself fails (only on a Python `MemoryError`), the
+    // destructor is never registered and the box leaks; that is a benign leak on
+    // an OOM path, never a double-free or use-after-free.
     unsafe { PyCapsule::new_with_pointer_and_destructor(py, ptr, name, Some(destructor)) }
 }
 
@@ -250,6 +253,13 @@ fn import_schema(obj: &Bound<'_, PyAny>) -> PyResult<Schema> {
     // consumer-owned `FFI_ArrowSchema` (Arrow PyCapsule protocol). We read it by
     // reference and deep-clone via `Schema::try_from`; we do not take ownership
     // of the producer's struct, so we must not run its release callback.
+    //
+    // Lifetime: `&*ptr` produces a reference whose lifetime the borrow checker
+    // does NOT tie to `capsule_obj` (it is reborrowed from a raw pointer). The
+    // capsule owns the `FFI_ArrowSchema`, so the borrow is valid only while
+    // `capsule_obj` is alive. We use `ffi_schema` solely below, before
+    // `capsule_obj` (a function-scoped local) is dropped, so it never dangles;
+    // the deep clone finishes before the capsule can be collected.
     let ffi_schema: &FFI_ArrowSchema = unsafe {
         let ptr = pyffi::PyCapsule_GetPointer(capsule.as_ptr(), CAP_SCHEMA.as_ptr());
         if ptr.is_null() {
