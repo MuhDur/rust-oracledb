@@ -97,6 +97,15 @@ impl<'a> DbObjectPackedReader<'a> {
         self.bytes.len().saturating_sub(self.pos)
     }
 
+    /// Bytes still unread in the packed image. Exposed so a caller materializing
+    /// a collection (whose element count is a server-declared `read_length`) can
+    /// bound its `Vec` pre-allocation against the buffer via the
+    /// [`BoundedReader`](crate::wire::BoundedReader) trait — closing the
+    /// OOM-from-length class for DbObject collections too.
+    pub fn remaining(&self) -> usize {
+        self.bytes_left()
+    }
+
     pub fn read_atomic_null(&mut self, is_collection_context: bool) -> Result<bool> {
         let value = self.read_u8()?;
         match (value, is_collection_context) {
@@ -106,6 +115,12 @@ impl<'a> DbObjectPackedReader<'a> {
                 Ok(false)
             }
         }
+    }
+}
+
+impl crate::wire::BoundedReader for DbObjectPackedReader<'_> {
+    fn remaining(&self) -> usize {
+        self.bytes_left()
     }
 }
 

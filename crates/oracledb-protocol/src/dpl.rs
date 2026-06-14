@@ -25,7 +25,7 @@ use crate::thin::{
     TNS_MSG_TYPE_ERROR, TNS_MSG_TYPE_PARAMETER, TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK,
     TNS_MSG_TYPE_STATUS,
 };
-use crate::wire::{TtcReader, TtcWriter};
+use crate::wire::{BoundedReader, TtcReader, TtcWriter};
 use crate::{ProtocolError, Result};
 
 pub const TNS_FUNC_DIRECT_PATH_PREPARE: u8 = 128;
@@ -184,7 +184,11 @@ fn parse_prepare_return_parameters(
     capabilities: ClientCapabilities,
 ) -> Result<DirectPathPrepareResult> {
     let num_columns = reader.read_ub4()?;
-    let mut column_metadata = Vec::with_capacity(num_columns.min(1_024) as usize);
+    // Each column reads a multi-field metadata record (>=1 byte), so bound the
+    // reservation by the buffer (BoundedReader) instead of an arbitrary cap;
+    // parse_column_metadata still fails closed on truncation.
+    let mut column_metadata: Vec<ColumnMetadata> =
+        reader.with_capacity_bounded(num_columns as usize, 1);
     for _ in 0..num_columns {
         let mut metadata = parse_column_metadata(reader, capabilities)?;
         apply_direct_path_metadata_overrides(&mut metadata, capabilities.charset_id);
@@ -197,7 +201,8 @@ fn parse_prepare_return_parameters(
         ));
     }
     let out_values_length = reader.read_ub2()?;
-    let mut out_values = Vec::with_capacity(usize::from(out_values_length));
+    // Each out value is a ub4 (>=1 byte on the wire); bound by the buffer.
+    let mut out_values: Vec<u32> = reader.with_capacity_bounded(usize::from(out_values_length), 1);
     for _ in 0..out_values_length {
         out_values.push(reader.read_ub4()?);
     }

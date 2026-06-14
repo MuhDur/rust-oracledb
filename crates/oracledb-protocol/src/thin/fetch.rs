@@ -353,11 +353,12 @@ pub(crate) fn parse_query_response_with_context_binds_and_options(
                 let num_results = reader.read_ub4()?;
                 // `num_results` is read straight off the wire (a ub4, up to
                 // ~4e9); each resultset consumes at least one byte, so cap the
-                // reservation by the bytes left in the payload. Without this a
-                // hostile server forces a multi-gigabyte allocation (OOM)
-                // before the truncated read in the loop body fails closed.
-                let mut resultsets =
-                    Vec::with_capacity((num_results as usize).min(reader.remaining()));
+                // reservation by the bytes left in the payload (BoundedReader).
+                // Without this a hostile server forces a multi-gigabyte
+                // allocation (OOM) before the truncated read in the loop body
+                // fails closed.
+                let mut resultsets: Vec<QueryValue> =
+                    reader.with_capacity_bounded(num_results as usize, 1);
                 for _ in 0..num_results {
                     let num_bytes = reader.read_u8()?;
                     reader.skip(usize::from(num_bytes))?;
@@ -579,11 +580,11 @@ pub(crate) fn parse_column_metadata(
             reader.skip(1)?;
             let num_annotations = reader.read_ub4()?;
             reader.skip(1)?;
-            // Bound by remaining bytes: each annotation reads at least a
-            // length-prefixed key/value, so a ub4 count larger than the
-            // payload is a lie that must not pre-allocate gigabytes.
-            let mut collected =
-                Vec::with_capacity((num_annotations as usize).min(reader.remaining()));
+            // Bound by remaining bytes (BoundedReader): each annotation reads
+            // at least a length-prefixed key/value, so a ub4 count larger than
+            // the payload is a lie that must not pre-allocate gigabytes.
+            let mut collected: Vec<(String, String)> =
+                reader.with_capacity_bounded(num_annotations as usize, 1);
             for _ in 0..num_annotations {
                 let key = reader.read_string_with_length()?.unwrap_or_default();
                 // A null annotation value is normalized to "" by the reference
@@ -710,9 +711,9 @@ pub(crate) fn parse_out_bind_row_data(
                     minimum: 0,
                 }
             })?;
-            // Cap by remaining bytes (each element consumes wire data); a ub4
-            // count cannot legitimately exceed the payload size.
-            let mut values = Vec::with_capacity(num_elements.min(reader.remaining()));
+            // Cap by remaining bytes (BoundedReader): each element consumes
+            // wire data, so a ub4 count cannot legitimately exceed the payload.
+            let mut values: Vec<Option<QueryValue>> = reader.with_capacity_bounded(num_elements, 1);
             for _ in 0..num_elements {
                 let value = parse_column_value(reader, metadata)?;
                 let actual_num_bytes = reader.read_sb4()?;
@@ -752,8 +753,8 @@ pub(crate) fn parse_returning_row_data(
                 minimum: 0,
             }
         })?;
-        // Cap by remaining bytes; see the OOM-hardening note above.
-        let mut values = Vec::with_capacity(num_rows.min(reader.remaining()));
+        // Cap by remaining bytes (BoundedReader); see the OOM note above.
+        let mut values: Vec<Option<QueryValue>> = reader.with_capacity_bounded(num_rows, 1);
         for _ in 0..num_rows {
             let value = parse_column_value(reader, metadata)?;
             let actual_num_bytes = reader.read_sb4()?;
@@ -1761,9 +1762,9 @@ pub(crate) fn parse_query_return_parameters(
     if arraydmlrowcounts {
         // reference messages/base.pyx `_process_return_parameters` tail
         let num_rows = reader.read_ub4()?;
-        // Each ub8 row count consumes at least one byte, so cap the
-        // reservation by the remaining payload size (OOM hardening).
-        let mut row_counts = Vec::with_capacity((num_rows as usize).min(reader.remaining()));
+        // Each ub8 row count consumes at least one byte, so cap the reservation
+        // by the remaining payload size (BoundedReader).
+        let mut row_counts: Vec<u64> = reader.with_capacity_bounded(num_rows as usize, 1);
         for _ in 0..num_rows {
             row_counts.push(reader.read_ub8()?);
         }

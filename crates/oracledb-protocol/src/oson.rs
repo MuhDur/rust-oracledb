@@ -42,6 +42,7 @@ use crate::thin::{
     decode_number_value, encode_binary_double, encode_binary_float, encode_interval_ds,
     encode_number_text, encode_oracle_date, encode_oracle_timestamp, QueryValue,
 };
+use crate::wire::BoundedReader;
 use crate::{ProtocolError, Result};
 
 // Magic bytes and versions (reference constants.pxi).
@@ -213,6 +214,17 @@ impl<'a> OsonReader<'a> {
     }
 }
 
+impl crate::wire::BoundedReader for OsonReader<'_> {
+    fn remaining(&self) -> usize {
+        // OSON is random-access (offsets seek anywhere in the image), so the
+        // ceiling on any count-driven reservation is the whole image, not the
+        // bytes after the current cursor. Every field name / child still needs
+        // at least one byte somewhere in the image, so the image length is the
+        // honest upper bound on any declared count.
+        self.data.len()
+    }
+}
+
 /// Maximum OSON container nesting depth. OSON offsets are absolute positions in
 /// the tree segment, so a malformed (or hostile) image can make a child node's
 /// offset point back at an ancestor, producing unbounded — effectively infinite
@@ -255,7 +267,10 @@ impl<'a> OsonDecoder<'a> {
         let final_pos = self.reader.pos;
 
         self.reader.seek_to(offsets_pos)?;
-        let mut names = Vec::with_capacity(num_fields);
+        // Bound the field-name reservation by the image (BoundedReader): each
+        // field occupies at least one hash-id byte, so a count larger than the
+        // image is necessarily a lie. The loop still fails closed on truncation.
+        let mut names: Vec<String> = self.reader.with_capacity_bounded(num_fields, 1);
         for _ in 0..num_fields {
             let offset = if offsets_size == 2 {
                 usize::from(self.reader.read_u16be()?)
@@ -345,20 +360,23 @@ impl<'a> OsonDecoder<'a> {
             offsets_pos = self.reader.pos;
         }
 
-        let mut object: Vec<(String, OsonValue)> = Vec::new();
-        let mut array: Vec<OsonValue> = Vec::new();
-        // Cap the speculative reservation by the image size: every child must
-        // occupy at least one offset-array entry plus one tree-segment byte, so
-        // a child count larger than the whole image is necessarily a lie. This
-        // turns an attacker-controlled `num_children` (a u32, up to ~4e9) into a
-        // bounded allocation; the loop below still fails closed when a child
-        // read runs past the end of the image.
-        let reserve_cap = self.reader.data.len();
-        if is_object {
-            object.reserve((num_children as usize).min(reserve_cap));
+        // Cap the speculative reservation by the image size (BoundedReader):
+        // every child must occupy at least one offset-array entry plus one
+        // tree-segment byte, so a child count larger than the whole image is
+        // necessarily a lie. This turns an attacker-controlled `num_children`
+        // (a u32, up to ~4e9) into a bounded allocation; the loop below still
+        // fails closed when a child read runs past the end of the image.
+        let (mut object, mut array): (Vec<(String, OsonValue)>, Vec<OsonValue>) = if is_object {
+            (
+                self.reader.with_capacity_bounded(num_children as usize, 1),
+                Vec::new(),
+            )
         } else {
-            array.reserve((num_children as usize).min(reserve_cap));
-        }
+            (
+                Vec::new(),
+                self.reader.with_capacity_bounded(num_children as usize, 1),
+            )
+        };
 
         for _ in 0..num_children {
             let mut name = String::new();
@@ -662,18 +680,19 @@ pub fn decode_oson(data: &[u8]) -> Result<OsonValue> {
     // Number of tiny nodes (always zero in images we produce; ignored).
     let _num_tiny_nodes = reader.read_u16be()?;
 
-    // Bound the field-name reservation by the image size (each name needs at
-    // least a hash-id byte, an offset entry, and a length-prefixed body, so the
-    // count cannot exceed the byte count). Without this an attacker-supplied
-    // num_*_field_names (each a u32) reserves multiple gigabytes before any
-    // name is read. The read_field_names calls below still bounds-check.
-    let decoder_data_len = reader.data.len();
-    let field_name_cap = num_short_field_names
-        .saturating_add(num_long_field_names)
-        .min(decoder_data_len);
+    // Bound the field-name reservation by the image size (BoundedReader): each
+    // name needs at least a hash-id byte, an offset entry, and a length-prefixed
+    // body, so the count cannot exceed the byte count. Without this an
+    // attacker-supplied num_*_field_names (each a u32) reserves multiple
+    // gigabytes before any name is read. The read_field_names calls below still
+    // bounds-check.
+    let field_names = reader.with_capacity_bounded(
+        num_short_field_names.saturating_add(num_long_field_names),
+        1,
+    );
     let mut decoder = OsonDecoder {
         reader,
-        field_names: Vec::with_capacity(field_name_cap),
+        field_names,
         field_id_length,
         tree_seg_pos: 0,
         relative_offsets,

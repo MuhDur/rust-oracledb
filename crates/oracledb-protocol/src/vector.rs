@@ -26,7 +26,7 @@
 //! The codec is fail-closed: unknown magic bytes, versions, or element
 //! formats produce an error rather than a best-effort guess.
 
-use crate::wire::{TtcReader, TtcWriter};
+use crate::wire::{BoundedReader, TtcReader, TtcWriter};
 use crate::{ProtocolError, Result};
 
 /// VECTOR image magic byte (`TNS_VECTOR_MAGIC_BYTE`).
@@ -125,7 +125,10 @@ pub fn decode_vector(data: &[u8]) -> Result<Vector> {
     if flags & TNS_VECTOR_FLAG_SPARSE != 0 {
         let num_dimensions = num_elements;
         let num_sparse = read_u16be(&mut reader)?;
-        let mut indices = Vec::with_capacity(usize::from(num_sparse));
+        // Each sparse index is a 4-byte u32 on the wire, so bound the
+        // pre-allocation by the buffer (BoundedReader invariant): a declared
+        // count larger than remaining()/4 cannot be honest.
+        let mut indices: Vec<u32> = reader.with_capacity_bounded(usize::from(num_sparse), 4);
         for _ in 0..num_sparse {
             indices.push(read_u32be(&mut reader)?);
         }
@@ -151,13 +154,13 @@ fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<V
     // many elements up front lets a hostile/buggy server force a multi-gigabyte
     // allocation (OOM) before the first element read even fails on truncation.
     // A legitimate image always carries `count * element_size` value bytes, so
-    // capping the initial reservation by what remains in the buffer never
-    // affects a valid vector while making the allocation fail-closed. The
-    // per-element `read_raw` below still bounds-checks each read.
-    let cap = |element_size: usize| count.min(reader.remaining() / element_size.max(1));
+    // `BoundedReader::with_capacity_bounded` caps the reservation by what
+    // remains in the buffer — never affecting a valid vector while making the
+    // allocation fail-closed. The per-element `read_raw` below still
+    // bounds-checks each read.
     match format {
         VECTOR_FORMAT_FLOAT32 => {
-            let mut out = Vec::with_capacity(cap(4));
+            let mut out: Vec<f32> = reader.with_capacity_bounded(count, 4);
             for _ in 0..count {
                 let raw = reader.read_raw(4)?;
                 out.push(decode_binary_float([raw[0], raw[1], raw[2], raw[3]]));
@@ -165,7 +168,7 @@ fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<V
             Ok(VectorValues::Float32(out))
         }
         VECTOR_FORMAT_FLOAT64 => {
-            let mut out = Vec::with_capacity(cap(8));
+            let mut out: Vec<f64> = reader.with_capacity_bounded(count, 8);
             for _ in 0..count {
                 let raw = reader.read_raw(8)?;
                 out.push(decode_binary_double([
@@ -175,7 +178,7 @@ fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<V
             Ok(VectorValues::Float64(out))
         }
         VECTOR_FORMAT_INT8 => {
-            let mut out = Vec::with_capacity(cap(1));
+            let mut out: Vec<i8> = reader.with_capacity_bounded(count, 1);
             for _ in 0..count {
                 out.push(reader.read_u8()? as i8);
             }
