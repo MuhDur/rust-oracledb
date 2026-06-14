@@ -224,6 +224,29 @@ once with no GIL, produces the large concurrent margin above. (On loopback, part
 of each pass is still the round-trips both drivers pay equally, which caps how
 large a *single-thread* ratio can get; the leverage is in parallelism.)
 
+### Decode-path tuning
+
+The decode CPU those numbers ride on is profiled and tightened continually — every
+change byte-identical to the reference and proven on a microbench before it ships
+(and reverted if it doesn't measure: two recent candidates were dropped for failing
+to beat the baseline):
+
+- **NUMBER decode +14–38%** — the i128 coefficient is accumulated in a single digit
+  walk instead of two.
+- **Single-packet responses 1.4–5.2×** — a one-packet fetch reply skips a whole
+  buffer copy.
+- **`simdutf8`** (feature `simd-decode`, opt-in) — SIMD UTF-8 validation for wide
+  text (10.6× on multibyte `VARCHAR2(2000)`; no win on short ASCII, hence off by
+  default).
+
+### Pipelining (round-trip elimination, GIL-free)
+
+A batch of N independent statements executes natively in **one** round trip instead
+of N — and on the GIL-free engine, so concurrent batches don't serialise. The win is
+pure round-trip elimination (it does not speed a single statement) and **grows with
+network latency**; on loopback a 10-statement batch already collapses 10 round trips
+to 1.
+
 ### Borrowed (zero-copy) fetch path
 
 A `for_each_row_ref` fast path lets a Rust consumer iterate rows as borrowed
