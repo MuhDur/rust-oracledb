@@ -279,8 +279,22 @@ fn derive_pbes2(alg_body: &[u8], password: &[u8]) -> Result<(Vec<u8>, Vec<u8>), 
     if iv.len() != 16 {
         return Err(sso("AES-CBC IV must be 16 bytes"));
     }
-    let key_len = key_len.unwrap_or(derived_key_len);
-    let key = pbkdf2_derive(password, salt, iterations, key_len, prf);
+    // The optional PBKDF2 keyLength, when present, MUST equal the AES cipher's
+    // key size (RFC 8018 §6.2). Reject a mismatch rather than trusting the
+    // wallet-declared length: an unbounded keyLength would otherwise flow into
+    // `vec![0u8; key_len]` in pbkdf2_derive and let a malicious cwallet.sso
+    // request an arbitrarily large allocation (OOM/DoS). This bounds key_len to
+    // {16,24,32} by construction (bead rust-oracledb-exz).
+    let key_len = match key_len {
+        Some(specified) if specified != derived_key_len => {
+            return Err(sso(format!(
+                "PBES2 keyLength {specified} does not match AES key size {derived_key_len}"
+            )));
+        }
+        Some(specified) => specified,
+        None => derived_key_len,
+    };
+    let key = pbkdf2_derive(password, salt, iterations, key_len, prf)?;
     Ok((key, iv.to_vec()))
 }
 
@@ -290,14 +304,25 @@ enum PrfHash {
     Sha256,
 }
 
+/// Largest PBKDF2 derived-key length we will ever allocate. Real keys are tiny
+/// (AES-256 = 32 bytes); this guards `vec![0u8; key_len]` against a malicious
+/// wallet-declared length even if a future caller forgets the cipher-size check
+/// in derive_pbes2 (defense-in-depth for bead rust-oracledb-exz).
+const MAX_PBKDF2_KEY_LEN: usize = 1024;
+
 fn pbkdf2_derive(
     password: &[u8],
     salt: &[u8],
     iterations: u64,
     key_len: usize,
     prf: PrfHash,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, WalletError> {
     use hmac::Hmac;
+    if key_len > MAX_PBKDF2_KEY_LEN {
+        return Err(sso(format!(
+            "PBKDF2 keyLength {key_len} exceeds maximum {MAX_PBKDF2_KEY_LEN}"
+        )));
+    }
     let iters = u32::try_from(iterations).unwrap_or(u32::MAX);
     let mut out = vec![0u8; key_len];
     match prf {
@@ -309,7 +334,7 @@ fn pbkdf2_derive(
                 .unwrap_or_default();
         }
     }
-    out
+    Ok(out)
 }
 
 fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ct: &[u8]) -> Result<Vec<u8>, WalletError> {
@@ -422,4 +447,29 @@ fn be_uint(bytes: &[u8]) -> Result<u64, WalletError> {
         v = (v << 8) | u64::from(b);
     }
     Ok(v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression (bead rust-oracledb-exz): a malicious wallet declaring a huge
+    // PBKDF2 keyLength must be rejected, never allocated. Before the bound,
+    // `vec![0u8; key_len]` with key_len up to u64::MAX caused OOM/DoS.
+    #[test]
+    fn pbkdf2_rejects_oversized_key_len_instead_of_allocating() {
+        let huge = pbkdf2_derive(b"pw", b"saltsalt", 1000, usize::MAX, PrfHash::Sha256);
+        assert!(huge.is_err(), "oversized key_len must error, not allocate");
+        let over = pbkdf2_derive(
+            b"pw",
+            b"saltsalt",
+            1000,
+            MAX_PBKDF2_KEY_LEN + 1,
+            PrfHash::Sha256,
+        );
+        assert!(over.is_err(), "key_len just past the cap must error");
+        // A real AES-256 key length still derives successfully.
+        let ok = pbkdf2_derive(b"pw", b"saltsalt", 1000, 32, PrfHash::Sha256);
+        assert!(ok.is_ok() && ok.unwrap().len() == 32);
+    }
 }
