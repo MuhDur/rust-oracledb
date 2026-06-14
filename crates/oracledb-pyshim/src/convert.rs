@@ -1075,84 +1075,33 @@ pub(crate) fn bind_optional_text(value: Option<&str>) -> BindValue {
         .unwrap_or(BindValue::Null)
 }
 
-// d49: migrate to oracledb-protocol (fetch metadata supplement)
+/// Mark CLOB/BLOB result columns that actually hold JSON, by probing
+/// `ALL_JSON_COLUMNS` for each candidate. Thin adapter over the crate driver's
+/// [`BlockingConnection::supplement_json_column_metadata`]; it only acquires the
+/// shared connection lock and maps the errors to Python exceptions.
 pub(crate) fn supplement_json_lob_column_metadata(
     connection: &Arc<Mutex<Option<RustConnection>>>,
     columns: &mut [ColumnMetadata],
     call_timeout: Option<u32>,
 ) -> PyResult<()> {
-    let candidates = columns
-        .iter()
-        .enumerate()
-        .filter(|(_, metadata)| {
-            !metadata.is_json
-                && matches!(metadata.ora_type_num, ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB)
-                && !metadata.name.is_empty()
-        })
-        .map(|(index, metadata)| (index, metadata.name.to_ascii_uppercase()))
-        .collect::<Vec<_>>();
-    if candidates.is_empty() {
-        return Ok(());
-    }
     let mut guard = connection.lock().map_err(runtime_error)?;
     let connection = guard.as_mut().ok_or_else(connection_closed_error)?;
-    for (index, column_name) in candidates {
-        let result = BlockingConnection::execute_query_with_binds_and_timeout(
-            connection,
-            "select 1 \
-             from all_json_columns \
-             where owner = sys_context('USERENV', 'CURRENT_SCHEMA') \
-               and column_name = :1",
-            1,
-            &[BindValue::Text(column_name)],
-            call_timeout,
-        )
-        .map_err(runtime_error)?;
-        if !result.rows.is_empty() {
-            columns[index].is_json = true;
-        }
-    }
-    Ok(())
+    BlockingConnection::supplement_json_column_metadata(connection, columns, call_timeout)
+        .map_err(runtime_error)
 }
 
+/// Async counterpart of [`supplement_json_lob_column_metadata`]; delegates to
+/// the crate driver's [`RustConnection::supplement_json_column_metadata`].
 pub(crate) async fn supplement_json_lob_column_metadata_async(
     cx: &Cx,
     connection: &mut RustConnection,
     columns: &mut [ColumnMetadata],
     call_timeout: Option<u32>,
 ) -> Result<(), String> {
-    let candidates = columns
-        .iter()
-        .enumerate()
-        .filter(|(_, metadata)| {
-            !metadata.is_json
-                && matches!(metadata.ora_type_num, ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB)
-                && !metadata.name.is_empty()
-        })
-        .map(|(index, metadata)| (index, metadata.name.to_ascii_uppercase()))
-        .collect::<Vec<_>>();
-    if candidates.is_empty() {
-        return Ok(());
-    }
-    for (index, column_name) in candidates {
-        let result = connection
-            .execute_query_with_binds_and_timeout(
-                cx,
-                "select 1 \
-                 from all_json_columns \
-                 where owner = sys_context('USERENV', 'CURRENT_SCHEMA') \
-                   and column_name = :1",
-                1,
-                &[BindValue::Text(column_name)],
-                call_timeout,
-            )
-            .await
-            .map_err(|err| err.to_string())?;
-        if !result.rows.is_empty() {
-            columns[index].is_json = true;
-        }
-    }
-    Ok(())
+    connection
+        .supplement_json_column_metadata(cx, columns, call_timeout)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 pub(crate) fn thin_lob_context_from_cursor(
