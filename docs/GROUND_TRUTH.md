@@ -33,7 +33,7 @@ python-oracledb baseline manifest on the same local Oracle Free container. Autho
 | Modules fully green (with passing tests) | **24 of 72** | §5 table |
 | Modules zero-fail but all-skip (false greens, see debt item 2) | 13 | §5 table |
 | Modules red | 34 | §5 table |
-| Modules UNVERIFIED | 1 (`test_4100`, suspected hang, see §5 notes) | — |
+| Modules UNVERIFIED | 0 — `test_4100`'s suspected hang was re-checked on `branch fix-hangs` and **does not reproduce** (27p/4.29s live; §5) | live run |
 
 Milestones: **M0 done** (bead `yoq` closed; baseline manifest recorded). **M1 done** including the
 identity-masquerade gate (bead `hq6` closed; test_1100 56 pass / 6 skip at HEAD,
@@ -47,11 +47,33 @@ the shim hardcodes `server_version = (0,0,0,0,0)`, so conftest believes the DB l
 vector/JSON/boolean/sessionless/12.2 support. Fixing it converts those into honest runs (most will
 then fail until their codecs exist). Debt item 2.
 
-A re-baseline of red modules from HEAD is **in flight** as of this writing
+A re-baseline of red modules from HEAD was **in flight** at the 2026-06-11 recording
 (`harness/.results/parts-rust-20260611T172927Z-3160370/`, started 17:29Z; 17 module JSONs written,
-then stalled >25 minutes inside `test_4100_cursor_callproc` with ~0 CPU — suspected hang, the same
-module that is missing from the 06:05Z run). Treat `test_4100` as a likely hang bug, not a gap in
-coverage.
+then stalled >25 minutes inside `test_4100_cursor_callproc` with ~0 CPU). That stall is **resolved**:
+on `branch fix-hangs` HEAD (2026-06-14) `test_4100` runs cleanly (27p/4.29s, §5) — the historical
+hang no longer reproduces, so it was not a permanent callproc bug but earlier-wave drain/reset
+fallout that intervening fixes cleared.
+
+**DML-RETURNING error hang (bead `zhm`, fixed on `branch fix-hangs`, 2026-06-14).** `test_1600`
+`test_1612` (an INSERT…RETURNING that trips ORA-12899 "value too large for column") deadlocked the
+client for 180 s while the DB session sat idle on "SQL*Net message from client". Root cause, proven
+by a live `strace` of the socket plus a `faulthandler` dump showing the freeze *inside*
+`cursor.execute()` (not at teardown): on the RETURNING error path the server reports the error
+out-of-band via a BREAK marker; the client runs the RESET dance correctly, then the server sends a
+`FLUSH_OUT_BINDS` *request* — a DATA packet with data-flags `0x0000` (no END_OF_RESPONSE flag,
+because the break-recovery path is not request-boundary framed) whose payload ends in the
+FLUSH_OUT_BINDS message byte `0x13`. The reference replies with a FLUSH_OUT_BINDS message and then
+reads the real ORA-12899 packet. Our `read_data_response_boundary` fed that post-reset packet back
+through `data_packet_ends_response`, which (correctly, for the bead-`n2s` wide-row guard) returns
+false for a flagless packet that merely *ends* in `0x13` — so the loop read another packet the
+server would never send (it was awaiting our FLUSH_OUT_BINDS reply) and blocked in epoll forever.
+Fix (`crates/oracledb/src/lib.rs`): once the boundary loop has run a RESET, treat a packet whose
+payload ends in `FLUSH_OUT_BINDS`/`END_OF_RESPONSE` as the response boundary (matching the
+reference's message-byte framing for post-reset packets), gated on the post-reset context so the
+wide-row guard is untouched. After-the-fix: `test_1612` passes in 0.33 s; full `test_1600` 27p/4.69s
+= reference. Hermetic regression test
+`dml_returning_error_flush_out_binds_after_reset_completes_without_hang` replays the exact wire
+sequence and was confirmed to hang→time-out before the fix and pass after.
 
 ## 3. Architecture as-built
 
@@ -132,7 +154,7 @@ JSONs are at (or within one commit of) HEAD `978491a`. Evidence paths are relati
 | test_1300_cursor_var | 21 | 0 | 0 | 21p/0s | GREEN | `.results/parts-rust-20260611T060544Z-1595374/003-test_1300_cursor_var.json` (06:06Z) |
 | test_1400_datetime_var | 19 | 0 | 0 | 19p/0s | GREEN | `.results/parts-rust-20260611T060544Z-1595374/004-test_1400_datetime_var.json` (06:06Z) |
 | test_1500_types | 32 | 0 | 0 | 32p/0s | GREEN | `.results/parts-rust-20260611T060544Z-1595374/005-test_1500_types.json` (06:06Z) |
-| test_1600_dml_returning | 25 | 1 | 1 | 27p/0s | RED (regression: test_1607 ORA-00932 CHAR vs ADT; was green at 06:05Z) | `.results/parts-rust-20260611T172927Z-3160370/002-test_1600_dml_returning.json` (17:29Z) |
+| test_1600_dml_returning | 27 | 0 | 0 | 27p/0s | GREEN (fix-hangs branch, 2026-06-14: test_1612 ORA-12899 DML-RETURNING-error hang FIXED, bead zhm; full module 27p in 4.69s vs reference 27p) | live run, `branch fix-hangs` HEAD; see §"DML-RETURNING error hang" below |
 | test_1700_error | 10 | 0 | 0 | 10p/0s | GREEN | `.results/parts-rust-20260611T172927Z-3160370/003-test_1700_error.json` (17:29Z) |
 | test_1800_interval_var | 1 | 11 | 0 | 12p/0s | RED | `.results/parts-rust-20260611T172927Z-3160370/004-test_1800_interval_var.json` (17:29Z) |
 | test_1900_lob_var | 39 | 0 | 3 | 42p/0s | GREEN (3 false skips, debt item 2) | `.results/parts-rust-20260611T172927Z-3160370/005-test_1900_lob_var.json` (17:30Z) |
@@ -152,7 +174,7 @@ JSONs are at (or within one commit of) HEAD `978491a`. Evidence paths are relati
 | test_3800_typehandler | 2 | 6 | 1 | 9p/0s | RED | `.results/parts-rust-20260611T172927Z-3160370/016-test_3800_typehandler.json` (17:32Z) |
 | test_3900_cursor_execute | 37 | 0 | 0 | 37p/0s | GREEN | `.results/parts-rust-20260611T060544Z-1595374/024-test_3900_cursor_execute.json` (06:07Z) |
 | test_4000_cursor_executemany | 34 | 4 | 0 | 38p/0s | RED (was 24F+1E at 06:05Z) | `.results/parts-rust-20260611T172927Z-3160370/017-test_4000_cursor_executemany.json` (17:32Z) |
-| test_4100_cursor_callproc | — | — | — | 27p/0s | UNVERIFIED — no artifact in any run; suspected hang (pytest ran >25 min with ~0 CPU in the 17:29Z run; also missing from the 06:05Z run) | — |
+| test_4100_cursor_callproc | 27 | 0 | 0 | 27p/0s | GREEN (fix-hangs branch, 2026-06-14: the historical suspected hang NO LONGER REPRODUCES at this HEAD; full module 27p in 4.29s vs reference 27p — already fixed by prior waves, no fix needed here) | live run, `branch fix-hangs` HEAD; see §"DML-RETURNING error hang" below |
 | test_4200_cursor_scrollable | 2 | 11 | 5 | 18p/0s | RED (stale) | `.results/parts-rust-20260611T060544Z-1595374/027-test_4200_cursor_scrollable.json` (12:36Z) |
 | test_4300_cursor_other | 47 | 24 | 2 | 73p/0s | RED (stale) | `.results/parts-rust-20260611T060544Z-1595374/028-test_4300_cursor_other.json` (12:36Z) |
 | test_4500_connect_params | 84 | 0 | 0 | 84p/0s | GREEN (note: exercises base_impl's Python parser; corpus differential owed at M3) | `.results/parts-rust-20260611T060544Z-1595374/029-test_4500_connect_params.json` (12:36Z) |
@@ -233,12 +255,16 @@ Do NOT cite `harness/.results/rust.json` (7.1 MB, 2026-06-10): it is the M0-era 
 7. **Monolith files vs plan layout** — plan prescribes `protocol/{packet,capabilities,messages,
    auth,types,net}` modules; reality is one 4.6k-line `thin.rs` and one 9.5k-line pyshim
    `lib.rs`. Wave 0 split plan ready (`.intake/split_plan.md` §7-9).
-8. **test_4100_cursor_callproc suspected hang** — no result artifact exists in any run; the
-   17:29Z re-baseline sat >25 min in it with ~0 CPU. Needs triage (likely an unanswered round
-   trip or lock in callproc paths). Until fixed, segmented runs stall here.
-9. **test_1607 regression at HEAD** — DML returning of object now fails with ORA-00932
-   ("CHAR ... expected ADT"); was green in the 06:05Z run. Likely fallout from the
-   executemany/bind-template work between 06:05Z and `978491a`.
+8. **test_4100_cursor_callproc suspected hang — RESOLVED (no longer reproduces).** Re-checked on
+   `branch fix-hangs` HEAD (2026-06-14): the full module runs **27p in 4.29s** under the shim,
+   matching the reference (27p), with no hang. The historical >25 min stall in the 17:29Z
+   re-baseline is gone — fixed incidentally by intervening waves (the same break/reset-drain and
+   reset-marker fixes referenced in §"DML-RETURNING error hang"), not by a callproc-specific
+   change. No callproc fix was required; the row is now GREEN with live evidence.
+9. **test_1607 regression at HEAD — RESOLVED.** On `branch fix-hangs` HEAD test_1607 (DML returning
+   of an object) PASSES; the full test_1600 module is 27p/0f. The ORA-00932 CHAR-vs-ADT regression
+   seen at 17:29Z no longer reproduces (the d49 merge's ADT-projection fix, commit d781c39, covers
+   it).
 10. **`.beads/`, `.claude/`, `AGENTS.md` untracked** — plan says commit `.beads/` with code;
     `git status` shows them untracked. (`.ntm/` is gitignored by design; `.intake/` now ignored
     too — briefs stay local per decision D7.)
