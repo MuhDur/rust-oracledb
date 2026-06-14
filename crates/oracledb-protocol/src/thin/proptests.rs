@@ -113,9 +113,10 @@ proptest! {
         // round-trip failure.
         let Ok(wire) = encode_number_text(&text) else { return Ok(()); };
         let decoded = decode_number_value(&wire).expect("decode our own encoding");
-        let QueryValue::Number { text: out, .. } = decoded else {
+        let QueryValue::Number(num) = decoded else {
             panic!("decode_number_value returned a non-Number variant");
         };
+        let out = num.to_canonical_string();
         prop_assert_eq!(
             number_key(&out),
             number_key(&normalize_input(&text)),
@@ -197,8 +198,8 @@ proptest! {
     fn number_round_trip_u64(value: u64) {
         let wire = encode_number_text(&value.to_string()).expect("u64 always encodable");
         let decoded = decode_number_value(&wire).expect("decode u64 number");
-        let QueryValue::Number { text, .. } = decoded else { panic!("not a Number") };
-        prop_assert_eq!(text.parse::<u64>().ok(), Some(value));
+        let QueryValue::Number(num) = decoded else { panic!("not a Number") };
+        prop_assert_eq!(num.to_canonical_string().parse::<u64>().ok(), Some(value));
     }
 
     /// METAMORPHIC — ORDER-PRESERVING: for a < b, the on-wire NUMBER bytes are
@@ -285,9 +286,10 @@ fn number_boundary_cases_round_trip() {
         // The wire NUMBER is at most 21 bytes (1 exponent + 20 mantissa).
         assert!(wire.len() <= 21, "{text} encoded to {} bytes", wire.len());
         let decoded = decode_number_value(&wire).unwrap_or_else(|e| panic!("decode {text}: {e:?}"));
-        let QueryValue::Number { text: out, .. } = decoded else {
+        let QueryValue::Number(num) = decoded else {
             panic!("{text}: not a Number");
         };
+        let out = num.to_canonical_string();
         assert_eq!(
             number_key(&out),
             number_key(&normalize_input(text)),
@@ -303,7 +305,7 @@ fn number_negative_zero_is_zero() {
     let wire = encode_number_text("-0").expect("encode -0");
     let decoded = decode_number_value(&wire).expect("decode -0");
     assert_eq!(decoded.as_i64(), Some(0));
-    assert_eq!(decoded.as_number_text(), Some("0"));
+    assert_eq!(decoded.as_number_text().as_deref(), Some("0"));
 }
 
 // ---------------------------------------------------------------------------

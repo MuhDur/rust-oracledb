@@ -149,7 +149,10 @@ fn typed_scalar_fetch_covers_core_types() {
         );
         // NUMBER with scale: text preserves the decimal exactly
         assert_eq!(
-            result.cell(0, 1).and_then(QueryValue::as_number_text),
+            result
+                .cell(0, 1)
+                .and_then(QueryValue::as_number_text)
+                .as_deref(),
             Some("2.5"),
         );
         // VARCHAR2

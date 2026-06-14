@@ -836,10 +836,13 @@ impl ThinVar {
             }
             // BOOLEAN wire values surface as NUMBER 0/1; materialize bool
             // (reference converters.pyx DB_TYPE_NUM_BOOLEAN)
-            (ThinVarReturnKind::Plain, Some(QueryValue::Number { text, .. }))
+            (ThinVarReturnKind::Plain, Some(QueryValue::Number(num)))
                 if self.dbtype_name == "DB_TYPE_BOOLEAN" =>
             {
-                Ok(PyBool::new(py, text != "0").to_owned().unbind().into())
+                Ok(PyBool::new(py, num.to_i64() != Some(0))
+                    .to_owned()
+                    .unbind()
+                    .into())
             }
             // a string/bytes bind larger than 32767 bytes is auto-converted
             // to a temporary LOB for PL/SQL; its out value reads back as
@@ -864,26 +867,29 @@ impl ThinVar {
                     lob_context.ok_or_else(|| PyRuntimeError::new_err("missing LOB context"))?;
                 direct_lob_value_to_py(py, *ora_type_num, *csfrm, locator, context)
             }
-            (ThinVarReturnKind::Plain, Some(QueryValue::Number { text, .. }))
+            (ThinVarReturnKind::Plain, Some(QueryValue::Number(num)))
                 if self.dbtype_name == "DB_TYPE_BINARY_INTEGER" =>
             {
-                python_int_from_decimal_text(py, text)
+                python_int_from_decimal_text(py, &num.to_canonical_string())
             }
-            (ThinVarReturnKind::Plain, Some(QueryValue::Number { text, .. }))
+            (ThinVarReturnKind::Plain, Some(QueryValue::Number(num)))
                 if matches!(self.py_kind, ThinVarPyKind::Decimal)
                     && self.dbtype_name == "DB_TYPE_NUMBER" =>
             {
                 let decimal = PyModule::import(py, "decimal")?.getattr("Decimal")?;
-                Ok(decimal.call1((text.as_str(),))?.unbind())
+                Ok(decimal
+                    .call1((num.to_canonical_string().as_str(),))?
+                    .unbind())
             }
-            (ThinVarReturnKind::Plain, Some(QueryValue::Number { text, .. }))
-                if target_is_float =>
-            {
+            (ThinVarReturnKind::Plain, Some(QueryValue::Number(num))) if target_is_float => {
                 let builtins = PyModule::import(py, "builtins")?;
-                Ok(builtins.getattr("float")?.call1((text.as_str(),))?.unbind())
+                Ok(builtins
+                    .getattr("float")?
+                    .call1((num.to_canonical_string().as_str(),))?
+                    .unbind())
             }
-            (ThinVarReturnKind::Plain, Some(QueryValue::Number { text, .. })) if target_is_char => {
-                Ok(text.clone().into_pyobject(py)?.unbind().into())
+            (ThinVarReturnKind::Plain, Some(QueryValue::Number(num))) if target_is_char => {
+                Ok(num.to_canonical_string().into_pyobject(py)?.unbind().into())
             }
             (ThinVarReturnKind::Plain, Some(QueryValue::BinaryDouble(text)))
                 if self.dbtype_name == "DB_TYPE_BINARY_INTEGER" =>

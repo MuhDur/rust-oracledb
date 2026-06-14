@@ -567,7 +567,9 @@ impl<'a> OsonDecoder<'a> {
     fn decode_number(&mut self, len: usize) -> Result<OsonValue> {
         let raw = self.reader.read_raw(len)?;
         match decode_number_value(raw)? {
-            QueryValue::Number { text, .. } => Ok(OsonValue::Number(text)),
+            // Route the OSON number text through the single shared formatter so
+            // it is byte-identical to the scalar NUMBER text path.
+            QueryValue::Number(num) => Ok(OsonValue::Number(num.to_canonical_string())),
             _ => Err(ProtocolError::OsonInvalid("number decode mismatch")),
         }
     }

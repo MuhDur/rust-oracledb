@@ -186,10 +186,13 @@ fn live_direct_path_load_then_arrow_fetch() {
             .execute_query(&cx, "select count(*) from rust_dpl_live", 10)
             .await
             .expect("count should fetch");
-        assert!(matches!(
-            count.rows[0][0],
-            Some(oracledb_protocol::thin::QueryValue::Number { ref text, .. }) if text == "5"
-        ));
+        assert_eq!(
+            count.rows[0][0]
+                .as_ref()
+                .and_then(oracledb_protocol::thin::QueryValue::as_number_text)
+                .as_deref(),
+            Some("5"),
+        );
 
         conn.execute_query(&cx, "drop table rust_dpl_live purge", 1)
             .await

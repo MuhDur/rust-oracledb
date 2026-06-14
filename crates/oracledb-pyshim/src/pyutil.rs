@@ -179,7 +179,7 @@ pub(crate) fn query_value_to_string(value: &Option<QueryValue>) -> Option<String
         Some(QueryValue::Rowid(value)) => Some(value.clone()),
         Some(QueryValue::Raw(value)) => String::from_utf8(value.clone()).ok(),
         Some(QueryValue::BinaryDouble(value)) => Some(value.clone()),
-        Some(QueryValue::Number { text, .. }) => Some(text.clone()),
+        Some(QueryValue::Number(num)) => Some(num.to_canonical_string()),
         Some(QueryValue::Boolean(_)) => None,
         Some(QueryValue::DateTime { .. }) => None,
         Some(QueryValue::IntervalDS { .. }) => None,

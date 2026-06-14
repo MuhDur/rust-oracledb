@@ -112,8 +112,8 @@ fn decoded_value_is_twelve(responses: &[Vec<u8>]) -> bool {
         };
         for row in &result.rows {
             for value in row {
-                if let Some(QueryValue::Number { text, is_integer }) = value {
-                    if text == "12" && *is_integer {
+                if let Some(QueryValue::Number(num)) = value {
+                    if num.to_canonical_string() == "12" && num.is_integer() {
                         return true;
                     }
                 }
@@ -222,10 +222,9 @@ fn record_select_7_plus_5_session() {
             .expect("live `select 7+5 from dual` should execute and fetch");
         // Confirm the LIVE result is 12 before we trust the recording.
         assert_eq!(result.rows.len(), 1);
-        assert!(matches!(
-            result.rows[0][0],
-            Some(QueryValue::Number { ref text, is_integer: true }) if text == "12"
-        ));
+        let cell = result.rows[0][0].as_ref().expect("NUMBER cell");
+        assert_eq!(cell.as_number_text().as_deref(), Some("12"));
+        assert!(cell.as_number().expect("number").is_integer());
         conn.close(&cx)
             .await
             .expect("live logoff should round-trip");

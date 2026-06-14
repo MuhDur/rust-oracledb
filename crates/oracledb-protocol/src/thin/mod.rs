@@ -23,6 +23,7 @@ mod errors;
 mod execute;
 mod fetch;
 mod lob;
+mod number;
 mod sessionless;
 mod subscr;
 mod types;
@@ -43,6 +44,7 @@ pub use dbobject::*;
 pub use execute::*;
 pub use fetch::*;
 pub use lob::*;
+pub use number::*;
 pub use sessionless::*;
 pub use subscr::*;
 pub use types::*;
@@ -113,14 +115,8 @@ mod tests {
             .expect("fixture response should be valid hex");
         let columns = vec![number_column("INTCOL"), number_column("NUMBERCOL")];
         let previous_row = vec![
-            Some(QueryValue::Number {
-                text: "2".into(),
-                is_integer: true,
-            }),
-            Some(QueryValue::Number {
-                text: "0.5".into(),
-                is_integer: false,
-            }),
+            Some(QueryValue::number_from_text("2", true)),
+            Some(QueryValue::number_from_text("0.5", false)),
         ];
 
         let parsed = parse_query_response_with_context(
@@ -135,10 +131,7 @@ mod tests {
         assert_eq!(
             parsed.rows,
             vec![vec![
-                Some(QueryValue::Number {
-                    text: "3".into(),
-                    is_integer: true,
-                }),
+                Some(QueryValue::number_from_text("3", true)),
                 previous_row[1].clone(),
             ]]
         );
@@ -175,14 +168,8 @@ mod tests {
         .expect("fixture response should be valid hex");
         let columns = vec![number_column("INTCOL"), number_column("NUMBERCOL")];
         let previous_row = vec![
-            Some(QueryValue::Number {
-                text: "1499".into(),
-                is_integer: true,
-            }),
-            Some(QueryValue::Number {
-                text: "0.5".into(),
-                is_integer: false,
-            }),
+            Some(QueryValue::number_from_text("1499", true)),
+            Some(QueryValue::number_from_text("0.5", false)),
         ];
 
         let err = parse_query_response_with_context(

@@ -156,9 +156,14 @@ fn decimal_roundtrip_lossless_live() {
         assert_eq!(back, dec, "Decimal must round-trip exactly through NUMBER");
         assert_eq!(back.to_string(), text, "all 28 digits preserved");
 
-        // And the raw canonical text carrier itself is byte-exact.
-        if let Some(QueryValue::Number { text: raw, .. }) = result.cell(0, 0) {
-            assert_eq!(raw, text, "canonical NUMBER text is byte-exact");
+        // And the canonical NUMBER text (synthesized from the inline form via
+        // the shared formatter) is byte-exact.
+        if let Some(cell @ QueryValue::Number(_)) = result.cell(0, 0) {
+            assert_eq!(
+                cell.as_number_text().unwrap(),
+                text,
+                "canonical NUMBER text is byte-exact"
+            );
         } else {
             panic!("expected a NUMBER cell");
         }

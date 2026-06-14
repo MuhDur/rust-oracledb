@@ -1894,8 +1894,8 @@ impl ThinCursorImpl {
                         metadata.ora_type_num == oracledb::protocol::thin::ORA_TYPE_NUM_NUMBER
                     })
                 {
-                    if let Some(QueryValue::Number { text, .. }) = value {
-                        return python_decimal_from_text(py, text);
+                    if let Some(QueryValue::Number(num)) = value {
+                        return python_decimal_from_text(py, &num.to_canonical_string());
                     }
                 }
                 query_value_to_py(
