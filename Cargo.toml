@@ -2,6 +2,7 @@
 members = [
     "crates/oracledb-protocol",
     "crates/oracledb",
+    "crates/oracledb-derive",
     "crates/oracledb-pyshim",
 ]
 resolver = "2"
@@ -50,6 +51,13 @@ pbkdf2 = "0.12"
 # behind nothing — plain `cargo test`.
 proptest = "1.11"
 pyo3 = { version = "0.28.3", features = ["extension-module", "abi3-py310", "experimental-async"] }
+# Proc-macro toolchain for the `#[derive(FromRow)]` derive in crates/oracledb-derive.
+# These are build-time-only dependencies (they do not ship in the runtime binary),
+# and the 2.x line is already in the workspace dependency graph transitively, so
+# pinning to it adds no new compiled artifact to the default build.
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full"] }
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
