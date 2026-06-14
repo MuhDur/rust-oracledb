@@ -35,8 +35,9 @@ impl SodaDatabase {
         metadata: Option<&str>,
         map_mode: bool,
     ) -> Result<SodaCollection> {
-        // CREATE_MODE: 0 = DDL (create table), 1 = MAP (map to existing table).
-        let create_mode = if map_mode { 1 } else { 0 };
+        // CREATE_MODE: 1 = DDL (create table), 2 = MAP (map to existing table)
+        // per DBMS_SODA.CREATE_MODE_DDL / CREATE_MODE_MAP.
+        let create_mode = if map_mode { 2 } else { 1 };
         let sql = "DECLARE c SODA_COLLECTION_T; \
                    BEGIN c := DBMS_SODA.CREATE_COLLECTION(:1, :2, :3); END;";
         let binds = vec![
@@ -52,13 +53,9 @@ impl SodaDatabase {
             .map_err(SodaError::Driver)?;
 
         // Read the descriptor back.
-        self.open_collection(conn, cx, name)
-            .await?
-            .ok_or_else(|| {
-                SodaError::InvalidMetadata(format!(
-                    "collection {name} not found after create"
-                ))
-            })
+        self.open_collection(conn, cx, name).await?.ok_or_else(|| {
+            SodaError::InvalidMetadata(format!("collection {name} not found after create"))
+        })
     }
 
     /// Open an existing collection. Returns `None` if it does not exist.

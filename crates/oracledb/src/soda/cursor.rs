@@ -3,7 +3,10 @@
 use std::collections::VecDeque;
 
 use asupersync::Cx;
-use oracledb_protocol::thin::{ColumnMetadata, QueryResult, QueryValue};
+use oracledb_protocol::thin::{
+    ColumnMetadata, QueryResult, QueryValue, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB,
+    ORA_TYPE_NUM_JSON, ORA_TYPE_NUM_VECTOR,
+};
 
 use crate::Connection;
 
@@ -77,10 +80,17 @@ impl SodaCursor {
         }
     }
 
-    /// Fetch another batch into the buffer.
+    /// Fetch another batch into the buffer. Native JSON / LOB / VECTOR columns
+    /// require the define-fetch variant to deliver values.
     async fn fetch_more(&mut self, conn: &mut Connection, cx: &Cx) -> Result<()> {
-        let result = conn
-            .fetch_rows_with_columns(
+        let needs_define = self.columns.iter().any(|c| {
+            matches!(
+                c.ora_type_num,
+                ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR | ORA_TYPE_NUM_JSON
+            )
+        });
+        let result = if needs_define {
+            conn.define_and_fetch_rows_with_columns(
                 cx,
                 self.cursor_id,
                 self.array_size,
@@ -88,7 +98,18 @@ impl SodaCursor {
                 self.previous_row.as_deref(),
             )
             .await
-            .map_err(SodaError::Driver)?;
+            .map_err(SodaError::Driver)?
+        } else {
+            conn.fetch_rows_with_columns(
+                cx,
+                self.cursor_id,
+                self.array_size,
+                &self.columns,
+                self.previous_row.as_deref(),
+            )
+            .await
+            .map_err(SodaError::Driver)?
+        };
         self.more_rows = result.more_rows;
         self.previous_row = result.rows.last().cloned();
         self.buffer.extend(result.rows);

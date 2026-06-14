@@ -138,12 +138,7 @@ fn translate_field_predicate(field: &str, val: &Value, content_col: &str) -> Res
 }
 
 /// Translate a single operator predicate on a path.
-fn translate_operator(
-    path: &str,
-    op: &str,
-    operand: &Value,
-    content_col: &str,
-) -> Result<String> {
+fn translate_operator(path: &str, op: &str, operand: &Value, content_col: &str) -> Result<String> {
     let cmp = |sym: &str| -> Result<String> {
         let lit = scalar_to_path_literal(operand)?;
         Ok(json_exists(content_col, path, &format!("?(@ {sym} {lit})")))
@@ -247,9 +242,9 @@ fn translate_not(path: &str, operand: &Value, content_col: &str) -> Result<Strin
 
 /// `$upper` / `$lower` case-folded comparison wrapper.
 fn fold_case(path: &str, operand: &Value, content_col: &str, func: &str) -> Result<String> {
-    let ops = operand.as_object().ok_or_else(|| {
-        SodaError::Qbe(format!("${func} requires an operator object"))
-    })?;
+    let ops = operand
+        .as_object()
+        .ok_or_else(|| SodaError::Qbe(format!("${func} requires an operator object")))?;
     let mut parts = Vec::new();
     for (op, inner) in ops {
         let s = operand_as_str(inner, op)?;
@@ -346,7 +341,10 @@ fn translate_date(path: &str, operand: &Value, content_col: &str) -> Result<Stri
 /// Build a `JSON_EXISTS(col, '$.path<pred>')` fragment.
 fn json_exists(content_col: &str, path: &str, pred: &str) -> String {
     let full = format!("{path}{pred}");
-    format!("JSON_EXISTS({content_col}, '{}')", escape_sql_literal(&full))
+    format!(
+        "JSON_EXISTS({content_col}, '{}')",
+        escape_sql_literal(&full)
+    )
 }
 
 /// Convert a SODA field reference into a JSON path. The reference can already
@@ -497,10 +495,7 @@ mod tests {
     #[test]
     fn has_substring_is_regex_escaped() {
         let w = where_of(json!({"name": {"$hasSubstring": "John"}}));
-        assert_eq!(
-            w,
-            r#"JSON_EXISTS(DATA, '$.name?(@ like_regex "John")')"#
-        );
+        assert_eq!(w, r#"JSON_EXISTS(DATA, '$.name?(@ like_regex "John")')"#);
     }
 
     #[test]
@@ -579,19 +574,13 @@ mod tests {
     #[test]
     fn date_equality() {
         let w = where_of(json!({"birthday": {"$date": "2000-12-15"}}));
-        assert_eq!(
-            w,
-            r#"JSON_EXISTS(DATA, '$.birthday?(@ == "2000-12-15")')"#
-        );
+        assert_eq!(w, r#"JSON_EXISTS(DATA, '$.birthday?(@ == "2000-12-15")')"#);
     }
 
     #[test]
     fn date_gt() {
         let w = where_of(json!({"birthday": {"$date": {"$gt": "2000-01-01"}}}));
-        assert_eq!(
-            w,
-            r#"JSON_EXISTS(DATA, '$.birthday?(@ > "2000-01-01")')"#
-        );
+        assert_eq!(w, r#"JSON_EXISTS(DATA, '$.birthday?(@ > "2000-01-01")')"#);
     }
 
     #[test]

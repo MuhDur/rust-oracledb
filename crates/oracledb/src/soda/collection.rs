@@ -6,7 +6,10 @@
 
 use asupersync::Cx;
 use oracledb_protocol::oson::{decode_oson, encode_oson, OsonValue};
-use oracledb_protocol::thin::{BindValue, QueryValue};
+use oracledb_protocol::thin::{
+    BindValue, ColumnMetadata, QueryResult, QueryValue, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB,
+    ORA_TYPE_NUM_JSON, ORA_TYPE_NUM_VECTOR,
+};
 
 use crate::Connection;
 
@@ -14,7 +17,7 @@ use super::cursor::SodaCursor;
 use super::document::SodaDocument;
 use super::error::{Result, SodaError};
 use super::metadata::{ContentSqlType, SodaCollectionMetadata, VersionMethod};
-use super::operation::{SelectColumns, SodaOperation};
+use super::operation::{self, SelectColumns, SodaOperation};
 
 /// A handle to a SODA collection: its name plus parsed metadata.
 #[derive(Debug, Clone)]
@@ -137,22 +140,20 @@ impl SodaCollection {
     }
 
     /// Fetch the first matching document, if any.
+    ///
+    /// We do NOT append `FETCH NEXT 1 ROWS ONLY` here: on this server a
+    /// `WHERE raw_col = :raw_bind` predicate stops matching when combined with a
+    /// row-limiting clause (a row-source transformation interaction). Instead we
+    /// fetch the first batch and take row 0; callers that explicitly set a
+    /// `limit` still get it honoured through `build_select_sql`.
     pub async fn get_one(
         &self,
         conn: &mut Connection,
         cx: &Cx,
         op: &SodaOperation,
     ) -> Result<Option<SodaDocument>> {
-        // getOne returns the first row; cap the fetch to one row.
-        let mut op = op.clone();
-        if op.limit.is_none() {
-            op.limit = Some(1);
-        }
         let (sql, binds, layout) = op.build_select_sql(&self.metadata)?;
-        let result = conn
-            .execute_query_with_binds(cx, &sql, 1, &binds)
-            .await
-            .map_err(SodaError::Driver)?;
+        let result = execute_collect_with_binds(conn, cx, &sql, 1, &binds).await?;
         if result.rows.is_empty() {
             return Ok(None);
         }
@@ -184,22 +185,14 @@ impl SodaCollection {
     ) -> Result<SodaCursor> {
         let (sql, binds, layout) = op.build_select_sql(&self.metadata)?;
         let array_size = op.fetch_array_size();
-        let result = conn
-            .execute_query_with_binds(cx, &sql, array_size, &binds)
-            .await
-            .map_err(SodaError::Driver)?;
+        let result = execute_collect_with_binds(conn, cx, &sql, array_size, &binds).await?;
         Ok(SodaCursor::new(self.clone(), result, layout, array_size))
     }
 
     // --- writes ------------------------------------------------------------
 
     /// Remove matching documents; returns the number removed.
-    pub async fn remove(
-        &self,
-        conn: &mut Connection,
-        cx: &Cx,
-        op: &SodaOperation,
-    ) -> Result<u64> {
+    pub async fn remove(&self, conn: &mut Connection, cx: &Cx, op: &SodaOperation) -> Result<u64> {
         let (sql, binds) = op.build_delete_sql(&self.metadata)?;
         let result = conn
             .execute_query_with_binds(cx, &sql, 0, &binds)
@@ -249,33 +242,30 @@ impl SodaCollection {
         }
 
         let mut next_bind = 2;
-        let key_pred = if meta.key_sql_type.eq_ignore_ascii_case("RAW") {
-            binds.push(BindValue::Text(key.clone()));
-            let p = format!("{} = HEXTORAW(:{next_bind})", meta.key_column);
-            next_bind += 1;
-            p
+        // RAW key/version columns bind decoded bytes (see operation.rs note on
+        // why HEXTORAW(:bind) does not match in a WHERE comparison).
+        let key_is_raw = meta.key_sql_type.eq_ignore_ascii_case("RAW");
+        if key_is_raw {
+            binds.push(BindValue::Raw(operation::hex_decode(key)));
         } else {
             binds.push(BindValue::Text(key.clone()));
-            let p = format!("{} = :{next_bind}", meta.key_column);
-            next_bind += 1;
-            p
-        };
-        let mut where_clause = key_pred;
+        }
+        let mut where_clause = format!("{} = :{next_bind}", meta.key_column);
+        next_bind += 1;
         if let Some(version) = &op.version {
             if let Some(vc) = &meta.version_column {
                 if matches!(meta.version_method, VersionMethod::None) && meta.native {
-                    binds.push(BindValue::Text(version.clone()));
-                    where_clause.push_str(&format!(" AND {vc} = HEXTORAW(:{next_bind})"));
+                    binds.push(BindValue::Raw(operation::hex_decode(version)));
                 } else {
                     binds.push(BindValue::Text(version.clone()));
-                    where_clause.push_str(&format!(" AND {vc} = :{next_bind}"));
                 }
+                where_clause.push_str(&format!(" AND {vc} = :{next_bind}"));
             }
         }
 
         let mut sql = format!(
             "UPDATE {} SET {} WHERE {}",
-            meta.table_name,
+            meta.quoted_table(),
             set_parts.join(", "),
             where_clause
         );
@@ -311,7 +301,7 @@ impl SodaCollection {
 
     /// Truncate the collection (remove all documents).
     pub async fn truncate(&self, conn: &mut Connection, cx: &Cx) -> Result<()> {
-        let sql = format!("TRUNCATE TABLE {}", self.metadata.table_name);
+        let sql = format!("TRUNCATE TABLE {}", self.metadata.quoted_table());
         conn.execute_query(cx, &sql, 0)
             .await
             .map_err(SodaError::Driver)?;
@@ -331,7 +321,13 @@ impl SodaCollection {
         Ok(())
     }
 
-    /// Drop an index by name. Returns whether the index existed and was dropped.
+    /// Drop an index by name. Returns whether the index existed and was
+    /// dropped.
+    ///
+    /// `DBMS_SODA_ADMIN` has no `DROP_INDEX` procedure on this server build, so
+    /// the index is dropped via DDL. A SODA index becomes a real index with the
+    /// same (case-sensitive) name, so we quote it. ORA-01418 (index does not
+    /// exist) maps to a `false` return; `force` appends `FORCE`.
     pub async fn drop_index(
         &self,
         conn: &mut Connection,
@@ -339,30 +335,24 @@ impl SodaCollection {
         index_name: &str,
         force: bool,
     ) -> Result<bool> {
-        let sql = "BEGIN DBMS_SODA_ADMIN.DROP_INDEX(P_URI_NAME => :1, P_IDX_NAME => :2, \
-                   P_FORCE => :3, P_DROPPED => :4); END;";
-        let binds = vec![
-            BindValue::Text(self.name.clone()),
-            BindValue::Text(index_name.to_string()),
-            BindValue::Number(if force { "1".into() } else { "0".into() }),
-            BindValue::Output {
-                ora_type_num: 2, // NUMBER
-                csfrm: 0,
-                buffer_size: 22,
-            },
-        ];
-        let result = conn
-            .execute_query_with_binds(cx, sql, 0, &binds)
-            .await
-            .map_err(SodaError::Driver)?;
-        let dropped = result
-            .out_values
-            .first()
-            .and_then(|(_, v)| v.as_ref())
-            .and_then(QueryValue::as_i64)
-            .map(|n| n != 0)
-            .unwrap_or(false);
-        Ok(dropped)
+        let force_kw = if force { " FORCE" } else { "" };
+        let sql = format!(
+            "DROP INDEX {}{}",
+            super::metadata::quote_ident(index_name),
+            force_kw
+        );
+        match conn.execute_query(cx, &sql, 0).await {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                // ORA-01418: specified index does not exist -> not dropped.
+                // ORA-00942: table/view does not exist (index gone) -> false.
+                if matches!(e.ora_code(), Some(1418) | Some(942)) {
+                    Ok(false)
+                } else {
+                    Err(SodaError::Driver(e))
+                }
+            }
+        }
     }
 
     // --- helpers -----------------------------------------------------------
@@ -372,9 +362,8 @@ impl SodaCollection {
         match self.metadata.content_sql_type {
             ContentSqlType::Json => {
                 let oson = self.doc_to_oson(doc)?;
-                let image = encode_oson(&oson, true).map_err(|e| {
-                    SodaError::Driver(crate::Error::Protocol(e))
-                })?;
+                let image = encode_oson(&oson, true)
+                    .map_err(|e| SodaError::Driver(crate::Error::Protocol(e)))?;
                 Ok(BindValue::Json(image))
             }
             ContentSqlType::Blob | ContentSqlType::Clob | ContentSqlType::Raw => {
@@ -451,7 +440,7 @@ impl SodaCollection {
         let hint_str = hint.map(|h| format!("/*+ {h} */ ")).unwrap_or_default();
         let mut sql = format!(
             "INSERT {hint_str}INTO {} ({}) VALUES ({})",
-            meta.table_name,
+            meta.quoted_table(),
             columns.join(", "),
             values.join(", ")
         );
@@ -501,18 +490,14 @@ impl SodaCollection {
         }
         if let Some(cc) = &meta.creation_time_column {
             n += 1;
-            ret_cols.push(format!(
-                "TO_CHAR({cc}, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6')"
-            ));
+            ret_cols.push(format!("TO_CHAR({cc}, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6')"));
             into.push(format!(":{n}"));
             layout.created_idx = Some(idx);
             idx += 1;
         }
         if let Some(lm) = &meta.last_modified_column {
             n += 1;
-            ret_cols.push(format!(
-                "TO_CHAR({lm}, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6')"
-            ));
+            ret_cols.push(format!("TO_CHAR({lm}, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6')"));
             into.push(format!(":{n}"));
             layout.last_modified_idx = Some(idx);
             idx += 1;
@@ -689,9 +674,11 @@ pub(crate) fn json_to_oson(v: &serde_json::Value) -> OsonValue {
         serde_json::Value::Number(n) => OsonValue::Number(n.to_string()),
         serde_json::Value::String(s) => OsonValue::String(s.clone()),
         serde_json::Value::Array(a) => OsonValue::Array(a.iter().map(json_to_oson).collect()),
-        serde_json::Value::Object(o) => {
-            OsonValue::Object(o.iter().map(|(k, v)| (k.clone(), json_to_oson(v))).collect())
-        }
+        serde_json::Value::Object(o) => OsonValue::Object(
+            o.iter()
+                .map(|(k, v)| (k.clone(), json_to_oson(v)))
+                .collect(),
+        ),
     }
 }
 
@@ -731,4 +718,58 @@ fn hex_encode(bytes: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+/// True when any column needs a client-side define to stream its value
+/// (`CLOB` / `BLOB` / `VECTOR` / native `JSON`). Such columns come back from the
+/// initial execute as describe-only metadata; the value is delivered on a
+/// follow-up define-fetch round trip. Mirrors the crate-private
+/// `columns_require_define`.
+fn columns_require_define(columns: &[ColumnMetadata]) -> bool {
+    columns.iter().any(|c| {
+        matches!(
+            c.ora_type_num,
+            ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR | ORA_TYPE_NUM_JSON
+        )
+    })
+}
+
+/// Execute a parameterised query and, if the result projects columns that
+/// require a client-side define (native JSON / LOB / VECTOR), perform the
+/// define-fetch round trip so the values are actually delivered.
+///
+/// `crate::Connection::execute_query_collect` does this for bind-free queries;
+/// SODA needs the same behaviour with binds, which this helper provides.
+pub(crate) async fn execute_collect_with_binds(
+    conn: &mut Connection,
+    cx: &Cx,
+    sql: &str,
+    prefetch_rows: u32,
+    binds: &[BindValue],
+) -> Result<QueryResult> {
+    let mut result = conn
+        .execute_query_with_binds(cx, sql, prefetch_rows, binds)
+        .await
+        .map_err(SodaError::Driver)?;
+    if !columns_require_define(&result.columns) || result.cursor_id == 0 {
+        return Ok(result);
+    }
+    if !result.rows.is_empty() {
+        return Ok(result);
+    }
+    let cursor_id = result.cursor_id;
+    let columns = result.columns.clone();
+    let fetched = conn
+        .define_and_fetch_rows_with_columns(cx, cursor_id, prefetch_rows.max(1), &columns, None)
+        .await
+        .map_err(SodaError::Driver)?;
+    result.rows = fetched.rows;
+    result.more_rows = fetched.more_rows;
+    if !fetched.columns.is_empty() {
+        result.columns = fetched.columns;
+    }
+    if result.cursor_id == 0 {
+        result.cursor_id = cursor_id;
+    }
+    Ok(result)
 }

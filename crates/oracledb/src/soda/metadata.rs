@@ -83,6 +83,13 @@ pub struct SodaCollectionMetadata {
 }
 
 impl SodaCollectionMetadata {
+    /// The backing table name as a SQL identifier, double-quoted so mixed-case
+    /// and otherwise non-foldable names resolve correctly. Embedded double
+    /// quotes are doubled.
+    pub fn quoted_table(&self) -> String {
+        quote_ident(&self.table_name)
+    }
+
     /// Is the content column stored as native Oracle JSON (vs BLOB/CLOB bytes)?
     pub fn content_is_native_json(&self) -> bool {
         matches!(self.content_sql_type, ContentSqlType::Json)
@@ -243,6 +250,11 @@ pub fn parse_metadata(json: &Value) -> Result<SodaCollectionMetadata> {
         read_only,
         native,
     })
+}
+
+/// Quote a SQL identifier with double quotes, doubling any embedded quote.
+pub(crate) fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 #[cfg(test)]

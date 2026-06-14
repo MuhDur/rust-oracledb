@@ -111,7 +111,11 @@ impl SodaOperation {
             sql.push_str(&format!("/*+ {hint} */ "));
         }
         sql.push_str(&cols);
-        sql.push_str(&format!(" FROM {} WHERE {}", meta.table_name, where_clause));
+        sql.push_str(&format!(
+            " FROM {} WHERE {}",
+            meta.quoted_table(),
+            where_clause
+        ));
 
         if let Some(order) = self.order_by(meta)? {
             sql.push_str(&format!(" ORDER BY {order}"));
@@ -146,7 +150,8 @@ impl SodaOperation {
         let (where_clause, binds) = self.build_where(meta)?;
         let sql = format!(
             "SELECT COUNT(*) FROM {} WHERE {}",
-            meta.table_name, where_clause
+            meta.quoted_table(),
+            where_clause
         );
         Ok((sql, binds))
     }
@@ -157,7 +162,7 @@ impl SodaOperation {
         meta: &SodaCollectionMetadata,
     ) -> Result<(String, Vec<BindValue>)> {
         let (where_clause, binds) = self.build_where(meta)?;
-        let sql = format!("DELETE FROM {} WHERE {}", meta.table_name, where_clause);
+        let sql = format!("DELETE FROM {} WHERE {}", meta.quoted_table(), where_clause);
         Ok((sql, binds))
     }
 }
@@ -197,14 +202,13 @@ pub(crate) fn select_column_list(meta: &SodaCollectionMetadata) -> (String, Sele
     let content_idx = take(meta.content_column.clone(), &mut cols, &mut next);
 
     let version_idx = meta.version_column.as_ref().map(|c| {
-        let expr = if matches!(meta.version_method, super::metadata::VersionMethod::None)
-            && meta.native
-        {
-            // ETAG is RAW; project as hex string.
-            format!("RAWTOHEX({c})")
-        } else {
-            c.clone()
-        };
+        let expr =
+            if matches!(meta.version_method, super::metadata::VersionMethod::None) && meta.native {
+                // ETAG is RAW; project as hex string.
+                format!("RAWTOHEX({c})")
+            } else {
+                c.clone()
+            };
         take(expr, &mut cols, &mut next)
     });
     let created_idx = meta
@@ -239,17 +243,19 @@ fn timestamp_iso(col: &str) -> String {
 }
 
 /// Build a key equality predicate, pushing the bind for the key value.
-fn key_predicate(
-    meta: &SodaCollectionMetadata,
-    binds: &mut Vec<BindValue>,
-    key: &str,
-) -> String {
+fn key_predicate(meta: &SodaCollectionMetadata, binds: &mut Vec<BindValue>, key: &str) -> String {
     let placeholder = key_bind_placeholder(meta, binds, key);
     format!("{} = {}", meta.key_column, placeholder)
 }
 
-/// Push a bind for a key value and return the SQL placeholder expression. RAW
-/// keys (native embedded OID) bind the hex string via HEXTORAW.
+/// Push a bind for a key value and return the SQL placeholder expression.
+///
+/// RAW keys (native embedded OID collections) are stored as a `RAW` column. We
+/// bind the decoded bytes as a `RAW` value and compare `RESID = :n` directly:
+/// binding the hex string and wrapping the placeholder in `HEXTORAW(:n)` does
+/// NOT match in the WHERE clause on this server (the function is not folded to a
+/// constant, so the implicit conversion silently fails to match), whereas a
+/// `RAW` bind matches exactly.
 fn key_bind_placeholder(
     meta: &SodaCollectionMetadata,
     binds: &mut Vec<BindValue>,
@@ -257,12 +263,28 @@ fn key_bind_placeholder(
 ) -> String {
     let n = binds.len() + 1;
     if meta.key_sql_type.eq_ignore_ascii_case("RAW") {
-        binds.push(BindValue::Text(key.to_string()));
-        format!("HEXTORAW(:{n})")
+        binds.push(BindValue::Raw(hex_decode(key)));
     } else {
         binds.push(BindValue::Text(key.to_string()));
-        format!(":{n}")
     }
+    format!(":{n}")
+}
+
+/// Decode a hex string into bytes. Invalid pairs are skipped defensively (the
+/// key always originates from `RAWTOHEX`, so it is well-formed in practice).
+pub(crate) fn hex_decode(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        let hi = (bytes[i] as char).to_digit(16);
+        let lo = (bytes[i + 1] as char).to_digit(16);
+        if let (Some(h), Some(l)) = (hi, lo) {
+            out.push((h * 16 + l) as u8);
+        }
+        i += 2;
+    }
+    out
 }
 
 /// Build a version equality predicate.
@@ -271,18 +293,18 @@ fn version_predicate(
     binds: &mut Vec<BindValue>,
     version: &str,
 ) -> Result<String> {
-    let col = meta.version_column.as_ref().ok_or_else(|| {
-        SodaError::NotSupported("collection has no version column".to_string())
-    })?;
+    let col = meta
+        .version_column
+        .as_ref()
+        .ok_or_else(|| SodaError::NotSupported("collection has no version column".to_string()))?;
     let n = binds.len() + 1;
     if matches!(meta.version_method, super::metadata::VersionMethod::None) && meta.native {
-        // ETAG RAW: compare hex.
-        binds.push(BindValue::Text(version.to_string()));
-        Ok(format!("{col} = HEXTORAW(:{n})"))
+        // ETAG RAW: bind the decoded bytes (see key_bind_placeholder).
+        binds.push(BindValue::Raw(hex_decode(version)));
     } else {
         binds.push(BindValue::Text(version.to_string()));
-        Ok(format!("{col} = :{n}"))
     }
+    Ok(format!("{col} = :{n}"))
 }
 
 /// True if the collection's key is client-assigned.
@@ -337,15 +359,19 @@ mod tests {
     }
 
     #[test]
-    fn native_select_by_key_uses_hextoraw_and_rawtohex() {
+    fn native_select_by_key_uses_raw_bind_and_rawtohex_projection() {
         let op = SodaOperation {
             key: Some("0123ABCD".into()),
             ..Default::default()
         };
         let (sql, binds, layout) = op.build_select_sql(&native_meta()).unwrap();
+        // Key projection is hex text; the WHERE binds the decoded RAW bytes and
+        // compares the RAW column directly (HEXTORAW(:bind) does not match).
         assert!(sql.contains("RAWTOHEX(RESID)"), "{sql}");
-        assert!(sql.contains("WHERE RESID = HEXTORAW(:1)"), "{sql}");
+        assert!(sql.contains("WHERE RESID = :1"), "{sql}");
+        assert!(!sql.contains("HEXTORAW"), "{sql}");
         assert_eq!(binds.len(), 1);
+        assert!(matches!(binds[0], BindValue::Raw(_)), "{binds:?}");
         assert_eq!(layout.key_idx, 0);
         assert_eq!(layout.content_idx, 1);
         assert_eq!(layout.version_idx, Some(2));
@@ -359,7 +385,7 @@ mod tests {
         };
         let (sql, binds, layout) = op.build_select_sql(&legacy_meta()).unwrap();
         assert!(sql.contains("WHERE ID = :1"), "{sql}");
-        assert!(sql.contains("FROM MYLEGACY"), "{sql}");
+        assert!(sql.contains("FROM \"MYLEGACY\""), "{sql}");
         assert_eq!(binds.len(), 1);
         // legacy has created + last_modified columns
         assert_eq!(layout.created_idx, Some(3));
@@ -384,7 +410,10 @@ mod tests {
             ..Default::default()
         };
         let (sql, binds, _) = op.build_select_sql(&legacy_meta()).unwrap();
-        assert!(sql.contains("JSON_EXISTS(JSON_DOCUMENT, '$.age?(@ > 18)')"), "{sql}");
+        assert!(
+            sql.contains("JSON_EXISTS(JSON_DOCUMENT, '$.age?(@ > 18)')"),
+            "{sql}"
+        );
         assert!(binds.is_empty());
     }
 
@@ -423,7 +452,7 @@ mod tests {
         let (sql, _, _) = op.build_select_sql(&legacy_meta()).unwrap();
         assert!(sql.contains("@ like \"John%\""), "{sql}");
         let (dsql, _) = op.build_delete_sql(&legacy_meta()).unwrap();
-        assert!(dsql.starts_with("DELETE FROM MYLEGACY WHERE"), "{dsql}");
+        assert!(dsql.starts_with("DELETE FROM \"MYLEGACY\" WHERE"), "{dsql}");
     }
 
     #[test]
