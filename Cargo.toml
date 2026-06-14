@@ -19,6 +19,16 @@ categories = ["database", "asynchronous"]
 
 [workspace.dependencies]
 aes = "0.8"
+# TLS / TCPS (Wave 5). rustls is pure-Rust and `#![forbid(unsafe_code)]`-clean
+# in our usage; versions are pinned to the copies asupersync's `tls` feature
+# links so a single rustls / pki-types is in the dependency graph.
+rustls = { version = "0.23.39", default-features = false, features = ["std", "tls12", "ring"] }
+rustls-pemfile = "2.2"
+rustls-pki-types = "1.14.1"
+# Sans-I/O ASN.1 + symmetric crypto for the experimental cwallet.sso reader.
+cbc = "0.1"
+der = { version = "0.7", features = ["oid"] }
+hmac = "0.12"
 # arrow-rs pinned as a single version family. The driver crate uses the plain
 # (default-feature) crates for fetch/ingest. The pyshim additionally enables
 # the "ffi" feature to export Arrow C Data Interface PyCapsules (the only place

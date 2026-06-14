@@ -7,16 +7,28 @@ license.workspace = true
 repository.workspace = true
 description = "Sans-I/O Oracle TNS/TTC protocol core for the oracledb crate."
 
+[features]
+default = []
+# Enables the cwallet.sso (SSO auto-login wallet) reader. Off by default: the
+# format is a proprietary Oracle container and only the AES/PBES2 branch is
+# implemented; ewallet.pem is fully supported without this feature.
+experimental = ["dep:cbc", "dep:der", "dep:hmac"]
+
 [dependencies]
 aes.workspace = true
 hex.workspace = true
 md-5.workspace = true
 pbkdf2.workspace = true
 rand.workspace = true
+rustls-pemfile.workspace = true
 serde.workspace = true
 sha1.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+# Experimental cwallet.sso reader deps (gated by the `experimental` feature).
+cbc = { workspace = true, optional = true }
+der = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true
