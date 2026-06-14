@@ -101,6 +101,12 @@ pub enum ArrowConversionError {
     NotImplemented(&'static str),
     #[error(transparent)]
     Arrow(#[from] arrow_schema::ArrowError),
+    /// A wire-decode failure surfaced while streaming the borrowed fetch batch
+    /// into the columnar Arrow builders (`build_record_batch_columnar`). The
+    /// `for_each_row_ref` decode is generic over `E: From<ProtocolError>`; this
+    /// carries that error into the Arrow conversion error type.
+    #[error(transparent)]
+    Protocol(#[from] oracledb_protocol::ProtocolError),
 }
 
 type Result<T> = std::result::Result<T, ArrowConversionError>;
@@ -1576,6 +1582,77 @@ impl crate::Connection {
         Ok(build_record_batch(&columns, &rows, options)?)
     }
 
+    /// Columnar `fetch_df_all` (bead rust-oracledb-wf7): executes `sql` and
+    /// returns the full result as a single [`RecordBatch`], decoded DIRECTLY
+    /// into per-column Arrow builders — the first execute page (owned) plus every
+    /// subsequent fetch page (borrowed, zero-copy) stream straight into the
+    /// builders, so no page is ever materialized into a
+    /// `Vec<Vec<Option<QueryValue>>>` and there is no transpose pass.
+    ///
+    /// The produced batch is byte-identical to
+    /// [`fetch_all_record_batch`](Self::fetch_all_record_batch) (the row path);
+    /// see the `arrow_columnar_equals_row_path` differential test. When the
+    /// result contains a VECTOR (List/Struct) column the columnar builders do not
+    /// apply, so this transparently falls back to the row path for that query —
+    /// callers always get the same `RecordBatch` either way.
+    pub async fn fetch_all_record_batch_columnar(
+        &mut self,
+        cx: &asupersync::Cx,
+        sql: &str,
+        fetch_array_size: u32,
+        options: &ArrowFetchOptions,
+    ) -> crate::Result<RecordBatch> {
+        let size = fetch_array_size.max(1);
+        let mut result = self.execute_query(cx, sql, size).await?;
+        require_result_set(&result.columns)?;
+        let columns = std::mem::take(&mut result.columns);
+        let cursor_id = result.cursor_id;
+        let schema = Arc::new(arrow_schema_for_columns(&columns, options)?);
+
+        // VECTOR (List/Struct) columns are not columnar-handled — fall back to
+        // the fully-tested row path for the whole query so the result is
+        // identical. This keeps the columnar path scalar-only (NUMBER / VARCHAR /
+        // RAW / BOOLEAN / DATE / TIMESTAMP / NULL) and lets the cold vector types
+        // keep their existing converter (bead 0mk is tracked separately).
+        if !columnar_supported(&schema) {
+            let mut rows = std::mem::take(&mut result.rows);
+            let mut more_rows = result.more_rows;
+            while more_rows {
+                let previous = rows.last().cloned();
+                let fetched = self
+                    .fetch_rows_with_columns(cx, cursor_id, size, &columns, previous.as_deref())
+                    .await?;
+                more_rows = fetched.more_rows;
+                rows.extend(fetched.rows);
+            }
+            return Ok(build_record_batch_with_schema(schema, &columns, &rows)?);
+        }
+
+        let capacity = result.rows.len().max(size as usize);
+        let mut builder = ColumnarBatchBuilder::new(schema, columns.clone(), capacity)
+            .expect("columnar_supported guarantees every column builds");
+
+        // First page arrived owned from the execute round trip.
+        builder.append_owned(&result.rows)?;
+        let mut more_rows = result.more_rows;
+        // Track the last owned row so duplicate-column compression on the next
+        // page resolves against it (mirrors the row path's `previous` seed). The
+        // borrowed fetch carries the seed internally via `previous_row`.
+        let mut previous: Option<Vec<Option<QueryValue>>> = result.rows.last().cloned();
+        while more_rows && cursor_id != 0 {
+            let page = self
+                .fetch_rows_ref(cx, cursor_id, size, previous.as_deref())
+                .await?;
+            more_rows = page.more_rows;
+            // Stream the page into the builders; `append_borrowed` returns the
+            // page's last row owned (one alloc/page) for the next page's seed.
+            if let Some(last) = builder.append_borrowed(&page.batch)? {
+                previous = Some(last);
+            }
+        }
+        Ok(builder.finish()?)
+    }
+
     /// Executes `sql` and returns an incremental batch fetch yielding
     /// [`RecordBatch`]es of (at most) `batch_size` rows each (the
     /// `fetch_df_batches` shape).
@@ -1616,6 +1693,23 @@ impl crate::BlockingConnection {
         })
     }
 
+    /// Synchronous columnar `fetch_df_all` (bead wf7). Byte-identical to
+    /// [`fetch_all_record_batch`](Self::fetch_all_record_batch) but decodes
+    /// straight into per-column Arrow builders (no row materialization). Falls
+    /// back to the row path transparently for VECTOR columns.
+    pub fn fetch_all_record_batch_columnar(
+        connection: &mut crate::Connection,
+        sql: &str,
+        fetch_array_size: u32,
+        options: &ArrowFetchOptions,
+    ) -> crate::Result<RecordBatch> {
+        crate::block_on_connection(move |cx| async move {
+            connection
+                .fetch_all_record_batch_columnar(&cx, sql, fetch_array_size, options)
+                .await
+        })
+    }
+
     pub fn fetch_record_batches(
         connection: &mut crate::Connection,
         sql: &str,
@@ -1635,6 +1729,556 @@ impl crate::BlockingConnection {
     ) -> crate::Result<Option<RecordBatch>> {
         crate::block_on_connection(move |cx| async move { fetch.next_batch(&cx, connection).await })
     }
+}
+
+// ===========================================================================
+// COLUMNAR fetch->Arrow (bead rust-oracledb-wf7): decode the borrowed fetch
+// batch DIRECTLY into per-column Arrow builders (transpose-during-parse),
+// skipping the `Vec<Vec<Option<QueryValue>>>` row materialization AND the
+// `build_record_batch` transpose pass.
+//
+// The wire is row-major; this path streams each borrowed row's cells straight
+// into the matching column builder, so:
+//   * no per-row `Vec<Option<QueryValue>>` is ever allocated,
+//   * VARCHAR2/CHAR/RAW cells borrow the wire buffer (zero copy) and are copied
+//     once into the Arrow value buffer,
+//   * NUMBER canonical text lands in the borrowed batch's amortized per-row
+//     arena (no per-cell `String` malloc), then converts to int64/float64/
+//     decimal128 with the SAME helpers the row path uses,
+//   * NULLs go straight into the builder's NullBuffer.
+//
+// CORRECTNESS: every cell is appended through the SAME conversion helpers
+// (`numeric_text_ref` -> `parse_number_i64`/`decimal128_from_number_text`/
+// `parse::<f64>`, `epoch_parts_ref` -> `timestamp_epoch_value`, etc.) the
+// row-major `build_column_array` uses, on byte-identical canonical text (the
+// shared NUMBER formatter), so the produced RecordBatch is byte-identical to
+// `build_record_batch`. The `arrow_columnar_equals_row_path` differential test
+// asserts this cell-for-cell over a mixed-type many-row result.
+// ===========================================================================
+
+use oracledb_protocol::thin::{BorrowedRowBatch, QueryValueRef};
+
+/// Canonical numeric text of a borrowed cell (mirror of [`numeric_text`] for the
+/// borrowed path). NUMBER borrows the per-row arena; BINARY_DOUBLE / BOOLEAN
+/// borrow their already-text form. The returned `&str` is valid for the cell's
+/// lifetime (the borrowed batch owns the backing arena/buffer).
+fn numeric_text_ref<'a>(
+    column: &ColumnMetadata,
+    value: &QueryValueRef<'a>,
+) -> Result<std::borrow::Cow<'a, str>> {
+    use std::borrow::Cow;
+    match *value {
+        QueryValueRef::Number { text, .. } => Ok(Cow::Borrowed(text)),
+        QueryValueRef::Boolean(b) => Ok(Cow::Borrowed(if b { "1" } else { "0" })),
+        QueryValueRef::Owned(owned) => numeric_text(column, owned),
+        _ => Err(invalid_value(column, "expected a numeric value")),
+    }
+}
+
+/// `EpochParts` for a borrowed datetime cell (mirror of [`epoch_parts`]).
+fn epoch_parts_ref(column: &ColumnMetadata, value: &QueryValueRef<'_>) -> Result<EpochParts> {
+    match *value {
+        QueryValueRef::DateTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+        } => {
+            let days = days_from_civil(year, month, day);
+            let seconds = days * 86_400
+                + i64::from(hour) * 3_600
+                + i64::from(minute) * 60
+                + i64::from(second);
+            Ok(EpochParts {
+                seconds,
+                nanos: nanosecond,
+            })
+        }
+        QueryValueRef::Owned(owned) => epoch_parts(column, owned),
+        _ => Err(invalid_value(column, "expected a datetime value")),
+    }
+}
+
+/// Borrow a text cell's `&str` (VARCHAR2/CHAR/LONG/ROWID) for the string
+/// builders (mirror of the `Text`/`Rowid` arms in [`build_column_array`]). The
+/// `Owned(Text/Rowid)` arm is the cold fallback (UTF-16 NCHAR, synthesized
+/// ROWID): the `&String` lives in the batch's owned arena and is valid for the
+/// cell lifetime `'a`.
+fn text_ref<'a>(column: &ColumnMetadata, value: &QueryValueRef<'a>) -> Result<&'a str> {
+    match *value {
+        QueryValueRef::Text(text) => Ok(text),
+        QueryValueRef::Owned(QueryValue::Text(text)) => Ok(text.as_str()),
+        QueryValueRef::Owned(QueryValue::Rowid(text)) => Ok(text.as_str()),
+        _ => Err(invalid_value(column, "expected a text value")),
+    }
+}
+
+/// Borrow a raw cell's bytes (RAW/LONG_RAW) for the binary builders.
+fn raw_ref<'a>(column: &ColumnMetadata, value: &QueryValueRef<'a>) -> Result<&'a [u8]> {
+    match *value {
+        QueryValueRef::Raw(bytes) => Ok(bytes),
+        QueryValueRef::Owned(QueryValue::Raw(bytes)) => Ok(bytes.as_slice()),
+        _ => Err(invalid_value(column, "expected a raw value")),
+    }
+}
+
+/// One Arrow column builder, type-erased over the scalar Arrow types this
+/// columnar path supports. Each variant appends one borrowed cell at a time
+/// (`append_ref`), reusing the row path's conversion helpers so the output is
+/// byte-identical. VECTOR (List/Struct) is intentionally NOT handled here (it
+/// stays on the row-materialize path); see `build_record_batch_columnar`.
+enum ColumnBuilder {
+    Int8(Int8Builder),
+    Int16(Int16Builder),
+    Int32(Int32Builder),
+    Int64(Int64Builder),
+    UInt8(UInt8Builder),
+    UInt16(UInt16Builder),
+    UInt32(UInt32Builder),
+    UInt64(UInt64Builder),
+    Float32(Float32Builder),
+    Float64(Float64Builder),
+    /// The builder plus its scale (arrow's `Decimal128Builder` does not expose
+    /// the scale back out, and we need it for `decimal128_from_number_text`).
+    Decimal128(Decimal128Builder, i8),
+    Boolean(BooleanBuilder),
+    Utf8(StringBuilder),
+    LargeUtf8(LargeStringBuilder),
+    Binary(BinaryBuilder),
+    LargeBinary(LargeBinaryBuilder),
+    FixedSizeBinary(FixedSizeBinaryBuilder, i32),
+    TimestampSecond(Vec<Option<i64>>),
+    TimestampMilli(Vec<Option<i64>>),
+    TimestampMicro(Vec<Option<i64>>),
+    TimestampNano(Vec<Option<i64>>),
+    Date32(Date32Builder),
+    Date64(Date64Builder),
+}
+
+impl ColumnBuilder {
+    /// Build the column builder for `data_type`, preallocating `capacity` rows.
+    /// Returns `None` for the List/Struct (VECTOR) types, which the columnar
+    /// entry routes to the row-materialize fallback.
+    fn new(data_type: &DataType, capacity: usize) -> Option<Self> {
+        Some(match data_type {
+            DataType::Int8 => ColumnBuilder::Int8(Int8Builder::with_capacity(capacity)),
+            DataType::Int16 => ColumnBuilder::Int16(Int16Builder::with_capacity(capacity)),
+            DataType::Int32 => ColumnBuilder::Int32(Int32Builder::with_capacity(capacity)),
+            DataType::Int64 => ColumnBuilder::Int64(Int64Builder::with_capacity(capacity)),
+            DataType::UInt8 => ColumnBuilder::UInt8(UInt8Builder::with_capacity(capacity)),
+            DataType::UInt16 => ColumnBuilder::UInt16(UInt16Builder::with_capacity(capacity)),
+            DataType::UInt32 => ColumnBuilder::UInt32(UInt32Builder::with_capacity(capacity)),
+            DataType::UInt64 => ColumnBuilder::UInt64(UInt64Builder::with_capacity(capacity)),
+            DataType::Float32 => ColumnBuilder::Float32(Float32Builder::with_capacity(capacity)),
+            DataType::Float64 => ColumnBuilder::Float64(Float64Builder::with_capacity(capacity)),
+            DataType::Decimal128(precision, scale) => ColumnBuilder::Decimal128(
+                Decimal128Builder::with_capacity(capacity)
+                    .with_precision_and_scale(*precision, *scale)
+                    .ok()?,
+                *scale,
+            ),
+            DataType::Boolean => ColumnBuilder::Boolean(BooleanBuilder::with_capacity(capacity)),
+            DataType::Utf8 => ColumnBuilder::Utf8(StringBuilder::with_capacity(capacity, 0)),
+            DataType::LargeUtf8 => {
+                ColumnBuilder::LargeUtf8(LargeStringBuilder::with_capacity(capacity, 0))
+            }
+            DataType::Binary => ColumnBuilder::Binary(BinaryBuilder::with_capacity(capacity, 0)),
+            DataType::LargeBinary => {
+                ColumnBuilder::LargeBinary(LargeBinaryBuilder::with_capacity(capacity, 0))
+            }
+            DataType::FixedSizeBinary(size) => ColumnBuilder::FixedSizeBinary(
+                FixedSizeBinaryBuilder::with_capacity(capacity, *size),
+                *size,
+            ),
+            DataType::Timestamp(TimeUnit::Second, None) => {
+                ColumnBuilder::TimestampSecond(Vec::with_capacity(capacity))
+            }
+            DataType::Timestamp(TimeUnit::Millisecond, None) => {
+                ColumnBuilder::TimestampMilli(Vec::with_capacity(capacity))
+            }
+            DataType::Timestamp(TimeUnit::Microsecond, None) => {
+                ColumnBuilder::TimestampMicro(Vec::with_capacity(capacity))
+            }
+            DataType::Timestamp(TimeUnit::Nanosecond, None) => {
+                ColumnBuilder::TimestampNano(Vec::with_capacity(capacity))
+            }
+            DataType::Date32 => ColumnBuilder::Date32(Date32Builder::with_capacity(capacity)),
+            DataType::Date64 => ColumnBuilder::Date64(Date64Builder::with_capacity(capacity)),
+            // List / Struct (VECTOR) and anything else: not columnar-handled.
+            _ => return None,
+        })
+    }
+
+    /// Append one borrowed cell, mirroring `build_column_array`'s per-cell
+    /// conversion exactly. `None` is a SQL NULL.
+    fn append_ref(
+        &mut self,
+        column: &ColumnMetadata,
+        cell: Option<QueryValueRef<'_>>,
+    ) -> Result<()> {
+        macro_rules! int_arm {
+            ($builder:expr, $target:ty, $arrow:literal) => {{
+                match cell {
+                    None => $builder.append_null(),
+                    Some(value) => {
+                        let text = numeric_text_ref(column, &value)?;
+                        let wide = parse_number_i64(text.as_ref()).ok_or_else(|| {
+                            ArrowConversionError::CannotConvertToInteger {
+                                value: text.to_string(),
+                            }
+                        })?;
+                        let narrowed = <$target>::try_from(wide).map_err(|_| {
+                            ArrowConversionError::InvalidInteger {
+                                value: text.to_string(),
+                                arrow_type: $arrow.to_string(),
+                            }
+                        })?;
+                        $builder.append_value(narrowed);
+                    }
+                }
+            }};
+        }
+        macro_rules! uint_arm {
+            ($builder:expr, $target:ty, $arrow:literal) => {{
+                match cell {
+                    None => $builder.append_null(),
+                    Some(value) => {
+                        let text = numeric_text_ref(column, &value)?;
+                        let invalid = || ArrowConversionError::InvalidInteger {
+                            value: text.to_string(),
+                            arrow_type: $arrow.to_string(),
+                        };
+                        let wide = match parse_number_u64(text.as_ref()) {
+                            Some(wide) => wide,
+                            None => {
+                                if parse_number_i64(text.as_ref()).is_some() {
+                                    return Err(invalid());
+                                }
+                                return Err(ArrowConversionError::CannotConvertToInteger {
+                                    value: text.to_string(),
+                                });
+                            }
+                        };
+                        let narrowed = <$target>::try_from(wide).map_err(|_| invalid())?;
+                        $builder.append_value(narrowed);
+                    }
+                }
+            }};
+        }
+
+        match self {
+            ColumnBuilder::Int8(b) => int_arm!(b, i8, "int8"),
+            ColumnBuilder::Int16(b) => int_arm!(b, i16, "int16"),
+            ColumnBuilder::Int32(b) => int_arm!(b, i32, "int32"),
+            ColumnBuilder::Int64(b) => int_arm!(b, i64, "int64"),
+            ColumnBuilder::UInt8(b) => uint_arm!(b, u8, "uint8"),
+            ColumnBuilder::UInt16(b) => uint_arm!(b, u16, "uint16"),
+            ColumnBuilder::UInt32(b) => uint_arm!(b, u32, "uint32"),
+            ColumnBuilder::UInt64(b) => uint_arm!(b, u64, "uint64"),
+            ColumnBuilder::Float64(b) => match cell {
+                None => b.append_null(),
+                Some(value) => {
+                    let text = numeric_text_ref(column, &value)?;
+                    let parsed = text.parse::<f64>().map_err(|_| {
+                        ArrowConversionError::CannotConvertToDouble {
+                            value: text.to_string(),
+                        }
+                    })?;
+                    b.append_value(parsed);
+                }
+            },
+            ColumnBuilder::Float32(b) => match cell {
+                None => b.append_null(),
+                Some(value) => {
+                    let text = numeric_text_ref(column, &value)?;
+                    let parsed = text.parse::<f32>().map_err(|_| {
+                        ArrowConversionError::CannotConvertToFloat {
+                            value: text.to_string(),
+                        }
+                    })?;
+                    b.append_value(parsed);
+                }
+            },
+            ColumnBuilder::Decimal128(b, scale) => {
+                match cell {
+                    None => b.append_null(),
+                    Some(value) => {
+                        // Build the unscaled i128 from the canonical NUMBER text with
+                        // the SAME helper the row path uses, so the result is
+                        // byte-identical. (The borrowed text is the canonical form
+                        // straight from the shared formatter; no per-cell String.)
+                        let text = numeric_text_ref(column, &value)?;
+                        let unscaled = decimal128_from_number_text(text.as_ref(), *scale)
+                            .ok_or_else(|| ArrowConversionError::DecimalOutOfRange {
+                                value: text.to_string(),
+                            })?;
+                        b.append_value(unscaled);
+                    }
+                }
+            }
+            ColumnBuilder::Boolean(b) => match cell {
+                None => b.append_null(),
+                Some(value) => {
+                    let text = numeric_text_ref(column, &value)?;
+                    b.append_value(text.as_ref() != "0");
+                }
+            },
+            ColumnBuilder::Utf8(b) => match cell {
+                None => b.append_null(),
+                Some(value) => b.append_value(text_ref(column, &value)?),
+            },
+            ColumnBuilder::LargeUtf8(b) => match cell {
+                None => b.append_null(),
+                Some(value) => b.append_value(text_ref(column, &value)?),
+            },
+            ColumnBuilder::Binary(b) => match cell {
+                None => b.append_null(),
+                Some(value) => b.append_value(raw_ref(column, &value)?),
+            },
+            ColumnBuilder::LargeBinary(b) => match cell {
+                None => b.append_null(),
+                Some(value) => b.append_value(raw_ref(column, &value)?),
+            },
+            ColumnBuilder::FixedSizeBinary(b, size) => match cell {
+                None => b.append_null(),
+                Some(value) => {
+                    let bytes = raw_ref(column, &value)?;
+                    let fixed = usize::try_from(*size).unwrap_or(0);
+                    if bytes.len() != fixed {
+                        return Err(ArrowConversionError::FixedSizeBinaryViolated {
+                            actual_len: bytes.len(),
+                            fixed_size_len: fixed,
+                        });
+                    }
+                    b.append_value(bytes)?;
+                }
+            },
+            ColumnBuilder::TimestampSecond(values) => {
+                push_timestamp_ref(column, cell, values, TimeUnit::Second)?
+            }
+            ColumnBuilder::TimestampMilli(values) => {
+                push_timestamp_ref(column, cell, values, TimeUnit::Millisecond)?
+            }
+            ColumnBuilder::TimestampMicro(values) => {
+                push_timestamp_ref(column, cell, values, TimeUnit::Microsecond)?
+            }
+            ColumnBuilder::TimestampNano(values) => {
+                push_timestamp_ref(column, cell, values, TimeUnit::Nanosecond)?
+            }
+            ColumnBuilder::Date32(b) => match cell {
+                None => b.append_null(),
+                Some(value) => {
+                    let parts = epoch_parts_ref(column, &value)?;
+                    let days = parts.seconds.div_euclid(86_400);
+                    let days = i32::try_from(days)
+                        .map_err(|_| invalid_value(column, "date out of range for date32"))?;
+                    b.append_value(days);
+                }
+            },
+            ColumnBuilder::Date64(b) => match cell {
+                None => b.append_null(),
+                Some(value) => {
+                    let parts = epoch_parts_ref(column, &value)?;
+                    let millis = timestamp_epoch_value(&parts, TimeUnit::Millisecond)
+                        .map_err(|_| invalid_value(column, "date out of range for date64"))?;
+                    b.append_value(millis);
+                }
+            },
+        }
+        Ok(())
+    }
+
+    /// Finalize this builder into an Arrow array.
+    fn finish(self) -> ArrayRef {
+        match self {
+            ColumnBuilder::Int8(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::Int16(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::Int32(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::Int64(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::UInt8(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::UInt16(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::UInt32(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::UInt64(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::Float32(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::Float64(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::Decimal128(mut b, _) => Arc::new(b.finish()),
+            ColumnBuilder::Boolean(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::Utf8(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::LargeUtf8(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::Binary(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::LargeBinary(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::FixedSizeBinary(mut b, _) => Arc::new(b.finish()),
+            ColumnBuilder::TimestampSecond(values) => {
+                Arc::new(PrimitiveArray::<TimestampSecondType>::from_iter(values))
+            }
+            ColumnBuilder::TimestampMilli(values) => Arc::new(PrimitiveArray::<
+                TimestampMillisecondType,
+            >::from_iter(values)),
+            ColumnBuilder::TimestampMicro(values) => Arc::new(PrimitiveArray::<
+                TimestampMicrosecondType,
+            >::from_iter(values)),
+            ColumnBuilder::TimestampNano(values) => {
+                Arc::new(PrimitiveArray::<TimestampNanosecondType>::from_iter(values))
+            }
+            ColumnBuilder::Date32(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::Date64(mut b) => Arc::new(b.finish()),
+        }
+    }
+}
+
+/// Push one borrowed datetime cell as the epoch value for a timestamp column
+/// (mirror of `build_timestamp_column`'s per-cell body).
+fn push_timestamp_ref(
+    column: &ColumnMetadata,
+    cell: Option<QueryValueRef<'_>>,
+    values: &mut Vec<Option<i64>>,
+    unit: TimeUnit,
+) -> Result<()> {
+    match cell {
+        None => values.push(None),
+        Some(value) => {
+            let parts = epoch_parts_ref(column, &value)?;
+            let epoch = timestamp_epoch_value(&parts, unit).map_err(|_| {
+                invalid_value(column, "timestamp out of range for the requested unit")
+            })?;
+            values.push(Some(epoch));
+        }
+    }
+    Ok(())
+}
+
+/// Whether the columnar path can handle every column of this schema. VECTOR
+/// (List/Struct) columns fall back to the row-materialize path so the cold,
+/// rarely-fetched vector types keep their fully-tested converter.
+fn columnar_supported(schema: &Schema) -> bool {
+    schema
+        .fields()
+        .iter()
+        .all(|f| !matches!(f.data_type(), DataType::List(_) | DataType::Struct(_)))
+}
+
+/// Accumulating columnar batch builder: holds one [`ColumnBuilder`] per column
+/// and appends rows from multiple fetch pages (borrowed or owned) before a
+/// single [`finish`](Self::finish) produces the [`RecordBatch`]. This is the
+/// multi-page columnar entry the `Connection::fetch_all_record_batch_columnar`
+/// driver feeds — every page streams straight into the builders, so no fetched
+/// page is ever materialized into a `Vec<Vec<Option<QueryValue>>>`.
+struct ColumnarBatchBuilder {
+    schema: SchemaRef,
+    columns: Vec<ColumnMetadata>,
+    builders: Vec<ColumnBuilder>,
+}
+
+impl ColumnarBatchBuilder {
+    /// Create builders for `schema`/`columns`, preallocating `capacity` rows.
+    /// Returns `None` if any column's Arrow type is not columnar-supported
+    /// (VECTOR List/Struct) — the caller falls back to the row path.
+    fn new(schema: SchemaRef, columns: Vec<ColumnMetadata>, capacity: usize) -> Option<Self> {
+        let mut builders = Vec::with_capacity(columns.len());
+        for field in schema.fields() {
+            builders.push(ColumnBuilder::new(field.data_type(), capacity)?);
+        }
+        Some(Self {
+            schema,
+            columns,
+            builders,
+        })
+    }
+
+    /// Append every row of a borrowed fetch page straight into the builders,
+    /// returning the page's last row materialized as owned values (or `None` for
+    /// an empty page) for the next page's duplicate-column seed. Capturing the
+    /// last row owned costs one allocation per page — the same as the row path's
+    /// `rows.last().cloned()` — and only happens once per page, not per row.
+    fn append_borrowed(
+        &mut self,
+        batch: &BorrowedRowBatch,
+    ) -> Result<Option<Vec<Option<QueryValue>>>> {
+        let columns = &self.columns;
+        let builders = &mut self.builders;
+        let last_index = batch.row_count().checked_sub(1);
+        let mut row_index = 0usize;
+        let mut last: Option<Vec<Option<QueryValue>>> = None;
+        batch.for_each_row_ref(|row: &[Option<QueryValueRef<'_>>]| {
+            if row.len() != columns.len() {
+                return Err(ArrowConversionError::InvalidValue {
+                    column_name: String::new(),
+                    reason: format!(
+                        "row has {} values but {} columns were described",
+                        row.len(),
+                        columns.len()
+                    ),
+                });
+            }
+            for (index, cell) in row.iter().enumerate() {
+                builders[index].append_ref(&columns[index], *cell)?;
+            }
+            // Snapshot ONLY the final row owned, once, for the next page's
+            // duplicate-column seed (matches the row path's `rows.last().cloned()`
+            // — one allocation per page, not per row).
+            if Some(row_index) == last_index {
+                last = Some(row.iter().map(|c| c.map(|v| v.to_owned_value())).collect());
+            }
+            row_index += 1;
+            Ok::<(), ArrowConversionError>(())
+        })?;
+        Ok(last)
+    }
+
+    /// Append owned rows (the first execute page arrives owned) by wrapping each
+    /// cell as a borrowed `QueryValueRef::Owned`, so the SAME `append_ref`
+    /// conversion runs — no separate owned code path to keep in sync.
+    fn append_owned(&mut self, rows: &[Vec<Option<QueryValue>>]) -> Result<()> {
+        for row in rows {
+            if row.len() != self.columns.len() {
+                return Err(ArrowConversionError::InvalidValue {
+                    column_name: String::new(),
+                    reason: format!(
+                        "row has {} values but {} columns were described",
+                        row.len(),
+                        self.columns.len()
+                    ),
+                });
+            }
+            for (index, cell) in row.iter().enumerate() {
+                let cell_ref = cell.as_ref().map(QueryValueRef::Owned);
+                self.builders[index].append_ref(&self.columns[index], cell_ref)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Finalize all builders into one [`RecordBatch`].
+    fn finish(self) -> Result<RecordBatch> {
+        let arrays: Vec<ArrayRef> = self
+            .builders
+            .into_iter()
+            .map(ColumnBuilder::finish)
+            .collect();
+        RecordBatch::try_new(self.schema, arrays).map_err(ArrowConversionError::from)
+    }
+}
+
+/// Builds one [`RecordBatch`] DIRECTLY from a borrowed fetch batch, transposing
+/// during parse into per-column Arrow builders (bead wf7). The produced batch is
+/// byte-identical to `build_record_batch_with_schema` over the same rows, but
+/// allocates only the Arrow value buffers (no per-row `Vec<Option<QueryValue>>`,
+/// no transpose pass, no per-cell `String` for scalar cells). Each builder is
+/// preallocated to the batch row count.
+pub fn build_record_batch_columnar(
+    schema: SchemaRef,
+    columns: &[ColumnMetadata],
+    batch: &BorrowedRowBatch,
+) -> Result<RecordBatch> {
+    let capacity = batch.row_count();
+    let mut builder = ColumnarBatchBuilder::new(schema, columns.to_vec(), capacity).ok_or(
+        ArrowConversionError::NotImplemented("columnar path does not support this column type"),
+    )?;
+    builder.append_borrowed(batch)?;
+    builder.finish()
 }
 
 #[cfg(test)]
