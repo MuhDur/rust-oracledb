@@ -245,7 +245,7 @@ Each row is a concrete differentiator, with the specific edge.
 | **Record/replay** | deterministic `.tns-cassette` capture + offline replay with no socket | no transport seam | reproduce a production wire bug from one file, no DB ([docs/RECORD_REPLAY.md](docs/RECORD_REPLAY.md)) |
 | **Observability** | feature-gated `tracing`/OpenTelemetry per-round-trip spans, GIL-free, digest-only (no secrets), zero-cost off | GIL-bound, app-wired | N connections trace in parallel; the dependency isn't compiled in when off ([docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)) |
 | **Thin-mode SODA** (experimental) | SODA over the thin TTC protocol — 42 of Oracle's own SODA tests pass | raises `DPI-1050`; SODA is thick-only | the first pure-thin SODA in an Oracle driver ([docs/SODA.md](docs/SODA.md)) |
-| **Fail-closed decoder** | OOM-closed by construction (`BoundedReader`); 9 cargo-fuzz targets, billions of execs, 0 crashes | — | a hostile/buggy server cannot OOM or panic the client ([docs/FUZZING.md](docs/FUZZING.md)) |
+| **Fail-closed decoder** | OOM-closed by construction (`BoundedReader`); 10 cargo-fuzz targets, billions of execs, 0 crashes | — | a hostile/buggy server cannot OOM or panic the client ([docs/FUZZING.md](docs/FUZZING.md)) |
 | **Cancellation-correct fetch** | `cancel()` / scope cancel-on-drop sends a break and drains, leaving a clean connection | — | a cancelled or timed-out fetch never poisons a reused connection |
 
 ---
@@ -451,9 +451,6 @@ hidden.
   still lives in the PyO3 shim rather than the standalone crate; suite-green is the
   gate as that logic moves down. The crate is exercised by native (non-shim)
   integration tests today.
-- **Wide multi-packet rows.** A known decoder bug in the wide-row multi-packet
-  reassembly path (`select *` spanning several packets past ~1500 wide rows) is
-  documented in [docs/PERFORMANCE.md](docs/PERFORMANCE.md#a-driver-limitation-this-surfaced).
 - **The static binary is x86_64-musl.** ARM64/Windows/macOS need their own
   targets; only Linux musl is `FROM scratch`.
 
