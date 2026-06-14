@@ -1861,6 +1861,13 @@ impl ThinConnImpl {
         crate::aq::ThinQueueImpl::new()
     }
 
+    /// Build a SODA database impl for `getSodaDatabase()`. The `_conn` argument
+    /// is the public Connection object (the reference passes `self`); we hold
+    /// the connection handle already, so it is unused.
+    fn create_soda_database_impl(&self, _conn: &Bound<'_, PyAny>) -> crate::soda::ThinSodaDbImpl {
+        self.build_soda_db_impl()
+    }
+
     fn create_msg_props_impl(&self) -> crate::aq::ThinMsgPropsImpl {
         crate::aq::ThinMsgPropsImpl::new()
     }
