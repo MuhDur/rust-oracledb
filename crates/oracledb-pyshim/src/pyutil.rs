@@ -186,9 +186,9 @@ pub(crate) fn query_value_to_string(value: &Option<QueryValue>) -> Option<String
         Some(QueryValue::IntervalYM { .. }) => None,
         Some(QueryValue::Array(_)) => None,
         Some(QueryValue::Vector(_)) => None,
-        Some(QueryValue::Cursor { .. }) => None,
-        Some(QueryValue::Object { .. }) => None,
-        Some(QueryValue::Lob { .. }) => None,
+        Some(QueryValue::Cursor(_)) => None,
+        Some(QueryValue::Object(_)) => None,
+        Some(QueryValue::Lob(_)) => None,
         Some(QueryValue::Json(_)) => None,
         None => None,
     }

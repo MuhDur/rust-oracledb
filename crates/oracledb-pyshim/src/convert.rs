@@ -5,11 +5,12 @@ use oracledb::protocol::oson::OsonValue;
 use oracledb::protocol::thin::{
     bind_template_from_type_name, bind_value_type_info, cursor_bind_template,
     dbobject_element_bind_type_info, decode_bfile_locator_name,
-    encode_lob_text as protocol_encode_lob_text, BindValue, ColumnMetadata, QueryValue,
-    CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE, ORA_TYPE_NUM_BINARY_DOUBLE,
-    ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_BOOLEAN, ORA_TYPE_NUM_CLOB,
-    ORA_TYPE_NUM_JSON, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ,
-    ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR, ORA_TYPE_NUM_VECTOR,
+    encode_lob_text as protocol_encode_lob_text, BindValue, ColumnMetadata, CursorValue, LobValue,
+    ObjectValue, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BFILE,
+    ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_INTEGER, ORA_TYPE_NUM_BLOB,
+    ORA_TYPE_NUM_BOOLEAN, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_JSON, ORA_TYPE_NUM_NUMBER,
+    ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ,
+    ORA_TYPE_NUM_VARCHAR, ORA_TYPE_NUM_VECTOR,
 };
 use oracledb::protocol::vector::{Vector, VectorValues};
 use oracledb::{BlockingConnection, Connection as RustConnection};
@@ -1346,7 +1347,8 @@ pub(crate) fn query_value_to_py(
         }
         // dense VECTOR -> array.array, sparse VECTOR -> oracledb.SparseVector
         Some(QueryValue::Vector(vector)) => vector_to_py(py, vector),
-        Some(QueryValue::Cursor { columns, cursor_id }) => {
+        Some(QueryValue::Cursor(cursor)) => {
+            let CursorValue { columns, cursor_id } = cursor.as_ref();
             let Some(owner_cursor) = owner_cursor else {
                 return Err(not_implemented("ThinCursorImpl cursor value conversion"));
             };
@@ -1355,13 +1357,14 @@ pub(crate) fn query_value_to_py(
             hydrate_cursor_impl(&child_cursor, columns, *cursor_id, false)?;
             Ok(child_cursor.unbind())
         }
-        Some(QueryValue::Lob {
-            ora_type_num,
-            csfrm,
-            locator,
-            size,
-            chunk_size,
-        }) => {
+        Some(QueryValue::Lob(lob)) => {
+            let LobValue {
+                ora_type_num,
+                csfrm,
+                locator,
+                size,
+                chunk_size,
+            } = lob.as_ref();
             let context = match (lob_context, owner_cursor) {
                 (Some(context), _) => context.clone(),
                 (None, Some(owner_cursor)) => thin_lob_context_from_cursor(owner_cursor)?,
@@ -1388,11 +1391,12 @@ pub(crate) fn query_value_to_py(
                 },
             )
         }
-        Some(QueryValue::Object {
-            schema,
-            type_name,
-            packed_data,
-        }) => {
+        Some(QueryValue::Object(object)) => {
+            let ObjectValue {
+                schema,
+                type_name,
+                packed_data,
+            } = object.as_ref();
             if type_name
                 .as_deref()
                 .is_some_and(|name| name.eq_ignore_ascii_case("XMLTYPE"))

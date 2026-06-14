@@ -600,9 +600,9 @@ impl ThinCursorImpl {
                     continue;
                 };
                 let inlined = match slot.take() {
-                    Some(QueryValue::Lob { locator, .. }) => {
+                    Some(QueryValue::Lob(lob)) => {
                         let column = &columns[index];
-                        let data = self.read_full_lob(&locator, call_timeout)?;
+                        let data = self.read_full_lob(&lob.locator, call_timeout)?;
                         Some(lob_bytes_to_query_value(column.ora_type_num, data))
                     }
                     other => other,
@@ -2153,11 +2153,11 @@ impl ThinCursorImpl {
         };
         let mut cursors = Vec::with_capacity(resultsets.len());
         for value in resultsets {
-            let QueryValue::Cursor { columns, cursor_id } = value else {
+            let QueryValue::Cursor(cursor) = value else {
                 continue;
             };
             let child_cursor = connection.call_method0("cursor")?;
-            hydrate_cursor_impl(&child_cursor, columns, *cursor_id, false)?;
+            hydrate_cursor_impl(&child_cursor, &cursor.columns, cursor.cursor_id, false)?;
             cursors.push(child_cursor.unbind());
         }
         self.implicit_result_cursors =

@@ -1073,16 +1073,18 @@ fn build_vector_list_column<'a>(
     for cell in cells {
         match cell {
             None => builder.append_null(),
-            Some(QueryValue::Vector(Vector::Dense(values))) => {
-                push_vector_values(column, &mut builder, values)?;
-            }
-            Some(QueryValue::Vector(Vector::Sparse { .. })) => {
-                // A sparse vector value reaching a dense `List` column means the
-                // column described with flexible dimensions (mixed num_dimensions
-                // across rows) so could not be typed as a fixed sparse struct.
-                // Reference: append_sparse_vector -> ERR_ARROW_SPARSE_VECTOR_NOT_ALLOWED.
-                return Err(ArrowConversionError::SparseVectorNotAllowed);
-            }
+            Some(QueryValue::Vector(vector)) => match vector.as_ref() {
+                Vector::Dense(values) => {
+                    push_vector_values(column, &mut builder, values)?;
+                }
+                Vector::Sparse { .. } => {
+                    // A sparse vector value reaching a dense `List` column means the
+                    // column described with flexible dimensions (mixed num_dimensions
+                    // across rows) so could not be typed as a fixed sparse struct.
+                    // Reference: append_sparse_vector -> ERR_ARROW_SPARSE_VECTOR_NOT_ALLOWED.
+                    return Err(ArrowConversionError::SparseVectorNotAllowed);
+                }
+            },
             Some(_) => return Err(invalid_value(column, "expected a vector value")),
         }
     }
@@ -1120,23 +1122,25 @@ fn build_vector_struct_column<'a>(
                 values.append_null();
                 validity.push(false);
             }
-            Some(QueryValue::Vector(Vector::Sparse {
-                num_dimensions: dims,
-                indices: idx,
-                values: vals,
-            })) => {
-                num_dimensions.append_value(i64::from(*dims));
-                indices.values().append_slice(idx);
-                indices.append(true);
-                push_vector_values(column, &mut values, vals)?;
-                validity.push(true);
-            }
-            Some(QueryValue::Vector(Vector::Dense(_))) => {
-                return Err(invalid_value(
-                    column,
-                    "expected a sparse vector but received a dense vector",
-                ));
-            }
+            Some(QueryValue::Vector(vector)) => match vector.as_ref() {
+                Vector::Sparse {
+                    num_dimensions: dims,
+                    indices: idx,
+                    values: vals,
+                } => {
+                    num_dimensions.append_value(i64::from(*dims));
+                    indices.values().append_slice(idx);
+                    indices.append(true);
+                    push_vector_values(column, &mut values, vals)?;
+                    validity.push(true);
+                }
+                Vector::Dense(_) => {
+                    return Err(invalid_value(
+                        column,
+                        "expected a sparse vector but received a dense vector",
+                    ));
+                }
+            },
             Some(_) => return Err(invalid_value(column, "expected a vector value")),
         }
     }
@@ -1968,13 +1972,13 @@ mod tests {
     fn dense_float32_vector_builds_list_array_with_nulls() {
         let columns = vec![vector_column("V", VECTOR_FORMAT_FLOAT32, 0)];
         let rows = vec![
-            vec![Some(QueryValue::Vector(Vector::Dense(
+            vec![Some(QueryValue::Vector(Box::new(Vector::Dense(
                 VectorValues::Float32(vec![34.6, 77.8]),
-            )))],
+            ))))],
             vec![None],
-            vec![Some(QueryValue::Vector(Vector::Dense(
+            vec![Some(QueryValue::Vector(Box::new(Vector::Dense(
                 VectorValues::Float32(vec![34.6, 77.8, 55.9]),
-            )))],
+            ))))],
         ];
         let batch =
             build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
@@ -2005,17 +2009,17 @@ mod tests {
             VECTOR_META_FLAG_SPARSE_VECTOR,
         )];
         let rows = vec![
-            vec![Some(QueryValue::Vector(Vector::Sparse {
+            vec![Some(QueryValue::Vector(Box::new(Vector::Sparse {
                 num_dimensions: 8,
                 indices: vec![0, 7],
                 values: VectorValues::Float64(vec![34.6, 77.8]),
-            }))],
+            })))],
             vec![None],
-            vec![Some(QueryValue::Vector(Vector::Sparse {
+            vec![Some(QueryValue::Vector(Box::new(Vector::Sparse {
                 num_dimensions: 8,
                 indices: vec![0, 7],
                 values: VectorValues::Float64(vec![34.6, 9.1]),
-            }))],
+            })))],
         ];
         let batch =
             build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
@@ -2054,9 +2058,9 @@ mod tests {
         // BINARY vector bytes are NOT bit-unpacked: 3 bytes -> 3 UInt8 elements
         // (test_9103 expects [3, 2, 3] from a 24-bit binary vector).
         let columns = vec![vector_column("V", VECTOR_FORMAT_BINARY, 0)];
-        let rows = vec![vec![Some(QueryValue::Vector(Vector::Dense(
+        let rows = vec![vec![Some(QueryValue::Vector(Box::new(Vector::Dense(
             VectorValues::Binary(vec![3, 2, 3]),
-        )))]];
+        ))))]];
         let batch =
             build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
         assert_eq!(

@@ -81,8 +81,46 @@ pub struct BindTypeInfo {
     pub buffer_size: u32,
 }
 
+/// Heap payload of [`QueryValue::Cursor`]. Boxed out of the enum because a
+/// REF CURSOR carries a full column-metadata vector — see [`QueryValue`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct CursorValue {
+    pub columns: Vec<ColumnMetadata>,
+    pub cursor_id: u32,
+}
+
+/// Heap payload of [`QueryValue::Object`] (ADT / collection image). Boxed out
+/// of the enum — see [`QueryValue`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ObjectValue {
+    pub schema: Option<String>,
+    pub type_name: Option<String>,
+    pub packed_data: Vec<u8>,
+}
+
+/// Heap payload of [`QueryValue::Lob`] (LOB / BFILE locator). Boxed out of the
+/// enum — see [`QueryValue`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct LobValue {
+    pub ora_type_num: u8,
+    pub csfrm: u8,
+    pub locator: Vec<u8>,
+    pub size: u64,
+    pub chunk_size: u32,
+}
+
 // `Eq` is intentionally omitted: VECTOR values carry floating-point elements,
 // which only implement `PartialEq`.
+//
+// COLD variants are boxed: `Cursor`, `Object`, `Lob`, `Vector` and `Json`
+// each carried a large (32-72 byte) inline payload that dominated the enum and
+// bloated the hot per-row fetch `Vec<QueryValue>`, hurting cache locality.
+// Boxing them moves the payload to the heap so the enum shrinks to the common
+// scalar footprint (the largest *hot* scalar variant is `Number`/`TextRaw` at
+// 32 bytes). The boxing is pure indirection: no semantics change, only the
+// cold/rare values now live behind a pointer. See the `const _` size guard
+// below for the enforced upper bound. (Perf pre-req for borrowed-fetch and
+// decode-offload work.)
 #[derive(Clone, Debug, PartialEq)]
 pub enum QueryValue {
     Text(String),
@@ -113,10 +151,8 @@ pub enum QueryValue {
     /// Native Oracle `DB_TYPE_BOOLEAN` (`ora_type_num` 252, 23ai+): surfaced as
     /// a Python `bool` rather than an integer.
     Boolean(bool),
-    Cursor {
-        columns: Vec<ColumnMetadata>,
-        cursor_id: u32,
-    },
+    /// REF CURSOR (cold): payload boxed, see [`CursorValue`].
+    Cursor(Box<CursorValue>),
     DateTime {
         year: i32,
         month: u8,
@@ -126,24 +162,28 @@ pub enum QueryValue {
         second: u8,
         nanosecond: u32,
     },
-    Object {
-        schema: Option<String>,
-        type_name: Option<String>,
-        packed_data: Vec<u8>,
-    },
-    Lob {
-        ora_type_num: u8,
-        csfrm: u8,
-        locator: Vec<u8>,
-        size: u64,
-        chunk_size: u32,
-    },
-    Vector(crate::vector::Vector),
+    /// ADT / collection image (cold): payload boxed, see [`ObjectValue`].
+    Object(Box<ObjectValue>),
+    /// LOB / BFILE locator (cold): payload boxed, see [`LobValue`].
+    Lob(Box<LobValue>),
+    /// VECTOR (cold): the per-element data is boxed out of the hot enum.
+    Vector(Box<crate::vector::Vector>),
     /// Native Oracle JSON (`DB_TYPE_JSON`, `ora_type_num` 119): the OSON image
-    /// is decoded eagerly into the lossless [`crate::oson::OsonValue`] tree.
-    Json(crate::oson::OsonValue),
+    /// is decoded eagerly into the lossless [`crate::oson::OsonValue`] tree
+    /// (cold): the tree is boxed out of the hot enum.
+    Json(Box<crate::oson::OsonValue>),
     Array(Vec<Option<QueryValue>>),
 }
+
+// Compile-time guard for the hot per-row fetch path. `Vec<QueryValue>` is
+// allocated once per fetched row, so the enum's stack footprint directly drives
+// cache locality. Boxing the cold variants (Cursor/Object/Lob/Vector/Json)
+// brought this from 72 bytes down to 32 — the niche-optimized footprint of the
+// largest hot scalar variant (`Number { text: String, is_integer: bool }`,
+// where the discriminant tucks into `String`'s spare capacity bytes so it adds
+// no width). Adding a new large *inline* variant must either stay under the
+// bound or be boxed; do not bump N without re-confirming the hot fetch path.
+const _: () = assert!(core::mem::size_of::<QueryValue>() <= 32);
 
 impl QueryValue {
     /// Borrow this value as decoded text when it is a `VARCHAR2` / `CHAR` /
