@@ -38,10 +38,13 @@ TNS/TTC protocol itself, so an application using it compiles to a single static
 binary, decodes the wire in parallel across cores (no GIL), fails closed against
 hostile input (fuzzed), and maps rows into compile-checked Rust types.
 
-**What "parity" means here, precisely.** This is a **conformance** parity, not a
-"drop-in / production-ready / Oracle-certified" claim. The yardstick is
-python-oracledb's own pytest suite, in thin mode, against Oracle Database 23ai
-Free:
+**What "parity" means here, precisely.** Parity here means **behavioural
+conformance with the reference** — verified by running python-oracledb's *own*
+pytest suite, in thin mode, against Oracle Database 23ai Free. It is not an
+Oracle-affiliated or Oracle-certified product. This is an early release (`0.1.0`):
+the API may still evolve, and it has not yet accumulated the years of in-production
+deployment the reference has. What it *has* earned is laid out, with evidence,
+below — judge its readiness for your workload from that:
 
 | | result | evidence |
 |---|---|---|
