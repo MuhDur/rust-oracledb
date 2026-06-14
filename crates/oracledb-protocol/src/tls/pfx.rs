@@ -109,10 +109,10 @@ pub(super) fn parse_pfx(data: &[u8], password: &[u8]) -> Result<WalletContents, 
 
     let mut contents = WalletContents::default();
     if !decrypted_safe_contents.is_empty() {
-        read_safe_contents(&decrypted_safe_contents, &mut contents)?;
+        read_safe_contents(&decrypted_safe_contents, password, &mut contents)?;
     }
     for sc in &plain_safe_contents {
-        read_safe_contents(sc, &mut contents)?;
+        read_safe_contents(sc, password, &mut contents)?;
     }
 
     if contents.ca_certificates.is_empty() && contents.client_cert_chain.is_empty() {
@@ -336,7 +336,11 @@ fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ct: &[u8]) -> Result<Vec<u8>, WalletEr
 /// Parse a SafeContents (`SEQUENCE OF SafeBag`) and collect certs/keys.
 ///
 /// SafeBag ::= SEQUENCE { bagId OID, bagValue [0] EXPLICIT, bagAttributes OPTIONAL }
-fn read_safe_contents(data: &[u8], out: &mut WalletContents) -> Result<(), WalletError> {
+fn read_safe_contents(
+    data: &[u8],
+    password: &[u8],
+    out: &mut WalletContents,
+) -> Result<(), WalletError> {
     let mut reader = into_seq(data)?;
     let (tag, seq) = read_tlv(&mut reader)?;
     if tag != Tag::Sequence {
@@ -360,14 +364,38 @@ fn read_safe_contents(data: &[u8], out: &mut WalletContents) -> Result<(), Walle
                 out.client_private_key = Some(value.to_vec());
             }
             OID_PKCS8_SHROUDED_KEY_BAG => {
-                return Err(sso(
-                    "PKCS#8 shrouded key bag (encrypted) is not supported in \
-                     experimental SSO mode — convert wallet to ewallet.pem",
-                ));
+                // bagValue [0] EXPLICIT wraps an EncryptedPrivateKeyInfo
+                // ::= SEQUENCE { encryptionAlgorithm AlgorithmIdentifier,
+                //                encryptedData OCTET STRING }.
+                // Only the PBES2/AES scheme is supported (the modern wallet
+                // format); other schemes return an explicit error.
+                let mut bv = into_seq(value)?;
+                let (epki_tag, epki_body) = read_tlv(&mut bv)?;
+                if epki_tag != Tag::Sequence {
+                    continue;
+                }
+                let mut epki = into_seq(epki_body)?;
+                let (alg_tag, alg_body) = read_tlv(&mut epki)?;
+                if alg_tag != Tag::Sequence {
+                    return Err(sso("shrouded key: expected AlgorithmIdentifier"));
+                }
+                let (key, iv) = derive_pbes2(alg_body, password)?;
+                let (ct_tag, ct) = read_tlv(&mut epki)?;
+                if ct_tag != Tag::OctetString {
+                    return Err(sso("shrouded key: expected encrypted OCTET STRING"));
+                }
+                let pkcs8 = aes_cbc_decrypt(&key, &iv, ct)?;
+                out.client_private_key = Some(pkcs8);
             }
             OID_CERT_BAG => {
+                // bagValue [0] EXPLICIT wraps a CertBag SEQUENCE; unwrap it.
                 // CertBag ::= SEQUENCE { certId OID, certValue [0] EXPLICIT OCTET STRING }
-                let mut cb = into_seq(value)?;
+                let mut bv = into_seq(value)?;
+                let (cb_tag, cb_body) = read_tlv(&mut bv)?;
+                if cb_tag != Tag::Sequence {
+                    continue;
+                }
+                let mut cb = into_seq(cb_body)?;
                 let _cert_id = read_oid(&mut cb)?;
                 let (ct_tag, cv) = read_tlv(&mut cb)?;
                 if ct_tag.is_context_specific() {

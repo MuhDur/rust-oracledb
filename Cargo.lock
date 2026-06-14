@@ -1390,6 +1390,7 @@ dependencies = [
  "hmac 0.12.1",
  "md-5",
  "pbkdf2",
+ "pkcs8",
  "rand",
  "rustls-pemfile",
  "serde",
@@ -1397,6 +1398,7 @@ dependencies = [
  "sha1 0.10.6",
  "sha2 0.10.9",
  "thiserror",
+ "x509-cert",
 ]
 
 [[package]]

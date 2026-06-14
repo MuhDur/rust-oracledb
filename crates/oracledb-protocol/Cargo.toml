@@ -32,6 +32,8 @@ hmac = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true
+x509-cert.workspace = true
+pkcs8 = "0.10"
 
 [lints]
 workspace = true
