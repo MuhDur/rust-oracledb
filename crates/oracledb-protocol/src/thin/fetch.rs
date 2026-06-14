@@ -7,7 +7,10 @@ pub fn build_fetch_payload(cursor_id: u32, arraysize: u32) -> Vec<u8> {
 }
 
 pub fn build_fetch_payload_with_seq(cursor_id: u32, arraysize: u32, seq_num: u8) -> Vec<u8> {
-    let mut writer = TtcWriter::new();
+    // Fixed tiny payload (function code + ub8 + two ub4 ≈ <=20 bytes). Prealloc
+    // so the small pushes do not grow the Vec through doublings; built every
+    // fetch page, so this matters on multi-page fetches. Bytes unchanged.
+    let mut writer = TtcWriter::with_capacity(32);
     writer.write_function_code_with_seq(TNS_FUNC_FETCH, seq_num);
     writer.write_ub8(0);
     writer.write_ub4(cursor_id);

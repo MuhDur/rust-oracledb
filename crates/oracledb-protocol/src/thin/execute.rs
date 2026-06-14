@@ -126,7 +126,15 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
             length: bind_rows.len(),
             minimum: 0,
         })?;
-    let mut writer = TtcWriter::new();
+    // Preallocate the writer so the small per-field `write_*` pushes do not grow
+    // the backing `Vec` through several doublings (each a heap allocation). The
+    // fixed message header + the inline SQL bytes dominate the no-bind/small-bind
+    // common case (e.g. `select 1 from dual` is 87 bytes total); bind columns add
+    // their own bytes and may still grow the buffer, but the hot small-statement
+    // path now builds in a single allocation. The written bytes are unchanged —
+    // this is a pure allocation optimization (see `TtcWriter::with_capacity`).
+    let writer_capacity = 96 + sql_bytes.len();
+    let mut writer = TtcWriter::with_capacity(writer_capacity);
     writer.write_function_code_with_seq(TNS_FUNC_EXECUTE, seq_num);
     writer.write_ub8(exec_options.token_num);
 
