@@ -26,7 +26,7 @@
 //! The codec is fail-closed: unknown magic bytes, versions, or element
 //! formats produce an error rather than a best-effort guess.
 
-use crate::wire::{TtcReader, TtcWriter};
+use crate::wire::{BoundedReader, TtcReader, TtcWriter};
 use crate::{ProtocolError, Result};
 
 /// VECTOR image magic byte (`TNS_VECTOR_MAGIC_BYTE`).
@@ -125,7 +125,10 @@ pub fn decode_vector(data: &[u8]) -> Result<Vector> {
     if flags & TNS_VECTOR_FLAG_SPARSE != 0 {
         let num_dimensions = num_elements;
         let num_sparse = read_u16be(&mut reader)?;
-        let mut indices = Vec::with_capacity(usize::from(num_sparse));
+        // Each sparse index is a 4-byte u32 on the wire, so bound the
+        // pre-allocation by the buffer (BoundedReader invariant): a declared
+        // count larger than remaining()/4 cannot be honest.
+        let mut indices: Vec<u32> = reader.with_capacity_bounded(usize::from(num_sparse), 4);
         for _ in 0..num_sparse {
             indices.push(read_u32be(&mut reader)?);
         }
@@ -151,13 +154,13 @@ fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<V
     // many elements up front lets a hostile/buggy server force a multi-gigabyte
     // allocation (OOM) before the first element read even fails on truncation.
     // A legitimate image always carries `count * element_size` value bytes, so
-    // capping the initial reservation by what remains in the buffer never
-    // affects a valid vector while making the allocation fail-closed. The
-    // per-element `read_raw` below still bounds-checks each read.
-    let cap = |element_size: usize| count.min(reader.remaining() / element_size.max(1));
+    // `BoundedReader::with_capacity_bounded` caps the reservation by what
+    // remains in the buffer — never affecting a valid vector while making the
+    // allocation fail-closed. The per-element `read_raw` below still
+    // bounds-checks each read.
     match format {
         VECTOR_FORMAT_FLOAT32 => {
-            let mut out = Vec::with_capacity(cap(4));
+            let mut out: Vec<f32> = reader.with_capacity_bounded(count, 4);
             for _ in 0..count {
                 let raw = reader.read_raw(4)?;
                 out.push(decode_binary_float([raw[0], raw[1], raw[2], raw[3]]));
@@ -165,7 +168,7 @@ fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<V
             Ok(VectorValues::Float32(out))
         }
         VECTOR_FORMAT_FLOAT64 => {
-            let mut out = Vec::with_capacity(cap(8));
+            let mut out: Vec<f64> = reader.with_capacity_bounded(count, 8);
             for _ in 0..count {
                 let raw = reader.read_raw(8)?;
                 out.push(decode_binary_double([
@@ -175,7 +178,7 @@ fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<V
             Ok(VectorValues::Float64(out))
         }
         VECTOR_FORMAT_INT8 => {
-            let mut out = Vec::with_capacity(cap(1));
+            let mut out: Vec<i8> = reader.with_capacity_bounded(count, 1);
             for _ in 0..count {
                 out.push(reader.read_u8()? as i8);
             }
@@ -400,6 +403,24 @@ mod tests {
         assert_eq!(decoded, vector);
     }
 
+    // BoundedReader invariant (l2p), behavior-preservation: a legitimately
+    // large vector (where count * element_size really fits the buffer) must
+    // still decode in full. The bound is "can't exceed what's in the buffer,"
+    // not an arbitrary small cap, so real large results are unaffected.
+    #[test]
+    fn legitimate_large_vector_still_decodes_fully() {
+        let big_f32: Vec<f32> = (0..4096).map(|i| i as f32 * 0.5 - 1024.0).collect();
+        roundtrip(Vector::Dense(VectorValues::Float32(big_f32)));
+        let big_f64: Vec<f64> = (0..2048).map(|i| i as f64 * 0.25).collect();
+        roundtrip(Vector::Dense(VectorValues::Float64(big_f64)));
+        // A large sparse vector exercises the bounded sparse-index path.
+        roundtrip(Vector::Sparse {
+            num_dimensions: 100_000,
+            indices: (0..1000).map(|i| i * 7).collect(),
+            values: VectorValues::Float32((0..1000).map(|i| i as f32).collect()),
+        });
+    }
+
     #[test]
     fn roundtrips_every_dense_format() {
         roundtrip(Vector::Dense(VectorValues::Float32(vec![
@@ -492,6 +513,33 @@ mod tests {
     fn fuzz_regression_oom_oversized_element_count() {
         let input = [219, 0, 0, 18, 3, 54, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let err = decode_vector(&input).expect_err("oversized count must fail closed");
+        assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
+    }
+
+    // BoundedReader invariant (l2p), VECTOR sparse family: a sparse image
+    // declaring a huge num_sparse_elements (0xFFFF u16) but carrying none of the
+    // 0xFFFF * 4 = 256 KiB of index bytes must fail closed, not pre-allocate
+    // from the count. The `with_capacity_bounded(num_sparse, 4)` cap keeps the
+    // reservation at remaining()/4 and the per-index read_u32be then errors.
+    #[test]
+    fn sparse_oversized_index_count_fails_closed_not_oom() {
+        // magic, version=2 (sparse), flags=0x0020 (SPARSE), format=3 (f64),
+        // num_elements/num_dimensions = 0 (u32), then num_sparse = 0xFFFF (u16)
+        // with NO index/value bytes following.
+        let input = [
+            TNS_VECTOR_MAGIC_BYTE,
+            TNS_VECTOR_VERSION_WITH_SPARSE,
+            0x00,
+            0x20, // flags: SPARSE
+            VECTOR_FORMAT_FLOAT64,
+            0x00,
+            0x00,
+            0x00,
+            0x00, // num_elements (u32) = 0
+            0xFF,
+            0xFF, // num_sparse = 65535, but no indices follow
+        ];
+        let err = decode_vector(&input).expect_err("oversized sparse count must fail closed");
         assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
     }
 

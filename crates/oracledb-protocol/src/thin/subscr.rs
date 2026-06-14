@@ -476,7 +476,10 @@ fn process_notification_payload(
 
 fn process_tables(cur: &mut ByteCursor<'_>) -> Result<Vec<MsgTable>> {
     let num_tables = cur.u16be()?;
-    let mut tables = Vec::with_capacity(num_tables as usize);
+    // Each table record reads at least a u32 operation + u16 name length (6
+    // bytes) before its name, so cap the reservation by the buffer
+    // (BoundedReader); the loop still fails closed on truncation.
+    let mut tables: Vec<MsgTable> = cur.with_capacity_bounded(num_tables as usize, 6);
     for _ in 0..num_tables {
         let operation = cur.u32be()?;
         let name_len = cur.u16be()? as usize;
@@ -499,7 +502,9 @@ fn process_tables(cur: &mut ByteCursor<'_>) -> Result<Vec<MsgTable>> {
 
 fn process_rows(cur: &mut ByteCursor<'_>) -> Result<Vec<MsgRow>> {
     let num_rows = cur.u16be()?;
-    let mut rows = Vec::with_capacity(num_rows as usize);
+    // Each row record reads at least a u32 operation + u16 rowid length (6
+    // bytes); bound the reservation by the buffer (BoundedReader).
+    let mut rows: Vec<MsgRow> = cur.with_capacity_bounded(num_rows as usize, 6);
     for _ in 0..num_rows {
         let operation = cur.u32be()?;
         let rowid_len = cur.u16be()? as usize;
@@ -512,7 +517,9 @@ fn process_rows(cur: &mut ByteCursor<'_>) -> Result<Vec<MsgRow>> {
 
 fn process_queries(cur: &mut ByteCursor<'_>) -> Result<Vec<MsgQuery>> {
     let num_queries = cur.u16be()?;
-    let mut queries = Vec::with_capacity(num_queries as usize);
+    // Each query record reads at least three u32s (12 bytes) before its nested
+    // tables; bound the reservation by the buffer (BoundedReader).
+    let mut queries: Vec<MsgQuery> = cur.with_capacity_bounded(num_queries as usize, 12);
     for _ in 0..num_queries {
         let id_lsb = u64::from(cur.u32be()?);
         let id_msb = u64::from(cur.u32be()?);
@@ -583,9 +590,34 @@ impl<'a> ByteCursor<'a> {
     }
 }
 
+impl crate::wire::BoundedReader for ByteCursor<'_> {
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.pos)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // BoundedReader invariant (l2p), CQN array family: a notification table
+    // record declaring the maximum num_tables (0xFFFF) but carrying no table
+    // bytes must fail closed via the bounded reservation + the per-record read,
+    // not pre-allocate 65535 MsgTable structs from the count. (num_tables is a
+    // u16 so this was never a multi-GB OOM, but routing it through the bound
+    // keeps the whole class uniform and regression-proof.)
+    #[test]
+    fn cqn_oversized_table_count_fails_closed_not_oom() {
+        // num_tables = 0xFFFF (u16), then nothing.
+        let bytes = [0xFFu8, 0xFF];
+        let mut cur = ByteCursor::new(&bytes);
+        let err = process_tables(&mut cur).expect_err("oversized table count must fail closed");
+        assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
+        // The pre-allocation never exceeds remaining()/6 even for the max count.
+        let cur2 = ByteCursor::new(&bytes);
+        let v: Vec<MsgTable> = cur2.with_capacity_bounded(0xFFFF, 6);
+        assert!(v.capacity() <= 1, "reservation capped by remaining bytes");
+    }
 
     fn caps_12_1() -> ClientCapabilities {
         ClientCapabilities {

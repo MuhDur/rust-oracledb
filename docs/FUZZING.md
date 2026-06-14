@@ -153,6 +153,81 @@ covered by a regression unit test plus a corpus seed.
   `wire::tests::sb4_decodes_representative_values`;
   seed `fuzz/corpus/query_response/regression_sb4_negate_overflow`.
 
+## OOM-from-length is now closed by construction
+
+Bugs #1–#3 above were the same bug three times: a length/count field read from
+the wire (`u16`/`u32`/`u64`) drove an unbounded `Vec::with_capacity(count)` /
+`reserve(count)` *before* a single element was read, so a hostile/buggy server
+could force a multi-gigabyte allocation (OOM DoS) with a few bytes. They were
+fixed reactively, one decoder at a time. That whole class is now closed
+**structurally** rather than case by case.
+
+The invariant: *a length/count field read from the wire can never cause an
+allocation larger than the bytes actually remaining in the current message
+buffer.* You cannot have `N` elements if fewer than `N * min_bytes_per_elem`
+bytes remain.
+
+It is enforced by the **`BoundedReader`** trait (`src/wire.rs`), implemented for
+every reader over an untrusted buffer — `TtcReader` (which also serves
+`vector.rs`, `fetch.rs`, `dpl.rs`), the OSON `OsonReader`, the CQN `ByteCursor`
+(`subscr.rs`), and the `DbObjectPackedReader` (`dbobject.rs`). It anchors two
+primitives on `remaining()`:
+
+- `alloc_count_checked(count, min_bytes_per_elem) -> Result<usize>` — fail
+  *closed* early with a `ProtocolError` (never a panic, never an OOM) when
+  `count * min_bytes_per_elem` exceeds `remaining()` (saturating on overflow).
+- `with_capacity_bounded::<T>(count, min_bytes_per_elem) -> Vec<T>` — cap the
+  speculative pre-allocation at `remaining() / min_bytes_per_elem` while still
+  returning a normal growable `Vec`, so legitimate large payloads (where the
+  count really fits) pre-size to the honest count and streamed/chunked fields
+  still append correctly as data arrives.
+
+**Every** server-count-driven reservation in the protocol crate now routes
+through one of these instead of trusting a raw wire count. The converted sites:
+
+| Decoder family | File | Count field | Primitive |
+|----------------|------|-------------|-----------|
+| OSON field-name table | `oson.rs` | `num_short/long_field_names`, per-segment `num_fields` | `with_capacity_bounded` |
+| OSON container | `oson.rs` | `num_children` (object/array) | `with_capacity_bounded` |
+| VECTOR dense | `vector.rs` | `num_elements` (f32/f64/int8) | `with_capacity_bounded` |
+| VECTOR sparse | `vector.rs` | `num_sparse` indices | `with_capacity_bounded` |
+| Query implicit resultsets | `thin/fetch.rs` | `num_results` | `with_capacity_bounded` |
+| Query column annotations | `thin/fetch.rs` | `num_annotations` | `with_capacity_bounded` |
+| Out-bind array | `thin/fetch.rs` | array `num_elements` | `with_capacity_bounded` |
+| DML RETURNING | `thin/fetch.rs` | `num_rows` | `with_capacity_bounded` |
+| arraydmlrowcounts | `thin/fetch.rs` | `num_rows` | `with_capacity_bounded` |
+| CQN notification | `thin/subscr.rs` | `num_tables` / `num_rows` / `num_queries` | `with_capacity_bounded` |
+| Direct Path prepare | `dpl.rs` | `num_columns`, `out_values_length` | `with_capacity_bounded` |
+| DbObject collection | `thin/dbobject.rs` | element count (`read_length`) | `remaining()` exposed for the caller's bound |
+
+The query **column** count (`parse_describe_info`) and the DbObject **attribute**
+loop never pre-size — they `push` into a `Vec` that grows as each record is read
+— so the loop body's per-element bounds check is the only allocation path and is
+already fail-closed; the crafted-input tests below lock that in.
+
+**New decoders MUST use `alloc_count_checked` / `with_capacity_bounded`** for any
+`Vec`/collection sized from a wire-supplied count. A raw `Vec::with_capacity(n)`
+where `n` comes from the wire is the exact shape this audit greps for; route it
+through `BoundedReader` instead.
+
+**Crafted-input tests** (`<huge declared count, few actual bytes> -> clean Err,
+not OOM/panic`) cover every count-driven family:
+`vector::tests::sparse_oversized_index_count_fails_closed_not_oom`,
+`vector::tests::fuzz_regression_oom_oversized_element_count`,
+`oson::tests::fuzz_regression_oom_oversized_counts`,
+`thin::fetch::fuzz_regression_tests::{describe_info_oversized_column_count_fails_closed_not_oom,
+out_bind_array_oversized_element_count_fails_closed_not_oom,
+fuzz_regression_implicit_resultset_oom}`,
+`dpl::tests::direct_path_oversized_column_count_fails_closed_not_oom`,
+`thin::subscr::tests::cqn_oversized_table_count_fails_closed_not_oom`,
+`thin::dbobject::bounded_reader_tests::{dbobject_oversized_collection_count_is_bounded_by_remaining,
+dbobject_legitimate_collection_count_passes}`,
+plus the primitive's own
+`wire::tests::{alloc_count_checked_errs_when_count_exceeds_remaining,
+with_capacity_bounded_caps_preallocation_but_still_grows}`. Temporarily reverting
+the out-bind bound to a raw `Vec::with_capacity(count)` makes the test attempt a
+~19.8 GB allocation and abort, confirming the bound is load-bearing.
+
 ## Clean-run evidence
 
 After all four fixes, each target was re-run for a bounded 120 s libFuzzer

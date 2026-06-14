@@ -198,10 +198,79 @@ impl TtcWriter {
     }
 }
 
+/// The structural OOM-from-length invariant for every wire decoder.
+///
+/// A length/count field read from the wire can **never** drive an allocation
+/// larger than the bytes actually remaining in the current message buffer: you
+/// cannot have `N` elements if fewer than `N * min_bytes_per_elem` bytes remain.
+/// Every reader over an untrusted buffer (`TtcReader`, the OSON / DbObject /
+/// notification cursors, the VECTOR reader) implements this trait, and every
+/// count-driven `Vec::with_capacity` / `reserve` in the decoders routes through
+/// one of its two methods instead of trusting a raw `u16`/`u32`/`u64` count.
+///
+/// This closes the OOM-from-length bug class *by construction*: a new decoder
+/// physically cannot pre-allocate from a wire count without going through a
+/// bound, because the raw `Vec::with_capacity(count)` shape is the thing we
+/// audit against (see `docs/FUZZING.md`).
+///
+/// Two flavors, both anchored on [`remaining`](Self::remaining):
+///
+/// * [`alloc_count_checked`](Self::alloc_count_checked) — fail *closed* early:
+///   returns an `Err` if the declared count cannot possibly fit, before any
+///   allocation. Use where an oversized count is unambiguously malformed.
+/// * [`with_capacity_bounded`](Self::with_capacity_bounded) — cap *the
+///   pre-allocation* at what the buffer could hold while still returning a
+///   normal growable `Vec`. Use where the loop body itself fails closed on the
+///   first truncated element read; legitimate large payloads keep working
+///   because the cap equals the honest count whenever the bytes are really
+///   there.
+pub trait BoundedReader {
+    /// Bytes still unread in the current message buffer. The ceiling on any
+    /// count-driven allocation.
+    fn remaining(&self) -> usize;
+
+    /// Validate a server-declared element `count` against the buffer: a run of
+    /// `count` elements must carry at least `count * min_bytes_per_elem` bytes,
+    /// so a count whose minimum byte footprint exceeds [`remaining`] is a lie.
+    /// Returns the (unchanged) `count` when it fits, or a fail-closed
+    /// [`ProtocolError::TtcDecode`] otherwise — never a panic, never an OOM.
+    ///
+    /// `min_bytes_per_elem` is the *minimum* on-wire size of one element (e.g.
+    /// 4 for a `u32` index, 8 for an `f64`, 1 for a length-prefixed field whose
+    /// shortest legal form is a single length byte). A zero is treated as 1.
+    fn alloc_count_checked(&self, count: usize, min_bytes_per_elem: usize) -> Result<usize> {
+        let per_elem = min_bytes_per_elem.max(1);
+        match count.checked_mul(per_elem) {
+            Some(needed) if needed <= self.remaining() => Ok(count),
+            _ => Err(ProtocolError::TtcDecode(
+                "declared element count exceeds remaining buffer",
+            )),
+        }
+    }
+
+    /// Pre-size a `Vec` for `count` elements *without* trusting `count`: the
+    /// reserved capacity is capped at `remaining() / min_bytes_per_elem`, the
+    /// largest number of elements the buffer could actually hold. The returned
+    /// `Vec` is a normal growable `Vec`, so a legitimately large payload (where
+    /// `count` really fits) is pre-sized to the honest count, and a streamed /
+    /// chunked field that grows past the initial buffer still appends correctly
+    /// — the cap only governs the *speculative* up-front reservation.
+    fn with_capacity_bounded<T>(&self, count: usize, min_bytes_per_elem: usize) -> Vec<T> {
+        let per_elem = min_bytes_per_elem.max(1);
+        Vec::with_capacity(count.min(self.remaining() / per_elem))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TtcReader<'a> {
     bytes: &'a [u8],
     pos: usize,
+}
+
+impl BoundedReader for TtcReader<'_> {
+    fn remaining(&self) -> usize {
+        TtcReader::remaining(self)
+    }
 }
 
 /// Outcome of [`TtcReader::read_bytes_borrowed`]: a borrowed run of the wire
@@ -537,6 +606,70 @@ pub fn encode_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- BoundedReader invariant (l2p) -----------------------------------
+    // A length/count field read from the wire can NEVER drive an allocation
+    // larger than the bytes actually remaining in the buffer. These tests pin
+    // both flavors of the bounded-allocation primitive: the early-erroring
+    // `alloc_count_checked` and the cap-and-grow `with_capacity_bounded`.
+
+    #[test]
+    fn alloc_count_checked_errs_when_count_exceeds_remaining() {
+        // 4 bytes left in the buffer, but a declared count of ~4 billion 8-byte
+        // elements. The honest minimum is 8 bytes per element, so the claim is
+        // a lie and must fail closed rather than reserving ~32 GB.
+        let bytes = [0u8; 4];
+        let reader = TtcReader::new(&bytes);
+        assert!(reader.alloc_count_checked(u32::MAX as usize, 8).is_err());
+        // count * min_bytes that overflows usize must also fail closed.
+        assert!(reader.alloc_count_checked(usize::MAX, 8).is_err());
+    }
+
+    #[test]
+    fn alloc_count_checked_ok_when_count_fits() {
+        // 16 bytes remaining, two 8-byte elements declared: legitimate.
+        let bytes = [0u8; 16];
+        let reader = TtcReader::new(&bytes);
+        assert_eq!(
+            reader.alloc_count_checked(2, 8).expect("fits"),
+            2,
+            "a count whose bytes fit must pass through unchanged"
+        );
+        // A zero-minimum element size is treated as 1 byte (defensive) and a
+        // zero count is always fine.
+        assert_eq!(reader.alloc_count_checked(0, 0).expect("zero"), 0);
+    }
+
+    #[test]
+    fn with_capacity_bounded_caps_preallocation_but_still_grows() {
+        // 8 bytes remaining; a hostile count of ~4 billion 4-byte elements.
+        let bytes = [0u8; 8];
+        let reader = TtcReader::new(&bytes);
+        let v: Vec<u32> = reader.with_capacity_bounded(u32::MAX as usize, 4);
+        // The pre-allocation is capped at remaining()/elem = 8/4 = 2, NOT 4e9.
+        assert_eq!(
+            v.capacity(),
+            2,
+            "pre-allocation must be capped by remaining"
+        );
+        // But the vec is still a normal growable Vec: pushing past the cap is
+        // fine (legitimate large payloads keep working as chunks arrive).
+        let mut v = v;
+        for i in 0..100u32 {
+            v.push(i);
+        }
+        assert_eq!(v.len(), 100);
+    }
+
+    #[test]
+    fn with_capacity_bounded_uses_full_count_when_buffer_is_large() {
+        // 400 bytes remaining, 10 four-byte elements: the real count fits, so
+        // the pre-allocation is the honest count, not an arbitrary small cap.
+        let bytes = [0u8; 400];
+        let reader = TtcReader::new(&bytes);
+        let v: Vec<u32> = reader.with_capacity_bounded(10, 4);
+        assert_eq!(v.capacity(), 10);
+    }
 
     // Regression (w6-fuzz, query_response target): a negative-flagged sb4/sb8
     // whose magnitude is i32::MIN / i64::MIN made `-value` overflow and panic

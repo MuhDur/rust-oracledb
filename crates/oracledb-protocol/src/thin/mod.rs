@@ -8,7 +8,7 @@
 pub(crate) use std::collections::BTreeMap;
 
 pub(crate) use crate::sql::statement_is_plsql;
-pub(crate) use crate::wire::{BorrowedBytes, TtcReader, TtcWriter};
+pub(crate) use crate::wire::{BorrowedBytes, BoundedReader, TtcReader, TtcWriter};
 pub(crate) use crate::{ProtocolError, Result, TNS_VERSION_DESIRED, TNS_VERSION_MIN};
 pub(crate) use hex::FromHex;
 

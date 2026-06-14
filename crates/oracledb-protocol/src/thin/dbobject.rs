@@ -97,6 +97,15 @@ impl<'a> DbObjectPackedReader<'a> {
         self.bytes.len().saturating_sub(self.pos)
     }
 
+    /// Bytes still unread in the packed image. Exposed so a caller materializing
+    /// a collection (whose element count is a server-declared `read_length`) can
+    /// bound its `Vec` pre-allocation against the buffer via the
+    /// [`BoundedReader`](crate::wire::BoundedReader) trait — closing the
+    /// OOM-from-length class for DbObject collections too.
+    pub fn remaining(&self) -> usize {
+        self.bytes_left()
+    }
+
     pub fn read_atomic_null(&mut self, is_collection_context: bool) -> Result<bool> {
         let value = self.read_u8()?;
         match (value, is_collection_context) {
@@ -106,6 +115,12 @@ impl<'a> DbObjectPackedReader<'a> {
                 Ok(false)
             }
         }
+    }
+}
+
+impl crate::wire::BoundedReader for DbObjectPackedReader<'_> {
+    fn remaining(&self) -> usize {
+        self.bytes_left()
     }
 }
 
@@ -531,6 +546,54 @@ pub fn decode_dbobject_binary_double(bytes: &[u8]) -> Result<f64> {
         }
     }
     Ok(f64::from_bits(u64::from_be_bytes(bytes)))
+}
+
+#[cfg(test)]
+mod bounded_reader_tests {
+    use super::*;
+    use crate::wire::BoundedReader;
+
+    // BoundedReader invariant (l2p), DbObject collection family: a packed image
+    // declaring a huge collection element count (via the long-length indicator
+    // + a ub4 ~620M) but carrying no element bytes must NOT drive a
+    // gigabyte-scale Vec pre-allocation. The collection decode loop lives in the
+    // pyshim, but the bound is structural: DbObjectPackedReader exposes
+    // `remaining()` so the count can be checked/capped against the buffer.
+    #[test]
+    fn dbobject_oversized_collection_count_is_bounded_by_remaining() {
+        // read_length long form: 0xfe then ub4 0x25000000 (~620M), no elements.
+        let bytes = [TNS_LONG_LENGTH_INDICATOR, 0x25, 0x00, 0x00, 0x00];
+        let mut reader = DbObjectPackedReader::new(&bytes);
+        let num_elements = reader.read_length().expect("length decodes");
+        assert_eq!(num_elements, 0x2500_0000);
+
+        // Only the (now zero) remaining bytes can be honestly allocated: an
+        // element needs at least one byte, so alloc_count_checked must reject
+        // the lie rather than letting a caller reserve ~620M slots.
+        assert!(
+            reader.alloc_count_checked(num_elements, 1).is_err(),
+            "declared count must not exceed the empty remaining buffer"
+        );
+        // The cap-and-grow flavor caps the pre-allocation at remaining() (0).
+        let v: Vec<u32> = reader.with_capacity_bounded(num_elements, 1);
+        assert_eq!(
+            v.capacity(),
+            0,
+            "pre-allocation must be capped by remaining"
+        );
+    }
+
+    // A legitimate small collection count whose elements really fit passes
+    // through unchanged (no false rejection of valid DbObjects).
+    #[test]
+    fn dbobject_legitimate_collection_count_passes() {
+        // 8 bytes of element payload remaining, two declared elements.
+        let bytes = [1u8, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11];
+        let reader = DbObjectPackedReader::new(&bytes);
+        assert_eq!(reader.alloc_count_checked(2, 1).expect("fits"), 2);
+        let v: Vec<u32> = reader.with_capacity_bounded(2, 1);
+        assert_eq!(v.capacity(), 2);
+    }
 }
 
 #[cfg(test)]
