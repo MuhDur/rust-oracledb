@@ -28,6 +28,12 @@ important decision:
 > use `BlockingConnection` inside `tokio::task::spawn_blocking`. See
 > [INTEGRATION.md](references/INTEGRATION.md).
 
+> **Requires nightly Rust.** The async runtime (`asupersync`) is built with
+> `#![feature(try_trait_v2)]`, so `oracledb` and anything depending on it only
+> compile on a nightly toolchain — a stable build fails with `E0554` before
+> reaching this crate's code. Pin it with a `rust-toolchain.toml`
+> (`channel = "nightly"`). There is no stable MSRV.
+
 `Cargo.toml`:
 
 ```toml

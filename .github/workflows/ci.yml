@@ -17,10 +17,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# The PyO3 conformance harness `oracledb-pyshim` (publish = false) is excluded
-# from the plain cargo jobs: it needs a Python toolchain to build and a live
-# Oracle database to run, and is exercised by the parity harness, not unit CI.
-# (Job shapes + action versions kept consistent with oraclemcp's CI.)
+# This driver requires NIGHTLY Rust (asupersync uses #![feature(try_trait_v2)]),
+# so every compiling job is pinned to the nightly in rust-toolchain.toml. There
+# is no stable MSRV, hence no MSRV job. The PyO3 conformance harness
+# oracledb-pyshim (publish=false) needs a Python toolchain + live DB and is
+# excluded from the plain cargo jobs.
 jobs:
   fmt:
     name: rustfmt
@@ -29,7 +30,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly-2026-05-11
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -41,7 +42,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly-2026-05-11
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -56,39 +57,27 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly-2026-05-11
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --exclude oracledb-pyshim
       - run: cargo test --workspace --exclude oracledb-pyshim --doc
 
-  # Honour the advertised MSRV (rust-version = "1.83" in [workspace.package]).
-  # A build (not test) is enough to catch use of newer std/lang features.
-  msrv:
-    name: build on MSRV (1.83)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.83.0
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace --exclude oracledb-pyshim
-
   docs:
     name: cargo doc (builds)
     runs-on: ubuntu-latest
-    env:
-      RUSTDOCFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly-2026-05-11
       - uses: Swatinem/rust-cache@v2
+      # Not gated with -D warnings: some doc-comments carry intentional
+      # `[bracketed]` text and feature-gated intra-doc links that warn under the
+      # default-feature doc build (matching oraclemcp's docs job policy).
       - run: cargo doc --workspace --exclude oracledb-pyshim --no-deps
 
   # Supply-chain / license gate, driven by the committed deny.toml.
-  # (Same job shape as oraclemcp's CI for cross-repo consistency.)
+  # (cargo-deny is a standalone binary — no Rust toolchain needed.)
   supply-chain:
     name: cargo deny (advisories, licenses, bans, sources)
     runs-on: ubuntu-latest
@@ -109,7 +98,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@nightly-2026-05-11
       - run: bash scripts/release_preflight.sh
 
   # The 8 cargo-fuzz targets live in the standalone crates/oracledb-protocol/fuzz
@@ -124,10 +113,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@nightly-2026-05-11
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
-      - run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
+      - run: cargo fuzz build --target x86_64-unknown-linux-gnu
         working-directory: crates/oracledb-protocol

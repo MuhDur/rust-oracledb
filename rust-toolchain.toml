@@ -1,0 +1,14 @@
+# This driver requires NIGHTLY Rust.
+#
+# asupersync (the async runtime) is built with `#![feature(try_trait_v2)]` and
+# `#![feature(try_trait_v2_residual)]`, which are nightly-only — so `oracledb`
+# (and every crate that depends on it) only compiles on nightly. There is NO
+# stable MSRV; a stable toolchain fails with E0554 before any of this crate's own
+# code is even reached.
+#
+# Pinned for reproducible local + CI builds. Bump this date in lockstep with
+# asupersync upgrades (and the matching `dtolnay/rust-toolchain@nightly-...`
+# pins in .github/workflows/).
+[toolchain]
+channel = "nightly-2026-05-11"
+components = ["rustfmt", "clippy"]
