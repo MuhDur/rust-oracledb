@@ -38,8 +38,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@nightly-2026-05-11
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-05-11
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
@@ -79,8 +80,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@nightly-2026-05-11
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-05-11
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -117,7 +119,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@nightly-2026-05-11
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-11
       - uses: Swatinem/rust-cache@v2
       - name: Publish crates in dependency order
         env:
