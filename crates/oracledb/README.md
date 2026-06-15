@@ -5,7 +5,7 @@ python-oracledb v4.0.1 thin mode that passes the reference's own test suite, wit
 no Oracle Instant Client, no OCI, and no C library at runtime.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/MuhDur/rust-oracledb#license)
-[![Rust 1.83+](https://img.shields.io/badge/rust-1.83%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust: nightly](https://img.shields.io/badge/rust-nightly-orange.svg)](https://www.rust-lang.org)
 [![unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/MuhDur/rust-oracledb)
 
 `oracledb` speaks the Oracle TNS/TTC wire protocol directly over TCP. You add the

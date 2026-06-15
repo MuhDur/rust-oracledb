@@ -112,7 +112,7 @@ Resulting package file counts: `oracledb-protocol` ~38 files, `oracledb-derive`
 
 ## Metadata completeness (per published crate)
 
-All three inherit `version`, `edition`, `rust-version`, `license`, `repository`,
+All three inherit `version`, `edition`, `license`, `repository`,
 and `homepage` from `[workspace.package]`, plus a `documentation = https://docs.rs/<crate>`
 default. Per-crate specifics:
 

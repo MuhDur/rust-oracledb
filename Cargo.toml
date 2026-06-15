@@ -10,7 +10,8 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.83"
+# No `rust-version`: this driver requires NIGHTLY Rust (asupersync uses
+# `#![feature(try_trait_v2)]`). See `rust-toolchain.toml`; there is no stable MSRV.
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/MuhDur/rust-oracledb"
 homepage = "https://github.com/MuhDur/rust-oracledb"

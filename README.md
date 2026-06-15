@@ -5,7 +5,7 @@
 <p align="center">
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License: MIT OR Apache-2.0"></a>
   <a href="https://crates.io/crates/oracledb"><img src="https://img.shields.io/crates/v/oracledb.svg" alt="crates.io"></a>
-  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.83%2B-orange.svg" alt="Rust 1.83+"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-nightly-orange.svg" alt="Rust: nightly"></a>
   <a href="#robustness"><img src="https://img.shields.io/badge/unsafe-forbidden-success.svg" alt="unsafe: forbidden"></a>
 </p>
 
@@ -395,7 +395,8 @@ across thousands of generated values. See [docs/FUZZING.md](docs/FUZZING.md).
 
 ## Installation
 
-`rust-oracledb` targets Rust 1.83+ and is published on crates.io as
+`rust-oracledb` requires **nightly Rust** (its async runtime, asupersync, is built
+with `#![feature(try_trait_v2)]`) and is published on crates.io as
 [`oracledb`](https://crates.io/crates/oracledb):
 
 ```bash
