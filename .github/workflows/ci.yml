@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Least privilege: no CI job touches the token or needs write scope.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# The PyO3 conformance harness `oracledb-pyshim` (publish = false) is excluded
+# from the plain cargo jobs: it needs a Python toolchain to build and a live
+# Oracle database to run, and is exercised by the parity harness, not unit CI.
+# (Job shapes + action versions kept consistent with oraclemcp's CI.)
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (-D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # --no-deps, not --all-targets: the workspace enables clippy::unwrap_used,
+      # which legitimately fires on test code under --all-targets.
+      - run: cargo clippy --workspace --exclude oracledb-pyshim --no-deps -- -D warnings
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --exclude oracledb-pyshim
+      - run: cargo test --workspace --exclude oracledb-pyshim --doc
+
+  # Honour the advertised MSRV (rust-version = "1.83" in [workspace.package]).
+  # A build (not test) is enough to catch use of newer std/lang features.
+  msrv:
+    name: build on MSRV (1.83)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.83.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --exclude oracledb-pyshim
+
+  docs:
+    name: cargo doc (builds)
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --exclude oracledb-pyshim --no-deps
+
+  # Supply-chain / license gate, driven by the committed deny.toml.
+  # (Same job shape as oraclemcp's CI for cross-repo consistency.)
+  supply-chain:
+    name: cargo deny (advisories, licenses, bans, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny check
+
+  # Catch workspace version skew / missing-package drift at PR time, not just at
+  # tag time. No token, no tag, no main-ancestry — the script validates only that
+  # all crates share one version when RELEASE_TAG/RELEASE_REQUIRE_MAIN are unset.
+  release-metadata:
+    name: release metadata sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - run: bash scripts/release_preflight.sh
+
+  # The 8 cargo-fuzz targets live in the standalone crates/oracledb-protocol/fuzz
+  # crate (not a workspace member), so nothing else in CI compiles them. This
+  # non-blocking job keeps them from bit-rotting. Pinned to the gnu target
+  # (cargo-fuzz defaults to musl, which breaks the ASan build).
+  fuzz-build:
+    name: fuzz targets compile (nightly)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
+        working-directory: crates/oracledb-protocol
