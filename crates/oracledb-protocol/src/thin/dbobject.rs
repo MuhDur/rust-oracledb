@@ -416,7 +416,7 @@ pub fn decode_lob_text(bytes: &[u8], csfrm: u8, locator: Option<&[u8]>) -> Resul
     // UTF-16 (almost always AL16UTF16 from the server for a multi-byte CLOB).
     // An odd byte count is malformed; reject it before decoding, matching the
     // previous `chunks_exact().remainder()` check.
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(ProtocolError::TtcDecode("invalid LOB UTF-16 text"));
     }
     // LOB text is overwhelmingly ASCII/Latin, where every UTF-16 code unit is a

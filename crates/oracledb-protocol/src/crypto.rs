@@ -200,7 +200,7 @@ fn encrypt_cbc(key: &[u8], plain_text: &[u8], zeros: bool) -> Result<Vec<u8>> {
 }
 
 fn decrypt_cbc_raw(key: &[u8], encrypted_text: &[u8]) -> Result<Vec<u8>> {
-    if encrypted_text.len() % 16 != 0 {
+    if !encrypted_text.len().is_multiple_of(16) {
         return Err(ProtocolError::TtcDecode(
             "AES-CBC ciphertext length is not block aligned",
         ));
