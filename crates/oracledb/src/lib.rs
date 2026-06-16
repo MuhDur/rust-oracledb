@@ -508,6 +508,173 @@ pub struct DbmsOutput {
     pub truncated: bool,
 }
 
+/// A scalar attribute of an Oracle ADT/object type (from the data dictionary).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectAttribute {
+    /// Attribute name, uppercased as Oracle stores it.
+    pub name: String,
+    /// Oracle attribute type name (`ALL_TYPE_ATTRS.ATTR_TYPE_NAME`), e.g.
+    /// `"VARCHAR2"`, `"NUMBER"`, `"DATE"`.
+    pub type_name: String,
+    /// `Some(owner)` when the attribute is itself an object/collection type (a
+    /// nested ADT); `None` for built-in scalar types.
+    pub type_owner: Option<String>,
+}
+
+/// Element type metadata for an Oracle collection type (VARRAY / nested table),
+/// from `ALL_COLL_TYPES`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionElement {
+    /// Oracle element type name (`ALL_COLL_TYPES.ELEM_TYPE_NAME`), e.g.
+    /// `"NUMBER"`, `"VARCHAR2"`.
+    pub type_name: String,
+    /// `Some(owner)` when the element is itself an object/collection type; `None`
+    /// for built-in scalar element types.
+    pub type_owner: Option<String>,
+}
+
+/// Metadata for an Oracle ADT/object type, fetched from the data dictionary by
+/// [`Connection::describe_object_type`]. A type is either an *object* (carrying
+/// `attributes`) or a *collection* (carrying `collection_element`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectType {
+    /// Owning schema (uppercased).
+    pub schema: String,
+    /// Type name (uppercased).
+    pub name: String,
+    /// Attributes in declaration order (empty for a collection type).
+    pub attributes: Vec<ObjectAttribute>,
+    /// `Some(..)` when this type is a collection (VARRAY / nested table); carries
+    /// its element metadata. `None` for object types (see `attributes`).
+    pub collection_element: Option<CollectionElement>,
+}
+
+/// A decoded Oracle ADT value. For an *object* type the scalar attributes are in
+/// `attributes`; for a *collection* type the elements are in `elements`. Each
+/// value is decoded with the same rules as a normal column. Returned by
+/// [`decode_object`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DecodedObject {
+    /// The object type's schema.
+    pub type_schema: String,
+    /// The object type's name.
+    pub type_name: String,
+    /// `(attribute name, value)` in declaration order; `None` is SQL `NULL`.
+    /// Empty when the decoded value is a collection (see `elements`).
+    pub attributes: Vec<(String, Option<oracledb_protocol::thin::QueryValue>)>,
+    /// `Some(elements)` when the decoded value is a collection; each entry is one
+    /// element in order (`None` is a NULL element). `None` for object values.
+    pub elements: Option<Vec<Option<oracledb_protocol::thin::QueryValue>>>,
+}
+
+/// Decode a returned Oracle ADT object value (the payload of a
+/// `QueryValue::Object`) into its scalar attributes, using the type metadata
+/// from [`Connection::describe_object_type`]. Bounded by the object image
+/// length, so a malformed/huge image cannot cause unbounded work.
+///
+/// Scoped to objects with scalar attributes: a nested object/collection
+/// attribute yields a typed `Error::Protocol(UnsupportedFeature(..))`, so a
+/// caller can classify "this shape isn't decodable yet" distinctly from a real
+/// failure. python-oracledb only decodes objects through its thick/DbObject
+/// machinery; this is the native structured surface.
+pub fn decode_object(
+    value: &oracledb_protocol::thin::ObjectValue,
+    ty: &ObjectType,
+) -> Result<DecodedObject> {
+    use oracledb_protocol::thin::DbObjectPackedReader;
+    let mut reader = DbObjectPackedReader::new(&value.packed_data);
+    reader.read_header()?;
+
+    // Collection type: 1 collection-flags byte, then an element count, then each
+    // element value (reference impl/thin/dbobject.pyx `_unpack_data_from_buf`).
+    if let Some(elem) = &ty.collection_element {
+        if elem.type_owner.is_some() {
+            return Err(oracledb_protocol::ProtocolError::UnsupportedFeature(
+                "collection of nested object/collection elements is not decodable yet",
+            )
+            .into());
+        }
+        let _collection_flags = reader.read_u8()?;
+        let num_elements = reader.read_length()?;
+        // Every element consumes at least one byte, so the real count cannot
+        // exceed the bytes still in the image; cap the pre-allocation against
+        // `remaining()` so a malformed huge count can't force an unbounded Vec.
+        // The loop itself is bounded too: `read_value_bytes` errors (truncated)
+        // once the image is exhausted.
+        let cap = num_elements.min(reader.remaining());
+        let mut elements = Vec::with_capacity(cap);
+        for _ in 0..num_elements {
+            let decoded = match reader.read_value_bytes()? {
+                None => None,
+                Some(bytes) => Some(decode_object_scalar(&elem.type_name, bytes)?),
+            };
+            elements.push(decoded);
+        }
+        return Ok(DecodedObject {
+            type_schema: ty.schema.clone(),
+            type_name: ty.name.clone(),
+            attributes: Vec::new(),
+            elements: Some(elements),
+        });
+    }
+
+    let mut attributes = Vec::with_capacity(ty.attributes.len());
+    for attr in &ty.attributes {
+        if attr.type_owner.is_some() {
+            return Err(oracledb_protocol::ProtocolError::UnsupportedFeature(
+                "nested object/collection attribute is not decodable yet",
+            )
+            .into());
+        }
+        let decoded = match reader.read_value_bytes()? {
+            None => None,
+            Some(bytes) => Some(decode_object_scalar(&attr.type_name, bytes)?),
+        };
+        attributes.push((attr.name.clone(), decoded));
+    }
+    Ok(DecodedObject {
+        type_schema: ty.schema.clone(),
+        type_name: ty.name.clone(),
+        attributes,
+        elements: None,
+    })
+}
+
+/// Decode one scalar attribute/element value of an Oracle object/collection,
+/// using the same codecs as normal column values. Returns a typed
+/// `UnsupportedFeature` for a type we do not decode yet (so a caller can classify
+/// the shape distinctly from a real failure).
+fn decode_object_scalar(
+    type_name: &str,
+    bytes: Vec<u8>,
+) -> Result<oracledb_protocol::thin::QueryValue> {
+    use oracledb_protocol::thin::{
+        decode_datetime_value, decode_dbobject_text, decode_number_value, QueryValue,
+    };
+    let v = if type_name.starts_with("TIMESTAMP") {
+        decode_datetime_value(&bytes)?
+    } else {
+        match type_name {
+            "VARCHAR2" | "VARCHAR" | "CHAR" => {
+                QueryValue::Text(decode_dbobject_text(&bytes, "DB_TYPE_VARCHAR")?)
+            }
+            "NVARCHAR2" | "NCHAR" => {
+                QueryValue::Text(decode_dbobject_text(&bytes, "DB_TYPE_NCHAR")?)
+            }
+            "NUMBER" | "FLOAT" | "INTEGER" => decode_number_value(&bytes)?,
+            "DATE" => decode_datetime_value(&bytes)?,
+            "RAW" => QueryValue::Raw(bytes),
+            _ => {
+                return Err(oracledb_protocol::ProtocolError::UnsupportedFeature(
+                    "object attribute/element type is not decodable yet",
+                )
+                .into())
+            }
+        }
+    };
+    Ok(v)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
@@ -3163,6 +3330,95 @@ impl Connection {
         })
     }
 
+    /// Fetch the metadata for an Oracle ADT type from the data dictionary. For an
+    /// *object* type, returns its attributes in declaration order (`ALL_TYPE_ATTRS`),
+    /// each with its Oracle type name and whether it is itself a nested object
+    /// type. For a *collection* type (VARRAY / nested table), returns its element
+    /// metadata in `collection_element` (`ALL_COLL_TYPES`). Pair with
+    /// [`decode_object`] to turn a returned `QueryValue::Object` into structured
+    /// values. `schema`/`type_name` are matched case-insensitively.
+    pub async fn describe_object_type(
+        &mut self,
+        cx: &Cx,
+        schema: &str,
+        type_name: &str,
+    ) -> Result<ObjectType> {
+        let schema = schema.to_ascii_uppercase();
+        let name = type_name.to_ascii_uppercase();
+        let binds = || {
+            vec![
+                oracledb_protocol::thin::BindValue::Text(schema.clone()),
+                oracledb_protocol::thin::BindValue::Text(name.clone()),
+            ]
+        };
+        let row_text =
+            |row: &[Option<oracledb_protocol::thin::QueryValue>], i: usize| -> Option<String> {
+                match row.get(i) {
+                    Some(Some(v)) => {
+                        oracledb_protocol::thin::QueryValue::as_text(v).map(str::to_string)
+                    }
+                    _ => None,
+                }
+            };
+
+        // A collection type (VARRAY / nested table) is described by its element
+        // type, not by attributes — check ALL_COLL_TYPES first.
+        let coll = self
+            .execute_query_with_binds(
+                cx,
+                "select elem_type_name, elem_type_owner from all_coll_types \
+                 where owner = :1 and type_name = :2",
+                10,
+                &binds(),
+            )
+            .await?;
+        if let Some(row) = coll.rows.first() {
+            return Ok(ObjectType {
+                schema,
+                name,
+                attributes: Vec::new(),
+                collection_element: Some(CollectionElement {
+                    type_name: row_text(row, 0).unwrap_or_default(),
+                    type_owner: row_text(row, 1),
+                }),
+            });
+        }
+
+        // High prefetch so every attribute row arrives in one batch. Oracle caps
+        // a type at 1000 attributes, so this never truncates the metadata.
+        let res = self
+            .execute_query_with_binds(
+                cx,
+                "select attr_name, attr_type_name, attr_type_owner from all_type_attrs \
+                 where owner = :1 and type_name = :2 order by attr_no",
+                1000,
+                &binds(),
+            )
+            .await?;
+        let attributes: Vec<ObjectAttribute> = res
+            .rows
+            .iter()
+            .map(|row| ObjectAttribute {
+                name: row_text(row, 0).unwrap_or_default(),
+                type_name: row_text(row, 1).unwrap_or_default(),
+                type_owner: row_text(row, 2),
+            })
+            .collect();
+        if attributes.is_empty() {
+            return Err(Error::Protocol(
+                oracledb_protocol::ProtocolError::UnsupportedFeature(
+                    "object type not found or has no attributes",
+                ),
+            ));
+        }
+        Ok(ObjectType {
+            schema,
+            name,
+            attributes,
+            collection_element: None,
+        })
+    }
+
     /// Sends a scroll request on an open scrollable cursor and returns the
     /// repositioned buffer (reference `_create_scroll_message` +
     /// `_post_process_scroll`). The caller computes the orientation/position;
@@ -4770,6 +5026,22 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection.fetch_cursor(&cx, cursor, max_rows).await
+        })
+    }
+
+    /// Blocking wrapper for [`Connection::describe_object_type`].
+    pub fn describe_object_type(
+        connection: &mut Connection,
+        schema: &str,
+        type_name: &str,
+    ) -> Result<ObjectType> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .describe_object_type(&cx, schema, type_name)
+                .await
         })
     }
 
