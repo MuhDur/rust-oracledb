@@ -549,6 +549,15 @@ oracledb-pyshim     PyO3 module slotted under python-oracledb's public layer so
 
 ## Scope
 
+- **Native ergonomic surfaces (0.2).** First-class typed APIs over capabilities
+  the engine already speaks: REF CURSOR / implicit result sets
+  (`Connection::fetch_cursor`), structured ADT object **and collection** decode
+  (`describe_object_type` / `decode_object`), `DBMS_OUTPUT` capture
+  (`enable_dbms_output` / `read_dbms_output`), edition selection
+  (`ConnectOptions::with_edition`), OCI IAM / OAuth2 token auth
+  (`with_access_token`, with a redacted `AccessToken` and a TLS-required guard),
+  and compiler-style caret diagnostics for parse errors (`Error::caret`). All
+  live-tested against Oracle 23ai.
 - **Thin-mode SODA (preview).** rust-oracledb is the first Oracle driver to offer
   SODA in thin mode at all — it already passes 42 of the reference's own SODA
   tests (python-oracledb thin has none). The document API and its current surface
