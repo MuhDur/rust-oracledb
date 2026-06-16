@@ -37,9 +37,9 @@ important decision:
 `Cargo.toml`:
 
 ```toml
-oracledb = "0.1"
+oracledb = "0.2"
 # opt-in bridges & features (off by default; `derive` is already on):
-# oracledb = { version = "0.1", features = ["chrono", "serde_json", "arrow"] }
+# oracledb = { version = "0.2", features = ["chrono", "serde_json", "arrow"] }
 ```
 
 ## Quick start — blocking (the easy path)

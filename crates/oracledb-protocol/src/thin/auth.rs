@@ -38,11 +38,16 @@ pub fn append_auth_phase_two_token(
     driver_name: &str,
     version_num: u32,
     connect_string: &str,
+    edition: Option<&str>,
 ) -> Result<()> {
     let mut writer = TtcWriter::new();
     writer.write_function_code(TNS_FUNC_AUTH_PHASE_TWO);
-    // AUTH_TOKEN + the four mandatory session pairs, plus AUTH_CONNECT_STRING.
+    // AUTH_TOKEN + the four mandatory session pairs, plus the optional
+    // AUTH_ORA_EDITION and AUTH_CONNECT_STRING.
     let mut num_pairs = 5u32;
+    if edition.is_some() {
+        num_pairs += 1;
+    }
     if !connect_string.is_empty() {
         num_pairs += 1;
     }
@@ -62,6 +67,13 @@ pub fn append_auth_phase_two_token(
         "ALTER SESSION SET TIME_ZONE='+00:00'\0",
         1,
     )?;
+    // Edition-Based Redefinition applies to token auth too — the reference writes
+    // AUTH_ORA_EDITION after AUTH_ALTER_SESSION on both auth paths (messages/auth.pyx
+    // `_write_message`); omitting it here silently ran token sessions under the
+    // default edition.
+    if let Some(edition) = edition {
+        write_key_value(&mut writer, "AUTH_ORA_EDITION", edition, 0)?;
+    }
     if !connect_string.is_empty() {
         write_key_value(&mut writer, "AUTH_CONNECT_STRING", connect_string, 0)?;
     }
@@ -372,6 +384,7 @@ mod token_auth_tests {
             "drv",
             300_000_000,
             "cs",
+            None,
         )
         .unwrap();
 
@@ -412,12 +425,41 @@ mod token_auth_tests {
     #[test]
     fn token_message_pair_count_without_connect_string() {
         let mut out = Vec::new();
-        append_auth_phase_two_token(&mut out, "u", "tok", "drv", 1, "").unwrap();
+        append_auth_phase_two_token(&mut out, "u", "tok", "drv", 1, "", None).unwrap();
         let mut pos = 4;
         let _user_len = read_ub4(&out, &mut pos);
         let _auth_mode = read_ub4(&out, &mut pos);
         pos += 1; // authivl pointer
         assert_eq!(read_ub4(&out, &mut pos), 5, "AUTH_TOKEN + 4 session pairs");
         assert!(!contains(&out, b"AUTH_CONNECT_STRING"));
+    }
+
+    /// Edition-Based Redefinition must reach the server on the token path too:
+    /// `AUTH_ORA_EDITION` is written and counted, exactly as on the password path
+    /// (regression guard for the 0.2.0 bug where token auth dropped the edition).
+    #[test]
+    fn token_message_carries_edition() {
+        let mut out = Vec::new();
+        append_auth_phase_two_token(&mut out, "u", "tok", "drv", 1, "", Some("E_TEST")).unwrap();
+        let mut pos = 4;
+        let _user_len = read_ub4(&out, &mut pos);
+        let _auth_mode = read_ub4(&out, &mut pos);
+        pos += 1; // authivl pointer
+        assert_eq!(
+            read_ub4(&out, &mut pos),
+            6,
+            "AUTH_TOKEN + 4 session pairs + AUTH_ORA_EDITION"
+        );
+        assert!(contains(&out, b"AUTH_ORA_EDITION"));
+        assert!(contains(&out, b"E_TEST"), "the edition value is sent");
+
+        // With both an edition and a connect string the count rises to 7.
+        let mut out2 = Vec::new();
+        append_auth_phase_two_token(&mut out2, "u", "tok", "drv", 1, "cs", Some("E_TEST")).unwrap();
+        let mut p = 4;
+        let _ = read_ub4(&out2, &mut p);
+        let _ = read_ub4(&out2, &mut p);
+        p += 1;
+        assert_eq!(read_ub4(&out2, &mut p), 7, "+ AUTH_CONNECT_STRING");
     }
 }

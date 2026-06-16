@@ -64,3 +64,29 @@ fn dbms_output_respects_max_lines() {
 
     BlockingConnection::close(c).ok();
 }
+
+/// Output that ends *exactly* at `max_lines` must report `truncated == false`:
+/// the read drained the buffer, nothing remained. (Regression guard for the
+/// top-of-loop check that used to over-report truncation at the boundary.)
+#[test]
+#[ignore]
+fn dbms_output_exact_boundary_is_not_truncated() {
+    let mut c = connect();
+    BlockingConnection::enable_dbms_output(&mut c, None).unwrap();
+    BlockingConnection::execute_query(
+        &mut c,
+        "begin for i in 1..5 loop dbms_output.put_line('row ' || i); end loop; end;",
+        0,
+    )
+    .unwrap();
+
+    // Exactly 5 lines buffered, asked for exactly 5 -> drained, not truncated.
+    let out = BlockingConnection::read_dbms_output(&mut c, 5, 100_000).unwrap();
+    assert_eq!(out.lines.len(), 5);
+    assert!(
+        !out.truncated,
+        "buffer drained exactly at max_lines must not report truncated"
+    );
+
+    BlockingConnection::close(c).ok();
+}

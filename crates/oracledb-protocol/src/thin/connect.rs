@@ -92,6 +92,7 @@ pub fn build_fast_auth_token_payload(
     driver_name: &str,
     version_num: u32,
     connect_string: &str,
+    edition: Option<&str>,
 ) -> Result<Vec<u8>> {
     let mut out = Vec::from_hex(FAST_AUTH_PREFIX_HEX)
         .map_err(|_| ProtocolError::TtcDecode("invalid static fast-auth prefix"))?;
@@ -102,6 +103,7 @@ pub fn build_fast_auth_token_payload(
         driver_name,
         version_num,
         connect_string,
+        edition,
     )?;
     Ok(out)
 }

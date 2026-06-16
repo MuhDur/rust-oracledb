@@ -1442,6 +1442,7 @@ impl Connection {
                 &identity.driver_name,
                 PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
                 &auth_connect_string,
+                options.edition.as_deref(),
             )?;
             trace_connect_step("send AUTH token (fast-auth phase two)");
             send_data_packet_shared(cx, &write, &auth_payload, sdu).await?;
@@ -1950,10 +1951,6 @@ impl Connection {
         const NUMBER_SIZE: u32 = 22;
         let mut out = DbmsOutput::default();
         loop {
-            if out.lines.len() >= max_lines {
-                out.truncated = true;
-                break;
-            }
             let binds = [vec![
                 BindValue::Output {
                     ora_type_num: oracledb_protocol::thin::ORA_TYPE_NUM_VARCHAR,
@@ -1993,7 +1990,12 @@ impl Connection {
                 .unwrap_or("")
                 .to_string();
             let chars = line.chars().count();
-            if out.char_count + chars > max_chars {
+            // A real line is in hand. If it would cross a bound, stop and report
+            // truncation: this line is past the bound and is discarded (it is part
+            // of the acknowledged-truncated remainder). Checking after the read —
+            // rather than before — keeps `truncated` exact: output that ends right
+            // at `max_lines` reports `truncated == false`, not a false positive.
+            if out.lines.len() >= max_lines || out.char_count + chars > max_chars {
                 out.truncated = true;
                 break;
             }
@@ -3366,8 +3368,10 @@ impl Connection {
     /// self-describing (its column metadata travels with it as
     /// `CursorValue::columns`), so no manual cursor-id handling is required.
     /// The child result set's column metadata is on the returned
-    /// [`QueryResult::columns`]; fetching is bounded by `max_rows`, and the
-    /// cursor is released when the fetch finishes. python-oracledb makes you
+    /// [`QueryResult::columns`]; fetching is bounded by `max_rows`. Like the
+    /// reference, the nested cursor's id is not independently closed — the
+    /// server owns its lifecycle as part of the parent statement (reference
+    /// `_add_cursor_to_close` skips nested cursors). python-oracledb makes you
     /// drive the cursor lifecycle by hand; this does it.
     pub async fn fetch_cursor(
         &mut self,
@@ -3375,7 +3379,13 @@ impl Connection {
         cursor: &oracledb_protocol::thin::CursorValue,
         max_rows: usize,
     ) -> Result<QueryResult> {
-        const ARRAYSIZE: u32 = 100;
+        // Cap the per-fetch array size, but never ask the server for more rows
+        // than the caller wants: a small `max_rows` must not drag a full batch
+        // off the wire. (`.max(1)` keeps the degenerate `max_rows == 0` define
+        // fetch valid; the result is still truncated to 0 below.)
+        const ARRAYSIZE: usize = 100;
+        let fetch_size =
+            |fetched: usize| -> u32 { max_rows.saturating_sub(fetched).clamp(1, ARRAYSIZE) as u32 };
         let mut rows: Vec<Vec<Option<oracledb_protocol::thin::QueryValue>>> = Vec::new();
         // First fetch is a DEFINE-FETCH: it establishes the column buffers for
         // the cursor and returns the first batch.
@@ -3383,7 +3393,7 @@ impl Connection {
             .define_and_fetch_rows_with_columns(
                 cx,
                 cursor.cursor_id,
-                ARRAYSIZE,
+                fetch_size(0),
                 &cursor.columns,
                 None,
             )
@@ -3402,7 +3412,7 @@ impl Connection {
                 .fetch_rows_with_columns(
                     cx,
                     cid,
-                    ARRAYSIZE,
+                    fetch_size(rows.len()),
                     &cursor.columns,
                     previous_row.as_deref(),
                 )

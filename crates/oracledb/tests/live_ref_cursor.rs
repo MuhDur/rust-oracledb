@@ -70,3 +70,45 @@ fn cursor_fetch_is_bounded() {
     assert_eq!(out.rows.len(), 10, "fetch must be bounded to max_rows");
     BlockingConnection::close(c).ok();
 }
+
+/// 250 rows forces the multi-batch continuation loop (ARRAYSIZE is 100), which
+/// the other tests (5 / 100 rows) never exercise. Confirms the loop seeds
+/// `previous_row`, reuses the cursor id across batches, and returns every row in
+/// order — and that a small `max_rows` still bounds it.
+#[test]
+#[ignore]
+fn cursor_fetch_spans_multiple_batches() {
+    let mut c = connect();
+
+    // Full drain across 3 batches (100 + 100 + 50).
+    let res =
+        BlockingConnection::execute_query(&mut c, &RETURN_N.replace(":lim", "250"), 0).unwrap();
+    let cv = match &res.implicit_resultsets.as_ref().unwrap()[0] {
+        QueryValue::Cursor(cv) => cv.as_ref(),
+        other => panic!("expected cursor, got {other:?}"),
+    };
+    let out = BlockingConnection::fetch_cursor(&mut c, cv, 10_000).unwrap();
+    let vals: Vec<i64> = out
+        .rows
+        .iter()
+        .map(|r| r[0].as_ref().and_then(QueryValue::as_i64).unwrap())
+        .collect();
+    assert_eq!(vals.len(), 250, "all rows across batches");
+    assert_eq!(
+        vals,
+        (1..=250).collect::<Vec<_>>(),
+        "in order, no gaps/dupes"
+    );
+
+    // A bound below one batch still stops at max_rows (no full-batch over-fetch).
+    let res2 =
+        BlockingConnection::execute_query(&mut c, &RETURN_N.replace(":lim", "250"), 0).unwrap();
+    let cv2 = match &res2.implicit_resultsets.as_ref().unwrap()[0] {
+        QueryValue::Cursor(cv) => cv.as_ref(),
+        other => panic!("expected cursor, got {other:?}"),
+    };
+    let bounded = BlockingConnection::fetch_cursor(&mut c, cv2, 150).unwrap();
+    assert_eq!(bounded.rows.len(), 150, "bounded across the batch boundary");
+
+    BlockingConnection::close(c).ok();
+}
