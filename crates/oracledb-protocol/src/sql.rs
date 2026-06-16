@@ -685,6 +685,41 @@ fn parse_bind_name(statement: &str, colon_index: usize) -> (usize, Option<String
     (end, Some(statement[index..end].to_string()))
 }
 
+/// Returns the identifier unchanged when it is a bare Oracle identifier (only
+/// `[A-Za-z0-9_$#]`), which needs no quoting. Returns `None` when it would
+/// require a quoted identifier (the caller decides how to surface that). Pure
+/// driver logic lifted out of the PyO3 shim (bead p5o).
+pub fn simple_sql_identifier(value: &str) -> Option<String> {
+    value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '#'))
+        .then(|| value.to_string())
+}
+
+/// Parses the value assigned by an `ALTER SESSION SET <key> = <value>` statement,
+/// case-insensitively, returning the (unquoted) value when `statement` is exactly
+/// that alter for `key`. Used to track session state (e.g. `current_schema`,
+/// `edition`) that the server reflects back without a round trip (reference
+/// connection.pyx reads these from the executed `alter session`). Pure driver
+/// logic lifted out of the PyO3 shim (bead p5o).
+pub fn parse_alter_session_value(statement: &str, key: &str) -> Option<String> {
+    let trimmed = statement.trim().trim_end_matches(';').trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let prefix = format!("alter session set {key}");
+    if !lower.starts_with(&prefix) {
+        return None;
+    }
+    let mut value = trimmed.get(prefix.len()..)?.trim_start();
+    if let Some(stripped) = value.strip_prefix('=') {
+        value = stripped.trim_start();
+    }
+    value
+        .split_whitespace()
+        .next()
+        .map(|value| value.trim_matches('"').to_string())
+        .filter(|value| !value.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -973,5 +1008,34 @@ mod tests {
             .iter()
             .map(|name| public_bind_name(name))
             .collect()
+    }
+
+    #[test]
+    fn simple_identifier_accepts_bare_rejects_quoted() {
+        assert_eq!(simple_sql_identifier("MY_SCHEMA"), Some("MY_SCHEMA".into()));
+        assert_eq!(simple_sql_identifier("a$b#c1"), Some("a$b#c1".into()));
+        assert_eq!(simple_sql_identifier("needs space"), None);
+        assert_eq!(simple_sql_identifier("has\"quote"), None);
+    }
+
+    #[test]
+    fn parses_alter_session_value_case_insensitively() {
+        assert_eq!(
+            parse_alter_session_value("ALTER SESSION SET CURRENT_SCHEMA = HR", "current_schema"),
+            Some("HR".into())
+        );
+        assert_eq!(
+            parse_alter_session_value("alter session set edition=ed1;", "edition"),
+            Some("ed1".into())
+        );
+        // Wrong key, or not an alter-session-set, yields nothing.
+        assert_eq!(
+            parse_alter_session_value("alter session set current_schema = HR", "edition"),
+            None
+        );
+        assert_eq!(
+            parse_alter_session_value("select 1 from dual", "current_schema"),
+            None
+        );
     }
 }

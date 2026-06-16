@@ -219,30 +219,10 @@ pub(crate) fn query_value_to_i8(value: &Option<QueryValue>) -> Option<i8> {
 }
 
 pub(crate) fn sql_identifier(value: &str) -> PyResult<String> {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '#'))
-    {
-        Ok(value.to_string())
-    } else {
-        Err(not_implemented("quoted Oracle identifier"))
-    }
+    // Driver logic (the identifier-quoting rule) lives in the protocol crate;
+    // the shim only maps the unsupported case to a Python error (bead p5o).
+    oracledb::protocol::sql::simple_sql_identifier(value)
+        .ok_or_else(|| not_implemented("quoted Oracle identifier"))
 }
 
-pub(crate) fn parse_alter_session_value(statement: &str, key: &str) -> Option<String> {
-    let trimmed = statement.trim().trim_end_matches(';').trim();
-    let lower = trimmed.to_ascii_lowercase();
-    let prefix = format!("alter session set {key}");
-    if !lower.starts_with(&prefix) {
-        return None;
-    }
-    let mut value = trimmed.get(prefix.len()..)?.trim_start();
-    if let Some(stripped) = value.strip_prefix('=') {
-        value = stripped.trim_start();
-    }
-    value
-        .split_whitespace()
-        .next()
-        .map(|value| value.trim_matches('"').to_string())
-        .filter(|value| !value.is_empty())
-}
+pub(crate) use oracledb::protocol::sql::parse_alter_session_value;
