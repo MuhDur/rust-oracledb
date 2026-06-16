@@ -3101,6 +3101,68 @@ impl Connection {
         Ok(result)
     }
 
+    /// Fetch up to `max_rows` rows from a returned REF CURSOR — a
+    /// `QueryValue::Cursor` OUT value, or an entry of
+    /// [`QueryResult::implicit_resultsets`]. A returned cursor is
+    /// self-describing (its column metadata travels with it as
+    /// `CursorValue::columns`), so no manual cursor-id handling is required.
+    /// The child result set's column metadata is on the returned
+    /// [`QueryResult::columns`]; fetching is bounded by `max_rows`, and the
+    /// cursor is released when the fetch finishes. python-oracledb makes you
+    /// drive the cursor lifecycle by hand; this does it.
+    pub async fn fetch_cursor(
+        &mut self,
+        cx: &Cx,
+        cursor: &oracledb_protocol::thin::CursorValue,
+        max_rows: usize,
+    ) -> Result<QueryResult> {
+        const ARRAYSIZE: u32 = 100;
+        let mut rows: Vec<Vec<Option<oracledb_protocol::thin::QueryValue>>> = Vec::new();
+        // First fetch is a DEFINE-FETCH: it establishes the column buffers for
+        // the cursor and returns the first batch.
+        let mut batch = self
+            .define_and_fetch_rows_with_columns(
+                cx,
+                cursor.cursor_id,
+                ARRAYSIZE,
+                &cursor.columns,
+                None,
+            )
+            .await?;
+        let mut more = batch.more_rows;
+        let mut cid = if batch.cursor_id != 0 {
+            batch.cursor_id
+        } else {
+            cursor.cursor_id
+        };
+        rows.append(&mut batch.rows);
+        // Continuation fetches until the cursor drains or the bound is reached.
+        while more && cid != 0 && rows.len() < max_rows {
+            let previous_row = rows.last().cloned();
+            let mut next = self
+                .fetch_rows_with_columns(
+                    cx,
+                    cid,
+                    ARRAYSIZE,
+                    &cursor.columns,
+                    previous_row.as_deref(),
+                )
+                .await?;
+            more = next.more_rows;
+            if next.cursor_id != 0 {
+                cid = next.cursor_id;
+            }
+            rows.append(&mut next.rows);
+        }
+        rows.truncate(max_rows);
+        self.release_cursor(cid);
+        Ok(QueryResult {
+            columns: cursor.columns.clone(),
+            rows,
+            ..Default::default()
+        })
+    }
+
     /// Sends a scroll request on an open scrollable cursor and returns the
     /// repositioned buffer (reference `_create_scroll_message` +
     /// `_post_process_scroll`). The caller computes the orientation/position;
@@ -4694,6 +4756,20 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection.read_dbms_output(&cx, max_lines, max_chars).await
+        })
+    }
+
+    /// Blocking wrapper for [`Connection::fetch_cursor`].
+    pub fn fetch_cursor(
+        connection: &mut Connection,
+        cursor: &oracledb_protocol::thin::CursorValue,
+        max_rows: usize,
+    ) -> Result<QueryResult> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.fetch_cursor(&cx, cursor, max_rows).await
         })
     }
 
