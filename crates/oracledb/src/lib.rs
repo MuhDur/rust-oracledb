@@ -443,6 +443,56 @@ fn protocol_error_offset(err: &oracledb_protocol::ProtocolError) -> Option<i32> 
     }
 }
 
+/// Render a compiler-style caret diagnostic: the line of `sql` containing the
+/// 1-based character `offset` (the position Oracle reports for a parse error),
+/// with a `^` under that character, beneath `headline`.
+///
+/// Pure and panic-free: `offset` is clamped into range (a 0 or out-of-range
+/// offset points at the start / just past the end). Counts in Unicode scalar
+/// values, so multibyte SQL stays aligned; tabs count as one column.
+///
+/// ```
+/// let d = oracledb::render_caret(
+///     "select * from no_such_table",
+///     15,
+///     "ORA-00942: table or view does not exist",
+/// );
+/// assert!(d.contains("no_such_table"));
+/// assert!(d.lines().last().unwrap().trim_end().ends_with('^'));
+/// ```
+pub fn render_caret(sql: &str, offset: usize, headline: &str) -> String {
+    let chars: Vec<char> = sql.chars().collect();
+    let total = chars.len();
+    // 1-based -> 0-based char index, clamped into [0, total].
+    let target = offset.saturating_sub(1).min(total);
+
+    let mut line_start = 0usize;
+    let mut line_no = 1usize;
+    let mut col = 0usize;
+    for (i, &c) in chars.iter().enumerate() {
+        if i == target {
+            break;
+        }
+        if c == '\n' {
+            line_no += 1;
+            line_start = i + 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+
+    let mut line_end = line_start;
+    while line_end < total && chars[line_end] != '\n' {
+        line_end += 1;
+    }
+    let line: String = chars[line_start..line_end].iter().collect();
+    let gutter = line_no.to_string();
+    let pad = " ".repeat(gutter.len());
+    let caret_indent = " ".repeat(col);
+    format!("{headline}\n{pad} |\n{gutter} | {line}\n{pad} | {caret_indent}^")
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
@@ -564,6 +614,27 @@ impl Error {
             Error::Protocol(err) => protocol_error_offset(err),
             _ => None,
         }
+    }
+
+    /// Render a compiler-style caret diagnostic for a parse error, pointing at
+    /// the exact character in `sql` the server flagged ([`Error::offset`]):
+    ///
+    /// ```text
+    /// ORA-00942: table or view does not exist
+    ///   |
+    /// 1 | select * from no_such_table
+    ///   |               ^
+    /// ```
+    ///
+    /// Returns `None` when the error carries no parse offset (only structured
+    /// server parse errors do). The headline is this error's first `Display`
+    /// line (the `ORA-` code + message). python-oracledb hands you a bare offset
+    /// integer and leaves the rendering to you; this does it.
+    pub fn caret(&self, sql: &str) -> Option<String> {
+        let offset = usize::try_from(self.offset()?).ok()?;
+        let full = self.to_string();
+        let headline = full.lines().next().unwrap_or(full.as_str());
+        Some(render_caret(sql, offset, headline))
     }
 
     /// Whether this error means the underlying connection was lost: the session
@@ -5975,6 +6046,58 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
     use std::time::Duration;
+
+    // Character column of the first `needle` in `line` (chars, not bytes — the
+    // caret aligns by display column, so multibyte chars must be counted as 1).
+    fn char_col(line: &str, needle: char) -> usize {
+        line.chars()
+            .position(|c| c == needle)
+            .expect("char present")
+    }
+
+    #[test]
+    fn caret_points_at_the_flagged_char() {
+        // offset 8 (1-based) is the `x`.
+        let out = render_caret("select x from t", 8, "ORA-00904: invalid identifier");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "ORA-00904: invalid identifier");
+        assert!(lines[2].ends_with("select x from t"), "{:?}", lines[2]);
+        assert_eq!(
+            char_col(lines[3], '^'),
+            char_col(lines[2], 'x'),
+            "caret column must align under the flagged char"
+        );
+    }
+
+    #[test]
+    fn caret_handles_multiline_sql() {
+        // "select *\n" is 9 chars (\n at index 8); the `n` of `no_such` is char
+        // index 14 -> 1-based offset 15, on line 2.
+        let out = render_caret("select *\nfrom no_such", 15, "ORA-00942");
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[2].starts_with("2 | from no_such"), "{:?}", lines[2]);
+        assert_eq!(char_col(lines[3], '^'), char_col(lines[2], 'n'));
+    }
+
+    #[test]
+    fn caret_counts_unicode_scalar_values() {
+        // The multibyte `é` before the offset must not push the caret off — we
+        // count chars, not bytes.
+        let sql = "select 'café' x from t";
+        let x_idx = sql.chars().position(|c| c == 'x').unwrap();
+        let out = render_caret(sql, x_idx + 1, "h");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(char_col(lines[3], '^'), char_col(lines[2], 'x'));
+    }
+
+    #[test]
+    fn caret_clamps_and_never_panics() {
+        // out-of-range, zero, and empty inputs must render without panicking.
+        let _ = render_caret("select 1", 999, "h");
+        let _ = render_caret("select 1", 0, "h");
+        let _ = render_caret("", 5, "h");
+        assert!(render_caret("abc", 4, "h").ends_with('^'));
+    }
 
     fn identity() -> ClientIdentity {
         ClientIdentity::new("program", "machine", "osuser", "terminal", "driver")
