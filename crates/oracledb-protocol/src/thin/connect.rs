@@ -82,6 +82,30 @@ pub fn build_fast_auth_phase_one_payload(
     Ok(out)
 }
 
+/// Fast-auth bundle for **token authentication**: the same static
+/// protocol/data-types prefix as [`build_fast_auth_phase_one_payload`], but with
+/// a phase-two `AUTH_TOKEN` message appended (no verifier round-trip). The caller
+/// sends this once and reads a single auth response.
+pub fn build_fast_auth_token_payload(
+    user: &str,
+    token: &str,
+    driver_name: &str,
+    version_num: u32,
+    connect_string: &str,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::from_hex(FAST_AUTH_PREFIX_HEX)
+        .map_err(|_| ProtocolError::TtcDecode("invalid static fast-auth prefix"))?;
+    append_auth_phase_two_token(
+        &mut out,
+        user,
+        token,
+        driver_name,
+        version_num,
+        connect_string,
+    )?;
+    Ok(out)
+}
+
 pub fn build_function_payload(function_code: u8) -> Vec<u8> {
     build_function_payload_with_seq(function_code, 1)
 }

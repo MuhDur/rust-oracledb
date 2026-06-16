@@ -137,7 +137,7 @@ use oracledb_protocol::thin::{
     build_connect_packet_payload, build_define_fetch_payload_with_seq,
     build_end_pipeline_payload_with_seq, build_execute_payload_with_bind_rows_and_options_with_seq,
     build_execute_payload_with_bind_rows_with_seq_and_token, build_execute_payload_with_seq,
-    build_fast_auth_phase_one_payload, build_fetch_payload_with_seq,
+    build_fast_auth_phase_one_payload, build_fast_auth_token_payload, build_fetch_payload_with_seq,
     build_function_payload_with_seq, build_function_payload_with_seq_and_token,
     build_lob_create_temp_payload_with_seq, build_lob_free_temp_payload_with_seq,
     build_lob_read_payload_with_seq, build_lob_trim_payload_with_seq,
@@ -718,6 +718,13 @@ pub enum Error {
     /// DN-match failure).
     #[error("TLS/TCPS error: {0}")]
     Tls(String),
+    /// Access-token authentication was requested over a non-TLS transport.
+    /// A database access token must only travel over TCPS so it is not exposed
+    /// in clear text (reference protocol.pyx `ERR_ACCESS_TOKEN_REQUIRES_TCPS` /
+    /// DPY-3001). Reconnect with a `tcps://` connect string. The token itself is
+    /// never included in this error.
+    #[error("DPY-3001: access token authentication requires a TLS (TCPS) connection")]
+    AccessTokenRequiresTcps,
     /// A sessionless transaction client-API misuse (reference
     /// ERR_SESSIONLESS_* / DPY-3034/3035/3036). The payload is the DPY full
     /// code so the shim can raise the matching DatabaseError.
@@ -944,6 +951,33 @@ fn refetch_retry_applies(err: &Error) -> bool {
     message.starts_with("ORA-00932") || message.starts_with("ORA-01007")
 }
 
+/// A database access token used in place of a password — an OCI IAM database
+/// token or an OAuth2 token. Its [`Debug`] output is redacted so the secret
+/// never leaks into logs, error messages, or panic output. Set it with
+/// [`ConnectOptions::with_access_token`].
+#[derive(Clone)]
+pub struct AccessToken(String);
+
+impl AccessToken {
+    /// Wrap a token string. The value is never printed; see the type docs.
+    pub fn new(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    /// The raw token, for sending on the wire. Crate-internal so callers cannot
+    /// accidentally route the secret through `Display`/formatting.
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for AccessToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never render the token, regardless of formatter flags.
+        f.write_str("AccessToken(***redacted***)")
+    }
+}
+
 /// Everything needed to open a connection: where to connect, who to
 /// authenticate as, and the [`ClientIdentity`] the database will record.
 ///
@@ -996,6 +1030,11 @@ pub struct ConnectOptions {
     /// Send the Oracle TCPS SNI string (`use_sni`, reference default `false`).
     /// See [`tls::TlsParams::use_sni`] for the rustls-name-validity caveat.
     pub use_sni: bool,
+    /// Authenticate with a database access token (OCI IAM / OAuth2) instead of
+    /// `password`. When set, the token is sent as `AUTH_TOKEN` and no password
+    /// verifier is exchanged. Token auth requires a TLS/TCPS transport; see
+    /// [`ConnectOptions::with_access_token`]. The token is redacted from `Debug`.
+    pub access_token: Option<AccessToken>,
 }
 
 impl ConnectOptions {
@@ -1024,7 +1063,23 @@ impl ConnectOptions {
             ssl_server_cert_dn: None,
             use_sni: false,
             edition: None,
+            access_token: None,
         }
+    }
+
+    /// Authenticate with a database access token instead of a password — an OCI
+    /// IAM database token or an OAuth2 token (python-oracledb's `access_token`).
+    /// The token is sent as `AUTH_TOKEN` with no password-verifier exchange.
+    ///
+    /// Token authentication **requires** a TLS/TCPS connection (the token would
+    /// otherwise travel in clear text); connecting with a token over plain TCP
+    /// fails with the typed [`Error::AccessTokenRequiresTcps`]. The token is
+    /// wrapped in [`AccessToken`], whose `Debug` is redacted, so it never appears
+    /// in logs or error output.
+    #[must_use]
+    pub fn with_access_token(mut self, token: impl Into<String>) -> Self {
+        self.access_token = Some(AccessToken::new(token));
+        self
     }
 
     /// Select the Oracle edition for this session (Edition-Based Redefinition).
@@ -1362,55 +1417,92 @@ impl Connection {
             .unwrap_or(DEFAULT_SDU)
             .max(TNS_DATA_PACKET_OVERHEAD + 1);
 
-        let client_pid = process::id();
-        let auth_one = build_fast_auth_phase_one_payload(
-            &options.user,
-            &identity.program,
-            &identity.machine,
-            &identity.osuser,
-            &identity.terminal,
-            client_pid,
-        )?;
-        trace_connect_bytes("AUTH phase one payload", &auth_one);
-        trace_connect_step("send AUTH phase one");
-        send_data_packet_shared(cx, &write, &auth_one, sdu).await?;
-        trace_connect_step("read AUTH phase one");
-        let auth_one_response = read_data_response(&mut read, cx, &write).await?;
-        trace_connect_bytes("AUTH phase one response", &auth_one_response);
-        let auth_one = parse_auth_response(&auth_one_response)?;
-        let capabilities = auth_one.capabilities.unwrap_or_default();
         let mut ttc_seq_num = 1;
-        let verifier_type = auth_one
-            .verifier_type
-            .ok_or(Error::MissingSessionField("AUTH_VFR_DATA verifier type"))?;
-        let encrypted = oracledb_protocol::crypto::generate_verifier(
-            options.password.as_bytes(),
-            &auth_one.session_data,
-            verifier_type,
-        )?;
         let auth_connect_string = auth_connect_descriptor(&descriptor);
-        let auth_two = build_auth_phase_two_payload_with_proxy_with_seq(
-            &options.user,
-            &encrypted,
-            &identity.driver_name,
-            PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
-            &auth_connect_string,
-            next_ttc_sequence(&mut ttc_seq_num),
-            &options.app_context,
-            options.proxy_user.as_deref(),
-            options.edition.as_deref(),
-        )?;
-        trace_connect_bytes("AUTH phase two payload", &auth_two);
-        trace_connect_step("send AUTH phase two");
-        send_data_packet_shared(cx, &write, &auth_two, sdu).await?;
-        trace_connect_step("read AUTH phase two");
-        let auth_two_response = read_data_response(&mut read, cx, &write).await?;
-        trace_connect_bytes("AUTH phase two response", &auth_two_response);
-        let auth_two = parse_auth_response(&auth_two_response)?;
-        oracledb_protocol::crypto::verify_server_response(
-            &encrypted.combo_key,
-            &auth_two.session_data,
-        )?;
+
+        // Authentication has two shapes. Token auth (OCI IAM / OAuth2) carries
+        // the credential in `AUTH_TOKEN` and skips the password-verifier round
+        // trip entirely; password auth does the classic phase-one challenge /
+        // phase-two verifier exchange. Both converge on a parsed auth response
+        // plus the negotiated capabilities; only password auth yields a combo key
+        // (used later to verify the server's response and for change-password).
+        let (auth_two, capabilities, combo_key) = if let Some(token) = &options.access_token {
+            // A database access token must never travel in clear text: require
+            // TLS/TCPS, exactly as the reference does
+            // (protocol.pyx `ERR_ACCESS_TOKEN_REQUIRES_TCPS`).
+            if !descriptor.protocol.is_tls() {
+                return Err(Error::AccessTokenRequiresTcps);
+            }
+            // One combined fast-auth bundle carrying a phase-two `AUTH_TOKEN`
+            // message; no resend. The payload (which embeds the token) is never
+            // passed to `trace_connect_bytes`, so the secret stays out of logs.
+            let auth_payload = build_fast_auth_token_payload(
+                &options.user,
+                token.expose(),
+                &identity.driver_name,
+                PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
+                &auth_connect_string,
+            )?;
+            trace_connect_step("send AUTH token (fast-auth phase two)");
+            send_data_packet_shared(cx, &write, &auth_payload, sdu).await?;
+            trace_connect_step("read AUTH token response");
+            let response = read_data_response(&mut read, cx, &write).await?;
+            trace_connect_bytes("AUTH token response", &response);
+            let auth = parse_auth_response(&response)?;
+            let capabilities = auth.capabilities.unwrap_or_default();
+            // Token auth derives no shared password key: there is no combo key,
+            // hence no server-response MAC to verify and no change-password.
+            (auth, capabilities, Vec::new())
+        } else {
+            let client_pid = process::id();
+            let auth_one = build_fast_auth_phase_one_payload(
+                &options.user,
+                &identity.program,
+                &identity.machine,
+                &identity.osuser,
+                &identity.terminal,
+                client_pid,
+            )?;
+            trace_connect_bytes("AUTH phase one payload", &auth_one);
+            trace_connect_step("send AUTH phase one");
+            send_data_packet_shared(cx, &write, &auth_one, sdu).await?;
+            trace_connect_step("read AUTH phase one");
+            let auth_one_response = read_data_response(&mut read, cx, &write).await?;
+            trace_connect_bytes("AUTH phase one response", &auth_one_response);
+            let auth_one = parse_auth_response(&auth_one_response)?;
+            let capabilities = auth_one.capabilities.unwrap_or_default();
+            let verifier_type = auth_one
+                .verifier_type
+                .ok_or(Error::MissingSessionField("AUTH_VFR_DATA verifier type"))?;
+            let encrypted = oracledb_protocol::crypto::generate_verifier(
+                options.password.as_bytes(),
+                &auth_one.session_data,
+                verifier_type,
+            )?;
+            let auth_two_payload = build_auth_phase_two_payload_with_proxy_with_seq(
+                &options.user,
+                &encrypted,
+                &identity.driver_name,
+                PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
+                &auth_connect_string,
+                next_ttc_sequence(&mut ttc_seq_num),
+                &options.app_context,
+                options.proxy_user.as_deref(),
+                options.edition.as_deref(),
+            )?;
+            trace_connect_bytes("AUTH phase two payload", &auth_two_payload);
+            trace_connect_step("send AUTH phase two");
+            send_data_packet_shared(cx, &write, &auth_two_payload, sdu).await?;
+            trace_connect_step("read AUTH phase two");
+            let auth_two_response = read_data_response(&mut read, cx, &write).await?;
+            trace_connect_bytes("AUTH phase two response", &auth_two_response);
+            let auth_two = parse_auth_response(&auth_two_response)?;
+            oracledb_protocol::crypto::verify_server_response(
+                &encrypted.combo_key,
+                &auth_two.session_data,
+            )?;
+            (auth_two, capabilities, encrypted.combo_key)
+        };
 
         let session_id = parse_session_u32(&auth_two.session_data, "AUTH_SESSION_ID")?;
         let serial_num = parse_session_u16(&auth_two.session_data, "AUTH_SERIAL_NUM")?;
@@ -1446,7 +1538,7 @@ impl Connection {
             fetch_metadata_order: VecDeque::new(),
             dead: false,
             user: options.user,
-            combo_key: encrypted.combo_key,
+            combo_key,
             statement_cache: Vec::new(),
             in_use_cursors: HashSet::new(),
             copied_cursors: HashSet::new(),

@@ -23,6 +23,52 @@ pub fn append_auth_phase_one(
     Ok(())
 }
 
+/// Appends the auth message for **token authentication** (OCI IAM database
+/// token / OAuth2) to the fast-auth bundle. Unlike password auth there is no
+/// verifier challenge: the reference sends auth phase TWO directly, carrying the
+/// token in `AUTH_TOKEN` with no `AUTH_SESSKEY`/`AUTH_PASSWORD` and auth mode
+/// `LOGON` (no `WITH_PASSWORD`); it never resends (messages/auth.pyx
+/// `_set_params`/`_write_message`, messages/fast_auth.pyx). Because this message
+/// lives inside the fast-auth bundle (ttc field version 19.1), the function code
+/// carries no `ub8` token-num — exactly like [`append_auth_phase_one`].
+pub fn append_auth_phase_two_token(
+    out: &mut Vec<u8>,
+    user: &str,
+    token: &str,
+    driver_name: &str,
+    version_num: u32,
+    connect_string: &str,
+) -> Result<()> {
+    let mut writer = TtcWriter::new();
+    writer.write_function_code(TNS_FUNC_AUTH_PHASE_TWO);
+    // AUTH_TOKEN + the four mandatory session pairs, plus AUTH_CONNECT_STRING.
+    let mut num_pairs = 5u32;
+    if !connect_string.is_empty() {
+        num_pairs += 1;
+    }
+    write_auth_header(&mut writer, user, TNS_AUTH_MODE_LOGON, num_pairs)?;
+    write_key_value(&mut writer, "AUTH_TOKEN", token, 0)?;
+    write_key_value(&mut writer, "SESSION_CLIENT_CHARSET", "873", 0)?;
+    write_key_value(&mut writer, "SESSION_CLIENT_DRIVER_NAME", driver_name, 0)?;
+    write_key_value(
+        &mut writer,
+        "SESSION_CLIENT_VERSION",
+        &version_num.to_string(),
+        0,
+    )?;
+    write_key_value(
+        &mut writer,
+        "AUTH_ALTER_SESSION",
+        "ALTER SESSION SET TIME_ZONE='+00:00'\0",
+        1,
+    )?;
+    if !connect_string.is_empty() {
+        write_key_value(&mut writer, "AUTH_CONNECT_STRING", connect_string, 0)?;
+    }
+    out.extend_from_slice(&writer.into_bytes());
+    Ok(())
+}
+
 pub fn build_auth_phase_two_payload(
     user: &str,
     encrypted: &crate::crypto::EncryptedPassword,
@@ -290,4 +336,88 @@ pub(crate) fn parse_return_parameters(reader: &mut TtcReader<'_>) -> Result<Auth
         response.session_data.insert(key, value);
     }
     Ok(response)
+}
+
+#[cfg(test)]
+mod token_auth_tests {
+    use super::*;
+
+    /// Decode an Oracle `ub4` at `*pos`, advancing it (see `WriteBuffer::write_ub4`).
+    fn read_ub4(bytes: &[u8], pos: &mut usize) -> u32 {
+        let len = bytes[*pos] as usize;
+        *pos += 1;
+        let mut value = 0u32;
+        for _ in 0..len {
+            value = (value << 8) | u32::from(bytes[*pos]);
+            *pos += 1;
+        }
+        value
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// The token auth message must encode the token as `AUTH_TOKEN`, in auth mode
+    /// `LOGON` (never `WITH_PASSWORD`), with no `AUTH_SESSKEY`/`AUTH_PASSWORD` and
+    /// the correct key/value-pair count. This is the deterministic "cassette" that
+    /// pins the wire format against the reference (messages/auth.pyx).
+    #[test]
+    fn token_message_carries_auth_token_not_password() {
+        let mut out = Vec::new();
+        append_auth_phase_two_token(
+            &mut out,
+            "scott",
+            "HEADER.PAYLOAD.SIG",
+            "drv",
+            300_000_000,
+            "cs",
+        )
+        .unwrap();
+
+        // Function header: TTC function message, phase two, then the auth header.
+        assert_eq!(out[0], TNS_MSG_TYPE_FUNCTION);
+        assert_eq!(out[1], TNS_FUNC_AUTH_PHASE_TWO);
+        // out[2] is the sequence byte; out[3] is the has_user flag.
+        assert_eq!(out[3], 1, "user is present");
+        let mut pos = 4;
+        assert_eq!(read_ub4(&out, &mut pos), 5, "user length = len(\"scott\")");
+        assert_eq!(
+            read_ub4(&out, &mut pos),
+            TNS_AUTH_MODE_LOGON,
+            "token auth uses LOGON only — never the WITH_PASSWORD bit"
+        );
+        assert_eq!(out[pos], 1); // authivl pointer
+        pos += 1;
+        assert_eq!(
+            read_ub4(&out, &mut pos),
+            6,
+            "AUTH_TOKEN + 4 session pairs + AUTH_CONNECT_STRING"
+        );
+
+        assert!(contains(&out, b"AUTH_TOKEN"));
+        assert!(
+            contains(&out, b"HEADER.PAYLOAD.SIG"),
+            "the token value is sent"
+        );
+        assert!(contains(&out, b"AUTH_CONNECT_STRING"));
+        assert!(
+            !contains(&out, b"AUTH_PASSWORD") && !contains(&out, b"AUTH_SESSKEY"),
+            "token auth must not send any password material"
+        );
+    }
+
+    /// Without a connect string the pair count drops to exactly the token + the
+    /// four mandatory session pairs.
+    #[test]
+    fn token_message_pair_count_without_connect_string() {
+        let mut out = Vec::new();
+        append_auth_phase_two_token(&mut out, "u", "tok", "drv", 1, "").unwrap();
+        let mut pos = 4;
+        let _user_len = read_ub4(&out, &mut pos);
+        let _auth_mode = read_ub4(&out, &mut pos);
+        pos += 1; // authivl pointer
+        assert_eq!(read_ub4(&out, &mut pos), 5, "AUTH_TOKEN + 4 session pairs");
+        assert!(!contains(&out, b"AUTH_CONNECT_STRING"));
+    }
 }
