@@ -23,7 +23,13 @@ running python-oracledb's **own** thin-mode test suite against the Rust engine.
 - **GIL-free concurrent decode** — N connections decode the wire on N cores.
 - **Typed rows** — `#[derive(FromRow)]` with compile-checked field types.
 - **Structured errors and binds** — `Error::ora_code()` / `is_retryable()`,
-  `FromSql` / `ToSql`, the `params!` macro.
+  `FromSql` / `ToSql`, the `params!` macro, and compiler-style caret diagnostics
+  for parse errors (`Error::caret`).
+- **Beyond basic queries** — REF CURSOR / implicit result sets
+  (`fetch_cursor`), structured ADT object & collection decode
+  (`describe_object_type` / `decode_object`), `DBMS_OUTPUT` capture
+  (`enable_dbms_output` / `read_dbms_output`), edition selection
+  (`with_edition`), and OCI IAM / OAuth2 token auth (`with_access_token`).
 - **Tiny deployment** — a single static binary; `FROM scratch` images, no
   interpreter, no native client.
 - **`#![forbid(unsafe_code)]`** in the driver and protocol crates; fuzzed and
