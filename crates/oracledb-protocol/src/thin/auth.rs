@@ -77,6 +77,7 @@ pub fn build_auth_phase_two_payload_with_context_with_seq(
         seq_num,
         app_context,
         None,
+        None,
     )
 }
 
@@ -93,6 +94,7 @@ pub fn build_auth_phase_two_payload_with_proxy_with_seq(
     seq_num: u8,
     app_context: &[(String, String, String)],
     proxy_user: Option<&str>,
+    edition: Option<&str>,
 ) -> Result<Vec<u8>> {
     let mut writer = TtcWriter::new();
     writer.write_function_code_with_seq(TNS_FUNC_AUTH_PHASE_TWO, seq_num);
@@ -105,6 +107,9 @@ pub fn build_auth_phase_two_payload_with_proxy_with_seq(
         num_pairs += 1;
     }
     if !connect_string.is_empty() {
+        num_pairs += 1;
+    }
+    if edition.is_some() {
         num_pairs += 1;
     }
     let app_context_pairs =
@@ -148,6 +153,12 @@ pub fn build_auth_phase_two_payload_with_proxy_with_seq(
         "ALTER SESSION SET TIME_ZONE='+00:00'\0",
         1,
     )?;
+    // Edition-Based Redefinition: select the session edition during auth, exactly
+    // as the reference does (messages/auth.pyx writes `AUTH_ORA_EDITION` when
+    // `params.edition is not None`). Applied before any user SQL.
+    if let Some(edition) = edition {
+        write_key_value(&mut writer, "AUTH_ORA_EDITION", edition, 0)?;
+    }
     for (namespace, name, value) in app_context {
         write_key_value(&mut writer, "AUTH_APPCTX_NSPACE\0", namespace, 0)?;
         write_key_value(&mut writer, "AUTH_APPCTX_ATTR\0", name, 0)?;

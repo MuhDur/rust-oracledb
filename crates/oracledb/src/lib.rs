@@ -799,6 +799,10 @@ pub struct ConnectOptions {
     /// Password for an encrypted wallet (mTLS key). `None` for auto-login or
     /// verify-only wallets.
     pub wallet_password: Option<String>,
+    /// Oracle edition for Edition-Based Redefinition (`AUTH_ORA_EDITION`),
+    /// applied during authentication before any user SQL. `None` uses the
+    /// database default edition.
+    pub edition: Option<String>,
     /// Run the Oracle server-DN match after the TLS handshake
     /// (`ssl_server_dn_match`, reference default `true`).
     pub ssl_server_dn_match: bool,
@@ -837,7 +841,19 @@ impl ConnectOptions {
             ssl_server_dn_match: true,
             ssl_server_cert_dn: None,
             use_sni: false,
+            edition: None,
         }
+    }
+
+    /// Select the Oracle edition for this session (Edition-Based Redefinition).
+    /// Applied via `AUTH_ORA_EDITION` during authentication, *before* any user
+    /// SQL — deterministic even for pooled/reused sessions. Verify with
+    /// `SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME')`. An invalid/unauthorized
+    /// edition surfaces as a typed server error at connect time.
+    #[must_use]
+    pub fn with_edition(mut self, edition: impl Into<String>) -> Self {
+        self.edition = Some(edition.into());
+        self
     }
 
     /// Enable sending the Oracle TCPS SNI string (`use_sni`, default off).
@@ -1200,6 +1216,7 @@ impl Connection {
             next_ttc_sequence(&mut ttc_seq_num),
             &options.app_context,
             options.proxy_user.as_deref(),
+            options.edition.as_deref(),
         )?;
         trace_connect_bytes("AUTH phase two payload", &auth_two);
         trace_connect_step("send AUTH phase two");
