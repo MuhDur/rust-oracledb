@@ -493,6 +493,21 @@ pub fn render_caret(sql: &str, offset: usize, headline: &str) -> String {
     format!("{headline}\n{pad} |\n{gutter} | {line}\n{pad} | {caret_indent}^")
 }
 
+/// Captured `DBMS_OUTPUT`, bounded by the caller's line/char limits. Returned by
+/// [`Connection::read_dbms_output`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DbmsOutput {
+    /// The captured lines, in the order `DBMS_OUTPUT.GET_LINE` returned them.
+    pub lines: Vec<String>,
+    /// Number of lines captured (`== lines.len()`).
+    pub line_count: usize,
+    /// Total characters (Unicode scalar values) across all captured lines.
+    pub char_count: usize,
+    /// `true` if capture stopped at a `max_lines`/`max_chars` bound while more
+    /// output was still buffered server-side; `false` if it drained to the end.
+    pub truncated: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
@@ -1645,6 +1660,89 @@ impl Connection {
         self.send_function(cx, TNS_FUNC_ROLLBACK).await?;
         self.sessionless_data = None;
         Ok(())
+    }
+
+    /// Enable server-side `DBMS_OUTPUT` buffering for this session. `buffer_bytes`
+    /// caps the server buffer; `None` requests an unbounded buffer
+    /// (`DBMS_OUTPUT.ENABLE(NULL)`). Call once before running the PL/SQL whose
+    /// output you want, then [`read_dbms_output`](Self::read_dbms_output).
+    pub async fn enable_dbms_output(&mut self, cx: &Cx, buffer_bytes: Option<u32>) -> Result<()> {
+        // `buffer_bytes` is a u32 we own (never untrusted text), so inlining it
+        // as a numeric literal is injection-safe and avoids an extra IN bind.
+        let arg = buffer_bytes.map_or_else(|| "null".to_string(), |n| n.to_string());
+        self.execute_query(cx, &format!("begin dbms_output.enable({arg}); end;"), 0)
+            .await?;
+        Ok(())
+    }
+
+    /// Read buffered `DBMS_OUTPUT` from this session via the canonical
+    /// `GET_LINE(:line, :status)` loop, bounded by `max_lines` and `max_chars`.
+    /// Stops cleanly when the server reports no more lines (`status != 0`) or
+    /// when a bound is reached (setting [`DbmsOutput::truncated`]). Output is
+    /// captured from this exact connection/session. python-oracledb leaves this
+    /// loop to the caller; this centralizes it.
+    pub async fn read_dbms_output(
+        &mut self,
+        cx: &Cx,
+        max_lines: usize,
+        max_chars: usize,
+    ) -> Result<DbmsOutput> {
+        // ORA_TYPE_SIZE_NUMBER is crate-private upstream; 22 is the NUMBER size.
+        const NUMBER_SIZE: u32 = 22;
+        let mut out = DbmsOutput::default();
+        loop {
+            if out.lines.len() >= max_lines {
+                out.truncated = true;
+                break;
+            }
+            let binds = [vec![
+                BindValue::Output {
+                    ora_type_num: oracledb_protocol::thin::ORA_TYPE_NUM_VARCHAR,
+                    csfrm: oracledb_protocol::thin::CS_FORM_IMPLICIT,
+                    buffer_size: 32767,
+                },
+                BindValue::Output {
+                    ora_type_num: oracledb_protocol::thin::ORA_TYPE_NUM_NUMBER,
+                    csfrm: 0,
+                    buffer_size: NUMBER_SIZE,
+                },
+            ]];
+            let res = self
+                .execute_query_with_bind_rows_and_options(
+                    cx,
+                    "begin dbms_output.get_line(:1, :2); end;",
+                    0,
+                    &binds,
+                    ExecuteOptions::default(),
+                )
+                .await?;
+            // OUT values come back in bind order: [0] = line, [1] = status.
+            let status = res
+                .out_values
+                .get(1)
+                .and_then(|(_, v)| v.as_ref())
+                .and_then(oracledb_protocol::thin::QueryValue::as_i64)
+                .unwrap_or(1);
+            if status != 0 {
+                break; // no more lines buffered
+            }
+            let line = res
+                .out_values
+                .first()
+                .and_then(|(_, v)| v.as_ref())
+                .and_then(oracledb_protocol::thin::QueryValue::as_text)
+                .unwrap_or("")
+                .to_string();
+            let chars = line.chars().count();
+            if out.char_count + chars > max_chars {
+                out.truncated = true;
+                break;
+            }
+            out.char_count += chars;
+            out.lines.push(line);
+            out.line_count += 1;
+        }
+        Ok(out)
     }
 
     /// Begins (`flags = TPC_TXN_FLAGS_NEW`) or resumes
@@ -4569,6 +4667,33 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection.rollback(&cx).await
+        })
+    }
+
+    /// Blocking wrapper for [`Connection::enable_dbms_output`].
+    pub fn enable_dbms_output(
+        connection: &mut Connection,
+        buffer_bytes: Option<u32>,
+    ) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.enable_dbms_output(&cx, buffer_bytes).await
+        })
+    }
+
+    /// Blocking wrapper for [`Connection::read_dbms_output`].
+    pub fn read_dbms_output(
+        connection: &mut Connection,
+        max_lines: usize,
+        max_chars: usize,
+    ) -> Result<DbmsOutput> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.read_dbms_output(&cx, max_lines, max_chars).await
         })
     }
 
