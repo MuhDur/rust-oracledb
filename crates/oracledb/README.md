@@ -29,7 +29,11 @@ running python-oracledb's **own** thin-mode test suite against the Rust engine.
   (`fetch_cursor`), structured ADT object & collection decode
   (`describe_object_type` / `decode_object`), `DBMS_OUTPUT` capture
   (`enable_dbms_output` / `read_dbms_output`), edition selection
-  (`with_edition`), and OCI IAM / OAuth2 token auth (`with_access_token`).
+  (`with_edition`), per-call timeouts on positional *and* named binds
+  (`query_named_with_timeout`), and OCI IAM / OAuth2 token auth
+  (`with_access_token`).
+- **Tunable connection** — configurable statement-cache size
+  (`ConnectOptions::with_statement_cache_size`, `0` disables caching).
 - **Tiny deployment** — a single static binary; `FROM scratch` images, no
   interpreter, no native client.
 - **`#![forbid(unsafe_code)]`** in the driver and protocol crates; fuzzed and

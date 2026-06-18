@@ -1035,6 +1035,13 @@ pub struct ConnectOptions {
     /// verifier is exchanged. Token auth requires a TLS/TCPS transport; see
     /// [`ConnectOptions::with_access_token`]. The token is redacted from `Debug`.
     pub access_token: Option<AccessToken>,
+    /// Maximum number of open statements kept in this connection's statement
+    /// cache. Defaults to 20 (the reference default). `0` disables caching
+    /// entirely (every statement's cursor is closed after use, never retained),
+    /// matching python-oracledb's `stmtcachesize=0`. The cache holds at most this
+    /// many entries, each a small `(sql, cursor_id)` pair, so it is bounded by
+    /// construction. Set with [`ConnectOptions::with_statement_cache_size`].
+    pub statement_cache_size: usize,
 }
 
 impl ConnectOptions {
@@ -1064,7 +1071,20 @@ impl ConnectOptions {
             use_sni: false,
             edition: None,
             access_token: None,
+            statement_cache_size: STATEMENT_CACHE_SIZE,
         }
+    }
+
+    /// Set the statement-cache capacity for this connection (number of open
+    /// statements retained for reuse). `0` disables caching — every statement's
+    /// cursor is closed after use rather than cached (python-oracledb
+    /// `stmtcachesize=0` semantics). The default is 20. The cache is bounded to
+    /// this many small entries, so a large value cannot cause unbounded growth
+    /// beyond the count of distinct prepared statements.
+    #[must_use]
+    pub fn with_statement_cache_size(mut self, size: usize) -> Self {
+        self.statement_cache_size = size;
+        self
     }
 
     /// Authenticate with a database access token instead of a password — an OCI
@@ -1213,6 +1233,9 @@ pub struct Connection {
     /// LRU statement cache: SQL text -> open server cursor id (reference
     /// thin/statement_cache.pyx, default size 20).
     statement_cache: Vec<(String, u32)>,
+    /// Capacity of [`Self::statement_cache`] (from
+    /// [`ConnectOptions::statement_cache_size`]); `0` disables caching.
+    statement_cache_size: usize,
     /// Server cursor ids currently held by a live cursor (reference
     /// `Statement._in_use`). A cached cursor whose id is in this set must NOT
     /// be reused by a second cursor: `get_statement` returns a fresh
@@ -1541,6 +1564,7 @@ impl Connection {
             user: options.user,
             combo_key,
             statement_cache: Vec::new(),
+            statement_cache_size: options.statement_cache_size,
             in_use_cursors: HashSet::new(),
             copied_cursors: HashSet::new(),
             cursors_to_close: Vec::new(),
@@ -2640,6 +2664,24 @@ impl Connection {
     ) -> Result<QueryResult> {
         let binds = crate::sql_convert::order_named_binds(sql, named_params);
         self.execute_query_with_binds(cx, sql, 1, &binds).await
+    }
+
+    /// [`Self::query_named`] with a per-call timeout, for parity with the
+    /// positional [`Self::execute_query_with_binds_and_timeout`]. `timeout_ms`
+    /// bounds the round trip: on expiry the driver sends a BREAK and the call
+    /// fails with [`Error::CallTimeout`] (the connection stays usable). `None`
+    /// means no timeout. Like [`Self::query_named`], the named binds are
+    /// reordered to the placeholders' first-appearance order in `sql`.
+    pub async fn query_named_with_timeout(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        named_params: Vec<(String, BindValue)>,
+        timeout_ms: Option<u32>,
+    ) -> Result<QueryResult> {
+        let binds = crate::sql_convert::order_named_binds(sql, named_params);
+        self.execute_query_with_binds_and_timeout(cx, sql, 1, &binds, timeout_ms)
+            .await
     }
 
     /// Execute `sql` once per bind row (array DML / `executemany`). Each inner
@@ -4474,26 +4516,13 @@ impl Connection {
     /// recently used entry into the close-cursors piggyback queue (reference
     /// `_statement_cache.return_statement`).
     fn statement_cache_put(&mut self, sql: &str, cursor_id: u32) {
-        if cursor_id == 0 {
-            return;
-        }
-        if let Some(index) = self
-            .statement_cache
-            .iter()
-            .position(|(cached_sql, _)| cached_sql == sql)
-        {
-            let (_, cached_id) = self.statement_cache.remove(index);
-            if cached_id != 0 && cached_id != cursor_id {
-                self.cursors_to_close.push(cached_id);
-            }
-        }
-        self.statement_cache.push((sql.to_string(), cursor_id));
-        while self.statement_cache.len() > STATEMENT_CACHE_SIZE {
-            let (_, evicted_id) = self.statement_cache.remove(0);
-            if evicted_id != 0 {
-                self.cursors_to_close.push(evicted_id);
-            }
-        }
+        let to_close = statement_cache_insert(
+            &mut self.statement_cache,
+            self.statement_cache_size,
+            sql,
+            cursor_id,
+        );
+        self.cursors_to_close.extend(to_close);
     }
 
     /// Drops any statement-cache entry whose open cursor was passed as an IN
@@ -5374,6 +5403,25 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection.query_named(&cx, sql, named_params).await
+        })
+    }
+
+    /// Blocking wrapper for [`Connection::query_named_with_timeout`]: named binds
+    /// plus a per-call timeout (`Error::CallTimeout` on expiry; `None` = no
+    /// timeout).
+    pub fn query_named_with_timeout(
+        connection: &mut Connection,
+        sql: &str,
+        named_params: Vec<(String, BindValue)>,
+        timeout_ms: Option<u32>,
+    ) -> Result<QueryResult> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .query_named_with_timeout(&cx, sql, named_params, timeout_ms)
+                .await
         })
     }
 
@@ -6555,6 +6603,40 @@ fn next_ttc_sequence(seq_num: &mut u8) -> u8 {
     *seq_num
 }
 
+/// LRU statement-cache insert, bounded to `capacity`. Moves an existing entry
+/// for `sql` to most-recently-used (replacing its cursor) and evicts the oldest
+/// entries past `capacity`. Returns the cursor ids that should be closed (the
+/// replaced cursor and any evicted ones). `capacity == 0` disables caching: the
+/// freshly inserted cursor is itself evicted and returned for closing, so the
+/// cache stays empty (python-oracledb `stmtcachesize=0`). A `cursor_id` of 0
+/// (no server cursor) is never cached. Pure so it is unit-testable without a
+/// live connection.
+fn statement_cache_insert(
+    cache: &mut Vec<(String, u32)>,
+    capacity: usize,
+    sql: &str,
+    cursor_id: u32,
+) -> Vec<u32> {
+    let mut to_close = Vec::new();
+    if cursor_id == 0 {
+        return to_close;
+    }
+    if let Some(index) = cache.iter().position(|(cached_sql, _)| cached_sql == sql) {
+        let (_, cached_id) = cache.remove(index);
+        if cached_id != 0 && cached_id != cursor_id {
+            to_close.push(cached_id);
+        }
+    }
+    cache.push((sql.to_string(), cursor_id));
+    while cache.len() > capacity {
+        let (_, evicted_id) = cache.remove(0);
+        if evicted_id != 0 {
+            to_close.push(evicted_id);
+        }
+    }
+    to_close
+}
+
 fn statement_is_query(sql: &str) -> bool {
     sql.trim_start()
         .split(|ch: char| !ch.is_ascii_alphabetic())
@@ -6638,6 +6720,36 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn statement_cache_evicts_lru_past_capacity() {
+        let mut cache = Vec::new();
+        // capacity 2: a third distinct statement evicts the oldest (cursor 10).
+        assert!(statement_cache_insert(&mut cache, 2, "a", 10).is_empty());
+        assert!(statement_cache_insert(&mut cache, 2, "b", 11).is_empty());
+        assert_eq!(statement_cache_insert(&mut cache, 2, "c", 12), vec![10]);
+        assert_eq!(
+            cache,
+            vec![("b".into(), 11), ("c".into(), 12)],
+            "LRU order retained"
+        );
+        // Re-inserting an existing SQL with a new cursor closes the old cursor
+        // and moves it to most-recently-used; nothing is evicted.
+        assert_eq!(statement_cache_insert(&mut cache, 2, "b", 99), vec![11]);
+        assert_eq!(cache, vec![("c".into(), 12), ("b".into(), 99)]);
+    }
+
+    #[test]
+    fn statement_cache_size_zero_disables_caching() {
+        let mut cache = Vec::new();
+        // capacity 0: the freshly inserted cursor is itself evicted (queued for
+        // close) and the cache stays empty — caching disabled.
+        assert_eq!(statement_cache_insert(&mut cache, 0, "a", 10), vec![10]);
+        assert!(cache.is_empty(), "size 0 must never retain a statement");
+        // A no-cursor (0) insert is never cached and closes nothing.
+        assert!(statement_cache_insert(&mut cache, 5, "a", 0).is_empty());
+        assert!(cache.is_empty());
+    }
 
     // Character column of the first `needle` in `line` (chars, not bytes — the
     // caret aligns by display column, so multibyte chars must be counted as 1).
