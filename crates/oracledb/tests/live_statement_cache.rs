@@ -61,3 +61,35 @@ fn disabled_cache_size_zero_keeps_working() {
     run_n_distinct(&mut c, 10);
     BlockingConnection::close(c).ok();
 }
+
+/// With caching disabled (size 0) the executed cursor is queued for close, yet a
+/// query whose result spans multiple fetch batches must still drain correctly:
+/// the close-cursors piggyback only rides the next *execute*, never a `fetch`, so
+/// the still-open cursor survives until the caller is done with it. (Guards the
+/// size-0 disable path against closing an in-use cursor mid-fetch.)
+#[test]
+#[ignore]
+fn disabled_cache_multibatch_fetch_survives() {
+    let mut c = BlockingConnection::connect(options().with_statement_cache_size(0)).unwrap();
+    // prefetch 5 over 100 rows -> first batch leaves more_rows set, cursor open.
+    let first = BlockingConnection::execute_query(
+        &mut c,
+        "select level from dual connect by level <= 100",
+        5,
+    )
+    .unwrap();
+    assert!(
+        first.more_rows,
+        "expected an unfinished cursor for the test"
+    );
+    assert_ne!(first.cursor_id, 0);
+    let prev = first.rows.last().cloned();
+    let rest =
+        BlockingConnection::fetch_rows(&mut c, first.cursor_id, 100, prev.as_deref()).unwrap();
+    assert_eq!(
+        first.rows.len() + rest.rows.len(),
+        100,
+        "all rows fetched despite size-0 caching"
+    );
+    BlockingConnection::close(c).ok();
+}
