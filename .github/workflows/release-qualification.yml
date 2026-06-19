@@ -1,0 +1,24 @@
+name: Release Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: "Exact release-candidate commit SHA to qualify."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.candidate_sha }}
+  cancel-in-progress: false
+
+jobs:
+  release-qualification:
+    uses: ./.github/workflows/_quality.yml
+    with:
+      profile: release-qualification
+      budget: release
+      candidate_sha: ${{ inputs.candidate_sha }}

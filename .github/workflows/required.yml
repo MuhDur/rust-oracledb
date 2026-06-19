@@ -1,0 +1,21 @@
+name: Required
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  required:
+    uses: ./.github/workflows/_quality.yml
+    with:
+      profile: required
+      budget: required

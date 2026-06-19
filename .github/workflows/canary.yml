@@ -1,0 +1,20 @@
+name: Canary
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  canary:
+    uses: ./.github/workflows/_quality.yml
+    with:
+      profile: canary
+      budget: canary
