@@ -1,0 +1,1811 @@
+# profile: protocol-all-features
+# package: oracledb-protocol
+# command: cargo public-api -p oracledb-protocol -ss --color never --all-features
+
+pub mod oracledb_protocol
+pub mod oracledb_protocol::capabilities
+pub struct oracledb_protocol::capabilities::TnsVersion(_)
+impl oracledb_protocol::capabilities::TnsVersion
+pub fn oracledb_protocol::capabilities::TnsVersion::as_u16(self) -> u16
+pub fn oracledb_protocol::capabilities::TnsVersion::negotiate(u16) -> oracledb_protocol::Result<Self>
+impl core::clone::Clone for oracledb_protocol::capabilities::TnsVersion
+pub fn oracledb_protocol::capabilities::TnsVersion::clone(&self) -> oracledb_protocol::capabilities::TnsVersion
+impl core::cmp::Eq for oracledb_protocol::capabilities::TnsVersion
+impl core::cmp::PartialEq for oracledb_protocol::capabilities::TnsVersion
+pub fn oracledb_protocol::capabilities::TnsVersion::eq(&self, &oracledb_protocol::capabilities::TnsVersion) -> bool
+impl core::fmt::Debug for oracledb_protocol::capabilities::TnsVersion
+pub fn oracledb_protocol::capabilities::TnsVersion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb_protocol::capabilities::TnsVersion
+impl core::marker::StructuralPartialEq for oracledb_protocol::capabilities::TnsVersion
+pub mod oracledb_protocol::crypto
+pub struct oracledb_protocol::crypto::EncryptedPassword
+pub oracledb_protocol::crypto::EncryptedPassword::combo_key: alloc::vec::Vec<u8>
+pub oracledb_protocol::crypto::EncryptedPassword::password: alloc::string::String
+pub oracledb_protocol::crypto::EncryptedPassword::session_key: alloc::string::String
+pub oracledb_protocol::crypto::EncryptedPassword::speedy_key: core::option::Option<alloc::string::String>
+impl core::clone::Clone for oracledb_protocol::crypto::EncryptedPassword
+pub fn oracledb_protocol::crypto::EncryptedPassword::clone(&self) -> oracledb_protocol::crypto::EncryptedPassword
+impl core::cmp::Eq for oracledb_protocol::crypto::EncryptedPassword
+impl core::cmp::PartialEq for oracledb_protocol::crypto::EncryptedPassword
+pub fn oracledb_protocol::crypto::EncryptedPassword::eq(&self, &oracledb_protocol::crypto::EncryptedPassword) -> bool
+impl core::fmt::Debug for oracledb_protocol::crypto::EncryptedPassword
+pub fn oracledb_protocol::crypto::EncryptedPassword::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::crypto::EncryptedPassword
+pub fn oracledb_protocol::crypto::encrypt_change_password_pair(&[u8], &[u8], &[u8]) -> oracledb_protocol::Result<(alloc::string::String, alloc::string::String)>
+pub fn oracledb_protocol::crypto::generate_verifier(&[u8], &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>, u32) -> oracledb_protocol::Result<oracledb_protocol::crypto::EncryptedPassword>
+pub fn oracledb_protocol::crypto::verify_server_response(&[u8], &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>) -> oracledb_protocol::Result<()>
+pub mod oracledb_protocol::dpl
+pub enum oracledb_protocol::dpl::DirectPathColumnValue
+pub oracledb_protocol::dpl::DirectPathColumnValue::BinaryDouble(f64)
+pub oracledb_protocol::dpl::DirectPathColumnValue::BinaryFloat(f32)
+pub oracledb_protocol::dpl::DirectPathColumnValue::Boolean(bool)
+pub oracledb_protocol::dpl::DirectPathColumnValue::Bytes(alloc::vec::Vec<u8>)
+pub oracledb_protocol::dpl::DirectPathColumnValue::DateTime
+pub oracledb_protocol::dpl::DirectPathColumnValue::DateTime::day: u8
+pub oracledb_protocol::dpl::DirectPathColumnValue::DateTime::hour: u8
+pub oracledb_protocol::dpl::DirectPathColumnValue::DateTime::minute: u8
+pub oracledb_protocol::dpl::DirectPathColumnValue::DateTime::month: u8
+pub oracledb_protocol::dpl::DirectPathColumnValue::DateTime::nanosecond: u32
+pub oracledb_protocol::dpl::DirectPathColumnValue::DateTime::second: u8
+pub oracledb_protocol::dpl::DirectPathColumnValue::DateTime::year: i32
+pub oracledb_protocol::dpl::DirectPathColumnValue::Null
+pub oracledb_protocol::dpl::DirectPathColumnValue::Number(alloc::string::String)
+impl core::clone::Clone for oracledb_protocol::dpl::DirectPathColumnValue
+pub fn oracledb_protocol::dpl::DirectPathColumnValue::clone(&self) -> oracledb_protocol::dpl::DirectPathColumnValue
+impl core::cmp::PartialEq for oracledb_protocol::dpl::DirectPathColumnValue
+pub fn oracledb_protocol::dpl::DirectPathColumnValue::eq(&self, &oracledb_protocol::dpl::DirectPathColumnValue) -> bool
+impl core::fmt::Debug for oracledb_protocol::dpl::DirectPathColumnValue
+pub fn oracledb_protocol::dpl::DirectPathColumnValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::dpl::DirectPathColumnValue
+pub struct oracledb_protocol::dpl::BatchLoadState
+impl oracledb_protocol::dpl::BatchLoadState
+pub fn oracledb_protocol::dpl::BatchLoadState::chunk_index(&self) -> usize
+pub fn oracledb_protocol::dpl::BatchLoadState::for_rows(u64, u32) -> oracledb_protocol::Result<Self>
+pub fn oracledb_protocol::dpl::BatchLoadState::is_done(&self) -> bool
+pub fn oracledb_protocol::dpl::BatchLoadState::message_offset(&self) -> u64
+pub fn oracledb_protocol::dpl::BatchLoadState::new(alloc::vec::Vec<u64>, u32) -> oracledb_protocol::Result<Self>
+pub fn oracledb_protocol::dpl::BatchLoadState::next_batch(&mut self)
+pub fn oracledb_protocol::dpl::BatchLoadState::num_rows(&self) -> u32
+pub fn oracledb_protocol::dpl::BatchLoadState::offset(&self) -> u64
+impl core::clone::Clone for oracledb_protocol::dpl::BatchLoadState
+pub fn oracledb_protocol::dpl::BatchLoadState::clone(&self) -> oracledb_protocol::dpl::BatchLoadState
+impl core::cmp::Eq for oracledb_protocol::dpl::BatchLoadState
+impl core::cmp::PartialEq for oracledb_protocol::dpl::BatchLoadState
+pub fn oracledb_protocol::dpl::BatchLoadState::eq(&self, &oracledb_protocol::dpl::BatchLoadState) -> bool
+impl core::fmt::Debug for oracledb_protocol::dpl::BatchLoadState
+pub fn oracledb_protocol::dpl::BatchLoadState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::dpl::BatchLoadState
+pub struct oracledb_protocol::dpl::DirectPathPiece
+impl oracledb_protocol::dpl::DirectPathPiece
+pub fn oracledb_protocol::dpl::DirectPathPiece::data(&self) -> &[u8]
+pub fn oracledb_protocol::dpl::DirectPathPiece::flags(&self) -> u8
+pub fn oracledb_protocol::dpl::DirectPathPiece::num_segments(&self) -> u8
+impl core::clone::Clone for oracledb_protocol::dpl::DirectPathPiece
+pub fn oracledb_protocol::dpl::DirectPathPiece::clone(&self) -> oracledb_protocol::dpl::DirectPathPiece
+impl core::cmp::Eq for oracledb_protocol::dpl::DirectPathPiece
+impl core::cmp::PartialEq for oracledb_protocol::dpl::DirectPathPiece
+pub fn oracledb_protocol::dpl::DirectPathPiece::eq(&self, &oracledb_protocol::dpl::DirectPathPiece) -> bool
+impl core::fmt::Debug for oracledb_protocol::dpl::DirectPathPiece
+pub fn oracledb_protocol::dpl::DirectPathPiece::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::dpl::DirectPathPiece
+pub struct oracledb_protocol::dpl::DirectPathPieceBuffer
+impl oracledb_protocol::dpl::DirectPathPieceBuffer
+pub fn oracledb_protocol::dpl::DirectPathPieceBuffer::add_column_value(&mut self, &oracledb_protocol::thin::ColumnMetadata, &oracledb_protocol::dpl::DirectPathColumnValue, u64) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::dpl::DirectPathPieceBuffer::finish(self) -> oracledb_protocol::Result<(alloc::vec::Vec<oracledb_protocol::dpl::DirectPathPiece>, u32)>
+pub fn oracledb_protocol::dpl::DirectPathPieceBuffer::finish_row(&mut self) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::dpl::DirectPathPieceBuffer::new() -> Self
+pub fn oracledb_protocol::dpl::DirectPathPieceBuffer::start_row(&mut self) -> oracledb_protocol::Result<()>
+impl core::default::Default for oracledb_protocol::dpl::DirectPathPieceBuffer
+pub fn oracledb_protocol::dpl::DirectPathPieceBuffer::default() -> oracledb_protocol::dpl::DirectPathPieceBuffer
+impl core::fmt::Debug for oracledb_protocol::dpl::DirectPathPieceBuffer
+pub fn oracledb_protocol::dpl::DirectPathPieceBuffer::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb_protocol::dpl::DirectPathPrepareResult
+pub oracledb_protocol::dpl::DirectPathPrepareResult::column_metadata: alloc::vec::Vec<oracledb_protocol::thin::ColumnMetadata>
+pub oracledb_protocol::dpl::DirectPathPrepareResult::cursor_id: u16
+pub oracledb_protocol::dpl::DirectPathPrepareResult::out_values: alloc::vec::Vec<u32>
+impl core::clone::Clone for oracledb_protocol::dpl::DirectPathPrepareResult
+pub fn oracledb_protocol::dpl::DirectPathPrepareResult::clone(&self) -> oracledb_protocol::dpl::DirectPathPrepareResult
+impl core::cmp::Eq for oracledb_protocol::dpl::DirectPathPrepareResult
+impl core::cmp::PartialEq for oracledb_protocol::dpl::DirectPathPrepareResult
+pub fn oracledb_protocol::dpl::DirectPathPrepareResult::eq(&self, &oracledb_protocol::dpl::DirectPathPrepareResult) -> bool
+impl core::default::Default for oracledb_protocol::dpl::DirectPathPrepareResult
+pub fn oracledb_protocol::dpl::DirectPathPrepareResult::default() -> oracledb_protocol::dpl::DirectPathPrepareResult
+impl core::fmt::Debug for oracledb_protocol::dpl::DirectPathPrepareResult
+pub fn oracledb_protocol::dpl::DirectPathPrepareResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::dpl::DirectPathPrepareResult
+pub struct oracledb_protocol::dpl::DirectPathStream
+pub oracledb_protocol::dpl::DirectPathStream::pieces: alloc::vec::Vec<oracledb_protocol::dpl::DirectPathPiece>
+pub oracledb_protocol::dpl::DirectPathStream::total_piece_length: u32
+impl core::clone::Clone for oracledb_protocol::dpl::DirectPathStream
+pub fn oracledb_protocol::dpl::DirectPathStream::clone(&self) -> oracledb_protocol::dpl::DirectPathStream
+impl core::cmp::Eq for oracledb_protocol::dpl::DirectPathStream
+impl core::cmp::PartialEq for oracledb_protocol::dpl::DirectPathStream
+pub fn oracledb_protocol::dpl::DirectPathStream::eq(&self, &oracledb_protocol::dpl::DirectPathStream) -> bool
+impl core::fmt::Debug for oracledb_protocol::dpl::DirectPathStream
+pub fn oracledb_protocol::dpl::DirectPathStream::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::dpl::DirectPathStream
+pub const oracledb_protocol::dpl::TNS_DPLS_MAX_MESSAGE_SIZE: u64
+pub const oracledb_protocol::dpl::TNS_DPLS_MAX_PIECE_SIZE: usize
+pub const oracledb_protocol::dpl::TNS_DPLS_MAX_SHORT_LENGTH: usize
+pub const oracledb_protocol::dpl::TNS_DPLS_ROW_HEADER_FAST_PIECE: u8
+pub const oracledb_protocol::dpl::TNS_DPLS_ROW_HEADER_FAST_ROW: u8
+pub const oracledb_protocol::dpl::TNS_DPLS_ROW_HEADER_FIRST: u8
+pub const oracledb_protocol::dpl::TNS_DPLS_ROW_HEADER_LAST: u8
+pub const oracledb_protocol::dpl::TNS_DPLS_ROW_HEADER_SPLIT_WITH_NEXT: u8
+pub const oracledb_protocol::dpl::TNS_DPLS_ROW_HEADER_SPLIT_WITH_PREV: u8
+pub const oracledb_protocol::dpl::TNS_DPP_OP_CODE_LOAD: u32
+pub const oracledb_protocol::dpl::TNS_DP_INTERFACE_VERSION: u32
+pub const oracledb_protocol::dpl::TNS_DP_OP_ABORT: u32
+pub const oracledb_protocol::dpl::TNS_DP_OP_FINISH: u32
+pub const oracledb_protocol::dpl::TNS_DP_STREAM_VERSION: u32
+pub const oracledb_protocol::dpl::TNS_FUNC_DIRECT_PATH_LOAD_STREAM: u8
+pub const oracledb_protocol::dpl::TNS_FUNC_DIRECT_PATH_OP: u8
+pub const oracledb_protocol::dpl::TNS_FUNC_DIRECT_PATH_PREPARE: u8
+pub fn oracledb_protocol::dpl::build_direct_path_load_stream_payload(u16, &oracledb_protocol::dpl::DirectPathStream, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::dpl::build_direct_path_op_payload(u16, u32, u8) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::dpl::build_direct_path_prepare_payload(&str, &str, &[alloc::string::String], u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::dpl::encode_direct_path_rows(&[oracledb_protocol::thin::ColumnMetadata], &[alloc::vec::Vec<oracledb_protocol::dpl::DirectPathColumnValue>], u64) -> oracledb_protocol::Result<oracledb_protocol::dpl::DirectPathStream>
+pub fn oracledb_protocol::dpl::parse_direct_path_load_stream_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::dpl::parse_direct_path_op_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::dpl::parse_direct_path_prepare_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<oracledb_protocol::dpl::DirectPathPrepareResult>
+pub fn oracledb_protocol::dpl::parse_direct_path_simple_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<()>
+pub mod oracledb_protocol::net
+pub mod oracledb_protocol::net::cassette
+pub enum oracledb_protocol::net::cassette::CassetteError
+pub oracledb_protocol::net::cassette::CassetteError::BadDirection(u8)
+pub oracledb_protocol::net::cassette::CassetteError::BadMagic
+pub oracledb_protocol::net::cassette::CassetteError::Truncated
+pub oracledb_protocol::net::cassette::CassetteError::Truncated::wanted: &'static str
+pub oracledb_protocol::net::cassette::CassetteError::UnsupportedVersion(u8)
+impl core::clone::Clone for oracledb_protocol::net::cassette::CassetteError
+pub fn oracledb_protocol::net::cassette::CassetteError::clone(&self) -> oracledb_protocol::net::cassette::CassetteError
+impl core::cmp::Eq for oracledb_protocol::net::cassette::CassetteError
+impl core::cmp::PartialEq for oracledb_protocol::net::cassette::CassetteError
+pub fn oracledb_protocol::net::cassette::CassetteError::eq(&self, &oracledb_protocol::net::cassette::CassetteError) -> bool
+impl core::error::Error for oracledb_protocol::net::cassette::CassetteError
+impl core::fmt::Debug for oracledb_protocol::net::cassette::CassetteError
+pub fn oracledb_protocol::net::cassette::CassetteError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oracledb_protocol::net::cassette::CassetteError
+pub fn oracledb_protocol::net::cassette::CassetteError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::net::cassette::CassetteError
+pub enum oracledb_protocol::net::cassette::Direction
+pub oracledb_protocol::net::cassette::Direction::ClientToServer
+pub oracledb_protocol::net::cassette::Direction::ServerToClient
+impl oracledb_protocol::net::cassette::Direction
+pub fn oracledb_protocol::net::cassette::Direction::tag(self) -> u8
+impl core::clone::Clone for oracledb_protocol::net::cassette::Direction
+pub fn oracledb_protocol::net::cassette::Direction::clone(&self) -> oracledb_protocol::net::cassette::Direction
+impl core::cmp::Eq for oracledb_protocol::net::cassette::Direction
+impl core::cmp::PartialEq for oracledb_protocol::net::cassette::Direction
+pub fn oracledb_protocol::net::cassette::Direction::eq(&self, &oracledb_protocol::net::cassette::Direction) -> bool
+impl core::fmt::Debug for oracledb_protocol::net::cassette::Direction
+pub fn oracledb_protocol::net::cassette::Direction::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb_protocol::net::cassette::Direction
+impl core::marker::StructuralPartialEq for oracledb_protocol::net::cassette::Direction
+pub struct oracledb_protocol::net::cassette::Frame
+pub oracledb_protocol::net::cassette::Frame::bytes: alloc::vec::Vec<u8>
+pub oracledb_protocol::net::cassette::Frame::direction: oracledb_protocol::net::cassette::Direction
+pub oracledb_protocol::net::cassette::Frame::micros: u64
+impl core::clone::Clone for oracledb_protocol::net::cassette::Frame
+pub fn oracledb_protocol::net::cassette::Frame::clone(&self) -> oracledb_protocol::net::cassette::Frame
+impl core::cmp::Eq for oracledb_protocol::net::cassette::Frame
+impl core::cmp::PartialEq for oracledb_protocol::net::cassette::Frame
+pub fn oracledb_protocol::net::cassette::Frame::eq(&self, &oracledb_protocol::net::cassette::Frame) -> bool
+impl core::fmt::Debug for oracledb_protocol::net::cassette::Frame
+pub fn oracledb_protocol::net::cassette::Frame::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::net::cassette::Frame
+pub struct oracledb_protocol::net::cassette::Reader<'a>
+impl<'a> oracledb_protocol::net::cassette::Reader<'a>
+pub fn oracledb_protocol::net::cassette::Reader<'a>::new(&'a [u8]) -> core::result::Result<Self, oracledb_protocol::net::cassette::CassetteError>
+pub fn oracledb_protocol::net::cassette::Reader<'a>::next(&mut self) -> core::result::Result<core::option::Option<oracledb_protocol::net::cassette::Frame>, oracledb_protocol::net::cassette::CassetteError>
+impl<'a> core::clone::Clone for oracledb_protocol::net::cassette::Reader<'a>
+pub fn oracledb_protocol::net::cassette::Reader<'a>::clone(&self) -> oracledb_protocol::net::cassette::Reader<'a>
+impl<'a> core::fmt::Debug for oracledb_protocol::net::cassette::Reader<'a>
+pub fn oracledb_protocol::net::cassette::Reader<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub const oracledb_protocol::net::cassette::CASSETTE_MAGIC: [u8; 8]
+pub const oracledb_protocol::net::cassette::CASSETTE_VERSION: u8
+pub fn oracledb_protocol::net::cassette::decode_all(&[u8]) -> core::result::Result<alloc::vec::Vec<oracledb_protocol::net::cassette::Frame>, oracledb_protocol::net::cassette::CassetteError>
+pub fn oracledb_protocol::net::cassette::write_frame(&mut alloc::vec::Vec<u8>, oracledb_protocol::net::cassette::Direction, u64, &[u8])
+pub fn oracledb_protocol::net::cassette::write_header(&mut alloc::vec::Vec<u8>)
+pub mod oracledb_protocol::net::connectstring
+pub mod oracledb_protocol::net::connectstring::tnsnames
+pub struct oracledb_protocol::net::connectstring::tnsnames::TnsnamesReader
+impl oracledb_protocol::net::connectstring::tnsnames::TnsnamesReader
+pub fn oracledb_protocol::net::connectstring::tnsnames::TnsnamesReader::file_name(&self) -> &std::path::Path
+pub fn oracledb_protocol::net::connectstring::tnsnames::TnsnamesReader::get(&self, &str) -> core::option::Option<&str>
+pub fn oracledb_protocol::net::connectstring::tnsnames::TnsnamesReader::read(&std::path::Path) -> oracledb_protocol::Result<Self>
+pub fn oracledb_protocol::net::connectstring::tnsnames::TnsnamesReader::service_names(&self) -> alloc::vec::Vec<alloc::string::String>
+impl core::default::Default for oracledb_protocol::net::connectstring::tnsnames::TnsnamesReader
+pub fn oracledb_protocol::net::connectstring::tnsnames::TnsnamesReader::default() -> oracledb_protocol::net::connectstring::tnsnames::TnsnamesReader
+impl core::fmt::Debug for oracledb_protocol::net::connectstring::tnsnames::TnsnamesReader
+pub fn oracledb_protocol::net::connectstring::tnsnames::TnsnamesReader::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum oracledb_protocol::net::connectstring::Protocol
+pub oracledb_protocol::net::connectstring::Protocol::Tcp
+pub oracledb_protocol::net::connectstring::Protocol::Tcps
+impl oracledb_protocol::net::connectstring::Protocol
+pub fn oracledb_protocol::net::connectstring::Protocol::as_str(self) -> &'static str
+pub fn oracledb_protocol::net::connectstring::Protocol::default_port(self) -> u16
+pub fn oracledb_protocol::net::connectstring::Protocol::is_tls(self) -> bool
+impl core::clone::Clone for oracledb_protocol::net::connectstring::Protocol
+pub fn oracledb_protocol::net::connectstring::Protocol::clone(&self) -> oracledb_protocol::net::connectstring::Protocol
+impl core::cmp::Eq for oracledb_protocol::net::connectstring::Protocol
+impl core::cmp::PartialEq for oracledb_protocol::net::connectstring::Protocol
+pub fn oracledb_protocol::net::connectstring::Protocol::eq(&self, &oracledb_protocol::net::connectstring::Protocol) -> bool
+impl core::convert::From<oracledb_protocol::net::connectstring::Protocol> for oracledb_protocol::net::Protocol
+pub fn oracledb_protocol::net::Protocol::from(oracledb_protocol::net::connectstring::Protocol) -> Self
+impl core::default::Default for oracledb_protocol::net::connectstring::Protocol
+pub fn oracledb_protocol::net::connectstring::Protocol::default() -> oracledb_protocol::net::connectstring::Protocol
+impl core::fmt::Debug for oracledb_protocol::net::connectstring::Protocol
+pub fn oracledb_protocol::net::connectstring::Protocol::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb_protocol::net::connectstring::Protocol
+impl core::marker::StructuralPartialEq for oracledb_protocol::net::connectstring::Protocol
+pub enum oracledb_protocol::net::connectstring::Purity
+pub oracledb_protocol::net::connectstring::Purity::New
+pub oracledb_protocol::net::connectstring::Purity::Self_
+impl core::clone::Clone for oracledb_protocol::net::connectstring::Purity
+pub fn oracledb_protocol::net::connectstring::Purity::clone(&self) -> oracledb_protocol::net::connectstring::Purity
+impl core::cmp::Eq for oracledb_protocol::net::connectstring::Purity
+impl core::cmp::PartialEq for oracledb_protocol::net::connectstring::Purity
+pub fn oracledb_protocol::net::connectstring::Purity::eq(&self, &oracledb_protocol::net::connectstring::Purity) -> bool
+impl core::fmt::Debug for oracledb_protocol::net::connectstring::Purity
+pub fn oracledb_protocol::net::connectstring::Purity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb_protocol::net::connectstring::Purity
+impl core::marker::StructuralPartialEq for oracledb_protocol::net::connectstring::Purity
+pub enum oracledb_protocol::net::connectstring::ServerType
+pub oracledb_protocol::net::connectstring::ServerType::Dedicated
+pub oracledb_protocol::net::connectstring::ServerType::Pooled
+pub oracledb_protocol::net::connectstring::ServerType::Shared
+impl oracledb_protocol::net::connectstring::ServerType
+pub fn oracledb_protocol::net::connectstring::ServerType::as_str(self) -> &'static str
+impl core::clone::Clone for oracledb_protocol::net::connectstring::ServerType
+pub fn oracledb_protocol::net::connectstring::ServerType::clone(&self) -> oracledb_protocol::net::connectstring::ServerType
+impl core::cmp::Eq for oracledb_protocol::net::connectstring::ServerType
+impl core::cmp::PartialEq for oracledb_protocol::net::connectstring::ServerType
+pub fn oracledb_protocol::net::connectstring::ServerType::eq(&self, &oracledb_protocol::net::connectstring::ServerType) -> bool
+impl core::fmt::Debug for oracledb_protocol::net::connectstring::ServerType
+pub fn oracledb_protocol::net::connectstring::ServerType::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb_protocol::net::connectstring::ServerType
+impl core::marker::StructuralPartialEq for oracledb_protocol::net::connectstring::ServerType
+pub struct oracledb_protocol::net::connectstring::Address
+pub oracledb_protocol::net::connectstring::Address::host: core::option::Option<alloc::string::String>
+pub oracledb_protocol::net::connectstring::Address::https_proxy: core::option::Option<alloc::string::String>
+pub oracledb_protocol::net::connectstring::Address::https_proxy_port: u16
+pub oracledb_protocol::net::connectstring::Address::port: u16
+pub oracledb_protocol::net::connectstring::Address::protocol: oracledb_protocol::net::connectstring::Protocol
+impl core::clone::Clone for oracledb_protocol::net::connectstring::Address
+pub fn oracledb_protocol::net::connectstring::Address::clone(&self) -> oracledb_protocol::net::connectstring::Address
+impl core::cmp::Eq for oracledb_protocol::net::connectstring::Address
+impl core::cmp::PartialEq for oracledb_protocol::net::connectstring::Address
+pub fn oracledb_protocol::net::connectstring::Address::eq(&self, &oracledb_protocol::net::connectstring::Address) -> bool
+impl core::default::Default for oracledb_protocol::net::connectstring::Address
+pub fn oracledb_protocol::net::connectstring::Address::default() -> Self
+impl core::fmt::Debug for oracledb_protocol::net::connectstring::Address
+pub fn oracledb_protocol::net::connectstring::Address::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::net::connectstring::Address
+pub struct oracledb_protocol::net::connectstring::AddressList
+pub oracledb_protocol::net::connectstring::AddressList::addresses: alloc::vec::Vec<oracledb_protocol::net::connectstring::Address>
+pub oracledb_protocol::net::connectstring::AddressList::failover: bool
+pub oracledb_protocol::net::connectstring::AddressList::load_balance: bool
+pub oracledb_protocol::net::connectstring::AddressList::source_route: bool
+impl core::clone::Clone for oracledb_protocol::net::connectstring::AddressList
+pub fn oracledb_protocol::net::connectstring::AddressList::clone(&self) -> oracledb_protocol::net::connectstring::AddressList
+impl core::cmp::Eq for oracledb_protocol::net::connectstring::AddressList
+impl core::cmp::PartialEq for oracledb_protocol::net::connectstring::AddressList
+pub fn oracledb_protocol::net::connectstring::AddressList::eq(&self, &oracledb_protocol::net::connectstring::AddressList) -> bool
+impl core::default::Default for oracledb_protocol::net::connectstring::AddressList
+pub fn oracledb_protocol::net::connectstring::AddressList::default() -> oracledb_protocol::net::connectstring::AddressList
+impl core::fmt::Debug for oracledb_protocol::net::connectstring::AddressList
+pub fn oracledb_protocol::net::connectstring::AddressList::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::net::connectstring::AddressList
+pub struct oracledb_protocol::net::connectstring::ConnectData
+pub oracledb_protocol::net::connectstring::ConnectData::cclass: core::option::Option<alloc::string::String>
+pub oracledb_protocol::net::connectstring::ConnectData::connection_id_prefix: core::option::Option<alloc::string::String>
+pub oracledb_protocol::net::connectstring::ConnectData::extra: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub oracledb_protocol::net::connectstring::ConnectData::instance_name: core::option::Option<alloc::string::String>
+pub oracledb_protocol::net::connectstring::ConnectData::pool_boundary: core::option::Option<alloc::string::String>
+pub oracledb_protocol::net::connectstring::ConnectData::pool_name: core::option::Option<alloc::string::String>
+pub oracledb_protocol::net::connectstring::ConnectData::purity: core::option::Option<oracledb_protocol::net::connectstring::Purity>
+pub oracledb_protocol::net::connectstring::ConnectData::server_type: core::option::Option<oracledb_protocol::net::connectstring::ServerType>
+pub oracledb_protocol::net::connectstring::ConnectData::service_name: core::option::Option<alloc::string::String>
+pub oracledb_protocol::net::connectstring::ConnectData::sid: core::option::Option<alloc::string::String>
+pub oracledb_protocol::net::connectstring::ConnectData::use_tcp_fast_open: bool
+impl core::clone::Clone for oracledb_protocol::net::connectstring::ConnectData
+pub fn oracledb_protocol::net::connectstring::ConnectData::clone(&self) -> oracledb_protocol::net::connectstring::ConnectData
+impl core::cmp::Eq for oracledb_protocol::net::connectstring::ConnectData
+impl core::cmp::PartialEq for oracledb_protocol::net::connectstring::ConnectData
+pub fn oracledb_protocol::net::connectstring::ConnectData::eq(&self, &oracledb_protocol::net::connectstring::ConnectData) -> bool
+impl core::default::Default for oracledb_protocol::net::connectstring::ConnectData
+pub fn oracledb_protocol::net::connectstring::ConnectData::default() -> oracledb_protocol::net::connectstring::ConnectData
+impl core::fmt::Debug for oracledb_protocol::net::connectstring::ConnectData
+pub fn oracledb_protocol::net::connectstring::ConnectData::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::net::connectstring::ConnectData
+pub struct oracledb_protocol::net::connectstring::Description
+pub oracledb_protocol::net::connectstring::Description::address_lists: alloc::vec::Vec<oracledb_protocol::net::connectstring::AddressList>
+pub oracledb_protocol::net::connectstring::Description::connect_data: oracledb_protocol::net::connectstring::ConnectData
+pub oracledb_protocol::net::connectstring::Description::expire_time: u32
+pub oracledb_protocol::net::connectstring::Description::extra: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub oracledb_protocol::net::connectstring::Description::failover: bool
+pub oracledb_protocol::net::connectstring::Description::load_balance: bool
+pub oracledb_protocol::net::connectstring::Description::retry_count: u32
+pub oracledb_protocol::net::connectstring::Description::retry_delay: u32
+pub oracledb_protocol::net::connectstring::Description::sdu: u32
+pub oracledb_protocol::net::connectstring::Description::security: oracledb_protocol::net::connectstring::Security
+pub oracledb_protocol::net::connectstring::Description::source_route: bool
+pub oracledb_protocol::net::connectstring::Description::tcp_connect_timeout: f64
+pub oracledb_protocol::net::connectstring::Description::use_sni: bool
+impl oracledb_protocol::net::connectstring::Description
+pub fn oracledb_protocol::net::connectstring::Description::addresses(&self) -> impl core::iter::traits::iterator::Iterator<Item = &oracledb_protocol::net::connectstring::Address>
+impl core::clone::Clone for oracledb_protocol::net::connectstring::Description
+pub fn oracledb_protocol::net::connectstring::Description::clone(&self) -> oracledb_protocol::net::connectstring::Description
+impl core::cmp::PartialEq for oracledb_protocol::net::connectstring::Description
+pub fn oracledb_protocol::net::connectstring::Description::eq(&self, &oracledb_protocol::net::connectstring::Description) -> bool
+impl core::default::Default for oracledb_protocol::net::connectstring::Description
+pub fn oracledb_protocol::net::connectstring::Description::default() -> Self
+impl core::fmt::Debug for oracledb_protocol::net::connectstring::Description
+pub fn oracledb_protocol::net::connectstring::Description::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::net::connectstring::Description
+pub struct oracledb_protocol::net::connectstring::Descriptor
+pub oracledb_protocol::net::connectstring::Descriptor::descriptions: alloc::vec::Vec<oracledb_protocol::net::connectstring::Description>
+pub oracledb_protocol::net::connectstring::Descriptor::failover: bool
+pub oracledb_protocol::net::connectstring::Descriptor::load_balance: bool
+pub oracledb_protocol::net::connectstring::Descriptor::source_route: bool
+impl oracledb_protocol::net::connectstring::Descriptor
+pub fn oracledb_protocol::net::connectstring::Descriptor::addresses(&self) -> impl core::iter::traits::iterator::Iterator<Item = &oracledb_protocol::net::connectstring::Address>
+pub fn oracledb_protocol::net::connectstring::Descriptor::describe(&self) -> alloc::string::String
+pub fn oracledb_protocol::net::connectstring::Descriptor::first_address(&self) -> core::option::Option<&oracledb_protocol::net::connectstring::Address>
+pub fn oracledb_protocol::net::connectstring::Descriptor::first_description(&self) -> &oracledb_protocol::net::connectstring::Description
+impl core::clone::Clone for oracledb_protocol::net::connectstring::Descriptor
+pub fn oracledb_protocol::net::connectstring::Descriptor::clone(&self) -> oracledb_protocol::net::connectstring::Descriptor
+impl core::cmp::PartialEq for oracledb_protocol::net::connectstring::Descriptor
+pub fn oracledb_protocol::net::connectstring::Descriptor::eq(&self, &oracledb_protocol::net::connectstring::Descriptor) -> bool
+impl core::fmt::Debug for oracledb_protocol::net::connectstring::Descriptor
+pub fn oracledb_protocol::net::connectstring::Descriptor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::net::connectstring::Descriptor
+pub struct oracledb_protocol::net::connectstring::Security
+pub oracledb_protocol::net::connectstring::Security::extra: alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub oracledb_protocol::net::connectstring::Security::ssl_server_cert_dn: core::option::Option<alloc::string::String>
+pub oracledb_protocol::net::connectstring::Security::ssl_server_dn_match: bool
+pub oracledb_protocol::net::connectstring::Security::wallet_location: core::option::Option<alloc::string::String>
+impl core::clone::Clone for oracledb_protocol::net::connectstring::Security
+pub fn oracledb_protocol::net::connectstring::Security::clone(&self) -> oracledb_protocol::net::connectstring::Security
+impl core::cmp::Eq for oracledb_protocol::net::connectstring::Security
+impl core::cmp::PartialEq for oracledb_protocol::net::connectstring::Security
+pub fn oracledb_protocol::net::connectstring::Security::eq(&self, &oracledb_protocol::net::connectstring::Security) -> bool
+impl core::default::Default for oracledb_protocol::net::connectstring::Security
+pub fn oracledb_protocol::net::connectstring::Security::default() -> Self
+impl core::fmt::Debug for oracledb_protocol::net::connectstring::Security
+pub fn oracledb_protocol::net::connectstring::Security::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::net::connectstring::Security
+pub const oracledb_protocol::net::connectstring::DEFAULT_PORT: u16
+pub const oracledb_protocol::net::connectstring::DEFAULT_RETRY_DELAY: u32
+pub const oracledb_protocol::net::connectstring::DEFAULT_SDU: u32
+pub const oracledb_protocol::net::connectstring::DEFAULT_TCPS_PORT: u16
+pub const oracledb_protocol::net::connectstring::DEFAULT_TCP_CONNECT_TIMEOUT: f64
+pub const oracledb_protocol::net::connectstring::MAX_SDU: u32
+pub const oracledb_protocol::net::connectstring::MIN_SDU: u32
+pub fn oracledb_protocol::net::connectstring::parse(&str) -> oracledb_protocol::Result<core::option::Option<oracledb_protocol::net::connectstring::Descriptor>>
+pub enum oracledb_protocol::net::Protocol
+pub oracledb_protocol::net::Protocol::Tcp
+pub oracledb_protocol::net::Protocol::Tcps
+impl oracledb_protocol::net::Protocol
+pub fn oracledb_protocol::net::Protocol::default_port(self) -> u16
+pub fn oracledb_protocol::net::Protocol::is_tls(self) -> bool
+impl core::clone::Clone for oracledb_protocol::net::Protocol
+pub fn oracledb_protocol::net::Protocol::clone(&self) -> oracledb_protocol::net::Protocol
+impl core::cmp::Eq for oracledb_protocol::net::Protocol
+impl core::cmp::PartialEq for oracledb_protocol::net::Protocol
+pub fn oracledb_protocol::net::Protocol::eq(&self, &oracledb_protocol::net::Protocol) -> bool
+impl core::convert::From<oracledb_protocol::net::connectstring::Protocol> for oracledb_protocol::net::Protocol
+pub fn oracledb_protocol::net::Protocol::from(oracledb_protocol::net::connectstring::Protocol) -> Self
+impl core::default::Default for oracledb_protocol::net::Protocol
+pub fn oracledb_protocol::net::Protocol::default() -> oracledb_protocol::net::Protocol
+impl core::fmt::Debug for oracledb_protocol::net::Protocol
+pub fn oracledb_protocol::net::Protocol::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb_protocol::net::Protocol
+impl core::marker::StructuralPartialEq for oracledb_protocol::net::Protocol
+pub struct oracledb_protocol::net::EasyConnect
+pub oracledb_protocol::net::EasyConnect::host: alloc::string::String
+pub oracledb_protocol::net::EasyConnect::port: u16
+pub oracledb_protocol::net::EasyConnect::protocol: oracledb_protocol::net::Protocol
+pub oracledb_protocol::net::EasyConnect::service_name: alloc::string::String
+impl oracledb_protocol::net::EasyConnect
+pub fn oracledb_protocol::net::EasyConnect::parse(&str) -> oracledb_protocol::Result<Self>
+pub fn oracledb_protocol::net::EasyConnect::parse_descriptor(&str) -> oracledb_protocol::Result<oracledb_protocol::net::connectstring::Descriptor>
+impl core::clone::Clone for oracledb_protocol::net::EasyConnect
+pub fn oracledb_protocol::net::EasyConnect::clone(&self) -> oracledb_protocol::net::EasyConnect
+impl core::cmp::Eq for oracledb_protocol::net::EasyConnect
+impl core::cmp::PartialEq for oracledb_protocol::net::EasyConnect
+pub fn oracledb_protocol::net::EasyConnect::eq(&self, &oracledb_protocol::net::EasyConnect) -> bool
+impl core::fmt::Debug for oracledb_protocol::net::EasyConnect
+pub fn oracledb_protocol::net::EasyConnect::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::net::EasyConnect
+pub mod oracledb_protocol::oson
+pub enum oracledb_protocol::oson::OsonValue
+pub oracledb_protocol::oson::OsonValue::Array(alloc::vec::Vec<oracledb_protocol::oson::OsonValue>)
+pub oracledb_protocol::oson::OsonValue::BinaryDouble(f64)
+pub oracledb_protocol::oson::OsonValue::BinaryFloat(f32)
+pub oracledb_protocol::oson::OsonValue::Bool(bool)
+pub oracledb_protocol::oson::OsonValue::DateTime
+pub oracledb_protocol::oson::OsonValue::DateTime::day: u8
+pub oracledb_protocol::oson::OsonValue::DateTime::hour: u8
+pub oracledb_protocol::oson::OsonValue::DateTime::minute: u8
+pub oracledb_protocol::oson::OsonValue::DateTime::month: u8
+pub oracledb_protocol::oson::OsonValue::DateTime::nanosecond: u32
+pub oracledb_protocol::oson::OsonValue::DateTime::second: u8
+pub oracledb_protocol::oson::OsonValue::DateTime::year: i32
+pub oracledb_protocol::oson::OsonValue::IntervalDS
+pub oracledb_protocol::oson::OsonValue::IntervalDS::days: i32
+pub oracledb_protocol::oson::OsonValue::IntervalDS::fseconds: i32
+pub oracledb_protocol::oson::OsonValue::IntervalDS::hours: i32
+pub oracledb_protocol::oson::OsonValue::IntervalDS::minutes: i32
+pub oracledb_protocol::oson::OsonValue::IntervalDS::seconds: i32
+pub oracledb_protocol::oson::OsonValue::Null
+pub oracledb_protocol::oson::OsonValue::Number(alloc::string::String)
+pub oracledb_protocol::oson::OsonValue::Object(alloc::vec::Vec<(alloc::string::String, oracledb_protocol::oson::OsonValue)>)
+pub oracledb_protocol::oson::OsonValue::Raw(alloc::vec::Vec<u8>)
+pub oracledb_protocol::oson::OsonValue::String(alloc::string::String)
+pub oracledb_protocol::oson::OsonValue::Vector(oracledb_protocol::vector::Vector)
+impl core::clone::Clone for oracledb_protocol::oson::OsonValue
+pub fn oracledb_protocol::oson::OsonValue::clone(&self) -> oracledb_protocol::oson::OsonValue
+impl core::cmp::PartialEq for oracledb_protocol::oson::OsonValue
+pub fn oracledb_protocol::oson::OsonValue::eq(&self, &oracledb_protocol::oson::OsonValue) -> bool
+impl core::fmt::Debug for oracledb_protocol::oson::OsonValue
+pub fn oracledb_protocol::oson::OsonValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::oson::OsonValue
+pub fn oracledb_protocol::oson::decode_oson(&[u8]) -> oracledb_protocol::Result<oracledb_protocol::oson::OsonValue>
+pub fn oracledb_protocol::oson::encode_oson(&oracledb_protocol::oson::OsonValue, bool) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub mod oracledb_protocol::packet
+pub struct oracledb_protocol::packet::TnsPacket
+pub oracledb_protocol::packet::TnsPacket::flags: u8
+pub oracledb_protocol::packet::TnsPacket::packet_type: u8
+pub oracledb_protocol::packet::TnsPacket::payload: alloc::vec::Vec<u8>
+impl oracledb_protocol::packet::TnsPacket
+pub fn oracledb_protocol::packet::TnsPacket::encode(&self) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::packet::TnsPacket::parse(&[u8]) -> oracledb_protocol::Result<Self>
+impl core::clone::Clone for oracledb_protocol::packet::TnsPacket
+pub fn oracledb_protocol::packet::TnsPacket::clone(&self) -> oracledb_protocol::packet::TnsPacket
+impl core::cmp::Eq for oracledb_protocol::packet::TnsPacket
+impl core::cmp::PartialEq for oracledb_protocol::packet::TnsPacket
+pub fn oracledb_protocol::packet::TnsPacket::eq(&self, &oracledb_protocol::packet::TnsPacket) -> bool
+impl core::fmt::Debug for oracledb_protocol::packet::TnsPacket
+pub fn oracledb_protocol::packet::TnsPacket::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::packet::TnsPacket
+pub const oracledb_protocol::packet::TNS_HEADER_LEN: usize
+pub mod oracledb_protocol::sql
+pub enum oracledb_protocol::sql::SqlError
+pub oracledb_protocol::sql::SqlError::MissingEndingDoubleQuote
+pub oracledb_protocol::sql::SqlError::MissingEndingSingleQuote
+impl core::clone::Clone for oracledb_protocol::sql::SqlError
+pub fn oracledb_protocol::sql::SqlError::clone(&self) -> oracledb_protocol::sql::SqlError
+impl core::cmp::Eq for oracledb_protocol::sql::SqlError
+impl core::cmp::PartialEq for oracledb_protocol::sql::SqlError
+pub fn oracledb_protocol::sql::SqlError::eq(&self, &oracledb_protocol::sql::SqlError) -> bool
+impl core::error::Error for oracledb_protocol::sql::SqlError
+impl core::fmt::Debug for oracledb_protocol::sql::SqlError
+pub fn oracledb_protocol::sql::SqlError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oracledb_protocol::sql::SqlError
+pub fn oracledb_protocol::sql::SqlError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb_protocol::sql::SqlError
+impl core::marker::StructuralPartialEq for oracledb_protocol::sql::SqlError
+pub fn oracledb_protocol::sql::bind_name_matches_key(&str, &str) -> bool
+pub fn oracledb_protocol::sql::bind_names_equal(&str, &str) -> bool
+pub fn oracledb_protocol::sql::bind_names_per_occurrence(&str) -> oracledb_protocol::sql::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn oracledb_protocol::sql::dml_returning_single_bind_name(&str) -> oracledb_protocol::sql::Result<core::option::Option<alloc::string::String>>
+pub fn oracledb_protocol::sql::generated_object_attr_bind_name(&str, &str) -> alloc::string::String
+pub fn oracledb_protocol::sql::is_bind_name_char(char) -> bool
+pub fn oracledb_protocol::sql::is_quoted_bind_name(&str) -> bool
+pub fn oracledb_protocol::sql::parse_alter_session_value(&str, &str) -> core::option::Option<alloc::string::String>
+pub fn oracledb_protocol::sql::plsql_assignment_bind_names(&str) -> oracledb_protocol::sql::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn oracledb_protocol::sql::plsql_function_return_bind_name(&str) -> core::option::Option<alloc::string::String>
+pub fn oracledb_protocol::sql::plsql_output_bind_names(&str) -> oracledb_protocol::sql::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn oracledb_protocol::sql::public_bind_name(&str) -> alloc::string::String
+pub fn oracledb_protocol::sql::replace_bind_placeholder(&str, &str, &str) -> alloc::string::String
+pub fn oracledb_protocol::sql::replace_input_bind_placeholder(&str, &str, &str) -> alloc::string::String
+pub fn oracledb_protocol::sql::returning_bind_names(&str) -> oracledb_protocol::sql::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn oracledb_protocol::sql::rewrite_dml_returning_projection(&str, &str) -> oracledb_protocol::sql::Result<core::option::Option<alloc::string::String>>
+pub fn oracledb_protocol::sql::scan_bind_names(&str) -> oracledb_protocol::sql::Result<alloc::vec::Vec<alloc::string::String>>
+pub fn oracledb_protocol::sql::simple_sql_identifier(&str) -> core::option::Option<alloc::string::String>
+pub fn oracledb_protocol::sql::single_quote_end(&str, usize) -> usize
+pub fn oracledb_protocol::sql::statement_is_ddl(&str) -> bool
+pub fn oracledb_protocol::sql::statement_is_dml(&str) -> bool
+pub fn oracledb_protocol::sql::statement_is_plsql(&str) -> bool
+pub fn oracledb_protocol::sql::unique_bind_names(&str) -> oracledb_protocol::sql::Result<alloc::vec::Vec<alloc::string::String>>
+pub type oracledb_protocol::sql::Result<T> = core::result::Result<T, oracledb_protocol::sql::SqlError>
+pub mod oracledb_protocol::thin
+pub mod oracledb_protocol::thin::aq
+pub enum oracledb_protocol::thin::aq::AqDeqPayload
+pub oracledb_protocol::thin::aq::AqDeqPayload::Json(oracledb_protocol::oson::OsonValue)
+pub oracledb_protocol::thin::aq::AqDeqPayload::Object(alloc::vec::Vec<u8>)
+pub oracledb_protocol::thin::aq::AqDeqPayload::Raw(alloc::vec::Vec<u8>)
+impl core::clone::Clone for oracledb_protocol::thin::aq::AqDeqPayload
+pub fn oracledb_protocol::thin::aq::AqDeqPayload::clone(&self) -> oracledb_protocol::thin::aq::AqDeqPayload
+impl core::fmt::Debug for oracledb_protocol::thin::aq::AqDeqPayload
+pub fn oracledb_protocol::thin::aq::AqDeqPayload::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum oracledb_protocol::thin::aq::AqPayloadKind
+pub oracledb_protocol::thin::aq::AqPayloadKind::Json
+pub oracledb_protocol::thin::aq::AqPayloadKind::Object
+pub oracledb_protocol::thin::aq::AqPayloadKind::Raw
+impl core::clone::Clone for oracledb_protocol::thin::aq::AqPayloadKind
+pub fn oracledb_protocol::thin::aq::AqPayloadKind::clone(&self) -> oracledb_protocol::thin::aq::AqPayloadKind
+impl core::cmp::Eq for oracledb_protocol::thin::aq::AqPayloadKind
+impl core::cmp::PartialEq for oracledb_protocol::thin::aq::AqPayloadKind
+pub fn oracledb_protocol::thin::aq::AqPayloadKind::eq(&self, &oracledb_protocol::thin::aq::AqPayloadKind) -> bool
+impl core::fmt::Debug for oracledb_protocol::thin::aq::AqPayloadKind
+pub fn oracledb_protocol::thin::aq::AqPayloadKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::aq::AqPayloadKind
+pub enum oracledb_protocol::thin::aq::AqPayloadValue
+pub oracledb_protocol::thin::aq::AqPayloadValue::Json(oracledb_protocol::oson::OsonValue)
+pub oracledb_protocol::thin::aq::AqPayloadValue::Object
+pub oracledb_protocol::thin::aq::AqPayloadValue::Object::image: alloc::vec::Vec<u8>
+pub oracledb_protocol::thin::aq::AqPayloadValue::Object::oid: alloc::vec::Vec<u8>
+pub oracledb_protocol::thin::aq::AqPayloadValue::Raw(alloc::vec::Vec<u8>)
+impl core::clone::Clone for oracledb_protocol::thin::aq::AqPayloadValue
+pub fn oracledb_protocol::thin::aq::AqPayloadValue::clone(&self) -> oracledb_protocol::thin::aq::AqPayloadValue
+impl core::fmt::Debug for oracledb_protocol::thin::aq::AqPayloadValue
+pub fn oracledb_protocol::thin::aq::AqPayloadValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb_protocol::thin::aq::AqArrayResult
+pub oracledb_protocol::thin::aq::AqArrayResult::deq_messages: alloc::vec::Vec<oracledb_protocol::thin::aq::AqDeqMessage>
+pub oracledb_protocol::thin::aq::AqArrayResult::enq_msgids: alloc::vec::Vec<alloc::vec::Vec<u8>>
+impl core::clone::Clone for oracledb_protocol::thin::aq::AqArrayResult
+pub fn oracledb_protocol::thin::aq::AqArrayResult::clone(&self) -> oracledb_protocol::thin::aq::AqArrayResult
+impl core::default::Default for oracledb_protocol::thin::aq::AqArrayResult
+pub fn oracledb_protocol::thin::aq::AqArrayResult::default() -> oracledb_protocol::thin::aq::AqArrayResult
+impl core::fmt::Debug for oracledb_protocol::thin::aq::AqArrayResult
+pub fn oracledb_protocol::thin::aq::AqArrayResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb_protocol::thin::aq::AqDeqMessage
+pub oracledb_protocol::thin::aq::AqDeqMessage::correlation: core::option::Option<alloc::string::String>
+pub oracledb_protocol::thin::aq::AqDeqMessage::delay: i32
+pub oracledb_protocol::thin::aq::AqDeqMessage::delivery_mode: u16
+pub oracledb_protocol::thin::aq::AqDeqMessage::enq_time: core::option::Option<oracledb_protocol::thin::QueryValue>
+pub oracledb_protocol::thin::aq::AqDeqMessage::exception_queue: core::option::Option<alloc::string::String>
+pub oracledb_protocol::thin::aq::AqDeqMessage::expiration: i32
+pub oracledb_protocol::thin::aq::AqDeqMessage::msgid: core::option::Option<alloc::vec::Vec<u8>>
+pub oracledb_protocol::thin::aq::AqDeqMessage::num_attempts: i32
+pub oracledb_protocol::thin::aq::AqDeqMessage::payload: core::option::Option<oracledb_protocol::thin::aq::AqDeqPayload>
+pub oracledb_protocol::thin::aq::AqDeqMessage::priority: i32
+pub oracledb_protocol::thin::aq::AqDeqMessage::state: i32
+impl core::clone::Clone for oracledb_protocol::thin::aq::AqDeqMessage
+pub fn oracledb_protocol::thin::aq::AqDeqMessage::clone(&self) -> oracledb_protocol::thin::aq::AqDeqMessage
+impl core::default::Default for oracledb_protocol::thin::aq::AqDeqMessage
+pub fn oracledb_protocol::thin::aq::AqDeqMessage::default() -> oracledb_protocol::thin::aq::AqDeqMessage
+impl core::fmt::Debug for oracledb_protocol::thin::aq::AqDeqMessage
+pub fn oracledb_protocol::thin::aq::AqDeqMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb_protocol::thin::aq::AqDeqOptions
+pub oracledb_protocol::thin::aq::AqDeqOptions::condition: core::option::Option<alloc::string::String>
+pub oracledb_protocol::thin::aq::AqDeqOptions::consumer_name: core::option::Option<alloc::string::String>
+pub oracledb_protocol::thin::aq::AqDeqOptions::correlation: core::option::Option<alloc::string::String>
+pub oracledb_protocol::thin::aq::AqDeqOptions::delivery_mode: u16
+pub oracledb_protocol::thin::aq::AqDeqOptions::mode: i32
+pub oracledb_protocol::thin::aq::AqDeqOptions::msgid: core::option::Option<alloc::vec::Vec<u8>>
+pub oracledb_protocol::thin::aq::AqDeqOptions::navigation: i32
+pub oracledb_protocol::thin::aq::AqDeqOptions::visibility: i32
+pub oracledb_protocol::thin::aq::AqDeqOptions::wait: u32
+impl core::clone::Clone for oracledb_protocol::thin::aq::AqDeqOptions
+pub fn oracledb_protocol::thin::aq::AqDeqOptions::clone(&self) -> oracledb_protocol::thin::aq::AqDeqOptions
+impl core::default::Default for oracledb_protocol::thin::aq::AqDeqOptions
+pub fn oracledb_protocol::thin::aq::AqDeqOptions::default() -> Self
+impl core::fmt::Debug for oracledb_protocol::thin::aq::AqDeqOptions
+pub fn oracledb_protocol::thin::aq::AqDeqOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb_protocol::thin::aq::AqDeqResult
+pub oracledb_protocol::thin::aq::AqDeqResult::message: core::option::Option<oracledb_protocol::thin::aq::AqDeqMessage>
+impl core::clone::Clone for oracledb_protocol::thin::aq::AqDeqResult
+pub fn oracledb_protocol::thin::aq::AqDeqResult::clone(&self) -> oracledb_protocol::thin::aq::AqDeqResult
+impl core::default::Default for oracledb_protocol::thin::aq::AqDeqResult
+pub fn oracledb_protocol::thin::aq::AqDeqResult::default() -> oracledb_protocol::thin::aq::AqDeqResult
+impl core::fmt::Debug for oracledb_protocol::thin::aq::AqDeqResult
+pub fn oracledb_protocol::thin::aq::AqDeqResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb_protocol::thin::aq::AqEnqOptions
+pub oracledb_protocol::thin::aq::AqEnqOptions::delivery_mode: u16
+pub oracledb_protocol::thin::aq::AqEnqOptions::visibility: u32
+impl core::clone::Clone for oracledb_protocol::thin::aq::AqEnqOptions
+pub fn oracledb_protocol::thin::aq::AqEnqOptions::clone(&self) -> oracledb_protocol::thin::aq::AqEnqOptions
+impl core::default::Default for oracledb_protocol::thin::aq::AqEnqOptions
+pub fn oracledb_protocol::thin::aq::AqEnqOptions::default() -> Self
+impl core::fmt::Debug for oracledb_protocol::thin::aq::AqEnqOptions
+pub fn oracledb_protocol::thin::aq::AqEnqOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb_protocol::thin::aq::AqMsgProps
+pub oracledb_protocol::thin::aq::AqMsgProps::correlation: core::option::Option<alloc::string::String>
+pub oracledb_protocol::thin::aq::AqMsgProps::delay: i32
+pub oracledb_protocol::thin::aq::AqMsgProps::enq_txn_id: core::option::Option<alloc::vec::Vec<u8>>
+pub oracledb_protocol::thin::aq::AqMsgProps::exception_queue: core::option::Option<alloc::string::String>
+pub oracledb_protocol::thin::aq::AqMsgProps::expiration: i32
+pub oracledb_protocol::thin::aq::AqMsgProps::payload: core::option::Option<oracledb_protocol::thin::aq::AqPayloadValue>
+pub oracledb_protocol::thin::aq::AqMsgProps::priority: i32
+pub oracledb_protocol::thin::aq::AqMsgProps::recipients: core::option::Option<alloc::vec::Vec<alloc::string::String>>
+pub oracledb_protocol::thin::aq::AqMsgProps::state: i32
+impl core::clone::Clone for oracledb_protocol::thin::aq::AqMsgProps
+pub fn oracledb_protocol::thin::aq::AqMsgProps::clone(&self) -> oracledb_protocol::thin::aq::AqMsgProps
+impl core::default::Default for oracledb_protocol::thin::aq::AqMsgProps
+pub fn oracledb_protocol::thin::aq::AqMsgProps::default() -> Self
+impl core::fmt::Debug for oracledb_protocol::thin::aq::AqMsgProps
+pub fn oracledb_protocol::thin::aq::AqMsgProps::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb_protocol::thin::aq::AqQueueDesc
+pub oracledb_protocol::thin::aq::AqQueueDesc::kind: oracledb_protocol::thin::aq::AqPayloadKind
+pub oracledb_protocol::thin::aq::AqQueueDesc::name: alloc::string::String
+pub oracledb_protocol::thin::aq::AqQueueDesc::payload_toid: alloc::vec::Vec<u8>
+impl oracledb_protocol::thin::aq::AqQueueDesc
+pub fn oracledb_protocol::thin::aq::AqQueueDesc::new(alloc::string::String, oracledb_protocol::thin::aq::AqPayloadKind, core::option::Option<alloc::vec::Vec<u8>>) -> Self
+impl core::clone::Clone for oracledb_protocol::thin::aq::AqQueueDesc
+pub fn oracledb_protocol::thin::aq::AqQueueDesc::clone(&self) -> oracledb_protocol::thin::aq::AqQueueDesc
+impl core::fmt::Debug for oracledb_protocol::thin::aq::AqQueueDesc
+pub fn oracledb_protocol::thin::aq::AqQueueDesc::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub fn oracledb_protocol::thin::aq::build_aq_array_deq_payload(&oracledb_protocol::thin::aq::AqQueueDesc, &oracledb_protocol::thin::aq::AqDeqOptions, u32, u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::aq::build_aq_array_enq_payload(&oracledb_protocol::thin::aq::AqQueueDesc, &[oracledb_protocol::thin::aq::AqMsgProps], &oracledb_protocol::thin::aq::AqEnqOptions, u8, u8, bool) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::aq::build_aq_deq_payload(&oracledb_protocol::thin::aq::AqQueueDesc, &oracledb_protocol::thin::aq::AqDeqOptions, u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::aq::build_aq_enq_payload(&oracledb_protocol::thin::aq::AqQueueDesc, &oracledb_protocol::thin::aq::AqMsgProps, &oracledb_protocol::thin::aq::AqEnqOptions, u8, u8, bool) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::aq::parse_aq_array_response(&[u8], oracledb_protocol::thin::ClientCapabilities, i32, u32, &oracledb_protocol::thin::aq::AqPayloadKind) -> oracledb_protocol::Result<oracledb_protocol::thin::aq::AqArrayResult>
+pub fn oracledb_protocol::thin::aq::parse_aq_deq_response(&[u8], oracledb_protocol::thin::ClientCapabilities, &oracledb_protocol::thin::aq::AqPayloadKind) -> oracledb_protocol::Result<oracledb_protocol::thin::aq::AqDeqResult>
+pub fn oracledb_protocol::thin::aq::parse_aq_enq_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<core::option::Option<alloc::vec::Vec<u8>>>
+pub enum oracledb_protocol::thin::BindValue
+pub oracledb_protocol::thin::BindValue::Array
+pub oracledb_protocol::thin::BindValue::Array::buffer_size: u32
+pub oracledb_protocol::thin::BindValue::Array::csfrm: u8
+pub oracledb_protocol::thin::BindValue::Array::max_elements: u32
+pub oracledb_protocol::thin::BindValue::Array::ora_type_num: u8
+pub oracledb_protocol::thin::BindValue::Array::values: alloc::vec::Vec<core::option::Option<oracledb_protocol::thin::BindValue>>
+pub oracledb_protocol::thin::BindValue::BinaryDouble(f64)
+pub oracledb_protocol::thin::BindValue::BinaryFloat(f64)
+pub oracledb_protocol::thin::BindValue::BinaryInteger(alloc::string::String)
+pub oracledb_protocol::thin::BindValue::Boolean(bool)
+pub oracledb_protocol::thin::BindValue::Cursor
+pub oracledb_protocol::thin::BindValue::Cursor::cursor_id: u32
+pub oracledb_protocol::thin::BindValue::DateTime
+pub oracledb_protocol::thin::BindValue::DateTime::day: u8
+pub oracledb_protocol::thin::BindValue::DateTime::hour: u8
+pub oracledb_protocol::thin::BindValue::DateTime::minute: u8
+pub oracledb_protocol::thin::BindValue::DateTime::month: u8
+pub oracledb_protocol::thin::BindValue::DateTime::second: u8
+pub oracledb_protocol::thin::BindValue::DateTime::year: i32
+pub oracledb_protocol::thin::BindValue::IntervalDS
+pub oracledb_protocol::thin::BindValue::IntervalDS::days: i32
+pub oracledb_protocol::thin::BindValue::IntervalDS::microseconds: i32
+pub oracledb_protocol::thin::BindValue::IntervalDS::seconds: i32
+pub oracledb_protocol::thin::BindValue::IntervalYM
+pub oracledb_protocol::thin::BindValue::IntervalYM::months: i32
+pub oracledb_protocol::thin::BindValue::IntervalYM::years: i32
+pub oracledb_protocol::thin::BindValue::Json(alloc::vec::Vec<u8>)
+pub oracledb_protocol::thin::BindValue::Lob
+pub oracledb_protocol::thin::BindValue::Lob::csfrm: u8
+pub oracledb_protocol::thin::BindValue::Lob::locator: alloc::vec::Vec<u8>
+pub oracledb_protocol::thin::BindValue::Lob::ora_type_num: u8
+pub oracledb_protocol::thin::BindValue::Null
+pub oracledb_protocol::thin::BindValue::Number(alloc::string::String)
+pub oracledb_protocol::thin::BindValue::ObjectInput
+pub oracledb_protocol::thin::BindValue::ObjectInput::buffer_size: u32
+pub oracledb_protocol::thin::BindValue::ObjectInput::image: alloc::vec::Vec<u8>
+pub oracledb_protocol::thin::BindValue::ObjectInput::oid: alloc::vec::Vec<u8>
+pub oracledb_protocol::thin::BindValue::ObjectInput::schema: alloc::string::String
+pub oracledb_protocol::thin::BindValue::ObjectInput::type_name: alloc::string::String
+pub oracledb_protocol::thin::BindValue::ObjectInput::version: u32
+pub oracledb_protocol::thin::BindValue::ObjectOutput
+pub oracledb_protocol::thin::BindValue::ObjectOutput::buffer_size: u32
+pub oracledb_protocol::thin::BindValue::ObjectOutput::is_return: bool
+pub oracledb_protocol::thin::BindValue::ObjectOutput::oid: alloc::vec::Vec<u8>
+pub oracledb_protocol::thin::BindValue::ObjectOutput::schema: alloc::string::String
+pub oracledb_protocol::thin::BindValue::ObjectOutput::type_name: alloc::string::String
+pub oracledb_protocol::thin::BindValue::ObjectOutput::version: u32
+pub oracledb_protocol::thin::BindValue::Output
+pub oracledb_protocol::thin::BindValue::Output::buffer_size: u32
+pub oracledb_protocol::thin::BindValue::Output::csfrm: u8
+pub oracledb_protocol::thin::BindValue::Output::ora_type_num: u8
+pub oracledb_protocol::thin::BindValue::Raw(alloc::vec::Vec<u8>)
+pub oracledb_protocol::thin::BindValue::ReturnOutput
+pub oracledb_protocol::thin::BindValue::ReturnOutput::buffer_size: u32
+pub oracledb_protocol::thin::BindValue::ReturnOutput::csfrm: u8
+pub oracledb_protocol::thin::BindValue::ReturnOutput::ora_type_num: u8
+pub oracledb_protocol::thin::BindValue::Text(alloc::string::String)
+pub oracledb_protocol::thin::BindValue::Timestamp
+pub oracledb_protocol::thin::BindValue::Timestamp::day: u8
+pub oracledb_protocol::thin::BindValue::Timestamp::hour: u8
+pub oracledb_protocol::thin::BindValue::Timestamp::minute: u8
+pub oracledb_protocol::thin::BindValue::Timestamp::month: u8
+pub oracledb_protocol::thin::BindValue::Timestamp::nanosecond: u32
+pub oracledb_protocol::thin::BindValue::Timestamp::ora_type_num: u8
+pub oracledb_protocol::thin::BindValue::Timestamp::second: u8
+pub oracledb_protocol::thin::BindValue::Timestamp::year: i32
+pub oracledb_protocol::thin::BindValue::TypedNull
+pub oracledb_protocol::thin::BindValue::TypedNull::buffer_size: u32
+pub oracledb_protocol::thin::BindValue::TypedNull::csfrm: u8
+pub oracledb_protocol::thin::BindValue::TypedNull::ora_type_num: u8
+pub oracledb_protocol::thin::BindValue::Vector(oracledb_protocol::vector::Vector)
+impl core::clone::Clone for oracledb_protocol::thin::BindValue
+pub fn oracledb_protocol::thin::BindValue::clone(&self) -> oracledb_protocol::thin::BindValue
+impl core::cmp::PartialEq for oracledb_protocol::thin::BindValue
+pub fn oracledb_protocol::thin::BindValue::eq(&self, &oracledb_protocol::thin::BindValue) -> bool
+impl core::fmt::Debug for oracledb_protocol::thin::BindValue
+pub fn oracledb_protocol::thin::BindValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::BindValue
+pub enum oracledb_protocol::thin::NotificationRecord
+pub oracledb_protocol::thin::NotificationRecord::Message
+pub oracledb_protocol::thin::NotificationRecord::Message::end_of_response: bool
+pub oracledb_protocol::thin::NotificationRecord::Message::message: oracledb_protocol::thin::NotificationMessage
+pub oracledb_protocol::thin::NotificationRecord::Stop
+impl core::clone::Clone for oracledb_protocol::thin::NotificationRecord
+pub fn oracledb_protocol::thin::NotificationRecord::clone(&self) -> oracledb_protocol::thin::NotificationRecord
+impl core::cmp::Eq for oracledb_protocol::thin::NotificationRecord
+impl core::cmp::PartialEq for oracledb_protocol::thin::NotificationRecord
+pub fn oracledb_protocol::thin::NotificationRecord::eq(&self, &oracledb_protocol::thin::NotificationRecord) -> bool
+impl core::fmt::Debug for oracledb_protocol::thin::NotificationRecord
+pub fn oracledb_protocol::thin::NotificationRecord::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::NotificationRecord
+pub enum oracledb_protocol::thin::OracleNumber
+pub oracledb_protocol::thin::OracleNumber::Inline
+pub oracledb_protocol::thin::OracleNumber::Inline::coefficient_le: [u8; 16]
+pub oracledb_protocol::thin::OracleNumber::Inline::is_integer: bool
+pub oracledb_protocol::thin::OracleNumber::Inline::scale: i16
+pub oracledb_protocol::thin::OracleNumber::Text
+pub oracledb_protocol::thin::OracleNumber::Text::is_integer: bool
+pub oracledb_protocol::thin::OracleNumber::Text::text: alloc::boxed::Box<str>
+impl oracledb_protocol::thin::OracleNumber
+pub fn oracledb_protocol::thin::OracleNumber::as_borrowed_text(&self) -> core::option::Option<&str>
+pub fn oracledb_protocol::thin::OracleNumber::coefficient(&self) -> core::option::Option<i128>
+pub fn oracledb_protocol::thin::OracleNumber::fmt_into(&self, &mut alloc::string::String)
+pub fn oracledb_protocol::thin::OracleNumber::from_canonical_text(&str) -> Self
+pub fn oracledb_protocol::thin::OracleNumber::from_canonical_text_with_flag(&str, bool) -> Self
+pub fn oracledb_protocol::thin::OracleNumber::from_wire(&[u8]) -> oracledb_protocol::Result<Self>
+pub fn oracledb_protocol::thin::OracleNumber::is_integer(&self) -> bool
+pub fn oracledb_protocol::thin::OracleNumber::scale(&self) -> core::option::Option<i16>
+pub fn oracledb_protocol::thin::OracleNumber::to_canonical_cow(&self) -> alloc::borrow::Cow<'_, str>
+pub fn oracledb_protocol::thin::OracleNumber::to_canonical_string(&self) -> alloc::string::String
+pub fn oracledb_protocol::thin::OracleNumber::to_i128(&self) -> core::option::Option<i128>
+pub fn oracledb_protocol::thin::OracleNumber::to_i64(&self) -> core::option::Option<i64>
+impl core::clone::Clone for oracledb_protocol::thin::OracleNumber
+pub fn oracledb_protocol::thin::OracleNumber::clone(&self) -> oracledb_protocol::thin::OracleNumber
+impl core::cmp::Eq for oracledb_protocol::thin::OracleNumber
+impl core::cmp::PartialEq for oracledb_protocol::thin::OracleNumber
+pub fn oracledb_protocol::thin::OracleNumber::eq(&self, &oracledb_protocol::thin::OracleNumber) -> bool
+impl core::fmt::Debug for oracledb_protocol::thin::OracleNumber
+pub fn oracledb_protocol::thin::OracleNumber::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oracledb_protocol::thin::OracleNumber
+pub fn oracledb_protocol::thin::OracleNumber::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::OracleNumber
+pub enum oracledb_protocol::thin::QueryValue
+pub oracledb_protocol::thin::QueryValue::Array(alloc::vec::Vec<core::option::Option<oracledb_protocol::thin::QueryValue>>)
+pub oracledb_protocol::thin::QueryValue::BinaryDouble(alloc::string::String)
+pub oracledb_protocol::thin::QueryValue::Boolean(bool)
+pub oracledb_protocol::thin::QueryValue::Cursor(alloc::boxed::Box<oracledb_protocol::thin::CursorValue>)
+pub oracledb_protocol::thin::QueryValue::DateTime
+pub oracledb_protocol::thin::QueryValue::DateTime::day: u8
+pub oracledb_protocol::thin::QueryValue::DateTime::hour: u8
+pub oracledb_protocol::thin::QueryValue::DateTime::minute: u8
+pub oracledb_protocol::thin::QueryValue::DateTime::month: u8
+pub oracledb_protocol::thin::QueryValue::DateTime::nanosecond: u32
+pub oracledb_protocol::thin::QueryValue::DateTime::second: u8
+pub oracledb_protocol::thin::QueryValue::DateTime::year: i32
+pub oracledb_protocol::thin::QueryValue::IntervalDS
+pub oracledb_protocol::thin::QueryValue::IntervalDS::days: i32
+pub oracledb_protocol::thin::QueryValue::IntervalDS::fseconds: i32
+pub oracledb_protocol::thin::QueryValue::IntervalDS::hours: i32
+pub oracledb_protocol::thin::QueryValue::IntervalDS::minutes: i32
+pub oracledb_protocol::thin::QueryValue::IntervalDS::seconds: i32
+pub oracledb_protocol::thin::QueryValue::IntervalYM
+pub oracledb_protocol::thin::QueryValue::IntervalYM::months: i32
+pub oracledb_protocol::thin::QueryValue::IntervalYM::years: i32
+pub oracledb_protocol::thin::QueryValue::Json(alloc::boxed::Box<oracledb_protocol::oson::OsonValue>)
+pub oracledb_protocol::thin::QueryValue::Lob(alloc::boxed::Box<oracledb_protocol::thin::LobValue>)
+pub oracledb_protocol::thin::QueryValue::Number(oracledb_protocol::thin::OracleNumber)
+pub oracledb_protocol::thin::QueryValue::Object(alloc::boxed::Box<oracledb_protocol::thin::ObjectValue>)
+pub oracledb_protocol::thin::QueryValue::Raw(alloc::vec::Vec<u8>)
+pub oracledb_protocol::thin::QueryValue::Rowid(alloc::string::String)
+pub oracledb_protocol::thin::QueryValue::Text(alloc::string::String)
+pub oracledb_protocol::thin::QueryValue::TextRaw
+pub oracledb_protocol::thin::QueryValue::TextRaw::bytes: alloc::vec::Vec<u8>
+pub oracledb_protocol::thin::QueryValue::TextRaw::csfrm: u8
+pub oracledb_protocol::thin::QueryValue::Vector(alloc::boxed::Box<oracledb_protocol::vector::Vector>)
+impl oracledb_protocol::thin::QueryValue
+pub fn oracledb_protocol::thin::QueryValue::as_bool(&self) -> core::option::Option<bool>
+pub fn oracledb_protocol::thin::QueryValue::as_f64(&self) -> core::option::Option<f64>
+pub fn oracledb_protocol::thin::QueryValue::as_i64(&self) -> core::option::Option<i64>
+pub fn oracledb_protocol::thin::QueryValue::as_number(&self) -> core::option::Option<&oracledb_protocol::thin::OracleNumber>
+pub fn oracledb_protocol::thin::QueryValue::as_number_text(&self) -> core::option::Option<alloc::borrow::Cow<'_, str>>
+pub fn oracledb_protocol::thin::QueryValue::as_raw(&self) -> core::option::Option<&[u8]>
+pub fn oracledb_protocol::thin::QueryValue::as_rowid(&self) -> core::option::Option<&str>
+pub fn oracledb_protocol::thin::QueryValue::as_text(&self) -> core::option::Option<&str>
+pub fn oracledb_protocol::thin::QueryValue::number_from_text(&str, bool) -> Self
+impl core::clone::Clone for oracledb_protocol::thin::QueryValue
+pub fn oracledb_protocol::thin::QueryValue::clone(&self) -> oracledb_protocol::thin::QueryValue
+impl core::cmp::PartialEq for oracledb_protocol::thin::QueryValue
+pub fn oracledb_protocol::thin::QueryValue::eq(&self, &oracledb_protocol::thin::QueryValue) -> bool
+impl core::fmt::Debug for oracledb_protocol::thin::QueryValue
+pub fn oracledb_protocol::thin::QueryValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::QueryValue
+pub enum oracledb_protocol::thin::QueryValueRef<'buf>
+pub oracledb_protocol::thin::QueryValueRef::Boolean(bool)
+pub oracledb_protocol::thin::QueryValueRef::DateTime
+pub oracledb_protocol::thin::QueryValueRef::DateTime::day: u8
+pub oracledb_protocol::thin::QueryValueRef::DateTime::hour: u8
+pub oracledb_protocol::thin::QueryValueRef::DateTime::minute: u8
+pub oracledb_protocol::thin::QueryValueRef::DateTime::month: u8
+pub oracledb_protocol::thin::QueryValueRef::DateTime::nanosecond: u32
+pub oracledb_protocol::thin::QueryValueRef::DateTime::second: u8
+pub oracledb_protocol::thin::QueryValueRef::DateTime::year: i32
+pub oracledb_protocol::thin::QueryValueRef::IntervalDS
+pub oracledb_protocol::thin::QueryValueRef::IntervalDS::days: i32
+pub oracledb_protocol::thin::QueryValueRef::IntervalDS::fseconds: i32
+pub oracledb_protocol::thin::QueryValueRef::IntervalDS::hours: i32
+pub oracledb_protocol::thin::QueryValueRef::IntervalDS::minutes: i32
+pub oracledb_protocol::thin::QueryValueRef::IntervalDS::seconds: i32
+pub oracledb_protocol::thin::QueryValueRef::IntervalYM
+pub oracledb_protocol::thin::QueryValueRef::IntervalYM::months: i32
+pub oracledb_protocol::thin::QueryValueRef::IntervalYM::years: i32
+pub oracledb_protocol::thin::QueryValueRef::Number
+pub oracledb_protocol::thin::QueryValueRef::Number::is_integer: bool
+pub oracledb_protocol::thin::QueryValueRef::Number::text: &'buf str
+pub oracledb_protocol::thin::QueryValueRef::Owned(&'buf oracledb_protocol::thin::QueryValue)
+pub oracledb_protocol::thin::QueryValueRef::Raw(&'buf [u8])
+pub oracledb_protocol::thin::QueryValueRef::Text(&'buf str)
+impl oracledb_protocol::thin::QueryValueRef<'_>
+pub fn oracledb_protocol::thin::QueryValueRef<'_>::as_number_text(&self) -> core::option::Option<&str>
+pub fn oracledb_protocol::thin::QueryValueRef<'_>::as_raw(&self) -> core::option::Option<&[u8]>
+pub fn oracledb_protocol::thin::QueryValueRef<'_>::as_text(&self) -> core::option::Option<&str>
+pub fn oracledb_protocol::thin::QueryValueRef<'_>::to_owned_value(&self) -> oracledb_protocol::thin::QueryValue
+impl<'buf> core::clone::Clone for oracledb_protocol::thin::QueryValueRef<'buf>
+pub fn oracledb_protocol::thin::QueryValueRef<'buf>::clone(&self) -> oracledb_protocol::thin::QueryValueRef<'buf>
+impl<'buf> core::cmp::PartialEq for oracledb_protocol::thin::QueryValueRef<'buf>
+pub fn oracledb_protocol::thin::QueryValueRef<'buf>::eq(&self, &oracledb_protocol::thin::QueryValueRef<'buf>) -> bool
+impl<'buf> core::fmt::Debug for oracledb_protocol::thin::QueryValueRef<'buf>
+pub fn oracledb_protocol::thin::QueryValueRef<'buf>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'buf> core::marker::Copy for oracledb_protocol::thin::QueryValueRef<'buf>
+impl<'buf> core::marker::StructuralPartialEq for oracledb_protocol::thin::QueryValueRef<'buf>
+pub enum oracledb_protocol::thin::SessionlessTxnState
+pub oracledb_protocol::thin::SessionlessTxnState::Set
+pub oracledb_protocol::thin::SessionlessTxnState::Set::started_on_server: bool
+pub oracledb_protocol::thin::SessionlessTxnState::Unset
+impl core::clone::Clone for oracledb_protocol::thin::SessionlessTxnState
+pub fn oracledb_protocol::thin::SessionlessTxnState::clone(&self) -> oracledb_protocol::thin::SessionlessTxnState
+impl core::cmp::Eq for oracledb_protocol::thin::SessionlessTxnState
+impl core::cmp::PartialEq for oracledb_protocol::thin::SessionlessTxnState
+pub fn oracledb_protocol::thin::SessionlessTxnState::eq(&self, &oracledb_protocol::thin::SessionlessTxnState) -> bool
+impl core::fmt::Debug for oracledb_protocol::thin::SessionlessTxnState
+pub fn oracledb_protocol::thin::SessionlessTxnState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb_protocol::thin::SessionlessTxnState
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::SessionlessTxnState
+pub struct oracledb_protocol::thin::AcceptInfo
+pub oracledb_protocol::thin::AcceptInfo::protocol_options: u16
+pub oracledb_protocol::thin::AcceptInfo::protocol_version: u16
+pub oracledb_protocol::thin::AcceptInfo::sdu: u32
+pub oracledb_protocol::thin::AcceptInfo::supports_end_of_response: bool
+pub oracledb_protocol::thin::AcceptInfo::supports_fast_auth: bool
+pub oracledb_protocol::thin::AcceptInfo::supports_oob: bool
+pub oracledb_protocol::thin::AcceptInfo::supports_oob_check: bool
+impl core::clone::Clone for oracledb_protocol::thin::AcceptInfo
+pub fn oracledb_protocol::thin::AcceptInfo::clone(&self) -> oracledb_protocol::thin::AcceptInfo
+impl core::cmp::Eq for oracledb_protocol::thin::AcceptInfo
+impl core::cmp::PartialEq for oracledb_protocol::thin::AcceptInfo
+pub fn oracledb_protocol::thin::AcceptInfo::eq(&self, &oracledb_protocol::thin::AcceptInfo) -> bool
+impl core::fmt::Debug for oracledb_protocol::thin::AcceptInfo
+pub fn oracledb_protocol::thin::AcceptInfo::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::AcceptInfo
+pub struct oracledb_protocol::thin::AuthResponse
+pub oracledb_protocol::thin::AuthResponse::capabilities: core::option::Option<oracledb_protocol::thin::ClientCapabilities>
+pub oracledb_protocol::thin::AuthResponse::session_data: alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>
+pub oracledb_protocol::thin::AuthResponse::verifier_type: core::option::Option<u32>
+impl core::clone::Clone for oracledb_protocol::thin::AuthResponse
+pub fn oracledb_protocol::thin::AuthResponse::clone(&self) -> oracledb_protocol::thin::AuthResponse
+impl core::cmp::Eq for oracledb_protocol::thin::AuthResponse
+impl core::cmp::PartialEq for oracledb_protocol::thin::AuthResponse
+pub fn oracledb_protocol::thin::AuthResponse::eq(&self, &oracledb_protocol::thin::AuthResponse) -> bool
+impl core::default::Default for oracledb_protocol::thin::AuthResponse
+pub fn oracledb_protocol::thin::AuthResponse::default() -> oracledb_protocol::thin::AuthResponse
+impl core::fmt::Debug for oracledb_protocol::thin::AuthResponse
+pub fn oracledb_protocol::thin::AuthResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::AuthResponse
+pub struct oracledb_protocol::thin::BatchServerError
+pub oracledb_protocol::thin::BatchServerError::code: u32
+pub oracledb_protocol::thin::BatchServerError::message: alloc::string::String
+pub oracledb_protocol::thin::BatchServerError::offset: u32
+impl core::clone::Clone for oracledb_protocol::thin::BatchServerError
+pub fn oracledb_protocol::thin::BatchServerError::clone(&self) -> oracledb_protocol::thin::BatchServerError
+impl core::cmp::Eq for oracledb_protocol::thin::BatchServerError
+impl core::cmp::PartialEq for oracledb_protocol::thin::BatchServerError
+pub fn oracledb_protocol::thin::BatchServerError::eq(&self, &oracledb_protocol::thin::BatchServerError) -> bool
+impl core::default::Default for oracledb_protocol::thin::BatchServerError
+pub fn oracledb_protocol::thin::BatchServerError::default() -> oracledb_protocol::thin::BatchServerError
+impl core::fmt::Debug for oracledb_protocol::thin::BatchServerError
+pub fn oracledb_protocol::thin::BatchServerError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::BatchServerError
+pub struct oracledb_protocol::thin::BindTypeInfo
+pub oracledb_protocol::thin::BindTypeInfo::buffer_size: u32
+pub oracledb_protocol::thin::BindTypeInfo::csfrm: u8
+pub oracledb_protocol::thin::BindTypeInfo::ora_type_num: u8
+impl core::clone::Clone for oracledb_protocol::thin::BindTypeInfo
+pub fn oracledb_protocol::thin::BindTypeInfo::clone(&self) -> oracledb_protocol::thin::BindTypeInfo
+impl core::cmp::Eq for oracledb_protocol::thin::BindTypeInfo
+impl core::cmp::PartialEq for oracledb_protocol::thin::BindTypeInfo
+pub fn oracledb_protocol::thin::BindTypeInfo::eq(&self, &oracledb_protocol::thin::BindTypeInfo) -> bool
+impl core::fmt::Debug for oracledb_protocol::thin::BindTypeInfo
+pub fn oracledb_protocol::thin::BindTypeInfo::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb_protocol::thin::BindTypeInfo
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::BindTypeInfo
+pub struct oracledb_protocol::thin::BorrowedFetchResult
+pub oracledb_protocol::thin::BorrowedFetchResult::batch: oracledb_protocol::thin::BorrowedRowBatch
+pub oracledb_protocol::thin::BorrowedFetchResult::cursor_id: u32
+pub oracledb_protocol::thin::BorrowedFetchResult::more_rows: bool
+pub oracledb_protocol::thin::BorrowedFetchResult::row_count: u64
+impl core::clone::Clone for oracledb_protocol::thin::BorrowedFetchResult
+pub fn oracledb_protocol::thin::BorrowedFetchResult::clone(&self) -> oracledb_protocol::thin::BorrowedFetchResult
+impl core::fmt::Debug for oracledb_protocol::thin::BorrowedFetchResult
+pub fn oracledb_protocol::thin::BorrowedFetchResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb_protocol::thin::BorrowedRowBatch
+impl oracledb_protocol::thin::BorrowedRowBatch
+pub fn oracledb_protocol::thin::BorrowedRowBatch::columns(&self) -> &[oracledb_protocol::thin::ColumnMetadata]
+pub fn oracledb_protocol::thin::BorrowedRowBatch::for_each_row_ref<F, E>(&self, F) -> core::result::Result<(), E> where F: core::ops::function::FnMut(&[core::option::Option<oracledb_protocol::thin::QueryValueRef<'_>>]) -> core::result::Result<(), E>, E: core::convert::From<oracledb_protocol::ProtocolError>
+pub fn oracledb_protocol::thin::BorrowedRowBatch::new(alloc::vec::Vec<u8>, alloc::vec::Vec<oracledb_protocol::thin::ColumnMetadata>, alloc::vec::Vec<usize>) -> Self
+pub fn oracledb_protocol::thin::BorrowedRowBatch::row_count(&self) -> usize
+impl core::clone::Clone for oracledb_protocol::thin::BorrowedRowBatch
+pub fn oracledb_protocol::thin::BorrowedRowBatch::clone(&self) -> oracledb_protocol::thin::BorrowedRowBatch
+impl core::fmt::Debug for oracledb_protocol::thin::BorrowedRowBatch
+pub fn oracledb_protocol::thin::BorrowedRowBatch::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb_protocol::thin::ClientCapabilities
+pub oracledb_protocol::thin::ClientCapabilities::charset_id: u16
+pub oracledb_protocol::thin::ClientCapabilities::max_string_size: u32
+pub oracledb_protocol::thin::ClientCapabilities::ttc_field_version: u8
+impl core::clone::Clone for oracledb_protocol::thin::ClientCapabilities
+pub fn oracledb_protocol::thin::ClientCapabilities::clone(&self) -> oracledb_protocol::thin::ClientCapabilities
+impl core::cmp::Eq for oracledb_protocol::thin::ClientCapabilities
+impl core::cmp::PartialEq for oracledb_protocol::thin::ClientCapabilities
+pub fn oracledb_protocol::thin::ClientCapabilities::eq(&self, &oracledb_protocol::thin::ClientCapabilities) -> bool
+impl core::default::Default for oracledb_protocol::thin::ClientCapabilities
+pub fn oracledb_protocol::thin::ClientCapabilities::default() -> Self
+impl core::fmt::Debug for oracledb_protocol::thin::ClientCapabilities
+pub fn oracledb_protocol::thin::ClientCapabilities::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb_protocol::thin::ClientCapabilities
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::ClientCapabilities
+pub struct oracledb_protocol::thin::ColumnMetadata
+pub oracledb_protocol::thin::ColumnMetadata::annotations: core::option::Option<alloc::vec::Vec<(alloc::string::String, alloc::string::String)>>
+pub oracledb_protocol::thin::ColumnMetadata::buffer_size: u32
+pub oracledb_protocol::thin::ColumnMetadata::csfrm: u8
+pub oracledb_protocol::thin::ColumnMetadata::domain_name: core::option::Option<alloc::string::String>
+pub oracledb_protocol::thin::ColumnMetadata::domain_schema: core::option::Option<alloc::string::String>
+pub oracledb_protocol::thin::ColumnMetadata::is_array: bool
+pub oracledb_protocol::thin::ColumnMetadata::is_json: bool
+pub oracledb_protocol::thin::ColumnMetadata::is_oson: bool
+pub oracledb_protocol::thin::ColumnMetadata::max_size: u32
+pub oracledb_protocol::thin::ColumnMetadata::name: alloc::string::String
+pub oracledb_protocol::thin::ColumnMetadata::nulls_allowed: bool
+pub oracledb_protocol::thin::ColumnMetadata::object_schema: core::option::Option<alloc::string::String>
+pub oracledb_protocol::thin::ColumnMetadata::object_type_name: core::option::Option<alloc::string::String>
+pub oracledb_protocol::thin::ColumnMetadata::ora_type_num: u8
+pub oracledb_protocol::thin::ColumnMetadata::precision: i8
+pub oracledb_protocol::thin::ColumnMetadata::scale: i8
+pub oracledb_protocol::thin::ColumnMetadata::vector_dimensions: core::option::Option<u32>
+pub oracledb_protocol::thin::ColumnMetadata::vector_flags: u8
+pub oracledb_protocol::thin::ColumnMetadata::vector_format: u8
+impl core::clone::Clone for oracledb_protocol::thin::ColumnMetadata
+pub fn oracledb_protocol::thin::ColumnMetadata::clone(&self) -> oracledb_protocol::thin::ColumnMetadata
+impl core::cmp::Eq for oracledb_protocol::thin::ColumnMetadata
+impl core::cmp::PartialEq for oracledb_protocol::thin::ColumnMetadata
+pub fn oracledb_protocol::thin::ColumnMetadata::eq(&self, &oracledb_protocol::thin::ColumnMetadata) -> bool
+impl core::default::Default for oracledb_protocol::thin::ColumnMetadata
+pub fn oracledb_protocol::thin::ColumnMetadata::default() -> oracledb_protocol::thin::ColumnMetadata
+impl core::fmt::Debug for oracledb_protocol::thin::ColumnMetadata
+pub fn oracledb_protocol::thin::ColumnMetadata::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::ColumnMetadata
+pub struct oracledb_protocol::thin::CursorValue
+pub oracledb_protocol::thin::CursorValue::columns: alloc::vec::Vec<oracledb_protocol::thin::ColumnMetadata>
+pub oracledb_protocol::thin::CursorValue::cursor_id: u32
+impl core::clone::Clone for oracledb_protocol::thin::CursorValue
+pub fn oracledb_protocol::thin::CursorValue::clone(&self) -> oracledb_protocol::thin::CursorValue
+impl core::cmp::PartialEq for oracledb_protocol::thin::CursorValue
+pub fn oracledb_protocol::thin::CursorValue::eq(&self, &oracledb_protocol::thin::CursorValue) -> bool
+impl core::fmt::Debug for oracledb_protocol::thin::CursorValue
+pub fn oracledb_protocol::thin::CursorValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::CursorValue
+pub struct oracledb_protocol::thin::DbObjectPackedReader<'a>
+impl<'a> oracledb_protocol::thin::DbObjectPackedReader<'a>
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'a>::new(&'a [u8]) -> Self
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'a>::read_atomic_null(&mut self, bool) -> oracledb_protocol::Result<bool>
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'a>::read_header(&mut self) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'a>::read_i32be(&mut self) -> oracledb_protocol::Result<i32>
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'a>::read_length(&mut self) -> oracledb_protocol::Result<usize>
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'a>::read_u8(&mut self) -> oracledb_protocol::Result<u8>
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'a>::read_value_bytes(&mut self) -> oracledb_protocol::Result<core::option::Option<alloc::vec::Vec<u8>>>
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'a>::remaining(&self) -> usize
+impl oracledb_protocol::wire::BoundedReader for oracledb_protocol::thin::DbObjectPackedReader<'_>
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::alloc_count_checked(&self, usize, usize) -> oracledb_protocol::Result<usize>
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::remaining(&self) -> usize
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::with_capacity_bounded<T>(&self, usize, usize) -> alloc::vec::Vec<T>
+pub struct oracledb_protocol::thin::ExecuteOptions
+pub oracledb_protocol::thin::ExecuteOptions::arraydmlrowcounts: bool
+pub oracledb_protocol::thin::ExecuteOptions::batcherrors: bool
+pub oracledb_protocol::thin::ExecuteOptions::cache_statement: bool
+pub oracledb_protocol::thin::ExecuteOptions::cursor_id: u32
+pub oracledb_protocol::thin::ExecuteOptions::fetch_orientation: u32
+pub oracledb_protocol::thin::ExecuteOptions::fetch_pos: u32
+pub oracledb_protocol::thin::ExecuteOptions::no_prefetch: bool
+pub oracledb_protocol::thin::ExecuteOptions::parse_only: bool
+pub oracledb_protocol::thin::ExecuteOptions::registration_id: u64
+pub oracledb_protocol::thin::ExecuteOptions::scroll_operation: bool
+pub oracledb_protocol::thin::ExecuteOptions::scrollable: bool
+pub oracledb_protocol::thin::ExecuteOptions::suspend_on_success: bool
+pub oracledb_protocol::thin::ExecuteOptions::token_num: u64
+impl core::clone::Clone for oracledb_protocol::thin::ExecuteOptions
+pub fn oracledb_protocol::thin::ExecuteOptions::clone(&self) -> oracledb_protocol::thin::ExecuteOptions
+impl core::cmp::Eq for oracledb_protocol::thin::ExecuteOptions
+impl core::cmp::PartialEq for oracledb_protocol::thin::ExecuteOptions
+pub fn oracledb_protocol::thin::ExecuteOptions::eq(&self, &oracledb_protocol::thin::ExecuteOptions) -> bool
+impl core::default::Default for oracledb_protocol::thin::ExecuteOptions
+pub fn oracledb_protocol::thin::ExecuteOptions::default() -> Self
+impl core::fmt::Debug for oracledb_protocol::thin::ExecuteOptions
+pub fn oracledb_protocol::thin::ExecuteOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb_protocol::thin::ExecuteOptions
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::ExecuteOptions
+pub struct oracledb_protocol::thin::LobReadResult
+pub oracledb_protocol::thin::LobReadResult::amount: u64
+pub oracledb_protocol::thin::LobReadResult::data: core::option::Option<alloc::vec::Vec<u8>>
+pub oracledb_protocol::thin::LobReadResult::locator: alloc::vec::Vec<u8>
+impl core::clone::Clone for oracledb_protocol::thin::LobReadResult
+pub fn oracledb_protocol::thin::LobReadResult::clone(&self) -> oracledb_protocol::thin::LobReadResult
+impl core::cmp::Eq for oracledb_protocol::thin::LobReadResult
+impl core::cmp::PartialEq for oracledb_protocol::thin::LobReadResult
+pub fn oracledb_protocol::thin::LobReadResult::eq(&self, &oracledb_protocol::thin::LobReadResult) -> bool
+impl core::default::Default for oracledb_protocol::thin::LobReadResult
+pub fn oracledb_protocol::thin::LobReadResult::default() -> oracledb_protocol::thin::LobReadResult
+impl core::fmt::Debug for oracledb_protocol::thin::LobReadResult
+pub fn oracledb_protocol::thin::LobReadResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::LobReadResult
+pub struct oracledb_protocol::thin::LobValue
+pub oracledb_protocol::thin::LobValue::chunk_size: u32
+pub oracledb_protocol::thin::LobValue::csfrm: u8
+pub oracledb_protocol::thin::LobValue::locator: alloc::vec::Vec<u8>
+pub oracledb_protocol::thin::LobValue::ora_type_num: u8
+pub oracledb_protocol::thin::LobValue::size: u64
+impl core::clone::Clone for oracledb_protocol::thin::LobValue
+pub fn oracledb_protocol::thin::LobValue::clone(&self) -> oracledb_protocol::thin::LobValue
+impl core::cmp::PartialEq for oracledb_protocol::thin::LobValue
+pub fn oracledb_protocol::thin::LobValue::eq(&self, &oracledb_protocol::thin::LobValue) -> bool
+impl core::fmt::Debug for oracledb_protocol::thin::LobValue
+pub fn oracledb_protocol::thin::LobValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::LobValue
+pub struct oracledb_protocol::thin::MsgQuery
+pub oracledb_protocol::thin::MsgQuery::id: u64
+pub oracledb_protocol::thin::MsgQuery::operation: u32
+pub oracledb_protocol::thin::MsgQuery::tables: alloc::vec::Vec<oracledb_protocol::thin::MsgTable>
+impl core::clone::Clone for oracledb_protocol::thin::MsgQuery
+pub fn oracledb_protocol::thin::MsgQuery::clone(&self) -> oracledb_protocol::thin::MsgQuery
+impl core::cmp::Eq for oracledb_protocol::thin::MsgQuery
+impl core::cmp::PartialEq for oracledb_protocol::thin::MsgQuery
+pub fn oracledb_protocol::thin::MsgQuery::eq(&self, &oracledb_protocol::thin::MsgQuery) -> bool
+impl core::fmt::Debug for oracledb_protocol::thin::MsgQuery
+pub fn oracledb_protocol::thin::MsgQuery::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::MsgQuery
+pub struct oracledb_protocol::thin::MsgRow
+pub oracledb_protocol::thin::MsgRow::operation: u32
+pub oracledb_protocol::thin::MsgRow::rowid: alloc::string::String
+impl core::clone::Clone for oracledb_protocol::thin::MsgRow
+pub fn oracledb_protocol::thin::MsgRow::clone(&self) -> oracledb_protocol::thin::MsgRow
+impl core::cmp::Eq for oracledb_protocol::thin::MsgRow
+impl core::cmp::PartialEq for oracledb_protocol::thin::MsgRow
+pub fn oracledb_protocol::thin::MsgRow::eq(&self, &oracledb_protocol::thin::MsgRow) -> bool
+impl core::fmt::Debug for oracledb_protocol::thin::MsgRow
+pub fn oracledb_protocol::thin::MsgRow::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::MsgRow
+pub struct oracledb_protocol::thin::MsgTable
+pub oracledb_protocol::thin::MsgTable::name: alloc::string::String
+pub oracledb_protocol::thin::MsgTable::operation: u32
+pub oracledb_protocol::thin::MsgTable::rows: alloc::vec::Vec<oracledb_protocol::thin::MsgRow>
+impl core::clone::Clone for oracledb_protocol::thin::MsgTable
+pub fn oracledb_protocol::thin::MsgTable::clone(&self) -> oracledb_protocol::thin::MsgTable
+impl core::cmp::Eq for oracledb_protocol::thin::MsgTable
+impl core::cmp::PartialEq for oracledb_protocol::thin::MsgTable
+pub fn oracledb_protocol::thin::MsgTable::eq(&self, &oracledb_protocol::thin::MsgTable) -> bool
+impl core::fmt::Debug for oracledb_protocol::thin::MsgTable
+pub fn oracledb_protocol::thin::MsgTable::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::MsgTable
+pub struct oracledb_protocol::thin::NotificationMessage
+pub oracledb_protocol::thin::NotificationMessage::consumer_name: core::option::Option<alloc::string::String>
+pub oracledb_protocol::thin::NotificationMessage::dbname: core::option::Option<alloc::string::String>
+pub oracledb_protocol::thin::NotificationMessage::msg_type: u32
+pub oracledb_protocol::thin::NotificationMessage::msgid: core::option::Option<alloc::vec::Vec<u8>>
+pub oracledb_protocol::thin::NotificationMessage::queries: alloc::vec::Vec<oracledb_protocol::thin::MsgQuery>
+pub oracledb_protocol::thin::NotificationMessage::queue_name: core::option::Option<alloc::string::String>
+pub oracledb_protocol::thin::NotificationMessage::registered: bool
+pub oracledb_protocol::thin::NotificationMessage::tables: alloc::vec::Vec<oracledb_protocol::thin::MsgTable>
+pub oracledb_protocol::thin::NotificationMessage::txid: core::option::Option<alloc::vec::Vec<u8>>
+impl core::clone::Clone for oracledb_protocol::thin::NotificationMessage
+pub fn oracledb_protocol::thin::NotificationMessage::clone(&self) -> oracledb_protocol::thin::NotificationMessage
+impl core::cmp::Eq for oracledb_protocol::thin::NotificationMessage
+impl core::cmp::PartialEq for oracledb_protocol::thin::NotificationMessage
+pub fn oracledb_protocol::thin::NotificationMessage::eq(&self, &oracledb_protocol::thin::NotificationMessage) -> bool
+impl core::fmt::Debug for oracledb_protocol::thin::NotificationMessage
+pub fn oracledb_protocol::thin::NotificationMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::NotificationMessage
+pub struct oracledb_protocol::thin::ObjectValue
+pub oracledb_protocol::thin::ObjectValue::packed_data: alloc::vec::Vec<u8>
+pub oracledb_protocol::thin::ObjectValue::schema: core::option::Option<alloc::string::String>
+pub oracledb_protocol::thin::ObjectValue::type_name: core::option::Option<alloc::string::String>
+impl core::clone::Clone for oracledb_protocol::thin::ObjectValue
+pub fn oracledb_protocol::thin::ObjectValue::clone(&self) -> oracledb_protocol::thin::ObjectValue
+impl core::cmp::PartialEq for oracledb_protocol::thin::ObjectValue
+pub fn oracledb_protocol::thin::ObjectValue::eq(&self, &oracledb_protocol::thin::ObjectValue) -> bool
+impl core::fmt::Debug for oracledb_protocol::thin::ObjectValue
+pub fn oracledb_protocol::thin::ObjectValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::ObjectValue
+pub struct oracledb_protocol::thin::QueryResult
+pub oracledb_protocol::thin::QueryResult::array_dml_row_counts: core::option::Option<alloc::vec::Vec<u64>>
+pub oracledb_protocol::thin::QueryResult::batch_errors: alloc::vec::Vec<oracledb_protocol::thin::BatchServerError>
+pub oracledb_protocol::thin::QueryResult::columns: alloc::vec::Vec<oracledb_protocol::thin::ColumnMetadata>
+pub oracledb_protocol::thin::QueryResult::compilation_error_warning: bool
+pub oracledb_protocol::thin::QueryResult::cursor_id: u32
+pub oracledb_protocol::thin::QueryResult::implicit_resultsets: core::option::Option<alloc::vec::Vec<oracledb_protocol::thin::QueryValue>>
+pub oracledb_protocol::thin::QueryResult::last_rowid: core::option::Option<alloc::string::String>
+pub oracledb_protocol::thin::QueryResult::more_rows: bool
+pub oracledb_protocol::thin::QueryResult::out_values: alloc::vec::Vec<(usize, core::option::Option<oracledb_protocol::thin::QueryValue>)>
+pub oracledb_protocol::thin::QueryResult::query_id: core::option::Option<u64>
+pub oracledb_protocol::thin::QueryResult::return_values: alloc::vec::Vec<(usize, alloc::vec::Vec<core::option::Option<oracledb_protocol::thin::QueryValue>>)>
+pub oracledb_protocol::thin::QueryResult::row_count: u64
+pub oracledb_protocol::thin::QueryResult::rows: alloc::vec::Vec<alloc::vec::Vec<core::option::Option<oracledb_protocol::thin::QueryValue>>>
+pub oracledb_protocol::thin::QueryResult::sessionless_txn_state: core::option::Option<oracledb_protocol::thin::SessionlessTxnState>
+pub oracledb_protocol::thin::QueryResult::token_num: core::option::Option<u64>
+pub oracledb_protocol::thin::QueryResult::txn_in_progress: core::option::Option<bool>
+impl oracledb_protocol::thin::QueryResult
+pub fn oracledb_protocol::thin::QueryResult::cell(&self, usize, usize) -> core::option::Option<&oracledb_protocol::thin::QueryValue>
+pub fn oracledb_protocol::thin::QueryResult::column_index(&self, &str) -> core::option::Option<usize>
+impl core::clone::Clone for oracledb_protocol::thin::QueryResult
+pub fn oracledb_protocol::thin::QueryResult::clone(&self) -> oracledb_protocol::thin::QueryResult
+impl core::cmp::PartialEq for oracledb_protocol::thin::QueryResult
+pub fn oracledb_protocol::thin::QueryResult::eq(&self, &oracledb_protocol::thin::QueryResult) -> bool
+impl core::default::Default for oracledb_protocol::thin::QueryResult
+pub fn oracledb_protocol::thin::QueryResult::default() -> oracledb_protocol::thin::QueryResult
+impl core::fmt::Debug for oracledb_protocol::thin::QueryResult
+pub fn oracledb_protocol::thin::QueryResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::QueryResult
+pub struct oracledb_protocol::thin::SubscribeResult
+pub oracledb_protocol::thin::SubscribeResult::client_id: core::option::Option<alloc::vec::Vec<u8>>
+pub oracledb_protocol::thin::SubscribeResult::registration_id: u64
+impl core::clone::Clone for oracledb_protocol::thin::SubscribeResult
+pub fn oracledb_protocol::thin::SubscribeResult::clone(&self) -> oracledb_protocol::thin::SubscribeResult
+impl core::cmp::Eq for oracledb_protocol::thin::SubscribeResult
+impl core::cmp::PartialEq for oracledb_protocol::thin::SubscribeResult
+pub fn oracledb_protocol::thin::SubscribeResult::eq(&self, &oracledb_protocol::thin::SubscribeResult) -> bool
+impl core::default::Default for oracledb_protocol::thin::SubscribeResult
+pub fn oracledb_protocol::thin::SubscribeResult::default() -> oracledb_protocol::thin::SubscribeResult
+impl core::fmt::Debug for oracledb_protocol::thin::SubscribeResult
+pub fn oracledb_protocol::thin::SubscribeResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::SubscribeResult
+pub struct oracledb_protocol::thin::TpcChangeStateResponse
+pub oracledb_protocol::thin::TpcChangeStateResponse::state: u32
+pub oracledb_protocol::thin::TpcChangeStateResponse::txn_in_progress: bool
+impl core::clone::Clone for oracledb_protocol::thin::TpcChangeStateResponse
+pub fn oracledb_protocol::thin::TpcChangeStateResponse::clone(&self) -> oracledb_protocol::thin::TpcChangeStateResponse
+impl core::cmp::Eq for oracledb_protocol::thin::TpcChangeStateResponse
+impl core::cmp::PartialEq for oracledb_protocol::thin::TpcChangeStateResponse
+pub fn oracledb_protocol::thin::TpcChangeStateResponse::eq(&self, &oracledb_protocol::thin::TpcChangeStateResponse) -> bool
+impl core::default::Default for oracledb_protocol::thin::TpcChangeStateResponse
+pub fn oracledb_protocol::thin::TpcChangeStateResponse::default() -> oracledb_protocol::thin::TpcChangeStateResponse
+impl core::fmt::Debug for oracledb_protocol::thin::TpcChangeStateResponse
+pub fn oracledb_protocol::thin::TpcChangeStateResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb_protocol::thin::TpcChangeStateResponse
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::TpcChangeStateResponse
+pub struct oracledb_protocol::thin::TpcSwitchResponse
+pub oracledb_protocol::thin::TpcSwitchResponse::context: alloc::vec::Vec<u8>
+pub oracledb_protocol::thin::TpcSwitchResponse::sessionless_state: core::option::Option<oracledb_protocol::thin::SessionlessTxnState>
+pub oracledb_protocol::thin::TpcSwitchResponse::txn_in_progress: bool
+impl core::clone::Clone for oracledb_protocol::thin::TpcSwitchResponse
+pub fn oracledb_protocol::thin::TpcSwitchResponse::clone(&self) -> oracledb_protocol::thin::TpcSwitchResponse
+impl core::cmp::Eq for oracledb_protocol::thin::TpcSwitchResponse
+impl core::cmp::PartialEq for oracledb_protocol::thin::TpcSwitchResponse
+pub fn oracledb_protocol::thin::TpcSwitchResponse::eq(&self, &oracledb_protocol::thin::TpcSwitchResponse) -> bool
+impl core::default::Default for oracledb_protocol::thin::TpcSwitchResponse
+pub fn oracledb_protocol::thin::TpcSwitchResponse::default() -> oracledb_protocol::thin::TpcSwitchResponse
+impl core::fmt::Debug for oracledb_protocol::thin::TpcSwitchResponse
+pub fn oracledb_protocol::thin::TpcSwitchResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::thin::TpcSwitchResponse
+pub struct oracledb_protocol::thin::TpcXid<'a>
+pub oracledb_protocol::thin::TpcXid::branch_qualifier: &'a [u8]
+pub oracledb_protocol::thin::TpcXid::format_id: u32
+pub oracledb_protocol::thin::TpcXid::global_transaction_id: &'a [u8]
+impl<'a> core::clone::Clone for oracledb_protocol::thin::TpcXid<'a>
+pub fn oracledb_protocol::thin::TpcXid<'a>::clone(&self) -> oracledb_protocol::thin::TpcXid<'a>
+impl<'a> core::fmt::Debug for oracledb_protocol::thin::TpcXid<'a>
+pub fn oracledb_protocol::thin::TpcXid<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub const oracledb_protocol::thin::CS_FORM_IMPLICIT: u8
+pub const oracledb_protocol::thin::CS_FORM_NCHAR: u8
+pub const oracledb_protocol::thin::EVENT_AQ: u32
+pub const oracledb_protocol::thin::EVENT_DEREG: u32
+pub const oracledb_protocol::thin::EVENT_OBJCHANGE: u32
+pub const oracledb_protocol::thin::EVENT_QUERYCHANGE: u32
+pub const oracledb_protocol::thin::OPCODE_ALLROWS: u32
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_BFILE: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_BINARY_DOUBLE: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_BINARY_FLOAT: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_BINARY_INTEGER: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_BLOB: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_BOOLEAN: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_CHAR: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_CLOB: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_CURSOR: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_DATE: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_INTERVAL_DS: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_INTERVAL_YM: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_JSON: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_LONG: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_LONG_RAW: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_NUMBER: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_OBJECT: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_RAW: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_ROWID: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_TIMESTAMP: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_TIMESTAMP_LTZ: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_TIMESTAMP_TZ: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_UROWID: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_VARCHAR: u8
+pub const oracledb_protocol::thin::ORA_TYPE_NUM_VECTOR: u8
+pub const oracledb_protocol::thin::SESSIONLESS_FORMAT_ID: u32
+pub const oracledb_protocol::thin::SUBSCR_QOS_DEREG_NFY: u32
+pub const oracledb_protocol::thin::SUBSCR_QOS_QUERY: u32
+pub const oracledb_protocol::thin::SUBSCR_QOS_RELIABLE: u32
+pub const oracledb_protocol::thin::SUBSCR_QOS_ROWIDS: u32
+pub const oracledb_protocol::thin::TNS_AQ_ARRAY_DEQ: i32
+pub const oracledb_protocol::thin::TNS_AQ_ARRAY_ENQ: i32
+pub const oracledb_protocol::thin::TNS_AQ_ARRAY_FLAGS_RETURN_MESSAGE_ID: u32
+pub const oracledb_protocol::thin::TNS_AQ_EXT_KEYWORD_AGENT_ADDRESS: u16
+pub const oracledb_protocol::thin::TNS_AQ_EXT_KEYWORD_AGENT_NAME: u16
+pub const oracledb_protocol::thin::TNS_AQ_EXT_KEYWORD_AGENT_PROTOCOL: u16
+pub const oracledb_protocol::thin::TNS_AQ_EXT_KEYWORD_ORIGINAL_MSGID: u16
+pub const oracledb_protocol::thin::TNS_AQ_MESSAGE_ID_LENGTH: usize
+pub const oracledb_protocol::thin::TNS_AQ_MESSAGE_VERSION: u16
+pub const oracledb_protocol::thin::TNS_AQ_MSG_BUFFERED: u16
+pub const oracledb_protocol::thin::TNS_AQ_MSG_PERSISTENT: u16
+pub const oracledb_protocol::thin::TNS_AQ_MSG_PERSISTENT_OR_BUFFERED: u16
+pub const oracledb_protocol::thin::TNS_AUTH_MODE_CHANGE_PASSWORD: u32
+pub const oracledb_protocol::thin::TNS_AUTH_MODE_LOGON: u32
+pub const oracledb_protocol::thin::TNS_AUTH_MODE_WITH_PASSWORD: u32
+pub const oracledb_protocol::thin::TNS_CCAP_FIELD_VERSION_12_1: u8
+pub const oracledb_protocol::thin::TNS_DATA_FLAGS_BEGIN_PIPELINE: u16
+pub const oracledb_protocol::thin::TNS_DATA_FLAGS_END_OF_REQUEST: u16
+pub const oracledb_protocol::thin::TNS_DATA_FLAGS_END_OF_RESPONSE: u16
+pub const oracledb_protocol::thin::TNS_DATA_FLAGS_EOF: u16
+pub const oracledb_protocol::thin::TNS_EOCS_FLAGS_TXN_IN_PROGRESS: u32
+pub const oracledb_protocol::thin::TNS_ERR_NO_MESSAGES_FOUND: i32
+pub const oracledb_protocol::thin::TNS_FETCH_ORIENTATION_ABSOLUTE: u32
+pub const oracledb_protocol::thin::TNS_FETCH_ORIENTATION_CURRENT: u32
+pub const oracledb_protocol::thin::TNS_FETCH_ORIENTATION_FIRST: u32
+pub const oracledb_protocol::thin::TNS_FETCH_ORIENTATION_LAST: u32
+pub const oracledb_protocol::thin::TNS_FETCH_ORIENTATION_NEXT: u32
+pub const oracledb_protocol::thin::TNS_FETCH_ORIENTATION_PRIOR: u32
+pub const oracledb_protocol::thin::TNS_FETCH_ORIENTATION_RELATIVE: u32
+pub const oracledb_protocol::thin::TNS_FUNC_AQ_ARRAY: u8
+pub const oracledb_protocol::thin::TNS_FUNC_AQ_DEQ: u8
+pub const oracledb_protocol::thin::TNS_FUNC_AQ_ENQ: u8
+pub const oracledb_protocol::thin::TNS_FUNC_AUTH_PHASE_ONE: u8
+pub const oracledb_protocol::thin::TNS_FUNC_AUTH_PHASE_TWO: u8
+pub const oracledb_protocol::thin::TNS_FUNC_CLOSE_CURSORS: u8
+pub const oracledb_protocol::thin::TNS_FUNC_COMMIT: u8
+pub const oracledb_protocol::thin::TNS_FUNC_EXECUTE: u8
+pub const oracledb_protocol::thin::TNS_FUNC_FETCH: u8
+pub const oracledb_protocol::thin::TNS_FUNC_LOB_OP: u8
+pub const oracledb_protocol::thin::TNS_FUNC_LOGOFF: u8
+pub const oracledb_protocol::thin::TNS_FUNC_NOTIFY: u8
+pub const oracledb_protocol::thin::TNS_FUNC_PING: u8
+pub const oracledb_protocol::thin::TNS_FUNC_PIPELINE_BEGIN: u8
+pub const oracledb_protocol::thin::TNS_FUNC_PIPELINE_END: u8
+pub const oracledb_protocol::thin::TNS_FUNC_ROLLBACK: u8
+pub const oracledb_protocol::thin::TNS_FUNC_SUBSCRIBE: u8
+pub const oracledb_protocol::thin::TNS_FUNC_TPC_TXN_CHANGE_STATE: u8
+pub const oracledb_protocol::thin::TNS_FUNC_TPC_TXN_SWITCH: u8
+pub const oracledb_protocol::thin::TNS_INIT_KPNDRREQ: u8
+pub const oracledb_protocol::thin::TNS_KEYWORD_NUM_TRANSACTION_ID: u16
+pub const oracledb_protocol::thin::TNS_KPD_AQ_BUFMSG: u32
+pub const oracledb_protocol::thin::TNS_KPD_AQ_EITHER: u32
+pub const oracledb_protocol::thin::TNS_MAX_LONG_LENGTH: u32
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_BIT_VECTOR: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_DATA_TYPES: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_DESCRIBE_INFO: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_END_OF_RESPONSE: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_ERROR: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_FLUSH_OUT_BINDS: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_FUNCTION: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_IMPLICIT_RESULTSET: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_IO_VECTOR: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_LOB_DATA: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_OAC: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_PARAMETER: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_PIGGYBACK: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_PROTOCOL: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_ROW_DATA: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_ROW_HEADER: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_STATUS: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_TOKEN: u8
+pub const oracledb_protocol::thin::TNS_OBJ_TOP_LEVEL: u32
+pub const oracledb_protocol::thin::TNS_PACKET_TYPE_ACCEPT: u8
+pub const oracledb_protocol::thin::TNS_PACKET_TYPE_CONNECT: u8
+pub const oracledb_protocol::thin::TNS_PACKET_TYPE_DATA: u8
+pub const oracledb_protocol::thin::TNS_PACKET_TYPE_REDIRECT: u8
+pub const oracledb_protocol::thin::TNS_PACKET_TYPE_REFUSE: u8
+pub const oracledb_protocol::thin::TNS_PIPELINE_MODE_ABORT_ON_ERROR: u8
+pub const oracledb_protocol::thin::TNS_PIPELINE_MODE_CONTINUE_ON_ERROR: u8
+pub const oracledb_protocol::thin::TNS_SUBSCR_CLIENT_ID_LEN: u32
+pub const oracledb_protocol::thin::TNS_SUBSCR_FLAGS_INCLUDE_ROWIDS: u32
+pub const oracledb_protocol::thin::TNS_SUBSCR_FLAGS_QUERY: u32
+pub const oracledb_protocol::thin::TNS_SUBSCR_MODE_CLIENT_INITIATED: u32
+pub const oracledb_protocol::thin::TNS_SUBSCR_NAMESPACE_AQ: u32
+pub const oracledb_protocol::thin::TNS_SUBSCR_NAMESPACE_DBCHANGE: u32
+pub const oracledb_protocol::thin::TNS_SUBSCR_OP_REGISTER: u8
+pub const oracledb_protocol::thin::TNS_SUBSCR_OP_UNREGISTER: u8
+pub const oracledb_protocol::thin::TNS_SUBSCR_QOS_PURGE_ON_NTFN: u32
+pub const oracledb_protocol::thin::TNS_SUBSCR_QOS_RELIABLE: u32
+pub const oracledb_protocol::thin::TNS_SUBSCR_QOS_SECURE: u32
+pub const oracledb_protocol::thin::TNS_SUBSCR_STOP_NOTIF: u32
+pub const oracledb_protocol::thin::TNS_TPC_TXNID_SYNC_SERVER: u8
+pub const oracledb_protocol::thin::TNS_TPC_TXNID_SYNC_SET: u8
+pub const oracledb_protocol::thin::TNS_TPC_TXNID_SYNC_UNSET: u8
+pub const oracledb_protocol::thin::TNS_TPC_TXN_ABORT: u32
+pub const oracledb_protocol::thin::TNS_TPC_TXN_COMMIT: u32
+pub const oracledb_protocol::thin::TNS_TPC_TXN_DETACH: u32
+pub const oracledb_protocol::thin::TNS_TPC_TXN_FORGET: u32
+pub const oracledb_protocol::thin::TNS_TPC_TXN_POST_DETACH: u32
+pub const oracledb_protocol::thin::TNS_TPC_TXN_PREPARE: u32
+pub const oracledb_protocol::thin::TNS_TPC_TXN_START: u32
+pub const oracledb_protocol::thin::TNS_TPC_TXN_STATE_ABORTED: u32
+pub const oracledb_protocol::thin::TNS_TPC_TXN_STATE_COMMITTED: u32
+pub const oracledb_protocol::thin::TNS_TPC_TXN_STATE_FORGOTTEN: u32
+pub const oracledb_protocol::thin::TNS_TPC_TXN_STATE_PREPARE: u32
+pub const oracledb_protocol::thin::TNS_TPC_TXN_STATE_READ_ONLY: u32
+pub const oracledb_protocol::thin::TNS_TPC_TXN_STATE_REQUIRES_COMMIT: u32
+pub const oracledb_protocol::thin::TNS_VERIFIER_TYPE_11G_1: u32
+pub const oracledb_protocol::thin::TNS_VERIFIER_TYPE_11G_2: u32
+pub const oracledb_protocol::thin::TNS_VERIFIER_TYPE_12C: u32
+pub const oracledb_protocol::thin::TPC_TXN_FLAGS_JOIN: u32
+pub const oracledb_protocol::thin::TPC_TXN_FLAGS_NEW: u32
+pub const oracledb_protocol::thin::TPC_TXN_FLAGS_PROMOTE: u32
+pub const oracledb_protocol::thin::TPC_TXN_FLAGS_RESUME: u32
+pub const oracledb_protocol::thin::TPC_TXN_FLAGS_SESSIONLESS: u32
+pub fn oracledb_protocol::thin::adjust_refetch_metadata(&oracledb_protocol::thin::ColumnMetadata, &mut oracledb_protocol::thin::ColumnMetadata) -> bool
+pub fn oracledb_protocol::thin::append_auth_phase_one(&mut alloc::vec::Vec<u8>, &str, &str, &str, &str, &str, u32) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::thin::append_auth_phase_two_token(&mut alloc::vec::Vec<u8>, &str, &str, &str, u32, &str, core::option::Option<&str>) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::thin::bind_template_from_type_name(&str, u32) -> oracledb_protocol::thin::BindValue
+pub fn oracledb_protocol::thin::bind_value_type_info(&oracledb_protocol::thin::BindValue) -> core::option::Option<oracledb_protocol::thin::BindTypeInfo>
+pub fn oracledb_protocol::thin::build_auth_phase_two_payload(&str, &oracledb_protocol::crypto::EncryptedPassword, &str, u32, &str) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_auth_phase_two_payload_with_context_with_seq(&str, &oracledb_protocol::crypto::EncryptedPassword, &str, u32, &str, u8, &[(alloc::string::String, alloc::string::String, alloc::string::String)]) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_auth_phase_two_payload_with_proxy_with_seq(&str, &oracledb_protocol::crypto::EncryptedPassword, &str, u32, &str, u8, &[(alloc::string::String, alloc::string::String, alloc::string::String)], core::option::Option<&str>, core::option::Option<&str>) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_auth_phase_two_payload_with_seq(&str, &oracledb_protocol::crypto::EncryptedPassword, &str, u32, &str, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_begin_pipeline_piggyback(u8, u64, u8) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_change_password_payload_with_seq(&str, &str, &str, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_close_cursors_piggyback(&[u32], u8) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_connect_packet_payload(&str, u16) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_define_fetch_payload_with_seq(u32, u32, u8, &[oracledb_protocol::thin::ColumnMetadata]) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_end_pipeline_payload_with_seq(u8) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_execute_payload_with_bind_rows_and_options_with_seq(&str, u32, u8, bool, &[alloc::vec::Vec<oracledb_protocol::thin::BindValue>], oracledb_protocol::thin::ExecuteOptions) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_execute_payload_with_bind_rows_with_seq(&str, u32, u8, bool, &[alloc::vec::Vec<oracledb_protocol::thin::BindValue>]) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_execute_payload_with_bind_rows_with_seq_and_token(&str, u32, u8, bool, &[alloc::vec::Vec<oracledb_protocol::thin::BindValue>], u64) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_execute_payload_with_binds_with_seq(&str, u32, u8, bool, &[oracledb_protocol::thin::BindValue]) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_execute_payload_with_seq(&str, u32, u8, bool) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_execute_query_payload(&str, u32) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_execute_query_payload_with_seq(&str, u32, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_fast_auth_phase_one_payload(&str, &str, &str, &str, &str, u32) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_fast_auth_token_payload(&str, &str, &str, u32, &str, core::option::Option<&str>) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_fetch_payload(u32, u32) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_fetch_payload_with_seq(u32, u32, u8) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_function_payload(u8) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_function_payload_with_seq(u8, u8) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_function_payload_with_seq_and_token(u8, u8, u64) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_lob_create_temp_payload_with_seq(u8, u8, u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_lob_free_temp_payload_with_seq(&[alloc::vec::Vec<u8>], u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_lob_read_payload_with_seq(&[u8], u64, u64, u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_lob_trim_payload_with_seq(&[u8], u64, u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_lob_write_payload_with_seq(&[u8], u64, &[u8], u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_notify_payload_with_seq(u8, &[u8], u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_sessionless_piggyback(u8, u64, u32, u32, u32, core::option::Option<&[u8]>) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_subscribe_payload_with_seq(u8, u8, core::option::Option<&str>, core::option::Option<&[u8]>, u32, core::option::Option<&str>, u32, u32, u32, u8, u32, u8, u64, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_tpc_change_state_payload_with_seq(u8, u32, u32, u32, core::option::Option<&oracledb_protocol::thin::TpcXid<'_>>, core::option::Option<&[u8]>) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_tpc_switch_payload_with_seq(u8, u32, u32, u32, core::option::Option<&oracledb_protocol::thin::TpcXid<'_>>, core::option::Option<&[u8]>) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_tpc_txn_switch_payload_with_seq(u8, u64, u32, u32, u32, core::option::Option<&[u8]>) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::check_fetch_conversion(&oracledb_protocol::thin::ColumnMetadata, u8, u8) -> core::option::Option<oracledb_protocol::thin::ColumnMetadata>
+pub fn oracledb_protocol::thin::check_notification_header(&[u8]) -> oracledb_protocol::Result<usize>
+pub fn oracledb_protocol::thin::collection_flags_for(bool) -> u8
+pub fn oracledb_protocol::thin::column_metadata_is_xmltype(&oracledb_protocol::thin::ColumnMetadata) -> bool
+pub fn oracledb_protocol::thin::cursor_bind_template() -> oracledb_protocol::thin::BindValue
+pub fn oracledb_protocol::thin::dbobject_attr_max_size(&str, core::option::Option<u32>) -> u32
+pub fn oracledb_protocol::thin::dbobject_attr_precision_scale(&str, core::option::Option<i8>, core::option::Option<i8>) -> (i8, i8)
+pub fn oracledb_protocol::thin::dbobject_element_bind_type_info(&str, u32) -> oracledb_protocol::thin::BindTypeInfo
+pub fn oracledb_protocol::thin::dbobject_rowtype_attr_max_size(&str, core::option::Option<u32>, core::option::Option<u32>) -> u32
+pub fn oracledb_protocol::thin::decode_bfile_locator_name(&[u8]) -> core::option::Option<(alloc::string::String, alloc::string::String)>
+pub fn oracledb_protocol::thin::decode_datetime_value(&[u8]) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryValue>
+pub fn oracledb_protocol::thin::decode_dbobject_binary_double(&[u8]) -> oracledb_protocol::Result<f64>
+pub fn oracledb_protocol::thin::decode_dbobject_binary_float(&[u8]) -> oracledb_protocol::Result<f32>
+pub fn oracledb_protocol::thin::decode_dbobject_text(&[u8], &str) -> oracledb_protocol::Result<alloc::string::String>
+pub fn oracledb_protocol::thin::decode_dbobject_xmltype_text(&[u8]) -> oracledb_protocol::Result<core::option::Option<alloc::string::String>>
+pub fn oracledb_protocol::thin::decode_lob_text(&[u8], u8, core::option::Option<&[u8]>) -> oracledb_protocol::Result<alloc::string::String>
+pub fn oracledb_protocol::thin::decode_number_text_into(&[u8], &mut alloc::vec::Vec<u8>, &mut alloc::string::String) -> oracledb_protocol::Result<bool>
+pub fn oracledb_protocol::thin::decode_number_value(&[u8]) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryValue>
+pub fn oracledb_protocol::thin::decode_sessionless_txn_state(&[u8]) -> oracledb_protocol::Result<core::option::Option<oracledb_protocol::thin::SessionlessTxnState>>
+pub fn oracledb_protocol::thin::define_metadata_from_bind(&oracledb_protocol::thin::ColumnMetadata, &oracledb_protocol::thin::BindValue) -> oracledb_protocol::thin::ColumnMetadata
+pub fn oracledb_protocol::thin::encode_lob_text(&str, u8, core::option::Option<&[u8]>) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::encode_number_text(&str) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::image_begin(bool) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::image_finalize(&mut [u8]) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::thin::image_write_length(&mut alloc::vec::Vec<u8>, usize) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::thin::image_write_null(&mut alloc::vec::Vec<u8>, bool)
+pub fn oracledb_protocol::thin::image_write_value_bytes(&mut alloc::vec::Vec<u8>, &[u8]) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::thin::is_cursor_bind_template(&oracledb_protocol::thin::BindValue) -> bool
+pub fn oracledb_protocol::thin::lob_locator_is_temporary(&[u8]) -> bool
+pub fn oracledb_protocol::thin::output_bind(oracledb_protocol::thin::BindValue) -> oracledb_protocol::thin::BindValue
+pub fn oracledb_protocol::thin::pack_bindvalue_into_image(&mut alloc::vec::Vec<u8>, &oracledb_protocol::thin::BindValue, u8) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::thin::parse_accept_payload(&[u8]) -> oracledb_protocol::Result<oracledb_protocol::thin::AcceptInfo>
+pub fn oracledb_protocol::thin::parse_auth_response(&[u8]) -> oracledb_protocol::Result<oracledb_protocol::thin::AuthResponse>
+pub fn oracledb_protocol::thin::parse_fetch_response_with_context(&[u8], oracledb_protocol::thin::ClientCapabilities, &[oracledb_protocol::thin::ColumnMetadata], core::option::Option<&[core::option::Option<oracledb_protocol::thin::QueryValue>]>) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryResult>
+pub fn oracledb_protocol::thin::parse_lob_create_temp_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<oracledb_protocol::thin::LobReadResult>
+pub fn oracledb_protocol::thin::parse_lob_free_temp_response(&[u8], oracledb_protocol::thin::ClientCapabilities, usize) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::thin::parse_lob_read_response(&[u8], oracledb_protocol::thin::ClientCapabilities, &[u8]) -> oracledb_protocol::Result<oracledb_protocol::thin::LobReadResult>
+pub fn oracledb_protocol::thin::parse_lob_trim_response(&[u8], oracledb_protocol::thin::ClientCapabilities, &[u8]) -> oracledb_protocol::Result<oracledb_protocol::thin::LobReadResult>
+pub fn oracledb_protocol::thin::parse_lob_write_response(&[u8], oracledb_protocol::thin::ClientCapabilities, &[u8]) -> oracledb_protocol::Result<oracledb_protocol::thin::LobReadResult>
+pub fn oracledb_protocol::thin::parse_notification_stream(&[u8], u32, u32, core::option::Option<&str>) -> oracledb_protocol::Result<alloc::vec::Vec<oracledb_protocol::thin::NotificationRecord>>
+pub fn oracledb_protocol::thin::parse_oac_record(&mut oracledb_protocol::wire::TtcReader<'_>, u32, u32, core::option::Option<&str>) -> oracledb_protocol::Result<oracledb_protocol::thin::NotificationRecord>
+pub fn oracledb_protocol::thin::parse_plain_function_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<bool>
+pub fn oracledb_protocol::thin::parse_query_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryResult>
+pub fn oracledb_protocol::thin::parse_query_response_borrowed(&[u8], oracledb_protocol::thin::ClientCapabilities, &[oracledb_protocol::thin::ColumnMetadata], core::option::Option<&[core::option::Option<oracledb_protocol::thin::QueryValue>]>) -> oracledb_protocol::Result<oracledb_protocol::thin::BorrowedFetchResult>
+pub fn oracledb_protocol::thin::parse_query_response_with_binds(&[u8], oracledb_protocol::thin::ClientCapabilities, &[oracledb_protocol::thin::BindValue]) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryResult>
+pub fn oracledb_protocol::thin::parse_query_response_with_binds_and_options(&[u8], oracledb_protocol::thin::ClientCapabilities, &[oracledb_protocol::thin::BindValue], oracledb_protocol::thin::ExecuteOptions) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryResult>
+pub fn oracledb_protocol::thin::parse_query_response_with_binds_options_and_columns(&[u8], oracledb_protocol::thin::ClientCapabilities, &[oracledb_protocol::thin::BindValue], oracledb_protocol::thin::ExecuteOptions, &[oracledb_protocol::thin::ColumnMetadata]) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryResult>
+pub fn oracledb_protocol::thin::parse_query_response_with_context(&[u8], oracledb_protocol::thin::ClientCapabilities, &[oracledb_protocol::thin::ColumnMetadata], core::option::Option<&[core::option::Option<oracledb_protocol::thin::QueryValue>]>) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryResult>
+pub fn oracledb_protocol::thin::parse_query_response_with_previous(&[u8], oracledb_protocol::thin::ClientCapabilities, core::option::Option<&[core::option::Option<oracledb_protocol::thin::QueryValue>]>) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryResult>
+pub fn oracledb_protocol::thin::parse_subscribe_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<oracledb_protocol::thin::SubscribeResult>
+pub fn oracledb_protocol::thin::parse_tpc_change_state_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<oracledb_protocol::thin::TpcChangeStateResponse>
+pub fn oracledb_protocol::thin::parse_tpc_switch_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<oracledb_protocol::thin::TpcSwitchResponse>
+pub fn oracledb_protocol::thin::parse_tpc_txn_switch_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<core::option::Option<oracledb_protocol::thin::SessionlessTxnState>>
+pub fn oracledb_protocol::thin::public_dbtype_name_from_bind(&oracledb_protocol::thin::BindValue) -> &'static str
+pub fn oracledb_protocol::thin::public_dbtype_name_from_column_metadata(&oracledb_protocol::thin::ColumnMetadata) -> &'static str
+pub fn oracledb_protocol::thin::public_dbtype_name_from_oracle_type_name(&str) -> &'static str
+pub fn oracledb_protocol::thin::public_dbtype_name_from_type_name(&str) -> &'static str
+pub fn oracledb_protocol::thin::public_dbtype_size_info(&str) -> (u32, u32)
+pub fn oracledb_protocol::thin::returning_output_bind(oracledb_protocol::thin::BindValue) -> oracledb_protocol::thin::BindValue
+pub fn oracledb_protocol::thin::try_parse_oac_record(&[u8], u32, u32, core::option::Option<&str>) -> oracledb_protocol::Result<core::option::Option<(oracledb_protocol::thin::NotificationRecord, usize)>>
+pub fn oracledb_protocol::thin::write_dbobject_bind(&mut oracledb_protocol::wire::TtcWriter, &[u8], &[u8]) -> oracledb_protocol::Result<()>
+pub mod oracledb_protocol::tls
+pub mod oracledb_protocol::tls::dn
+pub enum oracledb_protocol::tls::dn::DnMatchError
+pub oracledb_protocol::tls::dn::DnMatchError::CertDnMismatch
+pub oracledb_protocol::tls::dn::DnMatchError::CertDnMismatch::expected_dn: alloc::string::String
+pub oracledb_protocol::tls::dn::DnMatchError::NameMismatch
+pub oracledb_protocol::tls::dn::DnMatchError::NameMismatch::expected_name: alloc::string::String
+impl core::clone::Clone for oracledb_protocol::tls::dn::DnMatchError
+pub fn oracledb_protocol::tls::dn::DnMatchError::clone(&self) -> oracledb_protocol::tls::dn::DnMatchError
+impl core::cmp::Eq for oracledb_protocol::tls::dn::DnMatchError
+impl core::cmp::PartialEq for oracledb_protocol::tls::dn::DnMatchError
+pub fn oracledb_protocol::tls::dn::DnMatchError::eq(&self, &oracledb_protocol::tls::dn::DnMatchError) -> bool
+impl core::error::Error for oracledb_protocol::tls::dn::DnMatchError
+impl core::fmt::Debug for oracledb_protocol::tls::dn::DnMatchError
+pub fn oracledb_protocol::tls::dn::DnMatchError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oracledb_protocol::tls::dn::DnMatchError
+pub fn oracledb_protocol::tls::dn::DnMatchError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::tls::dn::DnMatchError
+pub fn oracledb_protocol::tls::dn::check_cert_dn(&str, &str) -> core::result::Result<(), oracledb_protocol::tls::dn::DnMatchError>
+pub fn oracledb_protocol::tls::dn::check_server_name(&str, &[alloc::string::String], &[alloc::string::String]) -> core::result::Result<(), oracledb_protocol::tls::dn::DnMatchError>
+pub fn oracledb_protocol::tls::dn::name_matches(&str, &str) -> bool
+pub fn oracledb_protocol::tls::dn::parse_dn(&str) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub mod oracledb_protocol::tls::sni
+pub fn oracledb_protocol::tls::sni::build_sni(&str, core::option::Option<&str>) -> alloc::string::String
+pub mod oracledb_protocol::tls::sso
+pub fn oracledb_protocol::tls::sso::parse_cwallet_sso(&[u8]) -> core::result::Result<oracledb_protocol::tls::wallet::WalletContents, oracledb_protocol::tls::wallet::WalletError>
+pub mod oracledb_protocol::tls::wallet
+pub enum oracledb_protocol::tls::wallet::WalletError
+pub oracledb_protocol::tls::wallet::WalletError::FileMissing(alloc::string::String)
+pub oracledb_protocol::tls::wallet::WalletError::Io
+pub oracledb_protocol::tls::wallet::WalletError::Io::path: alloc::string::String
+pub oracledb_protocol::tls::wallet::WalletError::Io::source: std::io::error::Error
+pub oracledb_protocol::tls::wallet::WalletError::NoCertificates
+pub oracledb_protocol::tls::wallet::WalletError::Pem(alloc::string::String)
+pub oracledb_protocol::tls::wallet::WalletError::Sso(alloc::string::String)
+pub oracledb_protocol::tls::wallet::WalletError::SsoNotEnabled
+impl core::error::Error for oracledb_protocol::tls::wallet::WalletError
+pub fn oracledb_protocol::tls::wallet::WalletError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for oracledb_protocol::tls::wallet::WalletError
+pub fn oracledb_protocol::tls::wallet::WalletError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oracledb_protocol::tls::wallet::WalletError
+pub fn oracledb_protocol::tls::wallet::WalletError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb_protocol::tls::wallet::WalletContents
+pub oracledb_protocol::tls::wallet::WalletContents::ca_certificates: alloc::vec::Vec<alloc::vec::Vec<u8>>
+pub oracledb_protocol::tls::wallet::WalletContents::client_cert_chain: alloc::vec::Vec<alloc::vec::Vec<u8>>
+pub oracledb_protocol::tls::wallet::WalletContents::client_private_key: core::option::Option<alloc::vec::Vec<u8>>
+impl oracledb_protocol::tls::wallet::WalletContents
+pub fn oracledb_protocol::tls::wallet::WalletContents::has_client_identity(&self) -> bool
+impl core::clone::Clone for oracledb_protocol::tls::wallet::WalletContents
+pub fn oracledb_protocol::tls::wallet::WalletContents::clone(&self) -> oracledb_protocol::tls::wallet::WalletContents
+impl core::default::Default for oracledb_protocol::tls::wallet::WalletContents
+pub fn oracledb_protocol::tls::wallet::WalletContents::default() -> oracledb_protocol::tls::wallet::WalletContents
+impl core::fmt::Debug for oracledb_protocol::tls::wallet::WalletContents
+pub fn oracledb_protocol::tls::wallet::WalletContents::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub const oracledb_protocol::tls::wallet::PEM_WALLET_FILE_NAME: &str
+pub const oracledb_protocol::tls::wallet::SSO_WALLET_FILE_NAME: &str
+pub fn oracledb_protocol::tls::wallet::parse_ewallet_pem(&[u8], core::option::Option<&str>) -> core::result::Result<oracledb_protocol::tls::wallet::WalletContents, oracledb_protocol::tls::wallet::WalletError>
+pub fn oracledb_protocol::tls::wallet::parse_pem_certificates(&mut dyn std::io::BufRead) -> alloc::vec::Vec<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::tls::wallet::pem_wallet_path(&std::path::Path) -> std::path::PathBuf
+pub fn oracledb_protocol::tls::wallet::read_ewallet_pem(&std::path::Path, core::option::Option<&str>) -> core::result::Result<oracledb_protocol::tls::wallet::WalletContents, oracledb_protocol::tls::wallet::WalletError>
+pub fn oracledb_protocol::tls::wallet::resolve_wallet_dir(core::option::Option<&str>, core::option::Option<&str>) -> core::option::Option<std::path::PathBuf>
+pub fn oracledb_protocol::tls::wallet::sso_wallet_path(&std::path::Path) -> std::path::PathBuf
+pub enum oracledb_protocol::tls::DnMatchError
+pub oracledb_protocol::tls::DnMatchError::CertDnMismatch
+pub oracledb_protocol::tls::DnMatchError::CertDnMismatch::expected_dn: alloc::string::String
+pub oracledb_protocol::tls::DnMatchError::NameMismatch
+pub oracledb_protocol::tls::DnMatchError::NameMismatch::expected_name: alloc::string::String
+impl core::clone::Clone for oracledb_protocol::tls::dn::DnMatchError
+pub fn oracledb_protocol::tls::dn::DnMatchError::clone(&self) -> oracledb_protocol::tls::dn::DnMatchError
+impl core::cmp::Eq for oracledb_protocol::tls::dn::DnMatchError
+impl core::cmp::PartialEq for oracledb_protocol::tls::dn::DnMatchError
+pub fn oracledb_protocol::tls::dn::DnMatchError::eq(&self, &oracledb_protocol::tls::dn::DnMatchError) -> bool
+impl core::error::Error for oracledb_protocol::tls::dn::DnMatchError
+impl core::fmt::Debug for oracledb_protocol::tls::dn::DnMatchError
+pub fn oracledb_protocol::tls::dn::DnMatchError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oracledb_protocol::tls::dn::DnMatchError
+pub fn oracledb_protocol::tls::dn::DnMatchError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::tls::dn::DnMatchError
+pub enum oracledb_protocol::tls::WalletError
+pub oracledb_protocol::tls::WalletError::FileMissing(alloc::string::String)
+pub oracledb_protocol::tls::WalletError::Io
+pub oracledb_protocol::tls::WalletError::Io::path: alloc::string::String
+pub oracledb_protocol::tls::WalletError::Io::source: std::io::error::Error
+pub oracledb_protocol::tls::WalletError::NoCertificates
+pub oracledb_protocol::tls::WalletError::Pem(alloc::string::String)
+pub oracledb_protocol::tls::WalletError::Sso(alloc::string::String)
+pub oracledb_protocol::tls::WalletError::SsoNotEnabled
+impl core::error::Error for oracledb_protocol::tls::wallet::WalletError
+pub fn oracledb_protocol::tls::wallet::WalletError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for oracledb_protocol::tls::wallet::WalletError
+pub fn oracledb_protocol::tls::wallet::WalletError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oracledb_protocol::tls::wallet::WalletError
+pub fn oracledb_protocol::tls::wallet::WalletError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb_protocol::tls::WalletContents
+pub oracledb_protocol::tls::WalletContents::ca_certificates: alloc::vec::Vec<alloc::vec::Vec<u8>>
+pub oracledb_protocol::tls::WalletContents::client_cert_chain: alloc::vec::Vec<alloc::vec::Vec<u8>>
+pub oracledb_protocol::tls::WalletContents::client_private_key: core::option::Option<alloc::vec::Vec<u8>>
+impl oracledb_protocol::tls::wallet::WalletContents
+pub fn oracledb_protocol::tls::wallet::WalletContents::has_client_identity(&self) -> bool
+impl core::clone::Clone for oracledb_protocol::tls::wallet::WalletContents
+pub fn oracledb_protocol::tls::wallet::WalletContents::clone(&self) -> oracledb_protocol::tls::wallet::WalletContents
+impl core::default::Default for oracledb_protocol::tls::wallet::WalletContents
+pub fn oracledb_protocol::tls::wallet::WalletContents::default() -> oracledb_protocol::tls::wallet::WalletContents
+impl core::fmt::Debug for oracledb_protocol::tls::wallet::WalletContents
+pub fn oracledb_protocol::tls::wallet::WalletContents::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub const oracledb_protocol::tls::PEM_WALLET_FILE_NAME: &str
+pub const oracledb_protocol::tls::SSO_WALLET_FILE_NAME: &str
+pub fn oracledb_protocol::tls::build_sni(&str, core::option::Option<&str>) -> alloc::string::String
+pub fn oracledb_protocol::tls::check_cert_dn(&str, &str) -> core::result::Result<(), oracledb_protocol::tls::dn::DnMatchError>
+pub fn oracledb_protocol::tls::check_server_name(&str, &[alloc::string::String], &[alloc::string::String]) -> core::result::Result<(), oracledb_protocol::tls::dn::DnMatchError>
+pub fn oracledb_protocol::tls::name_matches(&str, &str) -> bool
+pub fn oracledb_protocol::tls::parse_cwallet_sso(&[u8]) -> core::result::Result<oracledb_protocol::tls::wallet::WalletContents, oracledb_protocol::tls::wallet::WalletError>
+pub fn oracledb_protocol::tls::parse_dn(&str) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
+pub fn oracledb_protocol::tls::parse_ewallet_pem(&[u8], core::option::Option<&str>) -> core::result::Result<oracledb_protocol::tls::wallet::WalletContents, oracledb_protocol::tls::wallet::WalletError>
+pub fn oracledb_protocol::tls::read_ewallet_pem(&std::path::Path, core::option::Option<&str>) -> core::result::Result<oracledb_protocol::tls::wallet::WalletContents, oracledb_protocol::tls::wallet::WalletError>
+pub fn oracledb_protocol::tls::resolve_wallet_dir(core::option::Option<&str>, core::option::Option<&str>) -> core::option::Option<std::path::PathBuf>
+pub mod oracledb_protocol::vector
+pub enum oracledb_protocol::vector::Vector
+pub oracledb_protocol::vector::Vector::Dense(oracledb_protocol::vector::VectorValues)
+pub oracledb_protocol::vector::Vector::Sparse
+pub oracledb_protocol::vector::Vector::Sparse::indices: alloc::vec::Vec<u32>
+pub oracledb_protocol::vector::Vector::Sparse::num_dimensions: u32
+pub oracledb_protocol::vector::Vector::Sparse::values: oracledb_protocol::vector::VectorValues
+impl core::clone::Clone for oracledb_protocol::vector::Vector
+pub fn oracledb_protocol::vector::Vector::clone(&self) -> oracledb_protocol::vector::Vector
+impl core::cmp::PartialEq for oracledb_protocol::vector::Vector
+pub fn oracledb_protocol::vector::Vector::eq(&self, &oracledb_protocol::vector::Vector) -> bool
+impl core::fmt::Debug for oracledb_protocol::vector::Vector
+pub fn oracledb_protocol::vector::Vector::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::vector::Vector
+pub enum oracledb_protocol::vector::VectorValues
+pub oracledb_protocol::vector::VectorValues::Binary(alloc::vec::Vec<u8>)
+pub oracledb_protocol::vector::VectorValues::Float32(alloc::vec::Vec<f32>)
+pub oracledb_protocol::vector::VectorValues::Float64(alloc::vec::Vec<f64>)
+pub oracledb_protocol::vector::VectorValues::Int8(alloc::vec::Vec<i8>)
+impl oracledb_protocol::vector::VectorValues
+pub fn oracledb_protocol::vector::VectorValues::format(&self) -> u8
+pub fn oracledb_protocol::vector::VectorValues::is_empty(&self) -> bool
+pub fn oracledb_protocol::vector::VectorValues::len(&self) -> usize
+impl core::clone::Clone for oracledb_protocol::vector::VectorValues
+pub fn oracledb_protocol::vector::VectorValues::clone(&self) -> oracledb_protocol::vector::VectorValues
+impl core::cmp::PartialEq for oracledb_protocol::vector::VectorValues
+pub fn oracledb_protocol::vector::VectorValues::eq(&self, &oracledb_protocol::vector::VectorValues) -> bool
+impl core::fmt::Debug for oracledb_protocol::vector::VectorValues
+pub fn oracledb_protocol::vector::VectorValues::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::vector::VectorValues
+pub const oracledb_protocol::vector::TNS_VECTOR_FLAG_NORM: u16
+pub const oracledb_protocol::vector::TNS_VECTOR_FLAG_NORM_RESERVED: u16
+pub const oracledb_protocol::vector::TNS_VECTOR_FLAG_SPARSE: u16
+pub const oracledb_protocol::vector::TNS_VECTOR_MAGIC_BYTE: u8
+pub const oracledb_protocol::vector::TNS_VECTOR_VERSION_BASE: u8
+pub const oracledb_protocol::vector::TNS_VECTOR_VERSION_WITH_BINARY: u8
+pub const oracledb_protocol::vector::TNS_VECTOR_VERSION_WITH_SPARSE: u8
+pub const oracledb_protocol::vector::VECTOR_FORMAT_BINARY: u8
+pub const oracledb_protocol::vector::VECTOR_FORMAT_FLOAT32: u8
+pub const oracledb_protocol::vector::VECTOR_FORMAT_FLOAT64: u8
+pub const oracledb_protocol::vector::VECTOR_FORMAT_INT8: u8
+pub fn oracledb_protocol::vector::decode_vector(&[u8]) -> oracledb_protocol::Result<oracledb_protocol::vector::Vector>
+pub fn oracledb_protocol::vector::encode_vector(&oracledb_protocol::vector::Vector) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::vector::write_oson_aq_payload(&mut oracledb_protocol::wire::TtcWriter, &[u8]) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::vector::write_vector_image(&mut oracledb_protocol::wire::TtcWriter, &[u8]) -> oracledb_protocol::Result<()>
+pub mod oracledb_protocol::wire
+pub enum oracledb_protocol::wire::BorrowedBytes<'a>
+pub oracledb_protocol::wire::BorrowedBytes::Chunked(alloc::vec::Vec<u8>)
+pub oracledb_protocol::wire::BorrowedBytes::Null
+pub oracledb_protocol::wire::BorrowedBytes::Slice(&'a [u8])
+impl<'a> core::clone::Clone for oracledb_protocol::wire::BorrowedBytes<'a>
+pub fn oracledb_protocol::wire::BorrowedBytes<'a>::clone(&self) -> oracledb_protocol::wire::BorrowedBytes<'a>
+impl<'a> core::cmp::Eq for oracledb_protocol::wire::BorrowedBytes<'a>
+impl<'a> core::cmp::PartialEq for oracledb_protocol::wire::BorrowedBytes<'a>
+pub fn oracledb_protocol::wire::BorrowedBytes<'a>::eq(&self, &oracledb_protocol::wire::BorrowedBytes<'a>) -> bool
+impl<'a> core::fmt::Debug for oracledb_protocol::wire::BorrowedBytes<'a>
+pub fn oracledb_protocol::wire::BorrowedBytes<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::marker::StructuralPartialEq for oracledb_protocol::wire::BorrowedBytes<'a>
+pub enum oracledb_protocol::wire::PacketLengthWidth
+pub oracledb_protocol::wire::PacketLengthWidth::Large32
+pub oracledb_protocol::wire::PacketLengthWidth::Legacy16
+impl core::clone::Clone for oracledb_protocol::wire::PacketLengthWidth
+pub fn oracledb_protocol::wire::PacketLengthWidth::clone(&self) -> oracledb_protocol::wire::PacketLengthWidth
+impl core::cmp::Eq for oracledb_protocol::wire::PacketLengthWidth
+impl core::cmp::PartialEq for oracledb_protocol::wire::PacketLengthWidth
+pub fn oracledb_protocol::wire::PacketLengthWidth::eq(&self, &oracledb_protocol::wire::PacketLengthWidth) -> bool
+impl core::fmt::Debug for oracledb_protocol::wire::PacketLengthWidth
+pub fn oracledb_protocol::wire::PacketLengthWidth::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb_protocol::wire::PacketLengthWidth
+impl core::marker::StructuralPartialEq for oracledb_protocol::wire::PacketLengthWidth
+pub struct oracledb_protocol::wire::TtcReader<'a>
+impl<'a> oracledb_protocol::wire::TtcReader<'a>
+pub fn oracledb_protocol::wire::TtcReader<'a>::new(&'a [u8]) -> Self
+pub fn oracledb_protocol::wire::TtcReader<'a>::peek_u8(&self) -> oracledb_protocol::Result<u8>
+pub fn oracledb_protocol::wire::TtcReader<'a>::position(&self) -> usize
+pub fn oracledb_protocol::wire::TtcReader<'a>::read_bytes(&mut self) -> oracledb_protocol::Result<core::option::Option<alloc::vec::Vec<u8>>>
+pub fn oracledb_protocol::wire::TtcReader<'a>::read_bytes_borrowed(&mut self) -> oracledb_protocol::Result<oracledb_protocol::wire::BorrowedBytes<'a>>
+pub fn oracledb_protocol::wire::TtcReader<'a>::read_bytes_with_length(&mut self) -> oracledb_protocol::Result<core::option::Option<alloc::vec::Vec<u8>>>
+pub fn oracledb_protocol::wire::TtcReader<'a>::read_i8(&mut self) -> oracledb_protocol::Result<i8>
+pub fn oracledb_protocol::wire::TtcReader<'a>::read_raw(&mut self, usize) -> oracledb_protocol::Result<&'a [u8]>
+pub fn oracledb_protocol::wire::TtcReader<'a>::read_sb4(&mut self) -> oracledb_protocol::Result<i32>
+pub fn oracledb_protocol::wire::TtcReader<'a>::read_sb8(&mut self) -> oracledb_protocol::Result<i64>
+pub fn oracledb_protocol::wire::TtcReader<'a>::read_string(&mut self) -> oracledb_protocol::Result<core::option::Option<alloc::string::String>>
+pub fn oracledb_protocol::wire::TtcReader<'a>::read_string_with_length(&mut self) -> oracledb_protocol::Result<core::option::Option<alloc::string::String>>
+pub fn oracledb_protocol::wire::TtcReader<'a>::read_u16be(&mut self) -> oracledb_protocol::Result<u16>
+pub fn oracledb_protocol::wire::TtcReader<'a>::read_u16le(&mut self) -> oracledb_protocol::Result<u16>
+pub fn oracledb_protocol::wire::TtcReader<'a>::read_u32be(&mut self) -> oracledb_protocol::Result<u32>
+pub fn oracledb_protocol::wire::TtcReader<'a>::read_u8(&mut self) -> oracledb_protocol::Result<u8>
+pub fn oracledb_protocol::wire::TtcReader<'a>::read_ub2(&mut self) -> oracledb_protocol::Result<u16>
+pub fn oracledb_protocol::wire::TtcReader<'a>::read_ub4(&mut self) -> oracledb_protocol::Result<u32>
+pub fn oracledb_protocol::wire::TtcReader<'a>::read_ub8(&mut self) -> oracledb_protocol::Result<u64>
+pub fn oracledb_protocol::wire::TtcReader<'a>::remaining(&self) -> usize
+pub fn oracledb_protocol::wire::TtcReader<'a>::remaining_slice(&self) -> &[u8]
+pub fn oracledb_protocol::wire::TtcReader<'a>::skip(&mut self, usize) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::TtcReader<'a>::skip_bytes_field(&mut self) -> oracledb_protocol::Result<()>
+impl oracledb_protocol::wire::BoundedReader for oracledb_protocol::wire::TtcReader<'_>
+pub fn oracledb_protocol::wire::TtcReader<'_>::alloc_count_checked(&self, usize, usize) -> oracledb_protocol::Result<usize>
+pub fn oracledb_protocol::wire::TtcReader<'_>::remaining(&self) -> usize
+pub fn oracledb_protocol::wire::TtcReader<'_>::with_capacity_bounded<T>(&self, usize, usize) -> alloc::vec::Vec<T>
+impl<'a> core::clone::Clone for oracledb_protocol::wire::TtcReader<'a>
+pub fn oracledb_protocol::wire::TtcReader<'a>::clone(&self) -> oracledb_protocol::wire::TtcReader<'a>
+impl<'a> core::fmt::Debug for oracledb_protocol::wire::TtcReader<'a>
+pub fn oracledb_protocol::wire::TtcReader<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb_protocol::wire::TtcWriter
+impl oracledb_protocol::wire::TtcWriter
+pub fn oracledb_protocol::wire::TtcWriter::into_bytes(self) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::wire::TtcWriter::new() -> Self
+pub fn oracledb_protocol::wire::TtcWriter::with_capacity(usize) -> Self
+pub fn oracledb_protocol::wire::TtcWriter::write_bytes_with_length(&mut self, &[u8]) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::TtcWriter::write_bytes_with_two_lengths(&mut self, core::option::Option<&[u8]>) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::TtcWriter::write_function_code(&mut self, u8)
+pub fn oracledb_protocol::wire::TtcWriter::write_function_code_with_seq(&mut self, u8, u8)
+pub fn oracledb_protocol::wire::TtcWriter::write_keyword_value_pair(&mut self, core::option::Option<&[u8]>, core::option::Option<&[u8]>, u16) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::TtcWriter::write_raw(&mut self, &[u8])
+pub fn oracledb_protocol::wire::TtcWriter::write_sb4(&mut self, i32)
+pub fn oracledb_protocol::wire::TtcWriter::write_seq_num(&mut self)
+pub fn oracledb_protocol::wire::TtcWriter::write_str_two_lengths(&mut self, &str) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::TtcWriter::write_u16be(&mut self, u16)
+pub fn oracledb_protocol::wire::TtcWriter::write_u16le(&mut self, u16)
+pub fn oracledb_protocol::wire::TtcWriter::write_u32be(&mut self, u32)
+pub fn oracledb_protocol::wire::TtcWriter::write_u64be(&mut self, u64)
+pub fn oracledb_protocol::wire::TtcWriter::write_u8(&mut self, u8)
+pub fn oracledb_protocol::wire::TtcWriter::write_ub2(&mut self, u16)
+pub fn oracledb_protocol::wire::TtcWriter::write_ub4(&mut self, u32)
+pub fn oracledb_protocol::wire::TtcWriter::write_ub8(&mut self, u64)
+impl core::clone::Clone for oracledb_protocol::wire::TtcWriter
+pub fn oracledb_protocol::wire::TtcWriter::clone(&self) -> oracledb_protocol::wire::TtcWriter
+impl core::cmp::Eq for oracledb_protocol::wire::TtcWriter
+impl core::cmp::PartialEq for oracledb_protocol::wire::TtcWriter
+pub fn oracledb_protocol::wire::TtcWriter::eq(&self, &oracledb_protocol::wire::TtcWriter) -> bool
+impl core::default::Default for oracledb_protocol::wire::TtcWriter
+pub fn oracledb_protocol::wire::TtcWriter::default() -> oracledb_protocol::wire::TtcWriter
+impl core::fmt::Debug for oracledb_protocol::wire::TtcWriter
+pub fn oracledb_protocol::wire::TtcWriter::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::wire::TtcWriter
+pub const oracledb_protocol::wire::TNS_LONG_LENGTH_INDICATOR: u8
+pub const oracledb_protocol::wire::TNS_MAX_SHORT_LENGTH: usize
+pub const oracledb_protocol::wire::TNS_NULL_LENGTH_INDICATOR: u8
+pub trait oracledb_protocol::wire::BoundedReader
+pub fn oracledb_protocol::wire::BoundedReader::alloc_count_checked(&self, usize, usize) -> oracledb_protocol::Result<usize>
+pub fn oracledb_protocol::wire::BoundedReader::remaining(&self) -> usize
+pub fn oracledb_protocol::wire::BoundedReader::with_capacity_bounded<T>(&self, usize, usize) -> alloc::vec::Vec<T>
+impl oracledb_protocol::wire::BoundedReader for oracledb_protocol::thin::DbObjectPackedReader<'_>
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::alloc_count_checked(&self, usize, usize) -> oracledb_protocol::Result<usize>
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::remaining(&self) -> usize
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::with_capacity_bounded<T>(&self, usize, usize) -> alloc::vec::Vec<T>
+impl oracledb_protocol::wire::BoundedReader for oracledb_protocol::wire::TtcReader<'_>
+pub fn oracledb_protocol::wire::TtcReader<'_>::alloc_count_checked(&self, usize, usize) -> oracledb_protocol::Result<usize>
+pub fn oracledb_protocol::wire::TtcReader<'_>::remaining(&self) -> usize
+pub fn oracledb_protocol::wire::TtcReader<'_>::with_capacity_bounded<T>(&self, usize, usize) -> alloc::vec::Vec<T>
+pub fn oracledb_protocol::wire::encode_packet(u8, u8, core::option::Option<u16>, &[u8], oracledb_protocol::wire::PacketLengthWidth) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub enum oracledb_protocol::ProtocolError
+pub oracledb_protocol::ProtocolError::DirectPathLoadTooMuchData
+pub oracledb_protocol::ProtocolError::IncompletePacket
+pub oracledb_protocol::ProtocolError::IncompletePacket::available: usize
+pub oracledb_protocol::ProtocolError::IncompletePacket::declared: usize
+pub oracledb_protocol::ProtocolError::InvalidAesKey
+pub oracledb_protocol::ProtocolError::InvalidClientIdentity
+pub oracledb_protocol::ProtocolError::InvalidClientIdentity::field: &'static str
+pub oracledb_protocol::ProtocolError::InvalidClientIdentity::reason: alloc::borrow::Cow<'static, str>
+pub oracledb_protocol::ProtocolError::InvalidConnectDescriptor(alloc::string::String)
+pub oracledb_protocol::ProtocolError::InvalidPacketLength
+pub oracledb_protocol::ProtocolError::InvalidPacketLength::length: usize
+pub oracledb_protocol::ProtocolError::InvalidPacketLength::minimum: usize
+pub oracledb_protocol::ProtocolError::InvalidServerResponse
+pub oracledb_protocol::ProtocolError::MissingAuthParameter
+pub oracledb_protocol::ProtocolError::MissingAuthParameter::key: &'static str
+pub oracledb_protocol::ProtocolError::NotImplemented(&'static str)
+pub oracledb_protocol::ProtocolError::NullsNotAllowed
+pub oracledb_protocol::ProtocolError::NullsNotAllowed::column_name: alloc::string::String
+pub oracledb_protocol::ProtocolError::NullsNotAllowed::row_num: u64
+pub oracledb_protocol::ProtocolError::OsonInvalid(&'static str)
+pub oracledb_protocol::ProtocolError::OsonNotEncoded(&'static str)
+pub oracledb_protocol::ProtocolError::OsonTypeNotSupported(&'static str)
+pub oracledb_protocol::ProtocolError::PacketTooLarge
+pub oracledb_protocol::ProtocolError::PacketTooLarge::length: usize
+pub oracledb_protocol::ProtocolError::ServerError(alloc::string::String)
+pub oracledb_protocol::ProtocolError::ServerErrorInfo(alloc::boxed::Box<oracledb_protocol::ServerErrorDetails>)
+pub oracledb_protocol::ProtocolError::ServerErrorWithRowCount
+pub oracledb_protocol::ProtocolError::ServerErrorWithRowCount::message: alloc::string::String
+pub oracledb_protocol::ProtocolError::ServerErrorWithRowCount::row_count: u64
+pub oracledb_protocol::ProtocolError::TruncatedHeader
+pub oracledb_protocol::ProtocolError::TruncatedHeader::got: usize
+pub oracledb_protocol::ProtocolError::TtcDecode(&'static str)
+pub oracledb_protocol::ProtocolError::UnknownMessageType
+pub oracledb_protocol::ProtocolError::UnknownMessageType::message_type: u8
+pub oracledb_protocol::ProtocolError::UnknownMessageType::position: usize
+pub oracledb_protocol::ProtocolError::UnsupportedFeature(&'static str)
+pub oracledb_protocol::ProtocolError::UnsupportedVerifier
+pub oracledb_protocol::ProtocolError::UnsupportedVerifier::verifier_type: u32
+pub oracledb_protocol::ProtocolError::UnsupportedVersion
+pub oracledb_protocol::ProtocolError::UnsupportedVersion::version: u16
+pub oracledb_protocol::ProtocolError::ValueTooLarge
+pub oracledb_protocol::ProtocolError::ValueTooLarge::actual_size: usize
+pub oracledb_protocol::ProtocolError::ValueTooLarge::column_name: alloc::string::String
+pub oracledb_protocol::ProtocolError::ValueTooLarge::max_size: u32
+pub oracledb_protocol::ProtocolError::ValueTooLarge::row_num: u64
+impl core::error::Error for oracledb_protocol::ProtocolError
+impl core::fmt::Debug for oracledb_protocol::ProtocolError
+pub fn oracledb_protocol::ProtocolError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oracledb_protocol::ProtocolError
+pub fn oracledb_protocol::ProtocolError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb_protocol::ClientIdentity
+pub oracledb_protocol::ClientIdentity::driver_name: alloc::string::String
+pub oracledb_protocol::ClientIdentity::machine: alloc::string::String
+pub oracledb_protocol::ClientIdentity::osuser: alloc::string::String
+pub oracledb_protocol::ClientIdentity::program: alloc::string::String
+pub oracledb_protocol::ClientIdentity::terminal: alloc::string::String
+impl oracledb_protocol::ClientIdentity
+pub fn oracledb_protocol::ClientIdentity::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> oracledb_protocol::Result<Self>
+impl core::clone::Clone for oracledb_protocol::ClientIdentity
+pub fn oracledb_protocol::ClientIdentity::clone(&self) -> oracledb_protocol::ClientIdentity
+impl core::cmp::Eq for oracledb_protocol::ClientIdentity
+impl core::cmp::PartialEq for oracledb_protocol::ClientIdentity
+pub fn oracledb_protocol::ClientIdentity::eq(&self, &oracledb_protocol::ClientIdentity) -> bool
+impl core::fmt::Debug for oracledb_protocol::ClientIdentity
+pub fn oracledb_protocol::ClientIdentity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::ClientIdentity
+pub struct oracledb_protocol::ServerErrorDetails
+pub oracledb_protocol::ServerErrorDetails::array_dml_row_counts: core::option::Option<alloc::vec::Vec<u64>>
+pub oracledb_protocol::ServerErrorDetails::code: u32
+pub oracledb_protocol::ServerErrorDetails::message: alloc::string::String
+pub oracledb_protocol::ServerErrorDetails::pos: i32
+pub oracledb_protocol::ServerErrorDetails::row_count: u64
+pub oracledb_protocol::ServerErrorDetails::rowid: core::option::Option<alloc::string::String>
+impl core::clone::Clone for oracledb_protocol::ServerErrorDetails
+pub fn oracledb_protocol::ServerErrorDetails::clone(&self) -> oracledb_protocol::ServerErrorDetails
+impl core::cmp::Eq for oracledb_protocol::ServerErrorDetails
+impl core::cmp::PartialEq for oracledb_protocol::ServerErrorDetails
+pub fn oracledb_protocol::ServerErrorDetails::eq(&self, &oracledb_protocol::ServerErrorDetails) -> bool
+impl core::default::Default for oracledb_protocol::ServerErrorDetails
+pub fn oracledb_protocol::ServerErrorDetails::default() -> oracledb_protocol::ServerErrorDetails
+impl core::fmt::Debug for oracledb_protocol::ServerErrorDetails
+pub fn oracledb_protocol::ServerErrorDetails::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb_protocol::ServerErrorDetails
+pub const oracledb_protocol::PYTHON_ORACLEDB_REFERENCE_COMMIT: &str
+pub const oracledb_protocol::PYTHON_ORACLEDB_REFERENCE_TAG: &str
+pub const oracledb_protocol::TNS_VERSION_DESIRED: u16
+pub const oracledb_protocol::TNS_VERSION_MIN: u16
+pub type oracledb_protocol::Result<T> = core::result::Result<T, oracledb_protocol::ProtocolError>

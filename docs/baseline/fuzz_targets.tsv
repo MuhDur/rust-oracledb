@@ -1,0 +1,11 @@
+target	path
+aq_response	crates/oracledb-protocol/fuzz/fuzz_targets/aq_response.rs
+connect_string	crates/oracledb-protocol/fuzz/fuzz_targets/connect_string.rs
+dpl_response	crates/oracledb-protocol/fuzz/fuzz_targets/dpl_response.rs
+oson_decoder	crates/oracledb-protocol/fuzz/fuzz_targets/oson_decoder.rs
+packet_framing	crates/oracledb-protocol/fuzz/fuzz_targets/packet_framing.rs
+query_response	crates/oracledb-protocol/fuzz/fuzz_targets/query_response.rs
+scalar_codecs	crates/oracledb-protocol/fuzz/fuzz_targets/scalar_codecs.rs
+server_error_info	crates/oracledb-protocol/fuzz/fuzz_targets/server_error_info.rs
+subscr_response	crates/oracledb-protocol/fuzz/fuzz_targets/subscr_response.rs
+vector_decoder	crates/oracledb-protocol/fuzz/fuzz_targets/vector_decoder.rs

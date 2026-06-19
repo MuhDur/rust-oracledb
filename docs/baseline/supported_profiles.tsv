@@ -1,0 +1,13 @@
+profile	command
+minimal	cargo check -p oracledb --no-default-features
+default	cargo check -p oracledb
+all-features	cargo check --workspace --all-features
+chrono	cargo check -p oracledb --features chrono
+uuid	cargo check -p oracledb --features uuid
+serde_json	cargo check -p oracledb --features serde_json
+rust_decimal	cargo check -p oracledb --features rust_decimal
+arrow	cargo check -p oracledb --features arrow
+soda	cargo check -p oracledb --features soda
+tracing	cargo check -p oracledb --features tracing
+protocol-stable	cargo +stable test -p oracledb-protocol
+fuzz-build	cargo fuzz build --target x86_64-unknown-linux-gnu (cwd crates/oracledb-protocol)

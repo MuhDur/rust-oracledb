@@ -66,6 +66,7 @@ need rg
 need rustc
 
 mkdir -p "$OUT"
+mkdir -p "$OUT/public_api"
 
 pin_file="$OUT/source_commit.txt"
 if [ "$REFRESH_PIN" = true ] || [ ! -s "$pin_file" ]; then
@@ -137,9 +138,58 @@ EOF
   printf 'minimal\tcargo check -p oracledb --no-default-features\n'
   printf 'default\tcargo check -p oracledb\n'
   printf 'all-features\tcargo check --workspace --all-features\n'
+  printf 'chrono\tcargo check -p oracledb --features chrono\n'
+  printf 'uuid\tcargo check -p oracledb --features uuid\n'
+  printf 'serde_json\tcargo check -p oracledb --features serde_json\n'
+  printf 'rust_decimal\tcargo check -p oracledb --features rust_decimal\n'
+  printf 'arrow\tcargo check -p oracledb --features arrow\n'
+  printf 'soda\tcargo check -p oracledb --features soda\n'
+  printf 'tracing\tcargo check -p oracledb --features tracing\n'
   printf 'protocol-stable\tcargo +stable test -p oracledb-protocol\n'
   printf 'fuzz-build\tcargo fuzz build --target x86_64-unknown-linux-gnu (cwd crates/oracledb-protocol)\n'
 } > "$OUT/supported_profiles.tsv"
+
+run_public_api() {
+  local profile="$1"
+  local package="$2"
+  shift 2
+
+  local output="$OUT/public_api/$profile.txt"
+  {
+    printf '# profile: %s\n' "$profile"
+    printf '# package: %s\n' "$package"
+    printf '# command: cargo public-api -p %s -ss --color never' "$package"
+    if [ "$#" -gt 0 ]; then
+      printf ' %q' "$@"
+    fi
+    printf '\n\n'
+    cargo public-api -p "$package" -ss --color never "$@"
+  } > "$output"
+
+  printf '%s\t%s\t%s\tok\n' "$profile" "$package" "$(relpath "$output")"
+}
+
+{
+  printf 'profile\tpackage\tpath\tstatus\n'
+  if command -v cargo-public-api >/dev/null 2>&1; then
+    run_public_api oracledb-minimal oracledb --no-default-features
+    run_public_api oracledb-default oracledb
+    run_public_api oracledb-all-features oracledb --all-features
+    run_public_api oracledb-chrono oracledb --features chrono
+    run_public_api oracledb-uuid oracledb --features uuid
+    run_public_api oracledb-serde_json oracledb --features serde_json
+    run_public_api oracledb-rust_decimal oracledb --features rust_decimal
+    run_public_api oracledb-arrow oracledb --features arrow
+    run_public_api oracledb-soda oracledb --features soda
+    run_public_api oracledb-tracing oracledb --features tracing
+    run_public_api protocol-default oracledb-protocol
+    run_public_api protocol-all-features oracledb-protocol --all-features
+  else
+    unavailable="$OUT/public_api/UNAVAILABLE.txt"
+    printf 'cargo-public-api is not installed; install it with: cargo install cargo-public-api\n' > "$unavailable"
+    printf 'unavailable\tall\t%s\tmissing cargo-public-api\n' "$(relpath "$unavailable")"
+  fi
+} > "$OUT/public_api_profiles.tsv"
 
 {
   printf 'target\tpath\n'

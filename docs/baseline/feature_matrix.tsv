@@ -1,0 +1,16 @@
+package	feature	members
+oracledb	arrow	dep:arrow-array,dep:arrow-buffer,dep:arrow-data,dep:arrow-schema
+oracledb	cassette	oracledb-protocol/cassette
+oracledb	chrono	dep:chrono
+oracledb	default	derive
+oracledb	derive	dep:oracledb-derive
+oracledb	experimental	oracledb-protocol/experimental
+oracledb	rust_decimal	dep:rust_decimal
+oracledb	serde_json	dep:serde_json
+oracledb	soda	dep:serde_json
+oracledb	tracing	dep:tracing
+oracledb	uuid	dep:uuid
+oracledb-protocol	cassette	
+oracledb-protocol	default	
+oracledb-protocol	experimental	dep:cbc,dep:der,dep:hmac
+oracledb-protocol	simd-decode	dep:simdutf8
