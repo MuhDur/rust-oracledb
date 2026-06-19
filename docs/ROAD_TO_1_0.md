@@ -153,15 +153,20 @@ candidate are collected deep.
 ### W0-T3 — Feature-profile + SemVer + stable-protocol lanes (decision (b))
 - **What:** define supported profiles in `docs/SUPPORT.md` (minimal/default/all +
   each optional-integration combo — chrono/uuid/serde_json/rust_decimal/arrow/soda);
-  exercise the **full** supported matrix with `cargo hack`; install + wire
-  `cargo-semver-checks` against the latest published baseline; keep `cargo public-api`
-  snapshots per supported profile; build+test **`oracledb-protocol` on current stable**
-  so its stable-compatibility can't silently rot.
-- **Verify (the one unproven mechanic):** confirm `cargo-semver-checks` runs under the
-  pinned nightly. It uses the same rustdoc-JSON path as `cargo public-api`, which the
-  grounding research already confirmed works under `nightly-2026-05-11`, so this is expected to
-  pass — but it is the one tool not yet run, so verify it explicitly here and record
-  the command + result in `docs/baseline/`.
+  exercise the **full** supported matrix with `cargo hack`; wire `cargo-semver-checks`
+  (gate it on the **library** crates `oracledb-protocol` + `oracledb` **only** — it
+  skips `oracledb-derive`, a proc-macro, and *errors* if asked to check it; cover the
+  derive's generated surface with a separate `trybuild` compile test instead); keep
+  `cargo public-api` snapshots per supported profile; build+test **`oracledb-protocol`
+  on current stable** so its stable-compatibility can't silently rot.
+- **VERIFIED (R10 resolved):** `cargo-semver-checks 0.48.0` runs cleanly under
+  `nightly-2026-05-11` — `semver-checks check-release -p oracledb-protocol` and
+  `-p oracledb` both pass (196 checks each) and it does **not** choke on `oracledb`'s
+  transitive asupersync `try_trait_v2` (its own rustdoc-JSON step handles the
+  nightly-only crate; ~60–75 s cold build for `oracledb`). Proven non-trivial: vs
+  `--baseline-rev 27fb6c3` it correctly flags the `ConnectOptions.statement_cache_size`
+  field-add as major-requiring. Offline runners pre-fetch the baseline + pass
+  `--baseline-rustdoc`; the manual rustdoc-JSON fallback is **not** needed.
 - **Advisory-now / blocking-at-0.3.0 (ADR-0002):** semver-checks runs **advisory**
   through 0.3.0 development so it does not block the intended API redesign (W1-T3);
   it is **flipped to blocking at the 0.3.0 release** (W2-T1), with 0.3.0 as the
@@ -633,11 +638,16 @@ breaks, not a prohibition. A real, needed break ships with the correct version b
 - **R9 (new, the residual real risk):** typed dependency bridges (chrono/uuid/decimal/
   serde_json) couple our SemVer to theirs — the only recurring involuntary break.
   Mitigate (feature-gate, minimize public dep-typed surface); ADR-0002 review trigger.
-- **R10 (verify in W0-T3):** `cargo-semver-checks` not yet run under the pinned nightly
-  (expected OK — same rustdoc-JSON path as the verified `cargo public-api`).
+- **R10 — RESOLVED:** `cargo-semver-checks 0.48.0` verified working under the pin (196
+  checks pass on `oracledb-protocol` + `oracledb`; no `try_trait_v2` choke). Gate those
+  two **library** crates only — `oracledb-derive` (proc-macro) is skipped by the tool →
+  guard its generated surface with `trybuild`; offline CI uses `--baseline-rustdoc`. W0-T3.
 - Accidental-leak candidates' intended visibility → adjudicated in **W0-T5** (ledger).
-- Unverified flag for review: the absence of a native PyO3↔asupersync async bridge that
-  W0-T4's `nto`-close rationale relies on (bead-author's claim).
+- **Async-bridge flag — RESOLVED:** verified there is **no** native PyO3↔asupersync
+  bridge — asupersync 0.3.4 exposes no foreign-loop/external-waker surface and
+  `pyo3-async-runtimes` supports only tokio/async-std. The shim's PyO3 `experimental-async`
+  + `spawn_blocking` + per-op `block_on` is the correct design (node-oracledb-analogous),
+  so `nto` is rightly won't-fixed (W0-T4).
 
 ---
 
