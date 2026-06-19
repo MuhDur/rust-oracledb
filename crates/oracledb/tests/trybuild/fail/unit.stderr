@@ -1,0 +1,5 @@
+error: #[derive(FromRow)] needs at least one field to map; a unit struct maps no columns
+ --> tests/trybuild/fail/unit.rs:4:8
+  |
+4 | struct Row;
+  |        ^^^

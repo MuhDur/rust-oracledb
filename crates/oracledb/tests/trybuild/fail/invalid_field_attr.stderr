@@ -1,0 +1,5 @@
+error: unsupported #[oracledb(...)] field option; expected `column = "..."` or `rename = "..."`
+ --> tests/trybuild/fail/invalid_field_attr.rs:5:16
+  |
+5 |     #[oracledb(foo = "ID")]
+  |                ^^^^^^^^^^

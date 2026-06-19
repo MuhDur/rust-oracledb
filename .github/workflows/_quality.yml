@@ -29,6 +29,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_PUBLIC_API_VERSION: "0.52.0"
   CARGO_HACK_VERSION: "0.6.45"
+  CARGO_SEMVER_CHECKS_VERSION: "0.48.0"
 
 jobs:
   quality:
@@ -157,6 +158,20 @@ jobs:
       - name: Baseline drift check
         if: ${{ inputs.profile != 'canary' }}
         run: scripts/gen_baseline.sh --check
+
+      - name: Install cargo-semver-checks
+        if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: true
+        run: cargo install cargo-semver-checks --version "$CARGO_SEMVER_CHECKS_VERSION" --locked
+
+      - name: SemVer advisory checks
+        if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo semver-checks check-release -p oracledb-protocol
+          cargo semver-checks check-release -p oracledb
 
       - uses: taiki-e/install-action@6385177bd1684e175e09301c9ee3ae18c14a367e # cargo-deny
 

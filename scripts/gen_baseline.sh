@@ -58,6 +58,21 @@ relpath() {
   esac
 }
 
+workflow_env() {
+  local key="$1"
+  local workflow="$ROOT/.github/workflows/_quality.yml"
+  [ -f "$workflow" ] || return 0
+  awk -F ':' -v key="$key" '
+    $1 ~ "^[[:space:]]*" key "$" {
+      value = $2
+      sub(/^[[:space:]]*/, "", value)
+      gsub(/^"|"$/, "", value)
+      print value
+      exit
+    }
+  ' "$workflow"
+}
+
 need awk
 need cargo
 need git
@@ -100,6 +115,12 @@ EOF
   if [ -f "$ROOT/rust-toolchain.toml" ]; then
     printf 'rust_toolchain_file\t%s\n' "$(tr '\n' ' ' < "$ROOT/rust-toolchain.toml" | awk '{$1=$1; print}')"
   fi
+  for key in CARGO_PUBLIC_API_VERSION CARGO_HACK_VERSION CARGO_SEMVER_CHECKS_VERSION; do
+    value="$(workflow_env "$key")"
+    if [ -n "$value" ]; then
+      printf 'workflow_%s\t%s\n' "$(tr '[:upper:]' '[:lower:]' <<<"$key")" "$value"
+    fi
+  done
 } > "$OUT/version_pins.tsv"
 
 {
@@ -140,6 +161,9 @@ EOF
   printf 'all-features\tcargo check -p oracledb --locked --all-features\n'
   printf 'integration-matrix-check\tcargo hack check -p oracledb --locked --feature-powerset --depth 1 --include-features chrono,uuid,serde_json,rust_decimal,arrow,soda\n'
   printf 'integration-matrix-lib-test\tcargo hack test -p oracledb --locked --lib --feature-powerset --depth 1 --include-features chrono,uuid,serde_json,rust_decimal,arrow,soda\n'
+  printf 'derive-trybuild\tcargo test -p oracledb --test derive_trybuild\n'
+  printf 'semver-advisory-protocol\tcargo semver-checks check-release -p oracledb-protocol\n'
+  printf 'semver-advisory-driver\tcargo semver-checks check-release -p oracledb\n'
   printf 'protocol-stable\tcargo +stable test -p oracledb-protocol\n'
   printf 'fuzz-build\tcargo fuzz build --target x86_64-unknown-linux-gnu (cwd crates/oracledb-protocol)\n'
 } > "$OUT/supported_profiles.tsv"

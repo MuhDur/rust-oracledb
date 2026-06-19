@@ -1,0 +1,5 @@
+error: #[derive(FromRow)] cannot be applied to enums: a query row maps to a fixed set of columns, which an enum's variants do not model
+ --> tests/trybuild/fail/enum.rs:4:1
+  |
+4 | enum Row {
+  | ^^^^

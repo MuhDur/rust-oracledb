@@ -4,5 +4,8 @@ default	cargo check -p oracledb --locked
 all-features	cargo check -p oracledb --locked --all-features
 integration-matrix-check	cargo hack check -p oracledb --locked --feature-powerset --depth 1 --include-features chrono,uuid,serde_json,rust_decimal,arrow,soda
 integration-matrix-lib-test	cargo hack test -p oracledb --locked --lib --feature-powerset --depth 1 --include-features chrono,uuid,serde_json,rust_decimal,arrow,soda
+derive-trybuild	cargo test -p oracledb --test derive_trybuild
+semver-advisory-protocol	cargo semver-checks check-release -p oracledb-protocol
+semver-advisory-driver	cargo semver-checks check-release -p oracledb
 protocol-stable	cargo +stable test -p oracledb-protocol
 fuzz-build	cargo fuzz build --target x86_64-unknown-linux-gnu (cwd crates/oracledb-protocol)

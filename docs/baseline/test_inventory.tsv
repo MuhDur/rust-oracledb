@@ -58,6 +58,7 @@ crates/oracledb/tests/arrow_golden.rs	2
 crates/oracledb/tests/asupersync_spike.rs	1
 crates/oracledb/tests/cancel_then_reuse.rs	1
 crates/oracledb/tests/cassette_record_replay.rs	2
+crates/oracledb/tests/derive_trybuild.rs	1
 crates/oracledb/tests/from_row_derive.rs	10
 crates/oracledb/tests/integration_arrow.rs	1
 crates/oracledb/tests/integration_library.rs	12
@@ -80,5 +81,11 @@ crates/oracledb/tests/prefetch_overlap.rs	4
 crates/oracledb/tests/repro_repeated_named_bind.rs	1
 crates/oracledb/tests/reuse_after_call_timeout.rs	1
 crates/oracledb/tests/tls_handshake.rs	3
+crates/oracledb/tests/trybuild/fail/enum.rs	0
+crates/oracledb/tests/trybuild/fail/invalid_field_attr.rs	0
+crates/oracledb/tests/trybuild/fail/invalid_rename_all.rs	0
+crates/oracledb/tests/trybuild/fail/tuple_column_attr.rs	0
+crates/oracledb/tests/trybuild/fail/unit.rs	0
+crates/oracledb/tests/trybuild/pass/from_row_surface.rs	0
 crates/oracledb/tests/wide_row_multipacket.rs	1
 crates/oracledb/tests/zz_diag_cassette.rs	2

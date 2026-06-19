@@ -1,0 +1,5 @@
+error: #[oracledb(column = ...)] is not supported on a tuple struct field; tuple-struct fields map to columns by position
+ --> tests/trybuild/fail/tuple_column_attr.rs:4:12
+  |
+4 | struct Row(#[oracledb(column = "ID")] i64);
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

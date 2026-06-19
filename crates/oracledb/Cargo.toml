@@ -94,6 +94,8 @@ rustls-pemfile.workspace = true
 # Span-capture subscriber for the feature-gated observability test
 # (tests/observability.rs, compiled only under `--features tracing`).
 tracing-subscriber.workspace = true
+# Compile-time coverage for the generated `#[derive(FromRow)]` surface.
+trybuild = "1.0.116"
 
 [[bench]]
 name = "thin_driver"
