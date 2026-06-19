@@ -1,0 +1,147 @@
+name: Reusable Quality
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        description: "Tier profile: required, canary, soak, or release-qualification."
+        required: true
+        type: string
+      budget:
+        description: "Command budget: required, canary, soak, or release."
+        required: true
+        type: string
+      candidate_sha:
+        description: "Exact candidate commit for release qualification; empty means the caller SHA."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PUBLIC_API_VERSION: "0.52.0"
+
+jobs:
+  quality:
+    name: quality (${{ inputs.profile }}/${{ inputs.budget }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ inputs.profile }}" in
+            required|canary|soak|release-qualification) ;;
+            *) echo "unsupported profile: ${{ inputs.profile }}" >&2; exit 64 ;;
+          esac
+          case "${{ inputs.budget }}" in
+            required|canary|soak|release) ;;
+            *) echo "unsupported budget: ${{ inputs.budget }}" >&2; exit 64 ;;
+          esac
+          if [[ "${{ inputs.profile }}" == "release-qualification" && -z "${{ inputs.candidate_sha }}" ]]; then
+            echo "release-qualification requires candidate_sha" >&2
+            exit 64
+          fi
+
+      - name: Select budget
+        id: budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ inputs.budget }}" in
+            required)
+              echo "fuzz_seconds=0" >> "$GITHUB_OUTPUT"
+              echo "package=false" >> "$GITHUB_OUTPUT"
+              ;;
+            canary)
+              echo "fuzz_seconds=30" >> "$GITHUB_OUTPUT"
+              echo "package=false" >> "$GITHUB_OUTPUT"
+              ;;
+            soak)
+              echo "fuzz_seconds=120" >> "$GITHUB_OUTPUT"
+              echo "package=false" >> "$GITHUB_OUTPUT"
+              ;;
+            release)
+              echo "fuzz_seconds=120" >> "$GITHUB_OUTPUT"
+              echo "package=true" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha != '' && inputs.candidate_sha || github.sha }}
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Show selected target
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          rustc --version
+          cargo --version
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --exclude oracledb-pyshim --no-deps -- -D warnings
+
+      - name: Test workspace
+        run: cargo test --workspace --exclude oracledb-pyshim
+
+      - name: Test docs
+        run: cargo test --workspace --exclude oracledb-pyshim --doc
+
+      - name: Build docs
+        run: cargo doc --workspace --exclude oracledb-pyshim --no-deps
+
+      - name: Validate release metadata
+        run: bash scripts/release_preflight.sh
+
+      - name: Install cargo-public-api
+        if: ${{ inputs.profile != 'canary' }}
+        run: cargo install cargo-public-api --version "$CARGO_PUBLIC_API_VERSION" --locked
+
+      - name: Baseline drift check
+        if: ${{ inputs.profile != 'canary' }}
+        run: scripts/gen_baseline.sh --check
+
+      - uses: taiki-e/install-action@cargo-deny
+
+      - name: Supply-chain checks
+        run: cargo deny check
+
+      - name: Package crates
+        if: ${{ steps.budget.outputs.package == 'true' }}
+        run: cargo package --workspace --exclude oracledb-pyshim --locked
+
+      - uses: taiki-e/install-action@v2
+        if: ${{ steps.budget.outputs.fuzz_seconds != '0' }}
+        with:
+          tool: cargo-fuzz
+
+      - name: Fuzz targets
+        if: ${{ steps.budget.outputs.fuzz_seconds != '0' }}
+        working-directory: crates/oracledb-protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fuzz build --target x86_64-unknown-linux-gnu
+          while IFS= read -r target; do
+            cargo fuzz run "$target" --target x86_64-unknown-linux-gnu -- \
+              -max_total_time="${{ steps.budget.outputs.fuzz_seconds }}" \
+              -rss_limit_mb=2048 \
+              -timeout=10
+          done < <(cargo fuzz list)
