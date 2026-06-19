@@ -58,7 +58,7 @@ becomes disproportionate.
 
 **ADR-0003 — Release evidence is per exact candidate SHA.** Scheduled lanes run the
 default branch and are discovery, not qualification; the 1.0 gate is a manual
-exact-SHA run (§9, §10).
+exact-SHA run (§10 gating summary; W4-T2).
 
 ### Verified baseline counts (reviewed commit; regenerate via W0-T1)
 `crates/oracledb/src/lib.rs`: 159 `pub fn`, 66 `pub async fn`, 19 `execute_query*`
@@ -200,8 +200,12 @@ candidate are collected deep.
   across success/timeout/cancel/error/dropped-future.
 
 ### W1-T3 — Operation-specific public API (replaces the mega-builder)
-- **Verified sprawl to subsume** (async `Connection`, `crates/oracledb/src/lib.rs`):
-  the 13 execute entries `execute_query` (`:2469`), `_collect` (`:2530`),
+- **Verified sprawl to subsume** (async `Connection`, `crates/oracledb/src/lib.rs`) —
+  13 async execute/query entries (= the 10 `execute_query*`-prefixed methods from §1's
+  baseline count, plus the `query`/`query_named`/`query_named_with_timeout` ergonomic
+  sugar; §1's "19" counts the `execute_query*` prefix across *both* surfaces = 10 async
+  + 9 blocking):
+  `execute_query` (`:2469`), `_collect` (`:2530`),
   `_with_timeout` (`:2561`), `_with_binds` (`:2578`), `_with_binds_and_timeout`
   (`:2600`), `query` (`:2629`), `query_named` (`:2659`), `query_named_with_timeout`
   (`:2675`), `_with_bind_rows` (`:2694`), `_with_bind_rows_and_options` (`:2711`, the
@@ -408,7 +412,8 @@ CI; sanitized fixtures with provenance; altered decoder fails.
 
 ### W3-E8 — Multiple multi-pass bug-hunt sweeps
 The `multi-pass-bug-hunting` cycle over protocol/codec/multi-packet/async paths;
-several independent fresh-eyes passes consuming E1–E5 findings; triage by severity.
+several independent fresh-eyes passes consuming the findings from E1–E7 and E9
+(matching the DAG); triage by severity.
 **Acceptance:** ≥2 consecutive full passes with zero new in-scope findings; all
 triaged findings resolved or signed-off; per-pass log committed.
 
@@ -431,15 +436,17 @@ requirement enters scope before RC freeze. (Was v2's W3-E6; demoted per review.)
 
 ### W4-T1 — Cut `1.0.0-rc.1`
 Remove pre-1.0 deprecations + accidental public internals; freeze the intended 1.x
-surface. **Deps:** §6, §7 (E1–E9).
+surface. **Deps:** W0 (CI tiers) ∧ §7 E1–E9 (which transitively require §5 architecture
++ §6 0.3.0 migration) — matches the DAG.
 
 ### W4-T2 — Qualify the exact RC SHA (ADR-0003)
 Run every gate + live/oraclemcp suites + perf comparison + a full canary/soak cycle on
 **one** commit; any code change → a new candidate. Convergence synthesis (E1 green at
 soak budget; E2 manifest coverage + differential 0 divergences; E3 exhaustive/bounded
 clean + E4 loom clean with artifacts; E5 fault matrix green; E6 cassette green;
-E7 matrix + oraclemcp green; E8 ≥2 zero-finding passes; E9 no regression) — all P0/P1
-clear. **Acceptance:** a committed exact-SHA evidence bundle.
+E7 matrix + oraclemcp green; E8 ≥2 zero-finding passes; E9 no regression) — meeting the
+§7 severity policy in full (no open P0/P1, no untriaged finding, P2 fixed-or-signed-
+exception). **Acceptance:** a committed exact-SHA evidence bundle.
 
 ### W4-T3 — Packaged-source & provenance preflight
 Verify all workspace + **inter-crate** versions (close the `release_preflight.sh` gap:
@@ -555,6 +562,8 @@ breaks, not a prohibition. A real, needed break ships with the correct version b
 - R2 API churn → 0.3.0 migration window + deprecations + conformance guard.
 - R3 `cargo public-api` under nightly → YES (rustdoc-JSON verified; raw-JSON fallback).
 - R4 scope → Group-A/#2-#4/#6 + `57z` out (E10 post-1.0).
+- R5 convergence-is-asymptotic → folded into R1 + §7: per-target bounds, severity
+  triage, and "exhaustive only when the finite queue empties" replace open-ended chase.
 - R6/R7 → subsumed by the single private transport seam (W1-T1) + state machine (W1-T2).
 - **R8 — RESOLVED (b):** full external SemVer/support contract; blocking semver-checks
   from the 0.3.0 baseline (advisory during the redesign). §13.
