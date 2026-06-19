@@ -3,7 +3,13 @@ name: Soak
 on:
   schedule:
     - cron: "43 4 * * 0"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force_failure:
+        description: "Deliberately fail the manual soak run to verify reporter deduplication."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -18,3 +24,46 @@ jobs:
     with:
       profile: soak
       budget: soak
+      force_failure: ${{ github.event_name == 'workflow_dispatch' && inputs.force_failure || false }}
+
+  report-soak-failure:
+    name: report soak failure
+    needs: soak
+    if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.soak.result != 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PROFILE: soak
+      JOB_RESULT: ${{ needs.soak.result }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      SHA: ${{ github.sha }}
+      REF_NAME: ${{ github.ref_name }}
+      FINGERPRINT: road-quality-failure:soak:${{ github.ref_name }}
+    steps:
+      - name: Create or update failure issue
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="[CI] soak quality failure on ${REF_NAME}"
+          {
+            printf "<!-- %s -->\n\n" "$FINGERPRINT"
+            printf "Scheduled/manual soak quality evidence failed.\n\n"
+            printf -- "- Workflow: %s\n" "$GITHUB_WORKFLOW"
+            printf -- "- Profile: %s\n" "$PROFILE"
+            printf -- "- Result: %s\n" "$JOB_RESULT"
+            printf -- "- Ref: %s\n" "$REF_NAME"
+            printf -- "- Commit: %s\n" "$SHA"
+            printf -- "- Run: %s\n" "$RUN_URL"
+            printf -- "- Updated: %s\n" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          } > body.md
+          query="repo:${GITHUB_REPOSITORY} is:issue is:open ${FINGERPRINT} in:body"
+          issue_number="$(gh api -X GET search/issues -f q="$query" --jq '.items[0].number // empty')"
+          if [[ -n "$issue_number" ]]; then
+            gh issue edit "$issue_number" --title "$title" --body-file body.md
+          else
+            gh issue create --title "$title" --body-file body.md
+          fi

@@ -34,15 +34,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: nightly-2026-05-11
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
 
       - name: Validate release metadata
         env:
@@ -58,7 +58,7 @@ jobs:
       - run: cargo test --workspace --exclude oracledb-pyshim
       - run: cargo test --workspace --exclude oracledb-pyshim --doc
       - run: cargo doc --workspace --exclude oracledb-pyshim --no-deps
-      - uses: taiki-e/install-action@cargo-deny
+      - uses: taiki-e/install-action@6385177bd1684e175e09301c9ee3ae18c14a367e # cargo-deny
       - run: cargo deny check
       # Validate the published tarballs build cleanly before the matrix/publish.
       # --exclude pyshim: cargo package (unlike publish) does not skip
@@ -77,14 +77,14 @@ jobs:
       CC_x86_64_unknown_linux_musl: musl-gcc
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: nightly-2026-05-11
           targets: x86_64-unknown-linux-musl
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build static smoke binary
         run: cargo build --release -p oracledb --example smoke --target x86_64-unknown-linux-musl
@@ -97,7 +97,7 @@ jobs:
           cp README.md LICENSE-APACHE LICENSE-MIT "$dist/"
           tar czf "$dist.tar.gz" "$dist"
           shasum -a 256 "$dist.tar.gz" > "$dist.tar.gz.sha256"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: oracledb-smoke-musl
           path: |
@@ -116,13 +116,13 @@ jobs:
     environment: crates-io
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: nightly-2026-05-11
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       - name: Publish crates in dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -142,12 +142,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
           merge-multiple: true
       - name: Publish release with checksums
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@7c4723f7a335432393329f8f1c564994ce50185d # v3
         with:
           name: ${{ github.ref_name }}
           files: |

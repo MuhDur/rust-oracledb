@@ -16,6 +16,11 @@ on:
         required: false
         default: ""
         type: string
+      force_failure:
+        description: "Deliberately fail a manual evidence run to verify failure reporting."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -46,6 +51,10 @@ jobs:
             echo "release-qualification requires candidate_sha" >&2
             exit 64
           fi
+          if [[ "${{ inputs.profile }}" == "required" && "${{ inputs.force_failure }}" == "true" ]]; then
+            echo "required CI cannot use force_failure" >&2
+            exit 64
+          fi
 
       - name: Select budget
         id: budget
@@ -71,18 +80,24 @@ jobs:
               ;;
           esac
 
-      - uses: actions/checkout@v6
+      - name: Forced evidence failure
+        if: ${{ inputs.force_failure }}
+        run: |
+          echo "force_failure requested for reporter verification"
+          exit 1
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ inputs.candidate_sha != '' && inputs.candidate_sha || github.sha }}
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
 
       - name: Show selected target
         shell: bash
@@ -118,7 +133,7 @@ jobs:
         if: ${{ inputs.profile != 'canary' }}
         run: scripts/gen_baseline.sh --check
 
-      - uses: taiki-e/install-action@cargo-deny
+      - uses: taiki-e/install-action@6385177bd1684e175e09301c9ee3ae18c14a367e # cargo-deny
 
       - name: Supply-chain checks
         run: cargo deny check
@@ -127,7 +142,7 @@ jobs:
         if: ${{ steps.budget.outputs.package == 'true' }}
         run: cargo package --workspace --exclude oracledb-pyshim --locked
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
         if: ${{ steps.budget.outputs.fuzz_seconds != '0' }}
         with:
           tool: cargo-fuzz

@@ -19,18 +19,19 @@ concurrency:
 
 # This driver requires NIGHTLY Rust (asupersync uses #![feature(try_trait_v2)]),
 # so every compiling job pins the nightly from rust-toolchain.toml via
-# dtolnay/rust-toolchain@master + toolchain input (dated nightlies are not valid
-# action @refs). There is no stable MSRV, hence no MSRV job. The PyO3 harness
-# oracledb-pyshim (publish=false) needs Python + a live DB and is excluded.
+# a pinned dtolnay/rust-toolchain action SHA + toolchain input (dated nightlies
+# are not valid action @refs). There is no stable MSRV, hence no MSRV job. The
+# PyO3 harness oracledb-pyshim (publish=false) needs Python + a live DB and is
+# excluded.
 jobs:
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: nightly-2026-05-11
           components: rustfmt
@@ -40,14 +41,14 @@ jobs:
     name: clippy (-D warnings)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: nightly-2026-05-11
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       # --no-deps, not --all-targets: the workspace enables clippy::unwrap_used,
       # which legitimately fires on test code under --all-targets.
       - run: cargo clippy --workspace --exclude oracledb-pyshim --no-deps -- -D warnings
@@ -56,13 +57,13 @@ jobs:
     name: cargo test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: nightly-2026-05-11
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       - run: cargo test --workspace --exclude oracledb-pyshim
       - run: cargo test --workspace --exclude oracledb-pyshim --doc
 
@@ -70,13 +71,13 @@ jobs:
     name: cargo doc (builds)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: nightly-2026-05-11
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       # Not gated with -D warnings: some doc-comments carry intentional
       # `[bracketed]` text and feature-gated intra-doc links that warn under the
       # default-feature doc build (matching oraclemcp's docs job policy).
@@ -88,10 +89,10 @@ jobs:
     name: cargo deny (advisories, licenses, bans, sources)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@cargo-deny
+      - uses: taiki-e/install-action@6385177bd1684e175e09301c9ee3ae18c14a367e # cargo-deny
       - run: cargo deny check
 
   # Catch workspace version skew / missing-package drift at PR time, not just at
@@ -101,10 +102,10 @@ jobs:
     name: release metadata sync
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: nightly-2026-05-11
       - run: bash scripts/release_preflight.sh
@@ -118,14 +119,14 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: nightly-2026-05-11
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
         with:
           tool: cargo-fuzz
       - run: cargo fuzz build --target x86_64-unknown-linux-gnu
