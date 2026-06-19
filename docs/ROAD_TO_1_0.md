@@ -231,6 +231,13 @@ candidate are collected deep.
   across success/timeout/cancel/error/dropped-future.
 
 ### W1-T3 — Operation-specific public API (replaces the mega-builder)
+- **WORKED DESIGN: [`docs/API_DESIGN.md`](API_DESIGN.md)** — the full spec (four families
+  `query`/`execute`/`execute_many`/`register_query` + `query_one`/`query_opt`/`query_all`,
+  `Params`/`Query`/`Execute`/`Batch`/`Registration` + `Rows`/`ExecuteOutcome`/`BatchOutcome`,
+  the retained low-level surface, the `BlockingConnection` mirror, examples, and the
+  old→new "nothing lost" map across all 24 capability groups). Built from the verified
+  capability inventory + the Rust-DB precedent survey. This bullet's enumeration is the
+  summary; the doc is authoritative.
 - **Verified sprawl to subsume** (async `Connection`, `crates/oracledb/src/lib.rs`) —
   13 async execute/query entries (= the 10 `execute_query*`-prefixed methods from §1's
   baseline count, plus the `query`/`query_named`/`query_named_with_timeout` ergonomic
@@ -652,6 +659,9 @@ breaks, not a prohibition. A real, needed break ships with the correct version b
 ---
 
 ## 15. Next steps (planning-workflow)
-R8 is resolved (§13 = full contract). 1. Optional further review round to
-steady-state. 2. Convert to beads with the DAG intact (`W{n}-T{m}`/`W3-E*` → ids +
-`br dep` edges). 3. Implement Wave 0 → Wave 4; tag 1.0 at W4-T4.
+**Done this round:** R8 resolved (§13); R10 + the async-bridge flag verified and
+resolved (§14); the W1-T3 public API designed in full ([`docs/API_DESIGN.md`](API_DESIGN.md)).
+The plan is decision-complete and the highest-stakes design (the 1.0 API contract) is
+specified. Remaining: 1. (optional) a review round on `API_DESIGN.md` itself. 2. Convert
+the plan to beads with the DAG intact (`W{n}-T{m}`/`W3-E*` → ids + `br dep` edges).
+3. Implement Wave 0 → Wave 4; tag 1.0 at W4-T4.
