@@ -93,12 +93,12 @@ crates. 0 `#[non_exhaustive]`. These are *baseline notes*, not acceptance criter
 Reordered per the review so deep evidence is collected only *after* the API + private
 core stabilize (otherwise fuzz/property/DPOR targets bind to types about to change).
 
-- **Wave 0 — Evidence & CI:** baseline inventories, tiered reusable CI, feature/
-  SemVer/stable lanes, ADRs. (§4)
+- **Wave 0 — Evidence & CI:** baseline inventories + ADRs, tiered reusable CI +
+  toolchain runbook, feature/SemVer/stable lanes, the API-surface ledger. (§4)
 - **Wave 1 — Architecture:** operation-specific public API; type-evolution policy;
   private transport/connector + `ConnectionCore`; session-recovery state machine;
-  `ProtocolLimits`; pure pool model; typed errors/disposition + redacted observability.
-  (§5)
+  `ProtocolLimits`; pure pool model; typed errors/disposition + redacted observability;
+  async↔blocking symmetry; module/re-export coherence. (§5)
 - **Wave 2 — Migration release:** publish **0.3.0**; migrate pyshim + oraclemcp;
   remove deprecations before RC. (§6)
 - **Wave 3 — Qualification:** property, fuzz (manifest), DPOR (on the seam), loom (on
@@ -115,12 +115,15 @@ candidate are collected deep.
 
 ## 4. Wave 0 — Evidence & CI
 
-### W0-T1 — Pin baseline + generate inventories
+### W0-T1 — Pin baseline + generate inventories + record ADRs
 - **What:** record the source commit; generate `docs/baseline/` artifacts — public-API
   listing (per supported profile), enabled-feature matrix, fuzz-target manifest dump,
   test inventory, and the version/pin set. All later counts derive from these, not
-  from prose.
-- **Deps:** none. **Acceptance:** `docs/baseline/*` committed + regenerable by a script.
+  from prose. Also write the three decisions in §1 as files under `docs/adr/`
+  (`0001-nightly-asupersync.md`, `0002-semver-contract.md`, `0003-exact-sha-evidence.md`),
+  each with its review triggers — the plan references `docs/adr/` but nothing creates it.
+- **Deps:** none. **Acceptance:** `docs/baseline/*` and `docs/adr/000{1,2,3}-*.md`
+  committed; the baseline is regenerable by a script.
 
 ### W0-T2 — Tiered, reusable CI (replaces the single nightly workflow)
 - **What:** a reusable `_quality.yml` (`workflow_call`, inputs: profile, budget,
@@ -137,9 +140,15 @@ candidate are collected deep.
   **one fingerprint-deduplicated** issue. Default `permissions: contents: read`; grant
   `issues: write`/attestation only to the reporter/release jobs; pin third-party
   actions to full SHAs; set `timeout-minutes` + `concurrency`. Avoid cron at minute 0.
+- **Companion runbook (`docs/TOOLCHAIN.md`):** the floating-nightly canary *detects* a
+  toolchain break; this doc is the *response* — why nightly (asupersync/`try_trait_v2`,
+  build-time-only), how the pin is chosen, and the exact re-pin steps when the canary
+  goes red. Link it from `README.md` + the `oracledb` skill. (Restores a v2 deliverable
+  the v3 restructure dropped.)
 - **Deps:** W0-T1. **Acceptance:** the four tiers run the same commands at different
   budgets; a forced evidence failure opens exactly one issue; required CI unchanged in
-  scope; a scheduled red job does **not** silently pass.
+  scope; a scheduled red job does **not** silently pass; `docs/TOOLCHAIN.md` lets a
+  fresh agent re-pin from it alone.
 
 ### W0-T3 — Feature-profile + SemVer + stable-protocol lanes (decision (b))
 - **What:** define supported profiles in `docs/SUPPORT.md` (minimal/default/all +
@@ -167,6 +176,22 @@ candidate are collected deep.
   `spawn_blocking` over native futures; `publish=false`; zero release impact). **Not a
   1.0 gate** — PM cleanup is tracked outside the release DAG.
 - **Deps:** none. **Acceptance:** `nto` closed; recorded as non-evidence.
+
+### W0-T5 — API-surface ledger + accidental-leak adjudication
+- **What:** from W0-T1's public-API listing, produce `docs/API_LEDGER.md` — every `pub`
+  item × disposition (keep / `pub(crate)` / rename / consolidate / deprecate) + a
+  one-line reason. **Adjudicate the accidental-leak candidates** flagged by research:
+  `ObsSpanGuard` (`obs.rs:106`), `OracleReadHalf`/`OracleWriteHalf` (`transport.rs:40/58`),
+  `PoolEngine<B>` (`pool.rs:164`), `DirectPathStream`/`BatchLoadState`/`DirectPathPieceBuffer`
+  (`dpl.rs:722/792/391`), `ExecutemanyManager`/`…Error` (`cursor_logic.rs:45/15`) — each
+  kept-public or made `pub(crate)` with a recorded reason (several may be deliberate).
+- **Why:** the ledger is the driving artifact of the API audit (D2) — Wave 1 *applies*
+  its dispositions (W1-T1 already privatizes the transport halves; W1-T3 consolidates;
+  W1-T4 evolves types; W1-T9 tidies modules). Restores a deliverable the v3 restructure
+  dropped.
+- **Deps:** W0-T1. **Skill:** `oracledb` (intended-surface ref). **Acceptance:** ledger
+  committed; human signs off on removals/renames; every leak candidate has a recorded
+  keep/`pub(crate)` decision.
 
 ---
 
@@ -293,6 +318,32 @@ candidate are collected deep.
   model; it also keeps network calls out of the critical section (perf).
 - **Deps:** none. **Skill:** `multi-pass-bug-hunting`. **Acceptance:** pure model with
   deterministic tests over the full lifecycle; counts derived; effects event-driven.
+
+### W1-T8 — async↔blocking symmetry sweep
+- **What:** make the two public surfaces mirror exactly. **Verified genuine I/O gaps to
+  fill:** `BlockingConnection::cancel` is missing (async `:4361`; only
+  `CancelHandle::cancel` `:4933` exists); CQN `recv_notification`/`notify_register`
+  (`:1816/1787`) are async-only; `free_temp_lobs` (`:3910`) and `trim_lob` (`:3873`)
+  have only `*_with_timeout` blocking twins; `execute_query_with_bind_rows_and_options`
+  (`:2711`, no-timeout) is async-only. **Deliberately async-only (document, don't wrap):**
+  the zero-copy `_ref` fetch family + direct-path (borrow lifetimes don't cross
+  `block_on`). The v2 "make `drain_cancel_response` public" reversed-gap is **mooted by
+  W1-T2** (drain stays private on both surfaces). Standardize naming
+  `x`/`x_with_timeout`/`x_named`.
+- **Why:** asymmetry is a silent papercut and contradicts W1-T3's "`BlockingConnection`
+  mirrors 1:1"; this is the task that verifies that claim. Restores v2's symmetry sweep.
+- **Deps:** W1-T3 (consolidation sets the final method set), W1-T2 (cancel semantics).
+  **Skill:** `oracledb`. **Acceptance:** a generated table shows 1:1 async↔blocking
+  coverage or an explicit documented exception per method.
+
+### W1-T9 — Module / re-export coherence
+- **What:** review the module tree and the `oracledb::protocol` re-export story; ensure
+  each public type is exported from one obvious path (no duplicate paths); tidy/define a
+  `prelude` if warranted. Apply the W0-T5 ledger's module-placement dispositions.
+- **Why:** a coherent import story is part of the 1.0 contract and ages badly if left
+  organic. Restores v2's module-coherence task.
+- **Deps:** W0-T5, W1-T3. **Skill:** `code-simplifier`. **Acceptance:** doc-tests/examples
+  compile against the tidied paths; no type reachable via two public paths.
 
 ---
 
@@ -477,12 +528,14 @@ criteria; the `cargo public-api` snapshot becomes the 1.x baseline.
 ## 9. Dependency graph (DAG)
 
 ```
-W0-T1 ─► W0-T2, W0-T3 ;  W0-T4 (independent, off-gate)
+W0-T1 ─► W0-T2, W0-T3, W0-T5 ;  W0-T4 (independent, off-gate)
 
+W0-T5 ─► W1-T1, W1-T3, W1-T4, W1-T9   (ledger dispositions feed the audit work)
 W1-T1 ─► W1-T2 ─► W1-T3 ─► W1-T4
 W1-T1 ─► W1-T5 ;  W1-T2 ─► W1-T6 ;  W1-T7 (independent)
+W1-T3 + W1-T2 ─► W1-T8 ;  (W0-T5 + W1-T3) ─► W1-T9
 
-(all §5) ─► W2-T1 (0.3.0 migration)
+(all §5 — W1-T1..T9) ─► W2-T1 (0.3.0 migration)
 
 W2-T1 ─► W3-E1, W3-E2, W3-E5, W3-E6, W3-E7, W3-E9
 W1-T1+W1-T2 ─► W3-E3 ;  W1-T7 ─► W3-E4
@@ -505,10 +558,11 @@ No cycles; every task feeds another or the release.
 
 ## 11. Skills are guidance, not gates (D3)
 We still leverage every applicable skill — `asupersync-mega-skill` (W1-T1/T2, W3-E3),
-`multi-pass-bug-hunting` (W3-E8 + triage), `code-simplifier` (W1-T3), `oracledb`
-(API/behavior), `idea-wizard` (post-1.0 W3-E10), `testing-conformance-harnesses`
-(W3-E6/E7) — but acceptance criteria name **observable behavior/artifacts**, never
-"which skill was used." Skills live in contributor/issue metadata.
+`multi-pass-bug-hunting` (W3-E8 + triage), `code-simplifier` (W1-T3, W1-T9), `oracledb`
+(W0-T5 ledger, W1-T8 symmetry, API/behavior), `idea-wizard` (post-1.0 W3-E10),
+`testing-conformance-harnesses` (W3-E6/E7) — but acceptance criteria name **observable
+behavior/artifacts**, never "which skill was used." Skills live in contributor/issue
+metadata.
 
 ---
 
@@ -581,8 +635,9 @@ breaks, not a prohibition. A real, needed break ships with the correct version b
   Mitigate (feature-gate, minimize public dep-typed surface); ADR-0002 review trigger.
 - **R10 (verify in W0-T3):** `cargo-semver-checks` not yet run under the pinned nightly
   (expected OK — same rustdoc-JSON path as the verified `cargo public-api`).
-- Unverified flags for W0-T1/review: accidental-leak candidates' intended visibility;
-  absence of a native PyO3↔asupersync async bridge (W0-T4 rationale).
+- Accidental-leak candidates' intended visibility → adjudicated in **W0-T5** (ledger).
+- Unverified flag for review: the absence of a native PyO3↔asupersync async bridge that
+  W0-T4's `nto`-close rationale relies on (bead-author's claim).
 
 ---
 
