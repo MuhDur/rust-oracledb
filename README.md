@@ -397,7 +397,8 @@ across thousands of generated values. See [docs/FUZZING.md](docs/FUZZING.md).
 
 `rust-oracledb` requires **nightly Rust** (its async runtime, asupersync, is built
 with `#![feature(try_trait_v2)]`) and is published on crates.io as
-[`oracledb`](https://crates.io/crates/oracledb):
+[`oracledb`](https://crates.io/crates/oracledb). The active pin and re-pin
+procedure are documented in [docs/TOOLCHAIN.md](docs/TOOLCHAIN.md):
 
 ```bash
 cargo add oracledb

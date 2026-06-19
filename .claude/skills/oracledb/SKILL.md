@@ -31,8 +31,9 @@ important decision:
 > **Requires nightly Rust.** The async runtime (`asupersync`) is built with
 > `#![feature(try_trait_v2)]`, so `oracledb` and anything depending on it only
 > compile on a nightly toolchain — a stable build fails with `E0554` before
-> reaching this crate's code. Pin it with a `rust-toolchain.toml`
-> (`channel = "nightly"`). There is no stable MSRV.
+> reaching this crate's code. This repo currently pins `nightly-2026-05-11`;
+> see [docs/TOOLCHAIN.md](../../../docs/TOOLCHAIN.md) before moving that pin.
+> There is no stable MSRV.
 
 `Cargo.toml`:
 
