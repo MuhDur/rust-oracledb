@@ -135,16 +135,11 @@ EOF
 
 {
   printf 'profile\tcommand\n'
-  printf 'minimal\tcargo check -p oracledb --no-default-features\n'
-  printf 'default\tcargo check -p oracledb\n'
-  printf 'all-features\tcargo check --workspace --all-features\n'
-  printf 'chrono\tcargo check -p oracledb --features chrono\n'
-  printf 'uuid\tcargo check -p oracledb --features uuid\n'
-  printf 'serde_json\tcargo check -p oracledb --features serde_json\n'
-  printf 'rust_decimal\tcargo check -p oracledb --features rust_decimal\n'
-  printf 'arrow\tcargo check -p oracledb --features arrow\n'
-  printf 'soda\tcargo check -p oracledb --features soda\n'
-  printf 'tracing\tcargo check -p oracledb --features tracing\n'
+  printf 'minimal\tcargo check -p oracledb --locked --no-default-features\n'
+  printf 'default\tcargo check -p oracledb --locked\n'
+  printf 'all-features\tcargo check -p oracledb --locked --all-features\n'
+  printf 'integration-matrix-check\tcargo hack check -p oracledb --locked --feature-powerset --depth 1 --include-features chrono,uuid,serde_json,rust_decimal,arrow,soda\n'
+  printf 'integration-matrix-lib-test\tcargo hack test -p oracledb --locked --lib --feature-powerset --depth 1 --include-features chrono,uuid,serde_json,rust_decimal,arrow,soda\n'
   printf 'protocol-stable\tcargo +stable test -p oracledb-protocol\n'
   printf 'fuzz-build\tcargo fuzz build --target x86_64-unknown-linux-gnu (cwd crates/oracledb-protocol)\n'
 } > "$OUT/supported_profiles.tsv"

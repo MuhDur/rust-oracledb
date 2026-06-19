@@ -28,6 +28,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_PUBLIC_API_VERSION: "0.52.0"
+  CARGO_HACK_VERSION: "0.6.45"
 
 jobs:
   quality:
@@ -121,6 +122,26 @@ jobs:
 
       - name: Build docs
         run: cargo doc --workspace --exclude oracledb-pyshim --no-deps
+
+      - name: Install cargo-hack
+        if: ${{ inputs.profile != 'canary' }}
+        run: cargo install cargo-hack --version "$CARGO_HACK_VERSION" --locked
+
+      - name: Feature profile matrix
+        if: ${{ inputs.profile != 'canary' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          integration_features=chrono,uuid,serde_json,rust_decimal,arrow,soda
+          cargo check -p oracledb --locked --no-default-features
+          cargo check -p oracledb --locked
+          cargo check -p oracledb --locked --all-features
+          cargo hack check -p oracledb --locked \
+            --feature-powerset --depth 1 \
+            --include-features "$integration_features"
+          cargo hack test -p oracledb --locked --lib \
+            --feature-powerset --depth 1 \
+            --include-features "$integration_features"
 
       - name: Validate release metadata
         run: bash scripts/release_preflight.sh

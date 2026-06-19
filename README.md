@@ -506,7 +506,8 @@ let emps: Vec<Emp> = result.rows_as::<Emp>()?;
 ### Feature flags
 
 `default = ["derive"]`. The `derive` proc-macro is build-time-only, so the
-default runtime build pulls in nothing extra.
+default runtime build pulls in nothing extra. The supported feature-profile
+matrix is defined in [docs/SUPPORT.md](docs/SUPPORT.md).
 
 | feature | default | what it adds |
 |---|:---:|---|
