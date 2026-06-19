@@ -60,7 +60,7 @@ jobs:
           query="repo:${GITHUB_REPOSITORY} is:issue is:open ${FINGERPRINT} in:body"
           issue_number="$(gh api -X GET search/issues -f q="$query" --jq '.items[0].number // empty')"
           if [[ -n "$issue_number" ]]; then
-            gh issue edit "$issue_number" --title "$title" --body-file body.md
+            gh issue edit "$issue_number" --repo "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
           else
-            gh issue create --title "$title" --body-file body.md
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
           fi
