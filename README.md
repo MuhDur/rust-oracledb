@@ -650,6 +650,6 @@ at your option.
 
 ### Work with me
 
-I bring **AI into production in the enterprise** — Oracle change-impact audits, systems modernization, and AI on your data, vendor-neutral (cloud or self-hosted). Building something hard in Oracle / Rust / AI? Reach out.
+I bring **AI into production in the enterprise** — databases at scale, systems modernization, and AI in production, vendor-neutral (cloud or self-hosted). Building something hard in Oracle / Rust / AI? Reach out.
 
 → **[durakovic.ai](https://durakovic.ai)** · hello@durakovic.ai
