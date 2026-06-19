@@ -125,6 +125,10 @@ jobs:
       - name: Validate release metadata
         run: bash scripts/release_preflight.sh
 
+      - name: Install baseline tools
+        if: ${{ inputs.profile != 'canary' }}
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Install cargo-public-api
         if: ${{ inputs.profile != 'canary' }}
         run: cargo install cargo-public-api --version "$CARGO_PUBLIC_API_VERSION" --locked
