@@ -1,16 +1,21 @@
 # rust-oracledb — Road to 1.0
 
-> **Status:** planning (v3 — GPT-Pro review round integrated). Authored via
+> **Status:** planning (v3.1 — GPT-Pro review integrated; R8 resolved to the full
+> external contract; internal-consistency pass done). Authored via
 > `/planning-workflow`. Repository facts/`file:line` describe the **reviewed
 > baseline**; W0-T1 pins the source commit and generates inventories under
 > `docs/baseline/` so a future contributor can tell whether a count changed
 > because the code changed or the plan was stale.
 > **North Star:** ship a **correctness-hardened, diagnosable, resource-bounded**
-> thin-mode Oracle driver that is safe for **oraclemcp** (its primary consumer,
-> shipped as a binary) and carries **explicit SemVer + support discipline** so
-> upgrades are predictable. 1.0 is a maturity *and* compatibility milestone — but
-> the audience is oraclemcp-the-engine, not a broad external-crate ecosystem
-> (see ADR-0001 / the open question in §13).
+> thin-mode Oracle driver. **oraclemcp** is the primary consumer (shipped as a
+> binary), but the crate is **publicly usable and carries a full SemVer + support
+> contract** (ADR-0002, decision **(b)**, §13): from **0.3.0** onward a blocking
+> `cargo-semver-checks` gate prevents *unintended* breaking changes; intentional
+> breaks are allowed but require the correct version bump + a baseline update.
+> 1.0 is a maturity *and* compatibility milestone. A driver is a bounded domain —
+> once parity + extras land and the API is designed deliberately (pre-0.3.0),
+> evolution is overwhelmingly **additive** (new types via `#[non_exhaustive]` +
+> `as_*` accessors, new methods), which the blocking gate fully allows.
 
 Self-contained: a fresh agent can implement any task without prior context. Tasks
 name dependencies, rationale, and **acceptance in terms of observable behavior /
@@ -32,14 +37,24 @@ LabRuntime+DPOR reach a bug class the single-threaded python suite cannot).
 appears; the pin blocks a security update; external Rust-crate adoption becomes a
 product goal.
 
-**ADR-0002 — 1.0 is a SemVer commitment, reached via a 0.3.0 migration + an RC.**
-Because `#[non_exhaustive]`, field-privatization, and method removal are themselves
-breaking, the breaking *cleanup* happens in a **0.3.0 migration release**; all
-first-party consumers (pyshim, oraclemcp) migrate; obsolete shims/accidental
-internals are removed before **1.0.0-rc.1**; the surface shipped in 1.0.0 is
-supported through 1.x. *Open question for the human (§13):* how strong is the
-external-consumer promise vs. "oraclemcp-engine only" — this calibrates WS0-T3's
-SemVer-CI strictness.
+**ADR-0002 — Full external SemVer + support contract; blocking semver-checks from
+0.3.0 (decision (b)).** Because `#[non_exhaustive]`, field-privatization, and method
+removal are themselves breaking, the breaking *cleanup* happens in a **0.3.0
+migration release**; all first-party consumers (pyshim, oraclemcp) migrate.
+**Sequencing (load-bearing — getting it wrong would block the redesign):**
+`cargo-semver-checks` runs **advisory** during 0.3.0 development (so the intended
+API redesign is *not* blocked); the moment **0.3.0 ships, its public API becomes
+the baseline and the gate flips to BLOCKING** for every subsequent release. The
+gate guards against *unintended* breaks only — an *intentional* break is fine but
+must take the correct bump and update the baseline. **0.x SemVer semantics (what
+the gate enforces):** a breaking change is a **minor** bump (0.3.x → 0.4.0); patch
+releases (0.3.1) must be non-breaking — so a "must-break" change is 0.4.0, not
+0.3.1, and a breaking 0.3.1 is exactly the error the gate catches. At 1.0 the same
+machinery continues (1.x additive; 2.0 for a real break). Obsolete shims /
+accidental internals are removed before **1.0.0-rc.1**. *Review trigger:* revisit
+strictness only if the maintenance cost of the typed dependency bridges (chrono/
+uuid/rust_decimal/serde_json — the one recurring involuntary break source, §13)
+becomes disproportionate.
 
 **ADR-0003 — Release evidence is per exact candidate SHA.** Scheduled lanes run the
 default branch and are discovery, not qualification; the 1.0 gate is a manual
@@ -56,7 +71,7 @@ crates. 0 `#[non_exhaustive]`. These are *baseline notes*, not acceptance criter
 
 - `oracledb-protocol` (wire/codecs): zero asupersync refs, no nightly features,
   `#![forbid(unsafe_code)]` (`oracledb-protocol/src/lib.rs:1`) — sans-io,
-  stable-compatible (WS0-T3 adds a stable-compiler lane so this advantage can't rot).
+  stable-compatible (W0-T3 adds a stable-compiler lane so this advantage can't rot).
 - `oracledb` (driver): small asupersync surface (`Cx`/`io`/`net::TcpStream`/
   `tls::TlsStream`/`sync::Mutex`/`runtime`) threaded through 109 `async fn`s; TLS is
   sans-io rustls; asupersync vendored at **0.3.4** (`Cargo.lock:211`).
@@ -125,18 +140,26 @@ candidate are collected deep.
   budgets; a forced evidence failure opens exactly one issue; required CI unchanged in
   scope; a scheduled red job does **not** silently pass.
 
-### W0-T3 — Feature-profile + SemVer + stable-protocol lanes
+### W0-T3 — Feature-profile + SemVer + stable-protocol lanes (decision (b))
 - **What:** define supported profiles in `docs/SUPPORT.md` (minimal/default/all +
-  optional-integration combos oraclemcp uses); exercise them with `cargo hack` (or a
-  generated matrix); run `cargo-semver-checks` vs the latest compatible published
-  baseline; keep `cargo public-api` snapshots per supported profile (verified to run
-  under the pin via raw rustdoc-JSON fallback); build+test **`oracledb-protocol` on
-  current stable** so its stable-compatibility doesn't silently rot.
-- **Scope note (ADR-0002 open question):** strictness of the external SemVer promise
-  is calibrated by §13; at minimum this protects oraclemcp upgrades.
-- **Deps:** W0-T1; pairs with W1 API work. **Acceptance:** supported profiles compile/
-  test; an unsupported combo is documented, not implied by `--all-features`; protocol
-  crate green on stable; semver-checks wired (advisory until §13 is decided).
+  each optional-integration combo — chrono/uuid/serde_json/rust_decimal/arrow/soda);
+  exercise the **full** supported matrix with `cargo hack`; install + wire
+  `cargo-semver-checks` against the latest published baseline; keep `cargo public-api`
+  snapshots per supported profile; build+test **`oracledb-protocol` on current stable**
+  so its stable-compatibility can't silently rot.
+- **Verify (the one unproven mechanic):** confirm `cargo-semver-checks` runs under the
+  pinned nightly. It uses the same rustdoc-JSON path as `cargo public-api`, which the
+  grounding research already confirmed works under `nightly-2026-05-11`, so this is expected to
+  pass — but it is the one tool not yet run, so verify it explicitly here and record
+  the command + result in `docs/baseline/`.
+- **Advisory-now / blocking-at-0.3.0 (ADR-0002):** semver-checks runs **advisory**
+  through 0.3.0 development so it does not block the intended API redesign (W1-T3);
+  it is **flipped to blocking at the 0.3.0 release** (W2-T1), with 0.3.0 as the
+  baseline, and stays blocking thereafter.
+- **Deps:** W0-T1; pairs with W1 API work. **Acceptance:** the full supported matrix
+  compiles/tests; an unsupported combo is documented, not implied by `--all-features`;
+  protocol crate green on stable; `cargo-semver-checks` verified runnable under the pin
+  and wired advisory.
 
 ### W0-T4 — Close `nto` (off the release gate)
 - **What:** close the sole in_progress bead with the ADR-0001 rationale (shim async =
@@ -277,8 +300,14 @@ candidate are collected deep.
   families (hand edits, file-by-file per AGENTS.md); keep `harness/run.sh diff` green.
 - **Why:** ADR-0002 — give the real downstream one published release to exercise; do
   the breaking cleanup here, not at/after 1.0.
+- **Flip the SemVer gate (ADR-0002):** on the 0.3.0 release, snapshot the published
+  public API (per supported profile) as the `cargo-semver-checks` **baseline** and
+  flip the gate from advisory to **blocking** in required CI. From 0.3.1 onward an
+  unintended break fails CI; an intentional break must take a minor bump (0.4.0) and
+  refresh the baseline in the same release.
 - **Deps:** all of §5. **Acceptance:** 0.3.0 published; pyshim + oraclemcp on the new
-  API; conformance suite green; deprecations scheduled for removal pre-RC.
+  API; conformance suite green; deprecations scheduled for removal pre-RC; semver-checks
+  baseline committed and the gate is blocking on `main`.
 
 ---
 
@@ -490,22 +519,33 @@ We still leverage every applicable skill — `asupersync-mega-skill` (W1-T1/T2, 
 
 ---
 
-## 13. Open question for the human (the one place I diverged from GPT Pro)
-GPT Pro recommends treating 1.0 as a **full external SemVer/support contract** (broad
-feature-profile matrix, `cargo-semver-checks` vs external baselines, build-oraclemcp-
-from-registry, SBOM/provenance for external supply-chain). That partially conflicts
-with your **D1 / ADR-0001** (oracledb is *oraclemcp's engine*, no external-crate
-audience). I integrated the **cheap, universally-good hygiene** (0.3.0 migration → RC
-→ exact-SHA qualification; do `#[non_exhaustive]`/removals before 1.0; `.crate`
-packaging tests; the inter-crate-pin preflight) and kept your engine framing, but left
-the **external-promise strength** as a decision:
-- **(a) Engine-only (lean):** SemVer-CI advisory; support matrix + provenance scoped
-  to what oraclemcp needs; skip the broad external feature matrix.
-- **(b) Full external contract (GPT-Pro):** make `cargo-semver-checks` blocking, full
-  profile matrix, SBOM/attestations, registry-consumer build — treat crates.io
-  consumers as first-class.
-This calibrates W0-T3, W3-E7, W4-T3. **Recommend (a)** given ADR-0001; switch to (b)
-only if external adoption becomes a goal.
+## 13. External-contract decision — RESOLVED: (b) full contract
+**Decided (R8 = b).** Reasoning: a driver is a *bounded* domain — once parity +
+extras land and the API is designed deliberately pre-0.3.0, the public surface
+genuinely stabilizes and future growth is overwhelmingly **additive** (new Oracle
+types via `#[non_exhaustive]` value enums + `as_*` accessors; new methods; new
+protocol capabilities). Oracle is backward-compatible, so the TTC/TNS protocol never
+forces an API break. Blocking `cargo-semver-checks` therefore does **not** impede
+evolution — it only blocks *unintended* breaks; additive growth passes freely. So
+the lock fits this domain and is worth doing.
+
+**What (b) commits us to** (calibrates W0-T3, W3-E7, W4-T3):
+- Blocking `cargo-semver-checks` from the 0.3.0 baseline onward (advisory during the
+  0.3.0 redesign; see ADR-0002 sequencing).
+- The full supported feature-profile matrix in CI (`docs/SUPPORT.md`).
+- SBOM + build provenance/attestations + build-a-clean-consumer-from-registry at 1.0.
+- The live support matrix (W3-E7) covers every promised server/TLS/charset config.
+
+**The one honest ongoing cost** (the only recurring *involuntary* break source): the
+typed dependency bridges (`chrono`/`uuid`/`rust_decimal`/`serde_json`) re-export those
+crates' types, so a *their*-major bump is a break in *our* API. Mitigation: keep them
+feature-gated, minimize public dep-typed surface, and treat a dep-major bump as a
+deliberate, baseline-updating bump. This is the ADR-0002 review trigger, not a reason
+to weaken the contract.
+
+**Intentional breaks remain allowed** — the gate is a safety net against *accidental*
+breaks, not a prohibition. A real, needed break ships with the correct version bump
+(0.x: minor; ≥1.0: major) and a baseline refresh in the same release.
 
 ---
 
@@ -516,12 +556,19 @@ only if external adoption becomes a goal.
 - R3 `cargo public-api` under nightly → YES (rustdoc-JSON verified; raw-JSON fallback).
 - R4 scope → Group-A/#2-#4/#6 + `57z` out (E10 post-1.0).
 - R6/R7 → subsumed by the single private transport seam (W1-T1) + state machine (W1-T2).
-- **R8 (new)** — external-contract strength unresolved → §13 decision; default (a).
+- **R8 — RESOLVED (b):** full external SemVer/support contract; blocking semver-checks
+  from the 0.3.0 baseline (advisory during the redesign). §13.
+- **R9 (new, the residual real risk):** typed dependency bridges (chrono/uuid/decimal/
+  serde_json) couple our SemVer to theirs — the only recurring involuntary break.
+  Mitigate (feature-gate, minimize public dep-typed surface); ADR-0002 review trigger.
+- **R10 (verify in W0-T3):** `cargo-semver-checks` not yet run under the pinned nightly
+  (expected OK — same rustdoc-JSON path as the verified `cargo public-api`).
 - Unverified flags for W0-T1/review: accidental-leak candidates' intended visibility;
   absence of a native PyO3↔asupersync async bridge (W0-T4 rationale).
 
 ---
 
 ## 15. Next steps (planning-workflow)
-1. Resolve §13 (R8). 2. Optional further review round to steady-state. 3. Convert to
-beads with the DAG intact. 4. Implement Wave 0 → Wave 4; tag 1.0 at W4-T4.
+R8 is resolved (§13 = full contract). 1. Optional further review round to
+steady-state. 2. Convert to beads with the DAG intact (`W{n}-T{m}`/`W3-E*` → ids +
+`br dep` edges). 3. Implement Wave 0 → Wave 4; tag 1.0 at W4-T4.
