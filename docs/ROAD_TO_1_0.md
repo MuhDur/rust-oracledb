@@ -20,7 +20,8 @@
 Self-contained: a fresh agent can implement any task without prior context. Tasks
 name dependencies, rationale, and **acceptance in terms of observable behavior /
 artifacts** (implementation techniques and agent skills are *guidance*, §11, not
-gates). Converts to a beads graph.
+gates). Converts to a beads graph. (Provenance notes like "review change N" / "review
+N" cite item N of the integrated GPT-Pro review round; they are rationale, not tasks.)
 
 ---
 
@@ -214,8 +215,9 @@ candidate are collected deep.
   (`:1869`); + `BlockingConnection` twins (`:5296`–`:5525`). The fetch/paging family
   (`fetch_rows*` `:3053…`, `for_each_row_ref` `:3281`, `define_and_fetch…` `:3377`,
   `fetch_cursor` `:3418`) **stays** (distinct low-level capability).
-- **Design (review change 5 — four operation families over the private core, NOT one
-  mega-builder):**
+- **Design (review change 5 — four operation families over a private `OperationCore`
+  dispatch layer atop W1-T1's `ConnectionCore` (the two private layers in §12's
+  diagram), NOT one mega-builder):**
   ```rust
   pub async fn query(&mut self, cx: &Cx, req: Query<'_>) -> Result<Rows>;
   pub async fn execute(&mut self, cx: &Cx, req: Execute<'_>) -> Result<ExecuteResult>;
@@ -321,7 +323,10 @@ Evidence rules (review change 11): fixed seeds in required CI + rotating seeds i
 canary/soak; record tool versions, bounds (CPU/time/state), corpus hashes, target
 manifests; severity triage (no open P0/P1, no untriaged finding; P2 needs fix or
 signed exception); call a model **exhaustive only** when its finite queue empties
-under recorded bounds — else "bounded clean." All evidence for one candidate SHA.
+under recorded bounds — else "bounded clean." Wave-3 runs during development are
+**discovery** (on moving commits); the single **qualifying** run that must be green on
+one exact SHA is the W4-T2 release-qualification on the frozen RC (ADR-0003) — Wave 3
+builds the suites, W4-T2 certifies them together.
 
 ### W3-E1 — Property round-trips: the `FromSql`/`ToSql` bridge
 Codec-layer properties already exist (`thin/proptests.rs`, `tests/codec_properties.rs`,
@@ -405,10 +410,11 @@ CI; sanitized fixtures with provenance; altered decoder fails.
 - **Live matrix:** conformance (`harness/run.sh diff`) across the promised
   configurations, with reviewed normalization/allowlist rules + recorded reference
   versions.
-- **oraclemcp contract suite:** the exact candidate SHA, covering query/binds/DML/
-  batch/LOB/pool/cancel-reuse/typed-errors — because the North Star names oraclemcp,
-  it gets a first-class contract test, not just indirect conformance.
-- **Acceptance:** matrix green per `SUPPORT.md`; oraclemcp suite green on the candidate.
+- **oraclemcp contract suite:** built here — query/binds/DML/batch/LOB/pool/cancel-reuse/
+  typed-errors — and run definitively on the RC SHA in W4-T2. Because the North Star
+  names oraclemcp, it gets a first-class contract test, not just indirect conformance.
+- **Acceptance:** matrix green per `SUPPORT.md`; oraclemcp suite green (definitively on
+  the RC SHA in W4-T2).
 
 ### W3-E8 — Multiple multi-pass bug-hunt sweeps
 The `multi-pass-bug-hunting` cycle over protocol/codec/multi-packet/async paths;
@@ -440,8 +446,11 @@ surface. **Deps:** W0 (CI tiers) ∧ §7 E1–E9 (which transitively require §5
 + §6 0.3.0 migration) — matches the DAG.
 
 ### W4-T2 — Qualify the exact RC SHA (ADR-0003)
-Run every gate + live/oraclemcp suites + perf comparison + a full canary/soak cycle on
-**one** commit; any code change → a new candidate. Convergence synthesis (E1 green at
+Run the **`release-qualification` workflow** (W0-T2 — it takes the RC SHA as
+`candidate_sha`) at soak-equivalent budget: every gate + live/oraclemcp suites + perf
+comparison, all on the **frozen RC commit**; any code change → a new RC. (Per ADR-0003
+the scheduled canary/soak lanes run `main` for *discovery*; this manual exact-SHA run
+is the *qualification* — they are not the same thing.) Convergence synthesis (E1 green at
 soak budget; E2 manifest coverage + differential 0 divergences; E3 exhaustive/bounded
 clean + E4 loom clean with artifacts; E5 fault matrix green; E6 cassette green;
 E7 matrix + oraclemcp green; E8 ≥2 zero-finding passes; E9 no regression) — meeting the
