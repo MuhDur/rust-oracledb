@@ -1,7 +1,12 @@
 # rust-oracledb — Road to 1.0
 
-> **Status:** planning (v3.1 — GPT-Pro review integrated; R8 resolved to the full
-> external contract; internal-consistency pass done). Authored via
+> **Status:** planning (v3.3 — folded the five asupersync-review refinements, each
+> verified against the vendored 0.3.4 API: single op-deadline (W1-T3), bounded recovery
+> budget + checkpoint invariant (W1-T2), `Outcome`/`CancelKind` discipline (W1-T6),
+> lab oracles-as-gates + crashpacks + chaos/`VirtualTcp` (W3-E3); v3.2 — pool made
+> async-native with a `block_on` sync facade (W1-T7/W3-E4) per the asupersync-mega-skill
+> review; v3.1 — GPT-Pro review integrated; R8 resolved to the full external contract;
+> internal-consistency pass done). Authored via
 > `/planning-workflow`. Repository facts/`file:line` describe the **reviewed
 > baseline**; W0-T1 pins the source commit and generates inventories under
 > `docs/baseline/` so a future contributor can tell whether a count changed
@@ -75,7 +80,17 @@ crates. 0 `#[non_exhaustive]`. These are *baseline notes*, not acceptance criter
   stable-compatible (W0-T3 adds a stable-compiler lane so this advantage can't rot).
 - `oracledb` (driver): small asupersync surface (`Cx`/`io`/`net::TcpStream`/
   `tls::TlsStream`/`sync::Mutex`/`runtime`) threaded through 109 `async fn`s; TLS is
-  sans-io rustls; asupersync vendored at **0.3.4** (`Cargo.lock:211`).
+  sans-io rustls; asupersync vendored at **0.3.4** (`Cargo.lock:211`). The connection
+  layer is "async core + thin `block_on` sync facade": one async `Connection` engine,
+  `BlockingConnection` = `block_on` wrappers over it.
+- `oracledb` connection pool (`pool.rs`) — **baseline note (changes in W1-T7):** today
+  it is *synchronous* and the lone inversion of that rule — `Mutex<PoolState>` +
+  `Condvar` waiters + a blocking reaper `std::thread`; `acquire` is a sync `fn`
+  (`pool.rs:234`) returning a `u64` handle from a low-level `PoolEngine` with **zero
+  `async fn`**. The `Condvar`/"no foreign locks held" design exists **only** so the PyO3
+  pyshim can release the GIL before blocking — i.e. it is shaped by a `publish=false`
+  test harness, not by a Rust consumer, and it forces an async caller to block a runtime
+  worker. W1-T7 flips it to async-native (sync facade), matching the connection layer.
 - `oracledb-pyshim` is `publish=false` (`Cargo.toml:8`) — the python-oracledb
   conformance harness, layered on top of the native crate; bridges Python-async→Rust
   via `spawn_blocking`.
@@ -97,12 +112,12 @@ core stabilize (otherwise fuzz/property/DPOR targets bind to types about to chan
   toolchain runbook, feature/SemVer/stable lanes, the API-surface ledger. (§4)
 - **Wave 1 — Architecture:** operation-specific public API; type-evolution policy;
   private transport/connector + `ConnectionCore`; session-recovery state machine;
-  `ProtocolLimits`; pure pool model; typed errors/disposition + redacted observability;
+  `ProtocolLimits`; async-native pool (sync facade); typed errors/disposition + redacted observability;
   async↔blocking symmetry; module/re-export coherence. (§5)
 - **Wave 2 — Migration release:** publish **0.3.0**; migrate pyshim + oraclemcp;
   remove deprecations before RC. (§6)
-- **Wave 3 — Qualification:** property, fuzz (manifest), DPOR (on the seam), loom (on
-  the pure pool shell), fault/fragmentation matrix, secure cassette replay, live
+- **Wave 3 — Qualification:** property, fuzz (manifest), DPOR (wire/cancel seam **and**
+  the async pool — loom dropped), fault/fragmentation matrix, secure cassette replay, live
   support matrix + direct oraclemcp contract suite, perf/resource gates, multi-pass
   hunts — all to exact-SHA bounded evidence. (§7)
 - **Wave 4 — Freeze & release:** cut `1.0.0-rc.1`; exact-SHA qualification;
@@ -223,6 +238,23 @@ candidate are collected deep.
   drain is at-most-once; close is idempotent. BREAK/RESET/drain stay **private**
   (do not expose `drain_cancel_response`). `CancelHandle` only *requests* cancellation;
   the op-completion path reconciles the wire and returns the session `Ready` or `Dead`.
+- **Bounded recovery budget (pairs with the single op-deadline, W1-T3 / `API_DESIGN.md`
+  principle 7):** the BREAK→`Draining` cleanup runs under its **own fresh, bounded recovery
+  deadline**, independent of the op's already-expired deadline — otherwise the very
+  timeout/cancel that triggered recovery would instantly cancel the drain and force `Dead`
+  on a recoverable session. Only a *second* failure during the bounded drain yields `Dead`.
+  *Mechanism note (verified):* asupersync `Cx::masked` (`cx/cx.rs:2238`) masks only a
+  **synchronous** finalize closure (`mask_depth`/`MaskGuard`, invariant
+  `inv.cancel.mask_bounded`), so the **async** drain is protected by a fresh recovery
+  sub-context/deadline, **not** by wrapping the await in `masked`. (Today recovery re-arms
+  a fresh relative `timeout_ms` — `recover_from_call_timeout(cx, timeout_ms)`,
+  `lib.rs:1926`; the single-deadline move makes the explicit bounded recovery budget
+  **necessary**, not optional.)
+- **Cancellation-observability invariant:** every multi-round-trip loop (fetch-batch
+  continuation, LOB chunk, recovery drain, retry) carries a `cx.checkpoint()` so a pending
+  cancel is observed *between* round-trips. Checkpoints already exist pervasively (~20+
+  sites incl. the fetch region `lib.rs:3081/3134/3195/3229`); this **codifies it as a
+  contract** that the W3-E3 DPOR cancel paths verify — it is not "add missing checkpoints."
 - **Why:** the public contract becomes "every completed op leaves the session reusable
   or dead," which is also the DPOR invariant (W3) and what oraclemcp needs. Supersedes
   v2's "make drain public" symmetry note.
@@ -233,7 +265,7 @@ candidate are collected deep.
 ### W1-T3 — Operation-specific public API (replaces the mega-builder)
 - **WORKED DESIGN: [`docs/API_DESIGN.md`](API_DESIGN.md)** — the full spec (four families
   `query`/`execute`/`execute_many`/`register_query` + `query_one`/`query_opt`/`query_all`,
-  `Params`/`Query`/`Execute`/`Batch`/`Registration` + `Rows`/`ExecuteOutcome`/`BatchOutcome`,
+  `Params`/`Query`/`Execute`/`Batch`/`Registration` + `Rows`/`ExecuteOutcome`/`BatchOutcome`/`RegistrationOutcome`,
   the retained low-level surface, the `BlockingConnection` mirror, examples, and the
   old→new "nothing lost" map across all 24 capability groups). Built from the verified
   capability inventory + the Rust-DB precedent survey. This bullet's enumeration is the
@@ -256,17 +288,24 @@ candidate are collected deep.
   dispatch layer atop W1-T1's `ConnectionCore` (the two private layers in §12's
   diagram), NOT one mega-builder):**
   ```rust
-  pub async fn query(&mut self, cx: &Cx, req: Query<'_>) -> Result<Rows>;
-  pub async fn execute(&mut self, cx: &Cx, req: Execute<'_>) -> Result<ExecuteResult>;
-  pub async fn execute_many(&mut self, cx: &Cx, req: Batch<'_>) -> Result<BatchResult>;
-  pub async fn register_query(&mut self, cx: &Cx, req: Registration<'_>) -> Result<RegistrationResult>;
+  // Builder-taking forms (the bare query/execute/execute_many take (sql, params) —
+  // see API_DESIGN.md §3–§5 for the full surface incl. query_one/opt/all).
+  pub async fn query_with       (&mut self, cx: &Cx, q: Query<'_>)        -> Result<Rows>;
+  pub async fn execute_with     (&mut self, cx: &Cx, e: Execute<'_>)      -> Result<ExecuteOutcome>;
+  pub async fn execute_many_with(&mut self, cx: &Cx, b: Batch<'_>)        -> Result<BatchOutcome>;
+  pub async fn register_query   (&mut self, cx: &Cx, r: Registration<'_>) -> Result<RegistrationOutcome>;
   ```
   Distinct borrowed request/result types per family (no invalid combos: batch rows ≠
   scalar binds; fetch/LOB policy only on `Query`; CQN only on `Registration`). Prefer
   **borrowed** params with owned convenience `From` conversions; relative timeouts use
-  **`Duration`** (translated once into the op context/deadline at the engine boundary,
-  not a public `timeout_ms`); validated **`NonZero`** sizes. `BlockingConnection`
-  mirrors 1:1.
+  **`Duration`**, translated **once into a single absolute deadline carried in the op/
+  cursor context across *every* round-trip of the logical op** — the initial call plus all
+  `Rows::next_batch`/`collect` continuations and LOB chunks — **never re-armed per
+  round-trip**, and never a public `timeout_ms`. (Fixes the current per-call model:
+  `timeout_ms: u32` is applied per call — `lib.rs:1911/2981` — so an N-batch fetch can run
+  up to N× the intended budget.) A tighter `Cx` deadline wins; the post-timeout drain runs
+  under its own bounded budget (W1-T2). Validated **`NonZero`** sizes. `BlockingConnection`
+  mirrors 1:1. (See `API_DESIGN.md` principle 7.)
 - **Deps:** W1-T1, W1-T2. **Skill:** `code-simplifier`, `oracledb`. **Acceptance:**
   the four families cover every prior capability (old→new mapping table in the PR);
   invalid states unrepresentable; `harness/run.sh diff` stays green (anti-drift guard).
@@ -274,8 +313,8 @@ candidate are collected deep.
 ### W1-T4 — Type-evolution policy (calibrated, not blanket `#[non_exhaustive]`)
 - **What:** during 0.3, by type class — **options/config** (`ConnectOptions`,
   `ExecuteOptions`-derived request types, `PoolConfig`, `ArrowFetchOptions`): private
-  fields + builders + getters; **results/metadata** (`Rows`/`ExecuteResult`/
-  `BatchResult`, `ColumnMetadata`, `DecodedObject`, `DbmsOutput`, `BatchServerError`):
+  fields + builders + getters; **results/metadata** (`Rows`/`ExecuteOutcome`/
+  `BatchOutcome`, `ColumnMetadata`, `DecodedObject`, `DbmsOutput`, `BatchServerError`):
   accessor APIs so the representation can change without caller destructuring;
   **open enums** (`Error` `:679`, `SessionlessError` `:890`, `PoolError`,
   `SodaError`, `ConversionError`, `ArrowConversionError`, `NotificationOutcome`,
@@ -310,7 +349,14 @@ candidate are collected deep.
 - **What:** stable inspection — `Error::kind() -> ErrorKind` (network/timeout/cancel/
   protocol/database/conversion/pool/resource-limit), `oracle_code()`,
   `connection_disposition() -> {Reusable, Dead}`, conservative `retry_hint()` (never
-  auto-retry non-idempotent ops). Prevalidate bind shape/type where unambiguous.
+  auto-retry non-idempotent ops). **Internal `Outcome`/`CancelKind` discipline:** keep
+  asupersync's four-valued `Outcome<T,E>` (verified `types/outcome.rs:216`) and
+  `CancelKind`/`CancelReason` (`types/cancel.rs:264/521`) threaded internally and branch on
+  the cancel kind — `Timeout` (drain + set `retry_hint` where idempotent), `Shutdown`
+  (close the connection), `RaceLost` (loser drains quietly) — to drive
+  `connection_disposition()`; flatten `Outcome`→`Result` only at the public boundary,
+  mapping `Cancelled` to a distinct cancel/timeout error variant (never a generic I/O
+  error). Prevalidate bind shape/type where unambiguous.
   Opt-in tracing/pool metrics record phase, duration, statement fingerprint, rows/
   bytes, pool wait, cancel phase, disposition — **raw SQL/binds/credentials excluded
   by default**, covered by redaction tests.
@@ -319,17 +365,73 @@ candidate are collected deep.
 - **Deps:** W1-T2. **Skill:** `oracledb`. **Acceptance:** classification + disposition
   via methods (no display-string parsing); redaction tests prove no secret leakage.
 
-### W1-T7 — Pure pool lifecycle model (before any loom)
-- **What:** extract pure bookkeeping from sync/I/O in `pool.rs` (`:154-162`): explicit
-  states `Opening/Idle/CheckedOut/Validating/Retiring/Closing/Closed`, counts derived
-  from state; run open/ping/close **outside** the lock and feed results back as events;
-  specify waiter ordering, acquire-cancel, reap, graceful/force close.
-- **Why:** review change 9 — loom-ing the big effectful module directly is expensive +
-  opaque, and the v2 invariant `open == free+busy+to_drop` is incomplete mid-transition.
-  This gives ordinary deterministic tests a precise oracle and shrinks the later loom
-  model; it also keeps network calls out of the critical section (perf).
-- **Deps:** none. **Skill:** `multi-pass-bug-hunting`. **Acceptance:** pure model with
-  deterministic tests over the full lifecycle; counts derived; effects event-driven.
+### W1-T7 — Async-native connection pool (sync facade) — *was "pure pool model + loom"*
+
+**DECISION (binding for this roadmap): the pool is async-native; sync is a `block_on`
+facade.** Today `pool.rs` is *synchronous* — `Mutex<PoolState>` + `Condvar` waiters + a
+blocking reaper `std::thread`, with `acquire` a sync `fn` (`pool.rs:234`) returning a
+`u64` handle from a low-level `PoolEngine` (zero `async fn`). That `Condvar`/"no foreign
+locks held" design exists **only** so the PyO3 pyshim can release the GIL before
+blocking. The pyshim is `publish=false` (a conformance harness) and **must not dictate
+the shipped driver's architecture**. Every other part of the driver is "async core +
+thin `block_on` sync facade" (`Connection`/`BlockingConnection`); the pool is the lone
+inversion (sync core; async callers must adapt), which forces an async consumer (e.g.
+oraclemcp on asupersync) to **block a runtime worker on a `Condvar`** — the canonical
+"blocking call inside a cooperative runtime" anti-pattern. W1-T7 flips the pool to match
+the rest of the driver. *(There is no GIL in Rust; the GIL constraint was never the
+driver's — only the test shim's.)*
+
+**What (detailed, self-contained):**
+1. **Async core.** `pub async fn acquire(&self, cx: &Cx, opts: AcquireOptions) ->
+   Result<PooledConnection, PoolError>`. Fast path takes an idle connection from
+   `PoolState`; slow path registers in an **ordered waiter queue** and `.await`s a
+   yielding wakeup (asupersync `Notify`/semaphore — **no `Condvar`, no parked OS
+   thread**). The acquire timeout is a **bounded deadline/`Budget`** on the wait (not a
+   sleep race), and `cx.checkpoint()` rides the wait so a cancel is observed promptly.
+2. **Cancel-safety (a DPOR invariant).** If the acquire future is dropped/cancelled in
+   the hand-off race window, the waiter removes itself from the queue and any connection
+   it was just granted is **returned to the pool** — never leaked, never double-handed.
+3. **Sync facade.** A blocking facade = `block_on(acquire(...))`, exposed the same way
+   `BlockingConnection` mirrors `Connection` (a `Blocking*` surface, **not** an
+   `_blocking` method suffix); exact surface/naming per W1-T3 + the W1-T8 sweep. Mirror
+   `close`/`drain`/`stats`/`release`. One engine, two doors.
+4. **Region-owned reaper.** The idle-ping / expiry reaper becomes an **async task owned
+   by the pool's region/scope**, not a detached `std::thread`: `close(&Cx).await` cancels
+   and joins it deterministically; a bare `drop` (no `close`) lets the owning region
+   **abort** it (no await in `Drop` — R11), so it never leaks either way. It runs
+   open/ping/close as async **effects outside the state lock**, fed back as events.
+5. **Pure `PoolState` retained (the salvaged half of the old task).** Explicit states
+   `Opening/Idle/CheckedOut/Validating/Retiring/Closing/Closed`, counts **derived** from
+   state, effects as events, specified waiter ordering / acquire-cancel / reap /
+   graceful-vs-force close. It now sits behind an async mutex + yielding waiter queue
+   instead of a `Condvar`; its concurrency is explored by **DPOR (W3-E4), not loom**.
+   (Keeps network calls out of the critical section — the original perf rationale.)
+6. **`PooledConnection` guard + the Drop problem.** Checkout returns a guard that returns
+   the connection on release. Because **async checkin cannot run in `Drop`**, drop
+   **enqueues a non-blocking "return" event** reconciled by the next acquire / the reaper
+   (the same effects-as-events model), with a bounded sync fallback; `Drop` never blocks
+   or spawns (see R11). An explicit `release(&Cx).await` is offered for the eager path. A
+   returned connection is reconciled to `Ready` (W1-T2) or retired.
+7. **Visibility.** The low-level handle engine (`PoolEngine<B>`, the W0-T5 leak candidate
+   at `pool.rs:164`) becomes `pub(crate)`; the public surface is the async `Pool` + its
+   sync facade.
+8. **pyshim.** Keeps driving the **blocking** facade; its GIL handling stays the pyshim's
+   own concern (it already does `spawn_blocking`). No `Condvar`/GIL rationale survives in
+   the shipped crate.
+
+- **Why:** consistency with the rest of the driver (async core + sync facade); removes a
+  runtime-blocking anti-pattern for async consumers; and lets the **single** deterministic-
+  concurrency tool (asupersync DPOR) cover the pool — eliminating the second runtime
+  (loom) entirely (W3-E4).
+- **Deps:** W1-T1 (mint/ping `Connection`s via `ConnectionCore`), W1-T2 (return-to-pool
+  reconciles session disposition `Ready`/`Dead`). The **pure `PoolState` sub-model has no
+  deps** and can land first with ordinary deterministic tests. **Skill:**
+  `asupersync-mega-skill`, `multi-pass-bug-hunting`.
+- **Acceptance:** async `acquire` **yields** under contention (no OS thread parked —
+  observable in the DPOR/lab schedule); a cancel mid-acquire leaks/duplicates no
+  connection; the sync facade is exactly `block_on` of the async path; the reaper is
+  joined on `close(&Cx).await` and aborted (not leaked) on bare `drop`; the pure `PoolState` has full-lifecycle
+  deterministic tests with derived counts; `harness/run.sh diff` stays green.
 
 ### W1-T8 — async↔blocking symmetry sweep
 - **What:** make the two public surfaces mirror exactly. **Verified genuine I/O gaps to
@@ -341,10 +443,15 @@ candidate are collected deep.
   the zero-copy `_ref` fetch family + direct-path (borrow lifetimes don't cross
   `block_on`). The v2 "make `drain_cancel_response` public" reversed-gap is **mooted by
   W1-T2** (drain stays private on both surfaces). Standardize naming
-  `x`/`x_with_timeout`/`x_named`.
+  `x`/`x_with_timeout`/`x_named`. **Pool surface (W1-T7):** the async `Pool` and its
+  blocking facade are part of this sweep — `acquire`/`close`/`drain`/`stats`/`release`
+  mirror 1:1 (or carry a documented async-only exception), named per the `BlockingConnection`
+  pattern (a `Blocking*` surface, not an `_blocking` suffix); this is where the W1-T7
+  facade naming is finalized.
 - **Why:** asymmetry is a silent papercut and contradicts W1-T3's "`BlockingConnection`
   mirrors 1:1"; this is the task that verifies that claim. Restores v2's symmetry sweep.
-- **Deps:** W1-T3 (consolidation sets the final method set), W1-T2 (cancel semantics).
+- **Deps:** W1-T3 (consolidation sets the final method set), W1-T2 (cancel semantics),
+  W1-T7 (the pool's two surfaces).
   **Skill:** `oracledb`. **Acceptance:** a generated table shows 1:1 async↔blocking
   coverage or an explicit documented exception per method.
 
@@ -435,16 +542,38 @@ drop-cancel auto-drain (`:6198/3003`); P3 shared write-mutex vs `CancelHandle`
 cursors piggyback vs `in_use_cursors` (`:1246/1255`, `ScheduleExplorer`); P5
 speculative prefetch drop (`:3171`). **Stopping:** P1/P2/P4/P5 exhaustive (queue
 empties under recorded `max_runs`, 0 violations); P3 bounded (`is_saturated(512)` &&
-`discovery_rate<0.005`). Assert the W1-T2 ready-or-dead invariant + obligation-leak/
-futurelock/cancellation oracles; emit `write_json_summary()` artifacts + reproducer
-seeds. **Acceptance:** all paths clean under recorded bounds.
+`discovery_rate<0.005` — a **heuristic, not an exhaustiveness proof**, §7). Assert the
+W1-T2 ready-or-dead invariant with the lab's oracles as **hard gates** — set `LabConfig`
+`panic_on_futurelock` + `panic_on_leak` + `futurelock_max_idle_steps` (verified
+`lab/config.rs`) plus the **quiescence** oracle (`lab/crashpack/oracle.rs`), so a
+futurelock / obligation-leak / non-quiescent-shutdown violation **fails the run**, not
+just a summary line; and **test-assert** the W1-T2 ready-or-dead contract + loser-drain
+(cancelled losers drain their cursor; cf. `lab/atp_path/harness.rs`). On any failure emit a **crashpack**
+(`CrashPack`, `lab/crashpack/…`) + `repro_manifest` (`lab/replay.rs`) +
+`write_json_summary()` (`lab/explorer.rs:335`) + reproducer seed (one-command replay).
+Layer deterministic chaos onto the cancel paths — `with_light_chaos()` in canary /
+`with_heavy_chaos()` in soak (`lab/chaos.rs:49/53`) over a `VirtualTcp`/`VirtualNet`
+surface (`net/tcp/virtual_tcp.rs`, `lab/network/harness.rs`) — to shake out lost-wakeup /
+budget-exhaustion classes pure backtracking may miss. **Acceptance:** all paths clean
+under recorded bounds; oracles green as gates; crashpack + seed captured on any failure.
 
-### W3-E4 — loom over the pool synchronization shell
-Model the *small* event/state shell from W1-T7 (not the raw effectful module) with
-explicit branch/permutation/preemption/duration/thread bounds; mock `PoolBackend`
-(`pool.rs:90-109`). Invariants: no double-handout, no lost wakeup, no leaked waiter,
-no returned-retired connection, idempotent close. **Stopping:** loom default budget
-(or `LOOM_MAX_PREEMPTIONS=3`), reported as *bounded clean*. **Deps:** W1-T7.
+### W3-E4 — DPOR over the async pool (shares the E3 lab; loom dropped)
+With W1-T7 the pool is **async-native on asupersync sync primitives**, so its
+interleavings are visible to the **same DPOR/`LabRuntime`** machinery as the wire/cancel
+paths (E3) — and **loom is removed from the plan**. *Rationale:* loom intercepts
+`std`/`loom` sync + atomics, whereas DPOR explores async task/await/obligation
+interleavings; once the pool holds no `std::sync`/atomics concurrency island, loom has
+nothing left to model. *Guard:* if any std-sync island *does* remain after W1-T7, loom
+covers **only** that, reported *bounded clean*; otherwise loom is not a dependency.
+Model the W1-T7 pure `PoolState` shell + yielding waiter queue with a mock `PoolBackend`
+(`pool.rs:90-109`) under DPOR. **Invariants:** no double-handout, no lost wakeup, no
+leaked waiter, no returned-retired connection, idempotent close, **and acquire-cancel
+returns (never leaks/duplicates) its connection** (W1-T7). **Stopping:** finite queue
+empties under recorded `max_runs` → *exhaustive*; else *bounded clean* — `is_saturated`/
+`discovery_rate` is a **heuristic, not a completeness proof** (§7; asupersync's documented
+guarantee is Optimal-DPOR *efficiency*, not saturation=exhaustiveness). Oracles as hard
+gates + crashpack / `repro_manifest` / `write_json_summary()` + reproducer seed on any
+failure, exactly as W3-E3. **Deps:** W1-T7.
 
 ### W3-E5 — Deterministic fault & fragmentation matrix
 On W1-T1's scripted transport: generate fault points from protocol phases (connect/
@@ -515,7 +644,7 @@ comparison, all on the **frozen RC commit**; any code change → a new RC. (Per 
 the scheduled canary/soak lanes run `main` for *discovery*; this manual exact-SHA run
 is the *qualification* — they are not the same thing.) Convergence synthesis (E1 green at
 soak budget; E2 manifest coverage + differential 0 divergences; E3 exhaustive/bounded
-clean + E4 loom clean with artifacts; E5 fault matrix green; E6 cassette green;
+clean + E4 pool-DPOR exhaustive/bounded clean with artifacts; E5 fault matrix green; E6 cassette green;
 E7 matrix + oraclemcp green; E8 ≥2 zero-finding passes; E9 no regression) — meeting the
 §7 severity policy in full (no open P0/P1, no untriaged finding, P2 fixed-or-signed-
 exception). **Acceptance:** a committed exact-SHA evidence bundle.
@@ -544,13 +673,13 @@ W0-T1 ─► W0-T2, W0-T3, W0-T5 ;  W0-T4 (independent, off-gate)
 
 W0-T5 ─► W1-T1, W1-T3, W1-T4, W1-T9   (ledger dispositions feed the audit work)
 W1-T1 ─► W1-T2 ─► W1-T3 ─► W1-T4
-W1-T1 ─► W1-T5 ;  W1-T2 ─► W1-T6 ;  W1-T7 (independent)
-W1-T3 + W1-T2 ─► W1-T8 ;  (W0-T5 + W1-T3) ─► W1-T9
+W1-T1 ─► W1-T5 ;  W1-T2 ─► W1-T6 ;  (W1-T1 ∧ W1-T2) ─► W1-T7   (its pure-state core can start earlier)
+(W1-T3 + W1-T2 + W1-T7) ─► W1-T8 ;  (W0-T5 + W1-T3) ─► W1-T9
 
 (all §5 — W1-T1..T9) ─► W2-T1 (0.3.0 migration)
 
 W2-T1 ─► W3-E1, W3-E2, W3-E5, W3-E6, W3-E7, W3-E9
-W1-T1+W1-T2 ─► W3-E3 ;  W1-T7 ─► W3-E4
+W1-T1+W1-T2 ─► W3-E3 ;  W1-T7 ─► W3-E4 (pool DPOR — shares the E3 lab; loom dropped)
 (E1..E7,E9) ─► W3-E8
 
 (W0) ∧ (E1..E9) ─► W4-T1 ─► W4-T2 ─► W4-T3 ─► W4-T4
@@ -569,7 +698,7 @@ No cycles; every task feeds another or the release.
 ---
 
 ## 11. Skills are guidance, not gates (D3)
-We still leverage every applicable skill — `asupersync-mega-skill` (W1-T1/T2, W3-E3),
+We still leverage every applicable skill — `asupersync-mega-skill` (W1-T1/T2, W1-T7, W3-E3, W3-E4),
 `multi-pass-bug-hunting` (W3-E8 + triage), `code-simplifier` (W1-T3, W1-T9), `oracledb`
 (W0-T5 ledger, W1-T8 symmetry, API/behavior), `idea-wizard` (post-1.0 W3-E10),
 `testing-conformance-harnesses` (W3-E6/E7) — but acceptance criteria name **observable
@@ -595,8 +724,11 @@ metadata.
           private WireTransport
    TCP/TLS · Recording · Replay · Scripted(fault/time)
 
- pool facade → sync shell → pure PoolState → effects(open/ping/close)
-                        (deterministic + loom models)
+ async pool core: acquire(&Cx).await · yielding waiter queue · region-owned reaper
+        → pure PoolState (Opening/Idle/CheckedOut/Validating/Retiring/Closing/Closed)
+        → effects(open/ping/close) as events
+ blocking pool facade = block_on(async pool)
+                        (deterministic unit tests + DPOR; loom dropped)
 ```
 
 ---
@@ -655,13 +787,45 @@ breaks, not a prohibition. A real, needed break ships with the correct version b
   `pyo3-async-runtimes` supports only tokio/async-std. The shim's PyO3 `experimental-async`
   + `spawn_blocking` + per-op `block_on` is the correct design (node-oracledb-analogous),
   so `nto` is rightly won't-fixed (W0-T4).
+- **R11 (new): async return-to-pool cannot run in `Drop`.** The W1-T7 `PooledConnection`
+  guard can't perform an async checkin on drop. Mitigation: `Drop` enqueues a
+  non-blocking "return" event reconciled by the next acquire / the reaper (the
+  effects-as-events model) with a bounded sync fallback — `Drop` never blocks or spawns;
+  an explicit `release(&Cx).await` is offered for the eager path. W3-E4 DPOR asserts no
+  connection is lost or double-returned across a future dropped mid-acquire/mid-use.
 
 ---
 
 ## 15. Next steps (planning-workflow)
 **Done this round:** R8 resolved (§13); R10 + the async-bridge flag verified and
-resolved (§14); the W1-T3 public API designed in full ([`docs/API_DESIGN.md`](API_DESIGN.md)).
+resolved (§14); the W1-T3 public API designed in full ([`docs/API_DESIGN.md`](API_DESIGN.md));
+the **pool decided async-native with a `block_on` sync facade** (W1-T7 rewritten in
+detail; loom dropped — DPOR covers the pool, W3-E4); and the **five asupersync-review
+refinements folded in, each verified against vendored 0.3.4** (single op-deadline W1-T3 +
+`API_DESIGN.md` principle 7; bounded recovery budget + checkpoint invariant W1-T2;
+`Outcome`/`CancelKind` discipline W1-T6; lab oracles-as-gates + crashpacks + chaos/
+`VirtualTcp` W3-E3) — all per the asupersync-mega-skill review.
 The plan is decision-complete and the highest-stakes design (the 1.0 API contract) is
 specified. Remaining: 1. (optional) a review round on `API_DESIGN.md` itself. 2. Convert
-the plan to beads with the DAG intact (`W{n}-T{m}`/`W3-E*` → ids + `br dep` edges).
-3. Implement Wave 0 → Wave 4; tag 1.0 at W4-T4.
+the plan to beads with the DAG intact (`W{n}-T{m}`/`W3-E*` → ids + `br dep` edges) via
+`/beads-workflow`. 3. Implement Wave 0 → Wave 4; tag 1.0 at W4-T4.
+
+---
+
+## 16. Beads are now the authoritative execution graph
+This plan has been converted to a beads graph (root epic **`rust-oracledb-road-to-1-0-llv`**:
+1 program epic + 5 wave epics + the `W*`/`E*` tasks + decomposed subtasks, with the §9 DAG
+overlaid as `blocks` edges and intra-task ordering edges). **The beads are the authoritative
+source for execution** (`br ready` / `bv --robot-next`); this markdown is the seed. Polish
+rounds + a **Codex (gpt-5.5) multi-model triangulation** refined the graph beyond this doc:
+- **W1-T10** — the pure `PoolState` model split out of W1-T7 as a standalone, dependency-free
+  task (it can land first, in parallel — the doc's W1-T7 said so but the bead had gated it).
+- **W1-T2.4** — the async `CancelHandle::cancel(&Cx)` variant that W3-E3 P3 needs (today only
+  `Connection::cancel(&Cx)` + a *sync* `CancelHandle::cancel` exist; `lib.rs:4361/4933`).
+- **W1-T3.9** — resolve the `API_DESIGN.md` §10 deferred signatures (ColumnIndex/Cow/scroll/
+  OutBinds/ReturningRows/cursor accessors; park `query_stream`) *before* the 0.3.0 freeze.
+- **W3-E7.4** — driver-native e2e integration scripts with detailed structured logging.
+- **W2-T1.6** — an external-facing 0.3.0 migration guide + CHANGELOG (decision (b) contract).
+- Dependency fixes: **W2-T1 now depends on W0-T2/W0-T3** (the SemVer-gate flip needs the
+  semver lanes + required CI — the doc's §9 reduction had dropped this); the W0-T5 leak
+  candidate `dpl.rs` lives in **`oracledb-protocol`**, not the driver crate.

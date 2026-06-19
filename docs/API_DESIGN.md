@@ -40,6 +40,14 @@ W1-T9 module tidy). §8 proves nothing is lost across the whole surface.
 7. **Per-call `Duration` timeout, cancel-safe** — justified (real BREAK/RESET
    cancellation, unlike `tokio::time::timeout` future-drop). On expiry: BREAK→drain→
    `Error::CallTimeout`, session left `Ready` (W1-T2). A `Cx` deadline, if tighter, wins.
+   **The `Duration` is translated *once* into a single absolute deadline carried in the
+   op/cursor context, spanning *every* round-trip of the one logical operation** — the
+   initial call *and* all `Rows::next_batch`/`collect` continuations and every LOB chunk
+   — never re-armed per round-trip. (`next_batch`/`collect` take no timeout of their own;
+   they inherit the cursor's deadline.) This avoids the per-call-`timeout_ms` pitfall
+   where an N-batch fetch could run up to N× the intended budget. The post-timeout
+   BREAK→drain runs under its *own* bounded recovery budget (W1-T2), so the expired op
+   deadline cannot also cancel the cleanup that keeps the session `Ready`.
 8. **`execute` returns a struct** (`rows_affected` + `last_rowid` + OUT/IN-OUT binds +
    RETURNING + implicit result sets), not a bare `u64`. RETURNING is surfaced via OUT
    binds (Oracle-correct), not as query rows.
@@ -107,7 +115,7 @@ pub struct Rows { /* private: columns + current batch + open cursor */ }
 impl Rows {
     pub fn columns(&self) -> &[ColumnMetadata];
     pub fn batch(&self) -> &[Row];                            // current materialized batch
-    pub async fn next_batch(&mut self, cx: &Cx) -> Result<bool>;   // drives more_rows
+    pub async fn next_batch(&mut self, cx: &Cx) -> Result<bool>;   // more_rows; inherits the op deadline (§principle 7)
     pub async fn collect(self, cx: &Cx) -> Result<Vec<Row>>;       // drain to the end
     pub fn one(self) -> Result<Row>;                          // exactly-1 (errors if 0/>1)
     pub fn opt(self) -> Result<Option<Row>>;
