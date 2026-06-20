@@ -26,7 +26,7 @@
 //! The codec is fail-closed: unknown magic bytes, versions, or element
 //! formats produce an error rather than a best-effort guess.
 
-use crate::wire::{BoundedReader, TtcReader, TtcWriter};
+use crate::wire::{BoundedReader, ProtocolLimits, TtcReader, TtcWriter};
 use crate::{ProtocolError, Result};
 
 /// VECTOR image magic byte (`TNS_VECTOR_MAGIC_BYTE`).
@@ -105,7 +105,13 @@ pub enum Vector {
 
 /// Decode a VECTOR image (the bytes carried inside the LOB wrapper).
 pub fn decode_vector(data: &[u8]) -> Result<Vector> {
-    let mut reader = TtcReader::new(data);
+    decode_vector_with_limits(data, ProtocolLimits::DEFAULT)
+}
+
+/// Decode a VECTOR image under the caller's protocol resource policy.
+pub fn decode_vector_with_limits(data: &[u8], limits: ProtocolLimits) -> Result<Vector> {
+    limits.check_response_bytes(data.len())?;
+    let mut reader = TtcReader::with_limits(data, limits)?;
 
     let magic = reader.read_u8()?;
     if magic != TNS_VECTOR_MAGIC_BYTE {
@@ -118,6 +124,9 @@ pub fn decode_vector(data: &[u8]) -> Result<Vector> {
     let flags = read_u16be(&mut reader)?;
     let format = reader.read_u8()?;
     let mut num_elements = read_u32be(&mut reader)?;
+    reader
+        .limits()
+        .check_vector_dimensions(num_elements as usize)?;
     if flags & TNS_VECTOR_FLAG_NORM_RESERVED != 0 || flags & TNS_VECTOR_FLAG_NORM != 0 {
         reader.skip(8)?;
     }
@@ -125,10 +134,17 @@ pub fn decode_vector(data: &[u8]) -> Result<Vector> {
     if flags & TNS_VECTOR_FLAG_SPARSE != 0 {
         let num_dimensions = num_elements;
         let num_sparse = read_u16be(&mut reader)?;
+        reader
+            .limits()
+            .check_vector_dimensions(usize::from(num_sparse))?;
         // Each sparse index is a 4-byte u32 on the wire, so bound the
         // pre-allocation by the buffer (BoundedReader invariant): a declared
         // count larger than remaining()/4 cannot be honest.
-        let mut indices: Vec<u32> = reader.with_capacity_bounded(usize::from(num_sparse), 4);
+        let mut indices: Vec<u32> = reader.with_capacity_limited(
+            usize::from(num_sparse),
+            4,
+            ProtocolLimits::check_vector_dimensions,
+        )?;
         for _ in 0..num_sparse {
             indices.push(read_u32be(&mut reader)?);
         }
@@ -150,6 +166,7 @@ pub fn decode_vector(data: &[u8]) -> Result<Vector> {
 
 fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<VectorValues> {
     let count = count as usize;
+    reader.limits().check_vector_dimensions(count)?;
     // `count` is read straight off the wire (a u32, up to ~4e9). Reserving that
     // many elements up front lets a hostile/buggy server force a multi-gigabyte
     // allocation (OOM) before the first element read even fails on truncation.
@@ -160,7 +177,8 @@ fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<V
     // bounds-checks each read.
     match format {
         VECTOR_FORMAT_FLOAT32 => {
-            let mut out: Vec<f32> = reader.with_capacity_bounded(count, 4);
+            let mut out: Vec<f32> =
+                reader.with_capacity_limited(count, 4, ProtocolLimits::check_vector_dimensions)?;
             for _ in 0..count {
                 let raw = reader.read_raw(4)?;
                 out.push(decode_binary_float([raw[0], raw[1], raw[2], raw[3]]));
@@ -168,7 +186,8 @@ fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<V
             Ok(VectorValues::Float32(out))
         }
         VECTOR_FORMAT_FLOAT64 => {
-            let mut out: Vec<f64> = reader.with_capacity_bounded(count, 8);
+            let mut out: Vec<f64> =
+                reader.with_capacity_limited(count, 8, ProtocolLimits::check_vector_dimensions)?;
             for _ in 0..count {
                 let raw = reader.read_raw(8)?;
                 out.push(decode_binary_double([
@@ -178,7 +197,8 @@ fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<V
             Ok(VectorValues::Float64(out))
         }
         VECTOR_FORMAT_INT8 => {
-            let mut out: Vec<i8> = reader.with_capacity_bounded(count, 1);
+            let mut out: Vec<i8> =
+                reader.with_capacity_limited(count, 1, ProtocolLimits::check_vector_dimensions)?;
             for _ in 0..count {
                 out.push(reader.read_u8()? as i8);
             }
@@ -513,7 +533,30 @@ mod tests {
     fn fuzz_regression_oom_oversized_element_count() {
         let input = [219, 0, 0, 18, 3, 54, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let err = decode_vector(&input).expect_err("oversized count must fail closed");
-        assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
+        assert!(
+            matches!(
+                err,
+                ProtocolError::TtcDecode(_) | ProtocolError::ResourceLimit { .. }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_vector_with_limits_rejects_dense_dimensions() {
+        let image = encode_vector(&Vector::Dense(VectorValues::Int8(vec![1, 2, 3, 4, 5])));
+        let limits = ProtocolLimits {
+            max_vector_dimensions: 4,
+            ..ProtocolLimits::DEFAULT
+        };
+        assert!(matches!(
+            decode_vector_with_limits(&image, limits),
+            Err(ProtocolError::ResourceLimit {
+                limit: "vector_dimensions",
+                observed: 5,
+                maximum: 4,
+            })
+        ));
     }
 
     // BoundedReader invariant (l2p), VECTOR sparse family: a sparse image

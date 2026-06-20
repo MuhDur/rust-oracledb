@@ -25,7 +25,7 @@ use crate::thin::{
     TNS_MSG_TYPE_ERROR, TNS_MSG_TYPE_PARAMETER, TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK,
     TNS_MSG_TYPE_STATUS,
 };
-use crate::wire::{BoundedReader, TtcReader, TtcWriter};
+use crate::wire::{BoundedReader, ProtocolLimits, TtcReader, TtcWriter};
 use crate::{ProtocolError, Result};
 
 pub const TNS_FUNC_DIRECT_PATH_PREPARE: u8 = 128;
@@ -143,7 +143,15 @@ pub fn parse_direct_path_prepare_response(
     payload: &[u8],
     capabilities: ClientCapabilities,
 ) -> Result<DirectPathPrepareResult> {
-    let mut reader = TtcReader::new(payload);
+    parse_direct_path_prepare_response_with_limits(payload, capabilities, ProtocolLimits::DEFAULT)
+}
+
+pub fn parse_direct_path_prepare_response_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    limits: ProtocolLimits,
+) -> Result<DirectPathPrepareResult> {
+    let mut reader = TtcReader::with_limits(payload, limits)?;
     let mut result: Option<DirectPathPrepareResult> = None;
     while reader.remaining() > 0 {
         let message_type = reader.read_u8()?;
@@ -184,11 +192,12 @@ fn parse_prepare_return_parameters(
     capabilities: ClientCapabilities,
 ) -> Result<DirectPathPrepareResult> {
     let num_columns = reader.read_ub4()?;
+    reader.limits().check_columns(num_columns as usize)?;
     // Each column reads a multi-field metadata record (>=1 byte), so bound the
     // reservation by the buffer (BoundedReader) instead of an arbitrary cap;
     // parse_column_metadata still fails closed on truncation.
     let mut column_metadata: Vec<ColumnMetadata> =
-        reader.with_capacity_bounded(num_columns as usize, 1);
+        reader.with_capacity_limited(num_columns as usize, 1, ProtocolLimits::check_columns)?;
     for _ in 0..num_columns {
         let mut metadata = parse_column_metadata(reader, capabilities)?;
         apply_direct_path_metadata_overrides(&mut metadata, capabilities.charset_id);
@@ -201,8 +210,15 @@ fn parse_prepare_return_parameters(
         ));
     }
     let out_values_length = reader.read_ub2()?;
+    reader
+        .limits()
+        .check_length_prefixed_elements(usize::from(out_values_length))?;
     // Each out value is a ub4 (>=1 byte on the wire); bound by the buffer.
-    let mut out_values: Vec<u32> = reader.with_capacity_bounded(usize::from(out_values_length), 1);
+    let mut out_values: Vec<u32> = reader.with_capacity_limited(
+        usize::from(out_values_length),
+        1,
+        ProtocolLimits::check_length_prefixed_elements,
+    )?;
     for _ in 0..out_values_length {
         out_values.push(reader.read_ub4()?);
     }
@@ -260,7 +276,15 @@ pub fn parse_direct_path_simple_response(
     payload: &[u8],
     capabilities: ClientCapabilities,
 ) -> Result<()> {
-    let mut reader = TtcReader::new(payload);
+    parse_direct_path_simple_response_with_limits(payload, capabilities, ProtocolLimits::DEFAULT)
+}
+
+pub fn parse_direct_path_simple_response_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    limits: ProtocolLimits,
+) -> Result<()> {
+    let mut reader = TtcReader::with_limits(payload, limits)?;
     while reader.remaining() > 0 {
         let message_type = reader.read_u8()?;
         match message_type {
@@ -298,6 +322,8 @@ pub fn parse_direct_path_simple_response(
 
 pub use parse_direct_path_simple_response as parse_direct_path_load_stream_response;
 pub use parse_direct_path_simple_response as parse_direct_path_op_response;
+pub use parse_direct_path_simple_response_with_limits as parse_direct_path_load_stream_response_with_limits;
+pub use parse_direct_path_simple_response_with_limits as parse_direct_path_op_response_with_limits;
 
 /// One column value of a direct path load row, already converted to the
 /// Oracle-facing intermediate form (mirrors the reference's `OracleData`).
@@ -902,7 +928,39 @@ mod tests {
         let payload = [TNS_MSG_TYPE_PARAMETER, 4, 0x25, 0x00, 0x00, 0x00];
         let err = parse_direct_path_prepare_response(&payload, ClientCapabilities::default())
             .expect_err("oversized direct-path column count must fail closed");
-        assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
+        assert!(
+            matches!(
+                err,
+                ProtocolError::TtcDecode(_) | ProtocolError::ResourceLimit { .. }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn direct_path_prepare_respects_protocol_column_limit() {
+        let payload = [TNS_MSG_TYPE_PARAMETER, 1, 2];
+        let limits = ProtocolLimits {
+            max_columns: 1,
+            ..ProtocolLimits::DEFAULT
+        };
+        let err = parse_direct_path_prepare_response_with_limits(
+            &payload,
+            ClientCapabilities::default(),
+            limits,
+        )
+        .expect_err("column count above policy must fail");
+        assert!(
+            matches!(
+                err,
+                ProtocolError::ResourceLimit {
+                    limit: "columns",
+                    observed: 2,
+                    maximum: 1,
+                }
+            ),
+            "got {err:?}"
+        );
     }
 
     fn column(name: &str, ora_type_num: u8, max_size: u32, nulls_allowed: bool) -> ColumnMetadata {

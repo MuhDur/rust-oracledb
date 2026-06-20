@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::wire::ProtocolLimits;
 
 pub fn append_auth_phase_one(
     out: &mut Vec<u8>,
@@ -253,7 +254,14 @@ pub fn build_change_password_payload_with_seq(
 }
 
 pub fn parse_auth_response(payload: &[u8]) -> Result<AuthResponse> {
-    let mut reader = TtcReader::new(payload);
+    parse_auth_response_with_limits(payload, ProtocolLimits::DEFAULT)
+}
+
+pub fn parse_auth_response_with_limits(
+    payload: &[u8],
+    limits: ProtocolLimits,
+) -> Result<AuthResponse> {
+    let mut reader = TtcReader::with_limits(payload, limits)?;
     let mut response = AuthResponse::default();
     while reader.remaining() > 0 {
         let message_type = reader.read_u8()?;
@@ -334,6 +342,9 @@ pub(crate) fn write_key_value(
 
 pub(crate) fn parse_return_parameters(reader: &mut TtcReader<'_>) -> Result<AuthResponse> {
     let num_params = reader.read_ub2()?;
+    reader
+        .limits()
+        .check_length_prefixed_elements(usize::from(num_params))?;
     let mut response = AuthResponse::default();
     for _ in 0..num_params {
         let key = reader

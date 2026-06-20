@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use crate::wire::ProtocolLimits;
 use crate::{ProtocolError, Result};
 
 pub const TNS_HEADER_LEN: usize = 8;
@@ -27,6 +28,11 @@ impl TnsPacket {
     }
 
     pub fn parse(input: &[u8]) -> Result<Self> {
+        Self::parse_with_limits(input, ProtocolLimits::DEFAULT)
+    }
+
+    pub fn parse_with_limits(input: &[u8], limits: ProtocolLimits) -> Result<Self> {
+        let limits = limits.validate()?;
         let header = input
             .get(..TNS_HEADER_LEN)
             .ok_or(ProtocolError::TruncatedHeader { got: input.len() })?;
@@ -44,6 +50,7 @@ impl TnsPacket {
                 minimum: TNS_HEADER_LEN,
             });
         }
+        limits.check_packet_bytes(declared)?;
         if declared > input.len() {
             return Err(ProtocolError::IncompletePacket {
                 declared,
@@ -112,6 +119,32 @@ mod tests {
         assert!(matches!(
             TnsPacket::parse(&bytes),
             Err(ProtocolError::IncompletePacket { .. })
+        ));
+    }
+
+    #[test]
+    fn packet_decoder_uses_protocol_limits_before_copying_payload() {
+        let bytes = TnsPacket {
+            packet_type: 1,
+            flags: 0,
+            payload: b"hello".to_vec(),
+        }
+        .encode()
+        .expect("small packet should encode");
+        let limits = ProtocolLimits {
+            max_packet_bytes: bytes.len() - 1,
+            max_frame_bytes: bytes.len() - 1,
+            max_response_bytes: bytes.len() - 1,
+            ..ProtocolLimits::DEFAULT
+        };
+
+        assert!(matches!(
+            TnsPacket::parse_with_limits(&bytes, limits),
+            Err(ProtocolError::ResourceLimit {
+                limit: "packet_bytes",
+                observed,
+                maximum,
+            }) if observed == bytes.len() && maximum == bytes.len() - 1
         ));
     }
 

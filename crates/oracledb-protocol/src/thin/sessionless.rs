@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::wire::ProtocolLimits;
 
 /// Body of the transaction-switch message (reference impl/thin/messages/
 /// tpc_switch.pyx `_write_message`), shared by the direct function call and the
@@ -131,7 +132,15 @@ pub fn parse_tpc_txn_switch_response(
     payload: &[u8],
     capabilities: ClientCapabilities,
 ) -> Result<Option<SessionlessTxnState>> {
-    let mut reader = TtcReader::new(payload);
+    parse_tpc_txn_switch_response_with_limits(payload, capabilities, ProtocolLimits::DEFAULT)
+}
+
+pub fn parse_tpc_txn_switch_response_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    limits: ProtocolLimits,
+) -> Result<Option<SessionlessTxnState>> {
+    let mut reader = TtcReader::with_limits(payload, limits)?;
     let mut state = None;
     while reader.remaining() > 0 {
         let message_type = reader.read_u8()?;
@@ -343,7 +352,15 @@ pub fn parse_tpc_switch_response(
     payload: &[u8],
     capabilities: ClientCapabilities,
 ) -> Result<TpcSwitchResponse> {
-    let mut reader = TtcReader::new(payload);
+    parse_tpc_switch_response_with_limits(payload, capabilities, ProtocolLimits::DEFAULT)
+}
+
+pub fn parse_tpc_switch_response_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    limits: ProtocolLimits,
+) -> Result<TpcSwitchResponse> {
+    let mut reader = TtcReader::with_limits(payload, limits)?;
     let mut response = TpcSwitchResponse::default();
     while reader.remaining() > 0 {
         let message_type = reader.read_u8()?;
@@ -397,7 +414,15 @@ pub fn parse_tpc_change_state_response(
     payload: &[u8],
     capabilities: ClientCapabilities,
 ) -> Result<TpcChangeStateResponse> {
-    let mut reader = TtcReader::new(payload);
+    parse_tpc_change_state_response_with_limits(payload, capabilities, ProtocolLimits::DEFAULT)
+}
+
+pub fn parse_tpc_change_state_response_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    limits: ProtocolLimits,
+) -> Result<TpcChangeStateResponse> {
+    let mut reader = TtcReader::with_limits(payload, limits)?;
     let mut response = TpcChangeStateResponse::default();
     while reader.remaining() > 0 {
         let message_type = reader.read_u8()?;

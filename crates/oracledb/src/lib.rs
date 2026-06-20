@@ -131,8 +131,9 @@ use asupersync::sync::Mutex as AsyncMutex;
 use asupersync::{time, Cx};
 use oracledb_protocol::thin::aq::{
     build_aq_array_deq_payload, build_aq_array_enq_payload, build_aq_deq_payload,
-    build_aq_enq_payload, parse_aq_array_response, parse_aq_deq_response, parse_aq_enq_response,
-    AqArrayResult, AqDeqOptions, AqDeqResult, AqEnqOptions, AqMsgProps, AqQueueDesc,
+    build_aq_enq_payload, parse_aq_array_response_with_limits, parse_aq_deq_response_with_limits,
+    parse_aq_enq_response_with_limits, AqArrayResult, AqDeqOptions, AqDeqResult, AqEnqOptions,
+    AqMsgProps, AqQueueDesc,
 };
 use oracledb_protocol::thin::{
     adjust_refetch_metadata, build_auth_phase_two_payload_with_proxy_with_seq,
@@ -144,12 +145,13 @@ use oracledb_protocol::thin::{
     build_function_payload_with_seq, build_function_payload_with_seq_and_token,
     build_lob_create_temp_payload_with_seq, build_lob_free_temp_payload_with_seq,
     build_lob_read_payload_with_seq, build_lob_trim_payload_with_seq,
-    build_lob_write_payload_with_seq, parse_accept_payload, parse_auth_response,
-    parse_fetch_response_with_context, parse_lob_create_temp_response,
-    parse_lob_free_temp_response, parse_lob_read_response, parse_lob_trim_response,
-    parse_lob_write_response, parse_plain_function_response, parse_query_response,
-    parse_query_response_borrowed, parse_query_response_with_binds_options_and_columns,
-    parse_tpc_txn_switch_response, BindValue, BorrowedFetchResult, ClientCapabilities,
+    build_lob_write_payload_with_seq, parse_accept_payload, parse_auth_response_with_limits,
+    parse_fetch_response_with_context_and_limits, parse_lob_create_temp_response_with_limits,
+    parse_lob_free_temp_response_with_limits, parse_lob_read_response_with_limits,
+    parse_lob_trim_response_with_limits, parse_lob_write_response_with_limits,
+    parse_plain_function_response_with_limits, parse_query_response_borrowed_with_limits,
+    parse_query_response_with_binds_options_columns_and_limits, parse_query_response_with_limits,
+    parse_tpc_txn_switch_response_with_limits, BindValue, BorrowedFetchResult, ClientCapabilities,
     ColumnMetadata, ExecuteOptions, LobReadResult, QueryResult, QueryValueRef, SessionlessTxnState,
     TpcChangeStateResponse, TpcSwitchResponse, TpcXid, TNS_DATA_FLAGS_BEGIN_PIPELINE,
     TNS_DATA_FLAGS_END_OF_REQUEST, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING,
@@ -163,17 +165,18 @@ use oracledb_protocol::thin::{
     TPC_TXN_FLAGS_RESUME, TPC_TXN_FLAGS_SESSIONLESS,
 };
 use oracledb_protocol::thin::{
-    build_notify_payload_with_seq, build_subscribe_payload_with_seq, check_notification_header,
-    parse_subscribe_response, try_parse_oac_record, NotificationRecord, SubscribeResult,
-    TNS_SUBSCR_OP_REGISTER, TNS_SUBSCR_OP_UNREGISTER,
+    build_notify_payload_with_seq, build_subscribe_payload_with_seq,
+    check_notification_header_with_limits, parse_subscribe_response_with_limits,
+    try_parse_oac_record_with_limits, NotificationRecord, SubscribeResult, TNS_SUBSCR_OP_REGISTER,
+    TNS_SUBSCR_OP_UNREGISTER,
 };
 use oracledb_protocol::thin::{
     build_sessionless_piggyback, build_tpc_change_state_payload_with_seq,
     build_tpc_switch_payload_with_seq, build_tpc_txn_switch_payload_with_seq,
-    parse_tpc_change_state_response, parse_tpc_switch_response,
+    parse_tpc_change_state_response_with_limits, parse_tpc_switch_response_with_limits,
 };
 use oracledb_protocol::thin::{TNS_AQ_ARRAY_DEQ, TNS_AQ_ARRAY_ENQ};
-use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
+use oracledb_protocol::wire::{encode_packet, PacketLengthWidth, ProtocolLimits};
 use oracledb_protocol::{net::EasyConnect, ClientIdentity};
 
 const PYTHON_ORACLEDB_COMPAT_VERSION_NUM: u32 = 0x0400_1000;
@@ -331,6 +334,7 @@ struct ConnectionCore<T: WireTransport> {
     read: Option<T::Read>,
     write: SharedWriteHalf<T>,
     recovery: Arc<SessionRecovery>,
+    protocol_limits: ProtocolLimits,
 }
 
 impl<T: WireTransport> ConnectionCore<T> {
@@ -339,7 +343,13 @@ impl<T: WireTransport> ConnectionCore<T> {
             read: Some(read),
             write: Arc::new(AsyncMutex::with_name(write_name, write)),
             recovery: Arc::new(SessionRecovery::new()),
+            protocol_limits: ProtocolLimits::DEFAULT,
         }
+    }
+
+    fn set_protocol_limits(&mut self, limits: ProtocolLimits) -> Result<()> {
+        self.protocol_limits = limits.validate()?;
+        Ok(())
     }
 
     fn read_mut(&mut self) -> Result<&mut T::Read> {
@@ -390,12 +400,14 @@ impl<T: WireTransport> ConnectionCore<T> {
     }
 
     async fn read_packet(&mut self, width: PacketLengthWidth) -> Result<IncomingPacket> {
-        read_packet(self.read_mut()?, width).await
+        let limits = self.protocol_limits;
+        read_packet_with_limits(self.read_mut()?, width, limits).await
     }
 
     async fn read_data_response(&mut self, cx: &Cx) -> Result<Vec<u8>> {
         let write = Arc::clone(&self.write);
-        read_data_response(self.read_mut()?, cx, &write).await
+        let limits = self.protocol_limits;
+        read_data_response_with_limits(self.read_mut()?, cx, &write, limits).await
     }
 
     async fn read_data_response_boundary(
@@ -404,7 +416,9 @@ impl<T: WireTransport> ConnectionCore<T> {
         in_pipeline: bool,
     ) -> Result<DataResponse> {
         let write = Arc::clone(&self.write);
-        read_data_response_boundary(self.read_mut()?, cx, &write, in_pipeline).await
+        let limits = self.protocol_limits;
+        read_data_response_boundary_with_limits(self.read_mut()?, cx, &write, in_pipeline, limits)
+            .await
     }
 
     async fn read_data_response_flushing_out_binds(
@@ -413,7 +427,9 @@ impl<T: WireTransport> ConnectionCore<T> {
         sdu: usize,
     ) -> Result<Vec<u8>> {
         let write = Arc::clone(&self.write);
-        read_data_response_flushing_out_binds(self.read_mut()?, cx, &write, sdu).await
+        let limits = self.protocol_limits;
+        read_data_response_flushing_out_binds_with_limits(self.read_mut()?, cx, &write, sdu, limits)
+            .await
     }
 
     fn break_and_drain_wire(&mut self, recovery_timeout: Duration) -> Result<()> {
@@ -435,12 +451,18 @@ impl<T: WireTransport> ConnectionCore<T> {
     ) -> Result<()> {
         let read = self.take_read()?;
         let write = Arc::clone(&self.write);
+        let limits = self.protocol_limits;
         let thread = std::thread::Builder::new()
             .name("oracledb-recovery-drain".to_string())
             .spawn(move || {
                 let mut read = read;
-                let result =
-                    run_recovery_without_current_cx(&mut read, &write, action, recovery_timeout);
+                let result = run_recovery_without_current_cx(
+                    &mut read,
+                    &write,
+                    action,
+                    recovery_timeout,
+                    limits,
+                );
                 (read, result)
             })
             .map_err(|err| {
@@ -540,6 +562,7 @@ fn run_recovery_without_current_cx<R, W>(
     write: &Arc<AsyncMutex<W>>,
     action: RecoveryWireAction,
     recovery_timeout: Duration,
+    limits: ProtocolLimits,
 ) -> Result<()>
 where
     R: AsyncRead + Send + Unpin + 'static,
@@ -549,9 +572,11 @@ where
         async {
             match action {
                 RecoveryWireAction::BreakAndDrain => {
-                    break_and_drain_wire_unbounded(read, write).await
+                    break_and_drain_wire_unbounded_with_limits(read, write, limits).await
                 }
-                RecoveryWireAction::DrainCancel => drain_cancel_wire_unbounded(read, write).await,
+                RecoveryWireAction::DrainCancel => {
+                    drain_cancel_wire_unbounded_with_limits(read, write, limits).await
+                }
             }
         },
         recovery_timeout,
@@ -1012,7 +1037,11 @@ pub fn decode_object(
     ty: &ObjectType,
 ) -> Result<DecodedObject> {
     use oracledb_protocol::thin::DbObjectPackedReader;
+    use oracledb_protocol::wire::{BoundedReader, ProtocolLimits};
     let mut reader = DbObjectPackedReader::new(&value.packed_data);
+    reader
+        .limits()
+        .check_response_bytes(value.packed_data.len())?;
     reader.read_header()?;
 
     // Collection type: 1 collection-flags byte, then an element count, then each
@@ -1026,13 +1055,14 @@ pub fn decode_object(
         }
         let _collection_flags = reader.read_u8()?;
         let num_elements = reader.read_length()?;
+        reader.limits().check_object_elements(num_elements)?;
         // Every element consumes at least one byte, so the real count cannot
         // exceed the bytes still in the image; cap the pre-allocation against
         // `remaining()` so a malformed huge count can't force an unbounded Vec.
         // The loop itself is bounded too: `read_value_bytes` errors (truncated)
         // once the image is exhausted.
-        let cap = num_elements.min(reader.remaining());
-        let mut elements = Vec::with_capacity(cap);
+        let mut elements: Vec<Option<oracledb_protocol::thin::QueryValue>> =
+            reader.with_capacity_limited(num_elements, 1, ProtocolLimits::check_object_elements)?;
         for _ in 0..num_elements {
             let decoded = match reader.read_value_bytes()? {
                 None => None,
@@ -1472,6 +1502,8 @@ pub struct ConnectOptions {
     /// many entries, each a small `(sql, cursor_id)` pair, so it is bounded by
     /// construction. Set with [`ConnectOptions::with_statement_cache_size`].
     pub statement_cache_size: usize,
+    /// Resource policy for thin-protocol decoding and packet reassembly.
+    pub protocol_limits: ProtocolLimits,
 }
 
 impl ConnectOptions {
@@ -1502,7 +1534,16 @@ impl ConnectOptions {
             edition: None,
             access_token: None,
             statement_cache_size: STATEMENT_CACHE_SIZE,
+            protocol_limits: ProtocolLimits::DEFAULT,
         }
+    }
+
+    /// Set the thin-protocol resource limits. Invalid policies are rejected at
+    /// connect time before any network I/O.
+    #[must_use]
+    pub fn with_protocol_limits(mut self, limits: ProtocolLimits) -> Self {
+        self.protocol_limits = limits;
+        self
     }
 
     /// Set the statement-cache capacity for this connection (number of open
@@ -1628,6 +1669,7 @@ pub struct Connection {
     /// Cancellable reads arm its drain flag so the next operation can break and
     /// drain before issuing a new request.
     core: DriverCore,
+    protocol_limits: ProtocolLimits,
     session_id: u32,
     serial_num: u16,
     server_version: Option<String>,
@@ -1776,6 +1818,7 @@ impl Connection {
     pub async fn connect(cx: &Cx, options: ConnectOptions) -> Result<Self> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
+        let protocol_limits = options.protocol_limits.validate()?;
         let descriptor = EasyConnect::parse(&options.connect_string)?;
         // Connect span (feature-gated, zero-cost when off). Carries only the
         // server address / port / service — never the password.
@@ -1823,6 +1866,7 @@ impl Connection {
             connector.plain_split(stream)
         };
         let mut core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
+        core.set_protocol_limits(protocol_limits)?;
 
         let connect_descriptor = listener_connect_descriptor_with_server(
             &descriptor,
@@ -1900,7 +1944,7 @@ impl Connection {
             trace_connect_step("read AUTH token response");
             let response = core.read_data_response(cx).await?;
             trace_connect_bytes("AUTH token response", &response);
-            let auth = parse_auth_response(&response)?;
+            let auth = parse_auth_response_with_limits(&response, protocol_limits)?;
             let capabilities = auth.capabilities.unwrap_or_default();
             // Token auth derives no shared password key: there is no combo key,
             // hence no server-response MAC to verify and no change-password.
@@ -1921,7 +1965,7 @@ impl Connection {
             trace_connect_step("read AUTH phase one");
             let auth_one_response = core.read_data_response(cx).await?;
             trace_connect_bytes("AUTH phase one response", &auth_one_response);
-            let auth_one = parse_auth_response(&auth_one_response)?;
+            let auth_one = parse_auth_response_with_limits(&auth_one_response, protocol_limits)?;
             let capabilities = auth_one.capabilities.unwrap_or_default();
             let verifier_type = auth_one
                 .verifier_type
@@ -1948,7 +1992,7 @@ impl Connection {
             trace_connect_step("read AUTH phase two");
             let auth_two_response = core.read_data_response(cx).await?;
             trace_connect_bytes("AUTH phase two response", &auth_two_response);
-            let auth_two = parse_auth_response(&auth_two_response)?;
+            let auth_two = parse_auth_response_with_limits(&auth_two_response, protocol_limits)?;
             oracledb_protocol::crypto::verify_server_response(
                 &encrypted.combo_key,
                 &auth_two.session_data,
@@ -1974,6 +2018,7 @@ impl Connection {
             descriptor,
             identity,
             core,
+            protocol_limits,
             session_id,
             serial_num,
             server_version,
@@ -2113,7 +2158,9 @@ impl Connection {
         )?;
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
-        self.note_parse(parse_auth_response(&response).map(|_| ()))?;
+        self.note_parse(
+            parse_auth_response_with_limits(&response, self.protocol_limits).map(|_| ()),
+        )?;
         Ok(())
     }
 
@@ -2156,7 +2203,11 @@ impl Connection {
         )?;
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
-        self.note_parse(parse_subscribe_response(&response, self.capabilities))
+        self.note_parse(parse_subscribe_response_with_limits(
+            &response,
+            self.capabilities,
+            self.protocol_limits,
+        ))
     }
 
     /// Unregister a CQN subscription (FUNC 125, opcode 2). The `client_id` is
@@ -2203,7 +2254,11 @@ impl Connection {
         )?;
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
-        self.note_parse(parse_subscribe_response(&response, self.capabilities))?;
+        self.note_parse(parse_subscribe_response_with_limits(
+            &response,
+            self.capabilities,
+            self.protocol_limits,
+        ))?;
         Ok(())
     }
 
@@ -2255,17 +2310,21 @@ impl Connection {
                         PacketRead::Closed => return Ok(NotificationOutcome::Closed),
                     }
                 }
-                let consumed = check_notification_header(&self.notification_buffer)?;
+                let consumed = check_notification_header_with_limits(
+                    &self.notification_buffer,
+                    self.protocol_limits,
+                )?;
                 self.notification_buffer.drain(..consumed);
                 self.notification_header_consumed = true;
             }
             // try to decode one full record from the buffered bytes
             if !self.notification_buffer.is_empty() {
-                if let Some((record, consumed)) = try_parse_oac_record(
+                if let Some((record, consumed)) = try_parse_oac_record_with_limits(
                     &self.notification_buffer,
                     namespace,
                     public_qos,
                     Some(&db_name),
+                    self.protocol_limits,
                 )? {
                     self.notification_buffer.drain(..consumed);
                     return Ok(NotificationOutcome::Record(record));
@@ -2498,7 +2557,11 @@ impl Connection {
         );
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
-        let state = self.note_parse(parse_tpc_txn_switch_response(&response, self.capabilities))?;
+        let state = self.note_parse(parse_tpc_txn_switch_response_with_limits(
+            &response,
+            self.capabilities,
+            self.protocol_limits,
+        ))?;
         self.sessionless_data = Some(data);
         self.apply_sessionless_state(state);
         Ok(())
@@ -2567,7 +2630,11 @@ impl Connection {
         );
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
-        let state = self.note_parse(parse_tpc_txn_switch_response(&response, self.capabilities))?;
+        let state = self.note_parse(parse_tpc_txn_switch_response_with_limits(
+            &response,
+            self.capabilities,
+            self.protocol_limits,
+        ))?;
         // a suspend always clears the active transaction locally; the server's
         // SYNC piggyback confirms it (reference clears `_sessionless_data`)
         self.sessionless_data = None;
@@ -2593,7 +2660,11 @@ impl Connection {
             build_tpc_switch_payload_with_seq(seq_num, operation, flags, timeout, xid, context);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
-        self.note_parse(parse_tpc_switch_response(&response, self.capabilities))
+        self.note_parse(parse_tpc_switch_response_with_limits(
+            &response,
+            self.capabilities,
+            self.protocol_limits,
+        ))
     }
 
     /// Run a TPC change-state (func 104) round trip and capture its response.
@@ -2620,9 +2691,10 @@ impl Connection {
         );
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
-        self.note_parse(parse_tpc_change_state_response(
+        self.note_parse(parse_tpc_change_state_response_with_limits(
             &response,
             self.capabilities,
+            self.protocol_limits,
         ))
     }
 
@@ -2928,7 +3000,8 @@ impl Connection {
         // next operation's break + drain.
         let response = self.read_response_cancellable(cx).await?;
         trace_query_bytes("EXECUTE query response", &response);
-        let parsed = parse_query_response(&response, self.capabilities);
+        let parsed =
+            parse_query_response_with_limits(&response, self.capabilities, self.protocol_limits);
         let result = self.note_parse(parsed)?;
         obs_record!(_span, db.rows_fetched = result.rows.len() as u64);
         self.remember_cursor_columns(&result);
@@ -3265,6 +3338,10 @@ impl Connection {
         // sessionless piggyback prepended to this execute (reference
         // messages/base.pyx `_write_sessionless_piggyback`); its sequence number
         // is consumed before the execute's, after the close-cursors piggyback's.
+        self.protocol_limits.check_batch_rows(bind_rows.len())?;
+        if let Some(first_row) = bind_rows.first() {
+            self.protocol_limits.check_binds(first_row.len())?;
+        }
         let sessionless_piggyback = self.take_sessionless_piggyback();
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let mut payload = build_execute_payload_with_bind_rows_and_options_with_seq(
@@ -3298,12 +3375,13 @@ impl Connection {
         } else {
             Vec::new()
         };
-        let parsed = parse_query_response_with_binds_options_and_columns(
+        let parsed = parse_query_response_with_binds_options_columns_and_limits(
             &response,
             self.capabilities,
             bind_rows.first().map(Vec::as_slice).unwrap_or(&[]),
             exec_options,
             &known_columns,
+            self.protocol_limits,
         );
         match self.note_parse(parsed) {
             Ok(result) => {
@@ -3527,8 +3605,13 @@ impl Connection {
             .cloned()
             .unwrap_or_else(|| known_columns.to_vec());
         let decode_start = profile.then(time::wall_now);
-        let parsed =
-            parse_fetch_response_with_context(&response, self.capabilities, &columns, previous_row);
+        let parsed = parse_fetch_response_with_context_and_limits(
+            &response,
+            self.capabilities,
+            &columns,
+            previous_row,
+            self.protocol_limits,
+        );
         if let Some(start) = decode_start {
             fetch_profile::add_decode(time::wall_now().duration_since(start));
         }
@@ -3575,8 +3658,13 @@ impl Connection {
             .cloned()
             .unwrap_or_default();
         let decode_start = profile.then(time::wall_now);
-        let parsed =
-            parse_query_response_borrowed(&response, self.capabilities, &columns, previous_row);
+        let parsed = parse_query_response_borrowed_with_limits(
+            &response,
+            self.capabilities,
+            &columns,
+            previous_row,
+            self.protocol_limits,
+        );
         if let Some(start) = decode_start {
             fetch_profile::add_decode(time::wall_now().duration_since(start));
         }
@@ -3677,8 +3765,13 @@ impl Connection {
             .cloned()
             .unwrap_or_default();
         let decode_start = profile.then(time::wall_now);
-        let parsed =
-            parse_query_response_borrowed(&response, self.capabilities, &columns, previous_row);
+        let parsed = parse_query_response_borrowed_with_limits(
+            &response,
+            self.capabilities,
+            &columns,
+            previous_row,
+            self.protocol_limits,
+        );
         if let Some(start) = decode_start {
             fetch_profile::add_decode(time::wall_now().duration_since(start));
         }
@@ -3822,11 +3915,12 @@ impl Connection {
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("DEFINE FETCH response", &response);
-        let result = parse_fetch_response_with_context(
+        let result = parse_fetch_response_with_context_and_limits(
             &response,
             self.capabilities,
             define_columns,
             previous_row,
+            self.protocol_limits,
         )
         .map_err(Error::from)?;
         self.cursor_columns
@@ -4045,12 +4139,13 @@ impl Connection {
             .get(&cursor_id)
             .cloned()
             .unwrap_or_default();
-        let parsed = parse_query_response_with_binds_options_and_columns(
+        let parsed = parse_query_response_with_binds_options_columns_and_limits(
             &response,
             self.capabilities,
             &[],
             exec_options,
             &known_columns,
+            self.protocol_limits,
         );
         let result = self.note_parse(parsed)?;
         self.remember_cursor_columns(&result);
@@ -4092,10 +4187,11 @@ impl Connection {
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("LOB READ response", &response);
-        self.note_parse(parse_lob_read_response(
+        self.note_parse(parse_lob_read_response_with_limits(
             &response,
             self.capabilities,
             locator,
+            self.protocol_limits,
         ))
     }
 
@@ -4122,6 +4218,9 @@ impl Connection {
     ) -> Result<Option<Vec<u8>>> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
+        self.protocol_limits.check_frame_bytes(queue.name.len())?;
+        self.protocol_limits
+            .check_frame_bytes(queue.payload_toid.len())?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_aq_enq_payload(
             queue,
@@ -4135,7 +4234,11 @@ impl Connection {
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("AQ ENQ response", &response);
-        self.note_parse(parse_aq_enq_response(&response, self.capabilities))
+        self.note_parse(parse_aq_enq_response_with_limits(
+            &response,
+            self.capabilities,
+            self.protocol_limits,
+        ))
     }
 
     /// Dequeues a single AQ message (FUNC 122). Returns `None` when the queue is
@@ -4148,6 +4251,9 @@ impl Connection {
     ) -> Result<AqDeqResult> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
+        self.protocol_limits.check_frame_bytes(queue.name.len())?;
+        self.protocol_limits
+            .check_frame_bytes(queue.payload_toid.len())?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_aq_deq_payload(
             queue,
@@ -4159,10 +4265,11 @@ impl Connection {
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("AQ DEQ response", &response);
-        self.note_parse(parse_aq_deq_response(
+        self.note_parse(parse_aq_deq_response_with_limits(
             &response,
             self.capabilities,
             &queue.kind,
+            self.protocol_limits,
         ))
     }
 
@@ -4177,6 +4284,10 @@ impl Connection {
     ) -> Result<Vec<Vec<u8>>> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
+        self.protocol_limits.check_batch_rows(props_list.len())?;
+        self.protocol_limits.check_frame_bytes(queue.name.len())?;
+        self.protocol_limits
+            .check_frame_bytes(queue.payload_toid.len())?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_aq_array_enq_payload(
             queue,
@@ -4190,12 +4301,13 @@ impl Connection {
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("AQ ARRAY ENQ response", &response);
-        let result: AqArrayResult = self.note_parse(parse_aq_array_response(
+        let result: AqArrayResult = self.note_parse(parse_aq_array_response_with_limits(
             &response,
             self.capabilities,
             TNS_AQ_ARRAY_ENQ,
             props_list.len() as u32,
             &queue.kind,
+            self.protocol_limits,
         ))?;
         Ok(result.enq_msgids)
     }
@@ -4211,6 +4323,11 @@ impl Connection {
     ) -> Result<Vec<oracledb_protocol::thin::aq::AqDeqMessage>> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
+        self.protocol_limits
+            .check_batch_rows(max_num_messages as usize)?;
+        self.protocol_limits.check_frame_bytes(queue.name.len())?;
+        self.protocol_limits
+            .check_frame_bytes(queue.payload_toid.len())?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_aq_array_deq_payload(
             queue,
@@ -4223,12 +4340,13 @@ impl Connection {
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("AQ ARRAY DEQ response", &response);
-        let result: AqArrayResult = self.note_parse(parse_aq_array_response(
+        let result: AqArrayResult = self.note_parse(parse_aq_array_response_with_limits(
             &response,
             self.capabilities,
             TNS_AQ_ARRAY_DEQ,
             max_num_messages,
             &queue.kind,
+            self.protocol_limits,
         ))?;
         Ok(result.deq_messages)
     }
@@ -4252,7 +4370,11 @@ impl Connection {
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("LOB CREATE TEMP response", &response);
-        self.note_parse(parse_lob_create_temp_response(&response, self.capabilities))
+        self.note_parse(parse_lob_create_temp_response_with_limits(
+            &response,
+            self.capabilities,
+            self.protocol_limits,
+        ))
     }
 
     pub async fn write_lob(
@@ -4272,6 +4394,8 @@ impl Connection {
         );
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
+        self.protocol_limits.check_frame_bytes(locator.len())?;
+        self.protocol_limits.check_frame_bytes(data.len())?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_lob_write_payload_with_seq(
             locator,
@@ -4284,10 +4408,11 @@ impl Connection {
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("LOB WRITE response", &response);
-        self.note_parse(parse_lob_write_response(
+        self.note_parse(parse_lob_write_response_with_limits(
             &response,
             self.capabilities,
             locator,
+            self.protocol_limits,
         ))
     }
 
@@ -4311,6 +4436,7 @@ impl Connection {
     ) -> Result<LobReadResult> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
+        self.protocol_limits.check_frame_bytes(locator.len())?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_lob_trim_payload_with_seq(
             locator,
@@ -4322,10 +4448,11 @@ impl Connection {
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("LOB TRIM response", &response);
-        self.note_parse(parse_lob_trim_response(
+        self.note_parse(parse_lob_trim_response_with_limits(
             &response,
             self.capabilities,
             locator,
+            self.protocol_limits,
         ))
     }
 
@@ -4346,7 +4473,19 @@ impl Connection {
         if locators.is_empty() {
             return Ok(());
         }
-        let returned_parameter_len = locators.iter().map(Vec::len).sum();
+        self.protocol_limits.check_lob_chunks(locators.len())?;
+        let returned_parameter_len = locators.iter().try_fold(0usize, |total, locator| {
+            self.protocol_limits.check_frame_bytes(locator.len())?;
+            total.checked_add(locator.len()).ok_or(
+                oracledb_protocol::ProtocolError::ResourceLimit {
+                    limit: "frame_bytes",
+                    observed: usize::MAX,
+                    maximum: self.protocol_limits.max_frame_bytes,
+                },
+            )
+        })?;
+        self.protocol_limits
+            .check_frame_bytes(returned_parameter_len)?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_lob_free_temp_payload_with_seq(
             locators,
@@ -4357,10 +4496,11 @@ impl Connection {
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("LOB FREE TEMP response", &response);
-        self.note_parse(parse_lob_free_temp_response(
+        self.note_parse(parse_lob_free_temp_response_with_limits(
             &response,
             self.capabilities,
             returned_parameter_len,
+            self.protocol_limits,
         ))
     }
 
@@ -4546,6 +4686,7 @@ impl Connection {
     ) -> Result<oracledb_protocol::dpl::DirectPathPrepareResult> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
+        self.protocol_limits.check_columns(column_names.len())?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = oracledb_protocol::dpl::build_direct_path_prepare_payload(
             schema_name,
@@ -4557,8 +4698,12 @@ impl Connection {
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("DIRECT PATH PREPARE response", &response);
-        oracledb_protocol::dpl::parse_direct_path_prepare_response(&response, self.capabilities)
-            .map_err(Error::from)
+        oracledb_protocol::dpl::parse_direct_path_prepare_response_with_limits(
+            &response,
+            self.capabilities,
+            self.protocol_limits,
+        )
+        .map_err(Error::from)
     }
 
     /// Sends one direct path load stream message (TTC function 129).
@@ -4578,8 +4723,12 @@ impl Connection {
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("DIRECT PATH LOAD STREAM response", &response);
-        oracledb_protocol::dpl::parse_direct_path_simple_response(&response, self.capabilities)
-            .map_err(Error::from)
+        oracledb_protocol::dpl::parse_direct_path_simple_response_with_limits(
+            &response,
+            self.capabilities,
+            self.protocol_limits,
+        )
+        .map_err(Error::from)
     }
 
     /// Sends a direct path op message (TTC function 130).
@@ -4595,8 +4744,12 @@ impl Connection {
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("DIRECT PATH OP response", &response);
-        oracledb_protocol::dpl::parse_direct_path_simple_response(&response, self.capabilities)
-            .map_err(Error::from)
+        oracledb_protocol::dpl::parse_direct_path_simple_response_with_limits(
+            &response,
+            self.capabilities,
+            self.protocol_limits,
+        )
+        .map_err(Error::from)
     }
 
     /// Loads `rows` into `schema_name.table_name` via the direct path load
@@ -4663,6 +4816,7 @@ impl Connection {
     ) -> Result<()> {
         // verify all row widths before sending anything (reference
         // _verify_metadata raises DPY-4009 before the first stream message)
+        self.protocol_limits.check_batch_rows(batch_size as usize)?;
         for row in rows {
             if row.len() != prepare.column_metadata.len() {
                 return Err(oracledb_protocol::ProtocolError::TtcDecode(
@@ -5139,6 +5293,8 @@ impl Connection {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
+        self.protocol_limits
+            .check_length_prefixed_elements(requests.len())?;
         let pipeline_mode = if continue_on_error {
             TNS_PIPELINE_MODE_CONTINUE_ON_ERROR
         } else {
@@ -5175,16 +5331,22 @@ impl Connection {
                     sql,
                     bind_rows,
                     prefetch_rows,
-                } => payload.extend_from_slice(
-                    &build_execute_payload_with_bind_rows_with_seq_and_token(
-                        sql,
-                        *prefetch_rows,
-                        seq_num,
-                        statement_is_query(sql),
-                        bind_rows,
-                        token_num,
-                    )?,
-                ),
+                } => {
+                    self.protocol_limits.check_batch_rows(bind_rows.len())?;
+                    if let Some(first_row) = bind_rows.first() {
+                        self.protocol_limits.check_binds(first_row.len())?;
+                    }
+                    payload.extend_from_slice(
+                        &build_execute_payload_with_bind_rows_with_seq_and_token(
+                            sql,
+                            *prefetch_rows,
+                            seq_num,
+                            statement_is_query(sql),
+                            bind_rows,
+                            token_num,
+                        )?,
+                    );
+                }
                 PipelineRequest::Commit => {
                     payload.extend_from_slice(&build_function_payload_with_seq_and_token(
                         TNS_FUNC_COMMIT,
@@ -5258,7 +5420,11 @@ impl Connection {
                     // A commit op answers with a plain function response; decode
                     // it the same way the standalone commit path does so the
                     // txn-in-progress bit is sampled identically.
-                    match parse_plain_function_response(payload, self.capabilities) {
+                    match parse_plain_function_response_with_limits(
+                        payload,
+                        self.capabilities,
+                        self.protocol_limits,
+                    ) {
                         Ok(txn_in_progress) => Ok(QueryResult {
                             txn_in_progress: Some(txn_in_progress),
                             ..QueryResult::default()
@@ -5267,12 +5433,13 @@ impl Connection {
                     }
                 }
                 PipelineRequest::Execute { sql, bind_rows, .. } => {
-                    parse_query_response_with_binds_options_and_columns(
+                    parse_query_response_with_binds_options_columns_and_limits(
                         payload,
                         self.capabilities,
                         bind_rows.first().map(Vec::as_slice).unwrap_or(&[]),
                         ExecuteOptions::default(),
                         &[],
+                        self.protocol_limits,
                     )
                     .map_err(Error::Protocol)
                     .inspect(|result| {
@@ -5314,8 +5481,11 @@ impl Connection {
         // commit/rollback depend on these not being silently swallowed. The
         // returned bit refreshes `txn_in_progress` from the wire end-of-call
         // status (reference protocol.pyx `_process_call_status`).
-        let txn_in_progress =
-            self.note_parse(parse_plain_function_response(&response, self.capabilities))?;
+        let txn_in_progress = self.note_parse(parse_plain_function_response_with_limits(
+            &response,
+            self.capabilities,
+            self.protocol_limits,
+        ))?;
         self.txn_in_progress = txn_in_progress;
         Ok(())
     }
@@ -6534,6 +6704,7 @@ struct DataResponse {
     flush_out_binds: bool,
 }
 
+#[cfg(test)]
 async fn read_data_response<R, W>(
     read: &mut R,
     cx: &Cx,
@@ -6543,9 +6714,24 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    Ok(read_data_response_boundary(read, cx, write, false)
-        .await?
-        .payload)
+    read_data_response_with_limits(read, cx, write, ProtocolLimits::DEFAULT).await
+}
+
+async fn read_data_response_with_limits<R, W>(
+    read: &mut R,
+    cx: &Cx,
+    write: &Arc<AsyncMutex<W>>,
+    limits: ProtocolLimits,
+) -> Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
+    Ok(
+        read_data_response_boundary_with_limits(read, cx, write, false, limits)
+            .await?
+            .payload,
+    )
 }
 
 /// Upper bound on how long the post-break recovery drain may take before the
@@ -6613,6 +6799,18 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
+    break_and_drain_wire_unbounded_with_limits(read, write, ProtocolLimits::DEFAULT).await
+}
+
+async fn break_and_drain_wire_unbounded_with_limits<R, W>(
+    read: &mut R,
+    write: &Arc<AsyncMutex<W>>,
+    limits: ProtocolLimits,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     // 1) Send the BREAK marker (reference `_break_external`).
     send_marker_recovery(write, TNS_MARKER_TYPE_BREAK)
         .await
@@ -6622,7 +6820,7 @@ where
             ))
         })?;
     // 2) Drain the whole break response.
-    drain_break_response_recovery(read, write).await
+    drain_break_response_recovery_with_limits(read, write, limits).await
 }
 
 /// Sends a BREAK and drains the server's cancel response so the wire is left at
@@ -6701,7 +6899,19 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    drain_break_response_recovery(read, write).await
+    drain_cancel_wire_unbounded_with_limits(read, write, ProtocolLimits::DEFAULT).await
+}
+
+async fn drain_cancel_wire_unbounded_with_limits<R, W>(
+    read: &mut R,
+    write: &Arc<AsyncMutex<W>>,
+    limits: ProtocolLimits,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
+    drain_break_response_recovery_with_limits(read, write, limits).await
 }
 
 /// Drop-guard that marks a connection's recovery phase `BreakSent` if a
@@ -6757,7 +6967,21 @@ impl Drop for CancelDrainGuard {
 /// RESET handshake, and the trailing error packet — leaving the reader at a
 /// clean boundary. See [`break_and_drain_wire`] for why stopping at the first
 /// end-of-response is insufficient.
+#[cfg(test)]
+#[allow(dead_code)]
 async fn drain_break_response_recovery<R, W>(read: &mut R, write: &Arc<AsyncMutex<W>>) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
+    drain_break_response_recovery_with_limits(read, write, ProtocolLimits::DEFAULT).await
+}
+
+async fn drain_break_response_recovery_with_limits<R, W>(
+    read: &mut R,
+    write: &Arc<AsyncMutex<W>>,
+    limits: ProtocolLimits,
+) -> Result<()>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
@@ -6767,7 +6991,7 @@ where
     // a complete DATA response (its own end-of-response) that we drop on the
     // floor. The MARKER is what drives the RESET handshake.
     let initial_marker = loop {
-        let packet = read_packet(read, PacketLengthWidth::Large32).await?;
+        let packet = read_packet_with_limits(read, PacketLengthWidth::Large32, limits).await?;
         match packet.packet_type {
             TNS_PACKET_TYPE_MARKER => break packet,
             TNS_PACKET_TYPE_DATA => {
@@ -6788,16 +7012,19 @@ where
     // RESET marker). `reset_after_marker` returns the first non-marker packet
     // after the RESET confirmation, if any — that is the head of the trailing
     // error response (ORA-01013).
-    let pending = reset_after_marker_recovery(read, write, &initial_marker).await?;
+    let pending =
+        reset_after_marker_recovery_with_limits(read, write, &initial_marker, limits).await?;
 
     // Phase C: consume the trailing error response to its end-of-response
     // boundary and discard it. Reuses the same boundary loop the normal read
     // path uses, seeded with the packet `reset_after_marker` already pulled.
-    let trailing = read_data_response_boundary_from_recovery(read, write, pending).await?;
+    let trailing =
+        read_data_response_boundary_from_recovery_with_limits(read, write, pending, limits).await?;
     trace_connect_bytes("BREAK drain: trailing error response", &trailing.payload);
     Ok(())
 }
 
+#[cfg(test)]
 async fn read_data_response_flushing_out_binds<R, W>(
     read: &mut R,
     cx: &Cx,
@@ -6808,7 +7035,23 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    let mut response = read_data_response_boundary(read, cx, write, false).await?;
+    read_data_response_flushing_out_binds_with_limits(read, cx, write, sdu, ProtocolLimits::DEFAULT)
+        .await
+}
+
+async fn read_data_response_flushing_out_binds_with_limits<R, W>(
+    read: &mut R,
+    cx: &Cx,
+    write: &Arc<AsyncMutex<W>>,
+    sdu: usize,
+    limits: ProtocolLimits,
+) -> Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
+    let mut response =
+        read_data_response_boundary_with_limits(read, cx, write, false, limits).await?;
     let mut payload = response.payload;
     while response.flush_out_binds {
         observe_cancellation_between_round_trips(cx)?;
@@ -6816,7 +7059,15 @@ where
             payload.pop();
         }
         send_data_packet_shared(cx, write, &[TNS_MSG_TYPE_FLUSH_OUT_BINDS], sdu).await?;
-        response = read_data_response_boundary(read, cx, write, false).await?;
+        response = read_data_response_boundary_with_limits(read, cx, write, false, limits).await?;
+        let combined = payload.len().checked_add(response.payload.len()).ok_or(
+            oracledb_protocol::ProtocolError::ResourceLimit {
+                limit: "response_bytes",
+                observed: usize::MAX,
+                maximum: limits.max_response_bytes,
+            },
+        )?;
+        limits.check_response_bytes(combined)?;
         payload.extend_from_slice(&response.payload);
     }
     Ok(payload)
@@ -6893,6 +7144,8 @@ fn post_reset_packet_ends_response(payload: &[u8]) -> bool {
 /// pipelined responses (packet.pyx:346-370, protocol.pyx:889-906), since the
 /// server emits a marker alongside an in-pipeline error without expecting a
 /// reset exchange.
+#[cfg(test)]
+#[allow(dead_code)]
 async fn read_data_response_boundary<R, W>(
     read: &mut R,
     cx: &Cx,
@@ -6903,7 +7156,22 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    read_data_response_boundary_seeded(read, Some(cx), write, in_pipeline, None).await
+    read_data_response_boundary_with_limits(read, cx, write, in_pipeline, ProtocolLimits::DEFAULT)
+        .await
+}
+
+async fn read_data_response_boundary_with_limits<R, W>(
+    read: &mut R,
+    cx: &Cx,
+    write: &Arc<AsyncMutex<W>>,
+    in_pipeline: bool,
+    limits: ProtocolLimits,
+) -> Result<DataResponse>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
+    read_data_response_boundary_seeded(read, Some(cx), write, in_pipeline, None, limits).await
 }
 
 /// Like [`read_data_response_boundary`] but seeds the reassembly loop with an
@@ -6911,6 +7179,8 @@ where
 /// pulled past a RESET marker) before reading more from the wire. Used by the
 /// break-drain path to consume the trailing error response. Always runs the
 /// non-pipeline (reset-handling) variant.
+#[cfg(test)]
+#[allow(dead_code)]
 async fn read_data_response_boundary_from_recovery<R, W>(
     read: &mut R,
     write: &Arc<AsyncMutex<W>>,
@@ -6920,7 +7190,26 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    read_data_response_boundary_seeded(read, None, write, false, seed).await
+    read_data_response_boundary_from_recovery_with_limits(
+        read,
+        write,
+        seed,
+        ProtocolLimits::DEFAULT,
+    )
+    .await
+}
+
+async fn read_data_response_boundary_from_recovery_with_limits<R, W>(
+    read: &mut R,
+    write: &Arc<AsyncMutex<W>>,
+    seed: Option<IncomingPacket>,
+    limits: ProtocolLimits,
+) -> Result<DataResponse>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
+    read_data_response_boundary_seeded(read, None, write, false, seed, limits).await
 }
 
 async fn read_data_response_boundary_seeded<R, W>(
@@ -6929,6 +7218,7 @@ async fn read_data_response_boundary_seeded<R, W>(
     write: &Arc<AsyncMutex<W>>,
     in_pipeline: bool,
     seed: Option<IncomingPacket>,
+    limits: ProtocolLimits,
 ) -> Result<DataResponse>
 where
     R: AsyncRead + Unpin,
@@ -6950,7 +7240,7 @@ where
     loop {
         let packet = match pending_packet.take() {
             Some(packet) => packet,
-            None => read_packet(read, PacketLengthWidth::Large32).await?,
+            None => read_packet_with_limits(read, PacketLengthWidth::Large32, limits).await?,
         };
         if packet.packet_type == TNS_PACKET_TYPE_MARKER {
             if in_pipeline {
@@ -6958,8 +7248,12 @@ where
                 continue;
             }
             pending_packet = match cx {
-                Some(cx) => reset_after_marker(read, cx, write, &packet).await?,
-                None => reset_after_marker_recovery(read, write, &packet).await?,
+                Some(cx) => {
+                    reset_after_marker_with_limits(read, cx, write, &packet, limits).await?
+                }
+                None => {
+                    reset_after_marker_recovery_with_limits(read, write, &packet, limits).await?
+                }
             };
             after_reset = true;
             continue;
@@ -6991,10 +7285,19 @@ where
         // detection below sees an identical byte stream. The multi-packet path is
         // unchanged (it must reassemble, so it extends).
         if ends && response.is_empty() {
+            limits.check_response_bytes(payload.len())?;
             response = packet.payload;
             response.drain(..2);
             break;
         }
+        let combined = response.len().checked_add(payload.len()).ok_or(
+            oracledb_protocol::ProtocolError::ResourceLimit {
+                limit: "response_bytes",
+                observed: usize::MAX,
+                maximum: limits.max_response_bytes,
+            },
+        )?;
+        limits.check_response_bytes(combined)?;
         response.extend_from_slice(payload);
         if ends {
             break;
@@ -7016,6 +7319,8 @@ const TNS_PACKET_TYPE_MARKER: u8 = 12;
 const TNS_MARKER_TYPE_BREAK: u8 = 1;
 const TNS_MARKER_TYPE_RESET: u8 = 2;
 
+#[cfg(test)]
+#[allow(dead_code)]
 async fn reset_after_marker_recovery<R, W>(
     read: &mut R,
     write: &Arc<AsyncMutex<W>>,
@@ -7025,11 +7330,27 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    trace_connect_bytes("MARKER packet", &initial_marker.payload);
-    send_marker_recovery(write, TNS_MARKER_TYPE_RESET).await?;
-    drain_reset_markers(read).await
+    reset_after_marker_recovery_with_limits(read, write, initial_marker, ProtocolLimits::DEFAULT)
+        .await
 }
 
+async fn reset_after_marker_recovery_with_limits<R, W>(
+    read: &mut R,
+    write: &Arc<AsyncMutex<W>>,
+    initial_marker: &IncomingPacket,
+    limits: ProtocolLimits,
+) -> Result<Option<IncomingPacket>>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
+    trace_connect_bytes("MARKER packet", &initial_marker.payload);
+    send_marker_recovery(write, TNS_MARKER_TYPE_RESET).await?;
+    drain_reset_markers_with_limits(read, limits).await
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
 async fn reset_after_marker<R, W>(
     read: &mut R,
     cx: &Cx,
@@ -7040,12 +7361,38 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    trace_connect_bytes("MARKER packet", &initial_marker.payload);
-    send_marker_shared(cx, write, TNS_MARKER_TYPE_RESET).await?;
-    drain_reset_markers(read).await
+    reset_after_marker_with_limits(read, cx, write, initial_marker, ProtocolLimits::DEFAULT).await
 }
 
+async fn reset_after_marker_with_limits<R, W>(
+    read: &mut R,
+    cx: &Cx,
+    write: &Arc<AsyncMutex<W>>,
+    initial_marker: &IncomingPacket,
+    limits: ProtocolLimits,
+) -> Result<Option<IncomingPacket>>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
+    trace_connect_bytes("MARKER packet", &initial_marker.payload);
+    send_marker_shared(cx, write, TNS_MARKER_TYPE_RESET).await?;
+    drain_reset_markers_with_limits(read, limits).await
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
 async fn drain_reset_markers<R>(read: &mut R) -> Result<Option<IncomingPacket>>
+where
+    R: AsyncRead + Unpin,
+{
+    drain_reset_markers_with_limits(read, ProtocolLimits::DEFAULT).await
+}
+
+async fn drain_reset_markers_with_limits<R>(
+    read: &mut R,
+    limits: ProtocolLimits,
+) -> Result<Option<IncomingPacket>>
 where
     R: AsyncRead + Unpin,
 {
@@ -7059,7 +7406,7 @@ where
     // break and answers with a DUPLICATE RESET, poisoning a reused connection
     // (bead rust-oracledb-yhz). Exactly one RESET is ever sent, here.
     loop {
-        let packet = read_packet(read, PacketLengthWidth::Large32).await?;
+        let packet = read_packet_with_limits(read, PacketLengthWidth::Large32, limits).await?;
         if packet.packet_type != TNS_PACKET_TYPE_MARKER {
             return Ok(Some(packet));
         }
@@ -7084,7 +7431,20 @@ where
     Ok(())
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 async fn read_packet<R>(stream: &mut R, width: PacketLengthWidth) -> Result<IncomingPacket>
+where
+    R: AsyncRead + Unpin,
+{
+    read_packet_with_limits(stream, width, ProtocolLimits::DEFAULT).await
+}
+
+async fn read_packet_with_limits<R>(
+    stream: &mut R,
+    width: PacketLengthWidth,
+    limits: ProtocolLimits,
+) -> Result<IncomingPacket>
 where
     R: AsyncRead + Unpin,
 {
@@ -7104,6 +7464,7 @@ where
         }
         .into());
     }
+    limits.check_packet_bytes(declared)?;
     let mut payload = vec![0u8; declared - header.len()];
     stream.read_exact(&mut payload).await?;
     Ok(IncomingPacket {
@@ -7396,6 +7757,7 @@ mod tests {
             server_version: None,
             server_version_tuple: None,
             capabilities: ClientCapabilities::default(),
+            protocol_limits: ProtocolLimits::DEFAULT,
             ttc_seq_num: 0,
             sdu: 8192,
             supports_end_of_response: true,

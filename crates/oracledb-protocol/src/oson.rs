@@ -42,7 +42,7 @@ use crate::thin::{
     decode_number_value, encode_binary_double, encode_binary_float, encode_interval_ds,
     encode_number_text, encode_oracle_date, encode_oracle_timestamp, QueryValue,
 };
-use crate::wire::BoundedReader;
+use crate::wire::{BoundedReader, ProtocolLimits};
 use crate::{ProtocolError, Result};
 
 // Magic bytes and versions (reference constants.pxi).
@@ -159,11 +159,16 @@ pub enum OsonValue {
 struct OsonReader<'a> {
     data: &'a [u8],
     pos: usize,
+    limits: ProtocolLimits,
 }
 
 impl<'a> OsonReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
+    fn with_limits(data: &'a [u8], limits: ProtocolLimits) -> Result<Self> {
+        Ok(Self {
+            data,
+            pos: 0,
+            limits: limits.validate()?,
+        })
     }
 
     fn invalid(reason: &'static str) -> ProtocolError {
@@ -171,6 +176,7 @@ impl<'a> OsonReader<'a> {
     }
 
     fn read_raw(&mut self, len: usize) -> Result<&'a [u8]> {
+        self.limits.check_response_bytes(len)?;
         let end = self
             .pos
             .checked_add(len)
@@ -223,15 +229,11 @@ impl crate::wire::BoundedReader for OsonReader<'_> {
         // honest upper bound on any declared count.
         self.data.len()
     }
-}
 
-/// Maximum OSON container nesting depth. OSON offsets are absolute positions in
-/// the tree segment, so a malformed (or hostile) image can make a child node's
-/// offset point back at an ancestor, producing unbounded — effectively infinite
-/// — recursion. The reference C decoder is bounded by the Python recursion
-/// limit; we cap explicitly and fail closed. Real JSON nesting never approaches
-/// this; the deepest documents in practice are a few dozen levels.
-const MAX_OSON_DEPTH: usize = 1_000;
+    fn protocol_limits(&self) -> ProtocolLimits {
+        self.limits
+    }
+}
 
 /// Header state carried through a full (non-scalar) OSON decode.
 struct OsonDecoder<'a> {
@@ -270,7 +272,11 @@ impl<'a> OsonDecoder<'a> {
         // Bound the field-name reservation by the image (BoundedReader): each
         // field occupies at least one hash-id byte, so a count larger than the
         // image is necessarily a lie. The loop still fails closed on truncation.
-        let mut names: Vec<String> = self.reader.with_capacity_bounded(num_fields, 1);
+        let mut names: Vec<String> = self.reader.with_capacity_limited(
+            num_fields,
+            1,
+            ProtocolLimits::check_object_elements,
+        )?;
         for _ in 0..num_fields {
             let offset = if offsets_size == 2 {
                 usize::from(self.reader.read_u16be()?)
@@ -340,6 +346,9 @@ impl<'a> OsonDecoder<'a> {
         let container_offset = (self.reader.pos - self.tree_seg_pos - 1) as u32;
 
         let (mut num_children, is_shared) = self.get_num_children(node_type)?;
+        self.reader
+            .protocol_limits()
+            .check_object_elements(num_children as usize)?;
         let mut field_ids_pos = 0usize;
         let mut offsets_pos;
 
@@ -352,6 +361,9 @@ impl<'a> OsonDecoder<'a> {
             let shared_type = self.reader.read_u8()?;
             let (shared_num, _) = self.get_num_children(shared_type)?;
             num_children = shared_num;
+            self.reader
+                .protocol_limits()
+                .check_object_elements(num_children as usize)?;
             field_ids_pos = self.reader.pos;
         } else if is_object {
             field_ids_pos = self.reader.pos;
@@ -368,13 +380,21 @@ impl<'a> OsonDecoder<'a> {
         // fails closed when a child read runs past the end of the image.
         let (mut object, mut array): (Vec<(String, OsonValue)>, Vec<OsonValue>) = if is_object {
             (
-                self.reader.with_capacity_bounded(num_children as usize, 1),
+                self.reader.with_capacity_limited(
+                    num_children as usize,
+                    1,
+                    ProtocolLimits::check_object_elements,
+                )?,
                 Vec::new(),
             )
         } else {
             (
                 Vec::new(),
-                self.reader.with_capacity_bounded(num_children as usize, 1),
+                self.reader.with_capacity_limited(
+                    num_children as usize,
+                    1,
+                    ProtocolLimits::check_object_elements,
+                )?,
             )
         };
 
@@ -494,9 +514,13 @@ impl<'a> OsonDecoder<'a> {
                 let extended_type = self.reader.read_u8()?;
                 if extended_type == TNS_JSON_TYPE_VECTOR {
                     let len = self.reader.read_u32be()? as usize;
+                    self.reader.protocol_limits().check_response_bytes(len)?;
                     let raw = self.reader.read_raw(len)?;
-                    let vector = crate::vector::decode_vector(raw)
-                        .map_err(|_| ProtocolError::OsonInvalid("invalid embedded VECTOR"))?;
+                    let vector = crate::vector::decode_vector_with_limits(
+                        raw,
+                        self.reader.protocol_limits(),
+                    )
+                    .map_err(|_| ProtocolError::OsonInvalid("invalid embedded VECTOR"))?;
                     Ok(OsonValue::Vector(vector))
                 } else {
                     Err(ProtocolError::OsonTypeNotSupported("JSON extended type"))
@@ -578,11 +602,9 @@ impl<'a> OsonDecoder<'a> {
         let node_type = self.reader.read_u8()?;
         if node_type & 0x80 != 0 {
             self.depth += 1;
-            if self.depth > MAX_OSON_DEPTH {
-                return Err(ProtocolError::OsonInvalid(
-                    "OSON nesting depth exceeds limit",
-                ));
-            }
+            self.reader
+                .protocol_limits()
+                .check_object_depth(self.depth)?;
             let value = self.decode_container_node(node_type);
             self.depth -= 1;
             return value;
@@ -598,7 +620,13 @@ impl<'a> OsonDecoder<'a> {
 /// (truncation, out-of-range offsets, non-UTF-8 names) yield
 /// [`ProtocolError::OsonInvalid`] (DPY-5006).
 pub fn decode_oson(data: &[u8]) -> Result<OsonValue> {
-    let mut reader = OsonReader::new(data);
+    decode_oson_with_limits(data, ProtocolLimits::DEFAULT)
+}
+
+/// Decodes an OSON binary image under the caller's protocol resource policy.
+pub fn decode_oson_with_limits(data: &[u8], limits: ProtocolLimits) -> Result<OsonValue> {
+    limits.check_response_bytes(data.len())?;
+    let mut reader = OsonReader::with_limits(data, limits)?;
 
     let magic = reader
         .read_raw(3)
@@ -688,10 +716,12 @@ pub fn decode_oson(data: &[u8]) -> Result<OsonValue> {
     // attacker-supplied num_*_field_names (each a u32) reserves multiple
     // gigabytes before any name is read. The read_field_names calls below still
     // bounds-check.
-    let field_names = reader.with_capacity_bounded(
-        num_short_field_names.saturating_add(num_long_field_names),
+    let total_field_names = num_short_field_names.saturating_add(num_long_field_names);
+    let field_names = reader.with_capacity_limited(
+        total_field_names,
         1,
-    );
+        ProtocolLimits::check_object_elements,
+    )?;
     let mut decoder = OsonDecoder {
         reader,
         field_names,
@@ -1455,6 +1485,29 @@ mod tests {
     }
 
     #[test]
+    fn decode_oson_with_limits_rejects_object_element_count() {
+        let value = obj(&[("a", num("1")), ("b", num("2"))]);
+        let encoded = encode_oson(&value, false).unwrap();
+        let limits = ProtocolLimits {
+            max_object_elements: 1,
+            ..ProtocolLimits::DEFAULT
+        };
+        let err = decode_oson_with_limits(&encoded, limits)
+            .expect_err("object member count above policy must fail");
+        assert!(
+            matches!(
+                err,
+                ProtocolError::ResourceLimit {
+                    limit: "object_elements",
+                    observed: 2,
+                    maximum: 1,
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
     fn bad_magic_is_dpy_5004() {
         let bytes = b"{'not a previous encoded value': 3}";
         let err = decode_oson(bytes).unwrap_err();
@@ -1522,7 +1575,9 @@ mod tests {
         assert!(
             matches!(
                 err,
-                ProtocolError::OsonInvalid(_) | ProtocolError::OsonNotEncoded(_)
+                ProtocolError::OsonInvalid(_)
+                    | ProtocolError::OsonNotEncoded(_)
+                    | ProtocolError::ResourceLimit { .. }
             ),
             "got {err:?}"
         );

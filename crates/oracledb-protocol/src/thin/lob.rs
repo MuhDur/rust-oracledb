@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::wire::ProtocolLimits;
 
 pub fn build_lob_read_payload_with_seq(
     locator: &[u8],
@@ -222,14 +223,31 @@ pub fn parse_lob_read_response(
     capabilities: ClientCapabilities,
     locator: &[u8],
 ) -> Result<LobReadResult> {
-    parse_lob_op_response(payload, capabilities, locator, false, true)
+    parse_lob_read_response_with_limits(payload, capabilities, locator, ProtocolLimits::DEFAULT)
+}
+
+pub fn parse_lob_read_response_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    locator: &[u8],
+    limits: ProtocolLimits,
+) -> Result<LobReadResult> {
+    parse_lob_op_response_with_limits(payload, capabilities, locator, false, true, limits)
 }
 
 pub fn parse_lob_create_temp_response(
     payload: &[u8],
     capabilities: ClientCapabilities,
 ) -> Result<LobReadResult> {
-    parse_lob_op_response(payload, capabilities, &[0; 40], true, false)
+    parse_lob_create_temp_response_with_limits(payload, capabilities, ProtocolLimits::DEFAULT)
+}
+
+pub fn parse_lob_create_temp_response_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    limits: ProtocolLimits,
+) -> Result<LobReadResult> {
+    parse_lob_op_response_with_limits(payload, capabilities, &[0; 40], true, false, limits)
 }
 
 pub fn parse_lob_write_response(
@@ -237,7 +255,16 @@ pub fn parse_lob_write_response(
     capabilities: ClientCapabilities,
     locator: &[u8],
 ) -> Result<LobReadResult> {
-    parse_lob_op_response(payload, capabilities, locator, false, false)
+    parse_lob_write_response_with_limits(payload, capabilities, locator, ProtocolLimits::DEFAULT)
+}
+
+pub fn parse_lob_write_response_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    locator: &[u8],
+    limits: ProtocolLimits,
+) -> Result<LobReadResult> {
+    parse_lob_op_response_with_limits(payload, capabilities, locator, false, false, limits)
 }
 
 pub fn parse_lob_trim_response(
@@ -245,7 +272,16 @@ pub fn parse_lob_trim_response(
     capabilities: ClientCapabilities,
     locator: &[u8],
 ) -> Result<LobReadResult> {
-    parse_lob_op_response(payload, capabilities, locator, false, true)
+    parse_lob_trim_response_with_limits(payload, capabilities, locator, ProtocolLimits::DEFAULT)
+}
+
+pub fn parse_lob_trim_response_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    locator: &[u8],
+    limits: ProtocolLimits,
+) -> Result<LobReadResult> {
+    parse_lob_op_response_with_limits(payload, capabilities, locator, false, true, limits)
 }
 
 pub fn parse_lob_free_temp_response(
@@ -253,7 +289,22 @@ pub fn parse_lob_free_temp_response(
     capabilities: ClientCapabilities,
     returned_parameter_len: usize,
 ) -> Result<()> {
-    let mut reader = TtcReader::new(payload);
+    parse_lob_free_temp_response_with_limits(
+        payload,
+        capabilities,
+        returned_parameter_len,
+        ProtocolLimits::DEFAULT,
+    )
+}
+
+pub fn parse_lob_free_temp_response_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    returned_parameter_len: usize,
+    limits: ProtocolLimits,
+) -> Result<()> {
+    limits.check_frame_bytes(returned_parameter_len)?;
+    let mut reader = TtcReader::with_limits(payload, limits)?;
     while reader.remaining() > 0 {
         let message_type = reader.read_u8()?;
         match message_type {
@@ -293,7 +344,15 @@ pub fn parse_plain_function_response(
     payload: &[u8],
     capabilities: ClientCapabilities,
 ) -> Result<bool> {
-    let mut reader = TtcReader::new(payload);
+    parse_plain_function_response_with_limits(payload, capabilities, ProtocolLimits::DEFAULT)
+}
+
+pub fn parse_plain_function_response_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    limits: ProtocolLimits,
+) -> Result<bool> {
+    let mut reader = TtcReader::with_limits(payload, limits)?;
     let mut txn_in_progress = false;
     while reader.remaining() > 0 {
         let message_type = reader.read_u8()?;
@@ -323,14 +382,15 @@ pub fn parse_plain_function_response(
     Ok(txn_in_progress)
 }
 
-pub(crate) fn parse_lob_op_response(
+pub(crate) fn parse_lob_op_response_with_limits(
     payload: &[u8],
     capabilities: ClientCapabilities,
     locator: &[u8],
     is_create_temp: bool,
     read_amount: bool,
+    limits: ProtocolLimits,
 ) -> Result<LobReadResult> {
-    let mut reader = TtcReader::new(payload);
+    let mut reader = TtcReader::with_limits(payload, limits)?;
     let mut result = LobReadResult {
         locator: locator.to_vec(),
         ..LobReadResult::default()

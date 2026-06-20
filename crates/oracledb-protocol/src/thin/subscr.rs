@@ -15,7 +15,7 @@
 //! live in the driver and pyshim crates.
 
 use super::*;
-use crate::wire::{TtcReader, TtcWriter};
+use crate::wire::{ProtocolLimits, TtcReader, TtcWriter};
 
 /// Result of decoding the SUBSCRIBE (register) response.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -215,7 +215,15 @@ pub fn parse_subscribe_response(
     payload: &[u8],
     capabilities: ClientCapabilities,
 ) -> Result<SubscribeResult> {
-    let mut reader = TtcReader::new(payload);
+    parse_subscribe_response_with_limits(payload, capabilities, ProtocolLimits::DEFAULT)
+}
+
+pub fn parse_subscribe_response_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    limits: ProtocolLimits,
+) -> Result<SubscribeResult> {
+    let mut reader = TtcReader::with_limits(payload, limits)?;
     let mut result = SubscribeResult::default();
     let field_version = capabilities.ttc_field_version;
     while reader.remaining() > 0 {
@@ -313,7 +321,23 @@ pub fn parse_notification_stream(
     public_qos: u32,
     db_name: Option<&str>,
 ) -> Result<Vec<NotificationRecord>> {
-    let mut reader = TtcReader::new(payload);
+    parse_notification_stream_with_limits(
+        payload,
+        namespace,
+        public_qos,
+        db_name,
+        ProtocolLimits::DEFAULT,
+    )
+}
+
+pub fn parse_notification_stream_with_limits(
+    payload: &[u8],
+    namespace: u32,
+    public_qos: u32,
+    db_name: Option<&str>,
+    limits: ProtocolLimits,
+) -> Result<Vec<NotificationRecord>> {
+    let mut reader = TtcReader::with_limits(payload, limits)?;
     let message_type = reader.read_u8()?; // outer process(): read_ub1(message_type)
     if message_type != TNS_MSG_TYPE_OAC {
         return Err(ProtocolError::UnknownMessageType {
@@ -323,7 +347,8 @@ pub fn parse_notification_stream(
     }
     let mut records = Vec::new();
     while reader.remaining() > 0 {
-        let record = parse_oac_record(&mut reader, namespace, public_qos, db_name)?;
+        let record =
+            parse_oac_record_with_limits(&mut reader, namespace, public_qos, db_name, limits)?;
         let end = match &record {
             NotificationRecord::Stop => true,
             NotificationRecord::Message {
@@ -342,7 +367,14 @@ pub fn parse_notification_stream(
 /// stream (`process()` reads it once before delivering any record). Returns the
 /// number of bytes consumed (1) or an error if the byte is not OAC.
 pub fn check_notification_header(bytes: &[u8]) -> Result<usize> {
-    let mut reader = TtcReader::new(bytes);
+    check_notification_header_with_limits(bytes, ProtocolLimits::DEFAULT)
+}
+
+pub fn check_notification_header_with_limits(
+    bytes: &[u8],
+    limits: ProtocolLimits,
+) -> Result<usize> {
+    let mut reader = TtcReader::with_limits(bytes, limits)?;
     let message_type = reader.read_u8()?;
     if message_type != TNS_MSG_TYPE_OAC {
         return Err(ProtocolError::UnknownMessageType {
@@ -364,8 +396,24 @@ pub fn try_parse_oac_record(
     public_qos: u32,
     db_name: Option<&str>,
 ) -> Result<Option<(NotificationRecord, usize)>> {
-    let mut reader = TtcReader::new(bytes);
-    match parse_oac_record(&mut reader, namespace, public_qos, db_name) {
+    try_parse_oac_record_with_limits(
+        bytes,
+        namespace,
+        public_qos,
+        db_name,
+        ProtocolLimits::DEFAULT,
+    )
+}
+
+pub fn try_parse_oac_record_with_limits(
+    bytes: &[u8],
+    namespace: u32,
+    public_qos: u32,
+    db_name: Option<&str>,
+    limits: ProtocolLimits,
+) -> Result<Option<(NotificationRecord, usize)>> {
+    let mut reader = TtcReader::with_limits(bytes, limits)?;
+    match parse_oac_record_with_limits(&mut reader, namespace, public_qos, db_name, limits) {
         Ok(record) => Ok(Some((record, reader.position()))),
         // The server only emits well-formed records; a decode failure while the
         // stream is still being chained means the buffer is short, so signal
@@ -381,6 +429,16 @@ pub fn parse_oac_record(
     namespace: u32,
     public_qos: u32,
     db_name: Option<&str>,
+) -> Result<NotificationRecord> {
+    parse_oac_record_with_limits(reader, namespace, public_qos, db_name, reader.limits())
+}
+
+pub fn parse_oac_record_with_limits(
+    reader: &mut TtcReader<'_>,
+    namespace: u32,
+    public_qos: u32,
+    db_name: Option<&str>,
+    limits: ProtocolLimits,
 ) -> Result<NotificationRecord> {
     let message_type = reader.read_ub4()?;
     if message_type == TNS_SUBSCR_STOP_NOTIF {
@@ -421,8 +479,13 @@ pub fn parse_oac_record(
         tables: Vec::new(),
         queries: Vec::new(),
     };
-    let end_of_response =
-        process_notification_payload(payload.as_deref(), namespace, public_qos, &mut message)?;
+    let end_of_response = process_notification_payload(
+        payload.as_deref(),
+        namespace,
+        public_qos,
+        limits,
+        &mut message,
+    )?;
     Ok(NotificationRecord::Message {
         message,
         end_of_response,
@@ -435,6 +498,7 @@ fn process_notification_payload(
     payload: Option<&[u8]>,
     namespace: u32,
     public_qos: u32,
+    limits: ProtocolLimits,
     message: &mut NotificationMessage,
 ) -> Result<bool> {
     if namespace == TNS_SUBSCR_NAMESPACE_AQ {
@@ -454,7 +518,7 @@ fn process_notification_payload(
         message.registered = true;
     }
     // inner payload is a plain big-endian byte cursor
-    let mut cur = ByteCursor::new(payload);
+    let mut cur = ByteCursor::with_limits(payload, limits)?;
     let _version = cur.u16be()?;
     let _registration_id = cur.u32be()?;
     let event_type = cur.u32be()?;
@@ -479,7 +543,11 @@ fn process_tables(cur: &mut ByteCursor<'_>) -> Result<Vec<MsgTable>> {
     // Each table record reads at least a u32 operation + u16 name length (6
     // bytes) before its name, so cap the reservation by the buffer
     // (BoundedReader); the loop still fails closed on truncation.
-    let mut tables: Vec<MsgTable> = cur.with_capacity_bounded(num_tables as usize, 6);
+    let mut tables: Vec<MsgTable> = cur.with_capacity_limited(
+        num_tables as usize,
+        6,
+        ProtocolLimits::check_length_prefixed_elements,
+    )?;
     for _ in 0..num_tables {
         let operation = cur.u32be()?;
         let name_len = cur.u16be()? as usize;
@@ -504,7 +572,11 @@ fn process_rows(cur: &mut ByteCursor<'_>) -> Result<Vec<MsgRow>> {
     let num_rows = cur.u16be()?;
     // Each row record reads at least a u32 operation + u16 rowid length (6
     // bytes); bound the reservation by the buffer (BoundedReader).
-    let mut rows: Vec<MsgRow> = cur.with_capacity_bounded(num_rows as usize, 6);
+    let mut rows: Vec<MsgRow> = cur.with_capacity_limited(
+        num_rows as usize,
+        6,
+        ProtocolLimits::check_length_prefixed_elements,
+    )?;
     for _ in 0..num_rows {
         let operation = cur.u32be()?;
         let rowid_len = cur.u16be()? as usize;
@@ -519,7 +591,11 @@ fn process_queries(cur: &mut ByteCursor<'_>) -> Result<Vec<MsgQuery>> {
     let num_queries = cur.u16be()?;
     // Each query record reads at least three u32s (12 bytes) before its nested
     // tables; bound the reservation by the buffer (BoundedReader).
-    let mut queries: Vec<MsgQuery> = cur.with_capacity_bounded(num_queries as usize, 12);
+    let mut queries: Vec<MsgQuery> = cur.with_capacity_limited(
+        num_queries as usize,
+        12,
+        ProtocolLimits::check_length_prefixed_elements,
+    )?;
     for _ in 0..num_queries {
         let id_lsb = u64::from(cur.u32be()?);
         let id_msb = u64::from(cur.u32be()?);
@@ -554,11 +630,27 @@ fn skip_bytes_with_length(reader: &mut TtcReader<'_>) -> Result<()> {
 struct ByteCursor<'a> {
     bytes: &'a [u8],
     pos: usize,
+    limits: ProtocolLimits,
 }
 
 impl<'a> ByteCursor<'a> {
+    #[cfg(test)]
     fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0 }
+        Self {
+            bytes,
+            pos: 0,
+            limits: ProtocolLimits::DEFAULT,
+        }
+    }
+
+    fn with_limits(bytes: &'a [u8], limits: ProtocolLimits) -> Result<Self> {
+        let limits = limits.validate()?;
+        limits.check_response_bytes(bytes.len())?;
+        Ok(Self {
+            bytes,
+            pos: 0,
+            limits,
+        })
     }
 
     fn raw(&mut self, n: usize) -> Result<&'a [u8]> {
@@ -594,6 +686,10 @@ impl crate::wire::BoundedReader for ByteCursor<'_> {
     fn remaining(&self) -> usize {
         self.bytes.len().saturating_sub(self.pos)
     }
+
+    fn protocol_limits(&self) -> ProtocolLimits {
+        self.limits
+    }
 }
 
 #[cfg(test)]
@@ -617,6 +713,30 @@ mod tests {
         let cur2 = ByteCursor::new(&bytes);
         let v: Vec<MsgTable> = cur2.with_capacity_bounded(0xFFFF, 6);
         assert!(v.capacity() <= 1, "reservation capped by remaining bytes");
+    }
+
+    #[test]
+    fn cqn_table_count_respects_protocol_element_limit() {
+        // num_tables = 2. A max_length_prefixed_elements=1 policy rejects the
+        // count before reserving table slots.
+        let bytes = [0x00u8, 0x02];
+        let limits = ProtocolLimits {
+            max_length_prefixed_elements: 1,
+            ..ProtocolLimits::DEFAULT
+        };
+        let mut cur = ByteCursor::with_limits(&bytes, limits).expect("valid limits");
+        let err = process_tables(&mut cur).expect_err("table count above policy must fail");
+        assert!(
+            matches!(
+                err,
+                ProtocolError::ResourceLimit {
+                    limit: "length_prefixed_elements",
+                    observed: 2,
+                    maximum: 1,
+                }
+            ),
+            "got {err:?}"
+        );
     }
 
     fn caps_12_1() -> ClientCapabilities {

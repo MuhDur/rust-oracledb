@@ -58,7 +58,7 @@ impl ProtocolLimits {
         max_batch_rows: 1_000_000,
         max_object_depth: 256,
         max_object_elements: 1_000_000,
-        max_vector_dimensions: 65_535,
+        max_vector_dimensions: 1_000_000,
         max_lob_chunks: 1_000_000,
         max_redirects: 8,
         max_length_prefixed_elements: 1_000_000,
@@ -414,6 +414,12 @@ pub trait BoundedReader {
     /// count-driven allocation.
     fn remaining(&self) -> usize;
 
+    /// Resource policy attached to this decoder. Readers that have not yet
+    /// grown a configurable policy surface use the validated defaults.
+    fn protocol_limits(&self) -> ProtocolLimits {
+        ProtocolLimits::DEFAULT
+    }
+
     /// Validate a server-declared element `count` against the buffer: a run of
     /// `count` elements must carry at least `count * min_bytes_per_elem` bytes,
     /// so a count whose minimum byte footprint exceeds [`remaining`] is a lie.
@@ -424,6 +430,8 @@ pub trait BoundedReader {
     /// 4 for a `u32` index, 8 for an `f64`, 1 for a length-prefixed field whose
     /// shortest legal form is a single length byte). A zero is treated as 1.
     fn alloc_count_checked(&self, count: usize, min_bytes_per_elem: usize) -> Result<usize> {
+        self.protocol_limits()
+            .check_length_prefixed_elements(count)?;
         let per_elem = min_bytes_per_elem.max(1);
         match count.checked_mul(per_elem) {
             Some(needed) if needed <= self.remaining() => Ok(count),
@@ -444,17 +452,38 @@ pub trait BoundedReader {
         let per_elem = min_bytes_per_elem.max(1);
         Vec::with_capacity(count.min(self.remaining() / per_elem))
     }
+
+    /// Policy-aware form of [`with_capacity_bounded`](Self::with_capacity_bounded):
+    /// the caller supplies the resource family check, then the speculative
+    /// allocation is still capped by the remaining buffer.
+    fn with_capacity_limited<T, F>(
+        &self,
+        count: usize,
+        min_bytes_per_elem: usize,
+        check: F,
+    ) -> Result<Vec<T>>
+    where
+        F: FnOnce(&ProtocolLimits, usize) -> Result<()>,
+    {
+        check(&self.protocol_limits(), count)?;
+        Ok(self.with_capacity_bounded(count, min_bytes_per_elem))
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct TtcReader<'a> {
     bytes: &'a [u8],
     pos: usize,
+    limits: ProtocolLimits,
 }
 
 impl BoundedReader for TtcReader<'_> {
     fn remaining(&self) -> usize {
         TtcReader::remaining(self)
+    }
+
+    fn protocol_limits(&self) -> ProtocolLimits {
+        self.limits
     }
 }
 
@@ -474,7 +503,26 @@ pub enum BorrowedBytes<'a> {
 
 impl<'a> TtcReader<'a> {
     pub fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0 }
+        Self {
+            bytes,
+            pos: 0,
+            limits: ProtocolLimits::DEFAULT,
+        }
+    }
+
+    pub fn with_limits(bytes: &'a [u8], limits: ProtocolLimits) -> Result<Self> {
+        let limits = limits.validate()?;
+        limits.check_frame_bytes(bytes.len())?;
+        limits.check_response_bytes(bytes.len())?;
+        Ok(Self {
+            bytes,
+            pos: 0,
+            limits,
+        })
+    }
+
+    pub fn limits(&self) -> ProtocolLimits {
+        self.limits
     }
 
     pub fn remaining(&self) -> usize {
@@ -537,6 +585,7 @@ impl<'a> TtcReader<'a> {
     }
 
     pub fn read_raw(&mut self, len: usize) -> Result<&'a [u8]> {
+        self.limits.check_response_bytes(len)?;
         let end = self
             .pos
             .checked_add(len)
@@ -659,18 +708,40 @@ impl<'a> TtcReader<'a> {
         let len = self.read_u8()?;
         if len == TNS_LONG_LENGTH_INDICATOR {
             let mut out = Vec::new();
+            let mut chunks = 0usize;
+            let mut total = 0usize;
             loop {
                 let chunk_len = self.read_ub4()?;
                 if chunk_len == 0 {
                     break;
                 }
-                let chunk = self.read_raw(chunk_len as usize)?;
+                chunks = chunks.checked_add(1).ok_or(ProtocolError::ResourceLimit {
+                    limit: "lob_chunks",
+                    observed: usize::MAX,
+                    maximum: self.limits.max_lob_chunks,
+                })?;
+                self.limits.check_lob_chunks(chunks)?;
+                let chunk_len =
+                    usize::try_from(chunk_len).map_err(|_| ProtocolError::InvalidPacketLength {
+                        length: usize::MAX,
+                        minimum: 0,
+                    })?;
+                total = total
+                    .checked_add(chunk_len)
+                    .ok_or(ProtocolError::ResourceLimit {
+                        limit: "response_bytes",
+                        observed: usize::MAX,
+                        maximum: self.limits.max_response_bytes,
+                    })?;
+                self.limits.check_response_bytes(total)?;
+                let chunk = self.read_raw(chunk_len)?;
                 out.extend_from_slice(chunk);
             }
             Ok(BorrowedBytes::Chunked(out))
         } else if len == 0 || len == TNS_NULL_LENGTH_INDICATOR {
             Ok(BorrowedBytes::Null)
         } else {
+            self.limits.check_response_bytes(usize::from(len))?;
             Ok(BorrowedBytes::Slice(self.read_raw(usize::from(len))?))
         }
     }
@@ -682,17 +753,39 @@ impl<'a> TtcReader<'a> {
     pub fn skip_bytes_field(&mut self) -> Result<()> {
         let len = self.read_u8()?;
         if len == TNS_LONG_LENGTH_INDICATOR {
+            let mut chunks = 0usize;
+            let mut total = 0usize;
             loop {
                 let chunk_len = self.read_ub4()?;
                 if chunk_len == 0 {
                     break;
                 }
-                self.skip(chunk_len as usize)?;
+                chunks = chunks.checked_add(1).ok_or(ProtocolError::ResourceLimit {
+                    limit: "lob_chunks",
+                    observed: usize::MAX,
+                    maximum: self.limits.max_lob_chunks,
+                })?;
+                self.limits.check_lob_chunks(chunks)?;
+                let chunk_len =
+                    usize::try_from(chunk_len).map_err(|_| ProtocolError::InvalidPacketLength {
+                        length: usize::MAX,
+                        minimum: 0,
+                    })?;
+                total = total
+                    .checked_add(chunk_len)
+                    .ok_or(ProtocolError::ResourceLimit {
+                        limit: "response_bytes",
+                        observed: usize::MAX,
+                        maximum: self.limits.max_response_bytes,
+                    })?;
+                self.limits.check_response_bytes(total)?;
+                self.skip(chunk_len)?;
             }
             Ok(())
         } else if len == 0 || len == TNS_NULL_LENGTH_INDICATOR {
             Ok(())
         } else {
+            self.limits.check_response_bytes(usize::from(len))?;
             self.skip(usize::from(len))
         }
     }
@@ -701,18 +794,40 @@ impl<'a> TtcReader<'a> {
         let len = self.read_u8()?;
         if len == TNS_LONG_LENGTH_INDICATOR {
             let mut out = Vec::new();
+            let mut chunks = 0usize;
+            let mut total = 0usize;
             loop {
                 let chunk_len = self.read_ub4()?;
                 if chunk_len == 0 {
                     break;
                 }
-                let chunk = self.read_raw(chunk_len as usize)?;
+                chunks = chunks.checked_add(1).ok_or(ProtocolError::ResourceLimit {
+                    limit: "lob_chunks",
+                    observed: usize::MAX,
+                    maximum: self.limits.max_lob_chunks,
+                })?;
+                self.limits.check_lob_chunks(chunks)?;
+                let chunk_len =
+                    usize::try_from(chunk_len).map_err(|_| ProtocolError::InvalidPacketLength {
+                        length: usize::MAX,
+                        minimum: 0,
+                    })?;
+                total = total
+                    .checked_add(chunk_len)
+                    .ok_or(ProtocolError::ResourceLimit {
+                        limit: "response_bytes",
+                        observed: usize::MAX,
+                        maximum: self.limits.max_response_bytes,
+                    })?;
+                self.limits.check_response_bytes(total)?;
+                let chunk = self.read_raw(chunk_len)?;
                 out.extend_from_slice(chunk);
             }
             Ok(Some(out))
         } else if len == 0 || len == TNS_NULL_LENGTH_INDICATOR {
             Ok(None)
         } else {
+            self.limits.check_response_bytes(usize::from(len))?;
             Ok(Some(self.read_raw(usize::from(len))?.to_vec()))
         }
     }
@@ -723,6 +838,7 @@ impl<'a> TtcReader<'a> {
                 length: usize::MAX,
                 minimum: 0,
             })?;
+        self.limits.check_response_bytes(len)?;
         if len == 0 {
             return Ok(None);
         }
@@ -942,6 +1058,43 @@ mod tests {
                 limit: "frame_bytes",
                 observed: 33,
                 maximum: 32,
+            })
+        ));
+    }
+
+    #[test]
+    fn ttc_reader_with_limits_rejects_oversized_raw_reads() {
+        let limits = ProtocolLimits {
+            max_packet_bytes: 4,
+            max_frame_bytes: 4,
+            max_response_bytes: 4,
+            ..ProtocolLimits::DEFAULT
+        };
+        let mut reader = TtcReader::with_limits(&[1, 2, 3, 4], limits).expect("valid limits");
+        assert!(matches!(
+            reader.read_raw(5),
+            Err(ProtocolError::ResourceLimit {
+                limit: "response_bytes",
+                observed: 5,
+                maximum: 4,
+            })
+        ));
+    }
+
+    #[test]
+    fn ttc_reader_with_limits_rejects_too_many_lob_chunks() {
+        let limits = ProtocolLimits {
+            max_lob_chunks: 1,
+            ..ProtocolLimits::DEFAULT
+        };
+        let bytes = [TNS_LONG_LENGTH_INDICATOR, 1, 1, b'a', 1, 1, b'b', 0];
+        let mut reader = TtcReader::with_limits(&bytes, limits).expect("valid limits");
+        assert!(matches!(
+            reader.read_bytes(),
+            Err(ProtocolError::ResourceLimit {
+                limit: "lob_chunks",
+                observed: 2,
+                maximum: 1,
             })
         ));
     }

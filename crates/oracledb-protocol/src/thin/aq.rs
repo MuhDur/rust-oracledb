@@ -14,7 +14,8 @@
 //! payloads reuse [`crate::oson`].
 
 use super::*;
-use crate::oson::{decode_oson, encode_oson, OsonValue};
+use crate::oson::{decode_oson_with_limits, encode_oson, OsonValue};
+use crate::wire::ProtocolLimits;
 
 /// Payload classification for a queue. Determines the TOID sentinel and the
 /// payload-encoding branch taken during enqueue/dequeue.
@@ -394,7 +395,15 @@ pub fn parse_aq_enq_response(
     payload: &[u8],
     capabilities: ClientCapabilities,
 ) -> Result<Option<Vec<u8>>> {
-    let mut reader = TtcReader::new(payload);
+    parse_aq_enq_response_with_limits(payload, capabilities, ProtocolLimits::DEFAULT)
+}
+
+pub fn parse_aq_enq_response_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    limits: ProtocolLimits,
+) -> Result<Option<Vec<u8>>> {
+    let mut reader = TtcReader::with_limits(payload, limits)?;
     let mut msgid: Option<Vec<u8>> = None;
     while reader.remaining() > 0 {
         let message_type = reader.read_u8()?;
@@ -562,7 +571,16 @@ pub fn parse_aq_deq_response(
     capabilities: ClientCapabilities,
     kind: &AqPayloadKind,
 ) -> Result<AqDeqResult> {
-    let mut reader = TtcReader::new(payload);
+    parse_aq_deq_response_with_limits(payload, capabilities, kind, ProtocolLimits::DEFAULT)
+}
+
+pub fn parse_aq_deq_response_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    kind: &AqPayloadKind,
+    limits: ProtocolLimits,
+) -> Result<AqDeqResult> {
+    let mut reader = TtcReader::with_limits(payload, limits)?;
     let mut result = AqDeqResult::default();
     let mut no_msg_found = false;
     while reader.remaining() > 0 {
@@ -777,7 +795,26 @@ pub fn parse_aq_array_response(
     props_count: u32,
     kind: &AqPayloadKind,
 ) -> Result<AqArrayResult> {
-    let mut reader = TtcReader::new(payload);
+    parse_aq_array_response_with_limits(
+        payload,
+        capabilities,
+        operation,
+        props_count,
+        kind,
+        ProtocolLimits::DEFAULT,
+    )
+}
+
+pub fn parse_aq_array_response_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    operation: i32,
+    props_count: u32,
+    kind: &AqPayloadKind,
+    limits: ProtocolLimits,
+) -> Result<AqArrayResult> {
+    limits.check_batch_rows(props_count as usize)?;
+    let mut reader = TtcReader::with_limits(payload, limits)?;
     let mut result = AqArrayResult::default();
     let mut messages: Vec<AqDeqMessage> = Vec::new();
     let mut enq_msgid_blob: Option<Vec<u8>> = None;
@@ -789,6 +826,7 @@ pub fn parse_aq_array_response(
             0 => {}
             TNS_MSG_TYPE_PARAMETER => {
                 let num_iters = reader.read_ub4()?;
+                reader.limits().check_batch_rows(num_iters as usize)?;
                 response_num_iters = num_iters;
                 for i in 0..num_iters {
                     let mut message = AqDeqMessage::default();
@@ -824,6 +862,9 @@ pub fn parse_aq_array_response(
                 }
                 if operation == TNS_AQ_ARRAY_ENQ {
                     response_num_iters = reader.read_ub4()?;
+                    reader
+                        .limits()
+                        .check_batch_rows(response_num_iters as usize)?;
                 }
             }
             TNS_MSG_TYPE_STATUS => {
@@ -967,6 +1008,9 @@ fn process_payload(
         let _snapshot = reader.read_bytes_with_length()?;
         let _version = reader.read_ub2()?;
         let image_length = reader.read_ub4()?;
+        reader
+            .limits()
+            .check_response_bytes(image_length as usize)?;
         let _flags = reader.read_ub2()?;
         if image_length == 0 {
             return Ok(None);
@@ -982,6 +1026,7 @@ fn process_payload(
     let _snapshot = reader.read_bytes_with_length()?;
     let _version = reader.read_ub2()?;
     let image_length = reader.read_ub4()? as usize;
+    reader.limits().check_response_bytes(image_length)?;
     let _flags = reader.read_ub2()?;
     if image_length > 0 {
         // reference: payload = read_bytes()[4:image_length]
@@ -992,7 +1037,7 @@ fn process_payload(
         let start = 4.min(end);
         let payload = raw.get(start..end).unwrap_or_default().to_vec();
         if matches!(kind, AqPayloadKind::Json) {
-            let value = decode_oson(&payload)?;
+            let value = decode_oson_with_limits(&payload, reader.limits())?;
             return Ok(Some(AqDeqPayload::Json(value)));
         }
         return Ok(Some(AqDeqPayload::Raw(payload)));
@@ -1080,6 +1125,34 @@ mod tests {
         let caps = caps();
         let res = parse_aq_deq_response(&[], caps, &AqPayloadKind::Raw).expect("parse");
         assert!(res.message.is_none());
+    }
+
+    #[test]
+    fn aq_array_response_respects_protocol_batch_limit() {
+        let limits = ProtocolLimits {
+            max_batch_rows: 1,
+            ..ProtocolLimits::DEFAULT
+        };
+        let err = parse_aq_array_response_with_limits(
+            &[],
+            caps(),
+            TNS_AQ_ARRAY_ENQ,
+            2,
+            &AqPayloadKind::Raw,
+            limits,
+        )
+        .expect_err("client-side AQ batch count above policy must fail");
+        assert!(
+            matches!(
+                err,
+                ProtocolError::ResourceLimit {
+                    limit: "batch_rows",
+                    observed: 2,
+                    maximum: 1,
+                }
+            ),
+            "got {err:?}"
+        );
     }
 
     // Golden JSON enqueue (FUNC 121): msgproperties(payload=dict(name="John",

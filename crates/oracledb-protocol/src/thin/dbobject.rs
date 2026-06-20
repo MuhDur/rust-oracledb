@@ -5,11 +5,28 @@ use super::*;
 pub struct DbObjectPackedReader<'a> {
     bytes: &'a [u8],
     pos: usize,
+    limits: crate::wire::ProtocolLimits,
 }
 
 impl<'a> DbObjectPackedReader<'a> {
     pub fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0 }
+        Self {
+            bytes,
+            pos: 0,
+            limits: crate::wire::ProtocolLimits::DEFAULT,
+        }
+    }
+
+    pub fn with_limits(bytes: &'a [u8], limits: crate::wire::ProtocolLimits) -> Result<Self> {
+        Ok(Self {
+            bytes,
+            pos: 0,
+            limits: limits.validate()?,
+        })
+    }
+
+    pub fn limits(&self) -> crate::wire::ProtocolLimits {
+        self.limits
     }
 
     pub fn read_u8(&mut self) -> Result<u8> {
@@ -23,6 +40,7 @@ impl<'a> DbObjectPackedReader<'a> {
     }
 
     fn read_raw(&mut self, len: usize) -> Result<&'a [u8]> {
+        self.limits.check_response_bytes(len)?;
         let end = self.pos.checked_add(len).ok_or(ProtocolError::TtcDecode(
             "DbObject packed data offset overflow",
         ))?;
@@ -121,6 +139,10 @@ impl<'a> DbObjectPackedReader<'a> {
 impl crate::wire::BoundedReader for DbObjectPackedReader<'_> {
     fn remaining(&self) -> usize {
         self.bytes_left()
+    }
+
+    fn protocol_limits(&self) -> crate::wire::ProtocolLimits {
+        self.limits
     }
 }
 

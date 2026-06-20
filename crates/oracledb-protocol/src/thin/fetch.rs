@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+use crate::wire::ProtocolLimits;
 
 /// Validate `slice` as UTF-8 for the hot borrowed-text decode path, returning the
 /// borrowed `&str` on success or `()` on rejection (the caller falls back to the
@@ -156,6 +157,24 @@ pub fn parse_query_response(
     parse_query_response_with_previous(payload, capabilities, None)
 }
 
+pub fn parse_query_response_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    limits: ProtocolLimits,
+) -> Result<QueryResult> {
+    parse_query_response_with_context_binds_options_and_limits(
+        payload,
+        capabilities,
+        &[],
+        None,
+        &[],
+        &[],
+        false,
+        ExecuteOptions::default(),
+        limits,
+    )
+}
+
 pub fn parse_query_response_with_binds(
     payload: &[u8],
     capabilities: ClientCapabilities,
@@ -212,6 +231,34 @@ pub fn parse_query_response_with_binds_options_and_columns(
     )
 }
 
+pub fn parse_query_response_with_binds_options_columns_and_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    binds: &[BindValue],
+    exec_options: ExecuteOptions,
+    known_columns: &[ColumnMetadata],
+    limits: ProtocolLimits,
+) -> Result<QueryResult> {
+    limits.check_binds(binds.len())?;
+    let bind_columns = binds.iter().map(bind_column_metadata).collect::<Vec<_>>();
+    let output_bind_indexes = binds
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| value.is_return_output().then_some(index))
+        .collect::<Vec<_>>();
+    parse_query_response_with_context_binds_options_and_limits(
+        payload,
+        capabilities,
+        known_columns,
+        None,
+        &bind_columns,
+        &output_bind_indexes,
+        false,
+        exec_options,
+        limits,
+    )
+}
+
 pub fn parse_query_response_with_previous(
     payload: &[u8],
     capabilities: ClientCapabilities,
@@ -234,6 +281,7 @@ pub fn parse_query_response_with_context(
         &[],
         &[],
         false,
+        ProtocolLimits::DEFAULT,
     )
 }
 
@@ -243,6 +291,22 @@ pub fn parse_fetch_response_with_context(
     previous_columns: &[ColumnMetadata],
     previous_row: Option<&[Option<QueryValue>]>,
 ) -> Result<QueryResult> {
+    parse_fetch_response_with_context_and_limits(
+        payload,
+        capabilities,
+        previous_columns,
+        previous_row,
+        ProtocolLimits::DEFAULT,
+    )
+}
+
+pub fn parse_fetch_response_with_context_and_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    previous_columns: &[ColumnMetadata],
+    previous_row: Option<&[Option<QueryValue>]>,
+    limits: ProtocolLimits,
+) -> Result<QueryResult> {
     parse_query_response_with_context_and_binds(
         payload,
         capabilities,
@@ -251,9 +315,11 @@ pub fn parse_fetch_response_with_context(
         &[],
         &[],
         true,
+        limits,
     )
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors the reference message attribute set
 pub(crate) fn parse_query_response_with_context_and_binds(
     payload: &[u8],
     capabilities: ClientCapabilities,
@@ -262,8 +328,9 @@ pub(crate) fn parse_query_response_with_context_and_binds(
     bind_columns: &[ColumnMetadata],
     output_bind_indexes: &[usize],
     fetch_long_status: bool,
+    limits: ProtocolLimits,
 ) -> Result<QueryResult> {
-    parse_query_response_with_context_binds_and_options(
+    parse_query_response_with_context_binds_options_and_limits(
         payload,
         capabilities,
         previous_columns,
@@ -272,6 +339,7 @@ pub(crate) fn parse_query_response_with_context_and_binds(
         output_bind_indexes,
         fetch_long_status,
         ExecuteOptions::default(),
+        limits,
     )
 }
 
@@ -286,7 +354,32 @@ pub(crate) fn parse_query_response_with_context_binds_and_options(
     fetch_long_status: bool,
     exec_options: ExecuteOptions,
 ) -> Result<QueryResult> {
-    let mut reader = TtcReader::new(payload);
+    parse_query_response_with_context_binds_options_and_limits(
+        payload,
+        capabilities,
+        previous_columns,
+        previous_row,
+        bind_columns,
+        output_bind_indexes,
+        fetch_long_status,
+        exec_options,
+        ProtocolLimits::DEFAULT,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // mirrors the reference message attribute set
+pub(crate) fn parse_query_response_with_context_binds_options_and_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    previous_columns: &[ColumnMetadata],
+    previous_row: Option<&[Option<QueryValue>]>,
+    bind_columns: &[ColumnMetadata],
+    output_bind_indexes: &[usize],
+    fetch_long_status: bool,
+    exec_options: ExecuteOptions,
+    limits: ProtocolLimits,
+) -> Result<QueryResult> {
+    let mut reader = TtcReader::with_limits(payload, limits)?;
     let mut result = QueryResult {
         columns: previous_columns.to_vec(),
         more_rows: true,
@@ -382,8 +475,11 @@ pub(crate) fn parse_query_response_with_context_binds_and_options(
                 // Without this a hostile server forces a multi-gigabyte
                 // allocation (OOM) before the truncated read in the loop body
                 // fails closed.
-                let mut resultsets: Vec<QueryValue> =
-                    reader.with_capacity_bounded(num_results as usize, 1);
+                let mut resultsets: Vec<QueryValue> = reader.with_capacity_limited(
+                    num_results as usize,
+                    1,
+                    ProtocolLimits::check_length_prefixed_elements,
+                )?;
                 for _ in 0..num_results {
                     let num_bytes = reader.read_u8()?;
                     reader.skip(usize::from(num_bytes))?;
@@ -510,6 +606,7 @@ pub(crate) fn parse_io_vector(reader: &mut TtcReader<'_>, bind_count: usize) -> 
         reader.skip(usize::from(rowid_len))?;
     }
     let mut out_indexes = Vec::new();
+    reader.limits().check_binds(num_binds)?;
     for index in 0..num_binds {
         let direction = reader.read_u8()?;
         if index < bind_count && direction != TNS_BIND_DIR_INPUT {
@@ -545,6 +642,7 @@ pub(crate) fn parse_describe_info(
 ) -> Result<()> {
     let _max_row_size = reader.read_ub4()?;
     let num_columns = reader.read_ub4()?;
+    reader.limits().check_columns(num_columns as usize)?;
     result.columns.clear();
     if num_columns > 0 {
         reader.skip(1)?;
@@ -608,8 +706,11 @@ pub(crate) fn parse_column_metadata(
             // Bound by remaining bytes (BoundedReader): each annotation reads
             // at least a length-prefixed key/value, so a ub4 count larger than
             // the payload is a lie that must not pre-allocate gigabytes.
-            let mut collected: Vec<(String, String)> =
-                reader.with_capacity_bounded(num_annotations as usize, 1);
+            let mut collected: Vec<(String, String)> = reader.with_capacity_limited(
+                num_annotations as usize,
+                1,
+                ProtocolLimits::check_object_elements,
+            )?;
             for _ in 0..num_annotations {
                 let key = reader.read_string_with_length()?.unwrap_or_default();
                 // A null annotation value is normalized to "" by the reference
@@ -628,6 +729,7 @@ pub(crate) fn parse_column_metadata(
     if capabilities.ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_4 {
         // reference metadata.pyx: ub4 dimensions, ub1 format, ub1 flags
         let dims = reader.read_ub4()?;
+        reader.limits().check_vector_dimensions(dims as usize)?;
         vector_format = reader.read_u8()?;
         vector_flags = reader.read_u8()?;
         if ora_type_num == ORA_TYPE_NUM_VECTOR {
@@ -736,9 +838,11 @@ pub(crate) fn parse_out_bind_row_data(
                     minimum: 0,
                 }
             })?;
+            reader.limits().check_batch_rows(num_elements)?;
             // Cap by remaining bytes (BoundedReader): each element consumes
             // wire data, so a ub4 count cannot legitimately exceed the payload.
-            let mut values: Vec<Option<QueryValue>> = reader.with_capacity_bounded(num_elements, 1);
+            let mut values: Vec<Option<QueryValue>> =
+                reader.with_capacity_limited(num_elements, 1, ProtocolLimits::check_batch_rows)?;
             for _ in 0..num_elements {
                 let value = parse_column_value(reader, metadata)?;
                 let actual_num_bytes = reader.read_sb4()?;
@@ -778,8 +882,10 @@ pub(crate) fn parse_returning_row_data(
                 minimum: 0,
             }
         })?;
+        reader.limits().check_batch_rows(num_rows)?;
         // Cap by remaining bytes (BoundedReader); see the OOM note above.
-        let mut values: Vec<Option<QueryValue>> = reader.with_capacity_bounded(num_rows, 1);
+        let mut values: Vec<Option<QueryValue>> =
+            reader.with_capacity_limited(num_rows, 1, ProtocolLimits::check_batch_rows)?;
         for _ in 0..num_rows {
             let value = parse_column_value(reader, metadata)?;
             let actual_num_bytes = reader.read_sb4()?;
@@ -1342,7 +1448,24 @@ pub fn parse_query_response_borrowed(
     columns: &[ColumnMetadata],
     previous_row: Option<&[Option<QueryValue>]>,
 ) -> Result<BorrowedFetchResult> {
-    let mut reader = TtcReader::new(payload);
+    parse_query_response_borrowed_with_limits(
+        payload,
+        capabilities,
+        columns,
+        previous_row,
+        ProtocolLimits::DEFAULT,
+    )
+}
+
+pub fn parse_query_response_borrowed_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    columns: &[ColumnMetadata],
+    previous_row: Option<&[Option<QueryValue>]>,
+    limits: ProtocolLimits,
+) -> Result<BorrowedFetchResult> {
+    let mut reader = TtcReader::with_limits(payload, limits)?;
+    reader.limits().check_columns(columns.len())?;
     let mut result_columns = columns.to_vec();
     let mut more_rows = true;
     let mut cursor_id = 0u32;
@@ -1379,6 +1502,7 @@ pub fn parse_query_response_borrowed(
             TNS_MSG_TYPE_ROW_DATA => {
                 // Record where this row's column values begin, then advance the
                 // reader past the row (skipping, not materializing).
+                reader.limits().check_batch_rows(row_starts.len() + 1)?;
                 row_starts.push(reader.position());
                 let bit_vector = pending_bit_vector.take();
                 any_bit_vector |= bit_vector.is_some();
@@ -1411,7 +1535,10 @@ pub fn parse_query_response_borrowed(
                 // consume the bytes). reference messages/base.pyx
                 // `_process_implicit_result`.
                 let num_results = reader.read_ub4()?;
-                for _ in 0..num_results.min(reader.remaining() as u32) {
+                reader
+                    .limits()
+                    .check_length_prefixed_elements(num_results as usize)?;
+                for _ in 0..num_results {
                     let num_bytes = reader.read_u8()?;
                     reader.skip(usize::from(num_bytes))?;
                     let mut child = QueryResult::default();
@@ -1645,6 +1772,7 @@ pub(crate) fn parse_lob_value(
     metadata: &ColumnMetadata,
 ) -> Result<Option<QueryValue>> {
     let num_bytes = reader.read_ub4()?;
+    reader.limits().check_response_bytes(num_bytes as usize)?;
     if num_bytes == 0 {
         return Ok(None);
     }
@@ -1670,6 +1798,7 @@ pub(crate) fn parse_lob_value(
 /// (discarded) LOB locator.
 pub(crate) fn parse_vector_value(reader: &mut TtcReader<'_>) -> Result<Option<QueryValue>> {
     let num_bytes = reader.read_ub4()?;
+    reader.limits().check_response_bytes(num_bytes as usize)?;
     if num_bytes == 0 {
         return Ok(None);
     }
@@ -1682,7 +1811,7 @@ pub(crate) fn parse_vector_value(reader: &mut TtcReader<'_>) -> Result<Option<Qu
     if data.is_empty() {
         return Ok(None);
     }
-    let vector = crate::vector::decode_vector(&data)?;
+    let vector = crate::vector::decode_vector_with_limits(&data, reader.limits())?;
     Ok(Some(QueryValue::Vector(Box::new(vector))))
 }
 
@@ -1691,6 +1820,7 @@ pub(crate) fn parse_vector_value(reader: &mut TtcReader<'_>) -> Result<Option<Qu
 /// then a (discarded) LOB locator (reference packet.pyx `read_oson`).
 pub(crate) fn parse_json_value(reader: &mut TtcReader<'_>) -> Result<Option<QueryValue>> {
     let num_bytes = reader.read_ub4()?;
+    reader.limits().check_response_bytes(num_bytes as usize)?;
     if num_bytes == 0 {
         return Ok(None);
     }
@@ -1703,7 +1833,7 @@ pub(crate) fn parse_json_value(reader: &mut TtcReader<'_>) -> Result<Option<Quer
     if data.is_empty() {
         return Ok(None);
     }
-    let value = crate::oson::decode_oson(&data)?;
+    let value = crate::oson::decode_oson_with_limits(&data, reader.limits())?;
     Ok(Some(QueryValue::Json(Box::new(value))))
 }
 
@@ -1716,6 +1846,7 @@ pub(crate) fn parse_object_value(
     let _snapshot = reader.read_bytes_with_length()?;
     let _version = reader.read_ub2()?;
     let num_bytes = reader.read_ub4()?;
+    reader.limits().check_response_bytes(num_bytes as usize)?;
     reader.skip(2)?;
     if num_bytes == 0 {
         return Ok(None);
@@ -1787,9 +1918,11 @@ pub(crate) fn parse_query_return_parameters(
     if arraydmlrowcounts {
         // reference messages/base.pyx `_process_return_parameters` tail
         let num_rows = reader.read_ub4()?;
+        reader.limits().check_batch_rows(num_rows as usize)?;
         // Each ub8 row count consumes at least one byte, so cap the reservation
         // by the remaining payload size (BoundedReader).
-        let mut row_counts: Vec<u64> = reader.with_capacity_bounded(num_rows as usize, 1);
+        let mut row_counts: Vec<u64> =
+            reader.with_capacity_limited(num_rows as usize, 1, ProtocolLimits::check_batch_rows)?;
         for _ in 0..num_rows {
             row_counts.push(reader.read_ub8()?);
         }
@@ -2031,8 +2164,11 @@ mod fuzz_regression_tests {
         let err = parse_query_response(&payload, ClientCapabilities::default())
             .expect_err("oversized implicit-resultset count must fail closed");
         assert!(
-            matches!(err, ProtocolError::TtcDecode(_)),
-            "expected fail-closed TtcDecode, got {err:?}"
+            matches!(
+                err,
+                ProtocolError::TtcDecode(_) | ProtocolError::ResourceLimit { .. }
+            ),
+            "expected fail-closed protocol error, got {err:?}"
         );
     }
 
@@ -2051,8 +2187,36 @@ mod fuzz_regression_tests {
         let err = parse_query_response(&payload, ClientCapabilities::default())
             .expect_err("oversized column count must fail closed");
         assert!(
-            matches!(err, ProtocolError::TtcDecode(_)),
-            "expected fail-closed TtcDecode, got {err:?}"
+            matches!(
+                err,
+                ProtocolError::TtcDecode(_) | ProtocolError::ResourceLimit { .. }
+            ),
+            "expected fail-closed protocol error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn describe_info_respects_protocol_column_limit() {
+        // type=16 DESCRIBE_INFO; describe_name null; max_row_size=0;
+        // num_columns=2. A max_columns=1 policy should fail before any column
+        // metadata allocation/parsing.
+        let payload = [TNS_MSG_TYPE_DESCRIBE_INFO, 0, 0, 1, 2];
+        let limits = ProtocolLimits {
+            max_columns: 1,
+            ..ProtocolLimits::DEFAULT
+        };
+        let err = parse_query_response_with_limits(&payload, ClientCapabilities::default(), limits)
+            .expect_err("column count above policy must fail");
+        assert!(
+            matches!(
+                err,
+                ProtocolError::ResourceLimit {
+                    limit: "columns",
+                    observed: 2,
+                    maximum: 1,
+                }
+            ),
+            "expected column ResourceLimit, got {err:?}"
         );
     }
 
@@ -2078,8 +2242,11 @@ mod fuzz_regression_tests {
             parse_out_bind_row_data(&mut reader, &mut result, &bind_columns, &out_bind_indexes)
                 .expect_err("oversized array OUT bind count must fail closed");
         assert!(
-            matches!(err, ProtocolError::TtcDecode(_)),
-            "expected fail-closed TtcDecode, got {err:?}"
+            matches!(
+                err,
+                ProtocolError::TtcDecode(_) | ProtocolError::ResourceLimit { .. }
+            ),
+            "expected fail-closed protocol error, got {err:?}"
         );
     }
 }
