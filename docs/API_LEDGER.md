@@ -57,8 +57,13 @@ pub oracledb::ConnectOptions::*	consolidate	Keep ConnectOptions public but priva
 *oracledb::ObjectType*	keep	Public object metadata type.
 *oracledb::Params*	keep	Public single-row bind payload for the operation-family API.
 *oracledb::PipelineRequest*	keep	Public pipelining request descriptor.
+*oracledb::Cursor*	keep	Public REF CURSOR handle alias used by Rows.
 *oracledb::QueryResultExt*	keep	Public convenience extension for query results.
+*oracledb::Query*	keep	Public query-family request builder.
+*oracledb::Rows*	keep	Public lazy row-result facade for the query family.
+*oracledb::Row*	keep	Public owned row type for the query family.
 *oracledb::render_caret*	keep	Public diagnostic helper used to render SQL error offsets.
+*oracledb::Scroll*	keep	Public scroll target for scrollable query cursors.
 *oracledb::SessionlessError*	keep	Public sessionless transaction error taxonomy.
 *oracledb::ToSql*	keep	Public outbound SQL conversion trait.
 *oracledb::TypedRow*	keep	Public typed-row accessor.

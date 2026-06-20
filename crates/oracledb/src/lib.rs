@@ -117,6 +117,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::pin::pin;
 use std::process;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -152,17 +153,20 @@ use oracledb_protocol::thin::{
     parse_plain_function_response_with_limits, parse_query_response_borrowed_with_limits,
     parse_query_response_with_binds_options_columns_and_limits, parse_query_response_with_limits,
     parse_tpc_txn_switch_response_with_limits, BindValue, BorrowedFetchResult, ClientCapabilities,
-    ColumnMetadata, ExecuteOptions, LobReadResult, QueryResult, QueryValueRef, SessionlessTxnState,
-    TpcChangeStateResponse, TpcSwitchResponse, TpcXid, TNS_DATA_FLAGS_BEGIN_PIPELINE,
-    TNS_DATA_FLAGS_END_OF_REQUEST, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING,
-    TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS,
-    TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA,
-    TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE, TNS_PIPELINE_MODE_ABORT_ON_ERROR,
-    TNS_PIPELINE_MODE_CONTINUE_ON_ERROR, TNS_TPC_TXN_ABORT, TNS_TPC_TXN_COMMIT, TNS_TPC_TXN_DETACH,
-    TNS_TPC_TXN_POST_DETACH, TNS_TPC_TXN_PREPARE, TNS_TPC_TXN_START, TNS_TPC_TXN_STATE_ABORTED,
-    TNS_TPC_TXN_STATE_COMMITTED, TNS_TPC_TXN_STATE_FORGOTTEN, TNS_TPC_TXN_STATE_PREPARE,
-    TNS_TPC_TXN_STATE_READ_ONLY, TNS_TPC_TXN_STATE_REQUIRES_COMMIT, TPC_TXN_FLAGS_NEW,
-    TPC_TXN_FLAGS_RESUME, TPC_TXN_FLAGS_SESSIONLESS,
+    ColumnMetadata, CursorValue, ExecuteOptions, LobReadResult, QueryResult, QueryValue,
+    QueryValueRef, SessionlessTxnState, TpcChangeStateResponse, TpcSwitchResponse, TpcXid,
+    TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST, TNS_FETCH_ORIENTATION_ABSOLUTE,
+    TNS_FETCH_ORIENTATION_CURRENT, TNS_FETCH_ORIENTATION_FIRST, TNS_FETCH_ORIENTATION_LAST,
+    TNS_FETCH_ORIENTATION_NEXT, TNS_FETCH_ORIENTATION_PRIOR, TNS_FETCH_ORIENTATION_RELATIVE,
+    TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK,
+    TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT,
+    TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT,
+    TNS_PACKET_TYPE_REFUSE, TNS_PIPELINE_MODE_ABORT_ON_ERROR, TNS_PIPELINE_MODE_CONTINUE_ON_ERROR,
+    TNS_TPC_TXN_ABORT, TNS_TPC_TXN_COMMIT, TNS_TPC_TXN_DETACH, TNS_TPC_TXN_POST_DETACH,
+    TNS_TPC_TXN_PREPARE, TNS_TPC_TXN_START, TNS_TPC_TXN_STATE_ABORTED, TNS_TPC_TXN_STATE_COMMITTED,
+    TNS_TPC_TXN_STATE_FORGOTTEN, TNS_TPC_TXN_STATE_PREPARE, TNS_TPC_TXN_STATE_READ_ONLY,
+    TNS_TPC_TXN_STATE_REQUIRES_COMMIT, TPC_TXN_FLAGS_NEW, TPC_TXN_FLAGS_RESUME,
+    TPC_TXN_FLAGS_SESSIONLESS,
 };
 use oracledb_protocol::thin::{
     build_notify_payload_with_seq, build_subscribe_payload_with_seq,
@@ -1204,6 +1208,10 @@ pub enum Error {
     MissingSessionField(&'static str),
     #[error("call timeout of {0} ms exceeded")]
     CallTimeout(u32),
+    #[error("query returned no rows")]
+    NoRows,
+    #[error("query returned more than one row")]
+    TooManyRows,
     /// The in-flight operation was explicitly cancelled by the user (via
     /// [`Connection::cancel`] or by dropping a cancellable fetch future), the
     /// driver's analog of the server-side `ORA-01013` "user requested cancel of
@@ -1257,6 +1265,465 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+const DEFAULT_QUERY_ARRAYSIZE: u32 = 100;
+
+fn default_query_arraysize() -> NonZeroU32 {
+    NonZeroU32::new(DEFAULT_QUERY_ARRAYSIZE).expect("default query arraysize is non-zero")
+}
+
+fn duration_to_nanos_saturating(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn duration_to_millis_saturating(duration: Duration) -> u32 {
+    duration.as_millis().min(u128::from(u32::MAX)) as u32
+}
+
+/// A REF CURSOR handle returned in a row or implicit result set.
+pub type Cursor = CursorValue;
+
+/// Scroll target for [`Rows::scroll`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Scroll {
+    Current,
+    Next,
+    Prior,
+    First,
+    Last,
+    Absolute(u32),
+    Relative(u32),
+}
+
+impl Scroll {
+    fn into_wire_parts(self) -> (u32, u32) {
+        match self {
+            Scroll::Current => (TNS_FETCH_ORIENTATION_CURRENT, 0),
+            Scroll::Next => (TNS_FETCH_ORIENTATION_NEXT, 0),
+            Scroll::Prior => (TNS_FETCH_ORIENTATION_PRIOR, 0),
+            Scroll::First => (TNS_FETCH_ORIENTATION_FIRST, 0),
+            Scroll::Last => (TNS_FETCH_ORIENTATION_LAST, 0),
+            Scroll::Absolute(pos) => (TNS_FETCH_ORIENTATION_ABSOLUTE, pos),
+            Scroll::Relative(pos) => (TNS_FETCH_ORIENTATION_RELATIVE, pos),
+        }
+    }
+}
+
+/// Query builder for the high-level row API.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Query<'a> {
+    sql: std::borrow::Cow<'a, str>,
+    params: Params<'a>,
+    arraysize: NonZeroU32,
+    prefetch: u32,
+    prefetch_set: bool,
+    materialize_lobs: bool,
+    scrollable: bool,
+    timeout: Option<Duration>,
+}
+
+impl<'a> Query<'a> {
+    pub fn new(sql: &'a str) -> Self {
+        let arraysize = default_query_arraysize();
+        Self {
+            sql: std::borrow::Cow::Borrowed(sql),
+            params: Params::None,
+            arraysize,
+            prefetch: arraysize.get(),
+            prefetch_set: false,
+            materialize_lobs: true,
+            scrollable: false,
+            timeout: None,
+        }
+    }
+
+    fn owned_sql(sql: String) -> Self {
+        let arraysize = default_query_arraysize();
+        Self {
+            sql: std::borrow::Cow::Owned(sql),
+            params: Params::None,
+            arraysize,
+            prefetch: arraysize.get(),
+            prefetch_set: false,
+            materialize_lobs: true,
+            scrollable: false,
+            timeout: None,
+        }
+    }
+
+    pub fn bind(mut self, params: impl Into<Params<'a>>) -> Self {
+        self.params = params.into();
+        self
+    }
+
+    pub fn arraysize(mut self, n: NonZeroU32) -> Self {
+        self.arraysize = n;
+        if !self.prefetch_set {
+            self.prefetch = n.get();
+        }
+        self
+    }
+
+    pub fn prefetch(mut self, n: u32) -> Self {
+        self.prefetch = n;
+        self.prefetch_set = true;
+        self
+    }
+
+    pub fn stream_lobs(mut self) -> Self {
+        self.materialize_lobs = false;
+        self
+    }
+
+    pub fn scrollable(mut self) -> Self {
+        self.scrollable = true;
+        self
+    }
+
+    pub fn timeout(mut self, d: Duration) -> Self {
+        self.timeout = Some(d);
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct QueryDeadline {
+    deadline: Option<asupersync::types::Time>,
+    timeout_ms: u32,
+}
+
+impl QueryDeadline {
+    fn new(cx: &Cx, timeout: Option<Duration>) -> Self {
+        let now = time::wall_now();
+        let query_deadline = timeout
+            .map(|duration| now.saturating_add_nanos(duration_to_nanos_saturating(duration)));
+        let cx_deadline = cx.budget().deadline;
+        let deadline = match (query_deadline, cx_deadline) {
+            (Some(query), Some(cx)) => Some(query.min(cx)),
+            (Some(query), None) => Some(query),
+            (None, Some(cx)) => Some(cx),
+            (None, None) => None,
+        };
+        let timeout_ms = timeout
+            .map(duration_to_millis_saturating)
+            .or_else(|| {
+                cx.budget()
+                    .remaining_time(now)
+                    .map(duration_to_millis_saturating)
+            })
+            .unwrap_or(0);
+        Self {
+            deadline,
+            timeout_ms,
+        }
+    }
+
+    fn timeout_ms(self) -> u32 {
+        self.timeout_ms
+    }
+
+    async fn run<T, F>(self, future: F) -> std::result::Result<Result<T>, ()>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        let Some(deadline) = self.deadline else {
+            return Ok(future.await);
+        };
+        let now = time::wall_now();
+        if now >= deadline {
+            return Err(());
+        }
+        let remaining = Duration::from_nanos(deadline.as_nanos().saturating_sub(now.as_nanos()));
+        match time::timeout(now, remaining, future).await {
+            Ok(result) => Ok(result),
+            Err(_) => Err(()),
+        }
+    }
+}
+
+/// One owned query row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Row {
+    columns: Arc<[ColumnMetadata]>,
+    values: Vec<Option<QueryValue>>,
+}
+
+impl Row {
+    fn new(columns: Arc<[ColumnMetadata]>, values: Vec<Option<QueryValue>>) -> Self {
+        Self { columns, values }
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    pub fn columns(&self) -> &[ColumnMetadata] {
+        &self.columns
+    }
+
+    pub fn values(&self) -> &[Option<QueryValue>] {
+        &self.values
+    }
+
+    pub fn value(&self, col: usize) -> Option<&QueryValue> {
+        self.values.get(col).and_then(Option::as_ref)
+    }
+
+    pub fn typed_row(&self) -> TypedRow<'_> {
+        TypedRow::new(&self.columns, &self.values, 0)
+    }
+
+    pub fn get<T: FromSql>(&self, col: usize) -> Result<T> {
+        self.typed_row().get(col)
+    }
+
+    pub fn get_by_name<T: FromSql>(&self, name: &str) -> Result<T> {
+        self.typed_row().get_by_name(name)
+    }
+
+    pub fn into_values(self) -> Vec<Option<QueryValue>> {
+        self.values
+    }
+}
+
+/// Lazy result-set facade returned by [`Connection::query`] and
+/// [`Connection::query_with`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Rows<'conn> {
+    connection: &'conn mut Connection,
+    sql: String,
+    columns: Arc<[ColumnMetadata]>,
+    batch: Vec<Row>,
+    cursor_id: u32,
+    more_rows: bool,
+    arraysize: NonZeroU32,
+    deadline: QueryDeadline,
+    scrollable: bool,
+    cursor: Option<Cursor>,
+}
+
+impl Rows<'_> {
+    fn from_result<'conn>(
+        connection: &'conn mut Connection,
+        sql: String,
+        arraysize: NonZeroU32,
+        deadline: QueryDeadline,
+        scrollable: bool,
+        result: QueryResult,
+    ) -> Rows<'conn> {
+        let cursor_id = result.cursor_id;
+        let more_rows = result.more_rows;
+        let cursor = first_cursor_from_result(&result);
+        let columns: Arc<[ColumnMetadata]> = Arc::from(result.columns.into_boxed_slice());
+        let batch = result
+            .rows
+            .into_iter()
+            .map(|values| Row::new(Arc::clone(&columns), values))
+            .collect();
+        Rows {
+            connection,
+            sql,
+            columns,
+            batch,
+            cursor_id,
+            more_rows,
+            arraysize,
+            deadline,
+            scrollable,
+            cursor,
+        }
+    }
+
+    pub fn columns(&self) -> &[ColumnMetadata] {
+        &self.columns
+    }
+
+    pub fn batch(&self) -> &[Row] {
+        &self.batch
+    }
+
+    pub async fn next_batch(&mut self, cx: &Cx) -> Result<bool> {
+        if !self.more_rows || self.cursor_id == 0 {
+            self.release_cursor();
+            return Ok(false);
+        }
+        observe_cancellation_between_round_trips(cx)?;
+        let previous_row = self.batch.last().map(|row| row.values.clone());
+        let cursor_id = self.cursor_id;
+        let arraysize = self.arraysize.get();
+        let columns = self.columns.to_vec();
+        let result = match self
+            .deadline
+            .run(self.connection.fetch_rows_with_columns(
+                cx,
+                cursor_id,
+                arraysize,
+                &columns,
+                previous_row.as_deref(),
+            ))
+            .await
+        {
+            Ok(result) => result?,
+            Err(()) => {
+                self.release_cursor();
+                return self
+                    .connection
+                    .recover_from_call_timeout(cx, self.deadline.timeout_ms())
+                    .await;
+            }
+        };
+        self.apply_result(result);
+        let batch_available = !self.batch.is_empty() || self.more_rows;
+        if !self.more_rows {
+            self.release_cursor();
+        }
+        Ok(batch_available)
+    }
+
+    pub async fn collect(mut self, cx: &Cx) -> Result<Vec<Row>> {
+        let mut rows = Vec::new();
+        rows.append(&mut self.batch);
+        while self.more_rows {
+            if let Err(err) = self.next_batch(cx).await {
+                self.release_cursor();
+                return Err(err);
+            }
+            rows.append(&mut self.batch);
+        }
+        self.release_cursor();
+        Ok(rows)
+    }
+
+    pub fn one(mut self) -> Result<Row> {
+        let too_many = self.more_rows || self.batch.len() > 1;
+        self.release_cursor();
+        if too_many {
+            return Err(Error::TooManyRows);
+        }
+        self.batch.pop().ok_or(Error::NoRows)
+    }
+
+    pub fn opt(mut self) -> Result<Option<Row>> {
+        let too_many = self.more_rows || self.batch.len() > 1;
+        self.release_cursor();
+        if too_many {
+            return Err(Error::TooManyRows);
+        }
+        Ok(self.batch.pop())
+    }
+
+    pub fn into_typed<T: FromRow>(mut self) -> Result<Vec<T>> {
+        self.release_cursor();
+        self.batch
+            .iter()
+            .map(|row| T::from_row(&row.typed_row()).map_err(Error::Conversion))
+            .collect()
+    }
+
+    pub fn cursor(&self) -> Option<&Cursor> {
+        self.cursor.as_ref()
+    }
+
+    pub async fn scroll(&mut self, cx: &Cx, to: Scroll) -> Result<()> {
+        if !self.scrollable {
+            return Err(Error::Runtime(
+                "Rows::scroll requires Query::scrollable".to_string(),
+            ));
+        }
+        if self.cursor_id == 0 {
+            return Err(Error::Runtime(
+                "Rows::scroll requires an open cursor".to_string(),
+            ));
+        }
+        observe_cancellation_between_round_trips(cx)?;
+        let (orientation, position) = to.into_wire_parts();
+        let result = match self
+            .deadline
+            .run(self.connection.scroll_cursor(
+                cx,
+                &self.sql,
+                self.cursor_id,
+                self.arraysize.get(),
+                orientation,
+                position,
+            ))
+            .await
+        {
+            Ok(result) => result?,
+            Err(()) => {
+                self.release_cursor();
+                return self
+                    .connection
+                    .recover_from_call_timeout(cx, self.deadline.timeout_ms())
+                    .await;
+            }
+        };
+        self.apply_result(result);
+        Ok(())
+    }
+
+    fn apply_result(&mut self, result: QueryResult) {
+        let cursor = first_cursor_from_result(&result);
+        if result.cursor_id != 0 {
+            self.cursor_id = result.cursor_id;
+        }
+        if !result.columns.is_empty() {
+            self.columns = Arc::from(result.columns.into_boxed_slice());
+        }
+        self.more_rows = result.more_rows;
+        if self.cursor.is_none() {
+            self.cursor = cursor;
+        }
+        self.batch = result
+            .rows
+            .into_iter()
+            .map(|values| Row::new(Arc::clone(&self.columns), values))
+            .collect();
+    }
+
+    fn release_cursor(&mut self) {
+        if self.cursor_id == 0 {
+            return;
+        }
+        self.connection.release_cursor(self.cursor_id);
+        self.cursor_id = 0;
+        self.more_rows = false;
+    }
+}
+
+impl Drop for Rows<'_> {
+    fn drop(&mut self) {
+        self.release_cursor();
+    }
+}
+
+fn first_cursor_from_result(result: &QueryResult) -> Option<Cursor> {
+    result
+        .implicit_resultsets
+        .as_ref()
+        .and_then(|values| values.iter().find_map(cursor_from_value))
+        .or_else(|| {
+            result
+                .rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .find_map(|cell| cell.as_ref().and_then(cursor_from_value))
+        })
+}
+
+fn cursor_from_value(value: &QueryValue) -> Option<Cursor> {
+    match value {
+        QueryValue::Cursor(cursor) => Some((**cursor).clone()),
+        _ => None,
+    }
+}
 
 /// Structured classification of an [`Error`].
 ///
@@ -3166,8 +3633,8 @@ impl Connection {
             .await
     }
 
-    /// Ergonomic execute: bind typed Rust values positionally and return the
-    /// first batch. `params` is anything that converts into [`Params`]: a tuple
+    /// Ergonomic query: bind typed Rust values positionally and return a lazy
+    /// [`Rows`] facade. `params` is anything that converts into [`Params`]: a tuple
     /// `(40, "alice")`, a homogeneous array `[1, 2, 3]`, a raw
     /// `Vec<BindValue>`, or the named [`params!`](crate::params) form:
     ///
@@ -3175,23 +3642,157 @@ impl Connection {
     /// # use oracledb::Connection;
     /// # use asupersync::Cx;
     /// # async fn demo(conn: &mut Connection, cx: &Cx) -> Result<(), oracledb::Error> {
-    /// let positional = conn.query(cx, "select :1 + :2 from dual", (40, 2)).await?;
+    /// let positional = conn.query(cx, "select :1 + :2 from dual", (40, 2)).await?
+    ///     .collect(cx)
+    ///     .await?;
     /// let named = conn
     ///     .query(cx, "select :a + :b from dual", oracledb::params!{ ":a" => 40, ":b" => 2 })
+    ///     .await?
+    ///     .collect(cx)
     ///     .await?;
     /// # let _ = (positional, named); Ok(()) }
     /// ```
     ///
-    /// This is sugar over [`Self::execute_query_with_binds`]; the prefetch size
-    /// defaults to 1 (one batch).
+    /// This is sugar over [`Self::query_with`]; the arraysize defaults to 100
+    /// rows and define-requiring cells are materialized by default.
     pub async fn query<'p>(
         &mut self,
         cx: &Cx,
         sql: &str,
         params: impl Into<crate::Params<'p>>,
-    ) -> Result<QueryResult> {
-        let binds = crate::sql_convert::resolve_params(sql, params.into());
-        self.execute_query_with_binds(cx, sql, 1, &binds).await
+    ) -> Result<Rows<'_>> {
+        self.query_with(cx, Query::owned_sql(sql.to_string()).bind(params))
+            .await
+    }
+
+    /// Run a query that must return exactly one row.
+    pub async fn query_one<'p>(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        params: impl Into<crate::Params<'p>>,
+    ) -> Result<Row> {
+        self.query_with(
+            cx,
+            Query::owned_sql(sql.to_string())
+                .bind(params)
+                .arraysize(NonZeroU32::new(2).expect("two is non-zero"))
+                .prefetch(2),
+        )
+        .await?
+        .one()
+    }
+
+    /// Run a query that may return zero or one row.
+    pub async fn query_opt<'p>(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        params: impl Into<crate::Params<'p>>,
+    ) -> Result<Option<Row>> {
+        self.query_with(
+            cx,
+            Query::owned_sql(sql.to_string())
+                .bind(params)
+                .arraysize(NonZeroU32::new(2).expect("two is non-zero"))
+                .prefetch(2),
+        )
+        .await?
+        .opt()
+    }
+
+    /// Run a query and eagerly drain every fetch batch.
+    pub async fn query_all<'p>(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        params: impl Into<crate::Params<'p>>,
+    ) -> Result<Vec<Row>> {
+        self.query(cx, sql, params).await?.collect(cx).await
+    }
+
+    /// Run a query described by a [`Query`] builder and return a lazy row
+    /// facade for the first batch plus continuation fetches.
+    pub async fn query_with<'conn, 'q>(
+        &'conn mut self,
+        cx: &Cx,
+        query: Query<'q>,
+    ) -> Result<Rows<'conn>> {
+        let Query {
+            sql,
+            params,
+            arraysize,
+            prefetch,
+            prefetch_set: _,
+            materialize_lobs,
+            scrollable,
+            timeout,
+        } = query;
+        let sql_owned = sql.into_owned();
+        let binds = crate::sql_convert::resolve_params(&sql_owned, params);
+        let bind_rows = if binds.is_empty() {
+            Vec::new()
+        } else {
+            vec![binds]
+        };
+        let exec_options = ExecuteOptions {
+            scrollable,
+            ..ExecuteOptions::default()
+        };
+        let deadline = QueryDeadline::new(cx, timeout);
+        let mut result = match deadline
+            .run(self.execute_query_with_bind_rows_and_options(
+                cx,
+                &sql_owned,
+                prefetch,
+                &bind_rows,
+                exec_options,
+            ))
+            .await
+        {
+            Ok(result) => result?,
+            Err(()) => {
+                return self
+                    .recover_from_call_timeout(cx, deadline.timeout_ms())
+                    .await
+            }
+        };
+        if materialize_lobs
+            && columns_require_define(&result.columns)
+            && result.cursor_id != 0
+            && result.rows.is_empty()
+        {
+            let cursor_id = result.cursor_id;
+            let columns = result.columns.clone();
+            let fetched = match deadline
+                .run(self.define_and_fetch_rows_with_columns(
+                    cx,
+                    cursor_id,
+                    prefetch.max(1),
+                    &columns,
+                    None,
+                ))
+                .await
+            {
+                Ok(result) => result?,
+                Err(()) => {
+                    return self
+                        .recover_from_call_timeout(cx, deadline.timeout_ms())
+                        .await
+                }
+            };
+            result.rows = fetched.rows;
+            result.more_rows = fetched.more_rows;
+            if !fetched.columns.is_empty() {
+                result.columns = fetched.columns;
+            }
+            if result.cursor_id == 0 {
+                result.cursor_id = cursor_id;
+            }
+        }
+        Ok(Rows::from_result(
+            self, sql_owned, arraysize, deadline, scrollable, result,
+        ))
     }
 
     /// Ergonomic execute with *named* binds. Pass the
@@ -3220,7 +3821,8 @@ impl Connection {
         sql: &str,
         named_params: Vec<(String, BindValue)>,
     ) -> Result<QueryResult> {
-        self.query(cx, sql, named_params).await
+        let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params));
+        self.execute_query_with_binds(cx, sql, 1, &binds).await
     }
 
     /// [`Self::query_named`] with a per-call timeout, for parity with the
@@ -6082,11 +6684,14 @@ impl BlockingConnection {
         sql: &str,
         params: impl Into<crate::Params<'p>>,
     ) -> Result<QueryResult> {
+        let binds = crate::sql_convert::resolve_params(sql, params.into());
         let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            connection.query(&cx, sql, params).await
+            connection
+                .execute_query_with_binds(&cx, sql, 1, &binds)
+                .await
         })
     }
 
@@ -7742,6 +8347,92 @@ mod tests {
         // A no-cursor (0) insert is never cached and closes nothing.
         assert!(statement_cache_insert(&mut cache, 5, "a", 0).is_empty());
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn query_arraysize_updates_default_prefetch_until_overridden() {
+        let seven = NonZeroU32::new(7).expect("non-zero");
+        let eleven = NonZeroU32::new(11).expect("non-zero");
+
+        let query = Query::new("select * from dual").arraysize(seven);
+        assert_eq!(query.arraysize, seven);
+        assert_eq!(
+            query.prefetch, 7,
+            "default prefetch follows arraysize when not explicitly set"
+        );
+
+        let query = Query::new("select * from dual")
+            .prefetch(3)
+            .arraysize(eleven);
+        assert_eq!(query.arraysize, eleven);
+        assert_eq!(query.prefetch, 3, "explicit prefetch must be stable");
+    }
+
+    #[test]
+    fn query_deadline_captures_one_absolute_query_timeout() {
+        let runtime = build_io_runtime().expect("runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs Cx");
+
+            let deadline = QueryDeadline::new(&cx, Some(Duration::from_secs(5)));
+            let captured = deadline.deadline.expect("query timeout sets deadline");
+
+            assert_eq!(deadline.timeout_ms(), 5_000);
+            assert_eq!(
+                deadline.deadline,
+                Some(captured),
+                "the deadline is captured once and then carried by value"
+            );
+        });
+    }
+
+    #[test]
+    fn row_reuses_typed_row_conversion_path() {
+        #[derive(Debug, Eq, PartialEq)]
+        struct Named {
+            id: i64,
+            name: String,
+        }
+
+        impl FromRow for Named {
+            fn from_row(row: &TypedRow<'_>) -> std::result::Result<Self, ConversionError> {
+                Ok(Self {
+                    id: row.try_get_by_name("id")?,
+                    name: row.try_get_by_name("name")?,
+                })
+            }
+        }
+
+        let columns: Arc<[ColumnMetadata]> = Arc::from(
+            vec![
+                ColumnMetadata {
+                    name: "ID".to_string(),
+                    ..ColumnMetadata::default()
+                },
+                ColumnMetadata {
+                    name: "NAME".to_string(),
+                    ..ColumnMetadata::default()
+                },
+            ]
+            .into_boxed_slice(),
+        );
+        let row = Row::new(
+            columns,
+            vec![
+                Some(QueryValue::number_from_text("42", true)),
+                Some(QueryValue::Text("alice".to_string())),
+            ],
+        );
+
+        assert_eq!(row.get_by_name::<i64>("id").unwrap(), 42);
+        assert_eq!(row.get::<String>(1).unwrap(), "alice");
+        assert_eq!(
+            Named::from_row(&row.typed_row()).unwrap(),
+            Named {
+                id: 42,
+                name: "alice".to_string()
+            }
+        );
     }
 
     // Character column of the first `needle` in `line` (chars, not bytes — the

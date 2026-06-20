@@ -153,11 +153,13 @@ pub oracledb::Error::FastAuthRequired
 pub oracledb::Error::Io(std::io::error::Error)
 pub oracledb::Error::ListenerRefused(alloc::string::String)
 pub oracledb::Error::MissingSessionField(&'static str)
+pub oracledb::Error::NoRows
 pub oracledb::Error::Protocol(oracledb_protocol::ProtocolError)
 pub oracledb::Error::RedirectUnsupported
 pub oracledb::Error::Runtime(alloc::string::String)
 pub oracledb::Error::SessionlessTransaction(oracledb::SessionlessError)
 pub oracledb::Error::Tls(alloc::string::String)
+pub oracledb::Error::TooManyRows
 pub oracledb::Error::UnknownTransactionState(u32)
 impl oracledb::Error
 pub fn oracledb::Error::caret(&self, &str) -> core::option::Option<alloc::string::String>
@@ -236,6 +238,23 @@ impl core::clone::Clone for oracledb::PipelineRequest
 pub fn oracledb::PipelineRequest::clone(&self) -> oracledb::PipelineRequest
 impl core::fmt::Debug for oracledb::PipelineRequest
 pub fn oracledb::PipelineRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub enum oracledb::Scroll
+pub oracledb::Scroll::Absolute(u32)
+pub oracledb::Scroll::Current
+pub oracledb::Scroll::First
+pub oracledb::Scroll::Last
+pub oracledb::Scroll::Next
+pub oracledb::Scroll::Prior
+pub oracledb::Scroll::Relative(u32)
+impl core::clone::Clone for oracledb::Scroll
+pub fn oracledb::Scroll::clone(&self) -> oracledb::Scroll
+impl core::cmp::Eq for oracledb::Scroll
+impl core::cmp::PartialEq for oracledb::Scroll
+pub fn oracledb::Scroll::eq(&self, &oracledb::Scroll) -> bool
+impl core::fmt::Debug for oracledb::Scroll
+pub fn oracledb::Scroll::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb::Scroll
+impl core::marker::StructuralPartialEq for oracledb::Scroll
 pub enum oracledb::SessionlessError
 pub oracledb::SessionlessError::AlreadyActive
 pub oracledb::SessionlessError::DifferingMethods
@@ -421,9 +440,13 @@ pub async fn oracledb::Connection::notify_register(&mut self, &asupersync::cx::c
 pub async fn oracledb::Connection::ping(&mut self, &asupersync::cx::cx::Cx) -> oracledb::Result<()>
 pub async fn oracledb::Connection::ping_with_timeout(&mut self, &asupersync::cx::cx::Cx, u32) -> oracledb::Result<()>
 pub fn oracledb::Connection::prepare_sessionless_suspend_on_success(&mut self) -> oracledb::Result<()>
-pub async fn oracledb::Connection::query<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::query<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::Rows<'_>>
+pub async fn oracledb::Connection::query_all<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<alloc::vec::Vec<oracledb::Row>>
 pub async fn oracledb::Connection::query_named(&mut self, &asupersync::cx::cx::Cx, &str, alloc::vec::Vec<(alloc::string::String, oracledb_protocol::thin::types::BindValue)>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
 pub async fn oracledb::Connection::query_named_with_timeout(&mut self, &asupersync::cx::cx::Cx, &str, alloc::vec::Vec<(alloc::string::String, oracledb_protocol::thin::types::BindValue)>, core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::query_one<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::Row>
+pub async fn oracledb::Connection::query_opt<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<core::option::Option<oracledb::Row>>
+pub async fn oracledb::Connection::query_with<'conn, 'q>(&'conn mut self, &asupersync::cx::cx::Cx, oracledb::Query<'q>) -> oracledb::Result<oracledb::Rows<'conn>>
 pub async fn oracledb::Connection::read_dbms_output(&mut self, &asupersync::cx::cx::Cx, usize, usize) -> oracledb::Result<oracledb::DbmsOutput>
 pub async fn oracledb::Connection::read_lob(&mut self, &asupersync::cx::cx::Cx, &[u8], u64, u64) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
 pub async fn oracledb::Connection::read_lob_with_timeout(&mut self, &asupersync::cx::cx::Cx, &[u8], u64, u64, core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
@@ -526,6 +549,52 @@ pub fn oracledb::ObjectType::eq(&self, &oracledb::ObjectType) -> bool
 impl core::fmt::Debug for oracledb::ObjectType
 pub fn oracledb::ObjectType::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb::ObjectType
+#[non_exhaustive] pub struct oracledb::Query<'a>
+impl<'a> oracledb::Query<'a>
+pub fn oracledb::Query<'a>::arraysize(self, core::num::nonzero::NonZeroU32) -> Self
+pub fn oracledb::Query<'a>::bind(self, impl core::convert::Into<oracledb::Params<'a>>) -> Self
+pub fn oracledb::Query<'a>::new(&'a str) -> Self
+pub fn oracledb::Query<'a>::prefetch(self, u32) -> Self
+pub fn oracledb::Query<'a>::scrollable(self) -> Self
+pub fn oracledb::Query<'a>::stream_lobs(self) -> Self
+pub fn oracledb::Query<'a>::timeout(self, core::time::Duration) -> Self
+impl<'a> core::clone::Clone for oracledb::Query<'a>
+pub fn oracledb::Query<'a>::clone(&self) -> oracledb::Query<'a>
+impl<'a> core::fmt::Debug for oracledb::Query<'a>
+pub fn oracledb::Query<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb::Row
+impl oracledb::Row
+pub fn oracledb::Row::columns(&self) -> &[oracledb_protocol::thin::types::ColumnMetadata]
+pub fn oracledb::Row::get<T: oracledb::FromSql>(&self, usize) -> oracledb::Result<T>
+pub fn oracledb::Row::get_by_name<T: oracledb::FromSql>(&self, &str) -> oracledb::Result<T>
+pub fn oracledb::Row::into_values(self) -> alloc::vec::Vec<core::option::Option<oracledb_protocol::thin::types::QueryValue>>
+pub fn oracledb::Row::is_empty(&self) -> bool
+pub fn oracledb::Row::len(&self) -> usize
+pub fn oracledb::Row::typed_row(&self) -> oracledb::TypedRow<'_>
+pub fn oracledb::Row::value(&self, usize) -> core::option::Option<&oracledb_protocol::thin::types::QueryValue>
+pub fn oracledb::Row::values(&self) -> &[core::option::Option<oracledb_protocol::thin::types::QueryValue>]
+impl core::clone::Clone for oracledb::Row
+pub fn oracledb::Row::clone(&self) -> oracledb::Row
+impl core::cmp::PartialEq for oracledb::Row
+pub fn oracledb::Row::eq(&self, &oracledb::Row) -> bool
+impl core::fmt::Debug for oracledb::Row
+pub fn oracledb::Row::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb::Row
+#[non_exhaustive] pub struct oracledb::Rows<'conn>
+impl oracledb::Rows<'_>
+pub fn oracledb::Rows<'_>::batch(&self) -> &[oracledb::Row]
+pub async fn oracledb::Rows<'_>::collect(self, &asupersync::cx::cx::Cx) -> oracledb::Result<alloc::vec::Vec<oracledb::Row>>
+pub fn oracledb::Rows<'_>::columns(&self) -> &[oracledb_protocol::thin::types::ColumnMetadata]
+pub fn oracledb::Rows<'_>::cursor(&self) -> core::option::Option<&oracledb::Cursor>
+pub fn oracledb::Rows<'_>::into_typed<T: oracledb::FromRow>(self) -> oracledb::Result<alloc::vec::Vec<T>>
+pub async fn oracledb::Rows<'_>::next_batch(&mut self, &asupersync::cx::cx::Cx) -> oracledb::Result<bool>
+pub fn oracledb::Rows<'_>::one(self) -> oracledb::Result<oracledb::Row>
+pub fn oracledb::Rows<'_>::opt(self) -> oracledb::Result<core::option::Option<oracledb::Row>>
+pub async fn oracledb::Rows<'_>::scroll(&mut self, &asupersync::cx::cx::Cx, oracledb::Scroll) -> oracledb::Result<()>
+impl core::ops::drop::Drop for oracledb::Rows<'_>
+pub fn oracledb::Rows<'_>::drop(&mut self)
+impl<'conn> core::fmt::Debug for oracledb::Rows<'conn>
+pub fn oracledb::Rows<'conn>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct oracledb::TypedRow<'a>
 impl oracledb::TypedRow<'_>
 pub fn oracledb::TypedRow<'_>::get<T: oracledb::FromSql>(&self, usize) -> oracledb::Result<T>
@@ -645,4 +714,5 @@ pub fn oracledb::fetch_profile_arm(bool)
 pub fn oracledb::fetch_profile_read_decode_ns() -> (u64, u64)
 pub fn oracledb::fetch_profile_reset()
 pub fn oracledb::render_caret(&str, usize, &str) -> alloc::string::String
+pub type oracledb::Cursor = oracledb_protocol::thin::types::CursorValue
 pub type oracledb::Result<T> = core::result::Result<T, oracledb::Error>

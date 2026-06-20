@@ -14,8 +14,13 @@
 //!   --features "chrono uuid serde_json rust_decimal" -- --nocapture
 //! ```
 
-use oracledb::protocol::thin::QueryValue;
-use oracledb::{params, BlockingConnection, ConnectOptions, Connection, QueryResultExt};
+use std::num::NonZeroU32;
+
+use asupersync::runtime::{reactor, RuntimeBuilder};
+use asupersync::Cx;
+use oracledb::{
+    params, BlockingConnection, ConnectOptions, Connection, Error, Query, QueryResultExt,
+};
 use oracledb_protocol::ClientIdentity;
 
 const PROGRAM: &str = "rust-oracledb-typed-itest";
@@ -105,6 +110,98 @@ fn query_named_reorders_correctly() {
         let diff: i64 = result.get_by_name(0, "DIFF").unwrap();
         assert_eq!(diff, 99, "named binds must map by name, not order given");
         eprintln!("named ok: diff={diff}");
+    });
+}
+
+#[test]
+fn async_query_family_eager_drains_and_checks_cardinality() {
+    let Some(options) = connect_options() else {
+        eprintln!("skipped async_query_family_eager_drains_and_checks_cardinality: PYO_TEST_* environment not configured");
+        return;
+    };
+    let reactor = reactor::create_reactor().expect("native reactor should build for live I/O");
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .expect("current-thread Asupersync runtime should build");
+
+    runtime.block_on(async {
+        let cx = Cx::current().expect("Runtime::block_on should install an ambient Cx");
+        let mut conn = Connection::connect(&cx, options)
+            .await
+            .expect("connect to test container");
+
+        let rows = conn
+            .query_with(
+                &cx,
+                Query::new("select level as n from dual connect by level <= 105")
+                    .arraysize(NonZeroU32::new(25).expect("non-zero"))
+                    .prefetch(25),
+            )
+            .await
+            .expect("query_with")
+            .collect(&cx)
+            .await
+            .expect("collect");
+        assert_eq!(rows.len(), 105);
+        assert_eq!(rows[0].get_by_name::<i64>("N").unwrap(), 1);
+        assert_eq!(rows[104].get::<i64>(0).unwrap(), 105);
+
+        {
+            let mut streamed = conn
+                .query_with(
+                    &cx,
+                    Query::new("select level as n from dual connect by level <= 105")
+                        .arraysize(NonZeroU32::new(25).expect("non-zero"))
+                        .prefetch(25),
+                )
+                .await
+                .expect("streamed query_with");
+            let mut seen = Vec::new();
+            loop {
+                seen.extend(
+                    streamed
+                        .batch()
+                        .iter()
+                        .map(|row| row.get_by_name::<i64>("N").unwrap()),
+                );
+                if !streamed.next_batch(&cx).await.expect("next_batch") {
+                    break;
+                }
+            }
+            assert_eq!(seen.len(), 105);
+            assert_eq!(seen[104], 105);
+        }
+
+        let all = conn
+            .query_all(
+                &cx,
+                "select level as n from dual connect by level <= 105",
+                (),
+            )
+            .await
+            .expect("query_all eager drain");
+        assert_eq!(all.len(), 105);
+
+        let one = conn
+            .query_one(&cx, "select :1 + :2 as n from dual", (40_i64, 2_i64))
+            .await
+            .expect("query_one");
+        assert_eq!(one.get_by_name::<i64>("N").unwrap(), 42);
+
+        let opt = conn
+            .query_opt(&cx, "select 1 as n from dual where 1 = 0", ())
+            .await
+            .expect("query_opt none");
+        assert!(opt.is_none());
+
+        let err = conn
+            .query_one(&cx, "select level as n from dual connect by level <= 2", ())
+            .await
+            .expect_err("query_one must reject >1 row");
+        assert!(matches!(err, Error::TooManyRows));
+
+        conn.close(&cx).await.expect("close connection");
     });
 }
 

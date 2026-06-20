@@ -34,7 +34,7 @@
 
 use std::borrow::Cow;
 
-use oracledb_protocol::thin::{BindValue, QueryResult, QueryValue};
+use oracledb_protocol::thin::{BindValue, ColumnMetadata, QueryResult, QueryValue};
 
 /// Why a typed [`FromSql`] conversion could not be performed.
 ///
@@ -693,7 +693,8 @@ impl QueryResultExt for QueryResult {
     }
 
     fn typed_row(&self, row: usize) -> TypedRow<'_> {
-        TypedRow { result: self, row }
+        let cells = self.rows.get(row).map_or(&[][..], Vec::as_slice);
+        TypedRow::new(&self.columns, cells, row)
     }
 
     fn rows_as<T: FromRow>(&self) -> crate::Result<Vec<T>> {
@@ -709,27 +710,49 @@ impl QueryResultExt for QueryResult {
 /// Rust values. Obtain it with [`QueryResultExt::typed_row`].
 #[derive(Clone, Copy)]
 pub struct TypedRow<'a> {
-    result: &'a QueryResult,
+    columns: &'a [ColumnMetadata],
+    cells: &'a [Option<QueryValue>],
     row: usize,
 }
 
 impl TypedRow<'_> {
+    pub(crate) fn new<'a>(
+        columns: &'a [ColumnMetadata],
+        cells: &'a [Option<QueryValue>],
+        row: usize,
+    ) -> TypedRow<'a> {
+        TypedRow {
+            columns,
+            cells,
+            row,
+        }
+    }
+
     /// Convert the cell in this row at column index `col` into `T`.
     pub fn get<T: FromSql>(&self, col: usize) -> crate::Result<T> {
-        self.result.get(self.row, col)
+        convert_cell(
+            self.cell_at(col),
+            format!("no cell at (row {}, col {col})", self.row),
+        )
     }
 
     /// Convert the cell in this row at column `name` (case-insensitive) into
     /// `T`.
     pub fn get_by_name<T: FromSql>(&self, name: &str) -> crate::Result<T> {
-        self.result.get_by_name(self.row, name)
+        match column_index(self.columns, name) {
+            Some(col) => self.get(col),
+            None => Err(crate::Error::Conversion(ConversionError::OutOfRange {
+                expected: std::any::type_name::<T>(),
+                detail: format!("no column named {name:?}"),
+            })),
+        }
     }
 
     /// Borrow the raw cell at column index `col` of this row: `None` if the
     /// index is out of range, `Some(None)` for a SQL `NULL`, `Some(Some(v))`
     /// for a present value.
     fn cell_at(&self, col: usize) -> Option<&Option<QueryValue>> {
-        self.result.rows.get(self.row).and_then(|r| r.get(col))
+        self.cells.get(col)
     }
 
     /// Convert the cell in this row at column index `col` into `T`, yielding the
@@ -768,7 +791,7 @@ impl TypedRow<'_> {
     /// non-`Option` named-field structs. It is `pub` so generated code can call
     /// it; hand-written code usually wants [`TypedRow::get_by_name`].
     pub fn try_get_by_name<T: FromSql>(&self, name: &str) -> Result<T, ConversionError> {
-        match self.result.column_index(name) {
+        match column_index(self.columns, name) {
             Some(col) => self.try_get(col),
             None => Err(ConversionError::OutOfRange {
                 expected: std::any::type_name::<T>(),
@@ -784,7 +807,7 @@ impl TypedRow<'_> {
         &self,
         name: &str,
     ) -> Result<Option<T>, ConversionError> {
-        match self.result.column_index(name) {
+        match column_index(self.columns, name) {
             Some(col) => self.try_get_opt(col),
             None => Err(ConversionError::OutOfRange {
                 expected: std::any::type_name::<Option<T>>(),
@@ -792,6 +815,12 @@ impl TypedRow<'_> {
             }),
         }
     }
+}
+
+fn column_index(columns: &[ColumnMetadata], name: &str) -> Option<usize> {
+    columns
+        .iter()
+        .position(|col| col.name.eq_ignore_ascii_case(name))
 }
 
 // ---------------------------------------------------------------------------

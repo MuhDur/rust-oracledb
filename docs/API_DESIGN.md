@@ -115,7 +115,7 @@ pub struct Rows { /* private: columns + current batch + open cursor */ }
 impl Rows {
     pub fn columns(&self) -> &[ColumnMetadata];
     pub fn batch(&self) -> &[Row];                            // current materialized batch
-    pub async fn next_batch(&mut self, cx: &Cx) -> Result<bool>;   // more_rows; inherits the op deadline (§principle 7)
+    pub async fn next_batch(&mut self, cx: &Cx) -> Result<bool>;   // true when batch() was refreshed; inherits the op deadline (§principle 7)
     pub async fn collect(self, cx: &Cx) -> Result<Vec<Row>>;       // drain to the end
     pub fn one(self) -> Result<Row>;                          // exactly-1 (errors if 0/>1)
     pub fn opt(self) -> Result<Option<Row>>;
