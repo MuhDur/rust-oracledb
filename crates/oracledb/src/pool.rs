@@ -108,6 +108,424 @@ pub trait PoolBackend: Send + Sync + 'static {
     fn connection_is_open(&self, conn: &Self::Conn) -> bool;
 }
 
+// W1-T10 lands this pure model before W1-T7 wires it into the async pool.
+#[allow(dead_code)]
+pub(crate) mod lifecycle {
+    use std::collections::VecDeque;
+
+    pub(crate) type SlotId = u64;
+    pub(crate) type WaiterId = u64;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum PoolCloseReason {
+        Reap,
+        Graceful,
+        Force,
+        Unhealthy,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum PoolEffect {
+        Open {
+            slot: SlotId,
+            waiter: Option<WaiterId>,
+        },
+        Ping {
+            slot: SlotId,
+            waiter: WaiterId,
+        },
+        Close {
+            slot: SlotId,
+            reason: PoolCloseReason,
+        },
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum PoolSlotState {
+        Opening { waiter: Option<WaiterId> },
+        Idle,
+        CheckedOut { waiter: WaiterId },
+        Validating { waiter: Option<WaiterId> },
+        Retiring,
+        Closing,
+        Closed,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub(crate) enum PoolLifecycleError {
+        Busy,
+        Closed,
+        UnknownSlot(SlotId),
+        InvalidState {
+            slot: SlotId,
+            state: PoolSlotState,
+            action: &'static str,
+        },
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub(crate) struct PoolCounts {
+        pub opening: usize,
+        pub idle: usize,
+        pub checked_out: usize,
+        pub validating: usize,
+        pub retiring: usize,
+        pub closing: usize,
+        pub closed: usize,
+        pub waiters: usize,
+    }
+
+    #[derive(Clone, Debug)]
+    struct PoolSlot {
+        id: SlotId,
+        state: PoolSlotState,
+    }
+
+    #[derive(Clone, Debug)]
+    pub(crate) struct PurePoolState {
+        min: usize,
+        max: usize,
+        slots: Vec<PoolSlot>,
+        waiters: VecDeque<WaiterId>,
+        effects: VecDeque<PoolEffect>,
+        history: Vec<String>,
+        closing: bool,
+        next_slot: SlotId,
+        next_waiter: WaiterId,
+    }
+
+    impl PurePoolState {
+        pub(crate) fn new(min: usize, max: usize) -> Self {
+            assert!(min <= max, "pool min must be <= max");
+            let mut state = Self {
+                min,
+                max,
+                slots: Vec::new(),
+                waiters: VecDeque::new(),
+                effects: VecDeque::new(),
+                history: Vec::new(),
+                closing: false,
+                next_slot: 1,
+                next_waiter: 1,
+            };
+            state.ensure_min_opening();
+            state
+        }
+
+        pub(crate) fn request_acquire(&mut self) -> Result<WaiterId, PoolLifecycleError> {
+            if self.closing {
+                return Err(PoolLifecycleError::Closed);
+            }
+            let waiter = self.next_waiter;
+            self.next_waiter += 1;
+            self.history.push(format!("acquire waiter={waiter}"));
+            self.waiters.push_back(waiter);
+            self.drive_waiters();
+            Ok(waiter)
+        }
+
+        pub(crate) fn cancel_acquire(
+            &mut self,
+            waiter: WaiterId,
+        ) -> Result<(), PoolLifecycleError> {
+            self.history.push(format!("cancel waiter={waiter}"));
+            self.waiters.retain(|queued| *queued != waiter);
+            for ix in 0..self.slots.len() {
+                match self.slots[ix].state {
+                    PoolSlotState::Opening {
+                        waiter: Some(current),
+                    } if current == waiter => {
+                        self.slots[ix].state = PoolSlotState::Opening { waiter: None };
+                        return Ok(());
+                    }
+                    PoolSlotState::Validating {
+                        waiter: Some(current),
+                    } if current == waiter => {
+                        self.slots[ix].state = PoolSlotState::Validating { waiter: None };
+                        return Ok(());
+                    }
+                    PoolSlotState::CheckedOut { waiter: current } if current == waiter => {
+                        self.release_slot_at(ix, PoolCloseReason::Graceful);
+                        self.drive_waiters();
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+
+        pub(crate) fn complete_open(
+            &mut self,
+            slot: SlotId,
+            healthy: bool,
+        ) -> Result<(), PoolLifecycleError> {
+            let ix = self.slot_index(slot)?;
+            let PoolSlotState::Opening { waiter } = self.slots[ix].state else {
+                return Err(self.invalid_state(slot, "complete_open"));
+            };
+            if healthy {
+                if self.closing {
+                    self.slots[ix].state = PoolSlotState::Closing;
+                    self.effects.push_back(PoolEffect::Close {
+                        slot,
+                        reason: PoolCloseReason::Force,
+                    });
+                    self.history.push(format!("open slot={slot} close"));
+                } else if let Some(waiter) = waiter {
+                    self.slots[ix].state = PoolSlotState::CheckedOut { waiter };
+                    self.history
+                        .push(format!("open slot={slot} grant waiter={waiter}"));
+                } else {
+                    self.slots[ix].state = PoolSlotState::Idle;
+                    self.history.push(format!("open slot={slot} idle"));
+                    self.drive_waiters();
+                }
+            } else {
+                self.slots[ix].state = PoolSlotState::Closed;
+                self.history.push(format!("open slot={slot} failed"));
+                if let Some(waiter) = waiter {
+                    self.waiters.push_front(waiter);
+                }
+                self.drive_waiters();
+                self.ensure_min_opening();
+            }
+            Ok(())
+        }
+
+        pub(crate) fn complete_ping(
+            &mut self,
+            slot: SlotId,
+            healthy: bool,
+        ) -> Result<(), PoolLifecycleError> {
+            let ix = self.slot_index(slot)?;
+            let PoolSlotState::Validating { waiter } = self.slots[ix].state else {
+                return Err(self.invalid_state(slot, "complete_ping"));
+            };
+            if healthy {
+                if self.closing {
+                    self.slots[ix].state = PoolSlotState::Closing;
+                    self.effects.push_back(PoolEffect::Close {
+                        slot,
+                        reason: PoolCloseReason::Force,
+                    });
+                } else if let Some(waiter) = waiter {
+                    self.slots[ix].state = PoolSlotState::CheckedOut { waiter };
+                    self.history
+                        .push(format!("ping slot={slot} grant waiter={waiter}"));
+                } else {
+                    self.slots[ix].state = PoolSlotState::Idle;
+                    self.history.push(format!("ping slot={slot} idle"));
+                    self.drive_waiters();
+                }
+            } else {
+                self.slots[ix].state = PoolSlotState::Retiring;
+                self.effects.push_back(PoolEffect::Close {
+                    slot,
+                    reason: PoolCloseReason::Unhealthy,
+                });
+                if let Some(waiter) = waiter {
+                    self.waiters.push_front(waiter);
+                }
+                self.history.push(format!("ping slot={slot} unhealthy"));
+            }
+            Ok(())
+        }
+
+        pub(crate) fn release(&mut self, slot: SlotId) -> Result<(), PoolLifecycleError> {
+            let ix = self.slot_index(slot)?;
+            let PoolSlotState::CheckedOut { .. } = self.slots[ix].state else {
+                return Err(self.invalid_state(slot, "release"));
+            };
+            self.release_slot_at(ix, PoolCloseReason::Graceful);
+            self.drive_waiters();
+            Ok(())
+        }
+
+        pub(crate) fn reap_idle(&mut self, slot: SlotId) -> Result<(), PoolLifecycleError> {
+            let ix = self.slot_index(slot)?;
+            let PoolSlotState::Idle = self.slots[ix].state else {
+                return Err(self.invalid_state(slot, "reap_idle"));
+            };
+            self.slots[ix].state = PoolSlotState::Retiring;
+            self.effects.push_back(PoolEffect::Close {
+                slot,
+                reason: PoolCloseReason::Reap,
+            });
+            self.history.push(format!("reap slot={slot}"));
+            Ok(())
+        }
+
+        pub(crate) fn complete_close(&mut self, slot: SlotId) -> Result<(), PoolLifecycleError> {
+            let ix = self.slot_index(slot)?;
+            match self.slots[ix].state {
+                PoolSlotState::Retiring | PoolSlotState::Closing => {
+                    self.slots[ix].state = PoolSlotState::Closed;
+                    self.history.push(format!("close slot={slot} done"));
+                    self.drive_waiters();
+                    self.ensure_min_opening();
+                    Ok(())
+                }
+                _ => Err(self.invalid_state(slot, "complete_close")),
+            }
+        }
+
+        pub(crate) fn begin_close(&mut self, force: bool) -> Result<(), PoolLifecycleError> {
+            self.history.push(format!("begin_close force={force}"));
+            if !force
+                && (self.counts().checked_out > 0
+                    || self.counts().validating > 0
+                    || self.counts().opening > 0
+                    || !self.waiters.is_empty())
+            {
+                return Err(PoolLifecycleError::Busy);
+            }
+            self.closing = true;
+            if force {
+                self.waiters.clear();
+            }
+            for slot in &mut self.slots {
+                match slot.state {
+                    PoolSlotState::Idle | PoolSlotState::CheckedOut { .. } => {
+                        slot.state = PoolSlotState::Closing;
+                        self.effects.push_back(PoolEffect::Close {
+                            slot: slot.id,
+                            reason: if force {
+                                PoolCloseReason::Force
+                            } else {
+                                PoolCloseReason::Graceful
+                            },
+                        });
+                    }
+                    PoolSlotState::Opening { .. } | PoolSlotState::Validating { .. } => {
+                        // The open/ping effect is already in flight. Its completion
+                        // event will observe `closing` and schedule the close effect.
+                    }
+                    PoolSlotState::Retiring | PoolSlotState::Closing | PoolSlotState::Closed => {}
+                }
+            }
+            Ok(())
+        }
+
+        pub(crate) fn counts(&self) -> PoolCounts {
+            let mut counts = PoolCounts {
+                waiters: self.waiters.len(),
+                ..PoolCounts::default()
+            };
+            for slot in &self.slots {
+                match slot.state {
+                    PoolSlotState::Opening { .. } => counts.opening += 1,
+                    PoolSlotState::Idle => counts.idle += 1,
+                    PoolSlotState::CheckedOut { .. } => counts.checked_out += 1,
+                    PoolSlotState::Validating { .. } => counts.validating += 1,
+                    PoolSlotState::Retiring => counts.retiring += 1,
+                    PoolSlotState::Closing => counts.closing += 1,
+                    PoolSlotState::Closed => counts.closed += 1,
+                }
+            }
+            counts
+        }
+
+        pub(crate) fn state_of(&self, slot: SlotId) -> Option<PoolSlotState> {
+            self.slots
+                .iter()
+                .find(|candidate| candidate.id == slot)
+                .map(|candidate| candidate.state)
+        }
+
+        pub(crate) fn take_effects(&mut self) -> Vec<PoolEffect> {
+            self.effects.drain(..).collect()
+        }
+
+        pub(crate) fn history(&self) -> &[String] {
+            &self.history
+        }
+
+        fn drive_waiters(&mut self) {
+            while !self.closing {
+                let Some(waiter) = self.waiters.pop_front() else {
+                    return;
+                };
+                if let Some(ix) = self
+                    .slots
+                    .iter()
+                    .position(|slot| matches!(slot.state, PoolSlotState::Idle))
+                {
+                    let slot = self.slots[ix].id;
+                    self.slots[ix].state = PoolSlotState::Validating {
+                        waiter: Some(waiter),
+                    };
+                    self.effects.push_back(PoolEffect::Ping { slot, waiter });
+                    self.history
+                        .push(format!("validate slot={slot} waiter={waiter}"));
+                    continue;
+                }
+                if self.live_slot_count() < self.max {
+                    self.open_slot(Some(waiter));
+                    continue;
+                }
+                self.waiters.push_front(waiter);
+                return;
+            }
+        }
+
+        fn ensure_min_opening(&mut self) {
+            while !self.closing && self.live_slot_count() < self.min {
+                self.open_slot(None);
+            }
+        }
+
+        fn open_slot(&mut self, waiter: Option<WaiterId>) {
+            let slot = self.next_slot;
+            self.next_slot += 1;
+            self.slots.push(PoolSlot {
+                id: slot,
+                state: PoolSlotState::Opening { waiter },
+            });
+            self.effects.push_back(PoolEffect::Open { slot, waiter });
+            self.history
+                .push(format!("open slot={slot} waiter={waiter:?}"));
+        }
+
+        fn release_slot_at(&mut self, ix: usize, reason: PoolCloseReason) {
+            let slot = self.slots[ix].id;
+            if self.closing {
+                self.slots[ix].state = PoolSlotState::Closing;
+                self.effects.push_back(PoolEffect::Close { slot, reason });
+                self.history.push(format!("release slot={slot} close"));
+            } else {
+                self.slots[ix].state = PoolSlotState::Idle;
+                self.history.push(format!("release slot={slot} idle"));
+            }
+        }
+
+        fn live_slot_count(&self) -> usize {
+            self.slots
+                .iter()
+                .filter(|slot| !matches!(slot.state, PoolSlotState::Closed))
+                .count()
+        }
+
+        fn slot_index(&self, slot: SlotId) -> Result<usize, PoolLifecycleError> {
+            self.slots
+                .iter()
+                .position(|candidate| candidate.id == slot)
+                .ok_or(PoolLifecycleError::UnknownSlot(slot))
+        }
+
+        fn invalid_state(&self, slot: SlotId, action: &'static str) -> PoolLifecycleError {
+            let state = self
+                .state_of(slot)
+                .expect("slot existence checked before invalid_state");
+            PoolLifecycleError::InvalidState {
+                slot,
+                state,
+                action,
+            }
+        }
+    }
+}
+
 struct PooledConn<C> {
     id: u64,
     conn: C,
@@ -1165,7 +1583,277 @@ fn process_request<B: PoolBackend>(inner: &Arc<EngineInner<B>>, request_id: u64)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lifecycle::{PoolCloseReason, PoolCounts, PoolEffect, PoolSlotState, PurePoolState};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    #[test]
+    fn pure_pool_state_opens_min_and_derives_counts() {
+        let mut state = PurePoolState::new(2, 4);
+        assert_eq!(
+            state.take_effects(),
+            vec![
+                PoolEffect::Open {
+                    slot: 1,
+                    waiter: None,
+                },
+                PoolEffect::Open {
+                    slot: 2,
+                    waiter: None,
+                },
+            ]
+        );
+        assert_eq!(
+            state.counts(),
+            PoolCounts {
+                opening: 2,
+                ..PoolCounts::default()
+            }
+        );
+
+        state.complete_open(1, true).unwrap();
+        state.complete_open(2, true).unwrap();
+        assert_eq!(
+            state.counts(),
+            PoolCounts {
+                idle: 2,
+                ..PoolCounts::default()
+            }
+        );
+        assert_eq!(
+            state.history(),
+            &[
+                "open slot=1 waiter=None".to_string(),
+                "open slot=2 waiter=None".to_string(),
+                "open slot=1 idle".to_string(),
+                "open slot=2 idle".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn pure_pool_state_cancelled_opening_hands_slot_to_next_waiter() {
+        let mut state = PurePoolState::new(0, 1);
+        let first = state.request_acquire().unwrap();
+        assert_eq!(
+            state.take_effects(),
+            vec![PoolEffect::Open {
+                slot: 1,
+                waiter: Some(first),
+            }]
+        );
+        let second = state.request_acquire().unwrap();
+        assert!(state.take_effects().is_empty());
+
+        state.cancel_acquire(first).unwrap();
+        state.complete_open(1, true).unwrap();
+        assert_eq!(
+            state.take_effects(),
+            vec![PoolEffect::Ping {
+                slot: 1,
+                waiter: second,
+            }]
+        );
+        state.complete_ping(1, true).unwrap();
+
+        assert_eq!(
+            state.state_of(1),
+            Some(PoolSlotState::CheckedOut { waiter: second })
+        );
+        assert_eq!(
+            state.counts(),
+            PoolCounts {
+                checked_out: 1,
+                ..PoolCounts::default()
+            }
+        );
+    }
+
+    #[test]
+    fn pure_pool_state_release_respects_fifo_waiter_order() {
+        let mut state = PurePoolState::new(1, 1);
+        assert_eq!(state.take_effects().len(), 1);
+        state.complete_open(1, true).unwrap();
+        let first = state.request_acquire().unwrap();
+        assert_eq!(
+            state.take_effects(),
+            vec![PoolEffect::Ping {
+                slot: 1,
+                waiter: first,
+            }]
+        );
+        state.complete_ping(1, true).unwrap();
+        let second = state.request_acquire().unwrap();
+        assert!(state.take_effects().is_empty());
+
+        state.release(1).unwrap();
+        assert_eq!(
+            state.take_effects(),
+            vec![PoolEffect::Ping {
+                slot: 1,
+                waiter: second,
+            }]
+        );
+        state.complete_ping(1, true).unwrap();
+        assert_eq!(
+            state.state_of(1),
+            Some(PoolSlotState::CheckedOut { waiter: second })
+        );
+    }
+
+    #[test]
+    fn pure_pool_state_unhealthy_ping_requeues_waiter_and_reopens() {
+        let mut state = PurePoolState::new(1, 1);
+        assert_eq!(state.take_effects().len(), 1);
+        state.complete_open(1, true).unwrap();
+        let waiter = state.request_acquire().unwrap();
+        assert_eq!(
+            state.take_effects(),
+            vec![PoolEffect::Ping { slot: 1, waiter }]
+        );
+
+        state.complete_ping(1, false).unwrap();
+        assert_eq!(
+            state.take_effects(),
+            vec![PoolEffect::Close {
+                slot: 1,
+                reason: PoolCloseReason::Unhealthy,
+            }]
+        );
+        assert_eq!(
+            state.counts(),
+            PoolCounts {
+                retiring: 1,
+                waiters: 1,
+                ..PoolCounts::default()
+            }
+        );
+
+        state.complete_close(1).unwrap();
+        assert_eq!(
+            state.take_effects(),
+            vec![PoolEffect::Open {
+                slot: 2,
+                waiter: Some(waiter),
+            }]
+        );
+        state.complete_open(2, true).unwrap();
+        assert_eq!(
+            state.state_of(2),
+            Some(PoolSlotState::CheckedOut { waiter })
+        );
+    }
+
+    #[test]
+    fn pure_pool_state_reap_and_close_modes_are_event_driven() {
+        let mut state = PurePoolState::new(1, 2);
+        assert_eq!(state.take_effects().len(), 1);
+        state.complete_open(1, true).unwrap();
+
+        state.reap_idle(1).unwrap();
+        assert_eq!(
+            state.take_effects(),
+            vec![PoolEffect::Close {
+                slot: 1,
+                reason: PoolCloseReason::Reap,
+            }]
+        );
+        state.complete_close(1).unwrap();
+        assert_eq!(
+            state.take_effects(),
+            vec![PoolEffect::Open {
+                slot: 2,
+                waiter: None,
+            }]
+        );
+        state.complete_open(2, true).unwrap();
+
+        let waiter = state.request_acquire().unwrap();
+        assert_eq!(
+            state.take_effects(),
+            vec![PoolEffect::Ping { slot: 2, waiter }]
+        );
+        state.complete_ping(2, true).unwrap();
+        assert_eq!(
+            state.begin_close(false),
+            Err(lifecycle::PoolLifecycleError::Busy)
+        );
+
+        let waiting = state.request_acquire().unwrap();
+        assert_eq!(
+            state.take_effects(),
+            vec![PoolEffect::Open {
+                slot: 3,
+                waiter: Some(waiting),
+            }]
+        );
+        state.begin_close(true).unwrap();
+        assert_eq!(
+            state.take_effects(),
+            vec![PoolEffect::Close {
+                slot: 2,
+                reason: PoolCloseReason::Force,
+            }]
+        );
+        assert_eq!(
+            state.counts(),
+            PoolCounts {
+                opening: 1,
+                closing: 1,
+                closed: 1,
+                ..PoolCounts::default()
+            }
+        );
+        state.complete_open(3, true).unwrap();
+        assert_eq!(
+            state.take_effects(),
+            vec![PoolEffect::Close {
+                slot: 3,
+                reason: PoolCloseReason::Force,
+            }]
+        );
+    }
+
+    #[test]
+    fn pure_pool_state_force_close_waits_for_in_flight_open() {
+        let mut state = PurePoolState::new(0, 1);
+        let waiter = state.request_acquire().unwrap();
+        assert_eq!(
+            state.take_effects(),
+            vec![PoolEffect::Open {
+                slot: 1,
+                waiter: Some(waiter),
+            }]
+        );
+
+        state.begin_close(true).unwrap();
+        assert!(
+            state.take_effects().is_empty(),
+            "open is in flight; close is emitted after open completion"
+        );
+        assert_eq!(
+            state.counts(),
+            PoolCounts {
+                opening: 1,
+                ..PoolCounts::default()
+            }
+        );
+
+        state.complete_open(1, true).unwrap();
+        assert_eq!(
+            state.take_effects(),
+            vec![PoolEffect::Close {
+                slot: 1,
+                reason: PoolCloseReason::Force,
+            }]
+        );
+        assert_eq!(
+            state.counts(),
+            PoolCounts {
+                closing: 1,
+                ..PoolCounts::default()
+            }
+        );
+    }
 
     struct FakeConn {
         alive: Arc<AtomicBool>,
@@ -1237,9 +1925,10 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        panic!(
-            "open count never reached {expected}; current {}",
-            engine.open_count().unwrap()
+        assert_eq!(
+            engine.open_count().unwrap(),
+            expected,
+            "open count never reached {expected}"
         );
     }
 
@@ -1275,10 +1964,10 @@ mod tests {
         let b = engine.acquire(AcquireOptions::default()).unwrap();
         assert_eq!(engine.open_count().unwrap(), 2);
         engine.set_getmode(POOL_GETMODE_NOWAIT).unwrap();
-        match engine.acquire(AcquireOptions::default()) {
-            Err(PoolError::NoConnectionAvailable) => {}
-            other => panic!("expected NoConnectionAvailable, got {other:?}"),
-        }
+        assert!(matches!(
+            engine.acquire(AcquireOptions::default()),
+            Err(PoolError::NoConnectionAvailable)
+        ));
         engine.set_getmode(POOL_GETMODE_FORCEGET).unwrap();
         let c = engine.acquire(AcquireOptions::default()).unwrap();
         assert_eq!(engine.open_count().unwrap(), 3);
@@ -1300,10 +1989,10 @@ mod tests {
         )
         .unwrap();
         let _conn = engine.acquire(AcquireOptions::default()).unwrap();
-        match engine.close(false) {
-            Err(PoolError::HasBusyConnections) => {}
-            other => panic!("expected HasBusyConnections, got {other:?}"),
-        }
+        assert!(matches!(
+            engine.close(false),
+            Err(PoolError::HasBusyConnections)
+        ));
         engine.close(true).unwrap();
         assert!(matches!(
             engine.acquire(AcquireOptions::default()),
@@ -1320,12 +2009,11 @@ mod tests {
             test_config(1, 2, 1, POOL_GETMODE_WAIT),
         )
         .unwrap();
-        match engine.acquire(AcquireOptions::default()) {
-            Err(PoolError::Backend(message)) => {
-                assert!(message.contains("ORA-01017"), "message: {message}");
-            }
-            other => panic!("expected Backend error, got {other:?}"),
-        }
+        let error = engine.acquire(AcquireOptions::default()).err();
+        assert!(matches!(
+            error,
+            Some(PoolError::Backend(message)) if message.contains("ORA-01017")
+        ));
     }
 
     #[test]
