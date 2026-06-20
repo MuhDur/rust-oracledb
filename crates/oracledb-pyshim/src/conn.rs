@@ -1564,7 +1564,7 @@ impl ThinConnImpl {
     pub(crate) fn cancel(&self) -> PyResult<()> {
         self.cancel_requested.store(true, Ordering::SeqCst);
         if let Some(cancel_handle) = self.cancel_handle.lock().map_err(runtime_error)?.as_mut() {
-            cancel_handle.cancel().map_err(runtime_error)?;
+            cancel_handle.cancel_blocking().map_err(runtime_error)?;
         }
         Ok(())
     }

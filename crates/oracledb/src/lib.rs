@@ -1764,6 +1764,7 @@ pub enum PipelineRequest {
 #[derive(Debug)]
 pub struct CancelHandle {
     write: SharedWriteHalf,
+    recovery: Arc<SessionRecovery>,
 }
 
 impl Connection {
@@ -2054,6 +2055,7 @@ impl Connection {
     pub fn cancel_handle(&self) -> Result<CancelHandle> {
         Ok(CancelHandle {
             write: self.core.write_handle(),
+            recovery: Arc::clone(&self.core.recovery),
         })
     }
 
@@ -5361,13 +5363,49 @@ impl Connection {
 }
 
 impl CancelHandle {
-    pub fn cancel(&mut self) -> Result<()> {
+    /// Request cancellation of the connection operation currently in flight.
+    ///
+    /// The blocking facade for synchronous callers is [`Self::cancel_blocking`];
+    /// Rust cannot overload that zero-argument wrapper with this `&Cx` form.
+    ///
+    /// This is request-only: it sends the BREAK marker and records that recovery
+    /// is pending, but the connection owner remains responsible for draining the
+    /// cancel response and reconciling the session back to Ready or Dead.
+    pub async fn cancel(&mut self, cx: &Cx) -> Result<()> {
+        observe_cancellation_between_round_trips(cx)?;
+        if !self.should_send_break_request()? {
+            return Ok(());
+        }
+        let mut write = lock_write(cx, &self.write).await?;
+        if !self.should_send_break_request()? {
+            return Ok(());
+        }
+        match send_marker(&mut *write, TNS_MARKER_TYPE_BREAK).await {
+            Ok(()) => self.recovery.mark_break_sent(),
+            Err(err) => {
+                self.recovery.mark_dead();
+                Err(err)
+            }
+        }
+    }
+
+    fn should_send_break_request(&self) -> Result<bool> {
+        match self.recovery.phase() {
+            SessionRecoveryPhase::Dead => {
+                Err(Error::ConnectionClosed("connection is closed".into()))
+            }
+            SessionRecoveryPhase::BreakSent | SessionRecoveryPhase::Draining => Ok(false),
+            SessionRecoveryPhase::Ready | SessionRecoveryPhase::InFlight => Ok(true),
+        }
+    }
+
+    /// Blocking facade for synchronous callers.
+    pub fn cancel_blocking(&mut self) -> Result<()> {
         let runtime = build_io_runtime()?;
-        let write = Arc::clone(&self.write);
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            send_marker_shared(&cx, &write, TNS_MARKER_TYPE_BREAK).await
+            self.cancel(&cx).await
         })
     }
 }
@@ -7733,7 +7771,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_handle_sends_tns_break_marker() {
+    fn async_cancel_handle_requests_break_and_reconciles_ready() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
         let addr = listener.local_addr().expect("listener address");
         let server = thread::spawn(move || {
@@ -7747,15 +7785,21 @@ mod tests {
         });
 
         let runtime = build_io_runtime().expect("asupersync runtime");
+        let recovery = Arc::new(SessionRecovery::new());
         let mut handle = runtime.block_on(async {
             let stream = TcpStream::connect(addr).await.expect("connect to listener");
             let (_read, write) = transport::plain_split(stream);
             CancelHandle {
                 write: Arc::new(AsyncMutex::with_name("oracle_tcp_write_test", write)),
+                recovery: Arc::clone(&recovery),
             }
         });
 
-        handle.cancel().expect("cancel marker write");
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            handle.cancel(&cx).await
+        })?;
 
         let packet = server.join().expect("server thread joins");
         assert_eq!(
@@ -7774,6 +7818,259 @@ mod tests {
                 TNS_MARKER_TYPE_BREAK
             ]
         );
+        assert_eq!(
+            recovery.phase(),
+            SessionRecoveryPhase::BreakSent,
+            "CancelHandle::cancel(&Cx) requests cancellation without draining"
+        );
+        assert!(
+            recovery.begin_pending_drain()?,
+            "the connection owner must be able to adopt the pending cancel response"
+        );
+        recovery.finish_drain_ready();
+        assert_eq!(
+            recovery.phase(),
+            SessionRecoveryPhase::Ready,
+            "successful cancel-response drain reconciles the session to Ready"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn async_cancel_handle_owner_drain_reconciles_ready() -> Result<()> {
+        const INFLIGHT_BODY: &[u8] = &[0xCA, 0xFE];
+        const ERROR_BODY: &[u8] = &[0x04, 0x01, 0x0d];
+        const FRESH_BODY: &[u8] = &[0x07, 0x05, 0x0c];
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            use std::io::Write as _;
+
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_BREAK,
+                "CancelHandle must send exactly one BREAK request"
+            );
+            socket
+                .write_all(&data_packet(INFLIGHT_BODY, true))
+                .expect("write in-flight response");
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))
+                .expect("write break-ack marker");
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_RESET,
+                "owner drain must answer the break marker with RESET"
+            );
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_RESET))
+                .expect("write reset-confirm marker");
+            socket
+                .write_all(&data_packet(ERROR_BODY, true))
+                .expect("write trailing cancel error packet");
+            socket
+                .write_all(&data_packet(FRESH_BODY, true))
+                .expect("write fresh response");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let next = runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (read, write) = transport::plain_split(stream);
+            let mut conn = loopback_connection(read, write);
+            let mut handle = conn.cancel_handle()?;
+
+            handle.cancel(&cx).await?;
+            assert_eq!(
+                conn.core.recovery.phase(),
+                SessionRecoveryPhase::BreakSent,
+                "handle cancel only requests recovery"
+            );
+            conn.drain_cancel_response().await?;
+            assert_eq!(
+                conn.core.recovery.phase(),
+                SessionRecoveryPhase::Ready,
+                "owner drain reconciles a successful cancel response to Ready"
+            );
+            conn.core.read_data_response(&cx).await
+        })?;
+
+        assert_eq!(
+            next, FRESH_BODY,
+            "after owner drain the next read must consume the fresh response"
+        );
+        server.join().expect("server thread joins");
+        Ok(())
+    }
+
+    #[test]
+    fn async_cancel_handle_owner_drain_failure_marks_dead() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_BREAK,
+                "CancelHandle must send the BREAK before the failed drain"
+            );
+            // Drop the socket without sending a complete cancel response.
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (read, write) = transport::plain_split(stream);
+            let mut conn = loopback_connection(read, write);
+            let mut handle = conn.cancel_handle()?;
+
+            handle.cancel(&cx).await?;
+            assert_eq!(conn.core.recovery.phase(), SessionRecoveryPhase::BreakSent);
+            assert!(
+                conn.drain_cancel_response().await.is_err(),
+                "incomplete cancel response must fail owner drain"
+            );
+            assert!(
+                conn.is_dead(),
+                "failed owner drain marks the connection dead"
+            );
+            assert_eq!(conn.core.recovery.phase(), SessionRecoveryPhase::Dead);
+            Ok::<(), Error>(())
+        })?;
+
+        server.join().expect("server thread joins");
+        Ok(())
+    }
+
+    #[test]
+    fn async_cancel_handle_does_not_send_duplicate_break_when_recovery_pending() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            let mut packet = [0u8; 11];
+            socket.read_exact(&mut packet).expect("read first break");
+            socket
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .expect("set short read timeout");
+            let mut extra = [0u8; 1];
+            let extra_read = socket.read_exact(&mut extra);
+            assert!(
+                matches!(
+                    extra_read.as_ref().map_err(std::io::Error::kind),
+                    Err(std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+                ),
+                "duplicate BREAK check expected a read timeout, got {extra_read:?} with byte {:02x}",
+                extra[0]
+            );
+            packet
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let recovery = Arc::new(SessionRecovery::new());
+        let mut handle = runtime.block_on(async {
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (_read, write) = transport::plain_split(stream);
+            CancelHandle {
+                write: Arc::new(AsyncMutex::with_name("oracle_tcp_write_test", write)),
+                recovery: Arc::clone(&recovery),
+            }
+        });
+
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            handle.cancel(&cx).await?;
+            assert_eq!(recovery.phase(), SessionRecoveryPhase::BreakSent);
+            handle.cancel(&cx).await?;
+            assert!(
+                recovery.begin_pending_drain()?,
+                "test moves the pending cancel into Draining"
+            );
+            handle.cancel(&cx).await
+        })?;
+
+        let packet = server.join().expect("server thread joins");
+        assert_eq!(
+            packet,
+            [
+                0,
+                0,
+                0,
+                11,
+                TNS_PACKET_TYPE_MARKER,
+                0,
+                0,
+                0,
+                1,
+                0,
+                TNS_MARKER_TYPE_BREAK
+            ]
+        );
+        assert_eq!(recovery.phase(), SessionRecoveryPhase::Draining);
+        Ok(())
+    }
+
+    #[test]
+    fn blocking_cancel_handle_sends_tns_break_marker() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            let mut packet = [0u8; 11];
+            socket.read_exact(&mut packet).expect("read marker packet");
+            packet
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let recovery = Arc::new(SessionRecovery::new());
+        let mut handle = runtime.block_on(async {
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (_read, write) = transport::plain_split(stream);
+            CancelHandle {
+                write: Arc::new(AsyncMutex::with_name("oracle_tcp_write_test", write)),
+                recovery: Arc::clone(&recovery),
+            }
+        });
+
+        handle.cancel_blocking().expect("cancel marker write");
+
+        let packet = server.join().expect("server thread joins");
+        assert_eq!(
+            packet,
+            [
+                0,
+                0,
+                0,
+                11,
+                TNS_PACKET_TYPE_MARKER,
+                0,
+                0,
+                0,
+                1,
+                0,
+                TNS_MARKER_TYPE_BREAK
+            ]
+        );
+        assert_eq!(recovery.phase(), SessionRecoveryPhase::BreakSent);
     }
 
     // ---- break_and_drain regression (bead rust-oracledb-2vx) -------------------
