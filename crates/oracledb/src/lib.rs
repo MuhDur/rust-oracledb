@@ -117,7 +117,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::process;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -327,7 +327,7 @@ type DriverCore = ConnectionCore<DriverTransport>;
 struct ConnectionCore<T: WireTransport> {
     read: T::Read,
     write: SharedWriteHalf<T>,
-    cancel_drain_pending: Arc<AtomicBool>,
+    recovery: Arc<SessionRecovery>,
 }
 
 impl<T: WireTransport> ConnectionCore<T> {
@@ -335,7 +335,7 @@ impl<T: WireTransport> ConnectionCore<T> {
         Self {
             read,
             write: Arc::new(AsyncMutex::with_name(write_name, write)),
-            cancel_drain_pending: Arc::new(AtomicBool::new(false)),
+            recovery: Arc::new(SessionRecovery::new()),
         }
     }
 
@@ -408,6 +408,185 @@ impl<T: WireTransport> ConnectionCore<T> {
 
     async fn drain_cancel_wire(&mut self, cx: &Cx, recovery_timeout: Duration) -> Result<()> {
         drain_cancel_wire(&mut self.read, cx, &self.write, recovery_timeout).await
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum SessionRecoveryPhase {
+    Ready = 0,
+    InFlight = 1,
+    BreakSent = 2,
+    Draining = 3,
+    Dead = 4,
+}
+
+impl SessionRecoveryPhase {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Ready,
+            1 => Self::InFlight,
+            2 => Self::BreakSent,
+            3 => Self::Draining,
+            _ => Self::Dead,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SessionRecovery {
+    phase: AtomicU8,
+}
+
+impl SessionRecovery {
+    fn new() -> Self {
+        Self {
+            phase: AtomicU8::new(SessionRecoveryPhase::Ready as u8),
+        }
+    }
+
+    fn phase(&self) -> SessionRecoveryPhase {
+        SessionRecoveryPhase::from_u8(self.phase.load(Ordering::SeqCst))
+    }
+
+    fn is_dead(&self) -> bool {
+        self.phase() == SessionRecoveryPhase::Dead
+    }
+
+    fn begin_operation(&self) -> Result<()> {
+        match self.phase.compare_exchange(
+            SessionRecoveryPhase::Ready as u8,
+            SessionRecoveryPhase::InFlight as u8,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => Ok(()),
+            Err(current) => match SessionRecoveryPhase::from_u8(current) {
+                SessionRecoveryPhase::InFlight => Err(Error::ConnectionClosed(
+                    "operation attempted while a response is still in flight".into(),
+                )),
+                SessionRecoveryPhase::BreakSent | SessionRecoveryPhase::Draining => {
+                    Err(Error::ConnectionClosed(
+                        "operation attempted while session recovery is pending".into(),
+                    ))
+                }
+                SessionRecoveryPhase::Dead => {
+                    Err(Error::ConnectionClosed("connection is closed".into()))
+                }
+                SessionRecoveryPhase::Ready => Ok(()),
+            },
+        }
+    }
+
+    fn begin_or_adopt_operation(&self) -> Result<()> {
+        match self.phase.compare_exchange(
+            SessionRecoveryPhase::Ready as u8,
+            SessionRecoveryPhase::InFlight as u8,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => Ok(()),
+            Err(current) => match SessionRecoveryPhase::from_u8(current) {
+                SessionRecoveryPhase::InFlight => Ok(()),
+                SessionRecoveryPhase::BreakSent | SessionRecoveryPhase::Draining => {
+                    Err(Error::ConnectionClosed(
+                        "operation attempted while session recovery is pending".into(),
+                    ))
+                }
+                SessionRecoveryPhase::Dead => {
+                    Err(Error::ConnectionClosed("connection is closed".into()))
+                }
+                SessionRecoveryPhase::Ready => Ok(()),
+            },
+        }
+    }
+
+    fn complete_operation(&self) {
+        let _ = self.phase.compare_exchange(
+            SessionRecoveryPhase::InFlight as u8,
+            SessionRecoveryPhase::Ready as u8,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+    }
+
+    fn mark_break_required(&self) {
+        let _ = self.phase.compare_exchange(
+            SessionRecoveryPhase::InFlight as u8,
+            SessionRecoveryPhase::BreakSent as u8,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+    }
+
+    fn mark_break_sent(&self) -> Result<()> {
+        loop {
+            let current = self.phase.load(Ordering::SeqCst);
+            match SessionRecoveryPhase::from_u8(current) {
+                SessionRecoveryPhase::Dead => {
+                    return Err(Error::ConnectionClosed("connection is closed".into()));
+                }
+                SessionRecoveryPhase::BreakSent | SessionRecoveryPhase::Draining => return Ok(()),
+                SessionRecoveryPhase::Ready | SessionRecoveryPhase::InFlight => {
+                    if self
+                        .phase
+                        .compare_exchange(
+                            current,
+                            SessionRecoveryPhase::BreakSent as u8,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_ok()
+                    {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    fn begin_pending_drain(&self) -> Result<bool> {
+        match self.phase.compare_exchange(
+            SessionRecoveryPhase::BreakSent as u8,
+            SessionRecoveryPhase::Draining as u8,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => Ok(true),
+            Err(current) => match SessionRecoveryPhase::from_u8(current) {
+                SessionRecoveryPhase::Ready => Ok(false),
+                SessionRecoveryPhase::InFlight => Err(Error::ConnectionClosed(
+                    "operation attempted while a response is still in flight".into(),
+                )),
+                SessionRecoveryPhase::Draining => Err(Error::ConnectionClosed(
+                    "session recovery is already draining".into(),
+                )),
+                SessionRecoveryPhase::BreakSent => Ok(false),
+                SessionRecoveryPhase::Dead => {
+                    Err(Error::ConnectionClosed("connection is closed".into()))
+                }
+            },
+        }
+    }
+
+    fn begin_drain_after_break(&self) -> Result<()> {
+        self.mark_break_sent()?;
+        match self.begin_pending_drain()? {
+            true => Ok(()),
+            false => Err(Error::ConnectionClosed(
+                "session recovery did not enter draining state".into(),
+            )),
+        }
+    }
+
+    fn finish_drain_ready(&self) {
+        self.phase
+            .store(SessionRecoveryPhase::Ready as u8, Ordering::SeqCst);
+    }
+
+    fn mark_dead(&self) {
+        self.phase
+            .store(SessionRecoveryPhase::Dead as u8, Ordering::SeqCst);
     }
 }
 
@@ -1721,7 +1900,7 @@ impl Connection {
     /// Whether a session-dead Oracle error (mapped to DPY-4011 by the Python
     /// layer) has been observed on this connection.
     pub fn is_dead(&self) -> bool {
-        self.dead
+        self.dead || self.core.recovery.is_dead()
     }
 
     /// Wrap a protocol parse result, recording session-dead errors.
@@ -2566,7 +2745,7 @@ impl Connection {
             .map_err(|err| Error::Runtime(err.to_string()))?;
         // If a prior cancellable round trip was dropped mid-read, break + drain
         // the stranded call before issuing this execute (Scope cancel-on-drop).
-        self.drain_pending_cancel(cx).await?;
+        self.ensure_clean_before_request(cx).await?;
         // Flush any cursors queued for close (via `close_cursor`) ahead of this
         // execute: the close-cursors piggyback carries its own sequence number
         // and is prepended to the execute payload, mirroring the bind-rows
@@ -2853,7 +3032,7 @@ impl Connection {
             .map_err(|err| Error::Runtime(err.to_string()))?;
         // If a prior cancellable round trip was dropped mid-read, break + drain
         // the stranded call before issuing this execute (Scope cancel-on-drop).
-        self.drain_pending_cancel(cx).await?;
+        self.ensure_clean_before_request(cx).await?;
         let mut exec_options = exec_options;
         // a `suspend_on_success` execute folds a post-detach into the pending
         // sessionless piggyback; validate (DPY-3034/3036) before any wire work
@@ -3075,13 +3254,13 @@ impl Connection {
     }
 
     /// If a previous cancellable fetch future was dropped mid-read (its
-    /// [`CancelDrainGuard`] armed `cancel_drain_pending`), break + drain the
-    /// stranded server call now — before this round trip sends its own request —
-    /// so the leftover bytes / still-running call cannot poison this response.
-    /// Clears the flag once the wire is clean. A failed drain marks the
-    /// connection dead and surfaces [`Error::ConnectionClosed`].
-    async fn drain_pending_cancel(&mut self, cx: &Cx) -> Result<()> {
-        if !self.core.cancel_drain_pending.swap(false, Ordering::SeqCst) {
+    /// [`CancelDrainGuard`] moved the recovery phase to `BreakSent`), break +
+    /// drain the stranded server call now — before this round trip sends its own
+    /// request — so the leftover bytes / still-running call cannot poison this
+    /// response. A failed drain marks the connection dead and surfaces
+    /// [`Error::ConnectionClosed`].
+    async fn ensure_clean_before_request(&mut self, cx: &Cx) -> Result<()> {
+        if !self.core.recovery.begin_pending_drain()? {
             return Ok(());
         }
         match self
@@ -3089,8 +3268,12 @@ impl Connection {
             .cancel_and_drain_wire(cx, BREAK_DRAIN_RECOVERY_TIMEOUT)
             .await
         {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.core.recovery.finish_drain_ready();
+                Ok(())
+            }
             Err(err) => {
+                self.core.recovery.mark_dead();
                 self.dead = true;
                 Err(err)
             }
@@ -3098,16 +3281,16 @@ impl Connection {
     }
 
     /// Read one TTC response under a [`CancelDrainGuard`]: if THIS read future is
-    /// dropped mid-flight (the fetch was cancelled / raced), the guard arms
-    /// `cancel_drain_pending` so the next operation breaks + drains the stranded
-    /// call. A normal completion disarms the guard, so the uncancelled path costs
-    /// nothing beyond an `Arc::clone`.
+    /// dropped mid-flight (the fetch was cancelled / raced), the guard moves the
+    /// recovery phase to `BreakSent` so the next operation breaks + drains the
+    /// stranded call. A normal completion disarms the guard, so the uncancelled
+    /// path costs nothing beyond an `Arc::clone`.
     async fn read_response_cancellable(&mut self, cx: &Cx) -> Result<Vec<u8>> {
         // Clone the Arc so the guard owns a handle independent of the `&mut self`
         // read borrow (the two touch disjoint state but the borrow checker can't
         // prove it across the guard's lifetime).
-        let pending = Arc::clone(&self.core.cancel_drain_pending);
-        let mut guard = CancelDrainGuard::arm(&pending);
+        let recovery = Arc::clone(&self.core.recovery);
+        let mut guard = CancelDrainGuard::arm(recovery)?;
         let response = self.core.read_data_response(cx).await?;
         guard.disarm();
         Ok(response)
@@ -3118,8 +3301,8 @@ impl Connection {
     /// requests). Same cancel-on-drop semantics: a dropped execute future arms
     /// the next operation's break + drain.
     async fn read_flushing_out_binds_cancellable(&mut self, cx: &Cx) -> Result<Vec<u8>> {
-        let pending = Arc::clone(&self.core.cancel_drain_pending);
-        let mut guard = CancelDrainGuard::arm(&pending);
+        let recovery = Arc::clone(&self.core.recovery);
+        let mut guard = CancelDrainGuard::arm(recovery)?;
         let response = self
             .core
             .read_data_response_flushing_out_binds(cx, self.sdu)
@@ -3160,7 +3343,7 @@ impl Connection {
             .map_err(|err| Error::Runtime(err.to_string()))?;
         // If a prior fetch future was cancelled mid-read, break + drain the
         // stranded call before issuing this fetch (Scope-based cancel-on-drop).
-        self.drain_pending_cancel(cx).await?;
+        self.ensure_clean_before_request(cx).await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
         trace_query_bytes("FETCH payload", &payload);
@@ -3256,14 +3439,14 @@ impl Connection {
     /// ## Cancellation safety
     ///
     /// Issuing this request leaves a server response in flight on the wire. So
-    /// it **arms** `cancel_drain_pending` for the entire window until that
-    /// response is consumed: if the owning future is dropped while the response
-    /// is in flight — whether during the prior page's decode (no read yet) or
-    /// during the response read itself — the next operation breaks + drains the
-    /// stranded page before issuing its own request (the same machinery that
-    /// protects a dropped fetch, see [`CancelDrainGuard`]). A request can only be
-    /// issued from a clean wire boundary, so it first drains any *previously*
-    /// stranded call.
+    /// it moves the recovery phase to `InFlight` for the entire window until
+    /// that response is consumed: if the owning future is dropped while the
+    /// response is in flight — whether during the prior page's decode (no read
+    /// yet) or during the response read itself — the next operation breaks +
+    /// drains the stranded page before issuing its own request (the same
+    /// machinery that protects a dropped fetch, see [`CancelDrainGuard`]). A
+    /// request can only be issued from a clean wire boundary, so it first drains
+    /// any *previously* stranded call.
     pub async fn fetch_rows_request(
         &mut self,
         cx: &Cx,
@@ -3274,16 +3457,23 @@ impl Connection {
             .map_err(|err| Error::Runtime(err.to_string()))?;
         // A request must start from a clean boundary: if a prior cancelled op
         // left a drain pending, break + drain it first.
-        self.drain_pending_cancel(cx).await?;
+        self.ensure_clean_before_request(cx).await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
         trace_query_bytes("FETCH payload (prefetch)", &payload);
-        self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        // A speculative response is now outstanding: arm the pending-drain flag
-        // for the WHOLE window until it is consumed by `fetch_rows_ref_response`,
-        // so a drop anywhere in {decode prior page, read this response} cleans it
-        // up before the next op runs.
-        self.core.cancel_drain_pending.store(true, Ordering::SeqCst);
+        self.core.recovery.begin_operation()?;
+        match self.core.send_data_packet(cx, &payload, self.sdu).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.core.recovery.mark_dead();
+                self.dead = true;
+                Err(err)
+            }
+        }?;
+        // A speculative response is now outstanding: the recovery phase remains
+        // InFlight for the WHOLE window until it is consumed by
+        // `fetch_rows_ref_response`, so a drop anywhere in {decode prior page,
+        // read this response} cleans it up before the next op runs.
         Ok(())
     }
 
@@ -3306,20 +3496,16 @@ impl Connection {
     ) -> Result<BorrowedFetchResult> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
-        // Read under the cancel-on-drop guard. NOTE: do NOT `drain_pending_cancel`
-        // here — the pending flag is set by our own `fetch_rows_request` and
-        // marks the response we are about to read legitimately, not a stranded
-        // call to discard.
+        // Read under the cancel-on-drop guard. NOTE: do NOT
+        // `ensure_clean_before_request` here — the InFlight phase is set by our
+        // own `fetch_rows_request` and marks the response we are about to read
+        // legitimately, not a stranded call to discard.
         let profile = fetch_profile::enabled();
         let read_start = profile.then(time::wall_now);
         let response = self.read_response_cancellable(cx).await?;
         if let Some(start) = read_start {
             fetch_profile::add_read(time::wall_now().duration_since(start));
         }
-        // Consumed cleanly: the speculative response is no longer outstanding.
-        self.core
-            .cancel_drain_pending
-            .store(false, Ordering::SeqCst);
         trace_query_bytes("FETCH response (prefetch)", &response);
         let columns = self
             .cursor_columns
@@ -3405,13 +3591,14 @@ impl Connection {
         //   2. read+decode page K (callback) — overlaps with K+1 in flight
         //   3. read+decode page K+1 next iteration, immediately request K+2, ...
         //
-        // Cancellation: `fetch_rows_request` arms `cancel_drain_pending` until
-        // the response is consumed, so a drop anywhere in this loop (including
-        // inside the callback, with a page in flight) leaves the stranded page to
-        // be broken + drained by the next op on this connection. Decode stays on
-        // this task, so the borrowed batch buffer never crosses a thread/await
-        // boundary that outlives it — the borrowed-fetch guarantee is preserved
-        // and `#![forbid(unsafe_code)]` holds.
+        // Cancellation: `fetch_rows_request` leaves the recovery phase InFlight
+        // until the response is consumed, so a drop anywhere in this loop
+        // (including inside the callback, with a page in flight) leaves the
+        // stranded page to be broken + drained by the next op on this
+        // connection. Decode stays on this task, so the borrowed batch buffer
+        // never crosses a thread/await boundary that outlives it — the
+        // borrowed-fetch guarantee is preserved and `#![forbid(unsafe_code)]`
+        // holds.
 
         // Prime the pipeline: request the first paged batch ahead of decoding.
         if more_rows && cursor_id != 0 {
@@ -4353,15 +4540,20 @@ impl Connection {
     /// returned [`Error::ConnectionClosed`] is propagated instead — mirroring
     /// the reference's disconnect-on-second-timeout (protocol.pyx:454-458).
     async fn break_and_drain(&mut self, cx: &Cx) -> Result<()> {
+        self.core.recovery.begin_drain_after_break()?;
         match self
             .core
             .break_and_drain_wire(cx, BREAK_DRAIN_RECOVERY_TIMEOUT)
             .await
         {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.core.recovery.finish_drain_ready();
+                Ok(())
+            }
             Err(err) => {
                 // Recovery failed: the stream is poisoned, the connection is
                 // dead. Pools must discard it (see `is_dead` / `is_connection_lost`).
+                self.core.recovery.mark_dead();
                 self.dead = true;
                 Err(err)
             }
@@ -4396,13 +4588,18 @@ impl Connection {
     /// them (bead rust-oracledb-wnz). A failed drain marks the connection dead
     /// and surfaces [`Error::ConnectionClosed`].
     async fn drain_cancel_response(&mut self, cx: &Cx) -> Result<()> {
+        self.core.recovery.begin_drain_after_break()?;
         match self
             .core
             .drain_cancel_wire(cx, BREAK_DRAIN_RECOVERY_TIMEOUT)
             .await
         {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.core.recovery.finish_drain_ready();
+                Ok(())
+            }
             Err(err) => {
+                self.core.recovery.mark_dead();
                 self.dead = true;
                 Err(err)
             }
@@ -4434,13 +4631,18 @@ impl Connection {
     /// this is the single-call, self-contained cancel: break **and** drain in one
     /// place.
     pub async fn cancel(&mut self, cx: &Cx) -> Result<()> {
+        self.core.recovery.begin_drain_after_break()?;
         match self
             .core
             .cancel_and_drain_wire(cx, BREAK_DRAIN_RECOVERY_TIMEOUT)
             .await
         {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.core.recovery.finish_drain_ready();
+                Ok(())
+            }
             Err(err) => {
+                self.core.recovery.mark_dead();
                 self.dead = true;
                 Err(err)
             }
@@ -6288,7 +6490,7 @@ where
     }
 }
 
-/// Drop-guard that arms a connection's `cancel_drain_pending` flag if a
+/// Drop-guard that marks a connection's recovery phase `BreakSent` if a
 /// cancellable round-trip read future is **dropped while still in flight**.
 ///
 /// This is the Scope-based cancel-on-drop half of the cancellation story: when a
@@ -6296,39 +6498,42 @@ where
 /// losing branch is dropped, the request has already gone out but its response
 /// is still arriving (or the server is still mid-call). Dropping the future ends
 /// the `&mut Connection` borrow but leaves those bytes / that running call on the
-/// wire. The guard's `Drop` records that the next operation must first send a
-/// BREAK and drain (via [`cancel_and_drain_wire`]) before issuing its own
-/// request — so a cancelled fetch never poisons the stream for the next one.
+/// wire. The guard's `Drop` records in the single recovery owner that the next
+/// operation must first send a BREAK and drain (via [`cancel_and_drain_wire`])
+/// before issuing its own request — so a cancelled fetch never poisons the
+/// stream for the next one.
 ///
 /// A read that completes normally calls [`CancelDrainGuard::disarm`] first, so
 /// the common (uncancelled) path never arms the flag and pays nothing.
-struct CancelDrainGuard<'a> {
-    pending: &'a Arc<AtomicBool>,
+struct CancelDrainGuard {
+    recovery: Arc<SessionRecovery>,
     armed: bool,
 }
 
-impl<'a> CancelDrainGuard<'a> {
-    /// Arm a guard over `pending` for the duration of a cancellable read.
-    fn arm(pending: &'a Arc<AtomicBool>) -> Self {
-        Self {
-            pending,
+impl CancelDrainGuard {
+    /// Mark the response as in flight for the duration of a cancellable read.
+    fn arm(recovery: Arc<SessionRecovery>) -> Result<Self> {
+        recovery.begin_or_adopt_operation()?;
+        Ok(Self {
+            recovery,
             armed: true,
-        }
+        })
     }
 
     /// Disarm the guard after the read completed normally, so its `Drop` is a
     /// no-op and the next operation does not needlessly break + drain.
     fn disarm(&mut self) {
+        self.recovery.complete_operation();
         self.armed = false;
     }
 }
 
-impl Drop for CancelDrainGuard<'_> {
+impl Drop for CancelDrainGuard {
     fn drop(&mut self) {
         if self.armed {
             // The future was dropped mid-read (cancelled): tell the next
             // operation to break + drain the stranded server call first.
-            self.pending.store(true, Ordering::SeqCst);
+            self.recovery.mark_break_required();
         }
     }
 }
@@ -8803,37 +9008,76 @@ mod tests {
     }
 
     // The Scope-based cancel-on-drop guard. While a cancellable round trip's
-    // read future is in flight the guard is ARMED; if the future is dropped
-    // (cancelled — e.g. by a `select!`/`timeout` racing it) before the read
-    // completes, the guard's Drop arms the shared `cancel_drain_pending` flag, so
-    // the NEXT operation on the connection breaks + drains the stranded server
-    // call rather than reassembling its leftover bytes as its own response. A
-    // CLEAN completion calls `disarm()` first, so a normal read never arms it.
+    // read future is in flight the guard owns the InFlight recovery phase; if the
+    // future is dropped (cancelled — e.g. by a `select!`/`timeout` racing it)
+    // before the read completes, the guard's Drop moves the phase to BreakSent,
+    // so the NEXT operation on the connection breaks + drains the stranded
+    // server call rather than reassembling its leftover bytes as its own
+    // response. A CLEAN completion calls `disarm()` first, so a normal read
+    // returns the phase to Ready.
     #[test]
-    fn cancel_drain_guard_arms_pending_flag_only_when_dropped_in_flight() {
-        let pending = Arc::new(AtomicBool::new(false));
+    fn cancel_drain_guard_transitions_recovery_phase_only_when_dropped_in_flight() -> Result<()> {
+        let recovery = Arc::new(SessionRecovery::new());
 
         // A guard dropped WITHOUT disarming (the future was cancelled mid-read):
-        // the pending-drain flag is armed.
+        // the recovery phase records that a break/drain is required.
         {
-            let _guard = CancelDrainGuard::arm(&pending);
+            let _guard = CancelDrainGuard::arm(Arc::clone(&recovery))?;
+            assert_eq!(recovery.phase(), SessionRecoveryPhase::InFlight);
         }
-        assert!(
-            pending.load(Ordering::SeqCst),
-            "dropping an armed guard (cancelled in flight) must arm the drain flag"
+        assert_eq!(
+            recovery.phase(),
+            SessionRecoveryPhase::BreakSent,
+            "dropping an armed guard (cancelled in flight) must require recovery"
         );
+        assert!(recovery.begin_pending_drain()?);
+        assert_eq!(recovery.phase(), SessionRecoveryPhase::Draining);
+        assert!(
+            recovery.begin_pending_drain().is_err(),
+            "a drain that is already running must not start a second drain"
+        );
+        recovery.finish_drain_ready();
+        assert_eq!(recovery.phase(), SessionRecoveryPhase::Ready);
 
-        // Reset, then a guard that DISARMS before drop (the read completed
-        // normally): the flag stays clear.
-        pending.store(false, Ordering::SeqCst);
+        // Strict operation starts require Ready; a second operation cannot start
+        // while an earlier response is still in flight.
+        recovery.begin_operation()?;
+        match recovery.begin_operation() {
+            Err(Error::ConnectionClosed(message)) => {
+                assert!(message.contains("still in flight"));
+            }
+            other => {
+                return Err(Error::Runtime(format!(
+                    "second operation start should fail while InFlight, got {other:?}"
+                )));
+            }
+        }
+        recovery.complete_operation();
+        assert_eq!(recovery.phase(), SessionRecoveryPhase::Ready);
+
+        // A response reader may adopt an already-sent prefetch request's
+        // InFlight phase and complete it back to Ready.
+        recovery.begin_operation()?;
         {
-            let mut guard = CancelDrainGuard::arm(&pending);
+            let mut guard = CancelDrainGuard::arm(Arc::clone(&recovery))?;
+            assert_eq!(recovery.phase(), SessionRecoveryPhase::InFlight);
             guard.disarm();
         }
-        assert!(
-            !pending.load(Ordering::SeqCst),
-            "a disarmed guard (clean completion) must NOT arm the drain flag"
+        assert_eq!(recovery.phase(), SessionRecoveryPhase::Ready);
+
+        // A guard that DISARMS before drop (the read completed normally): the
+        // phase returns to Ready and no recovery is needed.
+        {
+            let mut guard = CancelDrainGuard::arm(Arc::clone(&recovery))?;
+            assert_eq!(recovery.phase(), SessionRecoveryPhase::InFlight);
+            guard.disarm();
+        }
+        assert_eq!(
+            recovery.phase(),
+            SessionRecoveryPhase::Ready,
+            "a disarmed guard (clean completion) must NOT require recovery"
         );
+        Ok(())
     }
 
     #[test]
