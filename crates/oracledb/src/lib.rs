@@ -559,6 +559,18 @@ where
     classify_recovery_result(action, result)
 }
 
+/// Contract checkpoint for multi-round-trip loops: call after the previous
+/// round trip has reached a clean boundary and before issuing the next one.
+///
+/// Recovery drains are the exception: they run without the expired caller `Cx`
+/// and are bounded by their fresh recovery deadline instead.
+/// Single wire round trips that internally write/read multiple frames (pipeline,
+/// packet reassembly) are not clean boundaries until the whole response drains.
+fn observe_cancellation_between_round_trips(cx: &Cx) -> Result<()> {
+    cx.checkpoint()
+        .map_err(|err| Error::Runtime(err.to_string()))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 enum SessionRecoveryPhase {
@@ -2231,6 +2243,7 @@ impl Connection {
             .map_err(|err| Error::Runtime(err.to_string()))?;
         let db_name = self.descriptor.service_name.clone();
         loop {
+            observe_cancellation_between_round_trips(cx)?;
             // consume the leading OAC message-type byte once
             if !self.notification_header_consumed {
                 if self.notification_buffer.is_empty() {
@@ -2382,6 +2395,7 @@ impl Connection {
         const NUMBER_SIZE: u32 = 22;
         let mut out = DbmsOutput::default();
         loop {
+            observe_cancellation_between_round_trips(cx)?;
             let binds = [vec![
                 BindValue::Output {
                     ora_type_num: oracledb_protocol::thin::ORA_TYPE_NUM_VARCHAR,
@@ -3141,6 +3155,7 @@ impl Connection {
             // call has already evicted the stale cursor from the statement
             // cache, so the retry re-parses from scratch.
             Err(err) if refetch_retry_applies(&err) && statement_is_query(sql) => {
+                observe_cancellation_between_round_trips(cx)?;
                 // also drop any retained by-SQL fetch metadata used by the
                 // older refetch path so the retry rebuilds it
                 self.forget_fetch_metadata(sql);
@@ -3863,6 +3878,7 @@ impl Connection {
         rows.append(&mut batch.rows);
         // Continuation fetches until the cursor drains or the bound is reached.
         while more && cid != 0 && rows.len() < max_rows {
+            observe_cancellation_between_round_trips(cx)?;
             let previous_row = rows.last().cloned();
             let mut next = self
                 .fetch_rows_with_columns(
@@ -4658,6 +4674,7 @@ impl Connection {
         // 1-based running row counter across batches for error messages
         let mut row_num: u64 = 1;
         while !state.is_done() {
+            observe_cancellation_between_round_trips(cx)?;
             let start = usize::try_from(state.offset()).map_err(|_| {
                 oracledb_protocol::ProtocolError::TtcDecode("direct path offset overflow")
             })?;
@@ -4868,6 +4885,7 @@ impl Connection {
                 }
             }
             if any_adjusted && result.cursor_id != 0 {
+                observe_cancellation_between_round_trips(cx)?;
                 let cursor_id = result.cursor_id;
                 let mut redefined = self
                     .define_and_fetch_rows_with_columns(
@@ -6755,6 +6773,7 @@ where
     let mut response = read_data_response_boundary(read, cx, write, false).await?;
     let mut payload = response.payload;
     while response.flush_out_binds {
+        observe_cancellation_between_round_trips(cx)?;
         if matches!(payload.last(), Some(&TNS_MSG_TYPE_FLUSH_OUT_BINDS)) {
             payload.pop();
         }
@@ -7321,6 +7340,47 @@ mod tests {
             .expect("test identity should be valid")
     }
 
+    fn loopback_connection(
+        read: transport::OracleReadHalf,
+        write: transport::OracleWriteHalf,
+    ) -> Connection {
+        Connection {
+            descriptor: EasyConnect::parse("127.0.0.1:1521/FREEPDB1")
+                .expect("test connect string should parse"),
+            identity: identity(),
+            core: ConnectionCore::<DriverTransport>::from_halves(
+                read,
+                write,
+                "loopback_test_write",
+            ),
+            session_id: 0,
+            serial_num: 0,
+            server_version: None,
+            server_version_tuple: None,
+            capabilities: ClientCapabilities::default(),
+            ttc_seq_num: 0,
+            sdu: 8192,
+            supports_end_of_response: true,
+            supports_oob: false,
+            cursor_columns: BTreeMap::new(),
+            fetch_metadata_by_sql: HashMap::new(),
+            fetch_metadata_order: VecDeque::new(),
+            dead: false,
+            user: "test_user".into(),
+            combo_key: Vec::new(),
+            statement_cache: Vec::new(),
+            statement_cache_size: STATEMENT_CACHE_SIZE,
+            in_use_cursors: HashSet::new(),
+            copied_cursors: HashSet::new(),
+            cursors_to_close: Vec::new(),
+            sessionless_data: None,
+            notification_buffer: Vec::new(),
+            notification_header_consumed: false,
+            transaction_context: None,
+            txn_in_progress: false,
+        }
+    }
+
     fn server_error(message: &str) -> Error {
         Error::Protocol(oracledb_protocol::ProtocolError::ServerError(
             message.to_string(),
@@ -7792,6 +7852,7 @@ mod tests {
                         bytes,
                         offset,
                         max_chunk,
+                        cancel_current_on_completion,
                     }) => {
                         if *offset >= bytes.len() {
                             state.read.pop_front();
@@ -7806,7 +7867,13 @@ mod tests {
                         buf.put_slice(&bytes[*offset..*offset + take]);
                         *offset += take;
                         if *offset >= bytes.len() {
+                            let cancel_current_on_completion = *cancel_current_on_completion;
                             state.read.pop_front();
+                            if cancel_current_on_completion {
+                                if let Some(cx) = Cx::current() {
+                                    cx.cancel_fast(asupersync::CancelKind::User);
+                                }
+                            }
                         }
                         return std::task::Poll::Ready(Ok(()));
                     }
@@ -7971,6 +8038,7 @@ mod tests {
             bytes: Vec<u8>,
             offset: usize,
             max_chunk: Option<usize>,
+            cancel_current_on_completion: bool,
         },
         Pending,
         Eof,
@@ -7984,6 +8052,16 @@ mod tests {
                 bytes,
                 offset: 0,
                 max_chunk,
+                cancel_current_on_completion: false,
+            }
+        }
+
+        fn bytes_then_cancel_current(bytes: Vec<u8>, max_chunk: Option<usize>) -> Self {
+            Self::Bytes {
+                bytes,
+                offset: 0,
+                max_chunk,
+                cancel_current_on_completion: true,
             }
         }
     }
@@ -8177,6 +8255,112 @@ mod tests {
         assert!(
             state.is_consumed(),
             "scripted fault matrix must consume every read/write step"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn flush_out_binds_observes_cancel_before_follow_up_round_trip() -> Result<()> {
+        let first_response = data_packet(&[TNS_MSG_TYPE_FLUSH_OUT_BINDS], true);
+        let unread_response = data_packet(b"must-not-read-after-cancel", true);
+        let script = Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+            vec![
+                ReadAction::bytes_then_cancel_current(first_response, None),
+                ReadAction::bytes(unread_response, None),
+            ],
+            Vec::new(),
+            ScriptedClock::default(),
+        )));
+
+        let runtime = build_io_runtime()?;
+        let err = runtime.block_on(async {
+            let cx = test_cx()?;
+            let mut read = ScriptedRead::from_state(Arc::clone(&script));
+            let write = Arc::new(AsyncMutex::with_name(
+                "flush_cancel_checkpoint_test_write",
+                ScriptedWrite::from_state(Arc::clone(&script)),
+            ));
+            let err = read_data_response_flushing_out_binds(&mut read, &cx, &write, 8192)
+                .await
+                .expect_err("cancel checkpoint must stop before FLUSH_OUT_BINDS follow-up");
+            Ok::<_, Error>(err)
+        })?;
+
+        assert!(
+            matches!(&err, Error::Runtime(message) if message.to_ascii_lowercase().contains("cancel")),
+            "flush continuation should stop on the cancellation checkpoint, got {err:?}"
+        );
+        let state = script
+            .lock()
+            .map_err(|_| Error::Runtime("scripted I/O state lock poisoned".into()))?;
+        assert_eq!(
+            state.read.len(),
+            1,
+            "the next response packet must not be read after cancellation"
+        );
+        assert!(
+            state.write.is_empty(),
+            "the FLUSH_OUT_BINDS follow-up must not be sent after cancellation"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pending_cx_cancel_is_observed_before_fetch_continuation_write() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<Option<u8>> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_millis(300)))?;
+            let mut first_byte = [0u8; 1];
+            match socket.read(&mut first_byte) {
+                Ok(0) => Ok(None),
+                Ok(_) => Ok(Some(first_byte[0])),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    Ok(None)
+                }
+                Err(err) => Err(err),
+            }
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            let before_seq = connection.ttc_seq_num;
+
+            cx.cancel_fast(asupersync::CancelKind::User);
+            let err = connection
+                .fetch_rows_request(&cx, 42, 10)
+                .await
+                .expect_err("fetch continuation must checkpoint before writing");
+            assert!(
+                matches!(&err, Error::Runtime(message) if message.to_ascii_lowercase().contains("cancel")),
+                "fetch continuation should stop on the cancellation checkpoint, got {err:?}"
+            );
+            assert_eq!(
+                connection.ttc_seq_num, before_seq,
+                "checkpoint must run before allocating the next TTC sequence number"
+            );
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready,
+                "checkpoint failure must not arm the recovery state machine"
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        let received = server.join().expect("server thread joins")?;
+        assert_eq!(
+            received, None,
+            "cancelled fetch continuation must not write a FETCH packet"
         );
         Ok(())
     }
