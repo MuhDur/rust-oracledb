@@ -210,6 +210,24 @@ pub mod oracledb::transport
 pub macro oracledb::obs_record!
 pub macro oracledb::obs_span!
 pub macro oracledb::params!
+pub enum oracledb::BatchRows<'a>
+pub oracledb::BatchRows::Borrowed(&'a [alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>])
+pub oracledb::BatchRows::Owned(alloc::vec::Vec<alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>>)
+impl<'a, const N: usize> core::convert::From<&'a [alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>; N]> for oracledb::BatchRows<'a>
+pub fn oracledb::BatchRows<'a>::from(&'a [alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>; N]) -> Self
+impl<'a> core::clone::Clone for oracledb::BatchRows<'a>
+pub fn oracledb::BatchRows<'a>::clone(&self) -> oracledb::BatchRows<'a>
+impl<'a> core::cmp::PartialEq for oracledb::BatchRows<'a>
+pub fn oracledb::BatchRows<'a>::eq(&self, &oracledb::BatchRows<'a>) -> bool
+impl<'a> core::convert::From<&'a [alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>]> for oracledb::BatchRows<'a>
+pub fn oracledb::BatchRows<'a>::from(&'a [alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>]) -> Self
+impl<'a> core::convert::From<&'a alloc::vec::Vec<alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>>> for oracledb::BatchRows<'a>
+pub fn oracledb::BatchRows<'a>::from(&'a alloc::vec::Vec<alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>>) -> Self
+impl<'a> core::convert::From<alloc::vec::Vec<alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>>> for oracledb::BatchRows<'a>
+pub fn oracledb::BatchRows<'a>::from(alloc::vec::Vec<alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>>) -> Self
+impl<'a> core::fmt::Debug for oracledb::BatchRows<'a>
+pub fn oracledb::BatchRows<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::marker::StructuralPartialEq for oracledb::BatchRows<'a>
 pub enum oracledb::ConversionError
 pub oracledb::ConversionError::OutOfRange
 pub oracledb::ConversionError::OutOfRange::detail: alloc::string::String
@@ -371,6 +389,50 @@ impl core::clone::Clone for oracledb::AccessToken
 pub fn oracledb::AccessToken::clone(&self) -> oracledb::AccessToken
 impl core::fmt::Debug for oracledb::AccessToken
 pub fn oracledb::AccessToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct oracledb::Batch<'a>
+impl<'a> oracledb::Batch<'a>
+pub fn oracledb::Batch<'a>::collect_errors(self) -> Self
+pub fn oracledb::Batch<'a>::new(&'a str, impl core::convert::Into<oracledb::BatchRows<'a>>) -> Self
+pub fn oracledb::Batch<'a>::raw_options(self, oracledb_protocol::thin::types::ExecuteOptions) -> Self
+pub fn oracledb::Batch<'a>::row_counts(self) -> Self
+pub fn oracledb::Batch<'a>::timeout(self, core::time::Duration) -> Self
+impl<'a> core::clone::Clone for oracledb::Batch<'a>
+pub fn oracledb::Batch<'a>::clone(&self) -> oracledb::Batch<'a>
+impl<'a> core::cmp::PartialEq for oracledb::Batch<'a>
+pub fn oracledb::Batch<'a>::eq(&self, &oracledb::Batch<'a>) -> bool
+impl<'a> core::fmt::Debug for oracledb::Batch<'a>
+pub fn oracledb::Batch<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::marker::StructuralPartialEq for oracledb::Batch<'a>
+#[non_exhaustive] pub struct oracledb::BatchError
+impl oracledb::BatchError
+pub fn oracledb::BatchError::code(&self) -> u32
+pub fn oracledb::BatchError::message(&self) -> &str
+pub fn oracledb::BatchError::row_index(&self) -> u32
+impl core::clone::Clone for oracledb::BatchError
+pub fn oracledb::BatchError::clone(&self) -> oracledb::BatchError
+impl core::cmp::Eq for oracledb::BatchError
+impl core::cmp::PartialEq for oracledb::BatchError
+pub fn oracledb::BatchError::eq(&self, &oracledb::BatchError) -> bool
+impl core::fmt::Debug for oracledb::BatchError
+pub fn oracledb::BatchError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oracledb::BatchError
+pub fn oracledb::BatchError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb::BatchError
+#[non_exhaustive] pub struct oracledb::BatchOutcome
+impl oracledb::BatchOutcome
+pub fn oracledb::BatchOutcome::errors(&self) -> &[oracledb::BatchError]
+pub fn oracledb::BatchOutcome::per_row_counts(&self) -> core::option::Option<&[u64]>
+pub fn oracledb::BatchOutcome::returning(&self) -> &oracledb::ReturningRows
+pub fn oracledb::BatchOutcome::rows_affected(&self) -> u64
+impl core::clone::Clone for oracledb::BatchOutcome
+pub fn oracledb::BatchOutcome::clone(&self) -> oracledb::BatchOutcome
+impl core::cmp::PartialEq for oracledb::BatchOutcome
+pub fn oracledb::BatchOutcome::eq(&self, &oracledb::BatchOutcome) -> bool
+impl core::default::Default for oracledb::BatchOutcome
+pub fn oracledb::BatchOutcome::default() -> oracledb::BatchOutcome
+impl core::fmt::Debug for oracledb::BatchOutcome
+pub fn oracledb::BatchOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb::BatchOutcome
 pub struct oracledb::BlockingConnection
 impl oracledb::BlockingConnection
 pub fn oracledb::BlockingConnection::aq_deq_many(&mut oracledb::Connection, &oracledb_protocol::thin::aq::AqQueueDesc, &oracledb_protocol::thin::aq::AqDeqOptions, u32) -> oracledb::Result<alloc::vec::Vec<oracledb_protocol::thin::aq::AqDeqMessage>>
@@ -512,6 +574,8 @@ pub async fn oracledb::Connection::direct_path_op(&mut self, &asupersync::cx::cx
 pub async fn oracledb::Connection::direct_path_prepare(&mut self, &asupersync::cx::cx::Cx, &str, &str, &[alloc::string::String]) -> oracledb::Result<oracledb_protocol::dpl::DirectPathPrepareResult>
 pub async fn oracledb::Connection::enable_dbms_output(&mut self, &asupersync::cx::cx::Cx, core::option::Option<u32>) -> oracledb::Result<()>
 pub async fn oracledb::Connection::execute<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::ExecuteOutcome>
+pub async fn oracledb::Connection::execute_many<'b>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::BatchRows<'b>>) -> oracledb::Result<oracledb::BatchOutcome>
+pub async fn oracledb::Connection::execute_many_with<'b>(&mut self, &asupersync::cx::cx::Cx, oracledb::Batch<'b>) -> oracledb::Result<oracledb::BatchOutcome>
 pub async fn oracledb::Connection::execute_query(&mut self, &asupersync::cx::cx::Cx, &str, u32) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
 pub async fn oracledb::Connection::execute_query_collect(&mut self, &asupersync::cx::cx::Cx, &str, u32) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
 pub async fn oracledb::Connection::execute_query_for_registration(&mut self, &asupersync::cx::cx::Cx, &str, u64) -> oracledb::Result<core::option::Option<u64>>

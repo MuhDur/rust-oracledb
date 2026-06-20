@@ -203,6 +203,8 @@ impl BatchOutcome {
 ```
 - True server-side array DML (one round trip), not a client loop. `BatchError` exposes
   the row index (today's `BatchServerError{code,offset,message}`).
+- Empty batches are a zero-iteration no-op, not a no-bind statement execute; ragged
+  bind rows are rejected before any wire work.
 - The iterative-PL/SQL helper (`bind_rows_need_iterative_plsql` + `ExecutemanyManager`)
   is the private engine driving this; it stays internal.
 
@@ -331,6 +333,7 @@ let n = BlockingConnection::execute(&mut conn, "delete from t where id=:1", (9,)
   (the one ergonomics tradeoff — kept split here so the 3-arg convenience path is literal).
 - `query_stream -> impl Stream` (bucket-2 `x3s`) — additive, async-only, post-1.0-capable.
 - Additional accessor ergonomics beyond `OutBinds::values/get`,
-  `ReturningRows::values/rows_for`, and `Rows::cursor`.
+  `ReturningRows::values/rows_for`, `BatchOutcome::per_row_counts/errors/returning`,
+  `BatchError::row_index/code/message`, and `Rows::cursor`.
 These are signature-level, not contract-level; they don't change the families, the
 "nothing lost" map, or the blocking mirror.

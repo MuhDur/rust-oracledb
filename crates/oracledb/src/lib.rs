@@ -152,21 +152,21 @@ use oracledb_protocol::thin::{
     parse_lob_trim_response_with_limits, parse_lob_write_response_with_limits,
     parse_plain_function_response_with_limits, parse_query_response_borrowed_with_limits,
     parse_query_response_with_binds_options_columns_and_limits, parse_query_response_with_limits,
-    parse_tpc_txn_switch_response_with_limits, BindValue, BorrowedFetchResult, ClientCapabilities,
-    ColumnMetadata, CursorValue, ExecuteOptions, LobReadResult, QueryResult, QueryValue,
-    QueryValueRef, SessionlessTxnState, TpcChangeStateResponse, TpcSwitchResponse, TpcXid,
-    TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST, TNS_FETCH_ORIENTATION_ABSOLUTE,
-    TNS_FETCH_ORIENTATION_CURRENT, TNS_FETCH_ORIENTATION_FIRST, TNS_FETCH_ORIENTATION_LAST,
-    TNS_FETCH_ORIENTATION_NEXT, TNS_FETCH_ORIENTATION_PRIOR, TNS_FETCH_ORIENTATION_RELATIVE,
-    TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK,
-    TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_TYPE_ACCEPT,
-    TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT,
-    TNS_PACKET_TYPE_REFUSE, TNS_PIPELINE_MODE_ABORT_ON_ERROR, TNS_PIPELINE_MODE_CONTINUE_ON_ERROR,
-    TNS_TPC_TXN_ABORT, TNS_TPC_TXN_COMMIT, TNS_TPC_TXN_DETACH, TNS_TPC_TXN_POST_DETACH,
-    TNS_TPC_TXN_PREPARE, TNS_TPC_TXN_START, TNS_TPC_TXN_STATE_ABORTED, TNS_TPC_TXN_STATE_COMMITTED,
-    TNS_TPC_TXN_STATE_FORGOTTEN, TNS_TPC_TXN_STATE_PREPARE, TNS_TPC_TXN_STATE_READ_ONLY,
-    TNS_TPC_TXN_STATE_REQUIRES_COMMIT, TPC_TXN_FLAGS_NEW, TPC_TXN_FLAGS_RESUME,
-    TPC_TXN_FLAGS_SESSIONLESS,
+    parse_tpc_txn_switch_response_with_limits, BatchServerError, BindValue, BorrowedFetchResult,
+    ClientCapabilities, ColumnMetadata, CursorValue, ExecuteOptions, LobReadResult, QueryResult,
+    QueryValue, QueryValueRef, SessionlessTxnState, TpcChangeStateResponse, TpcSwitchResponse,
+    TpcXid, TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST,
+    TNS_FETCH_ORIENTATION_ABSOLUTE, TNS_FETCH_ORIENTATION_CURRENT, TNS_FETCH_ORIENTATION_FIRST,
+    TNS_FETCH_ORIENTATION_LAST, TNS_FETCH_ORIENTATION_NEXT, TNS_FETCH_ORIENTATION_PRIOR,
+    TNS_FETCH_ORIENTATION_RELATIVE, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF, TNS_FUNC_PING,
+    TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS,
+    TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA,
+    TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE, TNS_PIPELINE_MODE_ABORT_ON_ERROR,
+    TNS_PIPELINE_MODE_CONTINUE_ON_ERROR, TNS_TPC_TXN_ABORT, TNS_TPC_TXN_COMMIT, TNS_TPC_TXN_DETACH,
+    TNS_TPC_TXN_POST_DETACH, TNS_TPC_TXN_PREPARE, TNS_TPC_TXN_START, TNS_TPC_TXN_STATE_ABORTED,
+    TNS_TPC_TXN_STATE_COMMITTED, TNS_TPC_TXN_STATE_FORGOTTEN, TNS_TPC_TXN_STATE_PREPARE,
+    TNS_TPC_TXN_STATE_READ_ONLY, TNS_TPC_TXN_STATE_REQUIRES_COMMIT, TPC_TXN_FLAGS_NEW,
+    TPC_TXN_FLAGS_RESUME, TPC_TXN_FLAGS_SESSIONLESS,
 };
 use oracledb_protocol::thin::{
     build_notify_payload_with_seq, build_subscribe_payload_with_seq,
@@ -1439,6 +1439,120 @@ impl<'a> Execute<'a> {
     }
 }
 
+/// Bind rows for [`Connection::execute_many`]. Each inner `Vec<BindValue>` is
+/// one execution of the statement.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BatchRows<'a> {
+    Borrowed(&'a [Vec<BindValue>]),
+    Owned(Vec<Vec<BindValue>>),
+}
+
+impl<'a> BatchRows<'a> {
+    fn as_slice(&self) -> &[Vec<BindValue>] {
+        match self {
+            Self::Borrowed(rows) => rows,
+            Self::Owned(rows) => rows.as_slice(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.as_slice().is_empty()
+    }
+
+    fn bind_width(&self) -> Option<usize> {
+        self.as_slice().first().map(Vec::len)
+    }
+
+    fn validate_rectangular(&self) -> Result<()> {
+        let Some(expected) = self.bind_width() else {
+            return Ok(());
+        };
+        for (row_index, row) in self.as_slice().iter().enumerate().skip(1) {
+            if row.len() != expected {
+                return Err(Error::Runtime(format!(
+                    "batch row {row_index} has {} bind values; expected {expected}",
+                    row.len()
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'a> From<&'a [Vec<BindValue>]> for BatchRows<'a> {
+    fn from(rows: &'a [Vec<BindValue>]) -> Self {
+        Self::Borrowed(rows)
+    }
+}
+
+impl<'a> From<&'a Vec<Vec<BindValue>>> for BatchRows<'a> {
+    fn from(rows: &'a Vec<Vec<BindValue>>) -> Self {
+        Self::Borrowed(rows.as_slice())
+    }
+}
+
+impl<'a, const N: usize> From<&'a [Vec<BindValue>; N]> for BatchRows<'a> {
+    fn from(rows: &'a [Vec<BindValue>; N]) -> Self {
+        Self::Borrowed(rows.as_slice())
+    }
+}
+
+impl<'a> From<Vec<Vec<BindValue>>> for BatchRows<'a> {
+    fn from(rows: Vec<Vec<BindValue>>) -> Self {
+        Self::Owned(rows)
+    }
+}
+
+/// Execute-many builder for array DML.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Batch<'a> {
+    sql: std::borrow::Cow<'a, str>,
+    rows: BatchRows<'a>,
+    timeout: Option<Duration>,
+    options: ExecuteOptions,
+}
+
+impl<'a> Batch<'a> {
+    pub fn new(sql: &'a str, rows: impl Into<BatchRows<'a>>) -> Self {
+        Self {
+            sql: std::borrow::Cow::Borrowed(sql),
+            rows: rows.into(),
+            timeout: None,
+            options: ExecuteOptions::default(),
+        }
+    }
+
+    fn owned_sql(sql: String, rows: impl Into<BatchRows<'a>>) -> Self {
+        Self {
+            sql: std::borrow::Cow::Owned(sql),
+            rows: rows.into(),
+            timeout: None,
+            options: ExecuteOptions::default(),
+        }
+    }
+
+    pub fn collect_errors(mut self) -> Self {
+        self.options.batcherrors = true;
+        self
+    }
+
+    pub fn row_counts(mut self) -> Self {
+        self.options.arraydmlrowcounts = true;
+        self
+    }
+
+    pub fn timeout(mut self, d: Duration) -> Self {
+        self.timeout = Some(d);
+        self
+    }
+
+    pub fn raw_options(mut self, options: ExecuteOptions) -> Self {
+        self.options = options;
+        self
+    }
+}
+
 /// OUT and IN/OUT bind values returned by [`Connection::execute`].
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
@@ -1567,6 +1681,97 @@ impl ExecuteOutcome {
     pub fn compilation_warning(&self) -> Option<&str> {
         self.compilation_warning
             .then_some(Self::COMPILATION_WARNING)
+    }
+}
+
+/// One row-level error collected by [`Batch::collect_errors`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct BatchError {
+    row_index: u32,
+    code: u32,
+    message: String,
+}
+
+impl BatchError {
+    fn from_server(error: BatchServerError) -> Self {
+        Self {
+            row_index: error.offset,
+            code: error.code,
+            message: error.message,
+        }
+    }
+
+    pub fn row_index(&self) -> u32 {
+        self.row_index
+    }
+
+    pub fn code(&self) -> u32 {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for BatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.message.is_empty() {
+            write!(f, "ORA-{:05} at batch row {}", self.code, self.row_index)
+        } else {
+            write!(f, "{} at batch row {}", self.message, self.row_index)
+        }
+    }
+}
+
+/// Result of an [`execute_many`](Connection::execute_many) operation.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct BatchOutcome {
+    rows_affected: u64,
+    per_row_counts: Option<Vec<u64>>,
+    errors: Vec<BatchError>,
+    returning: ReturningRows,
+}
+
+impl BatchOutcome {
+    fn empty(array_dml_row_counts: bool) -> Self {
+        Self {
+            rows_affected: 0,
+            per_row_counts: array_dml_row_counts.then(Vec::new),
+            errors: Vec::new(),
+            returning: ReturningRows::default(),
+        }
+    }
+
+    fn from_query_result(result: QueryResult) -> Self {
+        Self {
+            rows_affected: result.row_count,
+            per_row_counts: result.array_dml_row_counts,
+            errors: result
+                .batch_errors
+                .into_iter()
+                .map(BatchError::from_server)
+                .collect(),
+            returning: ReturningRows::new(result.return_values),
+        }
+    }
+
+    pub fn rows_affected(&self) -> u64 {
+        self.rows_affected
+    }
+
+    pub fn per_row_counts(&self) -> Option<&[u64]> {
+        self.per_row_counts.as_deref()
+    }
+
+    pub fn errors(&self) -> &[BatchError] {
+        &self.errors
+    }
+
+    pub fn returning(&self) -> &ReturningRows {
+        &self.returning
     }
 }
 
@@ -4023,6 +4228,55 @@ impl Connection {
                 }
             };
         Ok(ExecuteOutcome::from_query_result(result))
+    }
+
+    /// Execute `sql` once for each bind row in a single array-DML operation.
+    pub async fn execute_many<'b>(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        rows: impl Into<crate::BatchRows<'b>>,
+    ) -> Result<BatchOutcome> {
+        self.execute_many_with(cx, Batch::owned_sql(sql.to_string(), rows))
+            .await
+    }
+
+    /// Execute array DML described by a [`Batch`] builder.
+    pub async fn execute_many_with<'b>(
+        &mut self,
+        cx: &Cx,
+        batch: Batch<'b>,
+    ) -> Result<BatchOutcome> {
+        let Batch {
+            sql,
+            rows,
+            timeout,
+            options,
+        } = batch;
+        rows.validate_rectangular()?;
+        if rows.is_empty() {
+            return Ok(BatchOutcome::empty(options.arraydmlrowcounts));
+        }
+        let sql_owned = sql.into_owned();
+        let deadline = QueryDeadline::new(cx, timeout);
+        let result = match deadline
+            .run(self.execute_query_with_bind_rows_and_options(
+                cx,
+                &sql_owned,
+                0,
+                rows.as_slice(),
+                options,
+            ))
+            .await
+        {
+            Ok(result) => result?,
+            Err(()) => {
+                return self
+                    .recover_from_call_timeout(cx, deadline.timeout_ms())
+                    .await
+            }
+        };
+        Ok(BatchOutcome::from_query_result(result))
     }
 
     /// Ergonomic execute with *named* binds. Pass the
@@ -8724,6 +8978,111 @@ mod tests {
         assert_eq!(
             outcome.compilation_warning(),
             Some(ExecuteOutcome::COMPILATION_WARNING)
+        );
+    }
+
+    #[test]
+    fn batch_builder_sets_batch_execution_flags() {
+        let rows = vec![
+            vec![BindValue::Number("1".to_string())],
+            vec![BindValue::Number("2".to_string())],
+        ];
+
+        let batch = Batch::new("delete from t where id = :1", &rows)
+            .collect_errors()
+            .row_counts()
+            .timeout(Duration::from_secs(3));
+
+        assert!(matches!(batch.rows, BatchRows::Borrowed(_)));
+        assert!(batch.options.batcherrors);
+        assert!(batch.options.arraydmlrowcounts);
+        assert_eq!(batch.timeout, Some(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn batch_raw_options_preserves_escape_hatch() {
+        let rows = vec![vec![BindValue::Number("1".to_string())]];
+        let options = ExecuteOptions {
+            batcherrors: true,
+            arraydmlrowcounts: true,
+            parse_only: true,
+            token_num: 9,
+            cursor_id: 17,
+            cache_statement: false,
+            scrollable: true,
+            fetch_orientation: TNS_FETCH_ORIENTATION_ABSOLUTE,
+            fetch_pos: 4,
+            scroll_operation: true,
+            suspend_on_success: true,
+            no_prefetch: true,
+            registration_id: 21,
+        };
+
+        let batch = Batch::new("begin null; end;", rows).raw_options(options);
+
+        assert_eq!(batch.options, options);
+    }
+
+    #[test]
+    fn batch_outcome_projects_query_result_fields() {
+        let result = QueryResult {
+            row_count: 3,
+            batch_errors: vec![BatchServerError {
+                code: 1,
+                offset: 2,
+                message: "bad row".to_string(),
+            }],
+            array_dml_row_counts: Some(vec![1, 0, 1]),
+            return_values: vec![(0, vec![Some(QueryValue::Text("AAABBB".to_string()))])],
+            ..QueryResult::default()
+        };
+
+        let outcome = BatchOutcome::from_query_result(result);
+
+        assert_eq!(outcome.rows_affected(), 3);
+        assert_eq!(outcome.per_row_counts(), Some([1, 0, 1].as_slice()));
+        assert_eq!(outcome.errors()[0].row_index(), 2);
+        assert_eq!(outcome.errors()[0].code(), 1);
+        assert_eq!(outcome.errors()[0].message(), "bad row");
+        assert_eq!(
+            outcome
+                .returning()
+                .rows_for(0)
+                .and_then(|rows| rows.first())
+                .and_then(Option::as_ref)
+                .and_then(QueryValue::as_text),
+            Some("AAABBB")
+        );
+    }
+
+    #[test]
+    fn empty_batch_outcome_preserves_requested_row_counts_shape() {
+        let without_counts = BatchOutcome::empty(false);
+        let with_counts = BatchOutcome::empty(true);
+
+        assert_eq!(without_counts.rows_affected(), 0);
+        assert_eq!(without_counts.per_row_counts(), None);
+        assert_eq!(with_counts.rows_affected(), 0);
+        assert_eq!(with_counts.per_row_counts(), Some([].as_slice()));
+    }
+
+    #[test]
+    fn batch_rows_reject_ragged_bind_shapes() {
+        let rows = vec![
+            vec![
+                BindValue::Number("1".to_string()),
+                BindValue::Text("a".into()),
+            ],
+            vec![BindValue::Number("2".to_string())],
+        ];
+        let batch = Batch::new("insert into t values (:1, :2)", &rows);
+
+        let err = batch.rows.validate_rectangular().unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("batch row 1 has 1 bind values; expected 2"),
+            "{err}"
         );
     }
 

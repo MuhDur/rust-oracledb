@@ -29,6 +29,10 @@ pub use oracledb::FromRow	keep	Derive output is part of the typed row API.
 pub use oracledb::protocol	consolidate	Low-level protocol access is useful for advanced users, but W1-T9 should decide whether the driver keeps this re-export or points users at the protocol crate.
 pub use oracledb::transport::CassetteError	keep	Cassette diagnostics are part of the record/replay testing surface.
 *oracledb::AccessToken*	keep	Public credential wrapper used by token authentication.
+*oracledb::BatchError*	keep	Public execute-many row-level error type.
+*oracledb::BatchOutcome*	keep	Public execute-many outcome type.
+*oracledb::BatchRows*	keep	Public execute-many bind-row payload type.
+*oracledb::Batch*	keep	Public execute-many request builder.
 *oracledb::BlockingConnection::drain_cancel_response*	pub(crate)	Cancel response draining is private session recovery, not a blocking facade API.
 *oracledb::BlockingConnection::execute_query_for_registration*	rename	Keep the registration capability but rename it into an explicit registration API.
 *oracledb::BlockingConnection::execute_query*	consolidate	Query execution overloads should collapse into operation-specific request types.

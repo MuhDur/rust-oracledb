@@ -20,7 +20,8 @@ use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
 use oracledb::protocol::thin::{BindValue, ExecuteOptions, CS_FORM_IMPLICIT, ORA_TYPE_NUM_VARCHAR};
 use oracledb::{
-    params, BlockingConnection, ConnectOptions, Connection, Error, Execute, Query, QueryResultExt,
+    params, Batch, BlockingConnection, ConnectOptions, Connection, Error, Execute, Query,
+    QueryResultExt,
 };
 use oracledb_protocol::ClientIdentity;
 
@@ -307,6 +308,165 @@ fn async_execute_family_surfaces_outcome() {
             .expect("parse-only via raw options");
         assert_eq!(parsed.rows_affected(), 0);
 
+        conn.close(&cx).await.expect("close connection");
+    });
+}
+
+#[test]
+fn async_execute_many_family_surfaces_batch_outcome() {
+    let Some(options) = connect_options() else {
+        eprintln!(
+            "skipped async_execute_many_family_surfaces_batch_outcome: PYO_TEST_* environment not configured"
+        );
+        return;
+    };
+    let reactor = reactor::create_reactor().expect("native reactor should build for live I/O");
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .expect("current-thread Asupersync runtime should build");
+
+    runtime.block_on(async {
+        let cx = Cx::current().expect("Runtime::block_on should install an ambient Cx");
+        let mut conn = Connection::connect(&cx, options)
+            .await
+            .expect("connect to test container");
+
+        let _ = conn.execute(&cx, "drop table rust_batch_outcome_t purge", ()).await;
+        conn.execute(
+            &cx,
+            "create table rust_batch_outcome_t (id number primary key, name varchar2(30))",
+            (),
+        )
+        .await
+        .expect("create batch outcome table");
+
+        let rows = vec![
+            vec![
+                BindValue::Number("1".to_string()),
+                BindValue::Text("alice".to_string()),
+            ],
+            vec![
+                BindValue::Number("2".to_string()),
+                BindValue::Text("bob".to_string()),
+            ],
+            vec![
+                BindValue::Number("3".to_string()),
+                BindValue::Text("carol".to_string()),
+            ],
+        ];
+        let inserted = conn
+            .execute_many(
+                &cx,
+                "insert into rust_batch_outcome_t (id, name) values (:1, :2)",
+                &rows,
+            )
+            .await
+            .expect("array DML insert via execute_many");
+        assert_eq!(inserted.rows_affected(), 3);
+        assert_eq!(inserted.per_row_counts(), None);
+        assert!(inserted.errors().is_empty());
+        assert!(inserted.returning().is_empty());
+
+        let delete_rows = vec![
+            vec![BindValue::Number("1".to_string())],
+            vec![BindValue::Number("2".to_string())],
+            vec![BindValue::Number("99".to_string())],
+        ];
+        let deleted = conn
+            .execute_many_with(
+                &cx,
+                Batch::new(
+                    "delete from rust_batch_outcome_t where id = :1",
+                    &delete_rows,
+                )
+                .row_counts(),
+            )
+            .await
+            .expect("array DML delete row counts");
+        assert_eq!(deleted.rows_affected(), 2);
+        assert_eq!(deleted.per_row_counts(), Some([1, 1, 0].as_slice()));
+        assert!(deleted.errors().is_empty());
+
+        let error_rows = vec![
+            vec![
+                BindValue::Number("3".to_string()),
+                BindValue::Text("duplicate".to_string()),
+            ],
+            vec![
+                BindValue::Number("4".to_string()),
+                BindValue::Text("dana".to_string()),
+            ],
+        ];
+        let with_error = conn
+            .execute_many_with(
+                &cx,
+                Batch::new(
+                    "insert into rust_batch_outcome_t (id, name) values (:1, :2)",
+                    &error_rows,
+                )
+                .collect_errors(),
+            )
+            .await
+            .expect("array DML collect_errors");
+        assert_eq!(with_error.errors().len(), 1);
+        assert_eq!(with_error.errors()[0].row_index(), 0);
+        assert_eq!(with_error.errors()[0].code(), 1);
+        assert!(
+            !with_error.errors()[0].message().is_empty(),
+            "batch errors should carry the server message"
+        );
+
+        let returning_rows = vec![
+            vec![
+                BindValue::Number("3".to_string()),
+                BindValue::Text("cora".to_string()),
+                BindValue::ReturnOutput {
+                    ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                    csfrm: CS_FORM_IMPLICIT,
+                    buffer_size: 30,
+                },
+            ],
+            vec![
+                BindValue::Number("4".to_string()),
+                BindValue::Text("dana2".to_string()),
+                BindValue::ReturnOutput {
+                    ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                    csfrm: CS_FORM_IMPLICIT,
+                    buffer_size: 30,
+                },
+            ],
+        ];
+        let returning = conn
+            .execute_many_with(
+                &cx,
+                Batch::new(
+                    "update rust_batch_outcome_t set name = :2 where id = :1 returning name into :3",
+                    &returning_rows,
+                )
+                .row_counts(),
+            )
+            .await
+            .expect("array DML RETURNING");
+        assert_eq!(returning.rows_affected(), 2);
+        assert_eq!(returning.per_row_counts(), Some([1, 1].as_slice()));
+        let returned: Vec<&str> = returning
+            .returning()
+            .rows_for(2)
+            .expect("returning bind index")
+            .iter()
+            .map(|value| {
+                value
+                    .as_ref()
+                    .and_then(|value| value.as_text())
+                    .expect("returned text")
+            })
+            .collect();
+        assert_eq!(returned, vec!["cora", "dana2"]);
+
+        conn.execute(&cx, "drop table rust_batch_outcome_t purge", ())
+            .await
+            .expect("drop batch outcome table");
         conn.close(&cx).await.expect("close connection");
     });
 }
