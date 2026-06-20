@@ -517,6 +517,7 @@ pub async fn oracledb::Connection::read_dbms_output(&mut self, &asupersync::cx::
 pub async fn oracledb::Connection::read_lob(&mut self, &asupersync::cx::cx::Cx, &[u8], u64, u64) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
 pub async fn oracledb::Connection::read_lob_with_timeout(&mut self, &asupersync::cx::cx::Cx, &[u8], u64, u64, core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
 pub async fn oracledb::Connection::recv_notification(&mut self, &asupersync::cx::cx::Cx, u32, u32, core::time::Duration) -> oracledb::Result<oracledb::NotificationOutcome>
+pub async fn oracledb::Connection::register_query<'r>(&mut self, &asupersync::cx::cx::Cx, oracledb::Registration<'r>) -> oracledb::Result<oracledb::RegistrationOutcome>
 pub fn oracledb::Connection::release_cursor(&mut self, u32)
 pub async fn oracledb::Connection::resume_sessionless_transaction(&mut self, &asupersync::cx::cx::Cx, &[u8], u32, bool) -> oracledb::Result<()>
 pub async fn oracledb::Connection::rollback(&mut self, &asupersync::cx::cx::Cx) -> oracledb::Result<()>
@@ -672,6 +673,29 @@ impl<'a> core::clone::Clone for oracledb::Query<'a>
 pub fn oracledb::Query<'a>::clone(&self) -> oracledb::Query<'a>
 impl<'a> core::fmt::Debug for oracledb::Query<'a>
 pub fn oracledb::Query<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct oracledb::Registration<'a>
+impl<'a> oracledb::Registration<'a>
+pub fn oracledb::Registration<'a>::bind(self, impl core::convert::Into<oracledb::Params<'a>>) -> Self
+pub fn oracledb::Registration<'a>::new(&'a str, u64) -> Self
+pub fn oracledb::Registration<'a>::timeout(self, core::time::Duration) -> Self
+impl<'a> core::clone::Clone for oracledb::Registration<'a>
+pub fn oracledb::Registration<'a>::clone(&self) -> oracledb::Registration<'a>
+impl<'a> core::fmt::Debug for oracledb::Registration<'a>
+pub fn oracledb::Registration<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct oracledb::RegistrationOutcome
+impl oracledb::RegistrationOutcome
+pub fn oracledb::RegistrationOutcome::query_id(&self) -> core::option::Option<u64>
+impl core::clone::Clone for oracledb::RegistrationOutcome
+pub fn oracledb::RegistrationOutcome::clone(&self) -> oracledb::RegistrationOutcome
+impl core::cmp::Eq for oracledb::RegistrationOutcome
+impl core::cmp::PartialEq for oracledb::RegistrationOutcome
+pub fn oracledb::RegistrationOutcome::eq(&self, &oracledb::RegistrationOutcome) -> bool
+impl core::default::Default for oracledb::RegistrationOutcome
+pub fn oracledb::RegistrationOutcome::default() -> oracledb::RegistrationOutcome
+impl core::fmt::Debug for oracledb::RegistrationOutcome
+pub fn oracledb::RegistrationOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb::RegistrationOutcome
+impl core::marker::StructuralPartialEq for oracledb::RegistrationOutcome
 #[non_exhaustive] pub struct oracledb::ReturningRows
 impl oracledb::ReturningRows
 pub fn oracledb::ReturningRows::into_values(self) -> alloc::vec::Vec<(usize, alloc::vec::Vec<core::option::Option<oracledb_protocol::thin::types::QueryValue>>)>

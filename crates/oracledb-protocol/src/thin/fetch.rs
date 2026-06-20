@@ -1938,6 +1938,31 @@ pub(crate) fn parse_query_return_parameters(
 }
 
 #[cfg(test)]
+mod return_parameter_tests {
+    use super::*;
+
+    #[test]
+    fn registration_info_block_extracts_query_id_from_lsb_msb_tail() {
+        let mut writer = TtcWriter::new();
+        writer.write_ub2(0); // num params
+        writer.write_ub2(0); // parameter bytes
+        writer.write_ub2(0); // keyword/value pairs
+        writer.write_ub2(8); // registration-info block bytes
+        writer.write_raw(&[
+            0x55, 0x66, 0x77, 0x88, // lsb
+            0x11, 0x22, 0x33, 0x44, // msb
+        ]);
+        let payload = writer.into_bytes();
+        let mut reader = TtcReader::new(&payload);
+
+        let params = parse_query_return_parameters(&mut reader, false).expect("return parameters");
+
+        assert_eq!(params.query_id, Some(0x1122_3344_5566_7788));
+        assert_eq!(params.row_counts, None);
+    }
+}
+
+#[cfg(test)]
 mod borrowed_fetch_tests {
     use super::*;
     use crate::thin::codecs::encode_number_text;

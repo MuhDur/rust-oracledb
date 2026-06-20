@@ -220,6 +220,7 @@ pub struct Registration<'a> { /* sql, params, subscription_id, timeout */ }
 pub struct RegistrationOutcome { pub fn query_id(&self) -> Option<u64>; }
 ```
 - `register_query` = today's `execute_query_for_registration` (id in → query-id out).
+  Server query id `0` is normalized to `None` at this high-level API.
 - The CQN lifecycle stays in the **retained** family: `subscribe_register` /
   `subscribe_unregister` / `notify_register` / `recv_notification` →
   `NotificationOutcome` (these are not "queries" and don't fit the four families;

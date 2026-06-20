@@ -418,3 +418,41 @@ pub(crate) fn promoted_bind_metadata_type(left: u8, right: u8) -> u8 {
         left
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn register_query_execute_payload_splits_registration_id() {
+        let registration_id = 0x1122_3344_5566_7788_u64;
+        let payload = build_execute_payload_with_bind_rows_and_options_with_seq(
+            "select * from rust_register_query_t",
+            0,
+            7,
+            true,
+            &[],
+            ExecuteOptions {
+                registration_id,
+                ..ExecuteOptions::default()
+            },
+        )
+        .expect("execute payload");
+
+        let lsb = [0x55, 0x66, 0x77, 0x88];
+        let msb = [0x11, 0x22, 0x33, 0x44];
+        let lsb_pos = payload
+            .windows(lsb.len())
+            .position(|window| window == lsb)
+            .expect("registration id lsb is encoded");
+        let msb_pos = payload
+            .windows(msb.len())
+            .position(|window| window == msb)
+            .expect("registration id msb is encoded");
+
+        assert!(
+            lsb_pos < msb_pos,
+            "execute payload writes registration id lsb before msb"
+        );
+    }
+}

@@ -1775,6 +1775,65 @@ impl BatchOutcome {
     }
 }
 
+/// Registered-query builder for Continuous Query Notification (CQN).
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Registration<'a> {
+    sql: std::borrow::Cow<'a, str>,
+    params: Params<'a>,
+    registration_id: u64,
+    timeout: Option<Duration>,
+}
+
+impl<'a> Registration<'a> {
+    pub fn new(sql: &'a str, registration_id: u64) -> Self {
+        Self {
+            sql: std::borrow::Cow::Borrowed(sql),
+            params: Params::None,
+            registration_id,
+            timeout: None,
+        }
+    }
+
+    fn owned_sql(sql: String, registration_id: u64) -> Self {
+        Self {
+            sql: std::borrow::Cow::Owned(sql),
+            params: Params::None,
+            registration_id,
+            timeout: None,
+        }
+    }
+
+    pub fn bind(mut self, params: impl Into<Params<'a>>) -> Self {
+        self.params = params.into();
+        self
+    }
+
+    pub fn timeout(mut self, d: Duration) -> Self {
+        self.timeout = Some(d);
+        self
+    }
+}
+
+/// Result of a [`register_query`](Connection::register_query) operation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct RegistrationOutcome {
+    query_id: Option<u64>,
+}
+
+impl RegistrationOutcome {
+    fn from_query_result(result: QueryResult) -> Self {
+        Self {
+            query_id: result.query_id.filter(|id| *id != 0),
+        }
+    }
+
+    pub fn query_id(&self) -> Option<u64> {
+        self.query_id
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct QueryDeadline {
     deadline: Option<asupersync::types::Time>,
@@ -3268,14 +3327,12 @@ impl Connection {
         sql: &str,
         registration_id: u64,
     ) -> Result<Option<u64>> {
-        let exec_options = ExecuteOptions {
-            registration_id,
-            ..ExecuteOptions::default()
-        };
-        let result = self
-            .execute_query_with_bind_rows_and_options(cx, sql, 0, &[], exec_options)
-            .await?;
-        Ok(result.query_id)
+        self.register_query(
+            cx,
+            Registration::owned_sql(sql.to_string(), registration_id),
+        )
+        .await
+        .map(|outcome| outcome.query_id())
     }
 
     /// Reads one DATA packet from the emon socket (bounded by `read_timeout`)
@@ -4277,6 +4334,50 @@ impl Connection {
             }
         };
         Ok(BatchOutcome::from_query_result(result))
+    }
+
+    /// Register a query against an existing CQN subscription.
+    pub async fn register_query<'r>(
+        &mut self,
+        cx: &Cx,
+        registration: Registration<'r>,
+    ) -> Result<RegistrationOutcome> {
+        let Registration {
+            sql,
+            params,
+            registration_id,
+            timeout,
+        } = registration;
+        let sql_owned = sql.into_owned();
+        let binds = crate::sql_convert::resolve_params(&sql_owned, params);
+        let bind_rows = if binds.is_empty() {
+            Vec::new()
+        } else {
+            vec![binds]
+        };
+        let exec_options = ExecuteOptions {
+            registration_id,
+            ..ExecuteOptions::default()
+        };
+        let deadline = QueryDeadline::new(cx, timeout);
+        let result = match deadline
+            .run(self.execute_query_with_bind_rows_and_options(
+                cx,
+                &sql_owned,
+                0,
+                &bind_rows,
+                exec_options,
+            ))
+            .await
+        {
+            Ok(result) => result?,
+            Err(()) => {
+                return self
+                    .recover_from_call_timeout(cx, deadline.timeout_ms())
+                    .await
+            }
+        };
+        Ok(RegistrationOutcome::from_query_result(result))
     }
 
     /// Ergonomic execute with *named* binds. Pass the
@@ -9084,6 +9185,43 @@ mod tests {
                 .contains("batch row 1 has 1 bind values; expected 2"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn registration_builder_carries_params_subscription_and_timeout() {
+        let registration = Registration::new("select * from rust_cqn_t where id = :id", 42)
+            .bind(vec![(
+                ":id".to_string(),
+                BindValue::Number("7".to_string()),
+            )])
+            .timeout(Duration::from_secs(9));
+
+        assert_eq!(registration.registration_id, 42);
+        assert_eq!(registration.timeout, Some(Duration::from_secs(9)));
+        match registration.params {
+            Params::Named(values) => {
+                assert_eq!(values[0].0, ":id");
+                assert_eq!(values[0].1, BindValue::Number("7".to_string()));
+            }
+            other => panic!("expected named params, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn registration_outcome_projects_query_id() {
+        let with_id = RegistrationOutcome::from_query_result(QueryResult {
+            query_id: Some(123),
+            ..QueryResult::default()
+        });
+        let zero_id = RegistrationOutcome::from_query_result(QueryResult {
+            query_id: Some(0),
+            ..QueryResult::default()
+        });
+        let without_id = RegistrationOutcome::from_query_result(QueryResult::default());
+
+        assert_eq!(with_id.query_id(), Some(123));
+        assert_eq!(zero_id.query_id(), None);
+        assert_eq!(without_id.query_id(), None);
     }
 
     // Character column of the first `needle` in `line` (chars, not bytes — the

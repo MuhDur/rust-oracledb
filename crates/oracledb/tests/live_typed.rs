@@ -18,10 +18,13 @@ use std::num::NonZeroU32;
 
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
-use oracledb::protocol::thin::{BindValue, ExecuteOptions, CS_FORM_IMPLICIT, ORA_TYPE_NUM_VARCHAR};
+use oracledb::protocol::thin::{
+    BindValue, ExecuteOptions, CS_FORM_IMPLICIT, ORA_TYPE_NUM_VARCHAR, SUBSCR_QOS_QUERY,
+    TNS_SUBSCR_NAMESPACE_DBCHANGE,
+};
 use oracledb::{
     params, Batch, BlockingConnection, ConnectOptions, Connection, Error, Execute, Query,
-    QueryResultExt,
+    QueryResultExt, Registration,
 };
 use oracledb_protocol::ClientIdentity;
 
@@ -467,6 +470,106 @@ fn async_execute_many_family_surfaces_batch_outcome() {
         conn.execute(&cx, "drop table rust_batch_outcome_t purge", ())
             .await
             .expect("drop batch outcome table");
+        conn.close(&cx).await.expect("close connection");
+    });
+}
+
+#[test]
+fn async_register_query_surfaces_query_id_when_cqn_available() {
+    let Some(options) = connect_options() else {
+        eprintln!(
+            "skipped async_register_query_surfaces_query_id_when_cqn_available: PYO_TEST_* environment not configured"
+        );
+        return;
+    };
+    let reactor = reactor::create_reactor().expect("native reactor should build for live I/O");
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .expect("current-thread Asupersync runtime should build");
+
+    runtime.block_on(async {
+        let cx = Cx::current().expect("Runtime::block_on should install an ambient Cx");
+        let mut conn = Connection::connect(&cx, options)
+            .await
+            .expect("connect to test container");
+
+        let _ = conn
+            .execute(&cx, "drop table rust_register_query_t purge", ())
+            .await;
+        conn.execute(
+            &cx,
+            "create table rust_register_query_t (id number primary key, name varchar2(30))",
+            (),
+        )
+        .await
+        .expect("create CQN registration table");
+
+        let subscription = match conn
+            .subscribe_register(
+                &cx,
+                TNS_SUBSCR_NAMESPACE_DBCHANGE,
+                None,
+                SUBSCR_QOS_QUERY,
+                0,
+                30,
+                0,
+                0,
+                0,
+            )
+            .await
+        {
+            Ok(subscription) => subscription,
+            Err(err) => {
+                eprintln!(
+                    "skipped async_register_query_surfaces_query_id_when_cqn_available: CQN subscribe unavailable: {err}"
+                );
+                let _ = conn
+                    .execute(&cx, "drop table rust_register_query_t purge", ())
+                    .await;
+                conn.close(&cx).await.expect("close connection");
+                return;
+            }
+        };
+
+        let registered = conn
+            .register_query(
+                &cx,
+                Registration::new(
+                    "select id, name from rust_register_query_t where id > :1",
+                    subscription.registration_id,
+                )
+                .bind((0_i64,)),
+            )
+            .await
+            .expect("register query");
+        assert!(
+            matches!(registered.query_id(), Some(id) if id > 0),
+            "CQN register_query should surface a positive query id, got {:?}",
+            registered.query_id()
+        );
+
+        if let Some(client_id) = subscription.client_id.as_deref() {
+            conn.subscribe_unregister(
+                &cx,
+                subscription.registration_id,
+                client_id,
+                TNS_SUBSCR_NAMESPACE_DBCHANGE,
+                None,
+                SUBSCR_QOS_QUERY,
+                0,
+                30,
+                0,
+                0,
+                0,
+            )
+            .await
+            .expect("unsubscribe CQN");
+        }
+
+        conn.execute(&cx, "drop table rust_register_query_t purge", ())
+            .await
+            .expect("drop CQN registration table");
         conn.close(&cx).await.expect("close connection");
     });
 }

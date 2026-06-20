@@ -64,6 +64,8 @@ pub oracledb::ConnectOptions::*	consolidate	Keep ConnectOptions public but priva
 *oracledb::OutBinds*	keep	Public execute-family OUT-bind accessor.
 *oracledb::Params*	keep	Public single-row bind payload for the operation-family API.
 *oracledb::PipelineRequest*	keep	Public pipelining request descriptor.
+*oracledb::RegistrationOutcome*	keep	Public register-query outcome type.
+*oracledb::Registration*	keep	Public CQN register-query request builder.
 *oracledb::ReturningRows*	keep	Public execute-family RETURNING accessor.
 *oracledb::Cursor*	keep	Public REF CURSOR handle alias used by Rows.
 *oracledb::QueryResultExt*	keep	Public convenience extension for query results.
