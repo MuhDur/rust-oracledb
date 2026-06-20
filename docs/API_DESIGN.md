@@ -330,6 +330,7 @@ let n = BlockingConnection::execute(&mut conn, "delete from t where id=:1", (9,)
 - Whether `query`/`query_with` unify behind `impl Into<Query>` instead of two methods
   (the one ergonomics tradeoff — kept split here so the 3-arg convenience path is literal).
 - `query_stream -> impl Stream` (bucket-2 `x3s`) — additive, async-only, post-1.0-capable.
-- `OutBinds`/`ReturningRows`/`Cursor` accessor details.
+- Additional accessor ergonomics beyond `OutBinds::values/get`,
+  `ReturningRows::values/rows_for`, and `Rows::cursor`.
 These are signature-level, not contract-level; they don't change the families, the
 "nothing lost" map, or the blocking mirror.

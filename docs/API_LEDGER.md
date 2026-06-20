@@ -47,6 +47,8 @@ pub oracledb::ConnectOptions::*	consolidate	Keep ConnectOptions public but priva
 *oracledb::DecodedObject*	keep	Public object decoding result type.
 *oracledb::ExecutemanyManagerError*	pub(crate)	Same internal batch bookkeeping disposition as ExecutemanyManager.
 *oracledb::ExecutemanyManager*	pub(crate)	Batch offset bookkeeping is an implementation detail; public behavior should live on execute/executemany APIs.
+*oracledb::ExecuteOutcome*	keep	Public execute-family outcome type.
+*oracledb::Execute*	keep	Public execute-family request builder.
 *oracledb::Result*	keep	Public result alias.
 *oracledb::Error*	keep	Public driver error taxonomy.
 *oracledb::FromRow*	keep	Public typed-row conversion trait.
@@ -55,8 +57,10 @@ pub oracledb::ConnectOptions::*	consolidate	Keep ConnectOptions public but priva
 *oracledb::NotificationOutcome*	keep	Public notification receive outcome.
 *oracledb::ObjectAttribute*	keep	Public object metadata type.
 *oracledb::ObjectType*	keep	Public object metadata type.
+*oracledb::OutBinds*	keep	Public execute-family OUT-bind accessor.
 *oracledb::Params*	keep	Public single-row bind payload for the operation-family API.
 *oracledb::PipelineRequest*	keep	Public pipelining request descriptor.
+*oracledb::ReturningRows*	keep	Public execute-family RETURNING accessor.
 *oracledb::Cursor*	keep	Public REF CURSOR handle alias used by Rows.
 *oracledb::QueryResultExt*	keep	Public convenience extension for query results.
 *oracledb::Query*	keep	Public query-family request builder.

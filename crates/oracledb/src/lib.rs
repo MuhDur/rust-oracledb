@@ -1388,6 +1388,188 @@ impl<'a> Query<'a> {
     }
 }
 
+/// Execute builder for DML, DDL, and PL/SQL operations that use at most one
+/// bind row.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct Execute<'a> {
+    sql: std::borrow::Cow<'a, str>,
+    params: Params<'a>,
+    timeout: Option<Duration>,
+    options: ExecuteOptions,
+}
+
+impl<'a> Execute<'a> {
+    pub fn new(sql: &'a str) -> Self {
+        Self {
+            sql: std::borrow::Cow::Borrowed(sql),
+            params: Params::None,
+            timeout: None,
+            options: ExecuteOptions::default(),
+        }
+    }
+
+    fn owned_sql(sql: String) -> Self {
+        Self {
+            sql: std::borrow::Cow::Owned(sql),
+            params: Params::None,
+            timeout: None,
+            options: ExecuteOptions::default(),
+        }
+    }
+
+    pub fn bind(mut self, params: impl Into<Params<'a>>) -> Self {
+        self.params = params.into();
+        self
+    }
+
+    pub fn timeout(mut self, d: Duration) -> Self {
+        self.timeout = Some(d);
+        self
+    }
+
+    pub fn parse_only(mut self) -> Self {
+        self.options.parse_only = true;
+        self
+    }
+
+    pub fn raw_options(mut self, options: ExecuteOptions) -> Self {
+        self.options = options;
+        self
+    }
+}
+
+/// OUT and IN/OUT bind values returned by [`Connection::execute`].
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct OutBinds {
+    values: Vec<(usize, Option<QueryValue>)>,
+}
+
+impl OutBinds {
+    fn new(values: Vec<(usize, Option<QueryValue>)>) -> Self {
+        Self { values }
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    pub fn values(&self) -> &[(usize, Option<QueryValue>)] {
+        &self.values
+    }
+
+    pub fn get(&self, bind_index: usize) -> Option<&Option<QueryValue>> {
+        self.values
+            .iter()
+            .find_map(|(index, value)| (*index == bind_index).then_some(value))
+    }
+
+    pub fn into_values(self) -> Vec<(usize, Option<QueryValue>)> {
+        self.values
+    }
+}
+
+/// Per-bind rows returned by DML `RETURNING INTO`.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct ReturningRows {
+    values: Vec<(usize, Vec<Option<QueryValue>>)>,
+}
+
+impl ReturningRows {
+    fn new(values: Vec<(usize, Vec<Option<QueryValue>>)>) -> Self {
+        Self { values }
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    pub fn values(&self) -> &[(usize, Vec<Option<QueryValue>>)] {
+        &self.values
+    }
+
+    pub fn rows_for(&self, bind_index: usize) -> Option<&[Option<QueryValue>]> {
+        self.values
+            .iter()
+            .find_map(|(index, rows)| (*index == bind_index).then_some(rows.as_slice()))
+    }
+
+    pub fn into_values(self) -> Vec<(usize, Vec<Option<QueryValue>>)> {
+        self.values
+    }
+}
+
+/// Result of an [`Execute`] operation.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct ExecuteOutcome {
+    rows_affected: u64,
+    last_rowid: Option<String>,
+    out_binds: OutBinds,
+    returning: ReturningRows,
+    implicit_results: Vec<Cursor>,
+    compilation_warning: bool,
+}
+
+impl ExecuteOutcome {
+    const COMPILATION_WARNING: &'static str = "PL/SQL compiled with warnings";
+
+    fn from_query_result(result: QueryResult) -> Self {
+        let implicit_results = result
+            .implicit_resultsets
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|value| match value {
+                QueryValue::Cursor(cursor) => Some(*cursor),
+                _ => None,
+            })
+            .collect();
+        Self {
+            rows_affected: result.row_count,
+            last_rowid: result.last_rowid,
+            out_binds: OutBinds::new(result.out_values),
+            returning: ReturningRows::new(result.return_values),
+            implicit_results,
+            compilation_warning: result.compilation_error_warning,
+        }
+    }
+
+    pub fn rows_affected(&self) -> u64 {
+        self.rows_affected
+    }
+
+    pub fn last_rowid(&self) -> Option<&str> {
+        self.last_rowid.as_deref()
+    }
+
+    pub fn out_binds(&self) -> &OutBinds {
+        &self.out_binds
+    }
+
+    pub fn returning(&self) -> &ReturningRows {
+        &self.returning
+    }
+
+    pub fn implicit_results(&self) -> &[Cursor] {
+        &self.implicit_results
+    }
+
+    pub fn compilation_warning(&self) -> Option<&str> {
+        self.compilation_warning
+            .then_some(Self::COMPILATION_WARNING)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct QueryDeadline {
     deadline: Option<asupersync::types::Time>,
@@ -3793,6 +3975,54 @@ impl Connection {
         Ok(Rows::from_result(
             self, sql_owned, arraysize, deadline, scrollable, result,
         ))
+    }
+
+    /// Execute DML, DDL, or PL/SQL with a single bind row.
+    pub async fn execute<'p>(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        params: impl Into<crate::Params<'p>>,
+    ) -> Result<ExecuteOutcome> {
+        self.execute_with(cx, Execute::owned_sql(sql.to_string()).bind(params))
+            .await
+    }
+
+    /// Execute DML, DDL, or PL/SQL described by an [`Execute`] builder.
+    pub async fn execute_with<'e>(
+        &mut self,
+        cx: &Cx,
+        execute: Execute<'e>,
+    ) -> Result<ExecuteOutcome> {
+        let Execute {
+            sql,
+            params,
+            timeout,
+            options,
+        } = execute;
+        let sql_owned = sql.into_owned();
+        let binds = crate::sql_convert::resolve_params(&sql_owned, params);
+        let bind_rows = if binds.is_empty() {
+            Vec::new()
+        } else {
+            vec![binds]
+        };
+        let deadline = QueryDeadline::new(cx, timeout);
+        let result =
+            match deadline
+                .run(self.execute_query_with_bind_rows_and_options(
+                    cx, &sql_owned, 0, &bind_rows, options,
+                ))
+                .await
+            {
+                Ok(result) => result?,
+                Err(()) => {
+                    return self
+                        .recover_from_call_timeout(cx, deadline.timeout_ms())
+                        .await
+                }
+            };
+        Ok(ExecuteOutcome::from_query_result(result))
     }
 
     /// Ergonomic execute with *named* binds. Pass the
@@ -8432,6 +8662,68 @@ mod tests {
                 id: 42,
                 name: "alice".to_string()
             }
+        );
+    }
+
+    #[test]
+    fn execute_raw_options_preserves_full_escape_hatch() {
+        let options = ExecuteOptions {
+            batcherrors: true,
+            arraydmlrowcounts: true,
+            parse_only: true,
+            token_num: 7,
+            cursor_id: 11,
+            cache_statement: false,
+            scrollable: true,
+            fetch_orientation: TNS_FETCH_ORIENTATION_ABSOLUTE,
+            fetch_pos: 3,
+            scroll_operation: true,
+            suspend_on_success: true,
+            no_prefetch: true,
+            registration_id: 13,
+        };
+
+        let execute = Execute::new("begin null; end;").raw_options(options);
+
+        assert_eq!(execute.options, options);
+    }
+
+    #[test]
+    fn execute_outcome_projects_query_result_fields() {
+        let result = QueryResult {
+            row_count: 7,
+            last_rowid: Some("AAABBB".to_string()),
+            out_values: vec![(0, Some(QueryValue::Text("out".to_string())))],
+            return_values: vec![(1, vec![Some(QueryValue::number_from_text("42", true))])],
+            implicit_resultsets: Some(vec![QueryValue::Cursor(Box::new(CursorValue {
+                columns: Vec::new(),
+                cursor_id: 99,
+            }))]),
+            compilation_error_warning: true,
+            ..QueryResult::default()
+        };
+
+        let outcome = ExecuteOutcome::from_query_result(result);
+
+        assert_eq!(outcome.rows_affected(), 7);
+        assert_eq!(outcome.last_rowid(), Some("AAABBB"));
+        assert_eq!(
+            outcome.out_binds().get(0),
+            Some(&Some(QueryValue::Text("out".to_string())))
+        );
+        assert_eq!(
+            outcome
+                .returning()
+                .rows_for(1)
+                .and_then(|rows| rows.first())
+                .and_then(Option::as_ref)
+                .and_then(QueryValue::as_i64),
+            Some(42)
+        );
+        assert_eq!(outcome.implicit_results()[0].cursor_id, 99);
+        assert_eq!(
+            outcome.compilation_warning(),
+            Some(ExecuteOutcome::COMPILATION_WARNING)
         );
     }
 

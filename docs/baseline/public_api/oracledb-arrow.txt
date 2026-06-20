@@ -511,6 +511,7 @@ pub async fn oracledb::Connection::direct_path_load_stream(&mut self, &asupersyn
 pub async fn oracledb::Connection::direct_path_op(&mut self, &asupersync::cx::cx::Cx, u16, u32) -> oracledb::Result<()>
 pub async fn oracledb::Connection::direct_path_prepare(&mut self, &asupersync::cx::cx::Cx, &str, &str, &[alloc::string::String]) -> oracledb::Result<oracledb_protocol::dpl::DirectPathPrepareResult>
 pub async fn oracledb::Connection::enable_dbms_output(&mut self, &asupersync::cx::cx::Cx, core::option::Option<u32>) -> oracledb::Result<()>
+pub async fn oracledb::Connection::execute<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::ExecuteOutcome>
 pub async fn oracledb::Connection::execute_query(&mut self, &asupersync::cx::cx::Cx, &str, u32) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
 pub async fn oracledb::Connection::execute_query_collect(&mut self, &asupersync::cx::cx::Cx, &str, u32) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
 pub async fn oracledb::Connection::execute_query_for_registration(&mut self, &asupersync::cx::cx::Cx, &str, u64) -> oracledb::Result<core::option::Option<u64>>
@@ -521,6 +522,7 @@ pub async fn oracledb::Connection::execute_query_with_bind_rows_options_and_time
 pub async fn oracledb::Connection::execute_query_with_binds(&mut self, &asupersync::cx::cx::Cx, &str, u32, &[oracledb_protocol::thin::types::BindValue]) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
 pub async fn oracledb::Connection::execute_query_with_binds_and_timeout(&mut self, &asupersync::cx::cx::Cx, &str, u32, &[oracledb_protocol::thin::types::BindValue], core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
 pub async fn oracledb::Connection::execute_query_with_timeout(&mut self, &asupersync::cx::cx::Cx, &str, u32, core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::execute_with<'e>(&mut self, &asupersync::cx::cx::Cx, oracledb::Execute<'e>) -> oracledb::Result<oracledb::ExecuteOutcome>
 pub async fn oracledb::Connection::fetch_cursor(&mut self, &asupersync::cx::cx::Cx, &oracledb_protocol::thin::types::CursorValue, usize) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
 pub async fn oracledb::Connection::fetch_rows(&mut self, &asupersync::cx::cx::Cx, u32, u32, core::option::Option<&[core::option::Option<oracledb_protocol::thin::types::QueryValue>]>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
 pub async fn oracledb::Connection::fetch_rows_ref(&mut self, &asupersync::cx::cx::Cx, u32, u32, core::option::Option<&[core::option::Option<oracledb_protocol::thin::types::QueryValue>]>) -> oracledb::Result<oracledb_protocol::thin::fetch::BorrowedFetchResult>
@@ -609,6 +611,34 @@ pub fn oracledb::DecodedObject::default() -> oracledb::DecodedObject
 impl core::fmt::Debug for oracledb::DecodedObject
 pub fn oracledb::DecodedObject::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb::DecodedObject
+#[non_exhaustive] pub struct oracledb::Execute<'a>
+impl<'a> oracledb::Execute<'a>
+pub fn oracledb::Execute<'a>::bind(self, impl core::convert::Into<oracledb::Params<'a>>) -> Self
+pub fn oracledb::Execute<'a>::new(&'a str) -> Self
+pub fn oracledb::Execute<'a>::parse_only(self) -> Self
+pub fn oracledb::Execute<'a>::raw_options(self, oracledb_protocol::thin::types::ExecuteOptions) -> Self
+pub fn oracledb::Execute<'a>::timeout(self, core::time::Duration) -> Self
+impl<'a> core::clone::Clone for oracledb::Execute<'a>
+pub fn oracledb::Execute<'a>::clone(&self) -> oracledb::Execute<'a>
+impl<'a> core::fmt::Debug for oracledb::Execute<'a>
+pub fn oracledb::Execute<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct oracledb::ExecuteOutcome
+impl oracledb::ExecuteOutcome
+pub fn oracledb::ExecuteOutcome::compilation_warning(&self) -> core::option::Option<&str>
+pub fn oracledb::ExecuteOutcome::implicit_results(&self) -> &[oracledb::Cursor]
+pub fn oracledb::ExecuteOutcome::last_rowid(&self) -> core::option::Option<&str>
+pub fn oracledb::ExecuteOutcome::out_binds(&self) -> &oracledb::OutBinds
+pub fn oracledb::ExecuteOutcome::returning(&self) -> &oracledb::ReturningRows
+pub fn oracledb::ExecuteOutcome::rows_affected(&self) -> u64
+impl core::clone::Clone for oracledb::ExecuteOutcome
+pub fn oracledb::ExecuteOutcome::clone(&self) -> oracledb::ExecuteOutcome
+impl core::cmp::PartialEq for oracledb::ExecuteOutcome
+pub fn oracledb::ExecuteOutcome::eq(&self, &oracledb::ExecuteOutcome) -> bool
+impl core::default::Default for oracledb::ExecuteOutcome
+pub fn oracledb::ExecuteOutcome::default() -> oracledb::ExecuteOutcome
+impl core::fmt::Debug for oracledb::ExecuteOutcome
+pub fn oracledb::ExecuteOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb::ExecuteOutcome
 pub struct oracledb::ExecutemanyManager
 impl oracledb::cursor_logic::ExecutemanyManager
 pub fn oracledb::cursor_logic::ExecutemanyManager::message_offset(&self) -> u32
@@ -649,6 +679,22 @@ pub fn oracledb::ObjectType::eq(&self, &oracledb::ObjectType) -> bool
 impl core::fmt::Debug for oracledb::ObjectType
 pub fn oracledb::ObjectType::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb::ObjectType
+#[non_exhaustive] pub struct oracledb::OutBinds
+impl oracledb::OutBinds
+pub fn oracledb::OutBinds::get(&self, usize) -> core::option::Option<&core::option::Option<oracledb_protocol::thin::types::QueryValue>>
+pub fn oracledb::OutBinds::into_values(self) -> alloc::vec::Vec<(usize, core::option::Option<oracledb_protocol::thin::types::QueryValue>)>
+pub fn oracledb::OutBinds::is_empty(&self) -> bool
+pub fn oracledb::OutBinds::len(&self) -> usize
+pub fn oracledb::OutBinds::values(&self) -> &[(usize, core::option::Option<oracledb_protocol::thin::types::QueryValue>)]
+impl core::clone::Clone for oracledb::OutBinds
+pub fn oracledb::OutBinds::clone(&self) -> oracledb::OutBinds
+impl core::cmp::PartialEq for oracledb::OutBinds
+pub fn oracledb::OutBinds::eq(&self, &oracledb::OutBinds) -> bool
+impl core::default::Default for oracledb::OutBinds
+pub fn oracledb::OutBinds::default() -> oracledb::OutBinds
+impl core::fmt::Debug for oracledb::OutBinds
+pub fn oracledb::OutBinds::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb::OutBinds
 #[non_exhaustive] pub struct oracledb::Query<'a>
 impl<'a> oracledb::Query<'a>
 pub fn oracledb::Query<'a>::arraysize(self, core::num::nonzero::NonZeroU32) -> Self
@@ -662,6 +708,22 @@ impl<'a> core::clone::Clone for oracledb::Query<'a>
 pub fn oracledb::Query<'a>::clone(&self) -> oracledb::Query<'a>
 impl<'a> core::fmt::Debug for oracledb::Query<'a>
 pub fn oracledb::Query<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct oracledb::ReturningRows
+impl oracledb::ReturningRows
+pub fn oracledb::ReturningRows::into_values(self) -> alloc::vec::Vec<(usize, alloc::vec::Vec<core::option::Option<oracledb_protocol::thin::types::QueryValue>>)>
+pub fn oracledb::ReturningRows::is_empty(&self) -> bool
+pub fn oracledb::ReturningRows::len(&self) -> usize
+pub fn oracledb::ReturningRows::rows_for(&self, usize) -> core::option::Option<&[core::option::Option<oracledb_protocol::thin::types::QueryValue>]>
+pub fn oracledb::ReturningRows::values(&self) -> &[(usize, alloc::vec::Vec<core::option::Option<oracledb_protocol::thin::types::QueryValue>>)]
+impl core::clone::Clone for oracledb::ReturningRows
+pub fn oracledb::ReturningRows::clone(&self) -> oracledb::ReturningRows
+impl core::cmp::PartialEq for oracledb::ReturningRows
+pub fn oracledb::ReturningRows::eq(&self, &oracledb::ReturningRows) -> bool
+impl core::default::Default for oracledb::ReturningRows
+pub fn oracledb::ReturningRows::default() -> oracledb::ReturningRows
+impl core::fmt::Debug for oracledb::ReturningRows
+pub fn oracledb::ReturningRows::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb::ReturningRows
 pub struct oracledb::Row
 impl oracledb::Row
 pub fn oracledb::Row::columns(&self) -> &[oracledb_protocol::thin::types::ColumnMetadata]

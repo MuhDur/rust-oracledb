@@ -18,8 +18,9 @@ use std::num::NonZeroU32;
 
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
+use oracledb::protocol::thin::{BindValue, ExecuteOptions, CS_FORM_IMPLICIT, ORA_TYPE_NUM_VARCHAR};
 use oracledb::{
-    params, BlockingConnection, ConnectOptions, Connection, Error, Query, QueryResultExt,
+    params, BlockingConnection, ConnectOptions, Connection, Error, Execute, Query, QueryResultExt,
 };
 use oracledb_protocol::ClientIdentity;
 
@@ -200,6 +201,111 @@ fn async_query_family_eager_drains_and_checks_cardinality() {
             .await
             .expect_err("query_one must reject >1 row");
         assert!(matches!(err, Error::TooManyRows));
+
+        conn.close(&cx).await.expect("close connection");
+    });
+}
+
+#[test]
+fn async_execute_family_surfaces_outcome() {
+    let Some(options) = connect_options() else {
+        eprintln!(
+            "skipped async_execute_family_surfaces_outcome: PYO_TEST_* environment not configured"
+        );
+        return;
+    };
+    let reactor = reactor::create_reactor().expect("native reactor should build for live I/O");
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .expect("current-thread Asupersync runtime should build");
+
+    runtime.block_on(async {
+        let cx = Cx::current().expect("Runtime::block_on should install an ambient Cx");
+        let mut conn = Connection::connect(&cx, options)
+            .await
+            .expect("connect to test container");
+
+        let _ = conn.execute(&cx, "drop table rust_execute_outcome_t", ()).await;
+        conn.execute(
+            &cx,
+            "create table rust_execute_outcome_t (id number primary key, name varchar2(30))",
+            (),
+        )
+        .await
+        .expect("create execute outcome table");
+
+        let insert = conn
+            .execute(
+                &cx,
+                "insert into rust_execute_outcome_t (id, name) values (:1, :2)",
+                (1_i64, "alice"),
+            )
+            .await
+            .expect("insert via execute");
+        assert_eq!(insert.rows_affected(), 1);
+        assert!(insert.out_binds().is_empty());
+        assert!(insert.returning().is_empty());
+
+        let out = conn
+            .execute_with(
+                &cx,
+                Execute::new("begin :1 := 'out-value'; end;").bind(vec![BindValue::Output {
+                    ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                    csfrm: CS_FORM_IMPLICIT,
+                    buffer_size: 30,
+                }]),
+            )
+            .await
+            .expect("PL/SQL OUT bind");
+        assert_eq!(
+            out.out_binds()
+                .get(0)
+                .and_then(Option::as_ref)
+                .and_then(|value| value.as_text()),
+            Some("out-value")
+        );
+
+        let returning = conn
+            .execute_with(
+                &cx,
+                Execute::new(
+                    "update rust_execute_outcome_t set name = :2 where id = :1 returning name into :3",
+                )
+                .bind(vec![
+                    BindValue::Number("1".to_string()),
+                    BindValue::Text("bob".to_string()),
+                    BindValue::ReturnOutput {
+                        ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                        csfrm: CS_FORM_IMPLICIT,
+                        buffer_size: 30,
+                    },
+                ]),
+            )
+            .await
+            .expect("DML RETURNING");
+        assert_eq!(returning.rows_affected(), 1);
+        assert_eq!(
+            returning
+                .returning()
+                .rows_for(2)
+                .and_then(|rows| rows.first())
+                .and_then(Option::as_ref)
+                .and_then(|value| value.as_text()),
+            Some("bob")
+        );
+
+        let parsed = conn
+            .execute_with(
+                &cx,
+                Execute::new("select 1 from dual").raw_options(ExecuteOptions {
+                    parse_only: true,
+                    ..ExecuteOptions::default()
+                }),
+            )
+            .await
+            .expect("parse-only via raw options");
+        assert_eq!(parsed.rows_affected(), 0);
 
         conn.close(&cx).await.expect("close connection");
     });
