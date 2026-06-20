@@ -296,7 +296,7 @@ pub use cursor_logic::{
 };
 
 pub use sql_convert::{
-    ConversionError, FromRow, FromSql, IntoBinds, QueryResultExt, ToSql, TypedRow,
+    ConversionError, FromRow, FromSql, IntoBinds, Params, QueryResultExt, ToSql, TypedRow,
 };
 
 /// Derive a [`FromRow`] implementation that maps a query row into a struct with
@@ -3167,29 +3167,30 @@ impl Connection {
     }
 
     /// Ergonomic execute: bind typed Rust values positionally and return the
-    /// first batch. `params` is anything that implements
-    /// [`IntoBinds`](crate::IntoBinds) — a tuple `(40, "alice")`, a homogeneous
-    /// slice/array `[1, 2, 3]`, a `Vec<T: ToSql>`, or a raw `Vec<BindValue>`:
+    /// first batch. `params` is anything that converts into [`Params`]: a tuple
+    /// `(40, "alice")`, a homogeneous array `[1, 2, 3]`, a raw
+    /// `Vec<BindValue>`, or the named [`params!`](crate::params) form:
     ///
     /// ```no_run
     /// # use oracledb::Connection;
     /// # use asupersync::Cx;
     /// # async fn demo(conn: &mut Connection, cx: &Cx) -> Result<(), oracledb::Error> {
-    /// let rows = conn
-    ///     .query(cx, "select :1 + :2 from dual", (40, 2))
+    /// let positional = conn.query(cx, "select :1 + :2 from dual", (40, 2)).await?;
+    /// let named = conn
+    ///     .query(cx, "select :a + :b from dual", oracledb::params!{ ":a" => 40, ":b" => 2 })
     ///     .await?;
-    /// # let _ = rows; Ok(()) }
+    /// # let _ = (positional, named); Ok(()) }
     /// ```
     ///
     /// This is sugar over [`Self::execute_query_with_binds`]; the prefetch size
     /// defaults to 1 (one batch).
-    pub async fn query(
+    pub async fn query<'p>(
         &mut self,
         cx: &Cx,
         sql: &str,
-        params: impl crate::IntoBinds,
+        params: impl Into<crate::Params<'p>>,
     ) -> Result<QueryResult> {
-        let binds = params.into_binds();
+        let binds = crate::sql_convert::resolve_params(sql, params.into());
         self.execute_query_with_binds(cx, sql, 1, &binds).await
     }
 
@@ -3219,8 +3220,7 @@ impl Connection {
         sql: &str,
         named_params: Vec<(String, BindValue)>,
     ) -> Result<QueryResult> {
-        let binds = crate::sql_convert::order_named_binds(sql, named_params);
-        self.execute_query_with_binds(cx, sql, 1, &binds).await
+        self.query(cx, sql, named_params).await
     }
 
     /// [`Self::query_named`] with a per-call timeout, for parity with the
@@ -3236,7 +3236,7 @@ impl Connection {
         named_params: Vec<(String, BindValue)>,
         timeout_ms: Option<u32>,
     ) -> Result<QueryResult> {
-        let binds = crate::sql_convert::order_named_binds(sql, named_params);
+        let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params));
         self.execute_query_with_binds_and_timeout(cx, sql, 1, &binds, timeout_ms)
             .await
     }
@@ -6074,12 +6074,13 @@ impl BlockingConnection {
     }
 
     /// Blocking wrapper for [`Connection::query`]: bind typed Rust values
-    /// positionally (a tuple `(40, "alice")`, a slice/array, a `Vec<T: ToSql>`,
-    /// or a raw `Vec<BindValue>`) and return the first batch.
-    pub fn query(
+    /// positionally (a tuple `(40, "alice")`, an array, or a raw
+    /// `Vec<BindValue>`) or by name with [`params!`](crate::params), then return
+    /// the first batch.
+    pub fn query<'p>(
         connection: &mut Connection,
         sql: &str,
-        params: impl crate::IntoBinds,
+        params: impl Into<crate::Params<'p>>,
     ) -> Result<QueryResult> {
         let runtime = build_io_runtime()?;
         runtime.block_on(async {

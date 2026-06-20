@@ -32,6 +32,8 @@
 //! [`QueryValue::as_number_text`](oracledb_protocol::thin::QueryValue::as_number_text)
 //! and bind it back as `BindValue::Number`, which carries Oracle's full digits.
 
+use std::borrow::Cow;
+
 use oracledb_protocol::thin::{BindValue, QueryResult, QueryValue};
 
 /// Why a typed [`FromSql`] conversion could not be performed.
@@ -1020,7 +1022,65 @@ impl ToSql for [f32] {
 }
 
 // ---------------------------------------------------------------------------
-// Positional bind sources: tuples, slices, Vec
+// Single-row bind payload: positional or named
+// ---------------------------------------------------------------------------
+
+/// Single-row bind payload for the operation-family APIs.
+///
+/// `Params` keeps named binds first-class while preserving the existing
+/// positional [`IntoBinds`] and [`params!`](crate::params) conveniences:
+/// tuples/arrays/`Vec<T: ToSql>` become [`Params::Positional`], the named
+/// `params!` arm becomes [`Params::Named`], and raw `BindValue` slices can be
+/// borrowed without moving.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Params<'a> {
+    /// No binds.
+    #[default]
+    None,
+    /// Positional binds (`:1`, `:2`, ...).
+    Positional(Cow<'a, [BindValue]>),
+    /// Named binds; execution reorders these to SQL placeholder first-use.
+    Named(Cow<'a, [(String, BindValue)]>),
+}
+
+impl<'a, T: IntoBinds> From<T> for Params<'a> {
+    fn from(value: T) -> Self {
+        Params::Positional(Cow::Owned(value.into_binds()))
+    }
+}
+
+impl<'a> From<&'a [BindValue]> for Params<'a> {
+    fn from(value: &'a [BindValue]) -> Self {
+        Params::Positional(Cow::Borrowed(value))
+    }
+}
+
+impl<'a> From<&'a Vec<BindValue>> for Params<'a> {
+    fn from(value: &'a Vec<BindValue>) -> Self {
+        Params::from(value.as_slice())
+    }
+}
+
+impl<'a> From<Vec<(String, BindValue)>> for Params<'a> {
+    fn from(value: Vec<(String, BindValue)>) -> Self {
+        Params::Named(Cow::Owned(value))
+    }
+}
+
+impl<'a> From<&'a [(String, BindValue)]> for Params<'a> {
+    fn from(value: &'a [(String, BindValue)]) -> Self {
+        Params::Named(Cow::Borrowed(value))
+    }
+}
+
+impl<'a> From<&'a Vec<(String, BindValue)>> for Params<'a> {
+    fn from(value: &'a Vec<(String, BindValue)>) -> Self {
+        Params::from(value.as_slice())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Positional bind sources: tuples, arrays, Vec
 // ---------------------------------------------------------------------------
 
 /// A source of positional binds (`:1`, `:2`, ...) for the ergonomic execute
@@ -1140,6 +1200,16 @@ pub(crate) fn order_named_binds(sql: &str, named: Vec<(String, BindValue)>) -> V
         out.push(value);
     }
     out
+}
+
+/// Resolve a public [`Params`] payload into the positional bind vector the
+/// current wire path expects.
+pub(crate) fn resolve_params(sql: &str, params: Params<'_>) -> Vec<BindValue> {
+    match params {
+        Params::None => Vec::new(),
+        Params::Positional(binds) => binds.into_owned(),
+        Params::Named(named) => order_named_binds(sql, named.into_owned()),
+    }
 }
 
 /// `:id` in `params!` vs `id` scanned from the SQL: compare case-insensitively
@@ -1331,6 +1401,84 @@ mod tests {
         assert_eq!(named[0].0, ":id");
         assert_eq!(named[0].1, BindValue::Number("40".into()));
         assert_eq!(named[1].0, ":name");
+    }
+
+    #[test]
+    fn params_from_positional_sources() {
+        assert_eq!(Params::default(), Params::None);
+        assert_eq!(Params::from(()), Params::Positional(Cow::Owned(Vec::new())));
+
+        let from_tuple = Params::from((40_i64, "alice"));
+        assert_eq!(
+            from_tuple,
+            Params::Positional(Cow::Owned(vec![
+                BindValue::Number("40".into()),
+                BindValue::Text("alice".into())
+            ]))
+        );
+
+        let raw = vec![BindValue::Number("7".into()), BindValue::Boolean(true)];
+        assert_eq!(
+            Params::from(raw.clone()),
+            Params::Positional(Cow::Owned(raw.clone()))
+        );
+        assert_eq!(
+            Params::from(raw.as_slice()),
+            Params::Positional(Cow::Borrowed(raw.as_slice()))
+        );
+        assert_eq!(
+            Params::from(&raw),
+            Params::Positional(Cow::Borrowed(raw.as_slice()))
+        );
+
+        let empty: &[BindValue] = &[];
+        assert_eq!(
+            Params::from(empty),
+            Params::Positional(Cow::Borrowed(empty))
+        );
+    }
+
+    #[test]
+    fn params_from_named_sources() {
+        let named = params! { ":id" => 40_i64, ":name" => "alice" };
+
+        assert_eq!(
+            Params::from(named.clone()),
+            Params::Named(Cow::Owned(named.clone()))
+        );
+        assert_eq!(
+            Params::from(named.as_slice()),
+            Params::Named(Cow::Borrowed(named.as_slice()))
+        );
+        assert_eq!(
+            Params::from(&named),
+            Params::Named(Cow::Borrowed(named.as_slice()))
+        );
+
+        let empty: Vec<(String, BindValue)> = Vec::new();
+        assert_eq!(
+            Params::from(empty.clone()),
+            Params::Named(Cow::Owned(empty.clone()))
+        );
+        assert_eq!(
+            Params::from(empty.as_slice()),
+            Params::Named(Cow::Borrowed(empty.as_slice()))
+        );
+    }
+
+    #[test]
+    fn resolve_params_reuses_named_ordering() {
+        let named = params! { ":b" => 2_i64, ":a" => 1_i64 };
+        let ordered = resolve_params(
+            "select * from t where a = :a and b = :b",
+            Params::from(named),
+        );
+        assert_eq!(
+            ordered,
+            vec![BindValue::Number("1".into()), BindValue::Number("2".into())]
+        );
+
+        assert!(resolve_params("select 1 from dual", Params::None).is_empty());
     }
 
     #[test]

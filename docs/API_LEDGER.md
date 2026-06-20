@@ -55,6 +55,7 @@ pub oracledb::ConnectOptions::*	consolidate	Keep ConnectOptions public but priva
 *oracledb::NotificationOutcome*	keep	Public notification receive outcome.
 *oracledb::ObjectAttribute*	keep	Public object metadata type.
 *oracledb::ObjectType*	keep	Public object metadata type.
+*oracledb::Params*	keep	Public single-row bind payload for the operation-family API.
 *oracledb::PipelineRequest*	keep	Public pipelining request descriptor.
 *oracledb::QueryResultExt*	keep	Public convenience extension for query results.
 *oracledb::render_caret*	keep	Public diagnostic helper used to render SQL error offsets.
@@ -80,12 +81,6 @@ pub mod oracledb::soda	keep	Feature-gated SODA module.
 *oracledb::tls::*	pub(crate)	Driver-side TLS handoff types should sit behind ConnectOptions and the connector.
 pub mod oracledb::tls	pub(crate)	Driver-side TLS handoff types should sit behind ConnectOptions and the connector.
 *oracledb::transport::capture_scope*	consolidate	Keep capture capability, but W3 should expose it as a deliberate cassette API rather than raw transport internals.
-*oracledb::transport::recording_split*	consolidate	Keep recording capability, but W3 should expose it as a deliberate cassette API rather than raw transport internals.
-*oracledb::transport::replay_split*	consolidate	Keep replay capability, but W3 should expose it as a deliberate cassette API rather than raw transport internals.
-*oracledb::transport::plain_split*	pub(crate)	Transport split helper belongs behind the connector.
-*oracledb::transport::tls_split*	pub(crate)	Transport split helper belongs behind the connector.
-*oracledb::transport::OracleReadHalf*	pub(crate)	Transport split half is a connector implementation detail.
-*oracledb::transport::OracleWriteHalf*	pub(crate)	Transport split half is a connector implementation detail.
 *oracledb::transport::CaptureScope*	consolidate	Keep record/replay capability, but W3 should expose it as a deliberate cassette API rather than raw transport internals.
 *oracledb::transport::Cassette*	consolidate	Keep record/replay capability, but W3 should expose it as a deliberate cassette API rather than raw transport internals.
 *oracledb::transport::Replay*	consolidate	Keep replay capability, but W3 should expose it as a deliberate cassette API rather than raw transport internals.
@@ -110,6 +105,7 @@ pub mod oracledb_protocol::oson	keep	OSON namespace.
 pub mod oracledb_protocol::packet	keep	Packet namespace.
 *oracledb_protocol::ProtocolError*	keep	Public protocol error taxonomy.
 *oracledb_protocol::PYTHON_ORACLEDB_REFERENCE*	keep	Public reference-suite provenance constants.
+*oracledb_protocol::ResourceLimit*	keep	Public typed protocol resource-limit details for error classification.
 *oracledb_protocol::Result*	keep	Public protocol result alias.
 *oracledb_protocol::ServerErrorDetails*	keep	Public server error details.
 *oracledb_protocol::TNS_VERSION*	keep	Public TNS version constants used by protocol capability tests and diagnostics.
@@ -141,6 +137,6 @@ pub mod oracledb_protocol::wire	keep	Wire helper namespace.
 
 ## Follow-Up Use
 
-Wave 1 applies the non-`keep` rows. W0-T5.2 is the human sign-off point for
-breaking removals or renames; until that bead closes, these dispositions are
-recorded intent, not completed API changes.
+Wave 1 applies the non-`keep` rows. W0-T5.2 records the expert disposition for
+breaking removals or renames; implementation beads apply those decisions without
+waiting for human sign-off.

@@ -146,9 +146,13 @@ pub fn oracledb_protocol::dpl::build_direct_path_op_payload(u16, u32, u8) -> all
 pub fn oracledb_protocol::dpl::build_direct_path_prepare_payload(&str, &str, &[alloc::string::String], u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::dpl::encode_direct_path_rows(&[oracledb_protocol::thin::ColumnMetadata], &[alloc::vec::Vec<oracledb_protocol::dpl::DirectPathColumnValue>], u64) -> oracledb_protocol::Result<oracledb_protocol::dpl::DirectPathStream>
 pub fn oracledb_protocol::dpl::parse_direct_path_load_stream_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::dpl::parse_direct_path_load_stream_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::dpl::parse_direct_path_op_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::dpl::parse_direct_path_op_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::dpl::parse_direct_path_prepare_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<oracledb_protocol::dpl::DirectPathPrepareResult>
+pub fn oracledb_protocol::dpl::parse_direct_path_prepare_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::dpl::DirectPathPrepareResult>
 pub fn oracledb_protocol::dpl::parse_direct_path_simple_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::dpl::parse_direct_path_simple_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<()>
 pub mod oracledb_protocol::net
 pub mod oracledb_protocol::net::connectstring
 pub mod oracledb_protocol::net::connectstring::tnsnames
@@ -396,6 +400,7 @@ impl core::fmt::Debug for oracledb_protocol::oson::OsonValue
 pub fn oracledb_protocol::oson::OsonValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb_protocol::oson::OsonValue
 pub fn oracledb_protocol::oson::decode_oson(&[u8]) -> oracledb_protocol::Result<oracledb_protocol::oson::OsonValue>
+pub fn oracledb_protocol::oson::decode_oson_with_limits(&[u8], oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::oson::OsonValue>
 pub fn oracledb_protocol::oson::encode_oson(&oracledb_protocol::oson::OsonValue, bool) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub mod oracledb_protocol::packet
 pub struct oracledb_protocol::packet::TnsPacket
@@ -405,6 +410,7 @@ pub oracledb_protocol::packet::TnsPacket::payload: alloc::vec::Vec<u8>
 impl oracledb_protocol::packet::TnsPacket
 pub fn oracledb_protocol::packet::TnsPacket::encode(&self) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::packet::TnsPacket::parse(&[u8]) -> oracledb_protocol::Result<Self>
+pub fn oracledb_protocol::packet::TnsPacket::parse_with_limits(&[u8], oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<Self>
 impl core::clone::Clone for oracledb_protocol::packet::TnsPacket
 pub fn oracledb_protocol::packet::TnsPacket::clone(&self) -> oracledb_protocol::packet::TnsPacket
 impl core::cmp::Eq for oracledb_protocol::packet::TnsPacket
@@ -577,8 +583,11 @@ pub fn oracledb_protocol::thin::aq::build_aq_array_enq_payload(&oracledb_protoco
 pub fn oracledb_protocol::thin::aq::build_aq_deq_payload(&oracledb_protocol::thin::aq::AqQueueDesc, &oracledb_protocol::thin::aq::AqDeqOptions, u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::aq::build_aq_enq_payload(&oracledb_protocol::thin::aq::AqQueueDesc, &oracledb_protocol::thin::aq::AqMsgProps, &oracledb_protocol::thin::aq::AqEnqOptions, u8, u8, bool) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::aq::parse_aq_array_response(&[u8], oracledb_protocol::thin::ClientCapabilities, i32, u32, &oracledb_protocol::thin::aq::AqPayloadKind) -> oracledb_protocol::Result<oracledb_protocol::thin::aq::AqArrayResult>
+pub fn oracledb_protocol::thin::aq::parse_aq_array_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, i32, u32, &oracledb_protocol::thin::aq::AqPayloadKind, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::thin::aq::AqArrayResult>
 pub fn oracledb_protocol::thin::aq::parse_aq_deq_response(&[u8], oracledb_protocol::thin::ClientCapabilities, &oracledb_protocol::thin::aq::AqPayloadKind) -> oracledb_protocol::Result<oracledb_protocol::thin::aq::AqDeqResult>
+pub fn oracledb_protocol::thin::aq::parse_aq_deq_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, &oracledb_protocol::thin::aq::AqPayloadKind, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::thin::aq::AqDeqResult>
 pub fn oracledb_protocol::thin::aq::parse_aq_enq_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<core::option::Option<alloc::vec::Vec<u8>>>
+pub fn oracledb_protocol::thin::aq::parse_aq_enq_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub enum oracledb_protocol::thin::BindValue
 pub oracledb_protocol::thin::BindValue::Array
 pub oracledb_protocol::thin::BindValue::Array::buffer_size: u32
@@ -936,6 +945,7 @@ pub fn oracledb_protocol::thin::CursorValue::fmt(&self, &mut core::fmt::Formatte
 impl core::marker::StructuralPartialEq for oracledb_protocol::thin::CursorValue
 pub struct oracledb_protocol::thin::DbObjectPackedReader<'a>
 impl<'a> oracledb_protocol::thin::DbObjectPackedReader<'a>
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'a>::limits(&self) -> oracledb_protocol::wire::ProtocolLimits
 pub fn oracledb_protocol::thin::DbObjectPackedReader<'a>::new(&'a [u8]) -> Self
 pub fn oracledb_protocol::thin::DbObjectPackedReader<'a>::read_atomic_null(&mut self, bool) -> oracledb_protocol::Result<bool>
 pub fn oracledb_protocol::thin::DbObjectPackedReader<'a>::read_header(&mut self) -> oracledb_protocol::Result<()>
@@ -944,10 +954,13 @@ pub fn oracledb_protocol::thin::DbObjectPackedReader<'a>::read_length(&mut self)
 pub fn oracledb_protocol::thin::DbObjectPackedReader<'a>::read_u8(&mut self) -> oracledb_protocol::Result<u8>
 pub fn oracledb_protocol::thin::DbObjectPackedReader<'a>::read_value_bytes(&mut self) -> oracledb_protocol::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn oracledb_protocol::thin::DbObjectPackedReader<'a>::remaining(&self) -> usize
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'a>::with_limits(&'a [u8], oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<Self>
 impl oracledb_protocol::wire::BoundedReader for oracledb_protocol::thin::DbObjectPackedReader<'_>
 pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::alloc_count_checked(&self, usize, usize) -> oracledb_protocol::Result<usize>
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::protocol_limits(&self) -> oracledb_protocol::wire::ProtocolLimits
 pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::remaining(&self) -> usize
 pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::with_capacity_bounded<T>(&self, usize, usize) -> alloc::vec::Vec<T>
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::with_capacity_limited<T, F>(&self, usize, usize, F) -> oracledb_protocol::Result<alloc::vec::Vec<T>> where F: core::ops::function::FnOnce(&oracledb_protocol::wire::ProtocolLimits, usize) -> oracledb_protocol::Result<()>
 pub struct oracledb_protocol::thin::ExecuteOptions
 pub oracledb_protocol::thin::ExecuteOptions::arraydmlrowcounts: bool
 pub oracledb_protocol::thin::ExecuteOptions::batcherrors: bool
@@ -1337,6 +1350,7 @@ pub fn oracledb_protocol::thin::build_tpc_switch_payload_with_seq(u8, u32, u32, 
 pub fn oracledb_protocol::thin::build_tpc_txn_switch_payload_with_seq(u8, u64, u32, u32, u32, core::option::Option<&[u8]>) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::check_fetch_conversion(&oracledb_protocol::thin::ColumnMetadata, u8, u8) -> core::option::Option<oracledb_protocol::thin::ColumnMetadata>
 pub fn oracledb_protocol::thin::check_notification_header(&[u8]) -> oracledb_protocol::Result<usize>
+pub fn oracledb_protocol::thin::check_notification_header_with_limits(&[u8], oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<usize>
 pub fn oracledb_protocol::thin::collection_flags_for(bool) -> u8
 pub fn oracledb_protocol::thin::column_metadata_is_xmltype(&oracledb_protocol::thin::ColumnMetadata) -> bool
 pub fn oracledb_protocol::thin::cursor_bind_template() -> oracledb_protocol::thin::BindValue
@@ -1368,26 +1382,43 @@ pub fn oracledb_protocol::thin::output_bind(oracledb_protocol::thin::BindValue) 
 pub fn oracledb_protocol::thin::pack_bindvalue_into_image(&mut alloc::vec::Vec<u8>, &oracledb_protocol::thin::BindValue, u8) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::thin::parse_accept_payload(&[u8]) -> oracledb_protocol::Result<oracledb_protocol::thin::AcceptInfo>
 pub fn oracledb_protocol::thin::parse_auth_response(&[u8]) -> oracledb_protocol::Result<oracledb_protocol::thin::AuthResponse>
+pub fn oracledb_protocol::thin::parse_auth_response_with_limits(&[u8], oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::thin::AuthResponse>
 pub fn oracledb_protocol::thin::parse_fetch_response_with_context(&[u8], oracledb_protocol::thin::ClientCapabilities, &[oracledb_protocol::thin::ColumnMetadata], core::option::Option<&[core::option::Option<oracledb_protocol::thin::QueryValue>]>) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryResult>
+pub fn oracledb_protocol::thin::parse_fetch_response_with_context_and_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, &[oracledb_protocol::thin::ColumnMetadata], core::option::Option<&[core::option::Option<oracledb_protocol::thin::QueryValue>]>, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryResult>
 pub fn oracledb_protocol::thin::parse_lob_create_temp_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<oracledb_protocol::thin::LobReadResult>
+pub fn oracledb_protocol::thin::parse_lob_create_temp_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::thin::LobReadResult>
 pub fn oracledb_protocol::thin::parse_lob_free_temp_response(&[u8], oracledb_protocol::thin::ClientCapabilities, usize) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::thin::parse_lob_free_temp_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, usize, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::thin::parse_lob_read_response(&[u8], oracledb_protocol::thin::ClientCapabilities, &[u8]) -> oracledb_protocol::Result<oracledb_protocol::thin::LobReadResult>
+pub fn oracledb_protocol::thin::parse_lob_read_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, &[u8], oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::thin::LobReadResult>
 pub fn oracledb_protocol::thin::parse_lob_trim_response(&[u8], oracledb_protocol::thin::ClientCapabilities, &[u8]) -> oracledb_protocol::Result<oracledb_protocol::thin::LobReadResult>
+pub fn oracledb_protocol::thin::parse_lob_trim_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, &[u8], oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::thin::LobReadResult>
 pub fn oracledb_protocol::thin::parse_lob_write_response(&[u8], oracledb_protocol::thin::ClientCapabilities, &[u8]) -> oracledb_protocol::Result<oracledb_protocol::thin::LobReadResult>
+pub fn oracledb_protocol::thin::parse_lob_write_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, &[u8], oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::thin::LobReadResult>
 pub fn oracledb_protocol::thin::parse_notification_stream(&[u8], u32, u32, core::option::Option<&str>) -> oracledb_protocol::Result<alloc::vec::Vec<oracledb_protocol::thin::NotificationRecord>>
+pub fn oracledb_protocol::thin::parse_notification_stream_with_limits(&[u8], u32, u32, core::option::Option<&str>, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<alloc::vec::Vec<oracledb_protocol::thin::NotificationRecord>>
 pub fn oracledb_protocol::thin::parse_oac_record(&mut oracledb_protocol::wire::TtcReader<'_>, u32, u32, core::option::Option<&str>) -> oracledb_protocol::Result<oracledb_protocol::thin::NotificationRecord>
+pub fn oracledb_protocol::thin::parse_oac_record_with_limits(&mut oracledb_protocol::wire::TtcReader<'_>, u32, u32, core::option::Option<&str>, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::thin::NotificationRecord>
 pub fn oracledb_protocol::thin::parse_plain_function_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<bool>
+pub fn oracledb_protocol::thin::parse_plain_function_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<bool>
 pub fn oracledb_protocol::thin::parse_query_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryResult>
 pub fn oracledb_protocol::thin::parse_query_response_borrowed(&[u8], oracledb_protocol::thin::ClientCapabilities, &[oracledb_protocol::thin::ColumnMetadata], core::option::Option<&[core::option::Option<oracledb_protocol::thin::QueryValue>]>) -> oracledb_protocol::Result<oracledb_protocol::thin::BorrowedFetchResult>
+pub fn oracledb_protocol::thin::parse_query_response_borrowed_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, &[oracledb_protocol::thin::ColumnMetadata], core::option::Option<&[core::option::Option<oracledb_protocol::thin::QueryValue>]>, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::thin::BorrowedFetchResult>
 pub fn oracledb_protocol::thin::parse_query_response_with_binds(&[u8], oracledb_protocol::thin::ClientCapabilities, &[oracledb_protocol::thin::BindValue]) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryResult>
 pub fn oracledb_protocol::thin::parse_query_response_with_binds_and_options(&[u8], oracledb_protocol::thin::ClientCapabilities, &[oracledb_protocol::thin::BindValue], oracledb_protocol::thin::ExecuteOptions) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryResult>
 pub fn oracledb_protocol::thin::parse_query_response_with_binds_options_and_columns(&[u8], oracledb_protocol::thin::ClientCapabilities, &[oracledb_protocol::thin::BindValue], oracledb_protocol::thin::ExecuteOptions, &[oracledb_protocol::thin::ColumnMetadata]) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryResult>
+pub fn oracledb_protocol::thin::parse_query_response_with_binds_options_columns_and_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, &[oracledb_protocol::thin::BindValue], oracledb_protocol::thin::ExecuteOptions, &[oracledb_protocol::thin::ColumnMetadata], oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryResult>
 pub fn oracledb_protocol::thin::parse_query_response_with_context(&[u8], oracledb_protocol::thin::ClientCapabilities, &[oracledb_protocol::thin::ColumnMetadata], core::option::Option<&[core::option::Option<oracledb_protocol::thin::QueryValue>]>) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryResult>
+pub fn oracledb_protocol::thin::parse_query_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryResult>
 pub fn oracledb_protocol::thin::parse_query_response_with_previous(&[u8], oracledb_protocol::thin::ClientCapabilities, core::option::Option<&[core::option::Option<oracledb_protocol::thin::QueryValue>]>) -> oracledb_protocol::Result<oracledb_protocol::thin::QueryResult>
 pub fn oracledb_protocol::thin::parse_subscribe_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<oracledb_protocol::thin::SubscribeResult>
+pub fn oracledb_protocol::thin::parse_subscribe_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::thin::SubscribeResult>
 pub fn oracledb_protocol::thin::parse_tpc_change_state_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<oracledb_protocol::thin::TpcChangeStateResponse>
+pub fn oracledb_protocol::thin::parse_tpc_change_state_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::thin::TpcChangeStateResponse>
 pub fn oracledb_protocol::thin::parse_tpc_switch_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<oracledb_protocol::thin::TpcSwitchResponse>
+pub fn oracledb_protocol::thin::parse_tpc_switch_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::thin::TpcSwitchResponse>
 pub fn oracledb_protocol::thin::parse_tpc_txn_switch_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<core::option::Option<oracledb_protocol::thin::SessionlessTxnState>>
+pub fn oracledb_protocol::thin::parse_tpc_txn_switch_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<core::option::Option<oracledb_protocol::thin::SessionlessTxnState>>
 pub fn oracledb_protocol::thin::public_dbtype_name_from_bind(&oracledb_protocol::thin::BindValue) -> &'static str
 pub fn oracledb_protocol::thin::public_dbtype_name_from_column_metadata(&oracledb_protocol::thin::ColumnMetadata) -> &'static str
 pub fn oracledb_protocol::thin::public_dbtype_name_from_oracle_type_name(&str) -> &'static str
@@ -1395,6 +1426,7 @@ pub fn oracledb_protocol::thin::public_dbtype_name_from_type_name(&str) -> &'sta
 pub fn oracledb_protocol::thin::public_dbtype_size_info(&str) -> (u32, u32)
 pub fn oracledb_protocol::thin::returning_output_bind(oracledb_protocol::thin::BindValue) -> oracledb_protocol::thin::BindValue
 pub fn oracledb_protocol::thin::try_parse_oac_record(&[u8], u32, u32, core::option::Option<&str>) -> oracledb_protocol::Result<core::option::Option<(oracledb_protocol::thin::NotificationRecord, usize)>>
+pub fn oracledb_protocol::thin::try_parse_oac_record_with_limits(&[u8], u32, u32, core::option::Option<&str>, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<core::option::Option<(oracledb_protocol::thin::NotificationRecord, usize)>>
 pub fn oracledb_protocol::thin::write_dbobject_bind(&mut oracledb_protocol::wire::TtcWriter, &[u8], &[u8]) -> oracledb_protocol::Result<()>
 pub mod oracledb_protocol::tls
 pub mod oracledb_protocol::tls::dn
@@ -1554,6 +1586,7 @@ pub const oracledb_protocol::vector::VECTOR_FORMAT_FLOAT32: u8
 pub const oracledb_protocol::vector::VECTOR_FORMAT_FLOAT64: u8
 pub const oracledb_protocol::vector::VECTOR_FORMAT_INT8: u8
 pub fn oracledb_protocol::vector::decode_vector(&[u8]) -> oracledb_protocol::Result<oracledb_protocol::vector::Vector>
+pub fn oracledb_protocol::vector::decode_vector_with_limits(&[u8], oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::vector::Vector>
 pub fn oracledb_protocol::vector::encode_vector(&oracledb_protocol::vector::Vector) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::vector::write_oson_aq_payload(&mut oracledb_protocol::wire::TtcWriter, &[u8]) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::vector::write_vector_image(&mut oracledb_protocol::wire::TtcWriter, &[u8]) -> oracledb_protocol::Result<()>
@@ -1582,8 +1615,48 @@ impl core::fmt::Debug for oracledb_protocol::wire::PacketLengthWidth
 pub fn oracledb_protocol::wire::PacketLengthWidth::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for oracledb_protocol::wire::PacketLengthWidth
 impl core::marker::StructuralPartialEq for oracledb_protocol::wire::PacketLengthWidth
+pub struct oracledb_protocol::wire::ProtocolLimits
+pub oracledb_protocol::wire::ProtocolLimits::max_batch_rows: usize
+pub oracledb_protocol::wire::ProtocolLimits::max_binds: usize
+pub oracledb_protocol::wire::ProtocolLimits::max_columns: usize
+pub oracledb_protocol::wire::ProtocolLimits::max_frame_bytes: usize
+pub oracledb_protocol::wire::ProtocolLimits::max_length_prefixed_elements: usize
+pub oracledb_protocol::wire::ProtocolLimits::max_lob_chunks: usize
+pub oracledb_protocol::wire::ProtocolLimits::max_object_depth: usize
+pub oracledb_protocol::wire::ProtocolLimits::max_object_elements: usize
+pub oracledb_protocol::wire::ProtocolLimits::max_packet_bytes: usize
+pub oracledb_protocol::wire::ProtocolLimits::max_redirects: usize
+pub oracledb_protocol::wire::ProtocolLimits::max_response_bytes: usize
+pub oracledb_protocol::wire::ProtocolLimits::max_vector_dimensions: usize
+impl oracledb_protocol::wire::ProtocolLimits
+pub const oracledb_protocol::wire::ProtocolLimits::DEFAULT: Self
+pub fn oracledb_protocol::wire::ProtocolLimits::check_batch_rows(&self, usize) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::ProtocolLimits::check_binds(&self, usize) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::ProtocolLimits::check_columns(&self, usize) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::ProtocolLimits::check_frame_bytes(&self, usize) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::ProtocolLimits::check_length_prefixed_elements(&self, usize) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::ProtocolLimits::check_lob_chunks(&self, usize) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::ProtocolLimits::check_object_depth(&self, usize) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::ProtocolLimits::check_object_elements(&self, usize) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::ProtocolLimits::check_packet_bytes(&self, usize) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::ProtocolLimits::check_redirects(&self, usize) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::ProtocolLimits::check_response_bytes(&self, usize) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::ProtocolLimits::check_vector_dimensions(&self, usize) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::ProtocolLimits::validate(self) -> oracledb_protocol::Result<Self>
+impl core::clone::Clone for oracledb_protocol::wire::ProtocolLimits
+pub fn oracledb_protocol::wire::ProtocolLimits::clone(&self) -> oracledb_protocol::wire::ProtocolLimits
+impl core::cmp::Eq for oracledb_protocol::wire::ProtocolLimits
+impl core::cmp::PartialEq for oracledb_protocol::wire::ProtocolLimits
+pub fn oracledb_protocol::wire::ProtocolLimits::eq(&self, &oracledb_protocol::wire::ProtocolLimits) -> bool
+impl core::default::Default for oracledb_protocol::wire::ProtocolLimits
+pub fn oracledb_protocol::wire::ProtocolLimits::default() -> Self
+impl core::fmt::Debug for oracledb_protocol::wire::ProtocolLimits
+pub fn oracledb_protocol::wire::ProtocolLimits::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb_protocol::wire::ProtocolLimits
+impl core::marker::StructuralPartialEq for oracledb_protocol::wire::ProtocolLimits
 pub struct oracledb_protocol::wire::TtcReader<'a>
 impl<'a> oracledb_protocol::wire::TtcReader<'a>
+pub fn oracledb_protocol::wire::TtcReader<'a>::limits(&self) -> oracledb_protocol::wire::ProtocolLimits
 pub fn oracledb_protocol::wire::TtcReader<'a>::new(&'a [u8]) -> Self
 pub fn oracledb_protocol::wire::TtcReader<'a>::peek_u8(&self) -> oracledb_protocol::Result<u8>
 pub fn oracledb_protocol::wire::TtcReader<'a>::position(&self) -> usize
@@ -1607,10 +1680,13 @@ pub fn oracledb_protocol::wire::TtcReader<'a>::remaining(&self) -> usize
 pub fn oracledb_protocol::wire::TtcReader<'a>::remaining_slice(&self) -> &[u8]
 pub fn oracledb_protocol::wire::TtcReader<'a>::skip(&mut self, usize) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::wire::TtcReader<'a>::skip_bytes_field(&mut self) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::TtcReader<'a>::with_limits(&'a [u8], oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<Self>
 impl oracledb_protocol::wire::BoundedReader for oracledb_protocol::wire::TtcReader<'_>
 pub fn oracledb_protocol::wire::TtcReader<'_>::alloc_count_checked(&self, usize, usize) -> oracledb_protocol::Result<usize>
+pub fn oracledb_protocol::wire::TtcReader<'_>::protocol_limits(&self) -> oracledb_protocol::wire::ProtocolLimits
 pub fn oracledb_protocol::wire::TtcReader<'_>::remaining(&self) -> usize
 pub fn oracledb_protocol::wire::TtcReader<'_>::with_capacity_bounded<T>(&self, usize, usize) -> alloc::vec::Vec<T>
+pub fn oracledb_protocol::wire::TtcReader<'_>::with_capacity_limited<T, F>(&self, usize, usize, F) -> oracledb_protocol::Result<alloc::vec::Vec<T>> where F: core::ops::function::FnOnce(&oracledb_protocol::wire::ProtocolLimits, usize) -> oracledb_protocol::Result<()>
 impl<'a> core::clone::Clone for oracledb_protocol::wire::TtcReader<'a>
 pub fn oracledb_protocol::wire::TtcReader<'a>::clone(&self) -> oracledb_protocol::wire::TtcReader<'a>
 impl<'a> core::fmt::Debug for oracledb_protocol::wire::TtcReader<'a>
@@ -1652,16 +1728,22 @@ pub const oracledb_protocol::wire::TNS_MAX_SHORT_LENGTH: usize
 pub const oracledb_protocol::wire::TNS_NULL_LENGTH_INDICATOR: u8
 pub trait oracledb_protocol::wire::BoundedReader
 pub fn oracledb_protocol::wire::BoundedReader::alloc_count_checked(&self, usize, usize) -> oracledb_protocol::Result<usize>
+pub fn oracledb_protocol::wire::BoundedReader::protocol_limits(&self) -> oracledb_protocol::wire::ProtocolLimits
 pub fn oracledb_protocol::wire::BoundedReader::remaining(&self) -> usize
 pub fn oracledb_protocol::wire::BoundedReader::with_capacity_bounded<T>(&self, usize, usize) -> alloc::vec::Vec<T>
+pub fn oracledb_protocol::wire::BoundedReader::with_capacity_limited<T, F>(&self, usize, usize, F) -> oracledb_protocol::Result<alloc::vec::Vec<T>> where F: core::ops::function::FnOnce(&oracledb_protocol::wire::ProtocolLimits, usize) -> oracledb_protocol::Result<()>
 impl oracledb_protocol::wire::BoundedReader for oracledb_protocol::thin::DbObjectPackedReader<'_>
 pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::alloc_count_checked(&self, usize, usize) -> oracledb_protocol::Result<usize>
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::protocol_limits(&self) -> oracledb_protocol::wire::ProtocolLimits
 pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::remaining(&self) -> usize
 pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::with_capacity_bounded<T>(&self, usize, usize) -> alloc::vec::Vec<T>
+pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::with_capacity_limited<T, F>(&self, usize, usize, F) -> oracledb_protocol::Result<alloc::vec::Vec<T>> where F: core::ops::function::FnOnce(&oracledb_protocol::wire::ProtocolLimits, usize) -> oracledb_protocol::Result<()>
 impl oracledb_protocol::wire::BoundedReader for oracledb_protocol::wire::TtcReader<'_>
 pub fn oracledb_protocol::wire::TtcReader<'_>::alloc_count_checked(&self, usize, usize) -> oracledb_protocol::Result<usize>
+pub fn oracledb_protocol::wire::TtcReader<'_>::protocol_limits(&self) -> oracledb_protocol::wire::ProtocolLimits
 pub fn oracledb_protocol::wire::TtcReader<'_>::remaining(&self) -> usize
 pub fn oracledb_protocol::wire::TtcReader<'_>::with_capacity_bounded<T>(&self, usize, usize) -> alloc::vec::Vec<T>
+pub fn oracledb_protocol::wire::TtcReader<'_>::with_capacity_limited<T, F>(&self, usize, usize, F) -> oracledb_protocol::Result<alloc::vec::Vec<T>> where F: core::ops::function::FnOnce(&oracledb_protocol::wire::ProtocolLimits, usize) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::wire::encode_packet(u8, u8, core::option::Option<u16>, &[u8], oracledb_protocol::wire::PacketLengthWidth) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub enum oracledb_protocol::ProtocolError
 pub oracledb_protocol::ProtocolError::DirectPathLoadTooMuchData
@@ -1688,6 +1770,10 @@ pub oracledb_protocol::ProtocolError::OsonNotEncoded(&'static str)
 pub oracledb_protocol::ProtocolError::OsonTypeNotSupported(&'static str)
 pub oracledb_protocol::ProtocolError::PacketTooLarge
 pub oracledb_protocol::ProtocolError::PacketTooLarge::length: usize
+pub oracledb_protocol::ProtocolError::ResourceLimit
+pub oracledb_protocol::ProtocolError::ResourceLimit::limit: &'static str
+pub oracledb_protocol::ProtocolError::ResourceLimit::maximum: usize
+pub oracledb_protocol::ProtocolError::ResourceLimit::observed: usize
 pub oracledb_protocol::ProtocolError::ServerError(alloc::string::String)
 pub oracledb_protocol::ProtocolError::ServerErrorInfo(alloc::boxed::Box<oracledb_protocol::ServerErrorDetails>)
 pub oracledb_protocol::ProtocolError::ServerErrorWithRowCount
@@ -1709,6 +1795,8 @@ pub oracledb_protocol::ProtocolError::ValueTooLarge::actual_size: usize
 pub oracledb_protocol::ProtocolError::ValueTooLarge::column_name: alloc::string::String
 pub oracledb_protocol::ProtocolError::ValueTooLarge::max_size: u32
 pub oracledb_protocol::ProtocolError::ValueTooLarge::row_num: u64
+impl oracledb_protocol::ProtocolError
+pub fn oracledb_protocol::ProtocolError::resource_limit(&self) -> core::option::Option<oracledb_protocol::ResourceLimit>
 impl core::error::Error for oracledb_protocol::ProtocolError
 impl core::fmt::Debug for oracledb_protocol::ProtocolError
 pub fn oracledb_protocol::ProtocolError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -1730,6 +1818,19 @@ pub fn oracledb_protocol::ClientIdentity::eq(&self, &oracledb_protocol::ClientId
 impl core::fmt::Debug for oracledb_protocol::ClientIdentity
 pub fn oracledb_protocol::ClientIdentity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb_protocol::ClientIdentity
+pub struct oracledb_protocol::ResourceLimit
+pub oracledb_protocol::ResourceLimit::limit: &'static str
+pub oracledb_protocol::ResourceLimit::maximum: usize
+pub oracledb_protocol::ResourceLimit::observed: usize
+impl core::clone::Clone for oracledb_protocol::ResourceLimit
+pub fn oracledb_protocol::ResourceLimit::clone(&self) -> oracledb_protocol::ResourceLimit
+impl core::cmp::Eq for oracledb_protocol::ResourceLimit
+impl core::cmp::PartialEq for oracledb_protocol::ResourceLimit
+pub fn oracledb_protocol::ResourceLimit::eq(&self, &oracledb_protocol::ResourceLimit) -> bool
+impl core::fmt::Debug for oracledb_protocol::ResourceLimit
+pub fn oracledb_protocol::ResourceLimit::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb_protocol::ResourceLimit
+impl core::marker::StructuralPartialEq for oracledb_protocol::ResourceLimit
 pub struct oracledb_protocol::ServerErrorDetails
 pub oracledb_protocol::ServerErrorDetails::array_dml_row_counts: core::option::Option<alloc::vec::Vec<u64>>
 pub oracledb_protocol::ServerErrorDetails::code: u32
