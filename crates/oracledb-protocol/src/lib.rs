@@ -19,6 +19,18 @@ pub const PYTHON_ORACLEDB_REFERENCE_COMMIT: &str = "3daef052904e41668bb862e6fa40
 pub const TNS_VERSION_MIN: u16 = 300;
 pub const TNS_VERSION_DESIRED: u16 = 319;
 
+/// Structured details for a protocol resource-limit violation.
+///
+/// The limit names are stable policy keys from [`wire::ProtocolLimits`], so
+/// callers can classify or log the exact bound that rejected a payload without
+/// parsing the display string.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResourceLimit {
+    pub limit: &'static str,
+    pub observed: usize,
+    pub maximum: usize,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
     #[error("truncated packet header: got {got} bytes")]
@@ -96,6 +108,23 @@ pub enum ProtocolError {
     /// (e.g. INTERVAL YEAR TO MONTH). Mirrors DPY-3007 / ERR_DB_TYPE_NOT_SUPPORTED.
     #[error("DPY-3007: the data type {0} is not supported")]
     OsonTypeNotSupported(&'static str),
+}
+
+impl ProtocolError {
+    pub fn resource_limit(&self) -> Option<ResourceLimit> {
+        match self {
+            Self::ResourceLimit {
+                limit,
+                observed,
+                maximum,
+            } => Some(ResourceLimit {
+                limit,
+                observed: *observed,
+                maximum: *maximum,
+            }),
+            _ => None,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;
@@ -308,5 +337,23 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn resource_limit_accessor_returns_typed_details() {
+        let err = ProtocolError::ResourceLimit {
+            limit: "response_bytes",
+            observed: 33,
+            maximum: 32,
+        };
+        assert_eq!(
+            err.resource_limit(),
+            Some(ResourceLimit {
+                limit: "response_bytes",
+                observed: 33,
+                maximum: 32,
+            })
+        );
+        assert_eq!(ProtocolError::TtcDecode("bad").resource_limit(), None);
     }
 }

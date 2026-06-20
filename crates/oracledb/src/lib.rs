@@ -401,13 +401,15 @@ impl<T: WireTransport> ConnectionCore<T> {
 
     async fn read_packet(&mut self, width: PacketLengthWidth) -> Result<IncomingPacket> {
         let limits = self.protocol_limits;
-        read_packet_with_limits(self.read_mut()?, width, limits).await
+        let result = read_packet_with_limits(self.read_mut()?, width, limits).await;
+        self.note_post_sync_result(result)
     }
 
     async fn read_data_response(&mut self, cx: &Cx) -> Result<Vec<u8>> {
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
-        read_data_response_with_limits(self.read_mut()?, cx, &write, limits).await
+        let result = read_data_response_with_limits(self.read_mut()?, cx, &write, limits).await;
+        self.note_post_sync_result(result)
     }
 
     async fn read_data_response_boundary(
@@ -417,8 +419,15 @@ impl<T: WireTransport> ConnectionCore<T> {
     ) -> Result<DataResponse> {
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
-        read_data_response_boundary_with_limits(self.read_mut()?, cx, &write, in_pipeline, limits)
-            .await
+        let result = read_data_response_boundary_with_limits(
+            self.read_mut()?,
+            cx,
+            &write,
+            in_pipeline,
+            limits,
+        )
+        .await;
+        self.note_post_sync_result(result)
     }
 
     async fn read_data_response_flushing_out_binds(
@@ -428,8 +437,24 @@ impl<T: WireTransport> ConnectionCore<T> {
     ) -> Result<Vec<u8>> {
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
-        read_data_response_flushing_out_binds_with_limits(self.read_mut()?, cx, &write, sdu, limits)
-            .await
+        let result = read_data_response_flushing_out_binds_with_limits(
+            self.read_mut()?,
+            cx,
+            &write,
+            sdu,
+            limits,
+        )
+        .await;
+        self.note_post_sync_result(result)
+    }
+
+    fn note_post_sync_result<U>(&self, result: Result<U>) -> Result<U> {
+        if let Err(Error::Protocol(err)) = &result {
+            if post_sync_protocol_error_disposition(err) == PostSyncProtocolDisposition::Dead {
+                self.recovery.mark_dead();
+            }
+        }
+        result
     }
 
     fn break_and_drain_wire(&mut self, recovery_timeout: Duration) -> Result<()> {
@@ -865,8 +890,34 @@ fn parse_ora_code_from_message(message: &str) -> Option<u32> {
     digits.parse::<u32>().ok()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PostSyncProtocolDisposition {
+    Ready,
+    Dead,
+}
+
+/// Classify protocol errors after bytes for an operation have crossed the wire.
+///
+/// Pre-sync/client-side validation errors return directly and keep any existing
+/// connection usable. Once a server response is being decoded, a resource-limit
+/// violation means the client intentionally stopped consuming an in-flight
+/// response, so the wire can no longer be assumed aligned.
+fn post_sync_protocol_error_disposition(
+    err: &oracledb_protocol::ProtocolError,
+) -> PostSyncProtocolDisposition {
+    match err {
+        oracledb_protocol::ProtocolError::ResourceLimit { .. } => PostSyncProtocolDisposition::Dead,
+        _ if protocol_error_ora_code(err)
+            .is_some_and(|code| SESSION_DEAD_ORA_CODES.contains(&code)) =>
+        {
+            PostSyncProtocolDisposition::Dead
+        }
+        _ => PostSyncProtocolDisposition::Ready,
+    }
+}
+
 fn protocol_error_is_session_dead(err: &oracledb_protocol::ProtocolError) -> bool {
-    protocol_error_ora_code(err).is_some_and(|code| SESSION_DEAD_ORA_CODES.contains(&code))
+    post_sync_protocol_error_disposition(err) == PostSyncProtocolDisposition::Dead
 }
 
 /// The Oracle error number carried by a [`ProtocolError`], whether it is the
@@ -1234,6 +1285,15 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// The curated code sets are documented on [`TRANSIENT_ORA_CODES`] and
 /// [`CONNECTION_LOST_ORA_CODES`].
 impl Error {
+    /// Structured resource-limit details when this error came from
+    /// [`oracledb_protocol::wire::ProtocolLimits`].
+    pub fn resource_limit(&self) -> Option<oracledb_protocol::ResourceLimit> {
+        match self {
+            Error::Protocol(err) => err.resource_limit(),
+            _ => None,
+        }
+    }
+
     /// The Oracle error number (`ORA-NNNNN`) this error carries, if any.
     ///
     /// Returns the structured `ServerErrorInfo.code` when the error came back
@@ -2120,6 +2180,7 @@ impl Connection {
             Err(err) => {
                 if protocol_error_is_session_dead(&err) {
                     self.dead = true;
+                    self.core.recovery.mark_dead();
                 }
                 Err(Error::Protocol(err))
             }
@@ -7930,6 +7991,151 @@ mod tests {
             !recovery_failed.is_transient(),
             "ConnectionClosed needs a reconnect first, so it is not retry-in-place"
         );
+    }
+
+    #[test]
+    fn resource_limit_error_defines_pre_sync_and_post_sync_disposition() {
+        let err = oracledb_protocol::ProtocolError::ResourceLimit {
+            limit: "columns",
+            observed: 3,
+            maximum: 2,
+        };
+        assert_eq!(
+            post_sync_protocol_error_disposition(&err),
+            PostSyncProtocolDisposition::Dead,
+            "a post-sync resource-limit decode failure leaves unread response bytes"
+        );
+
+        let pre_sync = Error::Protocol(oracledb_protocol::ProtocolError::ResourceLimit {
+            limit: "columns",
+            observed: 3,
+            maximum: 2,
+        });
+        assert_eq!(
+            pre_sync.resource_limit(),
+            Some(oracledb_protocol::ResourceLimit {
+                limit: "columns",
+                observed: 3,
+                maximum: 2,
+            })
+        );
+        assert!(
+            !pre_sync.is_connection_lost(),
+            "client-side/pre-sync resource-limit validation does not imply a lost connection"
+        );
+        assert!(
+            !pre_sync.is_transient(),
+            "raising the configured limit, not retrying in-place, is the remedy"
+        );
+        assert!(
+            !pre_sync.is_retryable(),
+            "resource limits are deterministic for the same input and policy"
+        );
+        assert!(matches!(
+            pre_sync,
+            Error::Protocol(oracledb_protocol::ProtocolError::ResourceLimit {
+                limit: "columns",
+                observed: 3,
+                maximum: 2,
+            })
+        ));
+    }
+
+    #[test]
+    fn post_sync_resource_limit_marks_live_connection_dead() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (_socket, _) = listener.accept().expect("accept test client");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let mut conn = runtime.block_on(async {
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (read, write) = transport::plain_split(stream);
+            loopback_connection(read, write)
+        });
+
+        let err = conn
+            .note_parse::<()>(Err(oracledb_protocol::ProtocolError::ResourceLimit {
+                limit: "response_bytes",
+                observed: 33,
+                maximum: 32,
+            }))
+            .expect_err("post-sync resource-limit violation must be surfaced");
+
+        assert!(matches!(
+            err,
+            Error::Protocol(oracledb_protocol::ProtocolError::ResourceLimit {
+                limit: "response_bytes",
+                observed: 33,
+                maximum: 32,
+            })
+        ));
+        assert!(
+            conn.is_dead(),
+            "post-sync resource-limit violation stops consuming a response and kills the session"
+        );
+
+        drop(conn);
+        server.join().expect("server thread joins");
+        Ok(())
+    }
+
+    #[test]
+    fn in_flight_packet_resource_limit_marks_connection_dead() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            use std::io::Write as _;
+            socket
+                .write_all(&data_packet(&[0x01, 0x02, 0x03], true))
+                .expect("write oversized packet");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let conn = runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (read, write) = transport::plain_split(stream);
+            let mut conn = loopback_connection(read, write);
+            let limits = ProtocolLimits {
+                max_packet_bytes: 12,
+                max_frame_bytes: 16,
+                max_response_bytes: 32,
+                ..ProtocolLimits::DEFAULT
+            }
+            .validate()?;
+            conn.protocol_limits = limits;
+            conn.core.set_protocol_limits(limits)?;
+
+            let err = conn
+                .core
+                .read_data_response(&cx)
+                .await
+                .expect_err("oversized in-flight packet must fail closed");
+            assert!(matches!(
+                err,
+                Error::Protocol(oracledb_protocol::ProtocolError::ResourceLimit {
+                    limit: "packet_bytes",
+                    observed: 13,
+                    maximum: 12,
+                })
+            ));
+            Ok::<Connection, Error>(conn)
+        })?;
+
+        assert!(
+            conn.is_dead(),
+            "in-flight resource-limit violations leave unread wire bytes"
+        );
+        assert_eq!(conn.core.recovery.phase(), SessionRecoveryPhase::Dead);
+
+        drop(conn);
+        server.join().expect("server thread joins");
+        Ok(())
     }
 
     // Regression (bead rust-oracledb-n2s): the multi-packet wide-row response
