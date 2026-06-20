@@ -18,6 +18,7 @@
 //!   writes through the outer async write mutex and issues at most one read at
 //!   a time, so there is no lock contention or ordering hazard.
 
+use std::fmt::Debug;
 use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -35,6 +36,60 @@ pub use cassette_seam::{
 
 /// A TLS stream shared between the read and write halves.
 type SharedTls = Arc<Mutex<TlsStream<TcpStream>>>;
+
+/// Crate-private transport contract beneath the public [`Connection`](crate::Connection).
+pub(crate) trait WireTransport {
+    type Read: AsyncRead + Debug + Unpin;
+    type Write: AsyncWrite + Debug + Unpin;
+}
+
+pub(crate) type TransportHalves<T> = (<T as WireTransport>::Read, <T as WireTransport>::Write);
+
+/// Crate-private connector contract for producing transport halves.
+pub(crate) trait Connector {
+    type Transport: WireTransport;
+
+    fn plain_split(&self, stream: TcpStream) -> TransportHalves<Self::Transport>;
+
+    fn tls_split(&self, stream: TlsStream<TcpStream>) -> TransportHalves<Self::Transport>;
+}
+
+/// Production Oracle wire transport.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct OracleWireTransport;
+
+impl WireTransport for OracleWireTransport {
+    type Read = OracleReadHalf;
+    type Write = OracleWriteHalf;
+}
+
+/// Production connector for TCP and TCPS Oracle transports.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct OracleConnector;
+
+impl Connector for OracleConnector {
+    type Transport = OracleWireTransport;
+
+    fn plain_split(&self, stream: TcpStream) -> TransportHalves<Self::Transport> {
+        plain_split(stream)
+    }
+
+    fn tls_split(&self, stream: TlsStream<TcpStream>) -> TransportHalves<Self::Transport> {
+        tls_split(stream)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Connector, OracleConnector, OracleReadHalf, OracleWriteHalf, WireTransport};
+
+    fn assert_wire_transport<T: WireTransport<Read = OracleReadHalf, Write = OracleWriteHalf>>() {}
+
+    #[test]
+    fn oracle_connector_uses_current_transport_halves() {
+        assert_wire_transport::<<OracleConnector as Connector>::Transport>();
+    }
+}
 
 /// The read half of an Oracle connection transport.
 pub enum OracleReadHalf {

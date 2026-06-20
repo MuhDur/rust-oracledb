@@ -316,9 +316,13 @@ pub use sql_convert::{
 #[cfg(feature = "derive")]
 pub use oracledb_derive::FromRow;
 
-use transport::{OracleReadHalf, OracleWriteHalf};
+use transport::{Connector, WireTransport};
 
-type SharedWriteHalf = Arc<AsyncMutex<OracleWriteHalf>>;
+type DriverConnector = transport::OracleConnector;
+type DriverTransport = <DriverConnector as Connector>::Transport;
+type DriverReadHalf = <DriverTransport as WireTransport>::Read;
+type DriverWriteHalf = <DriverTransport as WireTransport>::Write;
+type SharedWriteHalf = Arc<AsyncMutex<DriverWriteHalf>>;
 
 /// Oracle error codes that python-oracledb maps to DPY-4011 (connection
 /// closed); seeing one of these marks the connection as dead so pools can
@@ -1194,7 +1198,7 @@ impl ConnectOptions {
 pub struct Connection {
     descriptor: EasyConnect,
     identity: ClientIdentity,
-    read: OracleReadHalf,
+    read: DriverReadHalf,
     write: SharedWriteHalf,
     session_id: u32,
     serial_num: u16,
@@ -1372,6 +1376,7 @@ impl Connection {
         // TCPS: complete the TLS handshake on the whole socket before splitting
         // and before any TNS bytes are sent (implicit TLS, matching
         // python-oracledb thin's _connect_tcp ordering).
+        let connector = DriverConnector::default();
         let (mut read, write) = if descriptor.protocol.is_tls() {
             trace_connect_step("tls handshake");
             let server_type = if options.server_type_emon {
@@ -1390,9 +1395,9 @@ impl Connection {
             let tls_stream =
                 tls::tls_handshake(&descriptor, server_type, &tls_params, stream).await?;
             trace_connect_step("tls established");
-            transport::tls_split(tls_stream)
+            connector.tls_split(tls_stream)
         } else {
-            transport::plain_split(stream)
+            connector.plain_split(stream)
         };
         let write = Arc::new(AsyncMutex::with_name("oracle_tcp_write", write));
 
@@ -5922,7 +5927,7 @@ struct IncomingPacket {
 async fn lock_write<'a>(
     cx: &Cx,
     write: &'a SharedWriteHalf,
-) -> Result<asupersync::sync::MutexGuard<'a, OracleWriteHalf>> {
+) -> Result<asupersync::sync::MutexGuard<'a, DriverWriteHalf>> {
     write
         .lock(cx)
         .await
@@ -6028,7 +6033,7 @@ struct DataResponse {
 }
 
 async fn read_data_response(
-    read: &mut OracleReadHalf,
+    read: &mut DriverReadHalf,
     cx: &Cx,
     write: &SharedWriteHalf,
 ) -> Result<Vec<u8>> {
@@ -6075,7 +6080,7 @@ const BREAK_DRAIN_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// be left clean, so the connection must be discarded — the error is surfaced as
 /// [`Error::ConnectionClosed`], which is [`Error::is_connection_lost`].
 async fn break_and_drain_wire(
-    read: &mut OracleReadHalf,
+    read: &mut DriverReadHalf,
     cx: &Cx,
     write: &SharedWriteHalf,
     recovery_timeout: Duration,
@@ -6134,7 +6139,7 @@ async fn break_and_drain_wire(
 /// surfaces [`Error::Cancelled`]. On a failed drain the error is
 /// [`Error::ConnectionClosed`] and the connection must be discarded.
 async fn cancel_and_drain_wire(
-    read: &mut OracleReadHalf,
+    read: &mut DriverReadHalf,
     cx: &Cx,
     write: &SharedWriteHalf,
     recovery_timeout: Duration,
@@ -6159,7 +6164,7 @@ async fn cancel_and_drain_wire(
 /// a secondary timeout yields [`Error::ConnectionClosed`] (the connection must
 /// be discarded), matching the break+drain failure semantics.
 async fn drain_cancel_wire(
-    read: &mut OracleReadHalf,
+    read: &mut DriverReadHalf,
     cx: &Cx,
     write: &SharedWriteHalf,
     recovery_timeout: Duration,
@@ -6232,7 +6237,7 @@ impl Drop for CancelDrainGuard<'_> {
 /// clean boundary. See [`break_and_drain_wire`] for why stopping at the first
 /// end-of-response is insufficient.
 async fn drain_break_response(
-    read: &mut OracleReadHalf,
+    read: &mut DriverReadHalf,
     cx: &Cx,
     write: &SharedWriteHalf,
 ) -> Result<()> {
@@ -6273,7 +6278,7 @@ async fn drain_break_response(
 }
 
 async fn read_data_response_flushing_out_binds(
-    read: &mut OracleReadHalf,
+    read: &mut DriverReadHalf,
     cx: &Cx,
     write: &SharedWriteHalf,
     sdu: usize,
@@ -6363,7 +6368,7 @@ fn post_reset_packet_ends_response(payload: &[u8]) -> bool {
 /// server emits a marker alongside an in-pipeline error without expecting a
 /// reset exchange.
 async fn read_data_response_boundary(
-    read: &mut OracleReadHalf,
+    read: &mut DriverReadHalf,
     cx: &Cx,
     write: &SharedWriteHalf,
     in_pipeline: bool,
@@ -6377,7 +6382,7 @@ async fn read_data_response_boundary(
 /// break-drain path to consume the trailing error response. Always runs the
 /// non-pipeline (reset-handling) variant.
 async fn read_data_response_boundary_from(
-    read: &mut OracleReadHalf,
+    read: &mut DriverReadHalf,
     cx: &Cx,
     write: &SharedWriteHalf,
     seed: Option<IncomingPacket>,
@@ -6386,7 +6391,7 @@ async fn read_data_response_boundary_from(
 }
 
 async fn read_data_response_boundary_seeded(
-    read: &mut OracleReadHalf,
+    read: &mut DriverReadHalf,
     cx: &Cx,
     write: &SharedWriteHalf,
     in_pipeline: bool,
@@ -6472,7 +6477,7 @@ const TNS_MARKER_TYPE_BREAK: u8 = 1;
 const TNS_MARKER_TYPE_RESET: u8 = 2;
 
 async fn reset_after_marker(
-    read: &mut OracleReadHalf,
+    read: &mut DriverReadHalf,
     cx: &Cx,
     write: &SharedWriteHalf,
     initial_marker: &IncomingPacket,
