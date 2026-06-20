@@ -7379,43 +7379,79 @@ mod tests {
 
     #[derive(Debug)]
     struct ScriptedRead {
-        bytes: Vec<u8>,
-        offset: usize,
+        state: Arc<std::sync::Mutex<ScriptedIoState>>,
     }
 
     impl ScriptedRead {
-        fn new(frames: Vec<Vec<u8>>) -> Self {
-            Self {
-                bytes: frames.into_iter().flatten().collect(),
-                offset: 0,
-            }
+        fn from_state(state: Arc<std::sync::Mutex<ScriptedIoState>>) -> Self {
+            Self { state }
         }
     }
 
     impl asupersync::io::AsyncRead for ScriptedRead {
         fn poll_read(
-            mut self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
             buf: &mut asupersync::io::ReadBuf<'_>,
         ) -> std::task::Poll<std::io::Result<()>> {
-            if self.offset >= self.bytes.len() {
-                return std::task::Poll::Ready(Ok(()));
+            let Ok(mut state) = self.state.lock() else {
+                return std::task::Poll::Ready(Err(std::io::Error::other(
+                    "scripted transport: poisoned read state",
+                )));
+            };
+
+            loop {
+                match state.read.front_mut() {
+                    Some(ReadAction::Bytes {
+                        bytes,
+                        offset,
+                        max_chunk,
+                    }) => {
+                        if *offset >= bytes.len() {
+                            state.read.pop_front();
+                            continue;
+                        }
+                        let cap = max_chunk.unwrap_or(usize::MAX);
+                        let available = bytes.len() - *offset;
+                        let take = available.min(buf.remaining()).min(cap);
+                        if take == 0 {
+                            return std::task::Poll::Ready(Ok(()));
+                        }
+                        buf.put_slice(&bytes[*offset..*offset + take]);
+                        *offset += take;
+                        if *offset >= bytes.len() {
+                            state.read.pop_front();
+                        }
+                        return std::task::Poll::Ready(Ok(()));
+                    }
+                    Some(ReadAction::Pending) => {
+                        state.read.pop_front();
+                        cx.waker().wake_by_ref();
+                        return std::task::Poll::Pending;
+                    }
+                    Some(ReadAction::Eof) | None => return std::task::Poll::Ready(Ok(())),
+                    Some(ReadAction::Error(message)) => {
+                        let message = *message;
+                        state.read.pop_front();
+                        return std::task::Poll::Ready(Err(std::io::Error::other(message)));
+                    }
+                    Some(ReadAction::AdvanceTime(duration)) => {
+                        let duration = *duration;
+                        state.read.pop_front();
+                        state.clock.advance(duration);
+                    }
+                }
             }
-            let available = &self.bytes[self.offset..];
-            let take = available.len().min(buf.remaining());
-            buf.put_slice(&available[..take]);
-            self.offset += take;
-            std::task::Poll::Ready(Ok(()))
         }
     }
 
     #[derive(Debug)]
     struct ScriptedWrite {
-        state: Arc<std::sync::Mutex<ScriptedWriteState>>,
+        state: Arc<std::sync::Mutex<ScriptedIoState>>,
     }
 
     impl ScriptedWrite {
-        fn new(state: Arc<std::sync::Mutex<ScriptedWriteState>>) -> Self {
+        fn from_state(state: Arc<std::sync::Mutex<ScriptedIoState>>) -> Self {
             Self { state }
         }
     }
@@ -7423,7 +7459,7 @@ mod tests {
     impl asupersync::io::AsyncWrite for ScriptedWrite {
         fn poll_write(
             self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
+            cx: &mut std::task::Context<'_>,
             buf: &[u8],
         ) -> std::task::Poll<std::io::Result<usize>> {
             let Ok(mut state) = self.state.lock() else {
@@ -7431,32 +7467,61 @@ mod tests {
                     "scripted transport: poisoned write state",
                 )));
             };
-            let mut cursor = 0usize;
-            while cursor < buf.len() {
-                let (take, front_len) = {
-                    let Some(front) = state.expected.front() else {
+
+            loop {
+                match state.write.front_mut() {
+                    Some(WriteAction::Expect {
+                        bytes,
+                        offset,
+                        max_chunk,
+                    }) => {
+                        if *offset >= bytes.len() {
+                            state.write.pop_front();
+                            continue;
+                        }
+                        let cap = max_chunk.unwrap_or(usize::MAX);
+                        let available = bytes.len() - *offset;
+                        let take = available.min(buf.len()).min(cap);
+                        if take == 0 {
+                            return std::task::Poll::Ready(Ok(0));
+                        }
+                        if bytes[*offset..*offset + take] != buf[..take] {
+                            return std::task::Poll::Ready(Err(std::io::Error::other(
+                                "scripted transport: write mismatch",
+                            )));
+                        }
+                        *offset += take;
+                        if *offset >= bytes.len() {
+                            state.write.pop_front();
+                        }
+                        return std::task::Poll::Ready(Ok(take));
+                    }
+                    Some(WriteAction::Pending) => {
+                        state.write.pop_front();
+                        cx.waker().wake_by_ref();
+                        return std::task::Poll::Pending;
+                    }
+                    Some(WriteAction::Eof) => {
+                        state.write.pop_front();
+                        return std::task::Poll::Ready(Ok(0));
+                    }
+                    Some(WriteAction::Error(message)) => {
+                        let message = *message;
+                        state.write.pop_front();
+                        return std::task::Poll::Ready(Err(std::io::Error::other(message)));
+                    }
+                    Some(WriteAction::AdvanceTime(duration)) => {
+                        let duration = *duration;
+                        state.write.pop_front();
+                        state.clock.advance(duration);
+                    }
+                    None => {
                         return std::task::Poll::Ready(Err(std::io::Error::other(
                             "scripted transport: unexpected write",
                         )));
-                    };
-                    let remaining = &front[state.offset..];
-                    let chunk = &buf[cursor..];
-                    let take = remaining.len().min(chunk.len());
-                    if remaining[..take] != chunk[..take] {
-                        return std::task::Poll::Ready(Err(std::io::Error::other(
-                            "scripted transport: write mismatch",
-                        )));
                     }
-                    (take, front.len())
-                };
-                cursor += take;
-                state.offset += take;
-                if state.offset >= front_len {
-                    state.expected.pop_front();
-                    state.offset = 0;
                 }
             }
-            std::task::Poll::Ready(Ok(buf.len()))
         }
 
         fn poll_flush(
@@ -7474,22 +7539,89 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct ScriptedWriteState {
-        expected: VecDeque<Vec<u8>>,
-        offset: usize,
+    #[derive(Clone, Debug, Default)]
+    struct ScriptedClock {
+        nanos: Arc<std::sync::atomic::AtomicU64>,
     }
 
-    impl ScriptedWriteState {
-        fn new(expected: Vec<Vec<u8>>) -> Self {
+    impl ScriptedClock {
+        fn advance(&self, duration: Duration) {
+            let nanos = match u64::try_from(duration.as_nanos()) {
+                Ok(nanos) => nanos,
+                Err(_) => u64::MAX,
+            };
+            self.nanos.fetch_add(nanos, Ordering::Relaxed);
+        }
+
+        fn elapsed(&self) -> Duration {
+            Duration::from_nanos(self.nanos.load(Ordering::Relaxed))
+        }
+    }
+
+    #[derive(Debug)]
+    struct ScriptedIoState {
+        read: VecDeque<ReadAction>,
+        write: VecDeque<WriteAction>,
+        clock: ScriptedClock,
+    }
+
+    impl ScriptedIoState {
+        fn new(read: Vec<ReadAction>, write: Vec<WriteAction>, clock: ScriptedClock) -> Self {
             Self {
-                expected: expected.into(),
-                offset: 0,
+                read: read.into(),
+                write: write.into(),
+                clock,
             }
         }
 
         fn is_consumed(&self) -> bool {
-            self.expected.is_empty() && self.offset == 0
+            self.read.is_empty() && self.write.is_empty()
+        }
+    }
+
+    #[derive(Debug)]
+    enum ReadAction {
+        Bytes {
+            bytes: Vec<u8>,
+            offset: usize,
+            max_chunk: Option<usize>,
+        },
+        Pending,
+        Eof,
+        Error(&'static str),
+        AdvanceTime(Duration),
+    }
+
+    impl ReadAction {
+        fn bytes(bytes: Vec<u8>, max_chunk: Option<usize>) -> Self {
+            Self::Bytes {
+                bytes,
+                offset: 0,
+                max_chunk,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    enum WriteAction {
+        Expect {
+            bytes: Vec<u8>,
+            offset: usize,
+            max_chunk: Option<usize>,
+        },
+        Pending,
+        Eof,
+        Error(&'static str),
+        AdvanceTime(Duration),
+    }
+
+    impl WriteAction {
+        fn expect_bytes(bytes: Vec<u8>, max_chunk: Option<usize>) -> Self {
+            Self::Expect {
+                bytes,
+                offset: 0,
+                max_chunk,
+            }
         }
     }
 
@@ -7533,18 +7665,22 @@ mod tests {
             PacketLengthWidth::Large32,
         )?;
 
-        let write_state = Arc::new(std::sync::Mutex::new(ScriptedWriteState::new(vec![
-            connect_packet.clone(),
-            execute_packet,
-            fetch_packet,
-        ])));
+        let script = Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+            vec![
+                ReadAction::bytes(accept_packet, None),
+                ReadAction::bytes(data_packet(EXECUTE_RESPONSE, true), None),
+                ReadAction::bytes(data_packet(FETCH_RESPONSE, true), None),
+            ],
+            vec![
+                WriteAction::expect_bytes(connect_packet.clone(), None),
+                WriteAction::expect_bytes(execute_packet, None),
+                WriteAction::expect_bytes(fetch_packet, None),
+            ],
+            ScriptedClock::default(),
+        )));
         let mut core = ConnectionCore::<ScriptedTransport>::from_halves(
-            ScriptedRead::new(vec![
-                accept_packet,
-                data_packet(EXECUTE_RESPONSE, true),
-                data_packet(FETCH_RESPONSE, true),
-            ]),
-            ScriptedWrite::new(Arc::clone(&write_state)),
+            ScriptedRead::from_state(Arc::clone(&script)),
+            ScriptedWrite::from_state(Arc::clone(&script)),
             "scripted_core_write",
         );
 
@@ -7566,13 +7702,306 @@ mod tests {
             Ok::<_, Error>(())
         })?;
 
-        let state = write_state
+        let state = script
             .lock()
-            .map_err(|_| Error::Runtime("scripted write state lock poisoned".into()))?;
+            .map_err(|_| Error::Runtime("scripted I/O state lock poisoned".into()))?;
         assert!(
             state.is_consumed(),
-            "scripted core must perform exactly the expected connect/execute/fetch writes"
+            "scripted core must perform exactly the expected connect/execute/fetch I/O"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn scripted_transport_replays_short_pending_and_virtual_time() -> Result<()> {
+        const EXECUTE_BODY: &[u8] = b"fault-matrix execute payload";
+        const EXECUTE_RESPONSE: &[u8] = b"fault-matrix execute response";
+
+        let connect_packet = encode_packet(
+            TNS_PACKET_TYPE_CONNECT,
+            0,
+            None,
+            b"FAULT-MATRIX-CONNECT",
+            PacketLengthWidth::Legacy16,
+        )?;
+        let accept_packet = encode_packet(
+            TNS_PACKET_TYPE_ACCEPT,
+            0,
+            None,
+            b"FAULT-MATRIX-ACCEPT",
+            PacketLengthWidth::Legacy16,
+        )?;
+        let execute_packet = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            EXECUTE_BODY,
+            PacketLengthWidth::Large32,
+        )?;
+        let execute_response_packet = data_packet(EXECUTE_RESPONSE, true);
+
+        let clock = ScriptedClock::default();
+        let script = Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+            vec![
+                ReadAction::Pending,
+                ReadAction::AdvanceTime(Duration::from_millis(7)),
+                ReadAction::bytes(accept_packet, Some(3)),
+                ReadAction::Pending,
+                ReadAction::AdvanceTime(Duration::from_millis(11)),
+                ReadAction::bytes(execute_response_packet, Some(2)),
+            ],
+            vec![
+                WriteAction::Pending,
+                WriteAction::AdvanceTime(Duration::from_millis(5)),
+                WriteAction::expect_bytes(connect_packet.clone(), Some(2)),
+                WriteAction::Pending,
+                WriteAction::AdvanceTime(Duration::from_millis(13)),
+                WriteAction::expect_bytes(execute_packet, Some(3)),
+            ],
+            clock.clone(),
+        )));
+        let mut core = ConnectionCore::<ScriptedTransport>::from_halves(
+            ScriptedRead::from_state(Arc::clone(&script)),
+            ScriptedWrite::from_state(Arc::clone(&script)),
+            "scripted_fault_matrix_write",
+        );
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            core.write_all(&cx, &connect_packet).await?;
+            let accept = core.read_packet(PacketLengthWidth::Legacy16).await?;
+            assert_eq!(accept.packet_type, TNS_PACKET_TYPE_ACCEPT);
+            assert_eq!(accept.payload, b"FAULT-MATRIX-ACCEPT");
+
+            core.send_data_packet(&cx, EXECUTE_BODY, 8192).await?;
+            let execute_response = core.read_data_response(&cx).await?;
+            assert_eq!(execute_response, EXECUTE_RESPONSE);
+            Ok::<_, Error>(())
+        })?;
+
+        assert_eq!(
+            clock.elapsed(),
+            Duration::from_millis(36),
+            "virtual time advances are deterministic and do not require wall-clock sleeps"
+        );
+        let state = script
+            .lock()
+            .map_err(|_| Error::Runtime("scripted I/O state lock poisoned".into()))?;
+        assert!(
+            state.is_consumed(),
+            "scripted fault matrix must consume every read/write step"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn scripted_transport_injects_errors_and_eof() -> Result<()> {
+        let payload = encode_packet(
+            TNS_PACKET_TYPE_CONNECT,
+            0,
+            None,
+            b"FAULT",
+            PacketLengthWidth::Legacy16,
+        )?;
+
+        let runtime = build_io_runtime()?;
+
+        let read_error = Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+            vec![ReadAction::Error("scripted read fault")],
+            Vec::new(),
+            ScriptedClock::default(),
+        )));
+        let mut core = ConnectionCore::<ScriptedTransport>::from_halves(
+            ScriptedRead::from_state(read_error),
+            ScriptedWrite::from_state(Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+                Vec::new(),
+                Vec::new(),
+                ScriptedClock::default(),
+            )))),
+            "scripted_read_error_write",
+        );
+        let read_err = runtime.block_on(async {
+            match core.read_packet(PacketLengthWidth::Legacy16).await {
+                Ok(_) => Err(Error::Runtime(
+                    "scripted read fault unexpectedly succeeded".into(),
+                )),
+                Err(err) => Ok(err),
+            }
+        })?;
+        assert!(
+            read_err.to_string().contains("scripted read fault"),
+            "scripted read error should keep its diagnostic"
+        );
+
+        let read_eof = Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+            vec![ReadAction::Eof],
+            Vec::new(),
+            ScriptedClock::default(),
+        )));
+        let mut core = ConnectionCore::<ScriptedTransport>::from_halves(
+            ScriptedRead::from_state(read_eof),
+            ScriptedWrite::from_state(Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+                Vec::new(),
+                Vec::new(),
+                ScriptedClock::default(),
+            )))),
+            "scripted_read_eof_write",
+        );
+        let eof_err = runtime.block_on(async {
+            match core.read_packet(PacketLengthWidth::Legacy16).await {
+                Ok(_) => Err(Error::Runtime(
+                    "scripted read EOF unexpectedly succeeded".into(),
+                )),
+                Err(err) => Ok(err),
+            }
+        })?;
+        let eof_message = eof_err.to_string().to_ascii_lowercase();
+        assert!(
+            matches!(&eof_err, Error::Io(_))
+                && (eof_message.contains("failed to fill whole buffer")
+                    || eof_message.contains("early eof")
+                    || eof_message.contains("unexpected eof")
+                    || eof_message.contains("end of file")),
+            "scripted EOF should surface as an incomplete read, got {eof_err:?}"
+        );
+
+        let write_error = Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+            Vec::new(),
+            vec![WriteAction::Error("scripted write fault")],
+            ScriptedClock::default(),
+        )));
+        let core = ConnectionCore::<ScriptedTransport>::from_halves(
+            ScriptedRead::from_state(Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+                Vec::new(),
+                Vec::new(),
+                ScriptedClock::default(),
+            )))),
+            ScriptedWrite::from_state(write_error),
+            "scripted_write_error_write",
+        );
+        let write_err = runtime.block_on(async {
+            let cx = test_cx()?;
+            match core.write_all(&cx, &payload).await {
+                Ok(()) => Err(Error::Runtime(
+                    "scripted write error unexpectedly succeeded".into(),
+                )),
+                Err(err) => Ok(err),
+            }
+        })?;
+        assert!(
+            write_err.to_string().contains("scripted write fault"),
+            "scripted write error should keep its diagnostic"
+        );
+
+        let write_eof = Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+            Vec::new(),
+            vec![WriteAction::Eof],
+            ScriptedClock::default(),
+        )));
+        let core = ConnectionCore::<ScriptedTransport>::from_halves(
+            ScriptedRead::from_state(Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+                Vec::new(),
+                Vec::new(),
+                ScriptedClock::default(),
+            )))),
+            ScriptedWrite::from_state(write_eof),
+            "scripted_write_eof_write",
+        );
+        let write_eof_err = runtime.block_on(async {
+            let cx = test_cx()?;
+            match core.write_all(&cx, &payload).await {
+                Ok(()) => Err(Error::Runtime(
+                    "scripted write EOF unexpectedly succeeded".into(),
+                )),
+                Err(err) => Ok(err),
+            }
+        })?;
+        assert!(
+            write_eof_err
+                .to_string()
+                .contains("failed to write whole buffer")
+                || write_eof_err.to_string().contains("write zero"),
+            "scripted write EOF should surface as an incomplete write"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn scripted_transport_rejects_mismatched_and_extra_writes() -> Result<()> {
+        let expected = encode_packet(
+            TNS_PACKET_TYPE_CONNECT,
+            0,
+            None,
+            b"EXPECTED",
+            PacketLengthWidth::Legacy16,
+        )?;
+        let actual = encode_packet(
+            TNS_PACKET_TYPE_CONNECT,
+            0,
+            None,
+            b"ACTUAL",
+            PacketLengthWidth::Legacy16,
+        )?;
+
+        let runtime = build_io_runtime()?;
+        let mismatch = Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+            Vec::new(),
+            vec![WriteAction::expect_bytes(expected, None)],
+            ScriptedClock::default(),
+        )));
+        let core = ConnectionCore::<ScriptedTransport>::from_halves(
+            ScriptedRead::from_state(Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+                Vec::new(),
+                Vec::new(),
+                ScriptedClock::default(),
+            )))),
+            ScriptedWrite::from_state(mismatch),
+            "scripted_mismatch_write",
+        );
+        let mismatch_err = runtime.block_on(async {
+            let cx = test_cx()?;
+            match core.write_all(&cx, &actual).await {
+                Ok(()) => Err(Error::Runtime(
+                    "scripted mismatched write unexpectedly succeeded".into(),
+                )),
+                Err(err) => Ok(err),
+            }
+        })?;
+        assert!(
+            mismatch_err.to_string().contains("write mismatch"),
+            "scripted write mismatch should be explicit"
+        );
+
+        let extra = Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+            Vec::new(),
+            Vec::new(),
+            ScriptedClock::default(),
+        )));
+        let core = ConnectionCore::<ScriptedTransport>::from_halves(
+            ScriptedRead::from_state(Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+                Vec::new(),
+                Vec::new(),
+                ScriptedClock::default(),
+            )))),
+            ScriptedWrite::from_state(extra),
+            "scripted_extra_write",
+        );
+        let extra_err = runtime.block_on(async {
+            let cx = test_cx()?;
+            match core.write_all(&cx, &actual).await {
+                Ok(()) => Err(Error::Runtime(
+                    "scripted extra write unexpectedly succeeded".into(),
+                )),
+                Err(err) => Ok(err),
+            }
+        })?;
+        assert!(
+            extra_err.to_string().contains("unexpected write"),
+            "scripted extra write should be rejected"
+        );
+
         Ok(())
     }
 
