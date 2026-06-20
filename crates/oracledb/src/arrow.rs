@@ -1565,7 +1565,15 @@ impl crate::Connection {
         options: &ArrowFetchOptions,
     ) -> crate::Result<RecordBatch> {
         let size = fetch_array_size.max(1);
-        let mut result = self.execute_query(cx, sql, size).await?;
+        let mut result = self
+            .execute_query_with_bind_rows_and_options_core(
+                cx,
+                sql,
+                size,
+                &[],
+                crate::ExecuteOptions::default(),
+            )
+            .await?;
         require_result_set(&result.columns)?;
         let columns = std::mem::take(&mut result.columns);
         let cursor_id = result.cursor_id;
@@ -1608,7 +1616,15 @@ impl crate::Connection {
         options: &ArrowFetchOptions,
     ) -> crate::Result<RecordBatch> {
         let size = fetch_array_size.max(1);
-        let mut result = self.execute_query(cx, sql, size).await?;
+        let mut result = self
+            .execute_query_with_bind_rows_and_options_core(
+                cx,
+                sql,
+                size,
+                &[],
+                crate::ExecuteOptions::default(),
+            )
+            .await?;
         require_result_set(&result.columns)?;
         let columns = std::mem::take(&mut result.columns);
         let cursor_id = result.cursor_id;
@@ -1674,7 +1690,15 @@ impl crate::Connection {
         options: &ArrowFetchOptions,
     ) -> crate::Result<RecordBatchFetch> {
         let size = batch_size.max(1);
-        let result = self.execute_query(cx, sql, size).await?;
+        let result = self
+            .execute_query_with_bind_rows_and_options_core(
+                cx,
+                sql,
+                size,
+                &[],
+                crate::ExecuteOptions::default(),
+            )
+            .await?;
         require_result_set(&result.columns)?;
         let schema = Arc::new(arrow_schema_for_columns(&result.columns, options)?);
         Ok(RecordBatchFetch {

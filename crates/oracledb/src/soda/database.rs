@@ -5,7 +5,7 @@ use oracledb_protocol::thin::{BindValue, QueryValue};
 
 use crate::Connection;
 
-use super::collection::SodaCollection;
+use super::collection::{execute_with_binds_raw, SodaCollection};
 use super::error::{Result, SodaError};
 use super::metadata::parse_metadata;
 
@@ -53,9 +53,7 @@ impl SodaDatabase {
             },
             BindValue::Number(create_mode.to_string()),
         ];
-        conn.execute_query_with_binds(cx, sql, 0, &binds)
-            .await
-            .map_err(SodaError::Driver)?;
+        execute_with_binds_raw(conn, cx, sql, 0, &binds).await?;
 
         // Read the descriptor back.
         let name = name.unwrap_or_default();
@@ -74,10 +72,7 @@ impl SodaDatabase {
         let sql = "SELECT JSON_SERIALIZE(JSON_DESCRIPTOR) \
                    FROM USER_SODA_COLLECTIONS WHERE URI_NAME = :1";
         let binds = vec![BindValue::Text(name.to_string())];
-        let result = conn
-            .execute_query_with_binds(cx, sql, 2, &binds)
-            .await
-            .map_err(SodaError::Driver)?;
+        let result = execute_with_binds_raw(conn, cx, sql, 2, &binds).await?;
         let Some(cell) = result.cell(0, 0) else {
             return Ok(None);
         };
@@ -109,10 +104,7 @@ impl SodaDatabase {
         if limit > 0 {
             sql.push_str(&format!(" FETCH FIRST {limit} ROWS ONLY"));
         }
-        let result = conn
-            .execute_query_with_binds(cx, &sql, limit.max(100), &binds)
-            .await
-            .map_err(SodaError::Driver)?;
+        let result = execute_with_binds_raw(conn, cx, &sql, limit.max(100), &binds).await?;
         let mut names = Vec::with_capacity(result.rows.len());
         for row in &result.rows {
             if let Some(name) = row
@@ -145,10 +137,7 @@ impl SodaDatabase {
             },
             BindValue::Text(name.to_string()),
         ];
-        let result = conn
-            .execute_query_with_binds(cx, sql, 0, &binds)
-            .await
-            .map_err(SodaError::Driver)?;
+        let result = execute_with_binds_raw(conn, cx, sql, 0, &binds).await?;
         let dropped = result
             .out_values
             .first()

@@ -77,10 +77,12 @@ impl<'a>             From<Vec<(String,BindValue)>> for Params<'a> {} // params!{
   two `params!` arms are **kept verbatim**. `params![40,"x"]` → `Positional`;
   `params!{":id"=>40}` → `Named`. Borrowed (`Cow`) so callers can pass `&[BindValue]`
   without moving; owned values live in `BindValue` (no `&dyn ToSql` lifetime friction).
-- The full **23 `BindValue` variants** remain the bind currency (Null/TypedNull/Text/
-  Raw/Number/BinaryInteger/BinaryDouble/BinaryFloat/Boolean/IntervalDS/IntervalYM/
-  DateTime/Timestamp/Lob/Vector/Json/Array/Cursor/Output/ReturnOutput/ObjectInput/
-  ObjectOutput) — OUT/IN-OUT/RETURNING/object/cursor binds all expressible.
+- The full **22 current `BindValue` variants** remain the bind currency
+  (`Null`/`TypedNull`/`Output`/`ReturnOutput`/`ObjectOutput`/`ObjectInput`/`Text`/
+  `Raw`/`Lob`/`Number`/`BinaryInteger`/`BinaryDouble`/`BinaryFloat`/`Boolean`/
+  `IntervalDS`/`IntervalYM`/`DateTime`/`Timestamp`/`Array`/`Vector`/`Json`/
+  `Cursor`) — OUT/IN-OUT/RETURNING/object/cursor binds all expressible. Earlier
+  planning text said 23; source truth is 22 at this point in W1.
 
 ---
 
@@ -281,26 +283,76 @@ execute/fetch/define/cursor machinery the SODA/Arrow/direct-path facades sit on.
 
 **Execute/query sprawl → families (the only methods that change), nothing lost:**
 
-| Old (19) | New |
-|---|---|
-| `execute_query` (None LOB cells) | `Query::new(sql).stream_lobs()` → `query` |
-| `execute_query_collect` (materialized) | `query` (materialize is the default) |
-| `execute_query_with_timeout` | `Query::new(sql).timeout(d)` |
-| `execute_query_with_binds[_and_timeout]` | `query`/`Query::bind(..).timeout(d)` |
-| `query` / `query_named[_with_timeout]` | `query` (positional or `params!{}`) / `Query::timeout` |
-| `execute_query_with_bind_rows[_and_options/_and_timeout/_options_and_timeout]` | `execute_many` / `Batch{.collect_errors/.row_counts/.timeout/.raw_options}` |
-| `execute_query_for_registration` | `register_query` |
-| (cardinality, previously manual) | `query_one` / `query_opt` / `query_all` |
+| Old async method | New family path | Blocking twin |
+|---|---|---|
+| `execute_query_for_registration` | `Registration::new(sql, registration_id)` → `register_query` | `BlockingConnection::execute_query_for_registration` deprecated the same way. |
+| `execute_query` | `Query::new(sql).stream_lobs().prefetch(n)` → `query_with` for row work; `Execute::new(sql)` → `execute_with` for DML/DDL/PLSQL. The compatibility shim returns the raw first-batch `QueryResult` through the same private operation core used by those families. | `BlockingConnection::execute_query` deprecated; W1-T3.8 adds the blocking family mirror. |
+| `execute_query_collect` | `Query::new(sql).prefetch(n)` → `query_with`; materialization is the query default. | `BlockingConnection::execute_query_collect` deprecated. |
+| `execute_query_with_timeout` | `Query::new(sql).timeout(d)` or `Execute::new(sql).timeout(d)`. | `BlockingConnection::execute_query_with_timeout` deprecated. |
+| `execute_query_with_binds` | `query(cx, sql, Params)` / `Query::bind(..)` for rows; `execute(cx, sql, Params)` / `Execute::bind(..)` for DML/DDL/PLSQL. | `BlockingConnection::execute_query_with_binds` deprecated. |
+| `execute_query_with_binds_and_timeout` | `Query::bind(..).timeout(d)` or `Execute::bind(..).timeout(d)`. | `BlockingConnection::execute_query_with_binds_and_timeout` deprecated. |
+| `query` | Name reused as the async `Rows` family (`query`/`query_with`) with `Params`. | Old blocking `query` returns raw `QueryResult`; deprecated until W1-T3.8 adds the blocking `Rows` mirror. |
+| `query_named` | `query(cx, sql, params!{...})` or `Query::bind(params!{...})`. | `BlockingConnection::query_named` deprecated. |
+| `query_named_with_timeout` | `Query::bind(params!{...}).timeout(d)`. | `BlockingConnection::query_named_with_timeout` deprecated. |
+| `execute_query_with_bind_rows` | `execute_many(cx, sql, BatchRows)` / `Batch::new(sql, rows)`. Query-style raw first-batch compatibility uses the shared private operation core. | `BlockingConnection::execute_query_with_bind_rows` deprecated. |
+| `execute_query_with_bind_rows_and_options` | `Batch::raw_options`, `Execute::raw_options`, or `Query` builders depending on operation family. | No separate old blocking twin; use `execute_query_with_bind_rows_options_and_timeout(..., None)` compatibility if needed. |
+| `execute_query_with_bind_rows_and_timeout` | `Batch::timeout(d)` or `Query::timeout(d)` as appropriate. | `BlockingConnection::execute_query_with_bind_rows_and_timeout` deprecated. |
+| `execute_query_with_bind_rows_options_and_timeout` | `Batch::raw_options(...).timeout(d)`, `Execute::raw_options(...).timeout(d)`, or `Query` builders. | `BlockingConnection::execute_query_with_bind_rows_options_and_timeout` deprecated. |
+| Cardinality checks previously done manually | `query_one`, `query_opt`, `query_all`. | W1-T3.8 mirrors these on `BlockingConnection`. |
 
-All 24 "must not lose" items from the inventory are covered: 1 (describe vs collect →
-`stream_lobs` vs default); 2 (13 ExecuteOptions → builder methods + `raw_options`);
-3 (OUT/RETURNING/implicit/REF CURSOR → `ExecuteOutcome`/`Rows::cursor`); 4 (batch errors/
-counts → `Batch`/`BatchOutcome`); 5 (zero-copy/speculative fetch → retained); 6 (scroll →
-`Query::scrollable`+`Rows::scroll`+retained `scroll_cursor`); 7 (per-call timeout → `.timeout`
-cancel-safe); 8 (named/positional + IntoBinds/params! → `Params`); 9 (typed stack → kept);
-10 (23 BindValue/16 QueryValue → kept); 11–22 (CQN/LOB/AQ/objects/txn/pool/pipeline/
-accessors/cancel/errors/DBMS_OUTPUT → retained); 23 (blocking mirror → W1-T8); 24
-(Arrow/dpl/SODA/profiling/protocol → retained).
+**24 capability groups covered by the map:**
+
+| ID | Capability | Disposition |
+|---|---|---|
+| C01 | Describe-only vs collected/materialized result cells | `Query::stream_lobs()` preserves raw describe behavior; default `Query` materializes LOB/JSON/vector cells. |
+| C02 | All `ExecuteOptions` knobs | Common knobs are builders; rare/internal combinations remain reachable through `raw_options`. |
+| C03 | OUT binds, DML RETURNING, implicit results, REF CURSOR | `ExecuteOutcome`, `ReturningRows`, `OutBinds`, `Rows::cursor`, and retained `fetch_cursor`. |
+| C04 | Batch errors and array DML row counts | `Batch::collect_errors`, `Batch::row_counts`, `BatchOutcome::errors`, `BatchOutcome::per_row_counts`. |
+| C05 | Low-level fetch, zero-copy borrowed fetch, speculative fetch | Retained public fetch/paging primitives. |
+| C06 | Scrollability | `Query::scrollable`, `Rows::scroll`, and retained `scroll_cursor`. |
+| C07 | Timeouts | `Query::timeout`, `Execute::timeout`, `Batch::timeout`, `Registration::timeout`; one logical operation deadline. |
+| C08 | Named/positional bind ergonomics | `Params`, `IntoBinds`, and `params!` cover positional and named binds. |
+| C09 | Typed read/write stack | `FromSql`, `ToSql`, `FromRow`, derive, `Row::get`, and `Rows::into_typed` retained. |
+| C10 | Value enum surface | 22 `BindValue` variants and 16 `QueryValue` variants remain covered below. |
+| C11 | Continuous Query Notification | `Registration`/`register_query` plus retained subscribe/notify primitives. |
+| C12 | LOB and BFILE operations | Retained read/write/trim/create/free APIs and timeout variants. |
+| C13 | AQ | Retained enqueue/dequeue APIs and option/property/payload types. |
+| C14 | Oracle objects and collections | Retained describe/decode/object bind capabilities. |
+| C15 | Local, TPC, and sessionless transactions | Retained transaction APIs. |
+| C16 | Pooling | Retained through W1-T7; public facade revised there. |
+| C17 | Pipeline execution | Retained `run_pipeline`, `run_pipeline_decoded`, and `PipelineRequest`. |
+| C18 | Lifecycle/accessors | Retained connect/close/ping/change-password/accessor/cursor-release APIs. |
+| C19 | Cancellation | Retained `cancel`, `CancelHandle`, cancel-on-drop recovery, and W1-T2 state machine. |
+| C20 | Error classification | W1-T6 structured errors build on the retained `Error` surface. |
+| C21 | DBMS_OUTPUT | Retained `enable_dbms_output` and `read_dbms_output`. |
+| C22 | `ConnectOptions` knobs | Retained and accessorized in W1-T4. |
+| C23 | Blocking mirror | W1-T3.8 adds a 1:1 blocking family mirror; deprecated blocking old names remain shims until then. |
+| C24 | Arrow, direct-path load, SODA, profiling, protocol re-export | Retained facades and `oracledb::protocol` re-export. |
+
+**`ExecuteOptions` field mapping (13/13):**
+
+| Field | Family surface |
+|---|---|
+| `batcherrors` | `Batch::collect_errors` or `Batch::raw_options`. |
+| `arraydmlrowcounts` | `Batch::row_counts` or `Batch::raw_options`. |
+| `parse_only` | `Execute::parse_only` or `Execute::raw_options`. |
+| `token_num` | Pipeline internals / `raw_options` compatibility. |
+| `cursor_id` | Retained cursor primitives / `raw_options` compatibility. |
+| `cache_statement` | Statement-cache behavior remains in the private operation core; `raw_options` preserves override. |
+| `scrollable` | `Query::scrollable`. |
+| `fetch_orientation` | `Rows::scroll` and retained `scroll_cursor`; `raw_options` preserves exact wire override. |
+| `fetch_pos` | `Rows::scroll` and retained `scroll_cursor`; `raw_options` preserves exact wire override. |
+| `scroll_operation` | `Rows::scroll` and retained `scroll_cursor`; `raw_options` preserves exact wire override. |
+| `suspend_on_success` | `Execute::raw_options` / `Batch::raw_options` for sessionless piggyback. |
+| `no_prefetch` | Private refetch/define logic and `raw_options` compatibility. |
+| `registration_id` | `Registration::new(sql, registration_id)` / `register_query`; `raw_options` still exact. |
+
+**Value variants retained:**
+
+| Domain | Variants |
+|---|---|
+| `BindValue` (22 current variants) | `Null`, `TypedNull`, `Output`, `ReturnOutput`, `ObjectOutput`, `ObjectInput`, `Text`, `Raw`, `Lob`, `Number`, `BinaryInteger`, `BinaryDouble`, `BinaryFloat`, `Boolean`, `IntervalDS`, `IntervalYM`, `DateTime`, `Timestamp`, `Array`, `Vector`, `Json`, `Cursor`. |
+| `QueryValue` (16 variants) | `Text`, `TextRaw`, `Raw`, `Rowid`, `BinaryDouble`, `IntervalDS`, `IntervalYM`, `Number`, `Boolean`, `Cursor`, `DateTime`, `Object`, `Lob`, `Vector`, `Json`, `Array`. |
 
 ---
 

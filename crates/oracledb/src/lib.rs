@@ -141,17 +141,17 @@ use oracledb_protocol::thin::{
     build_begin_pipeline_piggyback, build_change_password_payload_with_seq,
     build_connect_packet_payload, build_define_fetch_payload_with_seq,
     build_end_pipeline_payload_with_seq, build_execute_payload_with_bind_rows_and_options_with_seq,
-    build_execute_payload_with_bind_rows_with_seq_and_token, build_execute_payload_with_seq,
-    build_fast_auth_phase_one_payload, build_fast_auth_token_payload, build_fetch_payload_with_seq,
-    build_function_payload_with_seq, build_function_payload_with_seq_and_token,
-    build_lob_create_temp_payload_with_seq, build_lob_free_temp_payload_with_seq,
-    build_lob_read_payload_with_seq, build_lob_trim_payload_with_seq,
-    build_lob_write_payload_with_seq, parse_accept_payload, parse_auth_response_with_limits,
-    parse_fetch_response_with_context_and_limits, parse_lob_create_temp_response_with_limits,
-    parse_lob_free_temp_response_with_limits, parse_lob_read_response_with_limits,
-    parse_lob_trim_response_with_limits, parse_lob_write_response_with_limits,
-    parse_plain_function_response_with_limits, parse_query_response_borrowed_with_limits,
-    parse_query_response_with_binds_options_columns_and_limits, parse_query_response_with_limits,
+    build_execute_payload_with_bind_rows_with_seq_and_token, build_fast_auth_phase_one_payload,
+    build_fast_auth_token_payload, build_fetch_payload_with_seq, build_function_payload_with_seq,
+    build_function_payload_with_seq_and_token, build_lob_create_temp_payload_with_seq,
+    build_lob_free_temp_payload_with_seq, build_lob_read_payload_with_seq,
+    build_lob_trim_payload_with_seq, build_lob_write_payload_with_seq, parse_accept_payload,
+    parse_auth_response_with_limits, parse_fetch_response_with_context_and_limits,
+    parse_lob_create_temp_response_with_limits, parse_lob_free_temp_response_with_limits,
+    parse_lob_read_response_with_limits, parse_lob_trim_response_with_limits,
+    parse_lob_write_response_with_limits, parse_plain_function_response_with_limits,
+    parse_query_response_borrowed_with_limits,
+    parse_query_response_with_binds_options_columns_and_limits,
     parse_tpc_txn_switch_response_with_limits, BatchServerError, BindValue, BorrowedFetchResult,
     ClientCapabilities, ColumnMetadata, CursorValue, ExecuteOptions, LobReadResult, QueryResult,
     QueryValue, QueryValueRef, SessionlessTxnState, TpcChangeStateResponse, TpcSwitchResponse,
@@ -3369,6 +3369,7 @@ impl Connection {
     /// `cursor_impl._query_id`). Returns `Some(0)`/`None` when the server sent no
     /// query id (qos without SUBSCR_QOS_QUERY). Server errors (ORA-00942,
     /// ORA-29975) surface unchanged.
+    #[deprecated(note = "use Connection::register_query")]
     pub async fn execute_query_for_registration(
         &mut self,
         cx: &Cx,
@@ -3455,8 +3456,14 @@ impl Connection {
         // `buffer_bytes` is a u32 we own (never untrusted text), so inlining it
         // as a numeric literal is injection-safe and avoids an extra IN bind.
         let arg = buffer_bytes.map_or_else(|| "null".to_string(), |n| n.to_string());
-        self.execute_query(cx, &format!("begin dbms_output.enable({arg}); end;"), 0)
-            .await?;
+        self.execute_query_with_bind_rows_and_options_core(
+            cx,
+            &format!("begin dbms_output.enable({arg}); end;"),
+            0,
+            &[],
+            ExecuteOptions::default(),
+        )
+        .await?;
         Ok(())
     }
 
@@ -3490,7 +3497,7 @@ impl Connection {
                 },
             ]];
             let res = self
-                .execute_query_with_bind_rows_and_options(
+                .execute_query_with_bind_rows_and_options_core(
                     cx,
                     "begin dbms_output.get_line(:1, :2); end;",
                     0,
@@ -3981,51 +3988,23 @@ impl Connection {
     /// Columns that need a client-side define (`CLOB` / `BLOB` / `VECTOR` /
     /// native `JSON`) return describe-only metadata with `None` cells here;
     /// use [`Self::execute_query_collect`] to materialize them in one call.
+    #[deprecated(
+        note = "use Connection::query/query_with for rows or Connection::execute/execute_with for DML/PLSQL"
+    )]
     pub async fn execute_query(
         &mut self,
         cx: &Cx,
         sql: &str,
         prefetch_rows: u32,
     ) -> Result<QueryResult> {
-        // Per-round-trip observability span (feature-gated, zero-cost when off).
-        // Carries the SQL DIGEST (statement shape, never literal values) and a
-        // bind count of 0 (no binds on this path); `db.rows_fetched` is filled
-        // after the response. See `docs/OBSERVABILITY.md`.
-        let _span = obs_span!(
-            "oracledb.execute",
-            db.statement = %crate::obs::sql_digest(sql),
-            db.bind_count = 0u64,
-            db.rows_fetched = tracing::field::Empty,
-        );
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
-        // If a prior cancellable round trip was dropped mid-read, break + drain
-        // the stranded call before issuing this execute (Scope cancel-on-drop).
-        self.ensure_clean_before_request().await?;
-        // Flush any cursors queued for close (via `close_cursor`) ahead of this
-        // execute: the close-cursors piggyback carries its own sequence number
-        // and is prepended to the execute payload, mirroring the bind-rows
-        // execute path. With no queued closes this is a no-op.
-        let close_piggyback = self.take_close_cursors_piggyback();
-        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let mut payload =
-            build_execute_payload_with_seq(sql, prefetch_rows, seq_num, statement_is_query(sql))?;
-        if let Some(mut piggyback_bytes) = close_piggyback {
-            piggyback_bytes.extend_from_slice(&payload);
-            payload = piggyback_bytes;
-        }
-        trace_query_bytes("EXECUTE query payload", &payload);
-        self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        // Read under a cancel-on-drop guard: a dropped execute future arms the
-        // next operation's break + drain.
-        let response = self.read_response_cancellable(cx).await?;
-        trace_query_bytes("EXECUTE query response", &response);
-        let parsed =
-            parse_query_response_with_limits(&response, self.capabilities, self.protocol_limits);
-        let result = self.note_parse(parsed)?;
-        obs_record!(_span, db.rows_fetched = result.rows.len() as u64);
-        self.remember_cursor_columns(&result);
-        Ok(result)
+        self.execute_query_with_bind_rows_and_options_core(
+            cx,
+            sql,
+            prefetch_rows,
+            &[],
+            ExecuteOptions::default(),
+        )
+        .await
     }
 
     /// Execute `sql` and return the first fetch batch with every cell fully
@@ -4043,13 +4022,34 @@ impl Connection {
     /// `prefetch_rows` is the requested batch size. Rows beyond the first
     /// batch (when `more_rows` is set) are fetched with the cursor's
     /// `fetch_rows` / `define_and_fetch_rows_with_columns` methods as usual.
+    #[deprecated(
+        note = "use Connection::query/query_with; Query materializes LOB/JSON/vector cells by default"
+    )]
     pub async fn execute_query_collect(
         &mut self,
         cx: &Cx,
         sql: &str,
         prefetch_rows: u32,
     ) -> Result<QueryResult> {
-        let mut result = self.execute_query(cx, sql, prefetch_rows).await?;
+        self.execute_query_collect_core(cx, sql, prefetch_rows)
+            .await
+    }
+
+    async fn execute_query_collect_core(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+    ) -> Result<QueryResult> {
+        let mut result = self
+            .execute_query_with_bind_rows_and_options_core(
+                cx,
+                sql,
+                prefetch_rows,
+                &[],
+                ExecuteOptions::default(),
+            )
+            .await?;
         if !columns_require_define(&result.columns) || result.cursor_id == 0 {
             return Ok(result);
         }
@@ -4074,6 +4074,9 @@ impl Connection {
         Ok(result)
     }
 
+    #[deprecated(
+        note = "use Query::timeout with Connection::query/query_with or Execute::timeout with Connection::execute/execute_with"
+    )]
     pub async fn execute_query_with_timeout(
         &mut self,
         cx: &Cx,
@@ -4091,6 +4094,9 @@ impl Connection {
     /// placeholder in declaration order), `binds[1]` fills `:2`, and so on. Use
     /// [`Self::execute_query_with_bind_rows`] to run the same statement over
     /// many bind rows in a single array-DML round trip.
+    #[deprecated(
+        note = "use Connection::query/query_with for rows or Connection::execute/execute_with for DML/PLSQL"
+    )]
     pub async fn execute_query_with_binds(
         &mut self,
         cx: &Cx,
@@ -4098,21 +4104,13 @@ impl Connection {
         prefetch_rows: u32,
         binds: &[BindValue],
     ) -> Result<QueryResult> {
-        let bind_rows = if binds.is_empty() {
-            Vec::new()
-        } else {
-            vec![binds.to_vec()]
-        };
-        self.execute_query_with_bind_rows_and_options(
-            cx,
-            sql,
-            prefetch_rows,
-            &bind_rows,
-            ExecuteOptions::default(),
-        )
-        .await
+        self.execute_query_with_binds_core(cx, sql, prefetch_rows, binds)
+            .await
     }
 
+    #[deprecated(
+        note = "use Query::timeout with query/query_with or Execute::timeout with execute/execute_with"
+    )]
     pub async fn execute_query_with_binds_and_timeout(
         &mut self,
         cx: &Cx,
@@ -4233,7 +4231,7 @@ impl Connection {
         };
         let deadline = QueryDeadline::new(cx, timeout);
         let mut result = match deadline
-            .run(self.execute_query_with_bind_rows_and_options(
+            .run(self.execute_query_with_bind_rows_and_options_core(
                 cx,
                 &sql_owned,
                 prefetch,
@@ -4318,20 +4316,19 @@ impl Connection {
             vec![binds]
         };
         let deadline = QueryDeadline::new(cx, timeout);
-        let result =
-            match deadline
-                .run(self.execute_query_with_bind_rows_and_options(
-                    cx, &sql_owned, 0, &bind_rows, options,
-                ))
-                .await
-            {
-                Ok(result) => result?,
-                Err(()) => {
-                    return self
-                        .recover_from_call_timeout(cx, deadline.timeout_ms())
-                        .await
-                }
-            };
+        let result = match deadline
+            .run(self.execute_query_with_bind_rows_and_options_core(
+                cx, &sql_owned, 0, &bind_rows, options,
+            ))
+            .await
+        {
+            Ok(result) => result?,
+            Err(()) => {
+                return self
+                    .recover_from_call_timeout(cx, deadline.timeout_ms())
+                    .await
+            }
+        };
         Ok(ExecuteOutcome::from_query_result(result))
     }
 
@@ -4365,7 +4362,7 @@ impl Connection {
         let sql_owned = sql.into_owned();
         let deadline = QueryDeadline::new(cx, timeout);
         let result = match deadline
-            .run(self.execute_query_with_bind_rows_and_options(
+            .run(self.execute_query_with_bind_rows_and_options_core(
                 cx,
                 &sql_owned,
                 0,
@@ -4409,7 +4406,7 @@ impl Connection {
         };
         let deadline = QueryDeadline::new(cx, timeout);
         let result = match deadline
-            .run(self.execute_query_with_bind_rows_and_options(
+            .run(self.execute_query_with_bind_rows_and_options_core(
                 cx,
                 &sql_owned,
                 0,
@@ -4448,6 +4445,7 @@ impl Connection {
     ///     .await?;
     /// # let _ = rows; Ok(()) }
     /// ```
+    #[deprecated(note = "use Connection::query with params!{} named parameters")]
     pub async fn query_named(
         &mut self,
         cx: &Cx,
@@ -4455,7 +4453,7 @@ impl Connection {
         named_params: Vec<(String, BindValue)>,
     ) -> Result<QueryResult> {
         let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params));
-        self.execute_query_with_binds(cx, sql, 1, &binds).await
+        self.execute_query_with_binds_core(cx, sql, 1, &binds).await
     }
 
     /// [`Self::query_named`] with a per-call timeout, for parity with the
@@ -4464,6 +4462,7 @@ impl Connection {
     /// fails with [`Error::CallTimeout`] (the connection stays usable). `None`
     /// means no timeout. Like [`Self::query_named`], the named binds are
     /// reordered to the placeholders' first-appearance order in `sql`.
+    #[deprecated(note = "use Query::timeout with Connection::query and params!{} named parameters")]
     pub async fn query_named_with_timeout(
         &mut self,
         cx: &Cx,
@@ -4472,7 +4471,7 @@ impl Connection {
         timeout_ms: Option<u32>,
     ) -> Result<QueryResult> {
         let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params));
-        self.execute_query_with_binds_and_timeout(cx, sql, 1, &binds, timeout_ms)
+        self.execute_query_with_binds_call_timeout(cx, sql, 1, &binds, timeout_ms)
             .await
     }
 
@@ -4483,6 +4482,9 @@ impl Connection {
     /// batch errors, use
     /// [`Self::execute_query_with_bind_rows_and_options`] with the matching
     /// [`ExecuteOptions`] flags.
+    #[deprecated(
+        note = "use Connection::execute_many/execute_many_with for array DML or Connection::query/query_with for rows"
+    )]
     pub async fn execute_query_with_bind_rows(
         &mut self,
         cx: &Cx,
@@ -4490,7 +4492,7 @@ impl Connection {
         prefetch_rows: u32,
         bind_rows: &[Vec<BindValue>],
     ) -> Result<QueryResult> {
-        self.execute_query_with_bind_rows_and_options(
+        self.execute_query_with_bind_rows_and_options_core(
             cx,
             sql,
             prefetch_rows,
@@ -4500,7 +4502,50 @@ impl Connection {
         .await
     }
 
+    #[deprecated(
+        note = "use Batch::raw_options with execute_many_with, Execute::raw_options with execute_with, or Query builders"
+    )]
     pub async fn execute_query_with_bind_rows_and_options(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+        bind_rows: &[Vec<BindValue>],
+        exec_options: ExecuteOptions,
+    ) -> Result<QueryResult> {
+        self.execute_query_with_bind_rows_and_options_core(
+            cx,
+            sql,
+            prefetch_rows,
+            bind_rows,
+            exec_options,
+        )
+        .await
+    }
+
+    pub(crate) async fn execute_query_with_binds_core(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+        binds: &[BindValue],
+    ) -> Result<QueryResult> {
+        let bind_rows = if binds.is_empty() {
+            Vec::new()
+        } else {
+            vec![binds.to_vec()]
+        };
+        self.execute_query_with_bind_rows_and_options_core(
+            cx,
+            sql,
+            prefetch_rows,
+            &bind_rows,
+            ExecuteOptions::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn execute_query_with_bind_rows_and_options_core(
         &mut self,
         cx: &Cx,
         sql: &str,
@@ -4736,6 +4781,9 @@ impl Connection {
         }
     }
 
+    #[deprecated(
+        note = "use Batch::timeout with Connection::execute_many_with or Query::timeout with Connection::query_with"
+    )]
     pub async fn execute_query_with_bind_rows_and_timeout(
         &mut self,
         cx: &Cx,
@@ -4754,7 +4802,30 @@ impl Connection {
         .await
     }
 
+    #[deprecated(
+        note = "use Batch::raw_options(...).timeout(...) with execute_many_with, Execute::raw_options(...).timeout(...) with execute_with, or Query builders"
+    )]
     pub async fn execute_query_with_bind_rows_options_and_timeout(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        prefetch_rows: u32,
+        bind_rows: &[Vec<BindValue>],
+        exec_options: ExecuteOptions,
+        timeout_ms: Option<u32>,
+    ) -> Result<QueryResult> {
+        self.execute_query_with_bind_rows_options_call_timeout(
+            cx,
+            sql,
+            prefetch_rows,
+            bind_rows,
+            exec_options,
+            timeout_ms,
+        )
+        .await
+    }
+
+    pub(crate) async fn execute_query_with_bind_rows_options_call_timeout(
         &mut self,
         cx: &Cx,
         sql: &str,
@@ -4765,7 +4836,7 @@ impl Connection {
     ) -> Result<QueryResult> {
         let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
             return self
-                .execute_query_with_bind_rows_and_options(
+                .execute_query_with_bind_rows_and_options_core(
                     cx,
                     sql,
                     prefetch_rows,
@@ -4777,7 +4848,7 @@ impl Connection {
         match time::timeout(
             time::wall_now(),
             Duration::from_millis(u64::from(timeout_ms)),
-            self.execute_query_with_bind_rows_and_options(
+            self.execute_query_with_bind_rows_and_options_core(
                 cx,
                 sql,
                 prefetch_rows,
@@ -5113,7 +5184,13 @@ impl Connection {
         // owned result below. To keep the borrowed guarantee for the first batch
         // too, we re-fetch borrowed pages from the cursor.
         let first = self
-            .execute_query_with_bind_rows(cx, sql, arraysize, &[])
+            .execute_query_with_bind_rows_and_options_core(
+                cx,
+                sql,
+                arraysize,
+                &[],
+                ExecuteOptions::default(),
+            )
             .await?;
         let cursor_id = first.cursor_id;
 
@@ -5330,7 +5407,7 @@ impl Connection {
         // A collection type (VARRAY / nested table) is described by its element
         // type, not by attributes — check ALL_COLL_TYPES first.
         let coll = self
-            .execute_query_with_binds(
+            .execute_query_with_binds_core(
                 cx,
                 "select elem_type_name, elem_type_owner from all_coll_types \
                  where owner = :1 and type_name = :2",
@@ -5353,7 +5430,7 @@ impl Connection {
         // High prefetch so every attribute row arrives in one batch. Oracle caps
         // a type at 1000 attributes, so this never truncates the metadata.
         let res = self
-            .execute_query_with_binds(
+            .execute_query_with_binds_core(
                 cx,
                 "select attr_name, attr_type_name, attr_type_owner from all_type_attrs \
                  where owner = :1 and type_name = :2 order by attr_no",
@@ -5818,12 +5895,26 @@ impl Connection {
         timeout_ms: Option<u32>,
     ) -> Result<QueryResult> {
         let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
-            return self.execute_query(cx, sql, prefetch_rows).await;
+            return self
+                .execute_query_with_bind_rows_and_options_core(
+                    cx,
+                    sql,
+                    prefetch_rows,
+                    &[],
+                    ExecuteOptions::default(),
+                )
+                .await;
         };
         match time::timeout(
             time::wall_now(),
             Duration::from_millis(u64::from(timeout_ms)),
-            self.execute_query(cx, sql, prefetch_rows),
+            self.execute_query_with_bind_rows_and_options_core(
+                cx,
+                sql,
+                prefetch_rows,
+                &[],
+                ExecuteOptions::default(),
+            ),
         )
         .await
         {
@@ -5842,13 +5933,13 @@ impl Connection {
     ) -> Result<QueryResult> {
         let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
             return self
-                .execute_query_with_binds(cx, sql, prefetch_rows, binds)
+                .execute_query_with_binds_core(cx, sql, prefetch_rows, binds)
                 .await;
         };
         match time::timeout(
             time::wall_now(),
             Duration::from_millis(u64::from(timeout_ms)),
-            self.execute_query_with_binds(cx, sql, prefetch_rows, binds),
+            self.execute_query_with_binds_core(cx, sql, prefetch_rows, binds),
         )
         .await
         {
@@ -5867,13 +5958,25 @@ impl Connection {
     ) -> Result<QueryResult> {
         let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
             return self
-                .execute_query_with_bind_rows(cx, sql, prefetch_rows, bind_rows)
+                .execute_query_with_bind_rows_and_options_core(
+                    cx,
+                    sql,
+                    prefetch_rows,
+                    bind_rows,
+                    ExecuteOptions::default(),
+                )
                 .await;
         };
         match time::timeout(
             time::wall_now(),
             Duration::from_millis(u64::from(timeout_ms)),
-            self.execute_query_with_bind_rows(cx, sql, prefetch_rows, bind_rows),
+            self.execute_query_with_bind_rows_and_options_core(
+                cx,
+                sql,
+                prefetch_rows,
+                bind_rows,
+                ExecuteOptions::default(),
+            ),
         )
         .await
         {
@@ -6809,7 +6912,7 @@ impl Connection {
         }
         for (index, column_name) in candidates {
             let result = self
-                .execute_query_with_binds_and_timeout(
+                .execute_query_with_binds_call_timeout(
                     cx,
                     "select 1 \
                      from all_json_columns \
@@ -7030,6 +7133,7 @@ impl BlockingConnection {
 
     /// Execute a registerquery (registration id into the execute, query id out).
     /// See [`Connection::execute_query_for_registration`].
+    #[deprecated(note = "use Connection::register_query")]
     pub fn execute_query_for_registration(
         connection: &mut Connection,
         sql: &str,
@@ -7040,8 +7144,12 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection
-                .execute_query_for_registration(&cx, sql, registration_id)
+                .register_query(
+                    &cx,
+                    Registration::owned_sql(sql.to_string(), registration_id),
+                )
                 .await
+                .map(|outcome| outcome.query_id())
         })
     }
 
@@ -7228,6 +7336,9 @@ impl BlockingConnection {
         })
     }
 
+    #[deprecated(
+        note = "use Connection::query/query_with for rows or Connection::execute/execute_with for DML/PLSQL"
+    )]
     pub fn execute_query(
         connection: &mut Connection,
         sql: &str,
@@ -7237,13 +7348,24 @@ impl BlockingConnection {
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            connection.execute_query(&cx, sql, prefetch_rows).await
+            connection
+                .execute_query_with_bind_rows_and_options_core(
+                    &cx,
+                    sql,
+                    prefetch_rows,
+                    &[],
+                    ExecuteOptions::default(),
+                )
+                .await
         })
     }
 
     /// Blocking wrapper for [`Connection::execute_query_collect`]: execute and
     /// return the first batch with `CLOB` / `BLOB` / `VECTOR` / native `JSON`
     /// cells fully materialized via an automatic define-fetch round trip.
+    #[deprecated(
+        note = "use Connection::query/query_with; Query materializes LOB/JSON/vector cells by default"
+    )]
     pub fn execute_query_collect(
         connection: &mut Connection,
         sql: &str,
@@ -7254,11 +7376,14 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection
-                .execute_query_collect(&cx, sql, prefetch_rows)
+                .execute_query_collect_core(&cx, sql, prefetch_rows)
                 .await
         })
     }
 
+    #[deprecated(
+        note = "use Query::timeout with Connection::query/query_with or Execute::timeout with Connection::execute/execute_with"
+    )]
     pub fn execute_query_with_timeout(
         connection: &mut Connection,
         sql: &str,
@@ -7275,6 +7400,9 @@ impl BlockingConnection {
         })
     }
 
+    #[deprecated(
+        note = "use Connection::query/query_with for rows or Connection::execute/execute_with for DML/PLSQL"
+    )]
     pub fn execute_query_with_binds(
         connection: &mut Connection,
         sql: &str,
@@ -7286,11 +7414,14 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection
-                .execute_query_with_binds(&cx, sql, prefetch_rows, binds)
+                .execute_query_with_binds_core(&cx, sql, prefetch_rows, binds)
                 .await
         })
     }
 
+    #[deprecated(
+        note = "use Query::timeout with Connection::query/query_with or Execute::timeout with Connection::execute/execute_with"
+    )]
     pub fn execute_query_with_binds_and_timeout(
         connection: &mut Connection,
         sql: &str,
@@ -7312,6 +7443,7 @@ impl BlockingConnection {
     /// positionally (a tuple `(40, "alice")`, an array, or a raw
     /// `Vec<BindValue>`) or by name with [`params!`](crate::params), then return
     /// the first batch.
+    #[deprecated(note = "use Connection::query with Params; W1-T3.8 adds the blocking mirror")]
     pub fn query<'p>(
         connection: &mut Connection,
         sql: &str,
@@ -7323,7 +7455,7 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection
-                .execute_query_with_binds(&cx, sql, 1, &binds)
+                .execute_query_with_binds_core(&cx, sql, 1, &binds)
                 .await
         })
     }
@@ -7332,38 +7464,51 @@ impl BlockingConnection {
     /// [`params!`](crate::params) named form
     /// (`params!{ ":id" => 40 }`); names are reordered to the placeholder
     /// first-appearance order in `sql`.
+    #[deprecated(
+        note = "use Connection::query with params!{} named parameters; W1-T3.8 adds the blocking mirror"
+    )]
     pub fn query_named(
         connection: &mut Connection,
         sql: &str,
         named_params: Vec<(String, BindValue)>,
     ) -> Result<QueryResult> {
+        let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params));
         let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            connection.query_named(&cx, sql, named_params).await
+            connection
+                .execute_query_with_binds_core(&cx, sql, 1, &binds)
+                .await
         })
     }
 
     /// Blocking wrapper for [`Connection::query_named_with_timeout`]: named binds
     /// plus a per-call timeout (`Error::CallTimeout` on expiry; `None` = no
     /// timeout).
+    #[deprecated(
+        note = "use Query::timeout with Connection::query and params!{} named parameters; W1-T3.8 adds the blocking mirror"
+    )]
     pub fn query_named_with_timeout(
         connection: &mut Connection,
         sql: &str,
         named_params: Vec<(String, BindValue)>,
         timeout_ms: Option<u32>,
     ) -> Result<QueryResult> {
+        let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params));
         let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection
-                .query_named_with_timeout(&cx, sql, named_params, timeout_ms)
+                .execute_query_with_binds_call_timeout(&cx, sql, 1, &binds, timeout_ms)
                 .await
         })
     }
 
+    #[deprecated(
+        note = "use Connection::execute_many/execute_many_with for array DML or Connection::query/query_with for rows"
+    )]
     pub fn execute_query_with_bind_rows(
         connection: &mut Connection,
         sql: &str,
@@ -7375,11 +7520,20 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection
-                .execute_query_with_bind_rows(&cx, sql, prefetch_rows, bind_rows)
+                .execute_query_with_bind_rows_and_options_core(
+                    &cx,
+                    sql,
+                    prefetch_rows,
+                    bind_rows,
+                    ExecuteOptions::default(),
+                )
                 .await
         })
     }
 
+    #[deprecated(
+        note = "use Batch::timeout with Connection::execute_many_with or Query::timeout with Connection::query_with"
+    )]
     pub fn execute_query_with_bind_rows_and_timeout(
         connection: &mut Connection,
         sql: &str,
@@ -7403,6 +7557,9 @@ impl BlockingConnection {
         })
     }
 
+    #[deprecated(
+        note = "use Batch::raw_options(...).timeout(...) with execute_many_with, Execute::raw_options(...).timeout(...) with execute_with, or Query builders"
+    )]
     pub fn execute_query_with_bind_rows_options_and_timeout(
         connection: &mut Connection,
         sql: &str,
@@ -7416,7 +7573,7 @@ impl BlockingConnection {
             let cx = Cx::current()
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection
-                .execute_query_with_bind_rows_options_and_timeout(
+                .execute_query_with_bind_rows_options_call_timeout(
                     &cx,
                     sql,
                     prefetch_rows,
@@ -8951,6 +9108,169 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn api_design_nothing_lost_map_covers_current_surface() {
+        fn bind_value_variant_name(value: &BindValue) -> &'static str {
+            match value {
+                BindValue::Null => "Null",
+                BindValue::TypedNull { .. } => "TypedNull",
+                BindValue::Output { .. } => "Output",
+                BindValue::ReturnOutput { .. } => "ReturnOutput",
+                BindValue::ObjectOutput { .. } => "ObjectOutput",
+                BindValue::ObjectInput { .. } => "ObjectInput",
+                BindValue::Text(_) => "Text",
+                BindValue::Raw(_) => "Raw",
+                BindValue::Lob { .. } => "Lob",
+                BindValue::Number(_) => "Number",
+                BindValue::BinaryInteger(_) => "BinaryInteger",
+                BindValue::BinaryDouble(_) => "BinaryDouble",
+                BindValue::BinaryFloat(_) => "BinaryFloat",
+                BindValue::Boolean(_) => "Boolean",
+                BindValue::IntervalDS { .. } => "IntervalDS",
+                BindValue::IntervalYM { .. } => "IntervalYM",
+                BindValue::DateTime { .. } => "DateTime",
+                BindValue::Timestamp { .. } => "Timestamp",
+                BindValue::Array { .. } => "Array",
+                BindValue::Vector(_) => "Vector",
+                BindValue::Json(_) => "Json",
+                BindValue::Cursor { .. } => "Cursor",
+            }
+        }
+
+        fn query_value_variant_name(value: &QueryValue) -> &'static str {
+            match value {
+                QueryValue::Text(_) => "Text",
+                QueryValue::TextRaw { .. } => "TextRaw",
+                QueryValue::Raw(_) => "Raw",
+                QueryValue::Rowid(_) => "Rowid",
+                QueryValue::BinaryDouble(_) => "BinaryDouble",
+                QueryValue::IntervalDS { .. } => "IntervalDS",
+                QueryValue::IntervalYM { .. } => "IntervalYM",
+                QueryValue::Number(_) => "Number",
+                QueryValue::Boolean(_) => "Boolean",
+                QueryValue::Cursor(_) => "Cursor",
+                QueryValue::DateTime { .. } => "DateTime",
+                QueryValue::Object(_) => "Object",
+                QueryValue::Lob(_) => "Lob",
+                QueryValue::Vector(_) => "Vector",
+                QueryValue::Json(_) => "Json",
+                QueryValue::Array(_) => "Array",
+            }
+        }
+
+        assert_eq!(bind_value_variant_name(&BindValue::Null), "Null");
+        assert_eq!(
+            query_value_variant_name(&QueryValue::Text(String::new())),
+            "Text"
+        );
+
+        let design = include_str!("../../../docs/API_DESIGN.md");
+        for method in [
+            "execute_query_for_registration",
+            "execute_query",
+            "execute_query_collect",
+            "execute_query_with_timeout",
+            "execute_query_with_binds",
+            "execute_query_with_binds_and_timeout",
+            "query",
+            "query_named",
+            "query_named_with_timeout",
+            "execute_query_with_bind_rows",
+            "execute_query_with_bind_rows_and_options",
+            "execute_query_with_bind_rows_and_timeout",
+            "execute_query_with_bind_rows_options_and_timeout",
+        ] {
+            assert!(design.contains(method), "API_DESIGN.md missing {method}");
+        }
+
+        for group in 1..=24 {
+            let marker = format!("C{group:02}");
+            assert!(
+                design.contains(&marker),
+                "API_DESIGN.md missing capability group {marker}"
+            );
+        }
+
+        for field in [
+            "batcherrors",
+            "arraydmlrowcounts",
+            "parse_only",
+            "token_num",
+            "cursor_id",
+            "cache_statement",
+            "scrollable",
+            "fetch_orientation",
+            "fetch_pos",
+            "scroll_operation",
+            "suspend_on_success",
+            "no_prefetch",
+            "registration_id",
+        ] {
+            assert!(
+                design.contains(field),
+                "API_DESIGN.md missing ExecuteOptions field {field}"
+            );
+        }
+
+        let bind_variants = [
+            "Null",
+            "TypedNull",
+            "Output",
+            "ReturnOutput",
+            "ObjectOutput",
+            "ObjectInput",
+            "Text",
+            "Raw",
+            "Lob",
+            "Number",
+            "BinaryInteger",
+            "BinaryDouble",
+            "BinaryFloat",
+            "Boolean",
+            "IntervalDS",
+            "IntervalYM",
+            "DateTime",
+            "Timestamp",
+            "Array",
+            "Vector",
+            "Json",
+            "Cursor",
+        ];
+        assert_eq!(bind_variants.len(), 22);
+        for variant in bind_variants {
+            assert!(
+                design.contains(&format!("`{variant}`")),
+                "API_DESIGN.md missing BindValue::{variant}"
+            );
+        }
+
+        let query_variants = [
+            "Text",
+            "TextRaw",
+            "Raw",
+            "Rowid",
+            "BinaryDouble",
+            "IntervalDS",
+            "IntervalYM",
+            "Number",
+            "Boolean",
+            "Cursor",
+            "DateTime",
+            "Object",
+            "Lob",
+            "Vector",
+            "Json",
+            "Array",
+        ];
+        assert_eq!(query_variants.len(), 16);
+        for variant in query_variants {
+            assert!(
+                design.contains(&format!("`{variant}`")),
+                "API_DESIGN.md missing QueryValue::{variant}"
+            );
+        }
+    }
 
     #[test]
     fn statement_cache_evicts_lru_past_capacity() {

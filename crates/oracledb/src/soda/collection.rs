@@ -62,10 +62,7 @@ impl SodaCollection {
             self.push_returning_binds(&mut binds, ret_layout.bind_count);
         }
 
-        let result = conn
-            .execute_query_with_binds(cx, &sql, 0, &binds)
-            .await
-            .map_err(SodaError::Driver)?;
+        let result = execute_with_binds_raw(conn, cx, &sql, 0, &binds).await?;
 
         if return_doc {
             let doc = self.returning_to_doc(&result, &ret_layout)?;
@@ -113,9 +110,7 @@ impl SodaCollection {
                 let (_, binds, _) = self.build_insert_sql(doc, hint, false)?;
                 bind_rows.push(binds);
             }
-            conn.execute_query_with_bind_rows(cx, &sql, 0, &bind_rows)
-                .await
-                .map_err(SodaError::Driver)?;
+            execute_with_bind_rows_raw(conn, cx, &sql, 0, &bind_rows).await?;
             Ok(None)
         }
     }
@@ -130,10 +125,7 @@ impl SodaCollection {
         op: &SodaOperation,
     ) -> Result<u64> {
         let (sql, binds) = op.build_count_sql(&self.metadata)?;
-        let result = conn
-            .execute_query_with_binds(cx, &sql, 1, &binds)
-            .await
-            .map_err(SodaError::Driver)?;
+        let result = execute_with_binds_raw(conn, cx, &sql, 1, &binds).await?;
         let count = result
             .cell(0, 0)
             .and_then(QueryValue::as_i64)
@@ -197,10 +189,7 @@ impl SodaCollection {
     /// Remove matching documents; returns the number removed.
     pub async fn remove(&self, conn: &mut Connection, cx: &Cx, op: &SodaOperation) -> Result<u64> {
         let (sql, binds) = op.build_delete_sql(&self.metadata)?;
-        let result = conn
-            .execute_query_with_binds(cx, &sql, 0, &binds)
-            .await
-            .map_err(SodaError::Driver)?;
+        let result = execute_with_binds_raw(conn, cx, &sql, 0, &binds).await?;
         Ok(result.row_count)
     }
 
@@ -282,10 +271,7 @@ impl SodaCollection {
             None
         };
 
-        let result = conn
-            .execute_query_with_binds(cx, &sql, 0, &binds)
-            .await
-            .map_err(SodaError::Driver)?;
+        let result = execute_with_binds_raw(conn, cx, &sql, 0, &binds).await?;
 
         let replaced = result.row_count > 0;
         let out = if return_doc && replaced {
@@ -305,9 +291,7 @@ impl SodaCollection {
     /// Truncate the collection (remove all documents).
     pub async fn truncate(&self, conn: &mut Connection, cx: &Cx) -> Result<()> {
         let sql = format!("TRUNCATE TABLE {}", self.metadata.quoted_table());
-        conn.execute_query(cx, &sql, 0)
-            .await
-            .map_err(SodaError::Driver)?;
+        execute_raw(conn, cx, &sql, 0).await?;
         Ok(())
     }
 
@@ -318,9 +302,7 @@ impl SodaCollection {
             BindValue::Text(self.name.clone()),
             BindValue::Text(spec.to_string()),
         ];
-        conn.execute_query_with_binds(cx, sql, 0, &binds)
-            .await
-            .map_err(SodaError::Driver)?;
+        execute_with_binds_raw(conn, cx, sql, 0, &binds).await?;
         Ok(())
     }
 
@@ -344,17 +326,14 @@ impl SodaCollection {
             super::metadata::quote_ident(index_name),
             force_kw
         );
-        match conn.execute_query(cx, &sql, 0).await {
+        match execute_raw(conn, cx, &sql, 0).await {
             Ok(_) => Ok(true),
-            Err(e) => {
-                // ORA-01418: specified index does not exist -> not dropped.
-                // ORA-00942: table/view does not exist (index gone) -> false.
-                if matches!(e.ora_code(), Some(1418) | Some(942)) {
-                    Ok(false)
-                } else {
-                    Err(SodaError::Driver(e))
-                }
+            // ORA-01418: specified index does not exist -> not dropped.
+            // ORA-00942: table/view does not exist (index gone) -> false.
+            Err(SodaError::Driver(e)) if matches!(e.ora_code(), Some(1418) | Some(942)) => {
+                Ok(false)
             }
+            Err(e) => Err(e),
         }
     }
 
@@ -789,10 +768,7 @@ pub(crate) async fn execute_collect_with_binds(
     prefetch_rows: u32,
     binds: &[BindValue],
 ) -> Result<QueryResult> {
-    let mut result = conn
-        .execute_query_with_binds(cx, sql, prefetch_rows, binds)
-        .await
-        .map_err(SodaError::Driver)?;
+    let mut result = execute_with_binds_raw(conn, cx, sql, prefetch_rows, binds).await?;
     if !columns_require_define(&result.columns) || result.cursor_id == 0 {
         return Ok(result);
     }
@@ -814,4 +790,46 @@ pub(crate) async fn execute_collect_with_binds(
         result.cursor_id = cursor_id;
     }
     Ok(result)
+}
+
+pub(crate) async fn execute_raw(
+    conn: &mut Connection,
+    cx: &Cx,
+    sql: &str,
+    prefetch_rows: u32,
+) -> Result<QueryResult> {
+    execute_with_bind_rows_raw(conn, cx, sql, prefetch_rows, &[]).await
+}
+
+pub(crate) async fn execute_with_binds_raw(
+    conn: &mut Connection,
+    cx: &Cx,
+    sql: &str,
+    prefetch_rows: u32,
+    binds: &[BindValue],
+) -> Result<QueryResult> {
+    let bind_rows = if binds.is_empty() {
+        Vec::new()
+    } else {
+        vec![binds.to_vec()]
+    };
+    execute_with_bind_rows_raw(conn, cx, sql, prefetch_rows, &bind_rows).await
+}
+
+pub(crate) async fn execute_with_bind_rows_raw(
+    conn: &mut Connection,
+    cx: &Cx,
+    sql: &str,
+    prefetch_rows: u32,
+    bind_rows: &[Vec<BindValue>],
+) -> Result<QueryResult> {
+    conn.execute_query_with_bind_rows_and_options_core(
+        cx,
+        sql,
+        prefetch_rows,
+        bind_rows,
+        crate::ExecuteOptions::default(),
+    )
+    .await
+    .map_err(SodaError::Driver)
 }
