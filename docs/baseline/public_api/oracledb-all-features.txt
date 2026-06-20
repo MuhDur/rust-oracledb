@@ -1041,13 +1041,14 @@ impl core::marker::StructuralPartialEq for oracledb::ReturningRows
 pub struct oracledb::Row
 impl oracledb::Row
 pub fn oracledb::Row::columns(&self) -> &[oracledb_protocol::thin::types::ColumnMetadata]
-pub fn oracledb::Row::get<T: oracledb::FromSql>(&self, usize) -> oracledb::Result<T>
+pub fn oracledb::Row::get<T: oracledb::FromSql>(&self, impl oracledb::ColumnIndex) -> oracledb::Result<T>
 pub fn oracledb::Row::get_by_name<T: oracledb::FromSql>(&self, &str) -> oracledb::Result<T>
 pub fn oracledb::Row::into_values(self) -> alloc::vec::Vec<core::option::Option<oracledb_protocol::thin::types::QueryValue>>
 pub fn oracledb::Row::is_empty(&self) -> bool
 pub fn oracledb::Row::len(&self) -> usize
+pub fn oracledb::Row::try_get<T: oracledb::FromSql>(&self, impl oracledb::ColumnIndex) -> oracledb::Result<core::option::Option<T>>
 pub fn oracledb::Row::typed_row(&self) -> oracledb::TypedRow<'_>
-pub fn oracledb::Row::value(&self, usize) -> core::option::Option<&oracledb_protocol::thin::types::QueryValue>
+pub fn oracledb::Row::value(&self, impl oracledb::ColumnIndex) -> core::option::Option<&oracledb_protocol::thin::types::QueryValue>
 pub fn oracledb::Row::values(&self) -> &[core::option::Option<oracledb_protocol::thin::types::QueryValue>]
 impl core::clone::Clone for oracledb::Row
 pub fn oracledb::Row::clone(&self) -> oracledb::Row
@@ -1082,6 +1083,9 @@ pub fn oracledb::TypedRow<'_>::try_get_opt<T: oracledb::FromSql>(&self, usize) -
 impl<'a> core::clone::Clone for oracledb::TypedRow<'a>
 pub fn oracledb::TypedRow<'a>::clone(&self) -> oracledb::TypedRow<'a>
 impl<'a> core::marker::Copy for oracledb::TypedRow<'a>
+pub trait oracledb::ColumnIndex: oracledb::column_index_private::Sealed
+impl oracledb::ColumnIndex for &str
+impl oracledb::ColumnIndex for usize
 pub trait oracledb::FromRow: core::marker::Sized
 pub fn oracledb::FromRow::from_row(&oracledb::TypedRow<'_>) -> core::result::Result<Self, oracledb::ConversionError>
 pub trait oracledb::FromSql: core::marker::Sized

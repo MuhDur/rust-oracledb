@@ -210,8 +210,8 @@ candidate are collected deep.
   W1-T4 evolves types; W1-T9 tidies modules). Restores a deliverable the v3 restructure
   dropped.
 - **Deps:** W0-T1. **Skill:** `oracledb` (intended-surface ref). **Acceptance:** ledger
-  committed; human signs off on removals/renames; every leak candidate has a recorded
-  keep/`pub(crate)` decision.
+  committed; expert disposition recorded for removals/renames; every leak candidate has
+  a recorded keep/`pub(crate)` decision.
 
 ---
 

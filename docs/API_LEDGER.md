@@ -46,6 +46,7 @@ pub oracledb::ConnectOptions::*	consolidate	Keep ConnectOptions public but priva
 *oracledb::Connection::execute_query*	consolidate	Query execution overloads should collapse into operation-specific request types.
 *oracledb::Connection::query_named*	consolidate	Named-query overloads should collapse into the same operation-family surface.
 *oracledb::Connection*	keep	Primary async connection API.
+*oracledb::ColumnIndex*	keep	Public owned-row index resolver for usize and &str access.
 *oracledb::ConversionError*	keep	Public conversion failure taxonomy.
 *oracledb::DbmsOutput*	keep	Public DBMS_OUTPUT result type.
 *oracledb::DecodedObject*	keep	Public object decoding result type.
@@ -154,4 +155,4 @@ pub mod oracledb_protocol::wire	keep	Wire helper namespace.
 
 Wave 1 applies the non-`keep` rows. W0-T5.2 records the expert disposition for
 breaking removals or renames; implementation beads apply those decisions without
-waiting for human sign-off.
+additional approval gates.

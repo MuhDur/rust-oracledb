@@ -19,8 +19,8 @@ use std::num::NonZeroU32;
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
 use oracledb::protocol::thin::{
-    BindValue, ExecuteOptions, CS_FORM_IMPLICIT, ORA_TYPE_NUM_VARCHAR, SUBSCR_QOS_QUERY,
-    TNS_SUBSCR_NAMESPACE_DBCHANGE,
+    BindValue, ExecuteOptions, QueryValue, CS_FORM_IMPLICIT, ORA_TYPE_NUM_VARCHAR,
+    SUBSCR_QOS_QUERY, TNS_SUBSCR_NAMESPACE_DBCHANGE,
 };
 use oracledb::{
     params, Batch, BlockingConnection, ConnectOptions, Connection, Error, Execute, Query,
@@ -187,12 +187,13 @@ fn async_query_family_eager_drains_and_checks_cardinality() {
             .await
             .expect("query_all eager drain");
         assert_eq!(all.len(), 105);
+        let first_all = all[0].clone();
+        let last_all = all[104].clone();
 
         let one = conn
             .query_one(&cx, "select :1 + :2 as n from dual", (40_i64, 2_i64))
             .await
             .expect("query_one");
-        assert_eq!(one.get_by_name::<i64>("N").unwrap(), 42);
 
         let opt = conn
             .query_opt(&cx, "select 1 as n from dual where 1 = 0", ())
@@ -207,6 +208,18 @@ fn async_query_family_eager_drains_and_checks_cardinality() {
         assert!(matches!(err, Error::TooManyRows));
 
         conn.close(&cx).await.expect("close connection");
+
+        assert_eq!(first_all.get::<i64>(0).unwrap(), 1);
+        assert_eq!(first_all.get::<i64>("N").unwrap(), 1);
+        assert_eq!(first_all.try_get::<i64>(0).unwrap(), Some(1));
+        assert_eq!(first_all.try_get::<i64>("N").unwrap(), Some(1));
+        assert_eq!(first_all.value(0).and_then(QueryValue::as_i64), Some(1));
+        assert_eq!(first_all.value("N").and_then(QueryValue::as_i64), Some(1));
+        assert_eq!(last_all.get::<i64>(0).unwrap(), 105);
+        assert_eq!(last_all.get::<i64>("N").unwrap(), 105);
+        assert_eq!(one.get::<i64>(0).unwrap(), 42);
+        assert_eq!(one.get::<i64>("N").unwrap(), 42);
+        assert_eq!(one.get_by_name::<i64>("N").unwrap(), 42);
     });
 }
 

@@ -329,7 +329,7 @@ let n = BlockingConnection::execute(&mut conn, "delete from t where id=:1", (9,)
 
 ## 10. Deferred to implementation (small, non-structural)
 
-- Exact `ColumnIndex`/`Cow` ergonomics, `nz(..)`/`NonZeroU32` helpers, `Scroll` enum shape.
+- Exact `Cow` ergonomics, `nz(..)`/`NonZeroU32` helpers, `Scroll` enum shape.
 - Whether `query`/`query_with` unify behind `impl Into<Query>` instead of two methods
   (the one ergonomics tradeoff — kept split here so the 3-arg convenience path is literal).
 - `query_stream -> impl Stream` (bucket-2 `x3s`) — additive, async-only, post-1.0-capable.

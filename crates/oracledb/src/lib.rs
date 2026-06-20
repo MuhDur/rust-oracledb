@@ -1896,6 +1896,47 @@ pub struct Row {
     values: Vec<Option<QueryValue>>,
 }
 
+/// Resolve an owned [`Row`] column by index or by case-insensitive column name.
+///
+/// This trait is sealed; supported indexes are `usize` and `&str`.
+pub trait ColumnIndex: column_index_private::Sealed {
+    #[doc(hidden)]
+    fn resolve(self, columns: &[ColumnMetadata]) -> std::result::Result<usize, ConversionError>;
+}
+
+mod column_index_private {
+    pub trait Sealed {}
+}
+
+impl column_index_private::Sealed for usize {}
+
+impl ColumnIndex for usize {
+    fn resolve(self, columns: &[ColumnMetadata]) -> std::result::Result<usize, ConversionError> {
+        if self < columns.len() {
+            Ok(self)
+        } else {
+            Err(ConversionError::OutOfRange {
+                expected: "column index",
+                detail: format!("no column at index {self}"),
+            })
+        }
+    }
+}
+
+impl column_index_private::Sealed for &str {}
+
+impl ColumnIndex for &str {
+    fn resolve(self, columns: &[ColumnMetadata]) -> std::result::Result<usize, ConversionError> {
+        columns
+            .iter()
+            .position(|col| col.name.eq_ignore_ascii_case(self))
+            .ok_or_else(|| ConversionError::OutOfRange {
+                expected: "column name",
+                detail: format!("no column named {self:?}"),
+            })
+    }
+}
+
 impl Row {
     fn new(columns: Arc<[ColumnMetadata]>, values: Vec<Option<QueryValue>>) -> Self {
         Self { columns, values }
@@ -1917,7 +1958,8 @@ impl Row {
         &self.values
     }
 
-    pub fn value(&self, col: usize) -> Option<&QueryValue> {
+    pub fn value(&self, col: impl ColumnIndex) -> Option<&QueryValue> {
+        let col = col.resolve(&self.columns).ok()?;
         self.values.get(col).and_then(Option::as_ref)
     }
 
@@ -1925,12 +1967,18 @@ impl Row {
         TypedRow::new(&self.columns, &self.values, 0)
     }
 
-    pub fn get<T: FromSql>(&self, col: usize) -> Result<T> {
+    pub fn get<T: FromSql>(&self, col: impl ColumnIndex) -> Result<T> {
+        let col = col.resolve(&self.columns).map_err(Error::Conversion)?;
         self.typed_row().get(col)
     }
 
+    pub fn try_get<T: FromSql>(&self, col: impl ColumnIndex) -> Result<Option<T>> {
+        let col = col.resolve(&self.columns).map_err(Error::Conversion)?;
+        self.typed_row().try_get_opt(col).map_err(Error::Conversion)
+    }
+
     pub fn get_by_name<T: FromSql>(&self, name: &str) -> Result<T> {
-        self.typed_row().get_by_name(name)
+        self.get(name)
     }
 
     pub fn into_values(self) -> Vec<Option<QueryValue>> {
@@ -8998,6 +9046,10 @@ mod tests {
                     name: "NAME".to_string(),
                     ..ColumnMetadata::default()
                 },
+                ColumnMetadata {
+                    name: "NICK".to_string(),
+                    ..ColumnMetadata::default()
+                },
             ]
             .into_boxed_slice(),
         );
@@ -9006,11 +9058,24 @@ mod tests {
             vec![
                 Some(QueryValue::number_from_text("42", true)),
                 Some(QueryValue::Text("alice".to_string())),
+                None,
             ],
         );
 
+        assert_eq!(row.get::<i64>(0).unwrap(), 42);
+        assert_eq!(row.get::<i64>("id").unwrap(), 42);
         assert_eq!(row.get_by_name::<i64>("id").unwrap(), 42);
         assert_eq!(row.get::<String>(1).unwrap(), "alice");
+        assert_eq!(row.get::<String>("NAME").unwrap(), "alice");
+        assert_eq!(
+            row.value("name").and_then(QueryValue::as_text),
+            Some("alice")
+        );
+        assert_eq!(row.value(1).and_then(QueryValue::as_text), Some("alice"));
+        assert_eq!(row.try_get::<String>(2).unwrap(), None);
+        assert_eq!(row.try_get::<String>("nick").unwrap(), None);
+        assert!(row.try_get::<String>(99).is_err());
+        assert!(row.try_get::<String>("missing").is_err());
         assert_eq!(
             Named::from_row(&row.typed_row()).unwrap(),
             Named {
