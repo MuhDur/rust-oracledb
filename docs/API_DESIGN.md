@@ -366,7 +366,7 @@ execute/fetch/define/cursor machinery the SODA/Arrow/direct-path facades sit on.
 // rows (typed)
 let emps: Vec<Emp> = conn.query_all(cx, "select id,name from emp where dept=:1", (40,)).await?;
 let one: Emp       = conn.query_one(cx, "select * from emp where id=:id", params!{":id"=>7}).await?.into(); // via FromRow
-let mut rows = conn.query_with(cx, Query::new("select * from big").arraysize(nz(500)).timeout(secs(5))).await?;
+let mut rows = conn.query_with(cx, Query::new("select * from big").arraysize(NonZeroU32::new(500).expect("non-zero")).timeout(secs(5))).await?;
 while rows.next_batch(cx).await? { for r in rows.batch() { /* … */ } }
 
 // dml + OUT/RETURNING
@@ -384,14 +384,19 @@ let rows = BlockingConnection::query(&mut conn, "select * from t where id>:1", (
 
 ---
 
-## 10. Deferred to implementation (small, non-structural)
+## 10. Freeze dispositions for former implementation deferrals
 
-- Exact `Cow` ergonomics, `nz(..)`/`NonZeroU32` helpers, `Scroll` enum shape.
-- Whether `query`/`query_with` unify behind `impl Into<Query>` instead of two methods
-  (the one ergonomics tradeoff — kept split here so the 3-arg convenience path is literal).
-- `query_stream -> impl Stream` (bucket-2 `x3s`) — additive, async-only, post-1.0-capable.
-- Additional accessor ergonomics beyond `OutBinds::values/get`,
-  `ReturningRows::values/rows_for`, `BatchOutcome::per_row_counts/errors/returning`,
-  `BatchError::row_index/code/message`, and `Rows::cursor`.
-These are signature-level, not contract-level; they don't change the families, the
-"nothing lost" map, or the blocking mirror.
+Every signature-level item below is resolved for the 0.3.0 freeze. Future
+helpers are allowed only when they are additive and do not weaken the four
+operation-family contract.
+
+| Item | Disposition for 0.3.0 / 1.0 contract |
+|---|---|
+| `ColumnIndex` | **Finalized.** Keep the sealed `ColumnIndex` trait with exactly `usize` and `&str` impls for `Row::value`, `Row::get`, and `Row::try_get`. This covers index and case-insensitive Oracle column-name lookup without committing to user-defined index implementations. |
+| `Params` / `Cow` ergonomics | **Finalized.** `Params<'a>` remains `None`, `Positional(Cow<'a, [BindValue]>)`, and `Named(Cow<'a, [(String, BindValue)]>)`; builder SQL is borrowed by default and owned only through crate-private convenience constructors. Do not add `&dyn ToSql` bind lifetimes. |
+| `NonZeroU32` / `nz(..)` helper | **Finalized as no public helper.** `Query::arraysize` takes `NonZeroU32` directly. A public `nz()` wrapper is not part of the frozen contract; callers can use `NonZeroU32::new(..)` or their own local helper. Adding a helper later would be purely additive. |
+| `Scroll` shape | **Finalized.** `Scroll` is `#[non_exhaustive]` with `Current`, `Next`, `Prior`, `First`, `Last`, `Absolute(u32)`, and `Relative(u32)`, consumed by `Rows::scroll` and `BlockingRows::scroll`. |
+| `query` / `query_with` unification | **Finalized as split.** Keep `query(sql, params)` as the literal 3-argument convenience path and `query_with(Query)` as the builder path. Do not introduce `impl Into<Query>` before the freeze; it would obscure the simple path without removing real complexity. |
+| `query_stream -> impl Stream` | **Parked post-1.0.** No `futures::Stream` enters the stable 1.0 surface. The additive streaming/lending work stays in `rust-oracledb-x3s` and the W3-E10 post-1.0 idea backlog. |
+| OUT / RETURNING / batch accessors | **Finalized.** `OutBinds::{len,is_empty,values,get,into_values}`, `ReturningRows::{len,is_empty,values,rows_for,into_values}`, `ExecuteOutcome::{rows_affected,last_rowid,out_binds,returning,implicit_results,compilation_warning}`, `BatchOutcome::{rows_affected,per_row_counts,errors,returning}`, and `BatchError::{row_index,code,message}` are the frozen accessor surface. Extra typed convenience accessors remain additive only. |
+| Cursor accessors | **Finalized.** `Rows::cursor` and `BlockingRows::cursor` expose the first REF CURSOR / implicit result-set handle; the lower-level `fetch_cursor` family remains the explicit drain path. |

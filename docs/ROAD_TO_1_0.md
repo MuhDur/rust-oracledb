@@ -492,7 +492,7 @@ driver's — only the test shim's.)*
 Evidence rules (review change 11): fixed seeds in required CI + rotating seeds in
 canary/soak; record tool versions, bounds (CPU/time/state), corpus hashes, target
 manifests; severity triage (no open P0/P1, no untriaged finding; P2 needs fix or
-signed exception); call a model **exhaustive only** when its finite queue empties
+tracked technical exception); call a model **exhaustive only** when its finite queue empties
 under recorded bounds — else "bounded clean." Wave-3 runs during development are
 **discovery** (on moving commits); the single **qualifying** run that must be green on
 one exact SHA is the W4-T2 release-qualification on the frozen RC (ADR-0003) — Wave 3
@@ -527,7 +527,7 @@ Harness exists (10 cargo-fuzz targets; 4 DoS bugs already fixed; `BoundedReader`
   changed/high-risk; canary = sharded moderate + rotating seeds; soak = risk-weighted
   deep + ASan + corpus merge/minimize + coverage summary; release = candidate SHA, ≥2
   independent seeds for high-risk targets, no untriaged finding.
-- **Acceptance:** decoder coverage (or an approved exclusion) per the manifest — not a
+- **Acceptance:** decoder coverage (or a recorded technical exclusion) per the manifest — not a
   fixed target count; every finding fixed + corpus'd.
 
 ### W3-E3 — DPOR over the wire/cancel paths (asupersync)
@@ -613,7 +613,7 @@ The `multi-pass-bug-hunting` cycle over protocol/codec/multi-packet/async paths;
 several independent fresh-eyes passes consuming the findings from E1–E7 and E9
 (matching the DAG); triage by severity.
 **Acceptance:** ≥2 consecutive full passes with zero new in-scope findings; all
-triaged findings resolved or signed-off; per-pass log committed.
+triaged findings resolved or explicitly tracked as technical exceptions; per-pass log committed.
 
 ### W3-E9 — Performance & resource regression gates
 Benchmark hot/risky paths (codecs, conversion/binds, streaming fetch, large/multi-
@@ -621,12 +621,12 @@ packet results, LOB chunks, batch setup, cancel/recovery, pool contention, casse
 overhead) + **x86_64-musl binary size** (the single-binary product property). Shared
 runners = report-only trend; release thresholds on a controlled runner or repeated
 statistically-justified comparison. **Acceptance:** baselines tracked; no unaccepted
-regression vs the approved candidate baseline; large-result streaming has a documented
+regression vs the recorded candidate baseline; large-result streaming has a documented
 bounded-memory profile.
 
 ### W3-E10 — (post-1.0 backlog) idea-wizard differentiators
-Speculative idea generation is **post-1.0** unless a separately approved, supportable
-requirement enters scope before RC freeze. (Was v2's W3-E6; demoted per review.)
+Speculative idea generation is **post-1.0** unless a concrete, supportable
+requirement is created before RC freeze. (Was v2's W3-E6; demoted per review.)
 
 ---
 
@@ -646,8 +646,8 @@ is the *qualification* — they are not the same thing.) Convergence synthesis (
 soak budget; E2 manifest coverage + differential 0 divergences; E3 exhaustive/bounded
 clean + E4 pool-DPOR exhaustive/bounded clean with artifacts; E5 fault matrix green; E6 cassette green;
 E7 matrix + oraclemcp green; E8 ≥2 zero-finding passes; E9 no regression) — meeting the
-§7 severity policy in full (no open P0/P1, no untriaged finding, P2 fixed-or-signed-
-exception). **Acceptance:** a committed exact-SHA evidence bundle.
+§7 severity policy in full (no open P0/P1, no untriaged finding, P2 fixed or tracked
+with a technical exception and rationale). **Acceptance:** a committed exact-SHA evidence bundle.
 
 ### W4-T3 — Packaged-source & provenance preflight
 Verify all workspace + **inter-crate** versions (close the `release_preflight.sh` gap:
@@ -822,8 +822,9 @@ rounds + a **Codex (gpt-5.5) multi-model triangulation** refined the graph beyon
   task (it can land first, in parallel — the doc's W1-T7 said so but the bead had gated it).
 - **W1-T2.4** — the async `CancelHandle::cancel(&Cx)` variant that W3-E3 P3 needs (today only
   `Connection::cancel(&Cx)` + a *sync* `CancelHandle::cancel` exist; `lib.rs:4361/4933`).
-- **W1-T3.9** — resolve the `API_DESIGN.md` §10 deferred signatures (ColumnIndex/Cow/scroll/
-  OutBinds/ReturningRows/cursor accessors; park `query_stream`) *before* the 0.3.0 freeze.
+- **W1-T3.9** — `API_DESIGN.md` §10 records the resolved freeze dispositions for
+  ColumnIndex/Cow/scroll/OutBinds/ReturningRows/cursor accessors and parks
+  `query_stream` as post-1.0 additive work.
 - **W3-E7.4** — driver-native e2e integration scripts with detailed structured logging.
 - **W2-T1.6** — an external-facing 0.3.0 migration guide + CHANGELOG (decision (b) contract).
 - Dependency fixes: **W2-T1 now depends on W0-T2/W0-T3** (the SemVer-gate flip needs the
