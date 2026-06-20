@@ -300,7 +300,8 @@ pub use cursor_logic::{
 };
 
 pub use sql_convert::{
-    ConversionError, FromRow, FromSql, IntoBinds, Params, QueryResultExt, ToSql, TypedRow,
+    BindError, ConversionError, FromRow, FromSql, IntoBinds, Params, QueryResultExt, ToSql,
+    TypedRow,
 };
 
 /// Derive a [`FromRow`] implementation that maps a query row into a struct with
@@ -924,6 +925,16 @@ fn protocol_error_is_session_dead(err: &oracledb_protocol::ProtocolError) -> boo
     post_sync_protocol_error_disposition(err) == PostSyncProtocolDisposition::Dead
 }
 
+fn protocol_error_kind(err: &oracledb_protocol::ProtocolError) -> ErrorKind {
+    match err {
+        oracledb_protocol::ProtocolError::ResourceLimit { .. } => ErrorKind::ResourceLimit,
+        oracledb_protocol::ProtocolError::ServerError(_)
+        | oracledb_protocol::ProtocolError::ServerErrorWithRowCount { .. }
+        | oracledb_protocol::ProtocolError::ServerErrorInfo(_) => ErrorKind::Database,
+        _ => ErrorKind::Protocol,
+    }
+}
+
 /// The Oracle error number carried by a [`ProtocolError`], whether it is the
 /// structured [`ServerErrorInfo`] variant (read directly from `.code`) or a
 /// string variant (parsed from the `ORA-NNNNN` prefix). `None` for protocol
@@ -1190,6 +1201,36 @@ fn decode_object_scalar(
     Ok(v)
 }
 
+/// Stable top-level error bucket for [`Error::kind`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum ErrorKind {
+    Network,
+    Timeout,
+    Cancel,
+    Protocol,
+    Database,
+    Conversion,
+    Pool,
+    ResourceLimit,
+}
+
+/// Whether the connection that produced an error can be reused.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ConnectionDisposition {
+    Reusable,
+    Dead,
+}
+
+/// Conservative retry guidance for caller-proven idempotent operations.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum RetryHint {
+    Never,
+    RetrySameConnectionIfIdempotent,
+    ReconnectThenRetryIfIdempotent,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
@@ -1254,6 +1295,9 @@ pub enum Error {
     /// the unexpected state value.
     #[error("DPY-5010: internal error: unknown transaction state {0}")]
     UnknownTransactionState(u32),
+    /// A client-side bind payload was provably incompatible with the SQL text.
+    #[error("bind validation failed: {0}")]
+    Bind(#[from] BindError),
     /// A typed [`FromSql`] conversion failed: the fetched value did not match
     /// the requested Rust type, was out of range, or could not be parsed. The
     /// payload describes the mismatch.
@@ -1469,10 +1513,11 @@ impl<'a> BatchRows<'a> {
         };
         for (row_index, row) in self.as_slice().iter().enumerate().skip(1) {
             if row.len() != expected {
-                return Err(Error::Runtime(format!(
-                    "batch row {row_index} has {} bind values; expected {expected}",
-                    row.len()
-                )));
+                return Err(Error::Bind(BindError::BatchRowWidthMismatch {
+                    row_index,
+                    expected,
+                    actual: row.len(),
+                }));
             }
         }
         Ok(())
@@ -2300,9 +2345,33 @@ fn cursor_from_value(value: &QueryValue) -> Option<Cursor> {
 /// 1. The structured server error code (`ServerErrorInfo.code`) when present.
 /// 2. Otherwise the `ORA-NNNNN` prefix parsed from the error message.
 ///
-/// The curated code sets are documented on [`TRANSIENT_ORA_CODES`] and
-/// [`CONNECTION_LOST_ORA_CODES`].
+/// The curated transient and connection-lost code sets are maintained in this
+/// module and exposed through the stable methods below.
 impl Error {
+    /// Stable top-level error category.
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Error::Protocol(err) => protocol_error_kind(err),
+            Error::Io(_)
+            | Error::ListenerRefused(_)
+            | Error::ConnectionClosed(_)
+            | Error::Tls(_) => ErrorKind::Network,
+            Error::CallTimeout(_) => ErrorKind::Timeout,
+            Error::Cancelled => ErrorKind::Cancel,
+            Error::Conversion(_) | Error::Bind(_) => ErrorKind::Conversion,
+            #[cfg(feature = "arrow")]
+            Error::ArrowConversion(_) => ErrorKind::Conversion,
+            Error::RedirectUnsupported
+            | Error::Runtime(_)
+            | Error::FastAuthRequired
+            | Error::MissingSessionField(_)
+            | Error::AccessTokenRequiresTcps
+            | Error::SessionlessTransaction(_)
+            | Error::UnknownTransactionState(_) => ErrorKind::Protocol,
+            Error::NoRows | Error::TooManyRows => ErrorKind::Database,
+        }
+    }
+
     /// Structured resource-limit details when this error came from
     /// [`oracledb_protocol::wire::ProtocolLimits`].
     pub fn resource_limit(&self) -> Option<oracledb_protocol::ResourceLimit> {
@@ -2330,6 +2399,11 @@ impl Error {
             Error::Cancelled => Some(1013),
             _ => None,
         }
+    }
+
+    /// Alias for [`Self::ora_code`] using the API-design terminology.
+    pub fn oracle_code(&self) -> Option<i32> {
+        self.ora_code()
     }
 
     /// The server-reported parse offset / error position for this error, if the
@@ -2364,11 +2438,10 @@ impl Error {
         Some(render_caret(sql, offset, headline))
     }
 
-    /// Whether this error means the underlying connection was lost: the session
-    /// was killed, the socket was reset, or the listener/server dropped the
-    /// link. A caller seeing this should discard the connection, re-establish,
-    /// and (if the operation was idempotent) retry. See
-    /// [`CONNECTION_LOST_ORA_CODES`] for the exact codes.
+    /// Whether the connection that surfaced this error is still reusable. A
+    /// dead disposition means the session was killed, the socket was reset, or
+    /// the server reported one of the session-dead Oracle codes; callers should
+    /// discard the connection before continuing.
     ///
     /// Raw I/O errors ([`Error::Io`]) and the recovery-failure
     /// [`Error::ConnectionClosed`] also count as connection-lost: the transport
@@ -2383,6 +2456,19 @@ impl Error {
     /// (errors.py:124-125). The connection survives; retry on the same one. Only
     /// when that drain itself fails (a *second* timeout) does the driver give up
     /// and surface [`Error::ConnectionClosed`], which *is* connection-lost.
+    pub fn connection_disposition(&self) -> ConnectionDisposition {
+        match self {
+            Error::Io(_) | Error::ConnectionClosed(_) => ConnectionDisposition::Dead,
+            _ if self
+                .ora_code()
+                .is_some_and(|code| SESSION_DEAD_ORA_CODES.contains(&(code as u32))) =>
+            {
+                ConnectionDisposition::Dead
+            }
+            _ => ConnectionDisposition::Reusable,
+        }
+    }
+
     pub fn is_connection_lost(&self) -> bool {
         match self {
             Error::Io(_) | Error::ConnectionClosed(_) => true,
@@ -2396,9 +2482,8 @@ impl Error {
     /// expected to clear on its own (lock contention, deadlock victim, listener
     /// hand-off congestion, resource-manager throttle, or a call timeout), so
     /// the same call may be retried on the **same** connection after a short
-    /// back-off. See [`TRANSIENT_ORA_CODES`] for the exact codes. Does **not**
-    /// include connection-lost codes (those need a reconnect first — use
-    /// [`Self::is_connection_lost`]).
+    /// back-off. Does **not** include connection-lost codes (those need a
+    /// reconnect first — use [`Self::is_connection_lost`]).
     ///
     /// [`Error::CallTimeout`] is transient: after the driver drains the wire the
     /// connection is clean and reusable, so re-running the (idempotent) call on
@@ -2412,13 +2497,21 @@ impl Error {
                 .is_some_and(|code| TRANSIENT_ORA_CODES.contains(&(code as u32)))
     }
 
-    /// Whether retrying is reasonable at all: the union of [`Self::is_transient`]
-    /// and [`Self::is_connection_lost`]. A `true` here means "retry is sensible"
-    /// (back off and retry, reconnecting first if the connection was lost); a
-    /// `false` means the error is permanent for this input (syntax error,
-    /// constraint violation, missing object) and retrying will not help.
+    /// Conservative retry guidance. Any returned retry action still requires
+    /// the caller to know the operation is idempotent; non-idempotent operations
+    /// must not be replayed automatically.
+    pub fn retry_hint(&self) -> RetryHint {
+        if self.is_transient() {
+            RetryHint::RetrySameConnectionIfIdempotent
+        } else if self.is_connection_lost() {
+            RetryHint::ReconnectThenRetryIfIdempotent
+        } else {
+            RetryHint::Never
+        }
+    }
+
     pub fn is_retryable(&self) -> bool {
-        self.is_transient() || self.is_connection_lost()
+        !matches!(self.retry_hint(), RetryHint::Never)
     }
 }
 
@@ -4276,7 +4369,7 @@ impl Connection {
             timeout,
         } = query;
         let sql_owned = sql.into_owned();
-        let binds = crate::sql_convert::resolve_params(&sql_owned, params);
+        let binds = crate::sql_convert::resolve_params(&sql_owned, params)?;
         let bind_rows = if binds.is_empty() {
             Vec::new()
         } else {
@@ -4366,7 +4459,7 @@ impl Connection {
             options,
         } = execute;
         let sql_owned = sql.into_owned();
-        let binds = crate::sql_convert::resolve_params(&sql_owned, params);
+        let binds = crate::sql_convert::resolve_params(&sql_owned, params)?;
         let bind_rows = if binds.is_empty() {
             Vec::new()
         } else {
@@ -4451,7 +4544,7 @@ impl Connection {
             timeout,
         } = registration;
         let sql_owned = sql.into_owned();
-        let binds = crate::sql_convert::resolve_params(&sql_owned, params);
+        let binds = crate::sql_convert::resolve_params(&sql_owned, params)?;
         let bind_rows = if binds.is_empty() {
             Vec::new()
         } else {
@@ -4509,7 +4602,7 @@ impl Connection {
         sql: &str,
         named_params: Vec<(String, BindValue)>,
     ) -> Result<QueryResult> {
-        let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params));
+        let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params))?;
         self.execute_query_with_binds_core(cx, sql, 1, &binds).await
     }
 
@@ -4527,7 +4620,7 @@ impl Connection {
         named_params: Vec<(String, BindValue)>,
         timeout_ms: Option<u32>,
     ) -> Result<QueryResult> {
-        let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params));
+        let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params))?;
         self.execute_query_with_binds_call_timeout(cx, sql, 1, &binds, timeout_ms)
             .await
     }
@@ -4666,6 +4759,9 @@ impl Connection {
         );
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
+        if !exec_options.scroll_operation {
+            crate::sql_convert::validate_bind_rows_shape(sql, bind_rows)?;
+        }
         // If a prior cancellable round trip was dropped mid-read, break + drain
         // the stranded call before issuing this execute (Scope cancel-on-drop).
         self.ensure_clean_before_request().await?;
@@ -7596,7 +7692,7 @@ impl BlockingConnection {
         sql: &str,
         named_params: Vec<(String, BindValue)>,
     ) -> Result<QueryResult> {
-        let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params));
+        let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params))?;
         let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
@@ -7619,7 +7715,7 @@ impl BlockingConnection {
         named_params: Vec<(String, BindValue)>,
         timeout_ms: Option<u32>,
     ) -> Result<QueryResult> {
-        let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params));
+        let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params))?;
         let runtime = build_io_runtime()?;
         runtime.block_on(async {
             let cx = Cx::current()
@@ -9698,11 +9794,14 @@ mod tests {
 
         let err = batch.rows.validate_rectangular().unwrap_err();
 
-        assert!(
-            err.to_string()
-                .contains("batch row 1 has 1 bind values; expected 2"),
-            "{err}"
-        );
+        assert!(matches!(
+            err,
+            Error::Bind(BindError::BatchRowWidthMismatch {
+                row_index: 1,
+                expected: 2,
+                actual: 1
+            })
+        ));
     }
 
     #[test]
@@ -9905,6 +10004,75 @@ mod tests {
         assert_eq!(server_error("listener problem").ora_code(), None);
         // non-server errors have no code
         assert_eq!(Error::CallTimeout(500).ora_code(), None);
+    }
+
+    #[test]
+    fn stable_error_methods_classify_without_display_parsing() {
+        let transient = server_error("ORA-00060: deadlock detected");
+        assert_eq!(transient.kind(), ErrorKind::Database);
+        assert_eq!(transient.oracle_code(), Some(60));
+        assert_eq!(
+            transient.connection_disposition(),
+            ConnectionDisposition::Reusable
+        );
+        assert_eq!(
+            transient.retry_hint(),
+            RetryHint::RetrySameConnectionIfIdempotent
+        );
+
+        let lost = server_error("ORA-03113: end-of-file on communication channel");
+        assert_eq!(lost.kind(), ErrorKind::Database);
+        assert_eq!(lost.connection_disposition(), ConnectionDisposition::Dead);
+        assert_eq!(lost.retry_hint(), RetryHint::ReconnectThenRetryIfIdempotent);
+
+        let timeout = Error::CallTimeout(500);
+        assert_eq!(timeout.kind(), ErrorKind::Timeout);
+        assert_eq!(
+            timeout.connection_disposition(),
+            ConnectionDisposition::Reusable
+        );
+        assert_eq!(
+            timeout.retry_hint(),
+            RetryHint::RetrySameConnectionIfIdempotent
+        );
+
+        let cancelled = Error::Cancelled;
+        assert_eq!(cancelled.kind(), ErrorKind::Cancel);
+        assert_eq!(cancelled.oracle_code(), Some(1013));
+        assert_eq!(
+            cancelled.retry_hint(),
+            RetryHint::RetrySameConnectionIfIdempotent
+        );
+
+        let bind = Error::Bind(BindError::PositionalCountMismatch {
+            expected: 2,
+            actual: 1,
+        });
+        assert_eq!(bind.kind(), ErrorKind::Conversion);
+        assert_eq!(bind.retry_hint(), RetryHint::Never);
+
+        let resource = Error::Protocol(oracledb_protocol::ProtocolError::ResourceLimit {
+            limit: "binds",
+            observed: 4,
+            maximum: 3,
+        });
+        assert_eq!(resource.kind(), ErrorKind::ResourceLimit);
+        assert_eq!(
+            resource.connection_disposition(),
+            ConnectionDisposition::Reusable
+        );
+        assert_eq!(resource.retry_hint(), RetryHint::Never);
+
+        let session_dead = server_error("ORA-00600: internal error code, arguments: []");
+        assert_eq!(
+            session_dead.connection_disposition(),
+            ConnectionDisposition::Dead
+        );
+        assert!(
+            !session_dead.is_connection_lost(),
+            "ORA-00600 kills the session but is not a connection-lost retry code"
+        );
+        assert_eq!(session_dead.retry_hint(), RetryHint::Never);
     }
 
     #[test]

@@ -34,6 +34,7 @@
 
 use std::borrow::Cow;
 
+use oracledb_protocol::sql;
 use oracledb_protocol::thin::{BindValue, ColumnMetadata, QueryResult, QueryValue};
 
 /// Why a typed [`FromSql`] conversion could not be performed.
@@ -87,6 +88,68 @@ impl std::error::Error for ConversionError {}
 impl From<ConversionError> for crate::Error {
     fn from(err: ConversionError) -> Self {
         crate::Error::Conversion(err)
+    }
+}
+
+/// Why a bind payload could not be matched to a SQL statement before the wire
+/// round trip.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum BindError {
+    /// The SQL tokenizer could not safely scan placeholders.
+    Sql(sql::SqlError),
+    /// Positional bind count does not match the placeholders the statement uses.
+    PositionalCountMismatch { expected: usize, actual: usize },
+    /// A named bind placeholder in the SQL has no supplied value.
+    MissingNamedBind { name: String },
+    /// A supplied named bind is not referenced by the SQL.
+    ExtraNamedBind { name: String },
+    /// Execute-many bind rows are not rectangular.
+    BatchRowWidthMismatch {
+        row_index: usize,
+        expected: usize,
+        actual: usize,
+    },
+}
+
+impl std::fmt::Display for BindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BindError::Sql(err) => write!(f, "SQL bind scan failed: {err}"),
+            BindError::PositionalCountMismatch { expected, actual } => write!(
+                f,
+                "SQL expects {expected} bind values but {actual} were supplied"
+            ),
+            BindError::MissingNamedBind { name } => {
+                write!(f, "missing value for named bind :{name}")
+            }
+            BindError::ExtraNamedBind { name } => {
+                write!(f, "named bind {name} is not referenced by the SQL")
+            }
+            BindError::BatchRowWidthMismatch {
+                row_index,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "batch row {row_index} has {actual} bind values; expected {expected}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BindError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            BindError::Sql(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<sql::SqlError> for BindError {
+    fn from(err: sql::SqlError) -> Self {
+        BindError::Sql(err)
     }
 }
 
@@ -1207,113 +1270,88 @@ macro_rules! params {
 /// Oracle placeholders fill positionally in *first-appearance* order in the SQL
 /// text, so `params!{ ":b" => 2, ":a" => 1 }` against `... :a ... :b ...` must
 /// be reordered to `[1, 2]`. This scans the SQL for `:name` placeholders
-/// (ignoring those inside single-quoted string literals), then emits each
-/// supplied bind value once, in the order its name first appears. A name in the
-/// list that never appears in the SQL is appended at the end (the server will
-/// report the mismatch, matching the raw positional path).
-pub(crate) fn order_named_binds(sql: &str, named: Vec<(String, BindValue)>) -> Vec<BindValue> {
-    let order = placeholder_order(sql);
+/// (ignoring literals and comments), then emits each supplied bind value once,
+/// in the order its name first appears.
+pub(crate) fn order_named_binds(
+    sql: &str,
+    named: Vec<(String, BindValue)>,
+) -> Result<Vec<BindValue>, BindError> {
+    if !bind_shape_validation_enabled(sql) {
+        return Ok(named.into_iter().map(|(_, value)| value).collect());
+    }
+
+    let order = sql::unique_bind_names(sql)?;
     let mut remaining = named;
     let mut out = Vec::with_capacity(remaining.len());
     for placeholder in &order {
         if let Some(pos) = remaining
             .iter()
-            .position(|(name, _)| name_matches(name, placeholder))
+            .position(|(name, _)| sql::bind_name_matches_key(placeholder, name))
         {
             let (_, value) = remaining.remove(pos);
             out.push(value);
+        } else {
+            return Err(BindError::MissingNamedBind {
+                name: placeholder.clone(),
+            });
         }
     }
-    // Any leftover named binds the SQL did not reference, in their given order.
-    for (_, value) in remaining {
-        out.push(value);
+    if let Some((name, _)) = remaining.first() {
+        return Err(BindError::ExtraNamedBind { name: name.clone() });
     }
-    out
+    Ok(out)
 }
 
 /// Resolve a public [`Params`] payload into the positional bind vector the
 /// current wire path expects.
-pub(crate) fn resolve_params(sql: &str, params: Params<'_>) -> Vec<BindValue> {
+pub(crate) fn resolve_params(sql: &str, params: Params<'_>) -> Result<Vec<BindValue>, BindError> {
     match params {
-        Params::None => Vec::new(),
-        Params::Positional(binds) => binds.into_owned(),
+        Params::None => {
+            validate_positional_bind_count(sql, 0)?;
+            Ok(Vec::new())
+        }
+        Params::Positional(binds) => {
+            let binds = binds.into_owned();
+            validate_positional_bind_count(sql, binds.len())?;
+            Ok(binds)
+        }
         Params::Named(named) => order_named_binds(sql, named.into_owned()),
     }
 }
 
-/// `:id` in `params!` vs `id` scanned from the SQL: compare case-insensitively
-/// after stripping a single leading colon from either side.
-fn name_matches(supplied: &str, scanned: &str) -> bool {
-    supplied
-        .trim_start_matches(':')
-        .eq_ignore_ascii_case(scanned.trim_start_matches(':'))
-}
-
-/// Scan `sql` for bind placeholders (`:name` or `:1`), returning each distinct
-/// placeholder name in first-appearance order. Quoted string literals and
-/// `--`/`/* */` comments are skipped so a colon inside text is not mistaken for
-/// a placeholder.
-fn placeholder_order(sql: &str) -> Vec<String> {
-    let bytes = sql.as_bytes();
-    let mut seen: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\'' => {
-                // skip a single-quoted literal (doubled '' stays inside)
-                i += 1;
-                while i < bytes.len() {
-                    if bytes[i] == b'\'' {
-                        if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
-                            i += 2;
-                            continue;
-                        }
-                        i += 1;
-                        break;
-                    }
-                    i += 1;
-                }
-            }
-            b'"' => {
-                // skip a quoted identifier
-                i += 1;
-                while i < bytes.len() && bytes[i] != b'"' {
-                    i += 1;
-                }
-                i += 1;
-            }
-            b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
-                while i < bytes.len() && bytes[i] != b'\n' {
-                    i += 1;
-                }
-            }
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
-                i += 2;
-                while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                    i += 1;
-                }
-                i += 2;
-            }
-            b':' => {
-                let start = i + 1;
-                let mut j = start;
-                while j < bytes.len()
-                    && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_' || bytes[j] == b'$')
-                {
-                    j += 1;
-                }
-                if j > start {
-                    let name = sql[start..j].to_string();
-                    if !seen.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
-                        seen.push(name);
-                    }
-                }
-                i = j;
-            }
-            _ => i += 1,
+pub(crate) fn validate_bind_rows_shape(
+    sql: &str,
+    bind_rows: &[Vec<BindValue>],
+) -> Result<(), BindError> {
+    let Some(first_row) = bind_rows.first() else {
+        return validate_positional_bind_count(sql, 0);
+    };
+    let expected = first_row.len();
+    for (row_index, row) in bind_rows.iter().enumerate().skip(1) {
+        if row.len() != expected {
+            return Err(BindError::BatchRowWidthMismatch {
+                row_index,
+                expected,
+                actual: row.len(),
+            });
         }
     }
-    seen
+    validate_positional_bind_count(sql, expected)
+}
+
+pub(crate) fn validate_positional_bind_count(sql: &str, actual: usize) -> Result<(), BindError> {
+    if !bind_shape_validation_enabled(sql) {
+        return Ok(());
+    }
+    let expected = sql::bind_names_per_occurrence(sql)?.len();
+    if expected != actual {
+        return Err(BindError::PositionalCountMismatch { expected, actual });
+    }
+    Ok(())
+}
+
+fn bind_shape_validation_enabled(sql: &str) -> bool {
+    !sql::statement_is_ddl(sql)
 }
 
 #[cfg(test)]
@@ -1501,13 +1539,104 @@ mod tests {
         let ordered = resolve_params(
             "select * from t where a = :a and b = :b",
             Params::from(named),
-        );
+        )
+        .expect("named binds should resolve");
         assert_eq!(
             ordered,
             vec![BindValue::Number("1".into()), BindValue::Number("2".into())]
         );
 
-        assert!(resolve_params("select 1 from dual", Params::None).is_empty());
+        assert!(resolve_params("select 1 from dual", Params::None)
+            .expect("no binds should resolve")
+            .is_empty());
+    }
+
+    #[test]
+    fn resolve_params_rejects_missing_and_extra_named_binds() {
+        let missing = resolve_params(
+            "select * from t where a = :a and b = :b",
+            Params::from(params! { ":a" => 1_i64 }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            missing,
+            BindError::MissingNamedBind {
+                name: "b".to_string()
+            }
+        );
+
+        let extra = resolve_params(
+            "select * from t where a = :a",
+            Params::from(params! { ":a" => 1_i64, ":b" => 2_i64 }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            extra,
+            BindError::ExtraNamedBind {
+                name: ":b".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_params_uses_protocol_tokenizer_for_named_binds() {
+        let ordered = resolve_params(
+            r#"select ':skip', q'[not :this]', :"MiX", :a# from dual -- :comment"#,
+            Params::from(params! { ":a#" => 7_i64, r#""MiX""# => 6_i64 }),
+        )
+        .expect("tokenizer-backed named binds should resolve");
+
+        assert_eq!(
+            ordered,
+            vec![BindValue::Number("6".into()), BindValue::Number("7".into())]
+        );
+    }
+
+    #[test]
+    fn resolve_params_rejects_unambiguous_positional_count_mismatch() {
+        let err = resolve_params(
+            "select :1 + :2 from dual",
+            Params::from(vec![BindValue::Number("1".into())]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            BindError::PositionalCountMismatch {
+                expected: 2,
+                actual: 1
+            }
+        );
+
+        let repeated = resolve_params(
+            "select :1 + :1 from dual",
+            Params::from(vec![
+                BindValue::Number("1".into()),
+                BindValue::Number("1".into()),
+            ]),
+        )
+        .expect("plain SQL repeated placeholders consume one positional value per occurrence");
+        assert_eq!(repeated.len(), 2);
+    }
+
+    #[test]
+    fn validate_bind_rows_shape_rejects_ragged_raw_rows() {
+        let rows = vec![
+            vec![
+                BindValue::Number("1".to_string()),
+                BindValue::Text("a".into()),
+            ],
+            vec![BindValue::Number("2".to_string())],
+        ];
+
+        let err = validate_bind_rows_shape("insert into t values (:1, :2)", &rows).unwrap_err();
+        assert_eq!(
+            err,
+            BindError::BatchRowWidthMismatch {
+                row_index: 1,
+                expected: 2,
+                actual: 1
+            }
+        );
     }
 
     #[test]
@@ -1638,7 +1767,8 @@ mod tests {
         // :a appears before :b in the SQL, but the params! list is in the
         // opposite order. order_named_binds must reorder to [a=1, b=2].
         let named = params! { ":b" => 2_i64, ":a" => 1_i64 };
-        let ordered = order_named_binds("select * from t where a = :a and b = :b", named);
+        let ordered = order_named_binds("select * from t where a = :a and b = :b", named)
+            .expect("named binds should reorder");
         assert_eq!(
             ordered,
             vec![BindValue::Number("1".into()), BindValue::Number("2".into())]
@@ -1649,7 +1779,8 @@ mod tests {
     fn named_binds_repeated_placeholder_counts_once() {
         // :id used twice should appear once in the ordering.
         let named = params! { ":id" => 5_i64, ":name" => "x" };
-        let ordered = order_named_binds("select :id from t where id = :id and name = :name", named);
+        let ordered = order_named_binds("select :id from t where id = :id and name = :name", named)
+            .expect("named binds should coalesce repeated placeholders");
         assert_eq!(
             ordered,
             vec![BindValue::Number("5".into()), BindValue::Text("x".into())]
@@ -1661,7 +1792,8 @@ mod tests {
         // The ':not_a_bind' inside the literal must not be treated as a
         // placeholder; only :real is.
         let named = params! { ":real" => 9_i64 };
-        let ordered = order_named_binds("select 'time is 12:30' as t, :real from dual", named);
+        let ordered = order_named_binds("select 'time is 12:30' as t, :real from dual", named)
+            .expect("bind in string literal should be ignored");
         assert_eq!(ordered, vec![BindValue::Number("9".into())]);
     }
 

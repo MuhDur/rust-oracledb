@@ -141,6 +141,49 @@ pub fn oracledb::BatchRows<'a>::from(alloc::vec::Vec<alloc::vec::Vec<oracledb_pr
 impl<'a> core::fmt::Debug for oracledb::BatchRows<'a>
 pub fn oracledb::BatchRows<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'a> core::marker::StructuralPartialEq for oracledb::BatchRows<'a>
+#[non_exhaustive] pub enum oracledb::BindError
+pub oracledb::BindError::BatchRowWidthMismatch
+pub oracledb::BindError::BatchRowWidthMismatch::actual: usize
+pub oracledb::BindError::BatchRowWidthMismatch::expected: usize
+pub oracledb::BindError::BatchRowWidthMismatch::row_index: usize
+pub oracledb::BindError::ExtraNamedBind
+pub oracledb::BindError::ExtraNamedBind::name: alloc::string::String
+pub oracledb::BindError::MissingNamedBind
+pub oracledb::BindError::MissingNamedBind::name: alloc::string::String
+pub oracledb::BindError::PositionalCountMismatch
+pub oracledb::BindError::PositionalCountMismatch::actual: usize
+pub oracledb::BindError::PositionalCountMismatch::expected: usize
+pub oracledb::BindError::Sql(oracledb_protocol::sql::SqlError)
+impl core::clone::Clone for oracledb::BindError
+pub fn oracledb::BindError::clone(&self) -> oracledb::BindError
+impl core::cmp::Eq for oracledb::BindError
+impl core::cmp::PartialEq for oracledb::BindError
+pub fn oracledb::BindError::eq(&self, &oracledb::BindError) -> bool
+impl core::convert::From<oracledb::BindError> for oracledb::Error
+pub fn oracledb::Error::from(oracledb::BindError) -> Self
+impl core::convert::From<oracledb_protocol::sql::SqlError> for oracledb::BindError
+pub fn oracledb::BindError::from(oracledb_protocol::sql::SqlError) -> Self
+impl core::error::Error for oracledb::BindError
+pub fn oracledb::BindError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for oracledb::BindError
+pub fn oracledb::BindError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oracledb::BindError
+pub fn oracledb::BindError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb::BindError
+pub enum oracledb::ConnectionDisposition
+pub oracledb::ConnectionDisposition::Dead
+pub oracledb::ConnectionDisposition::Reusable
+impl core::clone::Clone for oracledb::ConnectionDisposition
+pub fn oracledb::ConnectionDisposition::clone(&self) -> oracledb::ConnectionDisposition
+impl core::cmp::Eq for oracledb::ConnectionDisposition
+impl core::cmp::PartialEq for oracledb::ConnectionDisposition
+pub fn oracledb::ConnectionDisposition::eq(&self, &oracledb::ConnectionDisposition) -> bool
+impl core::fmt::Debug for oracledb::ConnectionDisposition
+pub fn oracledb::ConnectionDisposition::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oracledb::ConnectionDisposition
+pub fn oracledb::ConnectionDisposition::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for oracledb::ConnectionDisposition
+impl core::marker::StructuralPartialEq for oracledb::ConnectionDisposition
 pub enum oracledb::ConversionError
 pub oracledb::ConversionError::OutOfRange
 pub oracledb::ConversionError::OutOfRange::detail: alloc::string::String
@@ -164,6 +207,7 @@ pub fn oracledb::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> c
 impl core::marker::StructuralPartialEq for oracledb::ConversionError
 pub enum oracledb::Error
 pub oracledb::Error::AccessTokenRequiresTcps
+pub oracledb::Error::Bind(oracledb::BindError)
 pub oracledb::Error::CallTimeout(u32)
 pub oracledb::Error::Cancelled
 pub oracledb::Error::ConnectionClosed(alloc::string::String)
@@ -182,12 +226,18 @@ pub oracledb::Error::TooManyRows
 pub oracledb::Error::UnknownTransactionState(u32)
 impl oracledb::Error
 pub fn oracledb::Error::caret(&self, &str) -> core::option::Option<alloc::string::String>
+pub fn oracledb::Error::connection_disposition(&self) -> oracledb::ConnectionDisposition
 pub fn oracledb::Error::is_connection_lost(&self) -> bool
 pub fn oracledb::Error::is_retryable(&self) -> bool
 pub fn oracledb::Error::is_transient(&self) -> bool
+pub fn oracledb::Error::kind(&self) -> oracledb::ErrorKind
 pub fn oracledb::Error::offset(&self) -> core::option::Option<i32>
 pub fn oracledb::Error::ora_code(&self) -> core::option::Option<i32>
+pub fn oracledb::Error::oracle_code(&self) -> core::option::Option<i32>
 pub fn oracledb::Error::resource_limit(&self) -> core::option::Option<oracledb_protocol::ResourceLimit>
+pub fn oracledb::Error::retry_hint(&self) -> oracledb::RetryHint
+impl core::convert::From<oracledb::BindError> for oracledb::Error
+pub fn oracledb::Error::from(oracledb::BindError) -> Self
 impl core::convert::From<oracledb::ConversionError> for oracledb::Error
 pub fn oracledb::Error::from(oracledb::ConversionError) -> Self
 impl core::convert::From<oracledb_protocol::ProtocolError> for oracledb::Error
@@ -200,6 +250,26 @@ impl core::fmt::Debug for oracledb::Error
 pub fn oracledb::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::fmt::Display for oracledb::Error
 pub fn oracledb::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub enum oracledb::ErrorKind
+pub oracledb::ErrorKind::Cancel
+pub oracledb::ErrorKind::Conversion
+pub oracledb::ErrorKind::Database
+pub oracledb::ErrorKind::Network
+pub oracledb::ErrorKind::Pool
+pub oracledb::ErrorKind::Protocol
+pub oracledb::ErrorKind::ResourceLimit
+pub oracledb::ErrorKind::Timeout
+impl core::clone::Clone for oracledb::ErrorKind
+pub fn oracledb::ErrorKind::clone(&self) -> oracledb::ErrorKind
+impl core::cmp::Eq for oracledb::ErrorKind
+impl core::cmp::PartialEq for oracledb::ErrorKind
+pub fn oracledb::ErrorKind::eq(&self, &oracledb::ErrorKind) -> bool
+impl core::fmt::Debug for oracledb::ErrorKind
+pub fn oracledb::ErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oracledb::ErrorKind
+pub fn oracledb::ErrorKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for oracledb::ErrorKind
+impl core::marker::StructuralPartialEq for oracledb::ErrorKind
 pub enum oracledb::ExecutemanyManagerError
 pub oracledb::ExecutemanyManagerError::RowCountOverflow
 pub oracledb::ExecutemanyManagerError::ZeroBatchSize
@@ -257,6 +327,21 @@ impl core::clone::Clone for oracledb::PipelineRequest
 pub fn oracledb::PipelineRequest::clone(&self) -> oracledb::PipelineRequest
 impl core::fmt::Debug for oracledb::PipelineRequest
 pub fn oracledb::PipelineRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub enum oracledb::RetryHint
+pub oracledb::RetryHint::Never
+pub oracledb::RetryHint::ReconnectThenRetryIfIdempotent
+pub oracledb::RetryHint::RetrySameConnectionIfIdempotent
+impl core::clone::Clone for oracledb::RetryHint
+pub fn oracledb::RetryHint::clone(&self) -> oracledb::RetryHint
+impl core::cmp::Eq for oracledb::RetryHint
+impl core::cmp::PartialEq for oracledb::RetryHint
+pub fn oracledb::RetryHint::eq(&self, &oracledb::RetryHint) -> bool
+impl core::fmt::Debug for oracledb::RetryHint
+pub fn oracledb::RetryHint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oracledb::RetryHint
+pub fn oracledb::RetryHint::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for oracledb::RetryHint
+impl core::marker::StructuralPartialEq for oracledb::RetryHint
 #[non_exhaustive] pub enum oracledb::Scroll
 pub oracledb::Scroll::Absolute(u32)
 pub oracledb::Scroll::Current

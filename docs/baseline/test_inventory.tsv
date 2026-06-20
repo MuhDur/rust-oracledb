@@ -43,13 +43,13 @@ crates/oracledb-protocol/tests/tls_wallet.rs	9
 crates/oracledb-protocol/tests/tpc_golden.rs	3
 crates/oracledb/src/arrow.rs	34
 crates/oracledb/src/cursor_logic.rs	14
-crates/oracledb/src/lib.rs	55
+crates/oracledb/src/lib.rs	56
 crates/oracledb/src/obs.rs	3
 crates/oracledb/src/pool.rs	11
 crates/oracledb/src/soda/metadata.rs	4
 crates/oracledb/src/soda/operation.rs	10
 crates/oracledb/src/soda/qbe.rs	23
-crates/oracledb/src/sql_convert.rs	20
+crates/oracledb/src/sql_convert.rs	24
 crates/oracledb/src/tls.rs	2
 crates/oracledb/src/transport.rs	9
 crates/oracledb/tests/access_token.rs	2

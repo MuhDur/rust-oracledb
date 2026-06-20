@@ -43,6 +43,7 @@ pub use oracledb::transport::CassetteError	keep	Cassette diagnostics are part of
 *oracledb::BatchOutcome*	keep	Public execute-many outcome type.
 *oracledb::BatchRows*	keep	Public execute-many bind-row payload type.
 *oracledb::Batch*	keep	Public execute-many request builder.
+*oracledb::BindError*	keep	Public client-side bind prevalidation error taxonomy.
 *oracledb::BlockingConnection::drain_cancel_response*	pub(crate)	Cancel response draining is private session recovery, not a blocking facade API.
 *oracledb::BlockingConnection::execute_query_for_registration*	rename	Keep the registration capability but rename it into an explicit registration API.
 *oracledb::BlockingConnection::execute_query*	consolidate	Query execution overloads should collapse into operation-specific request types.
@@ -56,6 +57,7 @@ pub oracledb::ConnectOptions::*	consolidate	Keep ConnectOptions public but priva
 *oracledb::Connection::execute_query_for_registration*	rename	Keep the registration capability but rename it into an explicit registration API.
 *oracledb::Connection::execute_query*	consolidate	Query execution overloads should collapse into operation-specific request types.
 *oracledb::Connection::query_named*	consolidate	Named-query overloads should collapse into the same operation-family surface.
+*oracledb::ConnectionDisposition*	keep	Public connection-reuse classification returned by Error::connection_disposition.
 *oracledb::Connection*	keep	Primary async connection API.
 *oracledb::ColumnIndex*	keep	Public owned-row index resolver for usize and &str access.
 *oracledb::ConversionError*	keep	Public conversion failure taxonomy.
@@ -66,6 +68,7 @@ pub oracledb::ConnectOptions::*	consolidate	Keep ConnectOptions public but priva
 *oracledb::ExecuteOutcome*	keep	Public execute-family outcome type.
 *oracledb::Execute*	keep	Public execute-family request builder.
 *oracledb::Result*	keep	Public result alias.
+*oracledb::ErrorKind*	keep	Public top-level driver error classification returned by Error::kind.
 *oracledb::Error*	keep	Public driver error taxonomy.
 *oracledb::FromRow*	keep	Public typed-row conversion trait.
 *oracledb::FromSql*	keep	Public inbound SQL conversion trait.
@@ -79,6 +82,7 @@ pub oracledb::ConnectOptions::*	consolidate	Keep ConnectOptions public but priva
 *oracledb::RegistrationOutcome*	keep	Public register-query outcome type.
 *oracledb::Registration*	keep	Public CQN register-query request builder.
 *oracledb::ReturningRows*	keep	Public execute-family RETURNING accessor.
+*oracledb::RetryHint*	keep	Public conservative retry guidance returned by Error::retry_hint.
 *oracledb::Cursor*	keep	Public REF CURSOR handle alias used by Rows.
 *oracledb::QueryResultExt*	keep	Public convenience extension for query results.
 *oracledb::Query*	keep	Public query-family request builder.

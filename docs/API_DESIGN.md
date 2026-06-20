@@ -246,11 +246,12 @@ pub trait ColumnIndex { /* impl for usize and &str */ }
   `ToSql`, all feature-gated impls (chrono/uuid/serde_json/rust_decimal, always
   Vec<f32>/Vec<f64> for VECTOR), `QueryResultExt`. `TypedRow` becomes the internal basis
   of `Row`. The 16 `QueryValue` variants and their accessors (`as_i64`/`as_text`/…) stay.
-- **`Error`** (W1-T6): typed; `kind() -> ErrorKind`, `ora_code()`, `offset()`,
-  `caret(sql)`, `connection_disposition() -> {Reusable, Dead}`, `retry_hint()`, and the
-  existing `is_connection_lost`/`is_transient`/`is_retryable` + curated code sets. The
-  16 variants + `SessionlessError`/`ConversionError`/`PoolError` are preserved (becoming
-  `#[non_exhaustive]` per W1-T4).
+- **`Error`** (W1-T6): typed; `kind() -> ErrorKind`, `ora_code()`/`oracle_code()`,
+  `offset()`, `caret(sql)`, `connection_disposition() -> {Reusable, Dead}`,
+  `retry_hint()`, and the existing `is_connection_lost`/`is_transient`/`is_retryable`
+  helpers + curated code sets. `BindError` covers client-side bind-shape
+  prevalidation; `SessionlessError`/`ConversionError`/`PoolError` remain the supporting
+  public taxonomies (with enum evolution handled by W1-T4).
 - **`BlockingConnection`** gets the 1:1 twin of every method above, each
   `block_on`-wrapping its async sibling (W1-T8 verifies completeness):
   `query`, `query_one`, `query_opt`, `query_all`, `query_with`, `execute`,
