@@ -134,7 +134,7 @@ pub mod oracledb_protocol::wire	keep	Wire helper namespace.
 | `OracleWriteHalf` | `crates/oracledb/src/transport.rs:58` | `pub(crate)` | Same transport-internal disposition as `OracleReadHalf`. |
 | `PoolEngine<B>` | `crates/oracledb/src/pool.rs:164` | `pub(crate)` | Low-level sync pool engine is not the intended async-native pool facade. |
 | `DirectPathStream` | `crates/oracledb-protocol/src/dpl.rs:722` | `keep` | Driver direct-path APIs accept this payload type directly. |
-| `BatchLoadState` | `crates/oracledb-protocol/src/dpl.rs:792` | `pub(crate)` | Batch offset state is encoder bookkeeping, not a user contract. |
+| `BatchLoadState` | `crates/oracledb-protocol/src/dpl.rs:792` | `keep` | Validated batch state is used across the driver/protocol crate boundary and has private fields. |
 | `DirectPathPieceBuffer` | `crates/oracledb-protocol/src/dpl.rs:391` | `pub(crate)` | Piece assembly buffer is an encoder implementation detail. |
 | `ExecutemanyManager` | `crates/oracledb/src/cursor_logic.rs:45` | `pub(crate)` | Batch chunk management should be encapsulated by execute/executemany APIs. |
 | `ExecutemanyManagerError` | `crates/oracledb/src/cursor_logic.rs:15` | `pub(crate)` | Public errors should describe user-visible execution failures, not internal batch planning failures. |
