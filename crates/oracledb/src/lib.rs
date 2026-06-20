@@ -116,10 +116,13 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::future::Future;
+use std::pin::pin;
 use std::process;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::task::{Context, Poll, Wake};
+use std::time::{Duration, Instant};
 
 use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use asupersync::net::TcpStream;
@@ -325,7 +328,7 @@ type DriverCore = ConnectionCore<DriverTransport>;
 
 #[derive(Debug)]
 struct ConnectionCore<T: WireTransport> {
-    read: T::Read,
+    read: Option<T::Read>,
     write: SharedWriteHalf<T>,
     recovery: Arc<SessionRecovery>,
 }
@@ -333,10 +336,22 @@ struct ConnectionCore<T: WireTransport> {
 impl<T: WireTransport> ConnectionCore<T> {
     fn from_halves(read: T::Read, write: T::Write, write_name: &'static str) -> Self {
         Self {
-            read,
+            read: Some(read),
             write: Arc::new(AsyncMutex::with_name(write_name, write)),
             recovery: Arc::new(SessionRecovery::new()),
         }
+    }
+
+    fn read_mut(&mut self) -> Result<&mut T::Read> {
+        self.read.as_mut().ok_or_else(|| {
+            Error::ConnectionClosed("connection read half unavailable during recovery".into())
+        })
+    }
+
+    fn take_read(&mut self) -> Result<T::Read> {
+        self.read.take().ok_or_else(|| {
+            Error::ConnectionClosed("connection read half unavailable during recovery".into())
+        })
     }
 
     fn write_handle(&self) -> SharedWriteHalf<T> {
@@ -375,11 +390,12 @@ impl<T: WireTransport> ConnectionCore<T> {
     }
 
     async fn read_packet(&mut self, width: PacketLengthWidth) -> Result<IncomingPacket> {
-        read_packet(&mut self.read, width).await
+        read_packet(self.read_mut()?, width).await
     }
 
     async fn read_data_response(&mut self, cx: &Cx) -> Result<Vec<u8>> {
-        read_data_response(&mut self.read, cx, &self.write).await
+        let write = Arc::clone(&self.write);
+        read_data_response(self.read_mut()?, cx, &write).await
     }
 
     async fn read_data_response_boundary(
@@ -387,7 +403,8 @@ impl<T: WireTransport> ConnectionCore<T> {
         cx: &Cx,
         in_pipeline: bool,
     ) -> Result<DataResponse> {
-        read_data_response_boundary(&mut self.read, cx, &self.write, in_pipeline).await
+        let write = Arc::clone(&self.write);
+        read_data_response_boundary(self.read_mut()?, cx, &write, in_pipeline).await
     }
 
     async fn read_data_response_flushing_out_binds(
@@ -395,20 +412,151 @@ impl<T: WireTransport> ConnectionCore<T> {
         cx: &Cx,
         sdu: usize,
     ) -> Result<Vec<u8>> {
-        read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, sdu).await
+        let write = Arc::clone(&self.write);
+        read_data_response_flushing_out_binds(self.read_mut()?, cx, &write, sdu).await
     }
 
-    async fn break_and_drain_wire(&mut self, cx: &Cx, recovery_timeout: Duration) -> Result<()> {
-        break_and_drain_wire(&mut self.read, cx, &self.write, recovery_timeout).await
+    fn break_and_drain_wire(&mut self, recovery_timeout: Duration) -> Result<()> {
+        self.run_recovery_drain(RecoveryWireAction::BreakAndDrain, recovery_timeout)
     }
 
-    async fn cancel_and_drain_wire(&mut self, cx: &Cx, recovery_timeout: Duration) -> Result<()> {
-        cancel_and_drain_wire(&mut self.read, cx, &self.write, recovery_timeout).await
+    fn cancel_and_drain_wire(&mut self, recovery_timeout: Duration) -> Result<()> {
+        self.run_recovery_drain(RecoveryWireAction::BreakAndDrain, recovery_timeout)
     }
 
-    async fn drain_cancel_wire(&mut self, cx: &Cx, recovery_timeout: Duration) -> Result<()> {
-        drain_cancel_wire(&mut self.read, cx, &self.write, recovery_timeout).await
+    fn drain_cancel_wire(&mut self, recovery_timeout: Duration) -> Result<()> {
+        self.run_recovery_drain(RecoveryWireAction::DrainCancel, recovery_timeout)
     }
+
+    fn run_recovery_drain(
+        &mut self,
+        action: RecoveryWireAction,
+        recovery_timeout: Duration,
+    ) -> Result<()> {
+        let read = self.take_read()?;
+        let write = Arc::clone(&self.write);
+        let thread = std::thread::Builder::new()
+            .name("oracledb-recovery-drain".to_string())
+            .spawn(move || {
+                let mut read = read;
+                let result =
+                    run_recovery_without_current_cx(&mut read, &write, action, recovery_timeout);
+                (read, result)
+            })
+            .map_err(|err| {
+                Error::ConnectionClosed(format!("failed to start recovery drain thread: {err}"))
+            })?;
+
+        match thread.join() {
+            Ok((read, result)) => {
+                self.read = Some(read);
+                result
+            }
+            Err(_) => Err(Error::ConnectionClosed(
+                "recovery drain thread panicked".to_string(),
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RecoveryWireAction {
+    BreakAndDrain,
+    DrainCancel,
+}
+
+impl RecoveryWireAction {
+    fn timeout_message(self) -> &'static str {
+        match self {
+            Self::BreakAndDrain => "socket timed out while recovering from previous call timeout",
+            Self::DrainCancel => "socket timed out while draining cancel response",
+        }
+    }
+
+    fn wire_error_prefix(self) -> &'static str {
+        match self {
+            Self::BreakAndDrain => "wire error while recovering from call timeout",
+            Self::DrainCancel => "wire error while draining cancel response",
+        }
+    }
+}
+
+struct RecoveryThreadWaker {
+    thread: std::thread::Thread,
+}
+
+impl Wake for RecoveryThreadWaker {
+    fn wake(self: Arc<Self>) {
+        self.thread.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.thread.unpark();
+    }
+}
+
+fn block_on_recovery_deadline<F>(future: F, recovery_timeout: Duration) -> Option<F::Output>
+where
+    F: Future,
+{
+    let start = Instant::now();
+    let deadline = start.checked_add(recovery_timeout).unwrap_or(start);
+    let waker = std::task::Waker::from(Arc::new(RecoveryThreadWaker {
+        thread: std::thread::current(),
+    }));
+    let mut cx = Context::from_waker(&waker);
+    let mut future = pin!(future);
+
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(output) => return Some(output),
+            Poll::Pending => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return None;
+                }
+                std::thread::park_timeout((deadline - now).min(Duration::from_millis(10)));
+            }
+        }
+    }
+}
+
+fn classify_recovery_result(action: RecoveryWireAction, result: Option<Result<()>>) -> Result<()> {
+    match result {
+        Some(Ok(())) => Ok(()),
+        Some(Err(Error::ConnectionClosed(message))) => Err(Error::ConnectionClosed(message)),
+        Some(Err(err)) => Err(Error::ConnectionClosed(format!(
+            "{}: {err}",
+            action.wire_error_prefix()
+        ))),
+        None => Err(Error::ConnectionClosed(
+            action.timeout_message().to_string(),
+        )),
+    }
+}
+
+fn run_recovery_without_current_cx<R, W>(
+    read: &mut R,
+    write: &Arc<AsyncMutex<W>>,
+    action: RecoveryWireAction,
+    recovery_timeout: Duration,
+) -> Result<()>
+where
+    R: AsyncRead + Send + Unpin + 'static,
+    W: AsyncWrite + std::fmt::Debug + Send + Unpin + 'static,
+{
+    let result = block_on_recovery_deadline(
+        async {
+            match action {
+                RecoveryWireAction::BreakAndDrain => {
+                    break_and_drain_wire_unbounded(read, write).await
+                }
+                RecoveryWireAction::DrainCancel => drain_cancel_wire_unbounded(read, write).await,
+            }
+        },
+        recovery_timeout,
+    );
+    classify_recovery_result(action, result)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2745,7 +2893,7 @@ impl Connection {
             .map_err(|err| Error::Runtime(err.to_string()))?;
         // If a prior cancellable round trip was dropped mid-read, break + drain
         // the stranded call before issuing this execute (Scope cancel-on-drop).
-        self.ensure_clean_before_request(cx).await?;
+        self.ensure_clean_before_request().await?;
         // Flush any cursors queued for close (via `close_cursor`) ahead of this
         // execute: the close-cursors piggyback carries its own sequence number
         // and is prepended to the execute payload, mirroring the bind-rows
@@ -3032,7 +3180,7 @@ impl Connection {
             .map_err(|err| Error::Runtime(err.to_string()))?;
         // If a prior cancellable round trip was dropped mid-read, break + drain
         // the stranded call before issuing this execute (Scope cancel-on-drop).
-        self.ensure_clean_before_request(cx).await?;
+        self.ensure_clean_before_request().await?;
         let mut exec_options = exec_options;
         // a `suspend_on_success` execute folds a post-detach into the pending
         // sessionless piggyback; validate (DPY-3034/3036) before any wire work
@@ -3259,14 +3407,13 @@ impl Connection {
     /// request — so the leftover bytes / still-running call cannot poison this
     /// response. A failed drain marks the connection dead and surfaces
     /// [`Error::ConnectionClosed`].
-    async fn ensure_clean_before_request(&mut self, cx: &Cx) -> Result<()> {
+    async fn ensure_clean_before_request(&mut self) -> Result<()> {
         if !self.core.recovery.begin_pending_drain()? {
             return Ok(());
         }
         match self
             .core
-            .cancel_and_drain_wire(cx, BREAK_DRAIN_RECOVERY_TIMEOUT)
-            .await
+            .cancel_and_drain_wire(BREAK_DRAIN_RECOVERY_TIMEOUT)
         {
             Ok(()) => {
                 self.core.recovery.finish_drain_ready();
@@ -3343,7 +3490,7 @@ impl Connection {
             .map_err(|err| Error::Runtime(err.to_string()))?;
         // If a prior fetch future was cancelled mid-read, break + drain the
         // stranded call before issuing this fetch (Scope-based cancel-on-drop).
-        self.ensure_clean_before_request(cx).await?;
+        self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
         trace_query_bytes("FETCH payload", &payload);
@@ -3457,7 +3604,7 @@ impl Connection {
             .map_err(|err| Error::Runtime(err.to_string()))?;
         // A request must start from a clean boundary: if a prior cancelled op
         // left a drain pending, break + drain it first.
-        self.ensure_clean_before_request(cx).await?;
+        self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
         trace_query_bytes("FETCH payload (prefetch)", &payload);
@@ -4539,13 +4686,9 @@ impl Connection {
     /// timeout or a wire error), the connection is marked [`Self::dead`] and the
     /// returned [`Error::ConnectionClosed`] is propagated instead — mirroring
     /// the reference's disconnect-on-second-timeout (protocol.pyx:454-458).
-    async fn break_and_drain(&mut self, cx: &Cx) -> Result<()> {
+    async fn break_and_drain(&mut self) -> Result<()> {
         self.core.recovery.begin_drain_after_break()?;
-        match self
-            .core
-            .break_and_drain_wire(cx, BREAK_DRAIN_RECOVERY_TIMEOUT)
-            .await
-        {
+        match self.core.break_and_drain_wire(BREAK_DRAIN_RECOVERY_TIMEOUT) {
             Ok(()) => {
                 self.core.recovery.finish_drain_ready();
                 Ok(())
@@ -4567,8 +4710,8 @@ impl Connection {
     /// dead and [`Error::ConnectionClosed`] (`DPY-4011`) is propagated. Always
     /// returns `Err`, so it composes as the `Err(_)` branch of the timeout
     /// `match`.
-    async fn recover_from_call_timeout<T>(&mut self, cx: &Cx, timeout_ms: u32) -> Result<T> {
-        match self.break_and_drain(cx).await {
+    async fn recover_from_call_timeout<T>(&mut self, _cx: &Cx, timeout_ms: u32) -> Result<T> {
+        match self.break_and_drain().await {
             Ok(()) => Err(Error::CallTimeout(timeout_ms)),
             Err(closed) => Err(closed),
         }
@@ -4578,22 +4721,18 @@ impl Connection {
     /// thread already sent the BREAK while this thread was blocked in a query, so
     /// the socket now holds the full multi-stage cancel response. Drains it with
     /// the SAME machinery the call-timeout path uses ([`drain_cancel_wire`] ->
-    /// [`drain_break_response`]) — the cancelled call's in-flight DATA response,
-    /// the break-ack MARKER, the RESET handshake, and the trailing ORA-01013 —
-    /// leaving the connection clean and reusable.
+    /// [`drain_break_response_recovery`]) — the cancelled call's in-flight DATA
+    /// response, the break-ack MARKER, the RESET handshake, and the trailing
+    /// ORA-01013 — leaving the connection clean and reusable.
     ///
     /// Before this used the proper drain it ran a single `read_data_response`
     /// that stopped at the in-flight response's end-of-response boundary, leaking
     /// the MARKER + ORA-01013 into the socket where the NEXT operation misread
     /// them (bead rust-oracledb-wnz). A failed drain marks the connection dead
     /// and surfaces [`Error::ConnectionClosed`].
-    async fn drain_cancel_response(&mut self, cx: &Cx) -> Result<()> {
+    async fn drain_cancel_response(&mut self) -> Result<()> {
         self.core.recovery.begin_drain_after_break()?;
-        match self
-            .core
-            .drain_cancel_wire(cx, BREAK_DRAIN_RECOVERY_TIMEOUT)
-            .await
-        {
+        match self.core.drain_cancel_wire(BREAK_DRAIN_RECOVERY_TIMEOUT) {
             Ok(()) => {
                 self.core.recovery.finish_drain_ready();
                 Ok(())
@@ -4630,12 +4769,11 @@ impl Connection {
     /// thread, leaving the drain to a later [`Self::drain_cancel_response`]),
     /// this is the single-call, self-contained cancel: break **and** drain in one
     /// place.
-    pub async fn cancel(&mut self, cx: &Cx) -> Result<()> {
+    pub async fn cancel(&mut self, _cx: &Cx) -> Result<()> {
         self.core.recovery.begin_drain_after_break()?;
         match self
             .core
-            .cancel_and_drain_wire(cx, BREAK_DRAIN_RECOVERY_TIMEOUT)
-            .await
+            .cancel_and_drain_wire(BREAK_DRAIN_RECOVERY_TIMEOUT)
         {
             Ok(()) => {
                 self.core.recovery.finish_drain_ready();
@@ -6085,11 +6223,7 @@ impl BlockingConnection {
 
     pub fn drain_cancel_response(connection: &mut Connection) -> Result<()> {
         let runtime = build_io_runtime()?;
-        runtime.block_on(async {
-            let cx = Cx::current()
-                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            connection.drain_cancel_response(&cx).await
-        })
+        runtime.block_on(async { connection.drain_cancel_response().await })
     }
 
     /// Blocking wrapper for [`Connection::supplement_json_column_metadata`].
@@ -6269,6 +6403,30 @@ where
     send_marker(&mut *guard, marker_type).await
 }
 
+fn lock_write_for_recovery<W>(
+    write: &Arc<AsyncMutex<W>>,
+) -> Result<asupersync::sync::MutexGuard<'_, W>>
+where
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
+    write.try_lock().map_err(|err| match err {
+        asupersync::sync::TryLockError::Locked => Error::ConnectionClosed(
+            "write lock unavailable while recovering from cancellation".into(),
+        ),
+        asupersync::sync::TryLockError::Poisoned => {
+            Error::ConnectionClosed("write lock poisoned while recovering from cancellation".into())
+        }
+    })
+}
+
+async fn send_marker_recovery<W>(write: &Arc<AsyncMutex<W>>, marker_type: u8) -> Result<()>
+where
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
+    let mut guard = lock_write_for_recovery(write)?;
+    send_marker(&mut *guard, marker_type).await
+}
+
 async fn send_data_packet<W>(stream: &mut W, payload: &[u8], sdu: usize) -> Result<()>
 where
     W: AsyncWrite + Unpin,
@@ -6371,9 +6529,9 @@ const BREAK_DRAIN_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// the drain errors or its bounded *secondary* timeout fires, the wire could not
 /// be left clean, so the connection must be discarded — the error is surfaced as
 /// [`Error::ConnectionClosed`], which is [`Error::is_connection_lost`].
+#[allow(dead_code)]
 async fn break_and_drain_wire<R, W>(
     read: &mut R,
-    cx: &Cx,
     write: &Arc<AsyncMutex<W>>,
     recovery_timeout: Duration,
 ) -> Result<()>
@@ -6381,35 +6539,34 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
+    let result = time::timeout(
+        time::wall_now(),
+        recovery_timeout,
+        break_and_drain_wire_unbounded(read, write),
+    )
+    .await
+    .ok();
+    classify_recovery_result(RecoveryWireAction::BreakAndDrain, result)
+}
+
+async fn break_and_drain_wire_unbounded<R, W>(
+    read: &mut R,
+    write: &Arc<AsyncMutex<W>>,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     // 1) Send the BREAK marker (reference `_break_external`).
-    send_marker_shared(cx, write, TNS_MARKER_TYPE_BREAK)
+    send_marker_recovery(write, TNS_MARKER_TYPE_BREAK)
         .await
         .map_err(|err| {
             Error::ConnectionClosed(format!(
                 "failed to send break marker on call timeout: {err}"
             ))
         })?;
-    // 2) Drain the whole break response under a bounded secondary timeout.
-    match time::timeout(
-        time::wall_now(),
-        recovery_timeout,
-        drain_break_response(read, cx, write),
-    )
-    .await
-    {
-        // Drained to a clean boundary: connection stays usable.
-        Ok(Ok(())) => Ok(()),
-        // The recovery read errored (socket reset, decode failure): the stream
-        // is poisoned and cannot be trusted; the connection is dead.
-        Ok(Err(err)) => Err(Error::ConnectionClosed(format!(
-            "wire error while recovering from call timeout: {err}"
-        ))),
-        // A SECOND timeout while recovering — the reference disconnects here and
-        // raises ERR_CONNECTION_CLOSED (protocol.pyx:454-458).
-        Err(_) => Err(Error::ConnectionClosed(
-            "socket timed out while recovering from previous call timeout".to_string(),
-        )),
-    }
+    // 2) Drain the whole break response.
+    drain_break_response_recovery(read, write).await
 }
 
 /// Sends a BREAK and drains the server's cancel response so the wire is left at
@@ -6434,9 +6591,9 @@ where
 /// `Ok(())` means the wire is clean and the connection is reusable; the caller
 /// surfaces [`Error::Cancelled`]. On a failed drain the error is
 /// [`Error::ConnectionClosed`] and the connection must be discarded.
+#[allow(dead_code)]
 async fn cancel_and_drain_wire<R, W>(
     read: &mut R,
-    cx: &Cx,
     write: &Arc<AsyncMutex<W>>,
     recovery_timeout: Duration,
 ) -> Result<()>
@@ -6444,7 +6601,7 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    break_and_drain_wire(read, cx, write, recovery_timeout).await
+    break_and_drain_wire(read, write, recovery_timeout).await
 }
 
 /// Drains the server's cancel response **without** sending a BREAK first.
@@ -6454,18 +6611,18 @@ where
 /// query round trip. The wire now carries the same multi-stage cancel response a
 /// timeout break would (the cancelled call's in-flight DATA response, the
 /// break-ack MARKER, the RESET handshake, and the trailing ORA-01013), so this
-/// reuses [`drain_break_response`] — the SAME drain `break_and_drain_wire` runs —
-/// under the same bounded recovery timeout. It just omits the `send_marker`
-/// BREAK that the handle thread already issued; sending a second BREAK here would
-/// inject an extra marker the server answers with an extra reset, desyncing the
-/// reused connection.
+/// reuses [`drain_break_response_recovery`] — the SAME drain
+/// `break_and_drain_wire` runs — under the same bounded recovery timeout. It
+/// just omits the `send_marker` BREAK that the handle thread already issued;
+/// sending a second BREAK here would inject an extra marker the server answers
+/// with an extra reset, desyncing the reused connection.
 ///
 /// `Ok(())` leaves the wire clean and the connection reusable. A drain error or
 /// a secondary timeout yields [`Error::ConnectionClosed`] (the connection must
 /// be discarded), matching the break+drain failure semantics.
+#[allow(dead_code)]
 async fn drain_cancel_wire<R, W>(
     read: &mut R,
-    cx: &Cx,
     write: &Arc<AsyncMutex<W>>,
     recovery_timeout: Duration,
 ) -> Result<()>
@@ -6473,21 +6630,22 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    match time::timeout(
+    let result = time::timeout(
         time::wall_now(),
         recovery_timeout,
-        drain_break_response(read, cx, write),
+        drain_cancel_wire_unbounded(read, write),
     )
     .await
-    {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(err)) => Err(Error::ConnectionClosed(format!(
-            "wire error while draining cancel response: {err}"
-        ))),
-        Err(_) => Err(Error::ConnectionClosed(
-            "socket timed out while draining cancel response".to_string(),
-        )),
-    }
+    .ok();
+    classify_recovery_result(RecoveryWireAction::DrainCancel, result)
+}
+
+async fn drain_cancel_wire_unbounded<R, W>(read: &mut R, write: &Arc<AsyncMutex<W>>) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
+    drain_break_response_recovery(read, write).await
 }
 
 /// Drop-guard that marks a connection's recovery phase `BreakSent` if a
@@ -6543,7 +6701,7 @@ impl Drop for CancelDrainGuard {
 /// RESET handshake, and the trailing error packet — leaving the reader at a
 /// clean boundary. See [`break_and_drain_wire`] for why stopping at the first
 /// end-of-response is insufficient.
-async fn drain_break_response<R, W>(read: &mut R, cx: &Cx, write: &Arc<AsyncMutex<W>>) -> Result<()>
+async fn drain_break_response_recovery<R, W>(read: &mut R, write: &Arc<AsyncMutex<W>>) -> Result<()>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
@@ -6574,12 +6732,12 @@ where
     // RESET marker). `reset_after_marker` returns the first non-marker packet
     // after the RESET confirmation, if any — that is the head of the trailing
     // error response (ORA-01013).
-    let pending = reset_after_marker(read, cx, write, &initial_marker).await?;
+    let pending = reset_after_marker_recovery(read, write, &initial_marker).await?;
 
     // Phase C: consume the trailing error response to its end-of-response
     // boundary and discard it. Reuses the same boundary loop the normal read
     // path uses, seeded with the packet `reset_after_marker` already pulled.
-    let trailing = read_data_response_boundary_from(read, cx, write, pending).await?;
+    let trailing = read_data_response_boundary_from_recovery(read, write, pending).await?;
     trace_connect_bytes("BREAK drain: trailing error response", &trailing.payload);
     Ok(())
 }
@@ -6688,7 +6846,7 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    read_data_response_boundary_seeded(read, cx, write, in_pipeline, None).await
+    read_data_response_boundary_seeded(read, Some(cx), write, in_pipeline, None).await
 }
 
 /// Like [`read_data_response_boundary`] but seeds the reassembly loop with an
@@ -6696,9 +6854,8 @@ where
 /// pulled past a RESET marker) before reading more from the wire. Used by the
 /// break-drain path to consume the trailing error response. Always runs the
 /// non-pipeline (reset-handling) variant.
-async fn read_data_response_boundary_from<R, W>(
+async fn read_data_response_boundary_from_recovery<R, W>(
     read: &mut R,
-    cx: &Cx,
     write: &Arc<AsyncMutex<W>>,
     seed: Option<IncomingPacket>,
 ) -> Result<DataResponse>
@@ -6706,12 +6863,12 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    read_data_response_boundary_seeded(read, cx, write, false, seed).await
+    read_data_response_boundary_seeded(read, None, write, false, seed).await
 }
 
 async fn read_data_response_boundary_seeded<R, W>(
     read: &mut R,
-    cx: &Cx,
+    cx: Option<&Cx>,
     write: &Arc<AsyncMutex<W>>,
     in_pipeline: bool,
     seed: Option<IncomingPacket>,
@@ -6743,7 +6900,10 @@ where
                 trace_connect_bytes("MARKER packet skipped in pipeline", &packet.payload);
                 continue;
             }
-            pending_packet = reset_after_marker(read, cx, write, &packet).await?;
+            pending_packet = match cx {
+                Some(cx) => reset_after_marker(read, cx, write, &packet).await?,
+                None => reset_after_marker_recovery(read, write, &packet).await?,
+            };
             after_reset = true;
             continue;
         }
@@ -6799,6 +6959,20 @@ const TNS_PACKET_TYPE_MARKER: u8 = 12;
 const TNS_MARKER_TYPE_BREAK: u8 = 1;
 const TNS_MARKER_TYPE_RESET: u8 = 2;
 
+async fn reset_after_marker_recovery<R, W>(
+    read: &mut R,
+    write: &Arc<AsyncMutex<W>>,
+    initial_marker: &IncomingPacket,
+) -> Result<Option<IncomingPacket>>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
+    trace_connect_bytes("MARKER packet", &initial_marker.payload);
+    send_marker_recovery(write, TNS_MARKER_TYPE_RESET).await?;
+    drain_reset_markers(read).await
+}
+
 async fn reset_after_marker<R, W>(
     read: &mut R,
     cx: &Cx,
@@ -6811,6 +6985,13 @@ where
 {
     trace_connect_bytes("MARKER packet", &initial_marker.payload);
     send_marker_shared(cx, write, TNS_MARKER_TYPE_RESET).await?;
+    drain_reset_markers(read).await
+}
+
+async fn drain_reset_markers<R>(read: &mut R) -> Result<Option<IncomingPacket>>
+where
+    R: AsyncRead + Unpin,
+{
     // Drain the RESET handshake: consume EVERY trailing marker packet — the
     // RESET acknowledgement AND any additional markers the server sends after
     // it (a documented variant: reference _reset's second loop,
@@ -8528,7 +8709,7 @@ mod tests {
             let write: SharedWriteHalf = Arc::new(AsyncMutex::with_name("drain_test_write", write));
 
             // The fix: break + drain leaves the stream clean.
-            break_and_drain_wire(&mut read, &cx, &write, Duration::from_secs(5))
+            break_and_drain_wire(&mut read, &write, Duration::from_secs(5))
                 .await
                 .expect("drain must succeed and leave the stream clean");
 
@@ -8543,6 +8724,72 @@ mod tests {
             "after break_and_drain the reused connection must read the FRESH response, \
              not the stale in-flight response ({INFLIGHT_BODY:?}) or error body ({ERROR_BODY:?})"
         );
+        server.join().expect("server thread joins");
+    }
+
+    // W1-T2.2: core recovery must not inherit the expired operation context.
+    // The core moves the read half to a short-lived no-ambient recovery thread;
+    // this test timeout-cancels the caller context before recovery starts and
+    // proves the bounded drain still completes.
+    #[test]
+    fn core_break_and_drain_runs_after_caller_context_timeout() {
+        const INFLIGHT_BODY: &[u8] = &[0xD1, 0xA1, 0xB1];
+        const ERROR_BODY: &[u8] = &[0x04, 0x01, 0x0d];
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            use std::io::Write as _;
+
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_BREAK,
+                "recovery must send BREAK even after caller context timeout"
+            );
+            socket
+                .write_all(&data_packet(INFLIGHT_BODY, true))
+                .expect("write in-flight response");
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))
+                .expect("write break-ack marker");
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_RESET,
+                "recovery must answer break marker with RESET"
+            );
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_RESET))
+                .expect("write reset-confirm marker");
+            socket
+                .write_all(&data_packet(ERROR_BODY, true))
+                .expect("write trailing error packet");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("ambient Cx");
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (read, write) = transport::plain_split(stream);
+            let mut core = ConnectionCore::<DriverTransport>::from_halves(
+                read,
+                write,
+                "timeout_drain_test_write",
+            );
+
+            cx.cancel_fast(asupersync::CancelKind::Timeout);
+            assert!(
+                cx.checkpoint().is_err(),
+                "test must start from an expired caller context"
+            );
+
+            core.break_and_drain_wire(Duration::from_secs(5))
+                .expect("recovery drain must ignore the expired caller context");
+        });
+
         server.join().expect("server thread joins");
     }
 
@@ -8620,7 +8867,7 @@ mod tests {
             let stream = TcpStream::connect(addr).await.expect("connect to listener");
             let (mut read, write) = transport::plain_split(stream);
             let write: SharedWriteHalf = Arc::new(AsyncMutex::with_name("yhz_test_write", write));
-            break_and_drain_wire(&mut read, &cx, &write, Duration::from_secs(5))
+            break_and_drain_wire(&mut read, &write, Duration::from_secs(5))
                 .await
                 .expect("drain must succeed even with multiple RESET markers");
             read_data_response(&mut read, &cx, &write)
@@ -8905,7 +9152,7 @@ mod tests {
                 Arc::new(AsyncMutex::with_name("cancel_test_write", write));
 
             // The cancel: break + drain leaves the stream clean and reusable.
-            cancel_and_drain_wire(&mut read, &cx, &write, Duration::from_secs(5))
+            cancel_and_drain_wire(&mut read, &write, Duration::from_secs(5))
                 .await
                 .expect("cancel drain must succeed and leave the stream clean");
 
@@ -8928,7 +9175,7 @@ mod tests {
     // DRAIN-ONLY clean-up: it must NOT send a second BREAK, but it must still
     // consume the in-flight response + break-ack MARKER + RESET handshake +
     // trailing ORA-01013, exactly like the full break+drain. `drain_cancel_wire`
-    // is that drain-only half, sharing `drain_break_response` with the
+    // is that drain-only half, sharing `drain_break_response_recovery` with the
     // break+drain path. The server here sends NO marker before its in-flight
     // response is flushed and does NOT expect a BREAK from us (the handle thread
     // already sent it) — only the RESET in answer to the break-ack marker.
@@ -8991,7 +9238,7 @@ mod tests {
             let write: SharedWriteHalf =
                 Arc::new(AsyncMutex::with_name("drain_cancel_test_write", write));
 
-            drain_cancel_wire(&mut read, &cx, &write, Duration::from_secs(5))
+            drain_cancel_wire(&mut read, &write, Duration::from_secs(5))
                 .await
                 .expect("drain-only cancel must succeed and leave the stream clean");
 

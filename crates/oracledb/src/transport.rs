@@ -40,8 +40,8 @@ type SharedTls = Arc<Mutex<TlsStream<TcpStream>>>;
 
 /// Crate-private transport contract beneath the public [`Connection`](crate::Connection).
 pub(crate) trait WireTransport {
-    type Read: AsyncRead + Debug + Unpin;
-    type Write: AsyncWrite + Debug + Unpin;
+    type Read: AsyncRead + Debug + Send + Unpin + 'static;
+    type Write: AsyncWrite + Debug + Send + Unpin + 'static;
 }
 
 pub(crate) type TransportHalves<T> = (<T as WireTransport>::Read, <T as WireTransport>::Write);
