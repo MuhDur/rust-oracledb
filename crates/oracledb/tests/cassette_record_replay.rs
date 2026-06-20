@@ -9,9 +9,9 @@
 //!   seam tees a real Oracle session through to a cassette file.
 //!
 //! * [`replay_select_7_plus_5_offline`] is an OFFLINE test (NO database). It
-//!   loads the captured fixture, builds a socket-free [`transport::replay_split`]
-//!   transport, drives the REAL TNS packet framing over the [`ReplayRead`] half,
-//!   and decodes the execute response with the REAL `parse_query_response`. It
+//!   loads the captured fixture, replays the captured server frames through the
+//!   REAL TNS packet framing, and decodes the execute response with the REAL
+//!   `parse_query_response`. It
 //!   asserts the decoded value is exactly 12 — reproducing the recorded session
 //!   with no socket, no clock, and no DB.
 //!
@@ -20,10 +20,10 @@
 
 #![cfg(feature = "cassette")]
 
+use std::io::{Cursor, Read};
 use std::path::PathBuf;
 
-use asupersync::io::{AsyncRead, AsyncReadExt};
-use oracledb::transport::{self, OracleReadHalf, ReplayWriteMode};
+use oracledb::transport;
 use oracledb_protocol::thin::{
     parse_query_response, ClientCapabilities, QueryValue, TNS_DATA_FLAGS_END_OF_RESPONSE,
     TNS_DATA_FLAGS_EOF,
@@ -50,16 +50,13 @@ enum LenWidth {
     Large32,
 }
 
-/// Read one TNS packet (8-byte header + body) from an [`AsyncRead`], mirroring
+/// Read one TNS packet (8-byte header + body) from captured server bytes, mirroring
 /// the driver's private `read_packet` framing. `width` selects the length field
 /// (the type byte is always at offset 4). Returns `(packet_type, body)` or
 /// `None` at end of stream.
-async fn read_tns_packet<R: AsyncRead + Unpin>(
-    read: &mut R,
-    width: LenWidth,
-) -> Option<(u8, Vec<u8>)> {
+fn read_tns_packet(read: &mut Cursor<&[u8]>, width: LenWidth) -> Option<(u8, Vec<u8>)> {
     let mut header = [0u8; 8];
-    read.read_exact(&mut header).await.ok()?;
+    read.read_exact(&mut header).ok()?;
     let declared = match width {
         LenWidth::Legacy16 => usize::from(u16::from_be_bytes([header[0], header[1]])),
         LenWidth::Large32 => {
@@ -70,7 +67,7 @@ async fn read_tns_packet<R: AsyncRead + Unpin>(
         return None;
     }
     let mut body = vec![0u8; declared - header.len()];
-    read.read_exact(&mut body).await.ok()?;
+    read.read_exact(&mut body).ok()?;
     Some((header[4], body))
 }
 
@@ -78,13 +75,14 @@ async fn read_tns_packet<R: AsyncRead + Unpin>(
 /// driver concatenates the post-flags payload of each DATA packet until the
 /// END_OF_RESPONSE / EOF data flag). Returns one reassembled payload per
 /// response boundary — exactly the byte stream `parse_query_response` consumes.
-async fn reassemble_responses(read: &mut OracleReadHalf) -> Vec<Vec<u8>> {
+fn reassemble_responses(server_bytes: &[u8]) -> Vec<Vec<u8>> {
     let mut responses = Vec::new();
     let mut current: Vec<u8> = Vec::new();
     // The first server packet is the ACCEPT handshake (legacy 16-bit length);
     // every packet after it is a 32-bit-length DATA/MARKER packet.
+    let mut read = Cursor::new(server_bytes);
     let mut width = LenWidth::Legacy16;
-    while let Some((packet_type, body)) = read_tns_packet(read, width).await {
+    while let Some((packet_type, body)) = read_tns_packet(&mut read, width) {
         width = LenWidth::Large32;
         if packet_type != TNS_PACKET_TYPE_DATA {
             continue; // skip CONNECT/ACCEPT/etc.; only DATA carries TTC.
@@ -123,8 +121,8 @@ fn decoded_value_is_twelve(responses: &[Vec<u8>]) -> bool {
     false
 }
 
-/// OFFLINE replay: NO database. Loads the captured fixture, builds a socket-free
-/// replay transport, drives the real TNS framing + real decoder, asserts 12.
+/// OFFLINE replay: NO database. Loads the captured fixture, drives the real TNS
+/// framing + real decoder over captured server bytes, asserts 12.
 #[test]
 fn replay_select_7_plus_5_offline() {
     let path = fixture_path();
@@ -152,20 +150,12 @@ fn replay_select_7_plus_5_offline() {
         "cassette must contain captured S->C reads"
     );
 
-    // Build the socket-free replay transport and drive the real read path.
-    let (mut read, _write) = transport::replay_split(&bytes, ReplayWriteMode::Ignore)
-        .expect("captured fixture should replay");
-
-    // A tiny single-thread runtime just to poll the in-memory ReplayRead; it
-    // never touches the network (the replay half has no socket).
-    let reactor =
-        asupersync::runtime::reactor::create_reactor().expect("reactor builds for in-memory poll");
-    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
-        .with_reactor(reactor)
-        .build()
-        .expect("current-thread runtime builds");
-
-    let responses = runtime.block_on(async { reassemble_responses(&mut read).await });
+    let server_bytes = frames
+        .iter()
+        .filter(|f| f.direction == oracledb_protocol::net::cassette::Direction::ServerToClient)
+        .flat_map(|f| f.bytes.iter().copied())
+        .collect::<Vec<_>>();
+    let responses = reassemble_responses(&server_bytes);
     assert!(
         decoded_value_is_twelve(&responses),
         "offline replay of the captured `select 7+5 from dual` session must \

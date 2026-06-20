@@ -21,10 +21,9 @@ use asupersync::net::TcpStream;
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
 use oracledb::tls::{self, TlsParams};
-use oracledb::transport;
 use oracledb_protocol::net::EasyConnect;
 use oracledb_protocol::tls::parse_ewallet_pem;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::CertificateDer;
 use rustls::{ServerConfig, ServerConnection};
 
 /// Build the asupersync I/O runtime the same way the driver does.
@@ -64,7 +63,7 @@ fn server_config() -> Arc<ServerConfig> {
 
     let config = ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(chain, PrivateKeyDer::from(key_der))
+        .with_single_cert(chain, key_der)
         .expect("server config");
     Arc::new(config)
 }
@@ -128,22 +127,17 @@ fn tcps_handshake_succeeds_with_ca_wallet_and_name_match() {
 
     let rt = io_runtime();
     let echoed: Vec<u8> = rt.block_on(async move {
-        let cx = Cx::current().expect("ambient cx");
+        let _cx = Cx::current().expect("ambient cx");
         let tcp = TcpStream::connect((desc.host.clone(), desc.port))
             .await
             .expect("tcp connect");
-        let tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
+        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
             .await
             .expect("TCPS handshake must succeed against CA-trusted server");
-        let (mut read, write) = transport::tls_split(tls_stream);
-        let write = Arc::new(asupersync::sync::Mutex::with_name("w", write));
-        {
-            let mut g = write.lock(&cx).await.expect("lock");
-            g.write_all(b"ping\n").await.expect("write");
-            g.flush().await.expect("flush");
-        }
+        tls_stream.write_all(b"ping\n").await.expect("write");
+        tls_stream.flush().await.expect("flush");
         let mut buf = vec![0u8; 5];
-        read.read_exact(&mut buf).await.expect("read echo");
+        tls_stream.read_exact(&mut buf).await.expect("read echo");
         buf
     });
     assert_eq!(

@@ -30,8 +30,7 @@ use asupersync::tls::TlsStream;
 
 #[cfg(feature = "cassette")]
 pub use cassette_seam::{
-    capture_scope, recording_split, replay_split, CaptureScope, CassetteError, CassetteRecorder,
-    ReplayMismatch, ReplayWriteMode,
+    capture_scope, CaptureScope, CassetteError, CassetteRecorder, ReplayMismatch, ReplayWriteMode,
 };
 
 /// A TLS stream shared between the read and write halves.
@@ -92,7 +91,7 @@ mod tests {
 }
 
 /// The read half of an Oracle connection transport.
-pub enum OracleReadHalf {
+pub(crate) enum OracleReadHalf {
     /// Plain TCP read half (non-TLS).
     Plain(OwnedReadHalf),
     /// Shared TLS stream (read side).
@@ -106,11 +105,12 @@ pub enum OracleReadHalf {
     /// Replay source: serves recorded `S->C` bytes to reads in order with no
     /// socket. Only present with the `cassette` feature.
     #[cfg(feature = "cassette")]
+    #[allow(dead_code)]
     Replay(cassette_seam::ReplayRead),
 }
 
 /// The write half of an Oracle connection transport.
-pub enum OracleWriteHalf {
+pub(crate) enum OracleWriteHalf {
     /// Plain TCP write half (non-TLS).
     Plain(OwnedWriteHalf),
     /// Shared TLS stream (write side).
@@ -123,6 +123,7 @@ pub enum OracleWriteHalf {
     /// Replay sink: checks-or-ignores `C->S` writes against the cassette with
     /// no socket. Only present with the `cassette` feature.
     #[cfg(feature = "cassette")]
+    #[allow(dead_code)]
     Replay(cassette_seam::ReplayWrite),
 }
 
@@ -160,7 +161,7 @@ impl std::fmt::Debug for OracleWriteHalf {
 /// — and always when the feature is off — this is byte-identical to the plain
 /// split.
 #[must_use]
-pub fn plain_split(stream: TcpStream) -> (OracleReadHalf, OracleWriteHalf) {
+pub(crate) fn plain_split(stream: TcpStream) -> (OracleReadHalf, OracleWriteHalf) {
     let (read, write) = stream.into_split();
     let halves = (OracleReadHalf::Plain(read), OracleWriteHalf::Plain(write));
     #[cfg(feature = "cassette")]
@@ -173,7 +174,7 @@ pub fn plain_split(stream: TcpStream) -> (OracleReadHalf, OracleWriteHalf) {
 /// Like [`plain_split`], an installed [`capture_scope`] recorder (with the
 /// `cassette` feature) transparently wraps the halves for recording.
 #[must_use]
-pub fn tls_split(stream: TlsStream<TcpStream>) -> (OracleReadHalf, OracleWriteHalf) {
+pub(crate) fn tls_split(stream: TlsStream<TcpStream>) -> (OracleReadHalf, OracleWriteHalf) {
     let shared: SharedTls = Arc::new(Mutex::new(stream));
     let halves = (
         OracleReadHalf::Tls(Arc::clone(&shared)),
@@ -370,7 +371,7 @@ mod cassette_seam {
     /// `recorder`. The returned halves behave exactly like the inner ones on
     /// the wire; recording is a side-effect only.
     #[must_use]
-    pub fn recording_split(
+    pub(crate) fn recording_split(
         read: OracleReadHalf,
         write: OracleWriteHalf,
         recorder: CassetteRecorder,
@@ -454,7 +455,7 @@ mod cassette_seam {
         }
     }
 
-    /// How a [`ReplayWrite`] handles the driver's `C->S` writes during replay.
+    /// How replay handles the driver's `C->S` writes.
     #[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
     pub enum ReplayWriteMode {
         /// Accept and discard writes (default). The decoder drives forward with
@@ -487,7 +488,8 @@ mod cassette_seam {
     /// # Errors
     ///
     /// Returns [`CassetteError`] if `data` is not a valid cassette.
-    pub fn replay_split(
+    #[allow(dead_code)]
+    pub(crate) fn replay_split(
         data: &[u8],
         write_mode: ReplayWriteMode,
     ) -> Result<(OracleReadHalf, OracleWriteHalf), CassetteError> {
