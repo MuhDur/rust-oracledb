@@ -6,6 +6,177 @@ pub const TNS_MAX_SHORT_LENGTH: usize = 252;
 pub const TNS_LONG_LENGTH_INDICATOR: u8 = 0xfe;
 pub const TNS_NULL_LENGTH_INDICATOR: u8 = 0xff;
 
+const MIB: usize = 1024 * 1024;
+
+/// Central resource policy for thin protocol decoding.
+///
+/// The values are deliberately collected in one copyable struct so connection,
+/// packet, TTC, object, vector, LOB, and notification decoders all share the
+/// same vocabulary for resource bounds. W1-T5.2 threads this policy through the
+/// current decoder call graph; this type is the single source of those limits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProtocolLimits {
+    /// Maximum encoded TNS packet size.
+    pub max_packet_bytes: usize,
+    /// Maximum decoded logical TTC frame/message size.
+    pub max_frame_bytes: usize,
+    /// Maximum cumulative bytes accepted for one server response.
+    pub max_response_bytes: usize,
+    /// Maximum number of columns in one describe/fetch shape.
+    pub max_columns: usize,
+    /// Maximum bind count in one execute/batch request.
+    pub max_binds: usize,
+    /// Maximum row count in one client-side batch operation.
+    pub max_batch_rows: usize,
+    /// Maximum recursive object/JSON nesting depth.
+    pub max_object_depth: usize,
+    /// Maximum element/member count in one decoded object/JSON container.
+    pub max_object_elements: usize,
+    /// Maximum VECTOR dimensions.
+    pub max_vector_dimensions: usize,
+    /// Maximum number of LOB chunks in one logical LOB operation.
+    pub max_lob_chunks: usize,
+    /// Maximum redirect hops while opening a connection.
+    pub max_redirects: usize,
+    /// Maximum elements in generic length-prefixed wire collections.
+    pub max_length_prefixed_elements: usize,
+}
+
+impl Default for ProtocolLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl ProtocolLimits {
+    pub const DEFAULT: Self = Self {
+        max_packet_bytes: 16 * MIB,
+        max_frame_bytes: 16 * MIB,
+        max_response_bytes: 256 * MIB,
+        max_columns: 4096,
+        max_binds: 65_535,
+        max_batch_rows: 1_000_000,
+        max_object_depth: 256,
+        max_object_elements: 1_000_000,
+        max_vector_dimensions: 65_535,
+        max_lob_chunks: 1_000_000,
+        max_redirects: 8,
+        max_length_prefixed_elements: 1_000_000,
+    };
+
+    /// Validate caller-supplied limits before attaching them to a connection.
+    pub fn validate(self) -> Result<Self> {
+        for (name, value) in self.named_limits() {
+            if value == 0 {
+                return Err(ProtocolError::ResourceLimit {
+                    limit: name,
+                    observed: 0,
+                    maximum: 1,
+                });
+            }
+        }
+        if self.max_packet_bytes > self.max_frame_bytes {
+            return Err(ProtocolError::ResourceLimit {
+                limit: "packet_bytes",
+                observed: self.max_packet_bytes,
+                maximum: self.max_frame_bytes,
+            });
+        }
+        if self.max_frame_bytes > self.max_response_bytes {
+            return Err(ProtocolError::ResourceLimit {
+                limit: "frame_bytes",
+                observed: self.max_frame_bytes,
+                maximum: self.max_response_bytes,
+            });
+        }
+        Ok(self)
+    }
+
+    pub fn check_packet_bytes(&self, observed: usize) -> Result<()> {
+        self.check("packet_bytes", observed, self.max_packet_bytes)
+    }
+
+    pub fn check_frame_bytes(&self, observed: usize) -> Result<()> {
+        self.check("frame_bytes", observed, self.max_frame_bytes)
+    }
+
+    pub fn check_response_bytes(&self, observed: usize) -> Result<()> {
+        self.check("response_bytes", observed, self.max_response_bytes)
+    }
+
+    pub fn check_columns(&self, observed: usize) -> Result<()> {
+        self.check("columns", observed, self.max_columns)
+    }
+
+    pub fn check_binds(&self, observed: usize) -> Result<()> {
+        self.check("binds", observed, self.max_binds)
+    }
+
+    pub fn check_batch_rows(&self, observed: usize) -> Result<()> {
+        self.check("batch_rows", observed, self.max_batch_rows)
+    }
+
+    pub fn check_object_depth(&self, observed: usize) -> Result<()> {
+        self.check("object_depth", observed, self.max_object_depth)
+    }
+
+    pub fn check_object_elements(&self, observed: usize) -> Result<()> {
+        self.check("object_elements", observed, self.max_object_elements)
+    }
+
+    pub fn check_vector_dimensions(&self, observed: usize) -> Result<()> {
+        self.check("vector_dimensions", observed, self.max_vector_dimensions)
+    }
+
+    pub fn check_lob_chunks(&self, observed: usize) -> Result<()> {
+        self.check("lob_chunks", observed, self.max_lob_chunks)
+    }
+
+    pub fn check_redirects(&self, observed: usize) -> Result<()> {
+        self.check("redirects", observed, self.max_redirects)
+    }
+
+    pub fn check_length_prefixed_elements(&self, observed: usize) -> Result<()> {
+        self.check(
+            "length_prefixed_elements",
+            observed,
+            self.max_length_prefixed_elements,
+        )
+    }
+
+    fn check(&self, limit: &'static str, observed: usize, maximum: usize) -> Result<()> {
+        if observed <= maximum {
+            Ok(())
+        } else {
+            Err(ProtocolError::ResourceLimit {
+                limit,
+                observed,
+                maximum,
+            })
+        }
+    }
+
+    fn named_limits(&self) -> [(&'static str, usize); 12] {
+        [
+            ("packet_bytes", self.max_packet_bytes),
+            ("frame_bytes", self.max_frame_bytes),
+            ("response_bytes", self.max_response_bytes),
+            ("columns", self.max_columns),
+            ("binds", self.max_binds),
+            ("batch_rows", self.max_batch_rows),
+            ("object_depth", self.max_object_depth),
+            ("object_elements", self.max_object_elements),
+            ("vector_dimensions", self.max_vector_dimensions),
+            ("lob_chunks", self.max_lob_chunks),
+            ("redirects", self.max_redirects),
+            (
+                "length_prefixed_elements",
+                self.max_length_prefixed_elements,
+            ),
+        ]
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PacketLengthWidth {
     Legacy16,
@@ -621,6 +792,160 @@ pub fn encode_packet(
 mod tests {
     use super::*;
 
+    fn assert_resource_limit(
+        result: Result<()>,
+        expected_limit: &'static str,
+        expected_observed: usize,
+        expected_maximum: usize,
+    ) {
+        assert!(
+            matches!(
+                result,
+                Err(ProtocolError::ResourceLimit {
+                    limit,
+                    observed,
+                    maximum,
+                }) if limit == expected_limit
+                    && observed == expected_observed
+                    && maximum == expected_maximum
+            ),
+            "expected ResourceLimit {{ limit: {expected_limit}, observed: {expected_observed}, maximum: {expected_maximum} }}"
+        );
+    }
+
+    #[test]
+    fn protocol_limits_default_names_every_resource_family() {
+        let limits = ProtocolLimits::default()
+            .validate()
+            .expect("valid defaults");
+        assert_eq!(limits, ProtocolLimits::DEFAULT);
+        let names: Vec<&'static str> = limits
+            .named_limits()
+            .into_iter()
+            .map(|(name, value)| {
+                assert!(value > 0, "{name} must be non-zero");
+                name
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "packet_bytes",
+                "frame_bytes",
+                "response_bytes",
+                "columns",
+                "binds",
+                "batch_rows",
+                "object_depth",
+                "object_elements",
+                "vector_dimensions",
+                "lob_chunks",
+                "redirects",
+                "length_prefixed_elements",
+            ]
+        );
+    }
+
+    #[test]
+    fn protocol_limits_check_helpers_return_typed_resource_limit_errors() {
+        let limits = ProtocolLimits {
+            max_packet_bytes: 8,
+            max_frame_bytes: 16,
+            max_response_bytes: 32,
+            max_columns: 2,
+            max_binds: 3,
+            max_batch_rows: 4,
+            max_object_depth: 5,
+            max_object_elements: 6,
+            max_vector_dimensions: 7,
+            max_lob_chunks: 8,
+            max_redirects: 1,
+            max_length_prefixed_elements: 9,
+        }
+        .validate()
+        .expect("valid test limits");
+
+        limits.check_packet_bytes(8).expect("boundary accepted");
+        limits.check_frame_bytes(16).expect("boundary accepted");
+        limits.check_response_bytes(32).expect("boundary accepted");
+        limits.check_columns(2).expect("boundary accepted");
+        limits.check_binds(3).expect("boundary accepted");
+        limits.check_batch_rows(4).expect("boundary accepted");
+        limits.check_object_depth(5).expect("boundary accepted");
+        limits.check_object_elements(6).expect("boundary accepted");
+        limits
+            .check_vector_dimensions(7)
+            .expect("boundary accepted");
+        limits.check_lob_chunks(8).expect("boundary accepted");
+        limits.check_redirects(1).expect("boundary accepted");
+        limits
+            .check_length_prefixed_elements(9)
+            .expect("boundary accepted");
+
+        assert_resource_limit(limits.check_packet_bytes(9), "packet_bytes", 9, 8);
+        assert_resource_limit(limits.check_frame_bytes(17), "frame_bytes", 17, 16);
+        assert_resource_limit(limits.check_response_bytes(33), "response_bytes", 33, 32);
+        assert_resource_limit(limits.check_columns(3), "columns", 3, 2);
+        assert_resource_limit(limits.check_binds(4), "binds", 4, 3);
+        assert_resource_limit(limits.check_batch_rows(5), "batch_rows", 5, 4);
+        assert_resource_limit(limits.check_object_depth(6), "object_depth", 6, 5);
+        assert_resource_limit(limits.check_object_elements(7), "object_elements", 7, 6);
+        assert_resource_limit(limits.check_vector_dimensions(8), "vector_dimensions", 8, 7);
+        assert_resource_limit(limits.check_lob_chunks(9), "lob_chunks", 9, 8);
+        assert_resource_limit(limits.check_redirects(2), "redirects", 2, 1);
+        assert_resource_limit(
+            limits.check_length_prefixed_elements(10),
+            "length_prefixed_elements",
+            10,
+            9,
+        );
+    }
+
+    #[test]
+    fn protocol_limits_validate_rejects_zero_and_inverted_byte_hierarchy() {
+        let zero_columns = ProtocolLimits {
+            max_columns: 0,
+            ..ProtocolLimits::DEFAULT
+        };
+        assert!(matches!(
+            zero_columns.validate(),
+            Err(ProtocolError::ResourceLimit {
+                limit: "columns",
+                observed: 0,
+                maximum: 1,
+            })
+        ));
+
+        let packet_larger_than_frame = ProtocolLimits {
+            max_packet_bytes: 17,
+            max_frame_bytes: 16,
+            ..ProtocolLimits::DEFAULT
+        };
+        assert!(matches!(
+            packet_larger_than_frame.validate(),
+            Err(ProtocolError::ResourceLimit {
+                limit: "packet_bytes",
+                observed: 17,
+                maximum: 16,
+            })
+        ));
+
+        let frame_larger_than_response = ProtocolLimits {
+            max_packet_bytes: 16,
+            max_frame_bytes: 33,
+            max_response_bytes: 32,
+            ..ProtocolLimits::DEFAULT
+        };
+        assert!(matches!(
+            frame_larger_than_response.validate(),
+            Err(ProtocolError::ResourceLimit {
+                limit: "frame_bytes",
+                observed: 33,
+                maximum: 32,
+            })
+        ));
+    }
+
     // --- BoundedReader invariant (l2p) -----------------------------------
     // A length/count field read from the wire can NEVER drive an allocation
     // larger than the bytes actually remaining in the buffer. These tests pin
@@ -746,10 +1071,8 @@ mod tests {
         // Short value: length byte 3 + "abc".
         let short = [0x03u8, b'a', b'b', b'c'];
         let mut reader = TtcReader::new(&short);
-        match reader.read_bytes_borrowed().expect("short decode") {
-            BorrowedBytes::Slice(slice) => assert_eq!(slice, b"abc"),
-            other => panic!("expected borrowed slice, got {other:?}"),
-        }
+        let borrowed = reader.read_bytes_borrowed().expect("short decode");
+        assert!(matches!(borrowed, BorrowedBytes::Slice(slice) if slice == b"abc"));
         assert_eq!(reader.remaining(), 0);
 
         // NULL value: 0xff.
@@ -775,10 +1098,9 @@ mod tests {
             .expect("chunked encode");
         let long = writer.into_bytes();
         let mut reader = TtcReader::new(&long);
-        match reader.read_bytes_borrowed().expect("chunked decode") {
-            BorrowedBytes::Chunked(bytes) => assert_eq!(bytes, vec![0x5au8; 600]),
-            other => panic!("expected owned chunked bytes, got {other:?}"),
-        }
+        let expected = vec![0x5au8; 600];
+        let borrowed = reader.read_bytes_borrowed().expect("chunked decode");
+        assert!(matches!(&borrowed, BorrowedBytes::Chunked(bytes) if bytes == &expected));
         assert_eq!(reader.remaining(), 0);
     }
 

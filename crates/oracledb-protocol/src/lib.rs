@@ -42,6 +42,12 @@ pub enum ProtocolError {
     TtcDecode(&'static str),
     #[error("unknown TTC message type {message_type} at position {position}")]
     UnknownMessageType { message_type: u8, position: usize },
+    #[error("protocol resource limit exceeded: {limit} observed {observed}, maximum {maximum}")]
+    ResourceLimit {
+        limit: &'static str,
+        observed: usize,
+        maximum: usize,
+    },
     #[error("server returned Oracle error: {0}")]
     ServerError(String),
     #[error("server returned Oracle error: {message}")]
