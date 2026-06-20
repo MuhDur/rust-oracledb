@@ -124,6 +124,14 @@ jobs:
       - name: Build docs
         run: cargo doc --workspace --exclude oracledb-pyshim --no-deps
 
+      - name: Install stable Rust
+        if: ${{ inputs.profile != 'canary' }}
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Stable protocol tests
+        if: ${{ inputs.profile != 'canary' }}
+        run: cargo +stable test -p oracledb-protocol --locked
+
       - name: Install cargo-hack
         if: ${{ inputs.profile != 'canary' }}
         run: cargo install cargo-hack --version "$CARGO_HACK_VERSION" --locked
