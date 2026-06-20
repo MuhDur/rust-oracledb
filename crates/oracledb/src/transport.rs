@@ -28,6 +28,8 @@ use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::net::{OwnedReadHalf, OwnedWriteHalf, TcpStream};
 use asupersync::tls::TlsStream;
 
+#[cfg(all(test, feature = "cassette"))]
+pub(crate) use cassette_seam::replay_split;
 #[cfg(feature = "cassette")]
 pub use cassette_seam::{
     capture_scope, CaptureScope, CassetteError, CassetteRecorder, ReplayMismatch, ReplayWriteMode,

@@ -320,9 +320,96 @@ use transport::{Connector, WireTransport};
 
 type DriverConnector = transport::OracleConnector;
 type DriverTransport = <DriverConnector as Connector>::Transport;
-type DriverReadHalf = <DriverTransport as WireTransport>::Read;
-type DriverWriteHalf = <DriverTransport as WireTransport>::Write;
-type SharedWriteHalf = Arc<AsyncMutex<DriverWriteHalf>>;
+type SharedWriteHalf<T = DriverTransport> = Arc<AsyncMutex<<T as WireTransport>::Write>>;
+type DriverCore = ConnectionCore<DriverTransport>;
+
+#[derive(Debug)]
+struct ConnectionCore<T: WireTransport> {
+    read: T::Read,
+    write: SharedWriteHalf<T>,
+    cancel_drain_pending: Arc<AtomicBool>,
+}
+
+impl<T: WireTransport> ConnectionCore<T> {
+    fn from_halves(read: T::Read, write: T::Write, write_name: &'static str) -> Self {
+        Self {
+            read,
+            write: Arc::new(AsyncMutex::with_name(write_name, write)),
+            cancel_drain_pending: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn write_handle(&self) -> SharedWriteHalf<T> {
+        Arc::clone(&self.write)
+    }
+
+    async fn write_all(&self, cx: &Cx, packet: &[u8]) -> Result<()> {
+        write_all_shared(cx, &self.write, packet).await
+    }
+
+    async fn shutdown_write(&self, cx: &Cx) -> Result<()> {
+        shutdown_write_shared(cx, &self.write).await
+    }
+
+    async fn send_data_packet(&self, cx: &Cx, payload: &[u8], sdu: usize) -> Result<()> {
+        send_data_packet_shared(cx, &self.write, payload, sdu).await
+    }
+
+    async fn send_data_packet_with_flags(
+        &self,
+        cx: &Cx,
+        payload: &[u8],
+        sdu: usize,
+        first_packet_flags: u16,
+        last_packet_flags: u16,
+    ) -> Result<()> {
+        send_data_packet_shared_with_flags(
+            cx,
+            &self.write,
+            payload,
+            sdu,
+            first_packet_flags,
+            last_packet_flags,
+        )
+        .await
+    }
+
+    async fn read_packet(&mut self, width: PacketLengthWidth) -> Result<IncomingPacket> {
+        read_packet(&mut self.read, width).await
+    }
+
+    async fn read_data_response(&mut self, cx: &Cx) -> Result<Vec<u8>> {
+        read_data_response(&mut self.read, cx, &self.write).await
+    }
+
+    async fn read_data_response_boundary(
+        &mut self,
+        cx: &Cx,
+        in_pipeline: bool,
+    ) -> Result<DataResponse> {
+        read_data_response_boundary(&mut self.read, cx, &self.write, in_pipeline).await
+    }
+
+    async fn read_data_response_flushing_out_binds(
+        &mut self,
+        cx: &Cx,
+        sdu: usize,
+    ) -> Result<Vec<u8>> {
+        read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, sdu).await
+    }
+
+    async fn break_and_drain_wire(&mut self, cx: &Cx, recovery_timeout: Duration) -> Result<()> {
+        break_and_drain_wire(&mut self.read, cx, &self.write, recovery_timeout).await
+    }
+
+    async fn cancel_and_drain_wire(&mut self, cx: &Cx, recovery_timeout: Duration) -> Result<()> {
+        cancel_and_drain_wire(&mut self.read, cx, &self.write, recovery_timeout).await
+    }
+
+    async fn drain_cancel_wire(&mut self, cx: &Cx, recovery_timeout: Duration) -> Result<()> {
+        drain_cancel_wire(&mut self.read, cx, &self.write, recovery_timeout).await
+    }
+}
 
 /// Oracle error codes that python-oracledb maps to DPY-4011 (connection
 /// closed); seeing one of these marks the connection as dead so pools can
@@ -1198,8 +1285,10 @@ impl ConnectOptions {
 pub struct Connection {
     descriptor: EasyConnect,
     identity: ClientIdentity,
-    read: DriverReadHalf,
-    write: SharedWriteHalf,
+    /// The private transport core owns packet I/O and cancellation-drain state.
+    /// Cancellable reads arm its drain flag so the next operation can break and
+    /// drain before issuing a new request.
+    core: DriverCore,
     session_id: u32,
     serial_num: u16,
     server_version: Option<String>,
@@ -1214,12 +1303,6 @@ pub struct Connection {
     /// [`Connection::cancel`] always uses the in-band BREAK marker regardless,
     /// because the transport does not expose `MSG_OOB`.
     supports_oob: bool,
-    /// Set when a cancellable round-trip future was dropped mid-read (its
-    /// [`CancelDrainGuard`] fired). The next operation breaks + drains the
-    /// stranded server call before issuing its own request, so a cancelled
-    /// fetch cannot poison the stream for the next one. `Arc` so the guard,
-    /// which outlives the borrow, can flip it from its `Drop`.
-    cancel_drain_pending: Arc<AtomicBool>,
     cursor_columns: BTreeMap<u32, Vec<ColumnMetadata>>,
     /// Fetch metadata of the most recent execution keyed by SQL text,
     /// mirroring the reference statement cache's per-statement
@@ -1377,7 +1460,7 @@ impl Connection {
         // and before any TNS bytes are sent (implicit TLS, matching
         // python-oracledb thin's _connect_tcp ordering).
         let connector = DriverConnector::default();
-        let (mut read, write) = if descriptor.protocol.is_tls() {
+        let (read, write) = if descriptor.protocol.is_tls() {
             trace_connect_step("tls handshake");
             let server_type = if options.server_type_emon {
                 Some("emon")
@@ -1399,7 +1482,7 @@ impl Connection {
         } else {
             connector.plain_split(stream)
         };
-        let write = Arc::new(AsyncMutex::with_name("oracle_tcp_write", write));
+        let mut core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
 
         let connect_descriptor = listener_connect_descriptor_with_server(
             &descriptor,
@@ -1417,10 +1500,10 @@ impl Connection {
         )?;
         trace_connect_bytes("CONNECT packet", &packet);
         trace_connect_step("send CONNECT");
-        write_all_shared(cx, &write, &packet).await?;
+        core.write_all(cx, &packet).await?;
 
         trace_connect_step("read ACCEPT");
-        let accept = read_packet(&mut read, PacketLengthWidth::Legacy16).await?;
+        let accept = core.read_packet(PacketLengthWidth::Legacy16).await?;
         match accept.packet_type {
             TNS_PACKET_TYPE_ACCEPT => {}
             TNS_PACKET_TYPE_REDIRECT => return Err(Error::RedirectUnsupported),
@@ -1473,9 +1556,9 @@ impl Connection {
                 options.edition.as_deref(),
             )?;
             trace_connect_step("send AUTH token (fast-auth phase two)");
-            send_data_packet_shared(cx, &write, &auth_payload, sdu).await?;
+            core.send_data_packet(cx, &auth_payload, sdu).await?;
             trace_connect_step("read AUTH token response");
-            let response = read_data_response(&mut read, cx, &write).await?;
+            let response = core.read_data_response(cx).await?;
             trace_connect_bytes("AUTH token response", &response);
             let auth = parse_auth_response(&response)?;
             let capabilities = auth.capabilities.unwrap_or_default();
@@ -1494,9 +1577,9 @@ impl Connection {
             )?;
             trace_connect_bytes("AUTH phase one payload", &auth_one);
             trace_connect_step("send AUTH phase one");
-            send_data_packet_shared(cx, &write, &auth_one, sdu).await?;
+            core.send_data_packet(cx, &auth_one, sdu).await?;
             trace_connect_step("read AUTH phase one");
-            let auth_one_response = read_data_response(&mut read, cx, &write).await?;
+            let auth_one_response = core.read_data_response(cx).await?;
             trace_connect_bytes("AUTH phase one response", &auth_one_response);
             let auth_one = parse_auth_response(&auth_one_response)?;
             let capabilities = auth_one.capabilities.unwrap_or_default();
@@ -1521,9 +1604,9 @@ impl Connection {
             )?;
             trace_connect_bytes("AUTH phase two payload", &auth_two_payload);
             trace_connect_step("send AUTH phase two");
-            send_data_packet_shared(cx, &write, &auth_two_payload, sdu).await?;
+            core.send_data_packet(cx, &auth_two_payload, sdu).await?;
             trace_connect_step("read AUTH phase two");
-            let auth_two_response = read_data_response(&mut read, cx, &write).await?;
+            let auth_two_response = core.read_data_response(cx).await?;
             trace_connect_bytes("AUTH phase two response", &auth_two_response);
             let auth_two = parse_auth_response(&auth_two_response)?;
             oracledb_protocol::crypto::verify_server_response(
@@ -1550,8 +1633,7 @@ impl Connection {
         Ok(Self {
             descriptor,
             identity,
-            read,
-            write,
+            core,
             session_id,
             serial_num,
             server_version,
@@ -1561,7 +1643,6 @@ impl Connection {
             sdu,
             supports_end_of_response: accept_info.supports_end_of_response,
             supports_oob: accept_info.supports_oob,
-            cancel_drain_pending: Arc::new(AtomicBool::new(false)),
             cursor_columns: BTreeMap::new(),
             fetch_metadata_by_sql: HashMap::new(),
             fetch_metadata_order: VecDeque::new(),
@@ -1633,7 +1714,7 @@ impl Connection {
 
     pub fn cancel_handle(&self) -> Result<CancelHandle> {
         Ok(CancelHandle {
-            write: Arc::clone(&self.write),
+            write: self.core.write_handle(),
         })
     }
 
@@ -1689,8 +1770,8 @@ impl Connection {
             &encoded_newpassword,
             seq_num,
         )?;
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         self.note_parse(parse_auth_response(&response).map(|_| ()))?;
         Ok(())
     }
@@ -1732,8 +1813,8 @@ impl Connection {
             0,
             self.capabilities.ttc_field_version,
         )?;
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         self.note_parse(parse_subscribe_response(&response, self.capabilities))
     }
 
@@ -1779,8 +1860,8 @@ impl Connection {
             registration_id,
             self.capabilities.ttc_field_version,
         )?;
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         self.note_parse(parse_subscribe_response(&response, self.capabilities))?;
         Ok(())
     }
@@ -1796,15 +1877,9 @@ impl Connection {
         let payload =
             build_notify_payload_with_seq(seq_num, client_id, self.capabilities.ttc_field_version)?;
         // NOTIFY sets the END_OF_REQUEST data flag on its (single) packet.
-        send_data_packet_shared_with_flags(
-            cx,
-            &self.write,
-            &payload,
-            self.sdu,
-            0,
-            TNS_DATA_FLAGS_END_OF_REQUEST,
-        )
-        .await?;
+        self.core
+            .send_data_packet_with_flags(cx, &payload, self.sdu, 0, TNS_DATA_FLAGS_END_OF_REQUEST)
+            .await?;
         Ok(())
     }
 
@@ -1893,7 +1968,7 @@ impl Connection {
     /// shutdown flag) or a closed/errored socket distinctly. Non-DATA packets
     /// (markers, disconnect) end the stream.
     async fn read_one_notification_packet(&mut self, read_timeout: Duration) -> Result<PacketRead> {
-        let read = read_packet(&mut self.read, PacketLengthWidth::Large32);
+        let read = self.core.read_packet(PacketLengthWidth::Large32);
         let packet = match time::timeout(time::wall_now(), read_timeout, read).await {
             Ok(Ok(packet)) => packet,
             // socket closed / errored (incl. force-close on teardown): end the
@@ -2078,8 +2153,8 @@ impl Connection {
             data.timeout,
             Some(transaction_id),
         );
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         let state = self.note_parse(parse_tpc_txn_switch_response(&response, self.capabilities))?;
         self.sessionless_data = Some(data);
         self.apply_sessionless_state(state);
@@ -2147,8 +2222,8 @@ impl Connection {
             0,
             None,
         );
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         let state = self.note_parse(parse_tpc_txn_switch_response(&response, self.capabilities))?;
         // a suspend always clears the active transaction locally; the server's
         // SYNC piggyback confirms it (reference clears `_sessionless_data`)
@@ -2173,8 +2248,8 @@ impl Connection {
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload =
             build_tpc_switch_payload_with_seq(seq_num, operation, flags, timeout, xid, context);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         self.note_parse(parse_tpc_switch_response(&response, self.capabilities))
     }
 
@@ -2200,8 +2275,8 @@ impl Connection {
             xid,
             context,
         );
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         self.note_parse(parse_tpc_change_state_response(
             &response,
             self.capabilities,
@@ -2505,7 +2580,7 @@ impl Connection {
             payload = piggyback_bytes;
         }
         trace_query_bytes("EXECUTE query payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
         // Read under a cancel-on-drop guard: a dropped execute future arms the
         // next operation's break + drain.
         let response = self.read_response_cancellable(cx).await?;
@@ -2866,7 +2941,7 @@ impl Connection {
             payload = piggyback_bytes;
         }
         trace_query_bytes("EXECUTE query payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
         // Read under a cancel-on-drop guard: a dropped execute future arms the
         // next operation's break + drain.
         let response = self.read_flushing_out_binds_cancellable(cx).await?;
@@ -3006,16 +3081,13 @@ impl Connection {
     /// Clears the flag once the wire is clean. A failed drain marks the
     /// connection dead and surfaces [`Error::ConnectionClosed`].
     async fn drain_pending_cancel(&mut self, cx: &Cx) -> Result<()> {
-        if !self.cancel_drain_pending.swap(false, Ordering::SeqCst) {
+        if !self.core.cancel_drain_pending.swap(false, Ordering::SeqCst) {
             return Ok(());
         }
-        match cancel_and_drain_wire(
-            &mut self.read,
-            cx,
-            &self.write,
-            BREAK_DRAIN_RECOVERY_TIMEOUT,
-        )
-        .await
+        match self
+            .core
+            .cancel_and_drain_wire(cx, BREAK_DRAIN_RECOVERY_TIMEOUT)
+            .await
         {
             Ok(()) => Ok(()),
             Err(err) => {
@@ -3034,9 +3106,9 @@ impl Connection {
         // Clone the Arc so the guard owns a handle independent of the `&mut self`
         // read borrow (the two touch disjoint state but the borrow checker can't
         // prove it across the guard's lifetime).
-        let pending = Arc::clone(&self.cancel_drain_pending);
+        let pending = Arc::clone(&self.core.cancel_drain_pending);
         let mut guard = CancelDrainGuard::arm(&pending);
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        let response = self.core.read_data_response(cx).await?;
         guard.disarm();
         Ok(response)
     }
@@ -3046,11 +3118,12 @@ impl Connection {
     /// requests). Same cancel-on-drop semantics: a dropped execute future arms
     /// the next operation's break + drain.
     async fn read_flushing_out_binds_cancellable(&mut self, cx: &Cx) -> Result<Vec<u8>> {
-        let pending = Arc::clone(&self.cancel_drain_pending);
+        let pending = Arc::clone(&self.core.cancel_drain_pending);
         let mut guard = CancelDrainGuard::arm(&pending);
-        let response =
-            read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, self.sdu)
-                .await?;
+        let response = self
+            .core
+            .read_data_response_flushing_out_binds(cx, self.sdu)
+            .await?;
         guard.disarm();
         Ok(response)
     }
@@ -3091,7 +3164,7 @@ impl Connection {
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
         trace_query_bytes("FETCH payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
         // Read under a cancel-on-drop guard: if THIS fetch future is dropped
         // mid-read, the next operation will break + drain the stranded call.
         let profile = fetch_profile::enabled();
@@ -3141,10 +3214,10 @@ impl Connection {
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
         trace_query_bytes("FETCH payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let profile = fetch_profile::enabled();
         let read_start = profile.then(time::wall_now);
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        let response = self.core.read_data_response(cx).await?;
         if let Some(start) = read_start {
             fetch_profile::add_read(time::wall_now().duration_since(start));
         }
@@ -3205,12 +3278,12 @@ impl Connection {
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
         trace_query_bytes("FETCH payload (prefetch)", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
         // A speculative response is now outstanding: arm the pending-drain flag
         // for the WHOLE window until it is consumed by `fetch_rows_ref_response`,
         // so a drop anywhere in {decode prior page, read this response} cleans it
         // up before the next op runs.
-        self.cancel_drain_pending.store(true, Ordering::SeqCst);
+        self.core.cancel_drain_pending.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -3244,7 +3317,9 @@ impl Connection {
             fetch_profile::add_read(time::wall_now().duration_since(start));
         }
         // Consumed cleanly: the speculative response is no longer outstanding.
-        self.cancel_drain_pending.store(false, Ordering::SeqCst);
+        self.core
+            .cancel_drain_pending
+            .store(false, Ordering::SeqCst);
         trace_query_bytes("FETCH response (prefetch)", &response);
         let columns = self
             .cursor_columns
@@ -3393,8 +3468,8 @@ impl Connection {
         let payload =
             build_define_fetch_payload_with_seq(cursor_id, arraysize, seq_num, define_columns)?;
         trace_query_bytes("DEFINE FETCH payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("DEFINE FETCH response", &response);
         let result = parse_fetch_response_with_context(
             &response,
@@ -3607,10 +3682,11 @@ impl Connection {
             payload = piggyback_bytes;
         }
         trace_query_bytes("SCROLL payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response =
-            read_data_response_flushing_out_binds(&mut self.read, cx, &self.write, self.sdu)
-                .await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self
+            .core
+            .read_data_response_flushing_out_binds(cx, self.sdu)
+            .await?;
         trace_query_bytes("SCROLL response", &response);
         let known_columns = self
             .cursor_columns
@@ -3661,8 +3737,8 @@ impl Connection {
             self.capabilities.ttc_field_version,
         )?;
         trace_query_bytes("LOB READ payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("LOB READ response", &response);
         self.note_parse(parse_lob_read_response(
             &response,
@@ -3704,8 +3780,8 @@ impl Connection {
             self.supports_oson_long_fnames(),
         )?;
         trace_query_bytes("AQ ENQ payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("AQ ENQ response", &response);
         self.note_parse(parse_aq_enq_response(&response, self.capabilities))
     }
@@ -3728,8 +3804,8 @@ impl Connection {
             self.capabilities.ttc_field_version,
         )?;
         trace_query_bytes("AQ DEQ payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("AQ DEQ response", &response);
         self.note_parse(parse_aq_deq_response(
             &response,
@@ -3759,8 +3835,8 @@ impl Connection {
             self.supports_oson_long_fnames(),
         )?;
         trace_query_bytes("AQ ARRAY ENQ payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("AQ ARRAY ENQ response", &response);
         let result: AqArrayResult = self.note_parse(parse_aq_array_response(
             &response,
@@ -3792,8 +3868,8 @@ impl Connection {
             self.capabilities.ttc_field_version,
         )?;
         trace_query_bytes("AQ ARRAY DEQ payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("AQ ARRAY DEQ response", &response);
         let result: AqArrayResult = self.note_parse(parse_aq_array_response(
             &response,
@@ -3821,8 +3897,8 @@ impl Connection {
             self.capabilities.ttc_field_version,
         )?;
         trace_query_bytes("LOB CREATE TEMP payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("LOB CREATE TEMP response", &response);
         self.note_parse(parse_lob_create_temp_response(&response, self.capabilities))
     }
@@ -3853,8 +3929,8 @@ impl Connection {
             self.capabilities.ttc_field_version,
         )?;
         trace_query_bytes("LOB WRITE payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("LOB WRITE response", &response);
         self.note_parse(parse_lob_write_response(
             &response,
@@ -3891,8 +3967,8 @@ impl Connection {
             self.capabilities.ttc_field_version,
         )?;
         trace_query_bytes("LOB TRIM payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("LOB TRIM response", &response);
         self.note_parse(parse_lob_trim_response(
             &response,
@@ -3926,8 +4002,8 @@ impl Connection {
             self.capabilities.ttc_field_version,
         )?;
         trace_query_bytes("LOB FREE TEMP payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("LOB FREE TEMP response", &response);
         self.note_parse(parse_lob_free_temp_response(
             &response,
@@ -4126,8 +4202,8 @@ impl Connection {
             seq_num,
         )?;
         trace_query_bytes("DIRECT PATH PREPARE payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("DIRECT PATH PREPARE response", &response);
         oracledb_protocol::dpl::parse_direct_path_prepare_response(&response, self.capabilities)
             .map_err(Error::from)
@@ -4147,8 +4223,8 @@ impl Connection {
             cursor_id, stream, seq_num,
         )?;
         trace_query_bytes("DIRECT PATH LOAD STREAM payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("DIRECT PATH LOAD STREAM response", &response);
         oracledb_protocol::dpl::parse_direct_path_simple_response(&response, self.capabilities)
             .map_err(Error::from)
@@ -4164,8 +4240,8 @@ impl Connection {
         let payload =
             oracledb_protocol::dpl::build_direct_path_op_payload(cursor_id, op_code, seq_num);
         trace_query_bytes("DIRECT PATH OP payload", &payload);
-        send_data_packet_shared(cx, &self.write, &payload, self.sdu).await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("DIRECT PATH OP response", &response);
         oracledb_protocol::dpl::parse_direct_path_simple_response(&response, self.capabilities)
             .map_err(Error::from)
@@ -4277,13 +4353,10 @@ impl Connection {
     /// returned [`Error::ConnectionClosed`] is propagated instead — mirroring
     /// the reference's disconnect-on-second-timeout (protocol.pyx:454-458).
     async fn break_and_drain(&mut self, cx: &Cx) -> Result<()> {
-        match break_and_drain_wire(
-            &mut self.read,
-            cx,
-            &self.write,
-            BREAK_DRAIN_RECOVERY_TIMEOUT,
-        )
-        .await
+        match self
+            .core
+            .break_and_drain_wire(cx, BREAK_DRAIN_RECOVERY_TIMEOUT)
+            .await
         {
             Ok(()) => Ok(()),
             Err(err) => {
@@ -4323,13 +4396,10 @@ impl Connection {
     /// them (bead rust-oracledb-wnz). A failed drain marks the connection dead
     /// and surfaces [`Error::ConnectionClosed`].
     async fn drain_cancel_response(&mut self, cx: &Cx) -> Result<()> {
-        match drain_cancel_wire(
-            &mut self.read,
-            cx,
-            &self.write,
-            BREAK_DRAIN_RECOVERY_TIMEOUT,
-        )
-        .await
+        match self
+            .core
+            .drain_cancel_wire(cx, BREAK_DRAIN_RECOVERY_TIMEOUT)
+            .await
         {
             Ok(()) => Ok(()),
             Err(err) => {
@@ -4364,13 +4434,10 @@ impl Connection {
     /// this is the single-call, self-contained cancel: break **and** drain in one
     /// place.
     pub async fn cancel(&mut self, cx: &Cx) -> Result<()> {
-        match cancel_and_drain_wire(
-            &mut self.read,
-            cx,
-            &self.write,
-            BREAK_DRAIN_RECOVERY_TIMEOUT,
-        )
-        .await
+        match self
+            .core
+            .cancel_and_drain_wire(cx, BREAK_DRAIN_RECOVERY_TIMEOUT)
+            .await
         {
             Ok(()) => Ok(()),
             Err(err) => {
@@ -4650,23 +4717,23 @@ impl Connection {
                     &[],
                     PacketLengthWidth::Large32,
                 )?;
-                let _ = write_all_shared(cx, &self.write, &eof).await;
-                let _ = shutdown_write_shared(cx, &self.write).await;
+                let _ = self.core.write_all(cx, &eof).await;
+                let _ = self.core.shutdown_write(cx).await;
                 return Ok(());
             }
         }
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        send_data_packet_shared(
-            cx,
-            &self.write,
-            &build_function_payload_with_seq(TNS_FUNC_LOGOFF, seq_num),
-            self.sdu,
-        )
-        .await?;
+        self.core
+            .send_data_packet(
+                cx,
+                &build_function_payload_with_seq(TNS_FUNC_LOGOFF, seq_num),
+                self.sdu,
+            )
+            .await?;
         if let Ok(response) = time::timeout(
             time::wall_now(),
             Duration::from_secs(5),
-            read_data_response(&mut self.read, cx, &self.write),
+            self.core.read_data_response(cx),
         )
         .await
         {
@@ -4679,8 +4746,8 @@ impl Connection {
             &[],
             PacketLengthWidth::Large32,
         )?;
-        write_all_shared(cx, &self.write, &eof).await?;
-        let _ = shutdown_write_shared(cx, &self.write).await;
+        self.core.write_all(cx, &eof).await?;
+        let _ = self.core.shutdown_write(cx).await;
         Ok(())
     }
 
@@ -4767,24 +4834,25 @@ impl Connection {
                 }
             }
             trace_query_bytes("PIPELINE op payload", &payload);
-            send_data_packet_shared_with_flags(
-                cx,
-                &self.write,
-                &payload,
-                self.sdu,
-                first_packet_flags,
-                TNS_DATA_FLAGS_END_OF_REQUEST,
-            )
-            .await?;
+            self.core
+                .send_data_packet_with_flags(
+                    cx,
+                    &payload,
+                    self.sdu,
+                    first_packet_flags,
+                    TNS_DATA_FLAGS_END_OF_REQUEST,
+                )
+                .await?;
         }
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let end_payload = build_end_pipeline_payload_with_seq(seq_num);
         trace_query_bytes("PIPELINE end payload", &end_payload);
-        send_data_packet_shared(cx, &self.write, &end_payload, self.sdu).await?;
+        self.core
+            .send_data_packet(cx, &end_payload, self.sdu)
+            .await?;
         let mut responses = Vec::with_capacity(requests.len() + 1);
         for _ in 0..=requests.len() {
-            let response =
-                read_data_response_boundary(&mut self.read, cx, &self.write, true).await?;
+            let response = self.core.read_data_response_boundary(cx, true).await?;
             trace_query_bytes("PIPELINE response", &response.payload);
             responses.push(response.payload);
         }
@@ -4873,14 +4941,14 @@ impl Connection {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        send_data_packet_shared(
-            cx,
-            &self.write,
-            &build_function_payload_with_seq(function_code, seq_num),
-            self.sdu,
-        )
-        .await?;
-        let response = read_data_response(&mut self.read, cx, &self.write).await?;
+        self.core
+            .send_data_packet(
+                cx,
+                &build_function_payload_with_seq(function_code, seq_num),
+                self.sdu,
+            )
+            .await?;
+        let response = self.core.read_data_response(cx).await?;
         // Surface server errors (e.g. ORA-01012 after a killed session) that
         // arrive on plain function round trips; pool ping health checks and
         // commit/rollback depend on these not being silently swallowed. The
@@ -5924,47 +5992,62 @@ struct IncomingPacket {
     payload: Vec<u8>,
 }
 
-async fn lock_write<'a>(
+async fn lock_write<'a, W>(
     cx: &Cx,
-    write: &'a SharedWriteHalf,
-) -> Result<asupersync::sync::MutexGuard<'a, DriverWriteHalf>> {
+    write: &'a Arc<AsyncMutex<W>>,
+) -> Result<asupersync::sync::MutexGuard<'a, W>>
+where
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     write
         .lock(cx)
         .await
         .map_err(|err| Error::Runtime(err.to_string()))
 }
 
-async fn write_all_shared(cx: &Cx, write: &SharedWriteHalf, packet: &[u8]) -> Result<()> {
+async fn write_all_shared<W>(cx: &Cx, write: &Arc<AsyncMutex<W>>, packet: &[u8]) -> Result<()>
+where
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     let mut guard = lock_write(cx, write).await?;
     guard.write_all(packet).await?;
     guard.flush().await?;
     Ok(())
 }
 
-async fn shutdown_write_shared(cx: &Cx, write: &SharedWriteHalf) -> Result<()> {
+async fn shutdown_write_shared<W>(cx: &Cx, write: &Arc<AsyncMutex<W>>) -> Result<()>
+where
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     let mut guard = lock_write(cx, write).await?;
     guard.shutdown().await?;
     Ok(())
 }
 
-async fn send_data_packet_shared(
+async fn send_data_packet_shared<W>(
     cx: &Cx,
-    write: &SharedWriteHalf,
+    write: &Arc<AsyncMutex<W>>,
     payload: &[u8],
     sdu: usize,
-) -> Result<()> {
+) -> Result<()>
+where
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     let mut guard = lock_write(cx, write).await?;
     send_data_packet(&mut *guard, payload, sdu).await
 }
 
-async fn send_data_packet_shared_with_flags(
+async fn send_data_packet_shared_with_flags<W>(
     cx: &Cx,
-    write: &SharedWriteHalf,
+    write: &Arc<AsyncMutex<W>>,
     payload: &[u8],
     sdu: usize,
     first_packet_flags: u16,
     last_packet_flags: u16,
-) -> Result<()> {
+) -> Result<()>
+where
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     let mut guard = lock_write(cx, write).await?;
     send_data_packet_with_flags(
         &mut *guard,
@@ -5976,7 +6059,10 @@ async fn send_data_packet_shared_with_flags(
     .await
 }
 
-async fn send_marker_shared(cx: &Cx, write: &SharedWriteHalf, marker_type: u8) -> Result<()> {
+async fn send_marker_shared<W>(cx: &Cx, write: &Arc<AsyncMutex<W>>, marker_type: u8) -> Result<()>
+where
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     let mut guard = lock_write(cx, write).await?;
     send_marker(&mut *guard, marker_type).await
 }
@@ -6032,11 +6118,15 @@ struct DataResponse {
     flush_out_binds: bool,
 }
 
-async fn read_data_response(
-    read: &mut DriverReadHalf,
+async fn read_data_response<R, W>(
+    read: &mut R,
     cx: &Cx,
-    write: &SharedWriteHalf,
-) -> Result<Vec<u8>> {
+    write: &Arc<AsyncMutex<W>>,
+) -> Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     Ok(read_data_response_boundary(read, cx, write, false)
         .await?
         .payload)
@@ -6079,12 +6169,16 @@ const BREAK_DRAIN_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// the drain errors or its bounded *secondary* timeout fires, the wire could not
 /// be left clean, so the connection must be discarded — the error is surfaced as
 /// [`Error::ConnectionClosed`], which is [`Error::is_connection_lost`].
-async fn break_and_drain_wire(
-    read: &mut DriverReadHalf,
+async fn break_and_drain_wire<R, W>(
+    read: &mut R,
     cx: &Cx,
-    write: &SharedWriteHalf,
+    write: &Arc<AsyncMutex<W>>,
     recovery_timeout: Duration,
-) -> Result<()> {
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     // 1) Send the BREAK marker (reference `_break_external`).
     send_marker_shared(cx, write, TNS_MARKER_TYPE_BREAK)
         .await
@@ -6138,12 +6232,16 @@ async fn break_and_drain_wire(
 /// `Ok(())` means the wire is clean and the connection is reusable; the caller
 /// surfaces [`Error::Cancelled`]. On a failed drain the error is
 /// [`Error::ConnectionClosed`] and the connection must be discarded.
-async fn cancel_and_drain_wire(
-    read: &mut DriverReadHalf,
+async fn cancel_and_drain_wire<R, W>(
+    read: &mut R,
     cx: &Cx,
-    write: &SharedWriteHalf,
+    write: &Arc<AsyncMutex<W>>,
     recovery_timeout: Duration,
-) -> Result<()> {
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     break_and_drain_wire(read, cx, write, recovery_timeout).await
 }
 
@@ -6163,12 +6261,16 @@ async fn cancel_and_drain_wire(
 /// `Ok(())` leaves the wire clean and the connection reusable. A drain error or
 /// a secondary timeout yields [`Error::ConnectionClosed`] (the connection must
 /// be discarded), matching the break+drain failure semantics.
-async fn drain_cancel_wire(
-    read: &mut DriverReadHalf,
+async fn drain_cancel_wire<R, W>(
+    read: &mut R,
     cx: &Cx,
-    write: &SharedWriteHalf,
+    write: &Arc<AsyncMutex<W>>,
     recovery_timeout: Duration,
-) -> Result<()> {
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     match time::timeout(
         time::wall_now(),
         recovery_timeout,
@@ -6236,11 +6338,11 @@ impl Drop for CancelDrainGuard<'_> {
 /// RESET handshake, and the trailing error packet — leaving the reader at a
 /// clean boundary. See [`break_and_drain_wire`] for why stopping at the first
 /// end-of-response is insufficient.
-async fn drain_break_response(
-    read: &mut DriverReadHalf,
-    cx: &Cx,
-    write: &SharedWriteHalf,
-) -> Result<()> {
+async fn drain_break_response<R, W>(read: &mut R, cx: &Cx, write: &Arc<AsyncMutex<W>>) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     // Phase A: discard whole DATA responses until the break-acknowledge MARKER.
     // The server flushes the cancelled call's in-flight response first; each is
     // a complete DATA response (its own end-of-response) that we drop on the
@@ -6277,12 +6379,16 @@ async fn drain_break_response(
     Ok(())
 }
 
-async fn read_data_response_flushing_out_binds(
-    read: &mut DriverReadHalf,
+async fn read_data_response_flushing_out_binds<R, W>(
+    read: &mut R,
     cx: &Cx,
-    write: &SharedWriteHalf,
+    write: &Arc<AsyncMutex<W>>,
     sdu: usize,
-) -> Result<Vec<u8>> {
+) -> Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     let mut response = read_data_response_boundary(read, cx, write, false).await?;
     let mut payload = response.payload;
     while response.flush_out_binds {
@@ -6367,12 +6473,16 @@ fn post_reset_packet_ends_response(payload: &[u8]) -> bool {
 /// pipelined responses (packet.pyx:346-370, protocol.pyx:889-906), since the
 /// server emits a marker alongside an in-pipeline error without expecting a
 /// reset exchange.
-async fn read_data_response_boundary(
-    read: &mut DriverReadHalf,
+async fn read_data_response_boundary<R, W>(
+    read: &mut R,
     cx: &Cx,
-    write: &SharedWriteHalf,
+    write: &Arc<AsyncMutex<W>>,
     in_pipeline: bool,
-) -> Result<DataResponse> {
+) -> Result<DataResponse>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     read_data_response_boundary_seeded(read, cx, write, in_pipeline, None).await
 }
 
@@ -6381,22 +6491,30 @@ async fn read_data_response_boundary(
 /// pulled past a RESET marker) before reading more from the wire. Used by the
 /// break-drain path to consume the trailing error response. Always runs the
 /// non-pipeline (reset-handling) variant.
-async fn read_data_response_boundary_from(
-    read: &mut DriverReadHalf,
+async fn read_data_response_boundary_from<R, W>(
+    read: &mut R,
     cx: &Cx,
-    write: &SharedWriteHalf,
+    write: &Arc<AsyncMutex<W>>,
     seed: Option<IncomingPacket>,
-) -> Result<DataResponse> {
+) -> Result<DataResponse>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     read_data_response_boundary_seeded(read, cx, write, false, seed).await
 }
 
-async fn read_data_response_boundary_seeded(
-    read: &mut DriverReadHalf,
+async fn read_data_response_boundary_seeded<R, W>(
+    read: &mut R,
     cx: &Cx,
-    write: &SharedWriteHalf,
+    write: &Arc<AsyncMutex<W>>,
     in_pipeline: bool,
     seed: Option<IncomingPacket>,
-) -> Result<DataResponse> {
+) -> Result<DataResponse>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     let mut response = Vec::new();
     let mut pending_packet = seed;
     // Set once this loop has run a RESET dance (reference `_reset`). After a
@@ -6476,12 +6594,16 @@ const TNS_PACKET_TYPE_MARKER: u8 = 12;
 const TNS_MARKER_TYPE_BREAK: u8 = 1;
 const TNS_MARKER_TYPE_RESET: u8 = 2;
 
-async fn reset_after_marker(
-    read: &mut DriverReadHalf,
+async fn reset_after_marker<R, W>(
+    read: &mut R,
     cx: &Cx,
-    write: &SharedWriteHalf,
+    write: &Arc<AsyncMutex<W>>,
     initial_marker: &IncomingPacket,
-) -> Result<Option<IncomingPacket>> {
+) -> Result<Option<IncomingPacket>>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
     trace_connect_bytes("MARKER packet", &initial_marker.payload);
     send_marker_shared(cx, write, TNS_MARKER_TYPE_RESET).await?;
     // Drain the RESET handshake: consume EVERY trailing marker packet — the
@@ -7245,6 +7367,445 @@ mod tests {
             PacketLengthWidth::Large32,
         )
         .expect("encode marker packet")
+    }
+
+    #[derive(Debug)]
+    struct ScriptedTransport;
+
+    impl WireTransport for ScriptedTransport {
+        type Read = ScriptedRead;
+        type Write = ScriptedWrite;
+    }
+
+    #[derive(Debug)]
+    struct ScriptedRead {
+        bytes: Vec<u8>,
+        offset: usize,
+    }
+
+    impl ScriptedRead {
+        fn new(frames: Vec<Vec<u8>>) -> Self {
+            Self {
+                bytes: frames.into_iter().flatten().collect(),
+                offset: 0,
+            }
+        }
+    }
+
+    impl asupersync::io::AsyncRead for ScriptedRead {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut asupersync::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.offset >= self.bytes.len() {
+                return std::task::Poll::Ready(Ok(()));
+            }
+            let available = &self.bytes[self.offset..];
+            let take = available.len().min(buf.remaining());
+            buf.put_slice(&available[..take]);
+            self.offset += take;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[derive(Debug)]
+    struct ScriptedWrite {
+        state: Arc<std::sync::Mutex<ScriptedWriteState>>,
+    }
+
+    impl ScriptedWrite {
+        fn new(state: Arc<std::sync::Mutex<ScriptedWriteState>>) -> Self {
+            Self { state }
+        }
+    }
+
+    impl asupersync::io::AsyncWrite for ScriptedWrite {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            let Ok(mut state) = self.state.lock() else {
+                return std::task::Poll::Ready(Err(std::io::Error::other(
+                    "scripted transport: poisoned write state",
+                )));
+            };
+            let mut cursor = 0usize;
+            while cursor < buf.len() {
+                let (take, front_len) = {
+                    let Some(front) = state.expected.front() else {
+                        return std::task::Poll::Ready(Err(std::io::Error::other(
+                            "scripted transport: unexpected write",
+                        )));
+                    };
+                    let remaining = &front[state.offset..];
+                    let chunk = &buf[cursor..];
+                    let take = remaining.len().min(chunk.len());
+                    if remaining[..take] != chunk[..take] {
+                        return std::task::Poll::Ready(Err(std::io::Error::other(
+                            "scripted transport: write mismatch",
+                        )));
+                    }
+                    (take, front.len())
+                };
+                cursor += take;
+                state.offset += take;
+                if state.offset >= front_len {
+                    state.expected.pop_front();
+                    state.offset = 0;
+                }
+            }
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[derive(Debug)]
+    struct ScriptedWriteState {
+        expected: VecDeque<Vec<u8>>,
+        offset: usize,
+    }
+
+    impl ScriptedWriteState {
+        fn new(expected: Vec<Vec<u8>>) -> Self {
+            Self {
+                expected: expected.into(),
+                offset: 0,
+            }
+        }
+
+        fn is_consumed(&self) -> bool {
+            self.expected.is_empty() && self.offset == 0
+        }
+    }
+
+    fn test_cx() -> Result<Cx> {
+        Cx::current().ok_or_else(|| Error::Runtime("missing ambient Cx in test runtime".into()))
+    }
+
+    #[test]
+    fn connection_core_routes_connect_execute_fetch_over_scripted_transport() -> Result<()> {
+        const EXECUTE_BODY: &[u8] = b"scripted execute payload";
+        const FETCH_BODY: &[u8] = b"scripted fetch payload";
+        const EXECUTE_RESPONSE: &[u8] = b"scripted execute response";
+        const FETCH_RESPONSE: &[u8] = b"scripted fetch response";
+
+        let connect_packet = encode_packet(
+            TNS_PACKET_TYPE_CONNECT,
+            0,
+            None,
+            b"SCRIPTED-CONNECT",
+            PacketLengthWidth::Legacy16,
+        )?;
+        let accept_packet = encode_packet(
+            TNS_PACKET_TYPE_ACCEPT,
+            0,
+            None,
+            b"SCRIPTED-ACCEPT",
+            PacketLengthWidth::Legacy16,
+        )?;
+        let execute_packet = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            EXECUTE_BODY,
+            PacketLengthWidth::Large32,
+        )?;
+        let fetch_packet = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            FETCH_BODY,
+            PacketLengthWidth::Large32,
+        )?;
+
+        let write_state = Arc::new(std::sync::Mutex::new(ScriptedWriteState::new(vec![
+            connect_packet.clone(),
+            execute_packet,
+            fetch_packet,
+        ])));
+        let mut core = ConnectionCore::<ScriptedTransport>::from_halves(
+            ScriptedRead::new(vec![
+                accept_packet,
+                data_packet(EXECUTE_RESPONSE, true),
+                data_packet(FETCH_RESPONSE, true),
+            ]),
+            ScriptedWrite::new(Arc::clone(&write_state)),
+            "scripted_core_write",
+        );
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            core.write_all(&cx, &connect_packet).await?;
+            let accept = core.read_packet(PacketLengthWidth::Legacy16).await?;
+            assert_eq!(accept.packet_type, TNS_PACKET_TYPE_ACCEPT);
+            assert_eq!(accept.payload, b"SCRIPTED-ACCEPT");
+
+            core.send_data_packet(&cx, EXECUTE_BODY, 8192).await?;
+            let execute_response = core.read_data_response(&cx).await?;
+            assert_eq!(execute_response, EXECUTE_RESPONSE);
+
+            core.send_data_packet(&cx, FETCH_BODY, 8192).await?;
+            let fetch_response = core.read_data_response(&cx).await?;
+            assert_eq!(fetch_response, FETCH_RESPONSE);
+            Ok::<_, Error>(())
+        })?;
+
+        let state = write_state
+            .lock()
+            .map_err(|_| Error::Runtime("scripted write state lock poisoned".into()))?;
+        assert!(
+            state.is_consumed(),
+            "scripted core must perform exactly the expected connect/execute/fetch writes"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "cassette")]
+    #[test]
+    fn connection_core_routes_connect_execute_fetch_over_replay_transport() -> Result<()> {
+        use oracledb_protocol::net::cassette::{self, Direction};
+
+        const EXECUTE_BODY: &[u8] = b"replay execute payload";
+        const FETCH_BODY: &[u8] = b"replay fetch payload";
+        const EXECUTE_RESPONSE: &[u8] = b"replay execute response";
+        const FETCH_RESPONSE: &[u8] = b"replay fetch response";
+
+        let connect_packet = encode_packet(
+            TNS_PACKET_TYPE_CONNECT,
+            0,
+            None,
+            b"REPLAY-CONNECT",
+            PacketLengthWidth::Legacy16,
+        )?;
+        let accept_packet = encode_packet(
+            TNS_PACKET_TYPE_ACCEPT,
+            0,
+            None,
+            b"REPLAY-ACCEPT",
+            PacketLengthWidth::Legacy16,
+        )?;
+        let execute_packet = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            EXECUTE_BODY,
+            PacketLengthWidth::Large32,
+        )?;
+        let fetch_packet = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            FETCH_BODY,
+            PacketLengthWidth::Large32,
+        )?;
+
+        let mut cassette_bytes = Vec::new();
+        cassette::write_header(&mut cassette_bytes);
+        cassette::write_frame(
+            &mut cassette_bytes,
+            Direction::ClientToServer,
+            0,
+            &connect_packet,
+        );
+        cassette::write_frame(
+            &mut cassette_bytes,
+            Direction::ServerToClient,
+            1,
+            &accept_packet,
+        );
+        cassette::write_frame(
+            &mut cassette_bytes,
+            Direction::ClientToServer,
+            2,
+            &execute_packet,
+        );
+        cassette::write_frame(
+            &mut cassette_bytes,
+            Direction::ServerToClient,
+            3,
+            &data_packet(EXECUTE_RESPONSE, true),
+        );
+        cassette::write_frame(
+            &mut cassette_bytes,
+            Direction::ClientToServer,
+            4,
+            &fetch_packet,
+        );
+        cassette::write_frame(
+            &mut cassette_bytes,
+            Direction::ServerToClient,
+            5,
+            &data_packet(FETCH_RESPONSE, true),
+        );
+
+        let (read, write) =
+            transport::replay_split(&cassette_bytes, transport::ReplayWriteMode::Check)
+                .map_err(|err| Error::Runtime(format!("invalid replay cassette: {err}")))?;
+        let mut core =
+            ConnectionCore::<DriverTransport>::from_halves(read, write, "replay_core_write");
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            core.write_all(&cx, &connect_packet).await?;
+            let accept = core.read_packet(PacketLengthWidth::Legacy16).await?;
+            assert_eq!(accept.packet_type, TNS_PACKET_TYPE_ACCEPT);
+            assert_eq!(accept.payload, b"REPLAY-ACCEPT");
+
+            core.send_data_packet(&cx, EXECUTE_BODY, 8192).await?;
+            let execute_response = core.read_data_response(&cx).await?;
+            assert_eq!(execute_response, EXECUTE_RESPONSE);
+
+            core.send_data_packet(&cx, FETCH_BODY, 8192).await?;
+            let fetch_response = core.read_data_response(&cx).await?;
+            assert_eq!(fetch_response, FETCH_RESPONSE);
+            Ok::<_, Error>(())
+        })?;
+        Ok(())
+    }
+
+    #[cfg(feature = "cassette")]
+    #[test]
+    fn connection_core_routes_connect_execute_fetch_over_recording_transport() -> Result<()> {
+        use oracledb_protocol::net::cassette::{self, Direction};
+        use std::io::Write as _;
+
+        const EXECUTE_BODY: &[u8] = b"recording execute payload";
+        const FETCH_BODY: &[u8] = b"recording fetch payload";
+        const EXECUTE_RESPONSE: &[u8] = b"recording execute response";
+        const FETCH_RESPONSE: &[u8] = b"recording fetch response";
+
+        let connect_packet = encode_packet(
+            TNS_PACKET_TYPE_CONNECT,
+            0,
+            None,
+            b"RECORDING-CONNECT",
+            PacketLengthWidth::Legacy16,
+        )?;
+        let accept_packet = encode_packet(
+            TNS_PACKET_TYPE_ACCEPT,
+            0,
+            None,
+            b"RECORDING-ACCEPT",
+            PacketLengthWidth::Legacy16,
+        )?;
+        let execute_packet = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            EXECUTE_BODY,
+            PacketLengthWidth::Large32,
+        )?;
+        let fetch_packet = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            FETCH_BODY,
+            PacketLengthWidth::Large32,
+        )?;
+        let execute_response_packet = data_packet(EXECUTE_RESPONSE, true);
+        let fetch_response_packet = data_packet(FETCH_RESPONSE, true);
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server_connect = connect_packet.clone();
+        let server_accept = accept_packet.clone();
+        let server_execute = execute_packet.clone();
+        let server_fetch = fetch_packet.clone();
+        let server_execute_response = execute_response_packet.clone();
+        let server_fetch_response = fetch_response_packet.clone();
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+            let mut got = vec![0u8; server_connect.len()];
+            socket.read_exact(&mut got)?;
+            assert_eq!(got, server_connect);
+            socket.write_all(&server_accept)?;
+
+            let mut got = vec![0u8; server_execute.len()];
+            socket.read_exact(&mut got)?;
+            assert_eq!(got, server_execute);
+            socket.write_all(&server_execute_response)?;
+
+            let mut got = vec![0u8; server_fetch.len()];
+            socket.read_exact(&mut got)?;
+            assert_eq!(got, server_fetch);
+            socket.write_all(&server_fetch_response)?;
+            Ok(())
+        });
+
+        let runtime = build_io_runtime()?;
+        let cassette_bytes = runtime.block_on(async {
+            let cx = test_cx()?;
+            let scope = transport::capture_scope();
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut core =
+                ConnectionCore::<DriverTransport>::from_halves(read, write, "recording_core_write");
+
+            core.write_all(&cx, &connect_packet).await?;
+            let accept = core.read_packet(PacketLengthWidth::Legacy16).await?;
+            assert_eq!(accept.packet_type, TNS_PACKET_TYPE_ACCEPT);
+            assert_eq!(accept.payload, b"RECORDING-ACCEPT");
+
+            core.send_data_packet(&cx, EXECUTE_BODY, 8192).await?;
+            let execute_response = core.read_data_response(&cx).await?;
+            assert_eq!(execute_response, EXECUTE_RESPONSE);
+
+            core.send_data_packet(&cx, FETCH_BODY, 8192).await?;
+            let fetch_response = core.read_data_response(&cx).await?;
+            assert_eq!(fetch_response, FETCH_RESPONSE);
+
+            Ok::<_, Error>(scope.to_cassette_bytes())
+        })?;
+
+        server
+            .join()
+            .map_err(|_| Error::Runtime("recording test server thread panicked".into()))??;
+        let frames = cassette::decode_all(&cassette_bytes)
+            .map_err(|err| Error::Runtime(format!("invalid recorded cassette: {err}")))?;
+        let (accept_header, accept_payload) = accept_packet.split_at(8);
+        let (execute_response_header, execute_response_payload) =
+            execute_response_packet.split_at(8);
+        let (fetch_response_header, fetch_response_payload) = fetch_response_packet.split_at(8);
+
+        assert_eq!(frames.len(), 9);
+        assert_eq!(frames[0].direction, Direction::ClientToServer);
+        assert_eq!(frames[0].bytes, connect_packet);
+        assert_eq!(frames[1].direction, Direction::ServerToClient);
+        assert_eq!(frames[1].bytes, accept_header);
+        assert_eq!(frames[2].direction, Direction::ServerToClient);
+        assert_eq!(frames[2].bytes, accept_payload);
+        assert_eq!(frames[3].direction, Direction::ClientToServer);
+        assert_eq!(frames[3].bytes, execute_packet);
+        assert_eq!(frames[4].direction, Direction::ServerToClient);
+        assert_eq!(frames[4].bytes, execute_response_header);
+        assert_eq!(frames[5].direction, Direction::ServerToClient);
+        assert_eq!(frames[5].bytes, execute_response_payload);
+        assert_eq!(frames[6].direction, Direction::ClientToServer);
+        assert_eq!(frames[6].bytes, fetch_packet);
+        assert_eq!(frames[7].direction, Direction::ServerToClient);
+        assert_eq!(frames[7].bytes, fetch_response_header);
+        assert_eq!(frames[8].direction, Direction::ServerToClient);
+        assert_eq!(frames[8].bytes, fetch_response_payload);
+        Ok(())
     }
 
     /// Reads exactly one 11-byte TNS marker packet from `socket` and returns its
