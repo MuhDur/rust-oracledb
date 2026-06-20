@@ -62,24 +62,26 @@ fn with_connection(test: &str, body: impl FnOnce(&mut Connection)) {
 fn query_positional_tuple_and_typed_get() {
     with_connection("query_positional_tuple_and_typed_get", |conn| {
         // (40, 2) binds :1, :2 — no manual BindValue::Number any more.
-        let result = BlockingConnection::query(conn, "select :1 + :2 from dual", (40_i64, 2_i64))
+        let row = BlockingConnection::query(conn, "select :1 + :2 from dual", (40_i64, 2_i64))
             .expect("query with tuple binds");
-        let sum: i64 = result.get(0, 0).expect("typed get i64");
+        let sum: i64 = row.one().expect("one row").get(0).expect("typed get i64");
         assert_eq!(sum, 42);
 
         // mixed-type tuple: number + string, read back by typed accessors
-        let result = BlockingConnection::query(
+        let row = BlockingConnection::query(
             conn,
             "select :1 as id, :2 as name from dual",
             (7_i64, "alice"),
         )
-        .expect("mixed tuple binds");
-        assert_eq!(result.get::<i64>(0, 0).unwrap(), 7);
-        assert_eq!(result.get_by_name::<String>(0, "NAME").unwrap(), "alice");
+        .expect("mixed tuple binds")
+        .one()
+        .expect("one row");
+        assert_eq!(row.get::<i64>(0).unwrap(), 7);
+        assert_eq!(row.get_by_name::<String>("NAME").unwrap(), "alice");
         eprintln!(
             "positional ok: id={} name={}",
-            result.get::<i64>(0, 0).unwrap(),
-            result.get_by_name::<String>(0, "name").unwrap()
+            row.get::<i64>(0).unwrap(),
+            row.get_by_name::<String>("name").unwrap()
         );
     });
 }
@@ -88,13 +90,13 @@ fn query_positional_tuple_and_typed_get() {
 #[test]
 fn params_macro_positional() {
     with_connection("params_macro_positional", |conn| {
-        let result = BlockingConnection::query(
+        let row = BlockingConnection::query_one(
             conn,
             "select :1 + :2 + :3 from dual",
             params![10_i64, 20_i64, 12_i64],
         )
         .expect("params! positional");
-        assert_eq!(result.get::<i64>(0, 0).unwrap(), 42);
+        assert_eq!(row.get::<i64>(0).unwrap(), 42);
     });
 }
 
@@ -587,6 +589,174 @@ fn async_register_query_surfaces_query_id_when_cqn_available() {
     });
 }
 
+#[test]
+fn blocking_connection_mirrors_four_operation_families() {
+    with_connection(
+        "blocking_connection_mirrors_four_operation_families",
+        |conn| {
+            let _ =
+                BlockingConnection::execute(conn, "drop table rust_blocking_family_t purge", ());
+            BlockingConnection::execute(
+                conn,
+                "create table rust_blocking_family_t (id number primary key, name varchar2(30))",
+                (),
+            )
+            .expect("create blocking family table");
+
+            let insert = BlockingConnection::execute(
+                conn,
+                "insert into rust_blocking_family_t (id, name) values (:1, :2)",
+                (1_i64, "alice"),
+            )
+            .expect("execute insert");
+            assert_eq!(insert.rows_affected(), 1);
+
+            let batch_rows = vec![
+                vec![
+                    BindValue::Number("2".to_string()),
+                    BindValue::Text("bob".to_string()),
+                ],
+                vec![
+                    BindValue::Number("3".to_string()),
+                    BindValue::Text("carol".to_string()),
+                ],
+            ];
+            let batch = BlockingConnection::execute_many(
+                conn,
+                "insert into rust_blocking_family_t (id, name) values (:1, :2)",
+                &batch_rows,
+            )
+            .expect("execute_many insert");
+            assert_eq!(batch.rows_affected(), 2);
+
+            let all = BlockingConnection::query_all(
+                conn,
+                "select id, name from rust_blocking_family_t order by id",
+                (),
+            )
+            .expect("query_all");
+            assert_eq!(all.len(), 3);
+            assert_eq!(all[0].get::<i64>("ID").unwrap(), 1);
+
+            let one = BlockingConnection::query_one(
+                conn,
+                "select name from rust_blocking_family_t where id = :1",
+                (2_i64,),
+            )
+            .expect("query_one");
+            assert_eq!(one.get::<String>(0).unwrap(), "bob");
+
+            let none = BlockingConnection::query_opt(
+                conn,
+                "select name from rust_blocking_family_t where id = :1",
+                (99_i64,),
+            )
+            .expect("query_opt");
+            assert!(none.is_none());
+
+            let mut rows = BlockingConnection::query_with(
+                conn,
+                Query::new("select id from rust_blocking_family_t order by id")
+                    .arraysize(NonZeroU32::new(1).expect("non-zero"))
+                    .prefetch(1),
+            )
+            .expect("query_with");
+            assert_eq!(rows.batch()[0].get::<i64>(0).unwrap(), 1);
+            assert!(rows.next_batch().expect("next blocking batch"));
+            assert_eq!(rows.batch()[0].get::<i64>(0).unwrap(), 2);
+            assert!(rows.next_batch().expect("final blocking batch"));
+            assert_eq!(rows.batch()[0].get::<i64>(0).unwrap(), 3);
+            assert!(!rows.next_batch().expect("cursor exhausted"));
+            drop(rows);
+
+            let out = BlockingConnection::execute_with(
+                conn,
+                Execute::new("begin :1 := 'mirror'; end;").bind(vec![BindValue::Output {
+                    ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                    csfrm: CS_FORM_IMPLICIT,
+                    buffer_size: 30,
+                }]),
+            )
+            .expect("execute_with output bind");
+            assert_eq!(
+                out.out_binds()
+                    .get(0)
+                    .and_then(Option::as_ref)
+                    .and_then(|value| value.as_text()),
+                Some("mirror")
+            );
+
+            let delete_rows = vec![
+                vec![BindValue::Number("1".to_string())],
+                vec![BindValue::Number("2".to_string())],
+                vec![BindValue::Number("99".to_string())],
+            ];
+            let deleted = BlockingConnection::execute_many_with(
+                conn,
+                Batch::new(
+                    "delete from rust_blocking_family_t where id = :1",
+                    &delete_rows,
+                )
+                .row_counts(),
+            )
+            .expect("execute_many_with row counts");
+            assert_eq!(deleted.rows_affected(), 2);
+            assert_eq!(deleted.per_row_counts(), Some([1, 1, 0].as_slice()));
+
+            match BlockingConnection::subscribe_register(
+                conn,
+                TNS_SUBSCR_NAMESPACE_DBCHANGE,
+                None,
+                SUBSCR_QOS_QUERY,
+                0,
+                30,
+                0,
+                0,
+                0,
+            ) {
+                Ok(subscription) => {
+                    let registered = BlockingConnection::register_query(
+                        conn,
+                        Registration::new(
+                            "select id, name from rust_blocking_family_t where id > :1",
+                            subscription.registration_id,
+                        )
+                        .bind((0_i64,)),
+                    )
+                    .expect("register_query");
+                    assert!(
+                        matches!(registered.query_id(), Some(id) if id > 0),
+                        "blocking register_query should surface a positive query id, got {:?}",
+                        registered.query_id()
+                    );
+                    if let Some(client_id) = subscription.client_id.as_deref() {
+                        BlockingConnection::subscribe_unregister(
+                            conn,
+                            subscription.registration_id,
+                            client_id,
+                            TNS_SUBSCR_NAMESPACE_DBCHANGE,
+                            None,
+                            SUBSCR_QOS_QUERY,
+                            0,
+                            30,
+                            0,
+                            0,
+                            0,
+                        )
+                        .expect("unsubscribe CQN");
+                    }
+                }
+                Err(err) => {
+                    eprintln!("skipped blocking register_query assertion: CQN unavailable: {err}");
+                }
+            }
+
+            BlockingConnection::execute(conn, "drop table rust_blocking_family_t purge", ())
+                .expect("drop blocking family table");
+        },
+    );
+}
+
 /// Typed extraction of several scalar types out of one row.
 #[test]
 fn typed_extraction_scalars() {
@@ -624,7 +794,7 @@ fn decimal_roundtrip_lossless_live() {
         let dec = Decimal::from_str(text).unwrap();
 
         // bind the Decimal directly via ToSql (query / params!)
-        BlockingConnection::query(conn, "insert into dec_rt_t values (:1)", (dec,))
+        BlockingConnection::execute(conn, "insert into dec_rt_t values (:1)", (dec,))
             .expect("insert decimal");
         BlockingConnection::execute_query(conn, "commit", 1).expect("commit");
 
@@ -666,7 +836,7 @@ fn chrono_roundtrip_live() {
             .unwrap()
             .and_hms_opt(13, 45, 30)
             .unwrap();
-        BlockingConnection::query(conn, "insert into chrono_rt_t values (:1)", (dt,))
+        BlockingConnection::execute(conn, "insert into chrono_rt_t values (:1)", (dt,))
             .expect("insert datetime");
         BlockingConnection::execute_query(conn, "commit", 1).expect("commit");
 
@@ -695,7 +865,7 @@ fn uuid_roundtrip_live() {
             .expect("create uuid table");
 
         let id = Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10);
-        BlockingConnection::query(conn, "insert into uuid_rt_t values (:1)", (id,))
+        BlockingConnection::execute(conn, "insert into uuid_rt_t values (:1)", (id,))
             .expect("insert uuid");
         BlockingConnection::execute_query(conn, "commit", 1).expect("commit");
 
@@ -764,7 +934,7 @@ fn vector_roundtrip_live() {
         }
 
         let embedding: Vec<f32> = vec![1.5, -2.0, 3.25];
-        BlockingConnection::query(
+        BlockingConnection::execute(
             conn,
             "insert into vec_rt_t values (:1)",
             (embedding.clone(),),

@@ -2198,6 +2198,63 @@ impl Drop for Rows<'_> {
     }
 }
 
+/// Blocking lazy result-set facade returned by [`BlockingConnection::query`]
+/// and [`BlockingConnection::query_with`].
+///
+/// `BlockingRows` owns the same server cursor state as [`Rows`], but its
+/// continuation methods drive the async cursor operations on the blocking
+/// facade runtime so synchronous callers never need to pass a [`Cx`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct BlockingRows<'conn> {
+    inner: Rows<'conn>,
+}
+
+impl<'conn> BlockingRows<'conn> {
+    fn new(inner: Rows<'conn>) -> Self {
+        Self { inner }
+    }
+
+    pub fn columns(&self) -> &[ColumnMetadata] {
+        self.inner.columns()
+    }
+
+    pub fn batch(&self) -> &[Row] {
+        self.inner.batch()
+    }
+
+    pub fn next_batch(&mut self) -> Result<bool> {
+        block_on_io(|cx| async move { self.inner.next_batch(&cx).await })
+    }
+
+    pub fn collect(self) -> Result<Vec<Row>> {
+        block_on_io(|cx| async move { self.inner.collect(&cx).await })
+    }
+
+    pub fn one(self) -> Result<Row> {
+        self.inner.one()
+    }
+
+    pub fn opt(self) -> Result<Option<Row>> {
+        self.inner.opt()
+    }
+
+    pub fn into_typed<T: FromRow>(self) -> Result<Vec<T>> {
+        self.collect()?
+            .iter()
+            .map(|row| T::from_row(&row.typed_row()).map_err(Error::Conversion))
+            .collect()
+    }
+
+    pub fn cursor(&self) -> Option<&Cursor> {
+        self.inner.cursor()
+    }
+
+    pub fn scroll(&mut self, to: Scroll) -> Result<()> {
+        block_on_io(|cx| async move { self.inner.scroll(&cx, to).await })
+    }
+}
+
 fn first_cursor_from_result(result: &QueryResult) -> Option<Cursor> {
     result
         .implicit_resultsets
@@ -7131,26 +7188,27 @@ impl BlockingConnection {
         })
     }
 
+    /// Blocking wrapper for [`Connection::register_query`].
+    pub fn register_query<'r>(
+        connection: &mut Connection,
+        registration: Registration<'r>,
+    ) -> Result<RegistrationOutcome> {
+        block_on_io(|cx| async move { connection.register_query(&cx, registration).await })
+    }
+
     /// Execute a registerquery (registration id into the execute, query id out).
     /// See [`Connection::execute_query_for_registration`].
-    #[deprecated(note = "use Connection::register_query")]
+    #[deprecated(note = "use BlockingConnection::register_query")]
     pub fn execute_query_for_registration(
         connection: &mut Connection,
         sql: &str,
         registration_id: u64,
     ) -> Result<Option<u64>> {
-        let runtime = build_io_runtime()?;
-        runtime.block_on(async {
-            let cx = Cx::current()
-                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            connection
-                .register_query(
-                    &cx,
-                    Registration::owned_sql(sql.to_string(), registration_id),
-                )
-                .await
-                .map(|outcome| outcome.query_id())
-        })
+        Self::register_query(
+            connection,
+            Registration::owned_sql(sql.to_string(), registration_id),
+        )
+        .map(|outcome| outcome.query_id())
     }
 
     pub fn rollback(connection: &mut Connection) -> Result<()> {
@@ -7440,33 +7498,99 @@ impl BlockingConnection {
     }
 
     /// Blocking wrapper for [`Connection::query`]: bind typed Rust values
-    /// positionally (a tuple `(40, "alice")`, an array, or a raw
-    /// `Vec<BindValue>`) or by name with [`params!`](crate::params), then return
-    /// the first batch.
-    #[deprecated(note = "use Connection::query with Params; W1-T3.8 adds the blocking mirror")]
-    pub fn query<'p>(
+    /// positionally or by name, then return a blocking lazy row facade.
+    pub fn query<'conn, 'p>(
+        connection: &'conn mut Connection,
+        sql: &str,
+        params: impl Into<crate::Params<'p>>,
+    ) -> Result<BlockingRows<'conn>> {
+        block_on_io(|cx| async move {
+            connection
+                .query(&cx, sql, params)
+                .await
+                .map(BlockingRows::new)
+        })
+    }
+
+    /// Blocking wrapper for [`Connection::query_one`].
+    pub fn query_one<'p>(
         connection: &mut Connection,
         sql: &str,
         params: impl Into<crate::Params<'p>>,
-    ) -> Result<QueryResult> {
-        let binds = crate::sql_convert::resolve_params(sql, params.into());
-        let runtime = build_io_runtime()?;
-        runtime.block_on(async {
-            let cx = Cx::current()
-                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+    ) -> Result<Row> {
+        block_on_io(|cx| async move { connection.query_one(&cx, sql, params).await })
+    }
+
+    /// Blocking wrapper for [`Connection::query_opt`].
+    pub fn query_opt<'p>(
+        connection: &mut Connection,
+        sql: &str,
+        params: impl Into<crate::Params<'p>>,
+    ) -> Result<Option<Row>> {
+        block_on_io(|cx| async move { connection.query_opt(&cx, sql, params).await })
+    }
+
+    /// Blocking wrapper for [`Connection::query_all`].
+    pub fn query_all<'p>(
+        connection: &mut Connection,
+        sql: &str,
+        params: impl Into<crate::Params<'p>>,
+    ) -> Result<Vec<Row>> {
+        block_on_io(|cx| async move { connection.query_all(&cx, sql, params).await })
+    }
+
+    /// Blocking wrapper for [`Connection::query_with`].
+    pub fn query_with<'conn, 'q>(
+        connection: &'conn mut Connection,
+        query: Query<'q>,
+    ) -> Result<BlockingRows<'conn>> {
+        block_on_io(|cx| async move {
             connection
-                .execute_query_with_binds_core(&cx, sql, 1, &binds)
+                .query_with(&cx, query)
                 .await
+                .map(BlockingRows::new)
         })
+    }
+
+    /// Blocking wrapper for [`Connection::execute`].
+    pub fn execute<'p>(
+        connection: &mut Connection,
+        sql: &str,
+        params: impl Into<crate::Params<'p>>,
+    ) -> Result<ExecuteOutcome> {
+        block_on_io(|cx| async move { connection.execute(&cx, sql, params).await })
+    }
+
+    /// Blocking wrapper for [`Connection::execute_with`].
+    pub fn execute_with<'e>(
+        connection: &mut Connection,
+        execute: Execute<'e>,
+    ) -> Result<ExecuteOutcome> {
+        block_on_io(|cx| async move { connection.execute_with(&cx, execute).await })
+    }
+
+    /// Blocking wrapper for [`Connection::execute_many`].
+    pub fn execute_many<'b>(
+        connection: &mut Connection,
+        sql: &str,
+        rows: impl Into<crate::BatchRows<'b>>,
+    ) -> Result<BatchOutcome> {
+        block_on_io(|cx| async move { connection.execute_many(&cx, sql, rows).await })
+    }
+
+    /// Blocking wrapper for [`Connection::execute_many_with`].
+    pub fn execute_many_with<'b>(
+        connection: &mut Connection,
+        batch: Batch<'b>,
+    ) -> Result<BatchOutcome> {
+        block_on_io(|cx| async move { connection.execute_many_with(&cx, batch).await })
     }
 
     /// Blocking wrapper for [`Connection::query_named`]: bind the
     /// [`params!`](crate::params) named form
     /// (`params!{ ":id" => 40 }`); names are reordered to the placeholder
     /// first-appearance order in `sql`.
-    #[deprecated(
-        note = "use Connection::query with params!{} named parameters; W1-T3.8 adds the blocking mirror"
-    )]
+    #[deprecated(note = "use BlockingConnection::query with params!{} named parameters")]
     pub fn query_named(
         connection: &mut Connection,
         sql: &str,
@@ -7487,7 +7611,7 @@ impl BlockingConnection {
     /// plus a per-call timeout (`Error::CallTimeout` on expiry; `None` = no
     /// timeout).
     #[deprecated(
-        note = "use Query::timeout with Connection::query and params!{} named parameters; W1-T3.8 adds the blocking mirror"
+        note = "use Query::timeout with BlockingConnection::query_with and params!{} named parameters"
     )]
     pub fn query_named_with_timeout(
         connection: &mut Connection,
@@ -7988,11 +8112,9 @@ fn build_io_runtime() -> Result<Runtime> {
     })
 }
 
-/// Runs a connection future to completion on a fresh blocking runtime,
-/// passing it the ambient [`Cx`] (shared shape of the `BlockingConnection`
-/// wrappers). Currently only used by the arrow-feature wrappers.
-#[cfg(feature = "arrow")]
-pub(crate) fn block_on_connection<F, Fut, T>(operation: F) -> Result<T>
+/// Run a blocking-facade operation on this thread's cached I/O runtime,
+/// passing it the ambient [`Cx`] installed by [`Runtime::block_on`].
+fn block_on_io<F, Fut, T>(operation: F) -> Result<T>
 where
     F: FnOnce(Cx) -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
@@ -8003,6 +8125,17 @@ where
             .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
         operation(cx).await
     })
+}
+
+/// Runs a connection future to completion on a blocking runtime, passing it the
+/// ambient [`Cx`] (shared shape of the `BlockingConnection` wrappers).
+#[cfg(feature = "arrow")]
+pub(crate) fn block_on_connection<F, Fut, T>(operation: F) -> Result<T>
+where
+    F: FnOnce(Cx) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    block_on_io(operation)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

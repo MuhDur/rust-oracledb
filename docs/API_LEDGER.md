@@ -29,6 +29,16 @@ pub use oracledb::FromRow	keep	Derive output is part of the typed row API.
 pub use oracledb::protocol	consolidate	Low-level protocol access is useful for advanced users, but W1-T9 should decide whether the driver keeps this re-export or points users at the protocol crate.
 pub use oracledb::transport::CassetteError	keep	Cassette diagnostics are part of the record/replay testing surface.
 *oracledb::AccessToken*	keep	Public credential wrapper used by token authentication.
+*oracledb::BlockingConnection::query<'*	keep	Blocking mirror of the query family.
+*oracledb::BlockingConnection::query_one*	keep	Blocking mirror of the query-one helper.
+*oracledb::BlockingConnection::query_opt*	keep	Blocking mirror of the optional-row query helper.
+*oracledb::BlockingConnection::query_all*	keep	Blocking mirror of the eager query helper.
+*oracledb::BlockingConnection::query_with*	keep	Blocking mirror of the query builder entry point.
+*oracledb::BlockingConnection::execute<'*	keep	Blocking mirror of the execute family.
+*oracledb::BlockingConnection::execute_with*	keep	Blocking mirror of the execute builder entry point.
+*oracledb::BlockingConnection::execute_many<'*	keep	Blocking mirror of the execute-many family.
+*oracledb::BlockingConnection::execute_many_with*	keep	Blocking mirror of the execute-many builder entry point.
+*oracledb::BlockingConnection::register_query*	keep	Blocking mirror of the CQN registration family.
 *oracledb::BatchError*	keep	Public execute-many row-level error type.
 *oracledb::BatchOutcome*	keep	Public execute-many outcome type.
 *oracledb::BatchRows*	keep	Public execute-many bind-row payload type.
@@ -38,6 +48,7 @@ pub use oracledb::transport::CassetteError	keep	Cassette diagnostics are part of
 *oracledb::BlockingConnection::execute_query*	consolidate	Query execution overloads should collapse into operation-specific request types.
 *oracledb::BlockingConnection::query_named*	consolidate	Named-query overloads should collapse into the same operation-family surface.
 *oracledb::BlockingConnection*	consolidate	Keep the sync facade, but W1-T8 should reduce duplicated async/blocking method sprawl.
+*oracledb::BlockingRows*	keep	Public blocking lazy row facade returned by the blocking query family.
 *oracledb::CancelHandle*	keep	Public cancellation handle.
 *oracledb::CollectionElement*	keep	Public object/collection conversion type.
 pub oracledb::ConnectOptions::*	consolidate	Keep ConnectOptions public but privatize fields behind builders/getters for redaction and SemVer evolution.

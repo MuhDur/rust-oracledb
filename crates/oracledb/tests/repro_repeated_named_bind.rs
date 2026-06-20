@@ -51,13 +51,13 @@ fn repeated_named_bind_in_sql() {
     assert_eq!(res1.cell(0, 0).and_then(QueryValue::as_i64), Some(7));
 
     // Positional control where the user supplies both occurrences.
-    let res2 = BlockingConnection::query(
+    let row2 = BlockingConnection::query_one(
         &mut c,
         "select :1 + :2 as s from dual",
         params![5_i64, 5_i64],
     )
     .expect("positional binds");
-    assert_eq!(res2.cell(0, 0).and_then(QueryValue::as_i64), Some(10));
+    assert_eq!(row2.value(0).and_then(QueryValue::as_i64), Some(10));
 
     BlockingConnection::close(c).ok();
 }

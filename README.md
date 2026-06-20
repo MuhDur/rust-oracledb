@@ -119,12 +119,12 @@ fn main() -> Result<(), oracledb::Error> {
     let mut conn = BlockingConnection::connect(options)?;
 
     // Bind typed Rust values positionally (:1, :2, ...) and map rows into a struct.
-    let result = BlockingConnection::query(
+    let emps: Vec<Emp> = BlockingConnection::query(
         &mut conn,
         "select id, name, manager_id from emp where dept = :1",
         (40,),
-    )?;
-    let emps: Vec<Emp> = result.rows_as::<Emp>()?;
+    )?
+    .into_typed()?;
     for e in &emps {
         println!("{}: {} (mgr {:?})", e.id, e.name, e.manager_id);
     }

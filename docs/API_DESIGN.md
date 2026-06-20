@@ -251,9 +251,13 @@ pub trait ColumnIndex { /* impl for usize and &str */ }
   existing `is_connection_lost`/`is_transient`/`is_retryable` + curated code sets. The
   16 variants + `SessionlessError`/`ConversionError`/`PoolError` are preserved (becoming
   `#[non_exhaustive]` per W1-T4).
-- **`BlockingConnection`** gets the 1:1 twin of every method above
-  (`BlockingConnection::query`/`query_one`/…/`execute`/`execute_many`/`register_query`
-  + `*_with`), each `block_on`-wrapping its async sibling (W1-T8 verifies completeness).
+- **`BlockingConnection`** gets the 1:1 twin of every method above, each
+  `block_on`-wrapping its async sibling (W1-T8 verifies completeness):
+  `query`, `query_one`, `query_opt`, `query_all`, `query_with`, `execute`,
+  `execute_with`, `execute_many`, `execute_many_with`, and `register_query`.
+  `query`/`query_with` return `BlockingRows`, the synchronous cursor facade for
+  `columns`, `batch`, `next_batch`, `collect`, `one`, `opt`, `into_typed`,
+  `cursor`, and `scroll`; sync callers never need to supply a `Cx`.
 
 ---
 
@@ -375,6 +379,7 @@ for e in out.errors() { eprintln!("row {} failed: {}", e.row_index(), e); }
 
 // blocking mirror — identical, no cx
 let n = BlockingConnection::execute(&mut conn, "delete from t where id=:1", (9,))?.rows_affected();
+let rows = BlockingConnection::query(&mut conn, "select * from t where id>:1", (100,))?.collect()?;
 ```
 
 ---

@@ -13,7 +13,7 @@
 //! cargo test -p oracledb --test live_connect_string -- --nocapture
 //! ```
 
-use oracledb::{BlockingConnection, ConnectOptions, Connection, QueryResultExt};
+use oracledb::{BlockingConnection, ConnectOptions, Connection};
 use oracledb_protocol::net::EasyConnect;
 use oracledb_protocol::ClientIdentity;
 
@@ -47,9 +47,9 @@ fn connect_and_add(label: &str, connect_string: String) {
     let options = ConnectOptions::new(connect_string, user, password, identity);
     let mut conn: Connection =
         BlockingConnection::connect(options).unwrap_or_else(|e| panic!("{label}: connect: {e:?}"));
-    let result = BlockingConnection::query(&mut conn, "select 7 + 5 from dual", ())
+    let row = BlockingConnection::query_one(&mut conn, "select 7 + 5 from dual", ())
         .unwrap_or_else(|e| panic!("{label}: query: {e:?}"));
-    let sum: i64 = result.get(0, 0).expect("typed get i64");
+    let sum: i64 = row.get(0).expect("typed get i64");
     assert_eq!(sum, 12, "{label}: 7 + 5 should be 12");
     BlockingConnection::close(conn).expect("close connection");
     eprintln!("{label}: 7 + 5 = {sum} OK");
