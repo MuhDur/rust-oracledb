@@ -6,12 +6,16 @@
 //!
 //! The engine is deliberately free of any Python types; the pyshim provides
 //! a backend whose `Conn` payload carries shared handles to the underlying
-//! transport. Acquire-side waiting happens on a [`Condvar`] with no foreign
-//! locks held, so embedders must release the GIL (or equivalent) before
-//! calling into blocking engine entry points.
+//! transport. The blocking facade waits on a [`Condvar`] with no foreign locks
+//! held, while [`PoolEngine::acquire_async`] waits on an async notification and
+//! checkpoints the caller's [`asupersync::Cx`] between waits.
 
+use asupersync::{time, Cx};
 use std::collections::VecDeque;
+use std::future::{poll_fn, Future};
+use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex};
+use std::task::Poll;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -38,6 +42,8 @@ pub enum PoolError {
     /// message is the backend's error display, re-raised on the acquiring
     /// thread just like the reference re-raises background exceptions.
     Backend(String),
+    /// The caller's async context was cancelled while waiting for a pool slot.
+    Cancelled(String),
     /// Internal invariant violation (poisoned lock, unknown id, ...).
     Internal(String),
 }
@@ -53,6 +59,7 @@ impl std::fmt::Display for PoolError {
                 write!(f, "connection pool has busy connections")
             }
             PoolError::Backend(message) => write!(f, "{message}"),
+            PoolError::Cancelled(message) => write!(f, "pool acquire cancelled: {message}"),
             PoolError::Internal(message) => write!(f, "pool internal error: {message}"),
         }
     }
@@ -574,6 +581,8 @@ struct EngineInner<B: PoolBackend> {
     state: Mutex<PoolState<B::Conn>>,
     /// Woken whenever a waiter's `fulfill` predicate may have changed.
     waiters: Condvar,
+    /// Async counterpart to [`EngineInner::waiters`].
+    async_waiters: asupersync::sync::Notify,
     /// Woken whenever the background worker has work to do.
     bg: Condvar,
     bg_handle: Mutex<Option<JoinHandle<()>>>,
@@ -598,6 +607,143 @@ fn lock_state<B: PoolBackend>(inner: &EngineInner<B>) -> Result<Locked<'_, B::Co
         .state
         .lock()
         .map_err(|err| PoolError::Internal(err.to_string()))
+}
+
+fn checkpoint_pool(cx: &Cx) -> Result<(), PoolError> {
+    cx.checkpoint()
+        .map_err(|err| PoolError::Cancelled(err.to_string()))
+}
+
+fn wake_waiters<B: PoolBackend>(inner: &EngineInner<B>) {
+    inner.waiters.notify_all();
+    inner.async_waiters.notify_waiters();
+}
+
+struct AsyncAcquireRequest<'a, B: PoolBackend> {
+    inner: &'a EngineInner<B>,
+    request_id: u64,
+    active: bool,
+}
+
+impl<'a, B: PoolBackend> AsyncAcquireRequest<'a, B> {
+    fn new(inner: &'a EngineInner<B>, request_id: u64) -> Self {
+        Self {
+            inner,
+            request_id,
+            active: true,
+        }
+    }
+
+    fn complete(&mut self) {
+        self.active = false;
+    }
+
+    fn abandon(&mut self) {
+        if !self.active {
+            return;
+        }
+        if let Ok(mut state) = self.inner.state.lock() {
+            abandon_request(&mut state, self.inner, self.request_id);
+            wake_waiters(self.inner);
+        }
+        self.active = false;
+    }
+}
+
+impl<B: PoolBackend> Drop for AsyncAcquireRequest<'_, B> {
+    fn drop(&mut self) {
+        self.abandon();
+    }
+}
+
+fn enqueue_request<C>(state: &mut PoolState<C>, opts: AcquireOptions) -> Result<u64, PoolError> {
+    if !state.open {
+        return Err(PoolError::Closed);
+    }
+    let request_id = state.next_request_id;
+    state.next_request_id += 1;
+    let pool_cclass = state.config.creation_cclass.clone();
+    let cclass_matches = opts.cclass.is_none() || opts.cclass.as_deref() == pool_cclass.as_deref();
+    state.requests.push(Request {
+        id: request_id,
+        cclass: opts.cclass,
+        cclass_matches,
+        wants_new: opts.wants_new,
+        requires_ping: false,
+        bg_processing: false,
+        is_extra: false,
+        is_replacing: false,
+        in_progress: false,
+        completed: false,
+        waiting: true,
+        conn: None,
+        error: None,
+    });
+    Ok(request_id)
+}
+
+fn finish_completed_request<C>(
+    state: &mut PoolState<C>,
+    request_id: u64,
+) -> Result<u64, PoolError> {
+    let position = request_position(state, request_id)
+        .ok_or_else(|| PoolError::Internal("request lost".to_string()))?;
+    let mut request = state.requests.remove(position);
+    let Some(mut conn) = request.conn.take() else {
+        return Err(PoolError::Internal(
+            "completed request without connection".to_string(),
+        ));
+    };
+    conn.ever_acquired = true;
+    let conn_id = conn.id;
+    state.busy.push(conn);
+    Ok(conn_id)
+}
+
+fn poll_request_completion<B: PoolBackend>(
+    state: &mut PoolState<B::Conn>,
+    inner: &EngineInner<B>,
+    request_id: u64,
+) -> Result<Option<u64>, PoolError> {
+    match fulfill(state, inner, request_id) {
+        Ok(true) => finish_completed_request(state, request_id).map(Some),
+        Ok(false) => Ok(None),
+        Err(err) => {
+            abandon_request(state, inner, request_id);
+            Err(err)
+        }
+    }
+}
+
+fn acquire_wait_future<'a, B: PoolBackend>(
+    cx: &'a Cx,
+    inner: &'a EngineInner<B>,
+    request_id: u64,
+) -> impl Future<Output = Result<u64, PoolError>> + 'a {
+    let mut notified = None;
+    poll_fn(move |task_cx| loop {
+        if let Err(err) = checkpoint_pool(cx) {
+            return Poll::Ready(Err(err));
+        }
+
+        let mut state = match lock_state(inner) {
+            Ok(state) => state,
+            Err(err) => return Poll::Ready(Err(err)),
+        };
+        match poll_request_completion(&mut state, inner, request_id) {
+            Ok(Some(conn_id)) => return Poll::Ready(Ok(conn_id)),
+            Ok(None) => {}
+            Err(err) => return Poll::Ready(Err(err)),
+        }
+
+        let waiter = notified.get_or_insert_with(|| Box::pin(inner.async_waiters.notified()));
+        match Future::poll(Pin::as_mut(waiter), task_cx) {
+            Poll::Ready(()) => {
+                notified = None;
+            }
+            Poll::Pending => return Poll::Pending,
+        }
+    })
 }
 
 impl<B: PoolBackend> PoolEngine<B> {
@@ -630,6 +776,7 @@ impl<B: PoolBackend> PoolEngine<B> {
             backend,
             state: Mutex::new(state),
             waiters: Condvar::new(),
+            async_waiters: asupersync::sync::Notify::new(),
             bg: Condvar::new(),
             bg_handle: Mutex::new(None),
         });
@@ -652,53 +799,13 @@ impl<B: PoolBackend> PoolEngine<B> {
     pub fn acquire(&self, opts: AcquireOptions) -> Result<u64, PoolError> {
         let inner = &*self.inner;
         let mut state = lock_state(inner)?;
-        if !state.open {
-            return Err(PoolError::Closed);
-        }
-        let request_id = state.next_request_id;
-        state.next_request_id += 1;
-        let pool_cclass = state.config.creation_cclass.clone();
-        let cclass_matches =
-            opts.cclass.is_none() || opts.cclass.as_deref() == pool_cclass.as_deref();
-        state.requests.push(Request {
-            id: request_id,
-            cclass: opts.cclass,
-            cclass_matches,
-            wants_new: opts.wants_new,
-            requires_ping: false,
-            bg_processing: false,
-            is_extra: false,
-            is_replacing: false,
-            in_progress: false,
-            completed: false,
-            waiting: true,
-            conn: None,
-            error: None,
-        });
+        let request_id = enqueue_request(&mut state, opts)?;
         let deadline = state
             .wait_timeout_ms
             .map(|ms| Instant::now() + Duration::from_millis(u64::from(ms)));
         loop {
-            match fulfill(&mut state, inner, request_id) {
-                Ok(true) => {
-                    let position = request_position(&state, request_id)
-                        .ok_or_else(|| PoolError::Internal("request lost".to_string()))?;
-                    let mut request = state.requests.remove(position);
-                    let Some(mut conn) = request.conn.take() else {
-                        return Err(PoolError::Internal(
-                            "completed request without connection".to_string(),
-                        ));
-                    };
-                    conn.ever_acquired = true;
-                    let conn_id = conn.id;
-                    state.busy.push(conn);
-                    return Ok(conn_id);
-                }
-                Ok(false) => {}
-                Err(err) => {
-                    abandon_request(&mut state, inner, request_id);
-                    return Err(err);
-                }
+            if let Some(conn_id) = poll_request_completion(&mut state, inner, request_id)? {
+                return Ok(conn_id);
             }
             if let Some(deadline) = deadline {
                 let now = Instant::now();
@@ -728,6 +835,46 @@ impl<B: PoolBackend> PoolEngine<B> {
         }
     }
 
+    /// Acquire a connection without parking the current OS thread.
+    ///
+    /// This uses the same request queue and fulfillment algebra as
+    /// [`Self::acquire`], but waits on an async notification and checkpoints
+    /// the caller's [`Cx`] before and after each wait. The existing blocking
+    /// method remains the pyshim/sync facade.
+    pub async fn acquire_async(&self, cx: &Cx, opts: AcquireOptions) -> Result<u64, PoolError> {
+        checkpoint_pool(cx)?;
+        let inner = &*self.inner;
+        let (request_id, wait_timeout) = {
+            let mut state = lock_state(inner)?;
+            let request_id = enqueue_request(&mut state, opts)?;
+            let wait_timeout = state
+                .wait_timeout_ms
+                .map(|ms| Duration::from_millis(u64::from(ms)));
+            (request_id, wait_timeout)
+        };
+        let mut request = AsyncAcquireRequest::new(inner, request_id);
+        let acquire = acquire_wait_future(cx, inner, request_id);
+        let result = if let Some(wait_timeout) = wait_timeout {
+            match time::timeout(time::wall_now(), wait_timeout, Box::pin(acquire)).await {
+                Ok(result) => result,
+                Err(_) => Err(PoolError::NoConnectionAvailable),
+            }
+        } else {
+            acquire.await
+        };
+
+        match result {
+            Ok(conn_id) => {
+                request.complete();
+                Ok(conn_id)
+            }
+            Err(err) => {
+                request.abandon();
+                Err(err)
+            }
+        }
+    }
+
     /// Return a busy connection to the pool. The embedder performs the
     /// end-of-request work (rollback) before calling this. No-op when the
     /// pool is already closed (mirrors the reference).
@@ -743,7 +890,7 @@ impl<B: PoolBackend> PoolEngine<B> {
         let conn = state.busy.remove(position);
         let is_open = inner.backend.connection_is_open(&conn.conn);
         return_connection_helper(&mut state, inner, conn, is_open);
-        inner.waiters.notify_all();
+        wake_waiters(inner);
         Ok(())
     }
 
@@ -760,7 +907,7 @@ impl<B: PoolBackend> PoolEngine<B> {
         state.open_count = state.open_count.saturating_sub(1);
         let conn = state.busy.remove(position);
         drop_conn(&mut state, inner, conn);
-        inner.waiters.notify_all();
+        wake_waiters(inner);
         Ok(())
     }
 
@@ -790,7 +937,7 @@ impl<B: PoolBackend> PoolEngine<B> {
                 .to_drop
                 .extend(free_new.into_iter().chain(free_used).chain(busy));
             inner.bg.notify_all();
-            inner.waiters.notify_all();
+            wake_waiters(inner);
         }
         let handle = self
             .inner
@@ -932,7 +1079,7 @@ fn reject<B: PoolBackend>(
         } else {
             state.free_used.push(conn);
         }
-        inner.waiters.notify_all();
+        wake_waiters(inner);
     }
 }
 
@@ -1204,7 +1351,7 @@ fn post_process_request<B: PoolBackend>(
             state.requests.remove(position);
         }
     }
-    inner.waiters.notify_all();
+    wake_waiters(inner);
 }
 
 /// Reference `_post_create_conn_impl`: integrate a connection created for
@@ -1242,7 +1389,7 @@ fn post_create_conn<B: PoolBackend>(
             request.conn = conn.take();
             request.completed = true;
             request.bg_processing = false;
-            inner.waiters.notify_all();
+            wake_waiters(inner);
             break;
         } else if !request.cclass_matches && open_count >= max {
             request.conn = conn.take();
@@ -1252,7 +1399,7 @@ fn post_create_conn<B: PoolBackend>(
     }
     if let Some(conn) = conn {
         state.free_new.push(conn);
-        inner.waiters.notify_all();
+        wake_waiters(inner);
     }
 }
 
@@ -1313,7 +1460,7 @@ fn return_connection_helper<B: PoolBackend>(
                 request.conn = conn.take();
                 request.completed = true;
                 request.bg_processing = false;
-                inner.waiters.notify_all();
+                wake_waiters(inner);
                 return;
             }
         }
@@ -2039,6 +2186,135 @@ mod tests {
         assert_ne!(c, b);
         assert_eq!(engine.open_count().unwrap(), 2, "replacement keeps count");
         engine.return_connection(c).unwrap();
+        engine.close(false).unwrap();
+    }
+
+    #[test]
+    fn async_acquire_waits_on_notification_and_reuses_returned_connection() {
+        let backend = Arc::new(FakeBackend::new());
+        let engine = PoolEngine::start(
+            Arc::clone(&backend),
+            test_config(1, 1, 1, POOL_GETMODE_WAIT),
+        )
+        .unwrap();
+        wait_for_open_count(&engine, 1);
+        let held = engine.acquire(AcquireOptions::default()).unwrap();
+
+        let returner_engine = engine.clone();
+        let returner = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(25));
+            returner_engine.return_connection(held).unwrap();
+        });
+
+        let runtime = crate::build_io_runtime().expect("asupersync runtime");
+        let acquired = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("asupersync installs an ambient Cx");
+                engine.acquire_async(&cx, AcquireOptions::default()).await
+            })
+            .unwrap();
+        returner.join().expect("returner thread");
+        assert_eq!(acquired, held);
+        engine.return_connection(acquired).unwrap();
+        engine.close(false).unwrap();
+    }
+
+    #[test]
+    fn async_acquire_timedwait_honors_deadline() {
+        let backend = Arc::new(FakeBackend::new());
+        let mut config = test_config(1, 1, 1, POOL_GETMODE_TIMEDWAIT);
+        config.wait_timeout_ms = 20;
+        let engine = PoolEngine::start(Arc::clone(&backend), config).unwrap();
+        wait_for_open_count(&engine, 1);
+        let held = engine.acquire(AcquireOptions::default()).unwrap();
+
+        let runtime = crate::build_io_runtime().expect("asupersync runtime");
+        let started = Instant::now();
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("asupersync installs an ambient Cx");
+                engine.acquire_async(&cx, AcquireOptions::default()).await
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, PoolError::NoConnectionAvailable));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "timed async acquire should not park indefinitely"
+        );
+        engine.return_connection(held).unwrap();
+        engine.close(false).unwrap();
+    }
+
+    #[test]
+    fn async_acquire_checkpoint_cancellation_does_not_enqueue_request() {
+        let backend = Arc::new(FakeBackend::new());
+        let engine = PoolEngine::start(
+            Arc::clone(&backend),
+            test_config(1, 1, 1, POOL_GETMODE_WAIT),
+        )
+        .unwrap();
+        wait_for_open_count(&engine, 1);
+        let held = engine.acquire(AcquireOptions::default()).unwrap();
+
+        let runtime = crate::build_io_runtime().expect("asupersync runtime");
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("asupersync installs an ambient Cx");
+                cx.cancel_fast(asupersync::CancelKind::Shutdown);
+                engine.acquire_async(&cx, AcquireOptions::default()).await
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, PoolError::Cancelled(_)));
+        assert_eq!(engine.busy_count().unwrap(), 1);
+        engine.return_connection(held).unwrap();
+        let reacquired = engine.acquire(AcquireOptions::default()).unwrap();
+        assert_eq!(
+            reacquired, held,
+            "cancelled async acquire must not leave a stale waiter ahead of later sync acquires"
+        );
+        engine.return_connection(reacquired).unwrap();
+        engine.close(false).unwrap();
+    }
+
+    #[test]
+    fn async_acquire_checkpoint_cancellation_while_waiting_abandons_request() {
+        let backend = Arc::new(FakeBackend::new());
+        let engine = PoolEngine::start(
+            Arc::clone(&backend),
+            test_config(1, 1, 1, POOL_GETMODE_WAIT),
+        )
+        .unwrap();
+        wait_for_open_count(&engine, 1);
+        let held = engine.acquire(AcquireOptions::default()).unwrap();
+
+        let runtime = crate::build_io_runtime().expect("asupersync runtime");
+        let returner_engine = engine.clone();
+        let err = runtime.block_on(async {
+            let cx = Cx::current().expect("asupersync installs an ambient Cx");
+            let cancel_cx = cx.clone();
+            let returner = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(25));
+                cancel_cx.cancel_fast(asupersync::CancelKind::Shutdown);
+                returner_engine.return_connection(held).unwrap();
+            });
+            let err = engine
+                .acquire_async(&cx, AcquireOptions::default())
+                .await
+                .unwrap_err();
+            returner.join().expect("returner thread");
+            err
+        });
+
+        assert!(matches!(err, PoolError::Cancelled(_)));
+        assert_eq!(engine.busy_count().unwrap(), 0);
+        let reacquired = engine.acquire(AcquireOptions::default()).unwrap();
+        assert_eq!(
+            reacquired, held,
+            "cancelled waiter must not retain the returned connection or block later acquires"
+        );
+        engine.return_connection(reacquired).unwrap();
         engine.close(false).unwrap();
     }
 }

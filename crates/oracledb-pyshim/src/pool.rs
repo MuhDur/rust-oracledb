@@ -52,9 +52,9 @@ pub(crate) fn record_next_pool_args(password: Option<String>) -> PyResult<u64> {
 }
 
 #[pyfunction]
-pub(crate) fn discard_pending_pool_args(id: u64) -> PyResult<bool> {
+pub(crate) fn discard_pending_pool_args(entry_id: u64) -> PyResult<bool> {
     let mut queue = next_pool_args_queue().lock().map_err(runtime_error)?;
-    if let Some(position) = queue.iter().position(|entry| entry.id == id) {
+    if let Some(position) = queue.iter().position(|entry| entry.id.eq(&entry_id)) {
         queue.remove(position);
         return Ok(true);
     }
@@ -218,6 +218,7 @@ fn pool_error_to_pyerr(err: PoolError) -> PyErr {
             raise_oracledb_driver_error("ERR_POOL_HAS_BUSY_CONNECTIONS")
         }
         PoolError::Backend(message) => runtime_error(message),
+        PoolError::Cancelled(message) => PyRuntimeError::new_err(message),
         PoolError::Internal(message) => PyRuntimeError::new_err(message),
     }
 }

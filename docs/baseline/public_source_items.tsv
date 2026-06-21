@@ -353,57 +353,58 @@ oracledb	crates/oracledb/src/lib.rs	8229	pub(crate) fn block_on_connection<F, Fu
 oracledb	crates/oracledb/src/lib.rs	984	pub fn render_caret(sql: &str, offset: usize, headline: &str) -> String {
 oracledb	crates/oracledb/src/obs.rs	106	pub struct ObsSpanGuard;
 oracledb	crates/oracledb/src/obs.rs	44	pub(crate) fn sql_digest(sql: &str) -> String {
-oracledb	crates/oracledb/src/pool.rs	113	pub(crate) mod lifecycle {
-oracledb	crates/oracledb/src/pool.rs	116	pub(crate) type SlotId = u64;
-oracledb	crates/oracledb/src/pool.rs	117	pub(crate) type WaiterId = u64;
-oracledb	crates/oracledb/src/pool.rs	120	pub(crate) enum PoolCloseReason {
-oracledb	crates/oracledb/src/pool.rs	128	pub(crate) enum PoolEffect {
-oracledb	crates/oracledb/src/pool.rs	144	pub(crate) enum PoolSlotState {
-oracledb	crates/oracledb/src/pool.rs	155	pub(crate) enum PoolLifecycleError {
-oracledb	crates/oracledb/src/pool.rs	167	pub(crate) struct PoolCounts {
-oracledb	crates/oracledb/src/pool.rs	185	pub(crate) struct PurePoolState {
-oracledb	crates/oracledb/src/pool.rs	18	pub const POOL_GETMODE_WAIT: u32 = 0;
-oracledb	crates/oracledb/src/pool.rs	198	pub(crate) fn new(min: usize, max: usize) -> Self {
-oracledb	crates/oracledb/src/pool.rs	19	pub const POOL_GETMODE_NOWAIT: u32 = 1;
-oracledb	crates/oracledb/src/pool.rs	20	pub const POOL_GETMODE_FORCEGET: u32 = 2;
-oracledb	crates/oracledb/src/pool.rs	215	pub(crate) fn request_acquire(&mut self) -> Result<WaiterId, PoolLifecycleError> {
-oracledb	crates/oracledb/src/pool.rs	21	pub const POOL_GETMODE_TIMEDWAIT: u32 = 3;
-oracledb	crates/oracledb/src/pool.rs	227	pub(crate) fn cancel_acquire(
-oracledb	crates/oracledb/src/pool.rs	23	pub const PURITY_DEFAULT: u32 = 0;
-oracledb	crates/oracledb/src/pool.rs	24	pub const PURITY_NEW: u32 = 1;
-oracledb	crates/oracledb/src/pool.rs	258	pub(crate) fn complete_open(
-oracledb	crates/oracledb/src/pool.rs	25	pub const PURITY_SELF: u32 = 2;
-oracledb	crates/oracledb/src/pool.rs	296	pub(crate) fn complete_ping(
-oracledb	crates/oracledb/src/pool.rs	30	pub enum PoolError {
-oracledb	crates/oracledb/src/pool.rs	335	pub(crate) fn release(&mut self, slot: SlotId) -> Result<(), PoolLifecycleError> {
-oracledb	crates/oracledb/src/pool.rs	345	pub(crate) fn reap_idle(&mut self, slot: SlotId) -> Result<(), PoolLifecycleError> {
-oracledb	crates/oracledb/src/pool.rs	359	pub(crate) fn complete_close(&mut self, slot: SlotId) -> Result<(), PoolLifecycleError> {
-oracledb	crates/oracledb/src/pool.rs	373	pub(crate) fn begin_close(&mut self, force: bool) -> Result<(), PoolLifecycleError> {
-oracledb	crates/oracledb/src/pool.rs	410	pub(crate) fn counts(&self) -> PoolCounts {
-oracledb	crates/oracledb/src/pool.rs	429	pub(crate) fn state_of(&self, slot: SlotId) -> Option<PoolSlotState> {
-oracledb	crates/oracledb/src/pool.rs	436	pub(crate) fn take_effects(&mut self) -> Vec<PoolEffect> {
-oracledb	crates/oracledb/src/pool.rs	440	pub(crate) fn history(&self) -> &[String] {
-oracledb	crates/oracledb/src/pool.rs	582	pub struct PoolEngine<B: PoolBackend> {
-oracledb	crates/oracledb/src/pool.rs	606	pub fn start(backend: B, config: PoolConfig) -> Result<Self, PoolError> {
-oracledb	crates/oracledb/src/pool.rs	64	pub struct PoolConfig {
-oracledb	crates/oracledb/src/pool.rs	652	pub fn acquire(&self, opts: AcquireOptions) -> Result<u64, PoolError> {
-oracledb	crates/oracledb/src/pool.rs	734	pub fn return_connection(&self, conn_id: u64) -> Result<(), PoolError> {
-oracledb	crates/oracledb/src/pool.rs	751	pub fn drop_connection(&self, conn_id: u64) -> Result<(), PoolError> {
-oracledb	crates/oracledb/src/pool.rs	772	pub fn close(&self, force: bool) -> Result<(), PoolError> {
-oracledb	crates/oracledb/src/pool.rs	79	pub struct AcquireOptions {
-oracledb	crates/oracledb/src/pool.rs	809	pub fn busy_count(&self) -> Result<u32, PoolError> {
-oracledb	crates/oracledb/src/pool.rs	814	pub fn open_count(&self) -> Result<u32, PoolError> {
-oracledb	crates/oracledb/src/pool.rs	819	pub fn getmode(&self) -> Result<u32, PoolError> {
-oracledb	crates/oracledb/src/pool.rs	826	pub fn set_getmode(&self, value: u32) -> Result<(), PoolError> {
-oracledb	crates/oracledb/src/pool.rs	843	pub fn wait_timeout_ms(&self) -> Result<Option<u32>, PoolError> {
-oracledb	crates/oracledb/src/pool.rs	848	pub fn set_wait_timeout_ms(&self, value: u32) -> Result<(), PoolError> {
-oracledb	crates/oracledb/src/pool.rs	858	pub fn timeout_secs(&self) -> Result<u32, PoolError> {
-oracledb	crates/oracledb/src/pool.rs	863	pub fn set_timeout_secs(&self, value: u32) -> Result<(), PoolError> {
-oracledb	crates/oracledb/src/pool.rs	870	pub fn max_lifetime_session_secs(&self) -> Result<u32, PoolError> {
-oracledb	crates/oracledb/src/pool.rs	875	pub fn set_max_lifetime_session_secs(&self, value: u32) -> Result<(), PoolError> {
-oracledb	crates/oracledb/src/pool.rs	881	pub fn ping_interval_secs(&self) -> Result<i64, PoolError> {
-oracledb	crates/oracledb/src/pool.rs	886	pub fn set_ping_interval_secs(&self, value: i64) -> Result<(), PoolError> {
-oracledb	crates/oracledb/src/pool.rs	90	pub trait PoolBackend: Send + Sync + 'static {
+oracledb	crates/oracledb/src/pool.rs	1005	pub fn timeout_secs(&self) -> Result<u32, PoolError> {
+oracledb	crates/oracledb/src/pool.rs	1010	pub fn set_timeout_secs(&self, value: u32) -> Result<(), PoolError> {
+oracledb	crates/oracledb/src/pool.rs	1017	pub fn max_lifetime_session_secs(&self) -> Result<u32, PoolError> {
+oracledb	crates/oracledb/src/pool.rs	1022	pub fn set_max_lifetime_session_secs(&self, value: u32) -> Result<(), PoolError> {
+oracledb	crates/oracledb/src/pool.rs	1028	pub fn ping_interval_secs(&self) -> Result<i64, PoolError> {
+oracledb	crates/oracledb/src/pool.rs	1033	pub fn set_ping_interval_secs(&self, value: i64) -> Result<(), PoolError> {
+oracledb	crates/oracledb/src/pool.rs	120	pub(crate) mod lifecycle {
+oracledb	crates/oracledb/src/pool.rs	123	pub(crate) type SlotId = u64;
+oracledb	crates/oracledb/src/pool.rs	124	pub(crate) type WaiterId = u64;
+oracledb	crates/oracledb/src/pool.rs	127	pub(crate) enum PoolCloseReason {
+oracledb	crates/oracledb/src/pool.rs	135	pub(crate) enum PoolEffect {
+oracledb	crates/oracledb/src/pool.rs	151	pub(crate) enum PoolSlotState {
+oracledb	crates/oracledb/src/pool.rs	162	pub(crate) enum PoolLifecycleError {
+oracledb	crates/oracledb/src/pool.rs	174	pub(crate) struct PoolCounts {
+oracledb	crates/oracledb/src/pool.rs	192	pub(crate) struct PurePoolState {
+oracledb	crates/oracledb/src/pool.rs	205	pub(crate) fn new(min: usize, max: usize) -> Self {
+oracledb	crates/oracledb/src/pool.rs	222	pub(crate) fn request_acquire(&mut self) -> Result<WaiterId, PoolLifecycleError> {
+oracledb	crates/oracledb/src/pool.rs	22	pub const POOL_GETMODE_WAIT: u32 = 0;
+oracledb	crates/oracledb/src/pool.rs	234	pub(crate) fn cancel_acquire(
+oracledb	crates/oracledb/src/pool.rs	23	pub const POOL_GETMODE_NOWAIT: u32 = 1;
+oracledb	crates/oracledb/src/pool.rs	24	pub const POOL_GETMODE_FORCEGET: u32 = 2;
+oracledb	crates/oracledb/src/pool.rs	25	pub const POOL_GETMODE_TIMEDWAIT: u32 = 3;
+oracledb	crates/oracledb/src/pool.rs	265	pub(crate) fn complete_open(
+oracledb	crates/oracledb/src/pool.rs	27	pub const PURITY_DEFAULT: u32 = 0;
+oracledb	crates/oracledb/src/pool.rs	28	pub const PURITY_NEW: u32 = 1;
+oracledb	crates/oracledb/src/pool.rs	29	pub const PURITY_SELF: u32 = 2;
+oracledb	crates/oracledb/src/pool.rs	303	pub(crate) fn complete_ping(
+oracledb	crates/oracledb/src/pool.rs	342	pub(crate) fn release(&mut self, slot: SlotId) -> Result<(), PoolLifecycleError> {
+oracledb	crates/oracledb/src/pool.rs	34	pub enum PoolError {
+oracledb	crates/oracledb/src/pool.rs	352	pub(crate) fn reap_idle(&mut self, slot: SlotId) -> Result<(), PoolLifecycleError> {
+oracledb	crates/oracledb/src/pool.rs	366	pub(crate) fn complete_close(&mut self, slot: SlotId) -> Result<(), PoolLifecycleError> {
+oracledb	crates/oracledb/src/pool.rs	380	pub(crate) fn begin_close(&mut self, force: bool) -> Result<(), PoolLifecycleError> {
+oracledb	crates/oracledb/src/pool.rs	417	pub(crate) fn counts(&self) -> PoolCounts {
+oracledb	crates/oracledb/src/pool.rs	436	pub(crate) fn state_of(&self, slot: SlotId) -> Option<PoolSlotState> {
+oracledb	crates/oracledb/src/pool.rs	443	pub(crate) fn take_effects(&mut self) -> Vec<PoolEffect> {
+oracledb	crates/oracledb/src/pool.rs	447	pub(crate) fn history(&self) -> &[String] {
+oracledb	crates/oracledb/src/pool.rs	591	pub struct PoolEngine<B: PoolBackend> {
+oracledb	crates/oracledb/src/pool.rs	71	pub struct PoolConfig {
+oracledb	crates/oracledb/src/pool.rs	752	pub fn start(backend: B, config: PoolConfig) -> Result<Self, PoolError> {
+oracledb	crates/oracledb/src/pool.rs	799	pub fn acquire(&self, opts: AcquireOptions) -> Result<u64, PoolError> {
+oracledb	crates/oracledb/src/pool.rs	844	pub async fn acquire_async(&self, cx: &Cx, opts: AcquireOptions) -> Result<u64, PoolError> {
+oracledb	crates/oracledb/src/pool.rs	86	pub struct AcquireOptions {
+oracledb	crates/oracledb/src/pool.rs	881	pub fn return_connection(&self, conn_id: u64) -> Result<(), PoolError> {
+oracledb	crates/oracledb/src/pool.rs	898	pub fn drop_connection(&self, conn_id: u64) -> Result<(), PoolError> {
+oracledb	crates/oracledb/src/pool.rs	919	pub fn close(&self, force: bool) -> Result<(), PoolError> {
+oracledb	crates/oracledb/src/pool.rs	956	pub fn busy_count(&self) -> Result<u32, PoolError> {
+oracledb	crates/oracledb/src/pool.rs	961	pub fn open_count(&self) -> Result<u32, PoolError> {
+oracledb	crates/oracledb/src/pool.rs	966	pub fn getmode(&self) -> Result<u32, PoolError> {
+oracledb	crates/oracledb/src/pool.rs	973	pub fn set_getmode(&self, value: u32) -> Result<(), PoolError> {
+oracledb	crates/oracledb/src/pool.rs	97	pub trait PoolBackend: Send + Sync + 'static {
+oracledb	crates/oracledb/src/pool.rs	990	pub fn wait_timeout_ms(&self) -> Result<Option<u32>, PoolError> {
+oracledb	crates/oracledb/src/pool.rs	995	pub fn set_wait_timeout_ms(&self, value: u32) -> Result<(), PoolError> {
 oracledb	crates/oracledb/src/soda/collection.rs	121	pub async fn get_count(
 oracledb	crates/oracledb/src/soda/collection.rs	144	pub async fn get_one(
 oracledb	crates/oracledb/src/soda/collection.rs	160	pub async fn get_documents(

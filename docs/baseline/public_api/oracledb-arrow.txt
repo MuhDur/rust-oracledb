@@ -126,6 +126,7 @@ pub fn oracledb::cursor_logic::bind_rows_need_iterative_plsql(&str, &[alloc::vec
 pub mod oracledb::pool
 pub enum oracledb::pool::PoolError
 pub oracledb::pool::PoolError::Backend(alloc::string::String)
+pub oracledb::pool::PoolError::Cancelled(alloc::string::String)
 pub oracledb::pool::PoolError::Closed
 pub oracledb::pool::PoolError::HasBusyConnections
 pub oracledb::pool::PoolError::Internal(alloc::string::String)
@@ -161,6 +162,7 @@ pub fn oracledb::pool::PoolConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> 
 pub struct oracledb::pool::PoolEngine<B: oracledb::pool::PoolBackend>
 impl<B: oracledb::pool::PoolBackend> oracledb::pool::PoolEngine<B>
 pub fn oracledb::pool::PoolEngine<B>::acquire(&self, oracledb::pool::AcquireOptions) -> core::result::Result<u64, oracledb::pool::PoolError>
+pub async fn oracledb::pool::PoolEngine<B>::acquire_async(&self, &asupersync::cx::cx::Cx, oracledb::pool::AcquireOptions) -> core::result::Result<u64, oracledb::pool::PoolError>
 pub fn oracledb::pool::PoolEngine<B>::busy_count(&self) -> core::result::Result<u32, oracledb::pool::PoolError>
 pub fn oracledb::pool::PoolEngine<B>::close(&self, bool) -> core::result::Result<(), oracledb::pool::PoolError>
 pub fn oracledb::pool::PoolEngine<B>::drop_connection(&self, u64) -> core::result::Result<(), oracledb::pool::PoolError>
