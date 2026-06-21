@@ -8,7 +8,10 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use oracledb::pool::{AcquireOptions, PoolBackend, PoolConfig, PoolEngine, PoolError, PURITY_NEW};
+use oracledb::pool::{
+    AcquireOptions, BlockingPool, Pool, PoolBackend, PoolConfig, PoolError, PooledConnection,
+    PURITY_NEW,
+};
 use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -203,8 +206,9 @@ pub(crate) struct ShimPool {
     increment: u32,
     max: u32,
     min: u32,
-    engine: PoolEngine<ShimPoolBackend>,
+    engine: BlockingPool<ShimPoolBackend>,
     registry: Registry,
+    guards: Mutex<HashMap<u64, PooledConnection<ShimPoolBackend>>>,
     stmt_cache_size: Mutex<u32>,
 }
 
@@ -325,7 +329,9 @@ impl ShimPool {
             ping_timeout_ms: ping_timeout,
             creation_cclass: None,
         };
-        let engine = PoolEngine::start(backend, config).map_err(pool_error_to_pyerr)?;
+        let engine = Pool::start(backend, config)
+            .map_err(pool_error_to_pyerr)?
+            .blocking();
         Ok(Arc::new(Self {
             dsn,
             username,
@@ -335,13 +341,20 @@ impl ShimPool {
             min,
             engine,
             registry,
+            guards: Mutex::new(HashMap::new()),
             stmt_cache_size: Mutex::new(stmt_cache_size),
         }))
     }
 
     /// Blocking acquire; callers must hold neither the GIL nor any lock.
     fn acquire_blocking(&self, opts: AcquireOptions) -> Result<u64, PoolError> {
-        self.engine.acquire(opts)
+        let guard = self.engine.acquire(opts)?;
+        let id = guard.id();
+        self.guards
+            .lock()
+            .map_err(|err| PoolError::Internal(err.to_string()))?
+            .insert(id, guard);
+        Ok(id)
     }
 
     fn registered_conn(&self, py: Python<'_>, id: u64) -> PyResult<Py<PyAny>> {
@@ -385,9 +398,25 @@ impl ShimPool {
                 }
             }
         }
-        self.engine
-            .return_connection(*id)
-            .map_err(pool_error_to_pyerr)
+        let guard = self.guards.lock().map_err(runtime_error)?.remove(id);
+        if let Some(guard) = guard {
+            guard.release_blocking().map_err(pool_error_to_pyerr)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn drop_blocking(&self, conn_id: u64) -> Result<(), PoolError> {
+        let guard = self
+            .guards
+            .lock()
+            .map_err(|err| PoolError::Internal(err.to_string()))?
+            .remove(&conn_id);
+        if let Some(guard) = guard {
+            guard.drop_from_pool_blocking()
+        } else {
+            Ok(())
+        }
     }
 
     fn wait_timeout_object(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -489,7 +518,7 @@ impl ThinPoolImpl {
     fn drop(&self, py: Python<'_>, conn_impl: &Bound<'_, PyAny>) -> PyResult<()> {
         let refs = extract_pool_conn_refs(conn_impl)?;
         let pool = Arc::clone(&self.pool);
-        py.detach(move || pool.engine.drop_connection(refs.0))
+        py.detach(move || pool.drop_blocking(refs.0))
             .map_err(pool_error_to_pyerr)
     }
 
@@ -697,7 +726,7 @@ impl AsyncThinPoolImpl {
         let refs = Python::attach(|py| extract_pool_conn_refs(conn_impl.bind(py)))?;
         let pool = Arc::clone(&self.pool);
         let task = spawn_blocking_task("oracledb-pyshim-pool-drop", move || {
-            Ok::<_, TaskError>(pool.engine.drop_connection(refs.0))
+            Ok::<_, TaskError>(pool.drop_blocking(refs.0))
         });
         task.await
             .map_err(runtime_error)?

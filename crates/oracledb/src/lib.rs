@@ -108,11 +108,12 @@
 //!
 //! # Connection pooling
 //!
-//! The [`pool`] module provides a connection-pool engine (`PoolEngine`) that
-//! mirrors python-oracledb's thin pool: free/busy lists, growth planning,
-//! getmode semantics, ping policy, idle timeout, and max lifetime. The engine
-//! is generic over a [`PoolBackend`](pool::PoolBackend) so the embedder
-//! supplies how a pooled connection is created, pinged, and closed.
+//! The [`pool`] module provides async [`Pool`](pool::Pool) and
+//! [`BlockingPool`](pool::BlockingPool) facades that mirror python-oracledb's
+//! thin pool: free/busy lists, growth planning, getmode semantics, ping policy,
+//! idle timeout, and max lifetime. The pool is generic over a
+//! [`PoolBackend`](pool::PoolBackend) so the embedder supplies how a pooled
+//! connection is created, pinged, and closed.
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};

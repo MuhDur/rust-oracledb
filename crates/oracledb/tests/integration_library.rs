@@ -1,7 +1,7 @@
 //! Standalone-library integration suite for the `oracledb` crate.
 //!
 //! These tests drive the PUBLIC crate API directly (`BlockingConnection`,
-//! `Connection`, `ConnectOptions`, the `pool` engine) against a live Oracle
+//! `Connection`, `ConnectOptions`, the `pool` facade) against a live Oracle
 //! container, with no PyO3 shim and no Python in the loop. Each test is a real
 //! round trip: connect, execute, fetch, commit. The point is to prove that the
 //! driver is usable as an ordinary Rust dependency.
@@ -18,7 +18,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use oracledb::pool::{AcquireOptions, PoolBackend, PoolConfig, PoolEngine, POOL_GETMODE_WAIT};
+use oracledb::pool::{AcquireOptions, Pool, PoolBackend, PoolConfig, POOL_GETMODE_WAIT};
 use oracledb::protocol::oson::OsonValue;
 use oracledb::protocol::thin::{BindValue, ExecuteOptions, QueryValue};
 use oracledb::protocol::vector::{Vector, VectorValues};
@@ -683,29 +683,30 @@ fn connection_pool_acquire_release() {
         ping_timeout_ms: 5_000,
         creation_cclass: None,
     };
-    let engine = PoolEngine::start(backend.clone(), config).expect("pool starts");
+    let pool = Pool::start(backend.clone(), config)
+        .expect("pool starts")
+        .blocking();
 
     // acquire two distinct connections up to max
-    let a = engine
-        .acquire(AcquireOptions::default())
-        .expect("acquire a");
-    let b = engine
-        .acquire(AcquireOptions::default())
-        .expect("acquire b");
-    assert_ne!(a, b, "two acquires up to max yield distinct connections");
-    assert_eq!(engine.busy_count().expect("busy count"), 2);
+    let a = pool.acquire(AcquireOptions::default()).expect("acquire a");
+    let b = pool.acquire(AcquireOptions::default()).expect("acquire b");
+    let a_id = a.id();
+    let b_id = b.id();
+    assert_ne!(
+        a_id, b_id,
+        "two acquires up to max yield distinct connections"
+    );
+    assert_eq!(pool.busy_count().expect("busy count"), 2);
 
     // release one and re-acquire: the freed connection is reused (LIFO)
-    engine.return_connection(a).expect("return a");
-    assert_eq!(engine.busy_count().expect("busy count"), 1);
-    let c = engine
-        .acquire(AcquireOptions::default())
-        .expect("re-acquire");
-    assert_eq!(c, a, "released connection is reused");
+    a.release_blocking().expect("return a");
+    assert_eq!(pool.busy_count().expect("busy count"), 1);
+    let c = pool.acquire(AcquireOptions::default()).expect("re-acquire");
+    assert_eq!(c.id(), a_id, "released connection is reused");
 
-    engine.return_connection(b).expect("return b");
-    engine.return_connection(c).expect("return c");
-    engine.close(false).expect("close pool");
+    b.release_blocking().expect("return b");
+    c.release_blocking().expect("return c");
+    pool.close(false).expect("close pool");
 
     assert!(backend.created.load(Ordering::SeqCst) >= 2);
     assert!(backend.closed.load(Ordering::SeqCst) >= 2);

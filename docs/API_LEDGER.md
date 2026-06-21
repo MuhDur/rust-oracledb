@@ -102,8 +102,7 @@ pub mod oracledb::cursor_logic	pub(crate)	Implementation support for executemany
 *oracledb::obs_span!*	keep	Public observability macro.
 *oracledb::params!*	keep	Public bind helper macro.
 *oracledb::pool::PoolBackend*	pub(crate)	Backend trait is the internal engine seam; W1-T7 introduces the async pool facade.
-*oracledb::pool::PoolEngine*	pub(crate)	Low-level sync pool engine is not the intended user-facing pool API.
-*oracledb::pool::*	keep	Pool constants, config, options, and error type stay public unless W1-T7 replaces them deliberately.
+*oracledb::pool::*	keep	Pool facades, guarded connection ownership, constants, config, options, and error type stay public.
 pub mod oracledb::pool	keep	Pool module remains the public namespace for pool configuration.
 *oracledb::soda::qbe::*	pub(crate)	Query-by-example SQL generation is SODA implementation detail.
 pub mod oracledb::soda::qbe	pub(crate)	Query-by-example SQL generation is SODA implementation detail.

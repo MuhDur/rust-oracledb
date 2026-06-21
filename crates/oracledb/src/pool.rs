@@ -6,7 +6,7 @@
 //!
 //! The engine is deliberately free of any Python types; the pyshim provides
 //! a backend whose `Conn` payload carries shared handles to the underlying
-//! transport. [`PoolEngine::acquire_async`] waits on an async notification and
+//! transport. [`Pool::acquire`] waits on an async notification and
 //! checkpoints the caller's [`asupersync::Cx`] between waits; the blocking
 //! facade is a thin `block_on` wrapper over that async path.
 
@@ -14,7 +14,7 @@ use asupersync::{time, Cx};
 use std::collections::VecDeque;
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::task::Poll;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -579,6 +579,8 @@ struct PoolState<C> {
 struct EngineInner<B: PoolBackend> {
     backend: B,
     state: Mutex<PoolState<B::Conn>>,
+    drop_returns_tx: mpsc::Sender<u64>,
+    drop_returns_rx: Mutex<mpsc::Receiver<u64>>,
     /// Woken whenever an async waiter's `fulfill` predicate may have changed.
     async_waiters: asupersync::sync::Notify,
     /// Woken whenever the background worker has work to do.
@@ -586,7 +588,256 @@ struct EngineInner<B: PoolBackend> {
     bg_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
-pub struct PoolEngine<B: PoolBackend> {
+pub struct Pool<B: PoolBackend> {
+    engine: PoolEngine<B>,
+}
+
+impl<B: PoolBackend> Clone for Pool<B> {
+    fn clone(&self) -> Self {
+        Self {
+            engine: self.engine.clone(),
+        }
+    }
+}
+
+impl<B: PoolBackend> Pool<B> {
+    /// Create an async-native pool and start its background worker.
+    pub fn start(backend: B, config: PoolConfig) -> Result<Self, PoolError> {
+        Ok(Self {
+            engine: PoolEngine::start(backend, config)?,
+        })
+    }
+
+    /// Return the blocking facade over this async pool.
+    pub fn blocking(&self) -> BlockingPool<B> {
+        BlockingPool { pool: self.clone() }
+    }
+
+    /// Acquire a guarded pooled connection without parking the current OS thread.
+    pub async fn acquire(
+        &self,
+        cx: &Cx,
+        opts: AcquireOptions,
+    ) -> Result<PooledConnection<B>, PoolError> {
+        let conn_id = self.engine.acquire_async(cx, opts).await?;
+        Ok(PooledConnection::new(self.clone(), conn_id))
+    }
+
+    /// Close the pool through the async facade.
+    pub async fn close(&self, cx: &Cx, force: bool) -> Result<(), PoolError> {
+        self.engine.close_async(cx, force).await
+    }
+
+    pub async fn busy_count(&self, cx: &Cx) -> Result<u32, PoolError> {
+        self.engine.busy_count_async(cx).await
+    }
+
+    pub async fn open_count(&self, cx: &Cx) -> Result<u32, PoolError> {
+        self.engine.open_count_async(cx).await
+    }
+
+    pub fn getmode(&self) -> Result<u32, PoolError> {
+        self.engine.getmode()
+    }
+
+    pub fn set_getmode(&self, value: u32) -> Result<(), PoolError> {
+        self.engine.set_getmode(value)
+    }
+
+    pub fn wait_timeout_ms(&self) -> Result<Option<u32>, PoolError> {
+        self.engine.wait_timeout_ms()
+    }
+
+    pub fn set_wait_timeout_ms(&self, value: u32) -> Result<(), PoolError> {
+        self.engine.set_wait_timeout_ms(value)
+    }
+
+    pub fn timeout_secs(&self) -> Result<u32, PoolError> {
+        self.engine.timeout_secs()
+    }
+
+    pub fn set_timeout_secs(&self, value: u32) -> Result<(), PoolError> {
+        self.engine.set_timeout_secs(value)
+    }
+
+    pub fn max_lifetime_session_secs(&self) -> Result<u32, PoolError> {
+        self.engine.max_lifetime_session_secs()
+    }
+
+    pub fn set_max_lifetime_session_secs(&self, value: u32) -> Result<(), PoolError> {
+        self.engine.set_max_lifetime_session_secs(value)
+    }
+
+    pub fn ping_interval_secs(&self) -> Result<i64, PoolError> {
+        self.engine.ping_interval_secs()
+    }
+
+    pub fn set_ping_interval_secs(&self, value: i64) -> Result<(), PoolError> {
+        self.engine.set_ping_interval_secs(value)
+    }
+}
+
+pub struct BlockingPool<B: PoolBackend> {
+    pool: Pool<B>,
+}
+
+impl<B: PoolBackend> Clone for BlockingPool<B> {
+    fn clone(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+        }
+    }
+}
+
+impl<B: PoolBackend> BlockingPool<B> {
+    /// Blocking facade for [`Pool::acquire`].
+    pub fn acquire(&self, opts: AcquireOptions) -> Result<PooledConnection<B>, PoolError> {
+        let conn_id = self.pool.engine.acquire(opts)?;
+        Ok(PooledConnection::new(self.pool.clone(), conn_id))
+    }
+
+    pub fn close(&self, force: bool) -> Result<(), PoolError> {
+        self.pool.engine.close(force)
+    }
+
+    pub fn busy_count(&self) -> Result<u32, PoolError> {
+        self.pool.engine.busy_count()
+    }
+
+    pub fn open_count(&self) -> Result<u32, PoolError> {
+        self.pool.engine.open_count()
+    }
+
+    pub fn getmode(&self) -> Result<u32, PoolError> {
+        self.pool.getmode()
+    }
+
+    pub fn set_getmode(&self, value: u32) -> Result<(), PoolError> {
+        self.pool.set_getmode(value)
+    }
+
+    pub fn wait_timeout_ms(&self) -> Result<Option<u32>, PoolError> {
+        self.pool.wait_timeout_ms()
+    }
+
+    pub fn set_wait_timeout_ms(&self, value: u32) -> Result<(), PoolError> {
+        self.pool.set_wait_timeout_ms(value)
+    }
+
+    pub fn timeout_secs(&self) -> Result<u32, PoolError> {
+        self.pool.timeout_secs()
+    }
+
+    pub fn set_timeout_secs(&self, value: u32) -> Result<(), PoolError> {
+        self.pool.set_timeout_secs(value)
+    }
+
+    pub fn max_lifetime_session_secs(&self) -> Result<u32, PoolError> {
+        self.pool.max_lifetime_session_secs()
+    }
+
+    pub fn set_max_lifetime_session_secs(&self, value: u32) -> Result<(), PoolError> {
+        self.pool.set_max_lifetime_session_secs(value)
+    }
+
+    pub fn ping_interval_secs(&self) -> Result<i64, PoolError> {
+        self.pool.ping_interval_secs()
+    }
+
+    pub fn set_ping_interval_secs(&self, value: i64) -> Result<(), PoolError> {
+        self.pool.set_ping_interval_secs(value)
+    }
+}
+
+pub struct PooledConnection<B: PoolBackend> {
+    pool: Pool<B>,
+    conn_id: u64,
+    armed: bool,
+}
+
+impl<B: PoolBackend> PooledConnection<B> {
+    fn new(pool: Pool<B>, conn_id: u64) -> Self {
+        Self {
+            pool,
+            conn_id,
+            armed: true,
+        }
+    }
+
+    /// Engine-assigned identity for embedders that keep sidecar objects.
+    pub fn id(&self) -> u64 {
+        self.conn_id
+    }
+
+    /// Eagerly return the connection to the pool through the async facade.
+    pub async fn release(mut self, cx: &Cx) -> Result<(), PoolError> {
+        checkpoint_pool(cx)?;
+        let conn_id = self.disarm();
+        match self.pool.engine.return_connection_impl(conn_id) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.rearm();
+                Err(err)
+            }
+        }
+    }
+
+    /// Blocking facade for [`Self::release`].
+    pub fn release_blocking(mut self) -> Result<(), PoolError> {
+        let conn_id = self.disarm();
+        match self.pool.engine.return_connection(conn_id) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.rearm();
+                Err(err)
+            }
+        }
+    }
+
+    /// Drop the physical connection from the pool instead of returning it.
+    pub async fn drop_from_pool(mut self, cx: &Cx) -> Result<(), PoolError> {
+        checkpoint_pool(cx)?;
+        let conn_id = self.disarm();
+        match self.pool.engine.drop_connection_impl(conn_id) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.rearm();
+                Err(err)
+            }
+        }
+    }
+
+    /// Blocking facade for [`Self::drop_from_pool`].
+    pub fn drop_from_pool_blocking(mut self) -> Result<(), PoolError> {
+        let conn_id = self.disarm();
+        match self.pool.engine.drop_connection(conn_id) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.rearm();
+                Err(err)
+            }
+        }
+    }
+
+    fn disarm(&mut self) -> u64 {
+        self.armed = false;
+        self.conn_id
+    }
+
+    fn rearm(&mut self) {
+        self.armed = true;
+    }
+}
+
+impl<B: PoolBackend> Drop for PooledConnection<B> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.pool.engine.enqueue_drop_return(self.conn_id);
+        }
+    }
+}
+
+pub(crate) struct PoolEngine<B: PoolBackend> {
     inner: Arc<EngineInner<B>>,
 }
 
@@ -739,6 +990,30 @@ fn complete_open_effect<C>(state: &mut PoolState<C>, conn_id: u64) {
     }
 }
 
+fn drain_drop_returns<B: PoolBackend>(
+    state: &mut PoolState<B::Conn>,
+    inner: &EngineInner<B>,
+) -> Result<bool, PoolError> {
+    let receiver = inner
+        .drop_returns_rx
+        .lock()
+        .map_err(|err| PoolError::Internal(err.to_string()))?;
+    let mut drained = false;
+    while let Ok(conn_id) = receiver.try_recv() {
+        drained = true;
+        if !state.open {
+            continue;
+        }
+        let Some(position) = state.busy.iter().position(|conn| conn.id == conn_id) else {
+            continue;
+        };
+        let conn = state.busy.remove(position);
+        let is_open = inner.backend.connection_is_open(&conn.conn);
+        return_connection_helper(state, inner, conn, is_open);
+    }
+    Ok(drained)
+}
+
 fn request_worker_shutdown_locked<B: PoolBackend>(
     state: &mut PoolState<B::Conn>,
     inner: &EngineInner<B>,
@@ -771,6 +1046,9 @@ fn request_worker_shutdown<B: PoolBackend>(
     force: bool,
 ) -> Result<(), PoolError> {
     let mut state = lock_state(inner)?;
+    if drain_drop_returns(&mut state, inner)? {
+        wake_waiters(inner);
+    }
     if !state.open {
         inner.bg.notify_all();
         wake_waiters(inner);
@@ -940,9 +1218,12 @@ impl<B: PoolBackend> PoolEngine<B> {
         };
         let min = state.config.min;
         schedule_open_effects(&mut state, min);
+        let (drop_returns_tx, drop_returns_rx) = mpsc::channel();
         let inner = Arc::new(EngineInner {
             backend,
             state: Mutex::new(state),
+            drop_returns_tx,
+            drop_returns_rx: Mutex::new(drop_returns_rx),
             async_waiters: asupersync::sync::Notify::new(),
             bg: Condvar::new(),
             bg_handle: Mutex::new(None),
@@ -957,6 +1238,13 @@ impl<B: PoolBackend> PoolEngine<B> {
             .lock()
             .map_err(|err| PoolError::Internal(err.to_string()))? = Some(handle);
         Ok(Self { inner })
+    }
+
+    fn enqueue_drop_return(&self, conn_id: u64) {
+        if self.inner.drop_returns_tx.send(conn_id).is_ok() {
+            self.inner.bg.notify_all();
+            wake_waiters(&self.inner);
+        }
     }
 
     /// Blocking facade for [`Self::acquire_async`].
@@ -978,6 +1266,9 @@ impl<B: PoolBackend> PoolEngine<B> {
         let inner = &*self.inner;
         let (request_id, wait_timeout) = {
             let mut state = lock_state(inner)?;
+            if drain_drop_returns(&mut state, inner)? {
+                wake_waiters(inner);
+            }
             let request_id = enqueue_request(&mut state, opts)?;
             let wait_timeout = state
                 .wait_timeout_ms
@@ -1027,6 +1318,7 @@ impl<B: PoolBackend> PoolEngine<B> {
     fn return_connection_impl(&self, conn_id: u64) -> Result<(), PoolError> {
         let inner = &*self.inner;
         let mut state = lock_state(inner)?;
+        drain_drop_returns(&mut state, inner)?;
         if !state.open {
             return Ok(());
         }
@@ -1058,6 +1350,7 @@ impl<B: PoolBackend> PoolEngine<B> {
     fn drop_connection_impl(&self, conn_id: u64) -> Result<(), PoolError> {
         let inner = &*self.inner;
         let mut state = lock_state(inner)?;
+        drain_drop_returns(&mut state, inner)?;
         if !state.open {
             return Ok(());
         }
@@ -1108,7 +1401,10 @@ impl<B: PoolBackend> PoolEngine<B> {
 
     pub(crate) async fn busy_count_async(&self, cx: &Cx) -> Result<u32, PoolError> {
         checkpoint_pool(cx)?;
-        let state = lock_state(&self.inner)?;
+        let mut state = lock_state(&self.inner)?;
+        if drain_drop_returns(&mut state, &self.inner)? {
+            wake_waiters(&self.inner);
+        }
         Ok(saturating_u32(derived_lifecycle_counts(&state).checked_out))
     }
 
@@ -1118,7 +1414,10 @@ impl<B: PoolBackend> PoolEngine<B> {
 
     pub(crate) async fn open_count_async(&self, cx: &Cx) -> Result<u32, PoolError> {
         checkpoint_pool(cx)?;
-        let state = lock_state(&self.inner)?;
+        let mut state = lock_state(&self.inner)?;
+        if drain_drop_returns(&mut state, &self.inner)? {
+            wake_waiters(&self.inner);
+        }
         Ok(active_open_count(&state))
     }
 
@@ -1682,6 +1981,9 @@ fn bg_main<B: PoolBackend>(inner: Arc<EngineInner<B>>) {
             let Ok(mut state) = inner.state.lock() else {
                 return;
             };
+            if drain_drop_returns(&mut state, &inner).is_err() {
+                return;
+            }
             open = state.open;
             if current_request.is_none() && open {
                 current_request = get_next_request(&mut state);
@@ -2434,6 +2736,122 @@ mod tests {
         engine.return_connection(second).unwrap();
         engine.close(false).unwrap();
         assert_eq!(backend.closed.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn blocking_pool_guard_release_disarms_drop() {
+        let backend = Arc::new(FakeBackend::new());
+        let pool = Pool::start(
+            Arc::clone(&backend),
+            test_config(1, 1, 1, POOL_GETMODE_WAIT),
+        )
+        .unwrap();
+        wait_for_open_count(&pool.engine, 1);
+        let blocking = pool.blocking();
+
+        let first = blocking.acquire(AcquireOptions::default()).unwrap();
+        let first_id = first.id();
+        assert_eq!(blocking.busy_count().unwrap(), 1);
+        first.release_blocking().unwrap();
+        assert_eq!(
+            blocking.busy_count().unwrap(),
+            0,
+            "explicit release must consume the guard without leaving a drop-return event"
+        );
+
+        let second = blocking.acquire(AcquireOptions::default()).unwrap();
+        assert_eq!(second.id(), first_id);
+        second.release_blocking().unwrap();
+        blocking.close(false).unwrap();
+        assert_eq!(backend.closed.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn dropping_pool_guard_returns_connection_for_next_acquire() {
+        let backend = Arc::new(FakeBackend::new());
+        let pool = Pool::start(
+            Arc::clone(&backend),
+            test_config(1, 1, 1, POOL_GETMODE_WAIT),
+        )
+        .unwrap();
+        wait_for_open_count(&pool.engine, 1);
+        let blocking = pool.blocking();
+
+        let first = blocking.acquire(AcquireOptions::default()).unwrap();
+        let first_id = first.id();
+        assert_eq!(blocking.busy_count().unwrap(), 1);
+        drop(first);
+
+        let second = blocking.acquire(AcquireOptions::default()).unwrap();
+        assert_eq!(
+            second.id(),
+            first_id,
+            "acquire must reconcile the guard drop-return event before waiting"
+        );
+        assert_eq!(
+            blocking.busy_count().unwrap(),
+            1,
+            "reacquired guard must be the only busy connection"
+        );
+        second.release_blocking().unwrap();
+        blocking.close(false).unwrap();
+        assert_eq!(backend.closed.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancelled_async_guard_release_falls_back_to_drop_return() {
+        let backend = Arc::new(FakeBackend::new());
+        let pool = Pool::start(
+            Arc::clone(&backend),
+            test_config(1, 1, 1, POOL_GETMODE_WAIT),
+        )
+        .unwrap();
+        wait_for_open_count(&pool.engine, 1);
+        let blocking = pool.blocking();
+        let conn = blocking.acquire(AcquireOptions::default()).unwrap();
+        let conn_id = conn.id();
+
+        let runtime = crate::build_io_runtime().expect("asupersync runtime");
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("asupersync installs an ambient Cx");
+                cx.cancel_fast(asupersync::CancelKind::Shutdown);
+                conn.release(&cx).await
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, PoolError::Cancelled(_)));
+        assert_eq!(
+            blocking.busy_count().unwrap(),
+            0,
+            "cancelled release must leave the guard armed so Drop can enqueue a return"
+        );
+        let reacquired = blocking.acquire(AcquireOptions::default()).unwrap();
+        assert_eq!(reacquired.id(), conn_id);
+        reacquired.release_blocking().unwrap();
+        blocking.close(false).unwrap();
+    }
+
+    #[test]
+    fn close_reconciles_dropped_guard_before_busy_check() {
+        let backend = Arc::new(FakeBackend::new());
+        let pool = Pool::start(
+            Arc::clone(&backend),
+            test_config(1, 1, 1, POOL_GETMODE_WAIT),
+        )
+        .unwrap();
+        wait_for_open_count(&pool.engine, 1);
+        let blocking = pool.blocking();
+
+        let conn = blocking.acquire(AcquireOptions::default()).unwrap();
+        drop(conn);
+
+        blocking.close(false).unwrap();
+        assert_eq!(
+            backend.closed.load(Ordering::SeqCst),
+            1,
+            "non-forced close must observe the queued guard return before rejecting busy state"
+        );
     }
 
     #[test]
