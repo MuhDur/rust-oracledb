@@ -25,6 +25,13 @@ and the project follows the SemVer contract described in
   `query_one` / `query_opt` now fetch ahead (at most one extra round trip, only
   when a single row is in hand with `more_rows` set) to confirm whether a real
   second row follows. Found by the W3-E1.2 live typed round-trip matrix.
+- **`execute_many` RETURNING aggregation**: `BatchOutcome::returning().rows_for(bind)`
+  now returns one value per affected input row, instead of only the first
+  iteration's value. Array DML decodes `RETURNING` once per iteration, so a single
+  RETURNING bind arrives as one group per iteration; the curated `BatchOutcome`
+  now coalesces groups that share a bind index (single-statement `RETURNING` is
+  unaffected — it already arrives as one group per bind). Found by the W3-E7.4
+  live e2e suite.
 
 ### Added
 

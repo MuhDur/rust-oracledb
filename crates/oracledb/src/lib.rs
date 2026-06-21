@@ -1948,6 +1948,27 @@ impl ReturningRows {
         Self { values }
     }
 
+    /// Build from raw per-call return-value groups, coalescing groups that share
+    /// a bind index. Array DML (`execute_many`) decodes `RETURNING` once per
+    /// iteration, emitting one `(bind_index, rows)` group per iteration; without
+    /// coalescing `rows_for(bind_index)` — which returns the first matching
+    /// group — would expose only the first iteration's value. Coalescing merges
+    /// them in input order so `rows_for(bind_index)` returns every affected
+    /// row's value, consistent with single-statement `RETURNING`, which already
+    /// arrives as one group per bind. (The raw per-iteration grouping is
+    /// preserved at the protocol layer for consumers that need it.)
+    fn coalesced(raw: Vec<(usize, Vec<Option<QueryValue>>)>) -> Self {
+        let mut values: Vec<(usize, Vec<Option<QueryValue>>)> = Vec::new();
+        for (index, rows) in raw {
+            if let Some((_, existing)) = values.iter_mut().find(|(i, _)| *i == index) {
+                existing.extend(rows);
+            } else {
+                values.push((index, rows));
+            }
+        }
+        Self { values }
+    }
+
     pub fn len(&self) -> usize {
         self.values.len()
     }
@@ -2103,7 +2124,7 @@ impl BatchOutcome {
                 .into_iter()
                 .map(BatchError::from_server)
                 .collect(),
-            returning: ReturningRows::new(result.return_values),
+            returning: ReturningRows::coalesced(result.return_values),
         }
     }
 
@@ -10447,6 +10468,46 @@ mod tests {
                 .and_then(Option::as_ref)
                 .and_then(QueryValue::as_text),
             Some("AAABBB")
+        );
+    }
+
+    #[test]
+    fn batch_outcome_coalesces_array_dml_returning_per_bind() {
+        // Regression: array DML decodes RETURNING once per iteration, so a
+        // single RETURNING bind (index 2) arrives as one group per affected
+        // input row. BatchOutcome must coalesce groups that share a bind index
+        // so rows_for(2) exposes every affected row's value, not just the first
+        // iteration's. (Found by the W3-E7.4 live e2e suite.)
+        let result = QueryResult {
+            row_count: 2,
+            array_dml_row_counts: Some(vec![1, 1]),
+            return_values: vec![
+                (2, vec![Some(QueryValue::Text("first".to_string()))]),
+                (2, vec![Some(QueryValue::Text("second".to_string()))]),
+            ],
+            ..QueryResult::default()
+        };
+
+        let outcome = BatchOutcome::from_query_result(result);
+
+        // One coalesced group for bind index 2 (not one group per iteration).
+        assert_eq!(outcome.returning().len(), 1);
+        let rows = outcome
+            .returning()
+            .rows_for(2)
+            .expect("returning group for bind index 2");
+        assert_eq!(
+            rows.len(),
+            2,
+            "both affected rows' RETURNING values must be present"
+        );
+        assert_eq!(
+            rows[0].as_ref().and_then(QueryValue::as_text),
+            Some("first")
+        );
+        assert_eq!(
+            rows[1].as_ref().and_then(QueryValue::as_text),
+            Some("second")
         );
     }
 
