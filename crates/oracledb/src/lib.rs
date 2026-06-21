@@ -9977,8 +9977,14 @@ fn trace_query_bytes(label: &'static str, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asupersync::lab::{DporExplorer, ExplorerConfig, LabRuntime};
+    use asupersync::types::Budget;
+    use std::future::{poll_fn, Future};
     use std::io::Read;
     use std::net::TcpListener;
+    use std::pin::pin;
+    use std::sync::atomic::AtomicBool;
+    use std::task::{Poll, Waker};
     use std::thread;
     use std::time::Duration;
 
@@ -11951,6 +11957,14 @@ mod tests {
                         cx.waker().wake_by_ref();
                         return std::task::Poll::Pending;
                     }
+                    Some(ReadAction::PendingUntil(gate)) => {
+                        if gate.is_open() {
+                            state.read.pop_front();
+                            continue;
+                        }
+                        gate.register(cx.waker());
+                        return std::task::Poll::Pending;
+                    }
                     Some(ReadAction::Eof) | None => return std::task::Poll::Ready(Ok(())),
                     Some(ReadAction::Error(message)) => {
                         let message = *message;
@@ -11992,28 +12006,40 @@ mod tests {
 
             loop {
                 match state.write.front_mut() {
-                    Some(WriteAction::Expect {
-                        bytes,
-                        offset,
-                        max_chunk,
-                    }) => {
-                        if *offset >= bytes.len() {
-                            state.write.pop_front();
-                            continue;
-                        }
-                        let cap = max_chunk.unwrap_or(usize::MAX);
-                        let available = bytes.len() - *offset;
-                        let take = available.min(buf.len()).min(cap);
-                        if take == 0 {
-                            return std::task::Poll::Ready(Ok(0));
-                        }
-                        if bytes[*offset..*offset + take] != buf[..take] {
-                            return std::task::Poll::Ready(Err(std::io::Error::other(
-                                "scripted transport: write mismatch",
-                            )));
-                        }
-                        *offset += take;
-                        if *offset >= bytes.len() {
+                    Some(WriteAction::Expect { .. }) => {
+                        let mut completed = None;
+                        let take = {
+                            let Some(WriteAction::Expect {
+                                bytes,
+                                offset,
+                                max_chunk,
+                            }) = state.write.front_mut()
+                            else {
+                                unreachable!("front action already matched Expect");
+                            };
+                            if *offset >= bytes.len() {
+                                state.write.pop_front();
+                                continue;
+                            }
+                            let cap = max_chunk.unwrap_or(usize::MAX);
+                            let available = bytes.len() - *offset;
+                            let take = available.min(buf.len()).min(cap);
+                            if take == 0 {
+                                return std::task::Poll::Ready(Ok(0));
+                            }
+                            if bytes[*offset..*offset + take] != buf[..take] {
+                                return std::task::Poll::Ready(Err(std::io::Error::other(
+                                    "scripted transport: write mismatch",
+                                )));
+                            }
+                            *offset += take;
+                            if *offset >= bytes.len() {
+                                completed = Some(bytes.clone());
+                            }
+                            take
+                        };
+                        if let Some(bytes) = completed {
+                            state.note_write(&bytes);
                             state.write.pop_front();
                         }
                         return std::task::Poll::Ready(Ok(take));
@@ -12080,11 +12106,53 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct ScriptedGate {
+        ready: Arc<AtomicBool>,
+        waker: Arc<std::sync::Mutex<Option<Waker>>>,
+    }
+
+    impl std::fmt::Debug for ScriptedGate {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ScriptedGate")
+                .field("ready", &self.ready.load(Ordering::Relaxed))
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl ScriptedGate {
+        fn open(&self) {
+            self.ready.store(true, Ordering::Release);
+            if let Ok(mut waker) = self.waker.lock() {
+                if let Some(waker) = waker.take() {
+                    waker.wake();
+                }
+            }
+        }
+
+        fn is_open(&self) -> bool {
+            self.ready.load(Ordering::Acquire)
+        }
+
+        fn register(&self, waker: &Waker) {
+            if let Ok(mut current) = self.waker.lock() {
+                let replace = current
+                    .as_ref()
+                    .is_none_or(|registered| !registered.will_wake(waker));
+                if replace {
+                    *current = Some(waker.clone());
+                }
+            }
+        }
+    }
+
     #[derive(Debug)]
     struct ScriptedIoState {
         read: VecDeque<ReadAction>,
         write: VecDeque<WriteAction>,
         clock: ScriptedClock,
+        break_writes: usize,
+        reset_writes: usize,
     }
 
     impl ScriptedIoState {
@@ -12093,11 +12161,23 @@ mod tests {
                 read: read.into(),
                 write: write.into(),
                 clock,
+                break_writes: 0,
+                reset_writes: 0,
             }
         }
 
         fn is_consumed(&self) -> bool {
             self.read.is_empty() && self.write.is_empty()
+        }
+
+        fn note_write(&mut self, bytes: &[u8]) {
+            let break_marker = marker_packet(TNS_MARKER_TYPE_BREAK);
+            let reset_marker = marker_packet(TNS_MARKER_TYPE_RESET);
+            if bytes == break_marker.as_slice() {
+                self.break_writes += 1;
+            } else if bytes == reset_marker.as_slice() {
+                self.reset_writes += 1;
+            }
         }
     }
 
@@ -12110,6 +12190,7 @@ mod tests {
             cancel_current_on_completion: bool,
         },
         Pending,
+        PendingUntil(ScriptedGate),
         Eof,
         Error(&'static str),
         AdvanceTime(Duration),
@@ -12326,6 +12407,324 @@ mod tests {
             "scripted fault matrix must consume every read/write step"
         );
         Ok(())
+    }
+
+    const DPOR_SATURATION_WINDOW: usize = 1;
+    const DPOR_WIRE_SEED: u64 = 0xE3_E4_D0_00;
+    const DPOR_WIRE_MAX_ITERS: usize = 96;
+    const DPOR_WIRE_TIMEOUT_MS: u32 = 1;
+    fn dpor_wire_recovery_timeout() -> Duration {
+        Duration::from_secs(1)
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum DporWireMode {
+        UserCancel,
+        Timeout,
+    }
+
+    fn dpor_wire_seed(mode: DporWireMode) -> u64 {
+        DPOR_WIRE_SEED
+            + match mode {
+                DporWireMode::UserCancel => 0,
+                DporWireMode::Timeout => 1,
+            }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum DporWireResultKind {
+        Cancelled,
+        CallTimeout,
+    }
+
+    #[derive(Debug)]
+    struct DporWireObservation {
+        result: DporWireResultKind,
+        phase: SessionRecoveryPhase,
+        break_writes: usize,
+        reset_writes: usize,
+        script_consumed: bool,
+    }
+
+    async fn dpor_read_until_cancel_gate(
+        core: &mut ConnectionCore<ScriptedTransport>,
+        cx: &Cx,
+        cancel_gate: &ScriptedGate,
+    ) -> Result<Vec<u8>> {
+        let recovery = Arc::clone(&core.recovery);
+        let read = async {
+            let mut guard = CancelDrainGuard::arm(recovery)?;
+            let response = core.read_data_response(cx).await;
+            if response.is_ok() {
+                guard.disarm();
+            }
+            response
+        };
+        let cancel = poll_fn(|task_cx| {
+            if cancel_gate.is_open() {
+                Poll::Ready(())
+            } else {
+                cancel_gate.register(task_cx.waker());
+                Poll::Pending
+            }
+        });
+        let mut read = pin!(read);
+        let mut cancel = pin!(cancel);
+
+        poll_fn(|task_cx| {
+            if cancel_gate.is_open() {
+                return Poll::Ready(Err(Error::Cancelled));
+            }
+            if let Poll::Ready(result) = read.as_mut().poll(task_cx) {
+                return Poll::Ready(result);
+            }
+            if let Poll::Ready(()) = cancel.as_mut().poll(task_cx) {
+                return Poll::Ready(Err(Error::Cancelled));
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
+    async fn dpor_read_until_timeout_gate(
+        core: &mut ConnectionCore<ScriptedTransport>,
+        cx: &Cx,
+        timeout_gate: &ScriptedGate,
+    ) -> Result<Vec<u8>> {
+        let recovery = Arc::clone(&core.recovery);
+        let read = async {
+            let mut guard = CancelDrainGuard::arm(recovery)?;
+            let response = core.read_data_response(cx).await;
+            if response.is_ok() {
+                guard.disarm();
+            }
+            response
+        };
+        let timeout = poll_fn(|task_cx| {
+            if timeout_gate.is_open() {
+                Poll::Ready(())
+            } else {
+                timeout_gate.register(task_cx.waker());
+                Poll::Pending
+            }
+        });
+        let mut read = pin!(read);
+        let mut timeout = pin!(timeout);
+
+        poll_fn(|task_cx| {
+            if timeout_gate.is_open() {
+                return Poll::Ready(Err(Error::CallTimeout(DPOR_WIRE_TIMEOUT_MS)));
+            }
+            if let Poll::Ready(result) = read.as_mut().poll(task_cx) {
+                return Poll::Ready(result);
+            }
+            if let Poll::Ready(()) = timeout.as_mut().poll(task_cx) {
+                return Poll::Ready(Err(Error::CallTimeout(DPOR_WIRE_TIMEOUT_MS)));
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
+    fn dpor_wire_script(
+        gate: ScriptedGate,
+        execute_packet: Vec<u8>,
+    ) -> Arc<std::sync::Mutex<ScriptedIoState>> {
+        const INFLIGHT_BODY: &[u8] = b"dpor in-flight response";
+        const ERROR_BODY: &[u8] = &[0x04, 0x01, 0x0d];
+
+        Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+            vec![
+                ReadAction::PendingUntil(gate),
+                ReadAction::bytes(data_packet(INFLIGHT_BODY, true), Some(3)),
+                ReadAction::Pending,
+                ReadAction::bytes(marker_packet(TNS_MARKER_TYPE_BREAK), Some(2)),
+                ReadAction::Pending,
+                ReadAction::bytes(marker_packet(TNS_MARKER_TYPE_RESET), Some(2)),
+                ReadAction::Pending,
+                ReadAction::bytes(data_packet(ERROR_BODY, true), Some(2)),
+            ],
+            vec![
+                WriteAction::Pending,
+                WriteAction::expect_bytes(execute_packet, Some(3)),
+                WriteAction::Pending,
+                WriteAction::expect_bytes(marker_packet(TNS_MARKER_TYPE_BREAK), Some(2)),
+                WriteAction::Pending,
+                WriteAction::expect_bytes(marker_packet(TNS_MARKER_TYPE_RESET), Some(2)),
+            ],
+            ScriptedClock::default(),
+        )))
+    }
+
+    async fn run_dpor_wire_operation(
+        mode: DporWireMode,
+        gate: ScriptedGate,
+        script: Arc<std::sync::Mutex<ScriptedIoState>>,
+        execute_body: &'static [u8],
+    ) -> Result<DporWireObservation> {
+        let cx = Cx::current().expect("LabRuntime task should install an ambient Cx");
+        let mut core = ConnectionCore::<ScriptedTransport>::from_halves(
+            ScriptedRead::from_state(Arc::clone(&script)),
+            ScriptedWrite::from_state(Arc::clone(&script)),
+            "dpor_wire_core_write",
+        );
+        core.send_data_packet(&cx, execute_body, 8192).await?;
+
+        let result = match mode {
+            DporWireMode::UserCancel => dpor_read_until_cancel_gate(&mut core, &cx, &gate).await,
+            DporWireMode::Timeout => dpor_read_until_timeout_gate(&mut core, &cx, &gate).await,
+        };
+        let result = match result {
+            Ok(payload) => {
+                return Err(Error::Runtime(format!(
+                    "DPOR wire race unexpectedly completed normally with payload {payload:?}"
+                )));
+            }
+            Err(Error::Cancelled) => {
+                core.recovery.begin_drain_after_break()?;
+                core.cancel_and_drain_wire(dpor_wire_recovery_timeout())?;
+                core.recovery.finish_drain_ready();
+                DporWireResultKind::Cancelled
+            }
+            Err(Error::CallTimeout(_)) => {
+                core.recovery.begin_drain_after_break()?;
+                core.break_and_drain_wire(dpor_wire_recovery_timeout())?;
+                core.recovery.finish_drain_ready();
+                DporWireResultKind::CallTimeout
+            }
+            Err(err) => return Err(err),
+        };
+
+        let state = script
+            .lock()
+            .map_err(|_| Error::Runtime("scripted DPOR wire state lock poisoned".into()))?;
+        Ok(DporWireObservation {
+            result,
+            phase: core.recovery.phase(),
+            break_writes: state.break_writes,
+            reset_writes: state.reset_writes,
+            script_consumed: state.is_consumed(),
+        })
+    }
+
+    fn explore_dpor_wire_mode(mode: DporWireMode) -> asupersync::lab::ExplorationReport {
+        const EXECUTE_BODY: &[u8] = b"dpor execute payload";
+        let execute_packet = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            EXECUTE_BODY,
+            PacketLengthWidth::Large32,
+        )
+        .expect("encode DPOR execute packet");
+
+        let mut explorer = DporExplorer::new(
+            ExplorerConfig::new(dpor_wire_seed(mode), DPOR_WIRE_MAX_ITERS).max_steps(100_000),
+        );
+        explorer.explore(|runtime: &mut LabRuntime| {
+            // Full ConnectionCore execution inside LabRuntime does not quiesce
+            // because the recovery path intentionally leaves the lab executor
+            // and drains on a blocking recovery thread. Keep DPOR on the finite
+            // operation-vs-interrupt ordering, then run the actual scripted
+            // ConnectionCore recovery path below for every explored schedule.
+            let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+
+            let operation_order = Arc::clone(&order);
+            let (operation, _operation_handle) = runtime
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    operation_order
+                        .lock()
+                        .expect("record DPOR wire operation ordering")
+                        .push("operation");
+                })
+                .expect("create DPOR wire operation task");
+            runtime.scheduler.lock().schedule(operation, 0);
+
+            let interrupt_order = Arc::clone(&order);
+            let (interrupt, _interrupt_handle) = runtime
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    interrupt_order
+                        .lock()
+                        .expect("record DPOR wire interrupt ordering")
+                        .push("interrupt");
+                })
+                .expect("create DPOR wire interrupt task");
+            runtime.scheduler.lock().schedule(interrupt, 0);
+            runtime.run_until_quiescent();
+            assert!(
+                runtime.is_quiescent(),
+                "DPOR wire ordering model did not quiesce"
+            );
+
+            let observed_order = order.lock().expect("read DPOR wire ordering").clone();
+            assert_eq!(
+                observed_order.len(),
+                2,
+                "DPOR wire ordering should include operation and interrupt"
+            );
+
+            let replay_gate = ScriptedGate::default();
+            replay_gate.open();
+            let script = dpor_wire_script(replay_gate.clone(), execute_packet.clone());
+            let io_runtime = build_io_runtime().expect("asupersync runtime for DPOR wire replay");
+            let observed = io_runtime
+                .block_on(run_dpor_wire_operation(
+                    mode,
+                    replay_gate,
+                    script,
+                    EXECUTE_BODY,
+                ))
+                .expect("DPOR wire operation should not fail");
+            let expected = match mode {
+                DporWireMode::UserCancel => DporWireResultKind::Cancelled,
+                DporWireMode::Timeout => DporWireResultKind::CallTimeout,
+            };
+            assert_eq!(
+                observed.result, expected,
+                "delivered cancel/timeout mapped to the wrong public error"
+            );
+            assert_eq!(
+                observed.phase,
+                SessionRecoveryPhase::Ready,
+                "wire recovery must finish at a clean Ready boundary"
+            );
+            assert_eq!(observed.break_writes, 1, "exactly one BREAK is required");
+            assert_eq!(observed.reset_writes, 1, "exactly one RESET is required");
+            assert!(
+                observed.script_consumed,
+                "wire recovery must consume the whole scripted break response"
+            );
+        })
+    }
+
+    #[test]
+    fn dpor_wire_cancel_and_timeout_recovery_saturates() {
+        for mode in [DporWireMode::UserCancel, DporWireMode::Timeout] {
+            let report = explore_dpor_wire_mode(mode);
+            eprintln!(
+                "[dpor-wire] mode={mode:?} seed={} max_iters={} runs={} classes={} saturated={}",
+                dpor_wire_seed(mode),
+                DPOR_WIRE_MAX_ITERS,
+                report.total_runs,
+                report.unique_classes,
+                report.coverage.is_saturated(DPOR_SATURATION_WINDOW)
+            );
+            assert!(
+                !report.has_violations(),
+                "DPOR wire {mode:?} found violations at seeds {:?}",
+                report.violation_seeds()
+            );
+            assert!(
+                report.total_runs == DPOR_WIRE_MAX_ITERS,
+                "DPOR wire fallback seed space did not complete for {mode:?}: runs={}, classes={}, new={}",
+                report.total_runs,
+                report.unique_classes,
+                report.coverage.new_class_discoveries
+            );
+        }
     }
 
     #[test]

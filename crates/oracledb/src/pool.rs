@@ -467,8 +467,10 @@ pub(crate) mod lifecycle {
             } else {
                 self.slots[ix].state = PoolSlotState::Closed;
                 self.history.push(format!("open slot={slot} failed"));
-                if let Some(waiter) = waiter {
-                    self.waiters.push_front(waiter);
+                if !self.closing {
+                    if let Some(waiter) = waiter {
+                        self.waiters.push_front(waiter);
+                    }
                 }
                 self.drive_waiters();
                 self.ensure_min_opening();
@@ -507,8 +509,10 @@ pub(crate) mod lifecycle {
                     slot,
                     reason: PoolCloseReason::Unhealthy,
                 });
-                if let Some(waiter) = waiter {
-                    self.waiters.push_front(waiter);
+                if !self.closing {
+                    if let Some(waiter) = waiter {
+                        self.waiters.push_front(waiter);
+                    }
                 }
                 self.history.push(format!("ping slot={slot} unhealthy"));
             }
@@ -2680,7 +2684,12 @@ fn process_request<B: PoolBackend>(inner: &Arc<EngineInner<B>>, request_id: u64)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lifecycle::{PoolCloseReason, PoolCounts, PoolEffect, PoolSlotState, PurePoolState};
+    use asupersync::lab::{DporExplorer, ExplorerConfig, LabRuntime};
+    use asupersync::types::Budget;
+    use lifecycle::{
+        PoolCloseReason, PoolCounts, PoolEffect, PoolSlotState, PurePoolState, SlotId, WaiterId,
+    };
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     // Test-only: `BlockingCreateBackend` is a fake backend that blocks inside
     // `create_connection` to exercise the in-flight-create close path. Its
@@ -2996,6 +3005,687 @@ mod tests {
                 ..PoolCounts::default()
             }
         );
+    }
+
+    const DPOR_POOL_SATURATION_WINDOW: usize = 1;
+    const DPOR_POOL_SEED: u64 = 0xE4_D0_00;
+    const DPOR_POOL_MAX_ITERS: usize = 128;
+    const DPOR_POOL_LIFECYCLE_DEPTH: usize = 7;
+
+    #[derive(Clone, Debug)]
+    struct LifecycleDporModel {
+        state: PurePoolState,
+        pending_open: VecDeque<SlotId>,
+        pending_ping: VecDeque<SlotId>,
+        pending_close: VecDeque<SlotId>,
+        fifo_waiters: VecDeque<WaiterId>,
+        checked_out: BTreeMap<WaiterId, SlotId>,
+        closing: bool,
+    }
+
+    impl LifecycleDporModel {
+        fn new() -> Self {
+            let mut model = Self {
+                state: PurePoolState::new(0, 2),
+                pending_open: VecDeque::new(),
+                pending_ping: VecDeque::new(),
+                pending_close: VecDeque::new(),
+                fifo_waiters: VecDeque::new(),
+                checked_out: BTreeMap::new(),
+                closing: false,
+            };
+            model.drain_effects();
+            model
+        }
+
+        fn apply(&mut self, op: LifecycleDporOp) -> bool {
+            match op {
+                LifecycleDporOp::Acquire => {
+                    if self.closing
+                        || self
+                            .fifo_waiters
+                            .len()
+                            .saturating_add(self.checked_out.len())
+                            >= 3
+                    {
+                        return false;
+                    }
+                    let waiter = self
+                        .state
+                        .request_acquire()
+                        .expect("lifecycle acquire before close");
+                    self.fifo_waiters.push_back(waiter);
+                }
+                LifecycleDporOp::CancelOldest => {
+                    let Some(waiter) = self.fifo_waiters.pop_front() else {
+                        return false;
+                    };
+                    self.state
+                        .cancel_acquire(waiter)
+                        .expect("cancel tracked lifecycle waiter");
+                }
+                LifecycleDporOp::OpenHealthy => {
+                    let Some(slot) = self.pending_open.pop_front() else {
+                        return false;
+                    };
+                    let waiter = match self.state.state_of(slot) {
+                        Some(PoolSlotState::Opening { waiter }) => waiter,
+                        state => {
+                            panic!("slot {slot} was not opening before complete_open: {state:?}")
+                        }
+                    };
+                    self.state
+                        .complete_open(slot, true)
+                        .expect("complete healthy open");
+                    if !self.closing {
+                        self.grant_if_waiting(slot, waiter);
+                    }
+                }
+                LifecycleDporOp::OpenUnhealthy => {
+                    let Some(slot) = self.pending_open.pop_front() else {
+                        return false;
+                    };
+                    let waiter = match self.state.state_of(slot) {
+                        Some(PoolSlotState::Opening { waiter }) => waiter,
+                        state => {
+                            panic!("slot {slot} was not opening before failed open: {state:?}")
+                        }
+                    };
+                    self.state
+                        .complete_open(slot, false)
+                        .expect("complete failed open");
+                    if !self.closing {
+                        self.promote_front_waiter_if_present(waiter);
+                    }
+                }
+                LifecycleDporOp::PingHealthy => {
+                    let Some(slot) = self.pending_ping.pop_front() else {
+                        return false;
+                    };
+                    let waiter = match self.state.state_of(slot) {
+                        Some(PoolSlotState::Validating { waiter }) => waiter,
+                        state => {
+                            panic!("slot {slot} was not validating before complete_ping: {state:?}")
+                        }
+                    };
+                    self.state
+                        .complete_ping(slot, true)
+                        .expect("complete healthy ping");
+                    if !self.closing {
+                        self.grant_if_waiting(slot, waiter);
+                    }
+                }
+                LifecycleDporOp::PingUnhealthy => {
+                    let Some(slot) = self.pending_ping.pop_front() else {
+                        return false;
+                    };
+                    let waiter = match self.state.state_of(slot) {
+                        Some(PoolSlotState::Validating { waiter }) => waiter,
+                        state => {
+                            panic!("slot {slot} was not validating before failed ping: {state:?}")
+                        }
+                    };
+                    self.state
+                        .complete_ping(slot, false)
+                        .expect("complete failed ping");
+                    if !self.closing {
+                        self.promote_front_waiter_if_present(waiter);
+                    }
+                }
+                LifecycleDporOp::ReleaseOldest => {
+                    let Some((waiter, slot)) = self
+                        .checked_out
+                        .iter()
+                        .next()
+                        .map(|(waiter, slot)| (*waiter, *slot))
+                    else {
+                        return false;
+                    };
+                    self.checked_out.remove(&waiter);
+                    self.state.release(slot).expect("release checked-out slot");
+                }
+                LifecycleDporOp::ForceClose => {
+                    if self.closing {
+                        return false;
+                    }
+                    self.state.begin_close(true).expect("force-close lifecycle");
+                    self.fifo_waiters.clear();
+                    self.checked_out.clear();
+                    self.closing = true;
+                }
+                LifecycleDporOp::CloseDone => {
+                    let Some(slot) = self.pending_close.pop_front() else {
+                        return false;
+                    };
+                    self.state
+                        .complete_close(slot)
+                        .expect("complete pending close");
+                }
+            }
+            self.drain_effects();
+            self.assert_invariants();
+            true
+        }
+
+        fn grant_if_waiting(&mut self, slot: SlotId, waiter: Option<WaiterId>) {
+            if let Some(waiter) = waiter {
+                let prior_len = self.fifo_waiters.len();
+                self.fifo_waiters.retain(|queued| *queued != waiter);
+                assert!(
+                    self.fifo_waiters.len() < prior_len || self.closing,
+                    "slot {slot} granted waiter {waiter} outside the tracked waiter set"
+                );
+                assert!(
+                    self.checked_out.insert(waiter, slot).is_none(),
+                    "waiter {waiter} was handed out twice"
+                );
+            }
+        }
+
+        fn promote_front_waiter_if_present(&mut self, waiter: Option<WaiterId>) {
+            if let Some(waiter) = waiter {
+                self.fifo_waiters.retain(|queued| *queued != waiter);
+                self.fifo_waiters.push_front(waiter);
+                assert_eq!(
+                    self.fifo_waiters.front(),
+                    Some(&waiter),
+                    "failed open/ping must requeue the waiter at the front"
+                );
+            }
+        }
+
+        fn drain_effects(&mut self) {
+            for effect in self.state.take_effects() {
+                match effect {
+                    PoolEffect::Open { slot, waiter } => {
+                        if !self.closing {
+                            self.promote_front_waiter_if_present(waiter);
+                        }
+                        self.pending_open.push_back(slot);
+                    }
+                    PoolEffect::Ping { slot, waiter } => {
+                        if !self.closing {
+                            self.promote_front_waiter_if_present(Some(waiter));
+                        }
+                        self.pending_ping.push_back(slot);
+                    }
+                    PoolEffect::Close { slot, .. } => self.pending_close.push_back(slot),
+                }
+            }
+        }
+
+        fn assert_invariants(&self) {
+            let counts = self.state.counts();
+            let live_slots = counts
+                .opening
+                .saturating_add(counts.idle)
+                .saturating_add(counts.checked_out)
+                .saturating_add(counts.validating)
+                .saturating_add(counts.retiring)
+                .saturating_add(counts.closing);
+            assert!(live_slots <= 2, "pure lifecycle exceeded max live slots");
+            assert_eq!(
+                counts.checked_out,
+                self.checked_out.len(),
+                "tracked checked-out grants diverged from lifecycle state"
+            );
+            if !self.closing {
+                assert!(
+                    counts.idle == 0 || counts.waiters == 0,
+                    "idle slot coexisted with a queued waiter: missed wakeup"
+                );
+            } else {
+                assert_eq!(counts.waiters, 0, "force close must drain waiters");
+                assert!(
+                    self.fifo_waiters.is_empty(),
+                    "force close left FIFO waiters"
+                );
+            }
+
+            let mut effect_slots = BTreeSet::new();
+            for slot in self
+                .pending_open
+                .iter()
+                .chain(self.pending_ping.iter())
+                .chain(self.pending_close.iter())
+            {
+                assert!(
+                    effect_slots.insert(*slot),
+                    "slot {slot} has duplicate pending lifecycle effects"
+                );
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum LifecycleDporOp {
+        Acquire,
+        CancelOldest,
+        OpenHealthy,
+        OpenUnhealthy,
+        PingHealthy,
+        PingUnhealthy,
+        ReleaseOldest,
+        ForceClose,
+        CloseDone,
+    }
+
+    const LIFECYCLE_DPOR_OPS: &[LifecycleDporOp] = &[
+        LifecycleDporOp::Acquire,
+        LifecycleDporOp::CancelOldest,
+        LifecycleDporOp::OpenHealthy,
+        LifecycleDporOp::OpenUnhealthy,
+        LifecycleDporOp::PingHealthy,
+        LifecycleDporOp::PingUnhealthy,
+        LifecycleDporOp::ReleaseOldest,
+        LifecycleDporOp::ForceClose,
+        LifecycleDporOp::CloseDone,
+    ];
+
+    fn enumerate_lifecycle_dpor(model: LifecycleDporModel, depth: usize, leaves: &mut usize) {
+        if depth == 0 {
+            *leaves = leaves.saturating_add(1);
+            return;
+        }
+
+        let mut progressed = false;
+        for op in LIFECYCLE_DPOR_OPS {
+            let mut next = model.clone();
+            if next.apply(*op) {
+                progressed = true;
+                enumerate_lifecycle_dpor(next, depth - 1, leaves);
+            }
+        }
+
+        if !progressed {
+            *leaves = leaves.saturating_add(1);
+        }
+    }
+
+    #[test]
+    fn dpor_pool_lifecycle_sequences_exhaust_structural_invariants() {
+        let model = LifecycleDporModel::new();
+        model.assert_invariants();
+        let mut leaves = 0;
+        enumerate_lifecycle_dpor(model, DPOR_POOL_LIFECYCLE_DEPTH, &mut leaves);
+        eprintln!(
+            "[dpor-pool-lifecycle] exhaustive_depth={} terminal_sequences={}",
+            DPOR_POOL_LIFECYCLE_DEPTH, leaves
+        );
+        assert!(
+            leaves > 1_000,
+            "lifecycle DPOR bound was not saturated enough"
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PoolDporMode {
+        ReleaseClose,
+        ImmediateTimedExpiry,
+    }
+
+    fn dpor_pool_seed(mode: PoolDporMode) -> u64 {
+        DPOR_POOL_SEED
+            + match mode {
+                PoolDporMode::ReleaseClose => 0,
+                PoolDporMode::ImmediateTimedExpiry => 1,
+            }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum PoolDporEvent {
+        Acquired(u64),
+        AcquireQueued,
+        TimedOut,
+        AcquireClosed,
+        ReleaseReturned,
+        ReleaseIgnored,
+        CloseForced,
+    }
+
+    fn make_dpor_pool_inner() -> (Arc<EngineInner<Arc<FakeBackend>>>, Arc<FakeBackend>, u64) {
+        let backend = Arc::new(FakeBackend::new());
+        let held = 1;
+        let (drop_returns_tx, drop_returns_rx) = mpsc::channel();
+        let now = Instant::now();
+        let state = PoolState {
+            open: true,
+            config: test_config(0, 1, 1, POOL_GETMODE_WAIT),
+            force_get: false,
+            wait_timeout_ms: None,
+            free_new: Vec::new(),
+            free_used: Vec::new(),
+            busy: vec![PooledConn {
+                id: held,
+                conn: FakeConn {
+                    alive: Arc::new(AtomicBool::new(true)),
+                },
+                cclass: None,
+                time_created: now,
+                time_returned: now,
+                is_pool_extra: false,
+                ever_acquired: true,
+            }],
+            to_drop: VecDeque::new(),
+            requests: Vec::new(),
+            open_effects: VecDeque::new(),
+            in_flight_open_effects: VecDeque::new(),
+            next_conn_id: 2,
+            next_request_id: 1,
+        };
+        let inner = Arc::new(EngineInner {
+            backend: Arc::clone(&backend),
+            state: Mutex::new(state),
+            drop_returns_tx,
+            drop_returns_rx: Mutex::new(drop_returns_rx),
+            async_waiters: Notify::new(),
+            bg: Arc::new(Notify::new()),
+            reaper_stop: AtomicBool::new(false),
+            reaper_handle: Mutex::new(None),
+        });
+        (inner, backend, held)
+    }
+
+    async fn dpor_pool_acquire_waiter(
+        inner: Arc<EngineInner<Arc<FakeBackend>>>,
+        wait_timeout_ms: Option<u32>,
+        events: Arc<Mutex<Vec<PoolDporEvent>>>,
+    ) {
+        if wait_timeout_ms == Some(0) {
+            events
+                .lock()
+                .expect("record timed-out pool acquire")
+                .push(PoolDporEvent::TimedOut);
+            return;
+        }
+
+        let request_id = {
+            let mut state = lock_state(&inner).expect("lock DPOR pool state for acquire");
+            match enqueue_request(&mut state, AcquireOptions::default()) {
+                Ok(request_id) => request_id,
+                Err(PoolError::Closed) => {
+                    events
+                        .lock()
+                        .expect("record closed acquire")
+                        .push(PoolDporEvent::AcquireClosed);
+                    return;
+                }
+                Err(err) => panic!("unexpected DPOR pool enqueue error: {err:?}"),
+            }
+        };
+        let result = {
+            let mut state = lock_state(&inner).expect("poll DPOR pool acquire once");
+            poll_request_completion(&mut state, &inner, request_id)
+        };
+        match result {
+            Ok(Some(conn_id)) => {
+                events
+                    .lock()
+                    .expect("record acquired pool connection")
+                    .push(PoolDporEvent::Acquired(conn_id));
+            }
+            Ok(None) => {
+                events
+                    .lock()
+                    .expect("record queued pool acquire")
+                    .push(PoolDporEvent::AcquireQueued);
+            }
+            Err(PoolError::Closed) => {
+                events
+                    .lock()
+                    .expect("record closed pool acquire")
+                    .push(PoolDporEvent::AcquireClosed);
+            }
+            Err(err) => panic!("unexpected DPOR pool acquire error: {err:?}"),
+        }
+    }
+
+    async fn dpor_pool_release_held(
+        inner: Arc<EngineInner<Arc<FakeBackend>>>,
+        held: u64,
+        events: Arc<Mutex<Vec<PoolDporEvent>>>,
+    ) {
+        let cx = Cx::current().expect("LabRuntime task should install an ambient Cx");
+        checkpoint_pool(&cx).expect("release checkpoint");
+        let released = {
+            let mut state = lock_state(&inner).expect("lock DPOR pool state for release");
+            if !state.open {
+                false
+            } else if let Some(position) = state.busy.iter().position(|conn| conn.id == held) {
+                let conn = state.busy.remove(position);
+                let is_open = inner.backend.connection_is_open(&conn.conn);
+                return_connection_helper(&mut state, &inner, conn, is_open);
+                true
+            } else {
+                false
+            }
+        };
+        wake_waiters(&inner);
+        events
+            .lock()
+            .expect("record DPOR pool release")
+            .push(if released {
+                PoolDporEvent::ReleaseReturned
+            } else {
+                PoolDporEvent::ReleaseIgnored
+            });
+    }
+
+    async fn dpor_pool_force_close(
+        inner: Arc<EngineInner<Arc<FakeBackend>>>,
+        events: Arc<Mutex<Vec<PoolDporEvent>>>,
+    ) {
+        let cx = Cx::current().expect("LabRuntime task should install an ambient Cx");
+        checkpoint_pool(&cx).expect("close checkpoint");
+        let (leftovers, drained_waiters) = {
+            let mut state = lock_state(&inner).expect("lock DPOR pool state for close");
+            let drained_waiters = state.requests.iter().any(|request| request.waiting);
+            request_worker_shutdown_locked(&mut state, &inner);
+            (state.to_drop.drain(..).collect::<Vec<_>>(), drained_waiters)
+        };
+        for conn in leftovers {
+            inner.backend.close_connection(conn.id, conn.conn);
+        }
+        wake_waiters(&inner);
+        let mut events = events.lock().expect("record DPOR pool close");
+        if drained_waiters {
+            events.push(PoolDporEvent::AcquireClosed);
+        }
+        events.push(PoolDporEvent::CloseForced);
+    }
+
+    fn assert_dpor_pool_async_invariants(
+        mode: PoolDporMode,
+        inner: &EngineInner<Arc<FakeBackend>>,
+        backend: &FakeBackend,
+        events: &[PoolDporEvent],
+    ) {
+        let acquire_terminals = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    PoolDporEvent::Acquired(_)
+                        | PoolDporEvent::TimedOut
+                        | PoolDporEvent::AcquireClosed
+                )
+            })
+            .count();
+        assert_eq!(
+            acquire_terminals, 1,
+            "each DPOR pool schedule must produce one acquire terminal: {events:?}"
+        );
+
+        let acquired = events
+            .iter()
+            .filter_map(|event| match event {
+                PoolDporEvent::Acquired(conn_id) => Some(*conn_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            acquired.iter().all(|conn_id| *conn_id == 1),
+            "pool handed out an unexpected connection id: {events:?}"
+        );
+        assert!(
+            acquired.len() <= 1,
+            "pool handed out the same slot more than once: {events:?}"
+        );
+
+        let state = inner.state.lock().expect("inspect DPOR pool state");
+        let mut live_ids = BTreeSet::new();
+        for conn in state
+            .free_new
+            .iter()
+            .chain(state.free_used.iter())
+            .chain(state.busy.iter())
+            .chain(state.to_drop.iter())
+        {
+            assert!(
+                live_ids.insert(conn.id),
+                "connection id {} appears in more than one pool list",
+                conn.id
+            );
+        }
+        assert!(state.busy.len() <= 1, "pool has duplicate busy grants");
+
+        match mode {
+            PoolDporMode::ReleaseClose => {
+                assert!(
+                    events.contains(&PoolDporEvent::CloseForced),
+                    "release/close DPOR scenario did not execute close: {events:?}"
+                );
+                assert!(!state.open, "force-close schedule left pool open");
+                assert!(
+                    state.requests.iter().all(|request| !request.waiting),
+                    "force-close schedule left a waiting acquire request"
+                );
+                assert!(
+                    state.free_new.is_empty()
+                        && state.free_used.is_empty()
+                        && state.busy.is_empty()
+                        && state.to_drop.is_empty(),
+                    "force-close schedule left live pool lists populated"
+                );
+                assert_eq!(
+                    backend.closed.load(Ordering::SeqCst),
+                    1,
+                    "force-close must close the single physical connection exactly once"
+                );
+                assert!(
+                    !events.contains(&PoolDporEvent::TimedOut),
+                    "release/close scenario must not report timeout: {events:?}"
+                );
+            }
+            PoolDporMode::ImmediateTimedExpiry => {
+                assert_eq!(
+                    events,
+                    &[PoolDporEvent::TimedOut],
+                    "immediate timed-wait expiry must map to DPY-4005"
+                );
+                assert!(state.open, "timed-wait expiry must leave the pool open");
+                assert_eq!(
+                    state.requests.len(),
+                    0,
+                    "timed-out acquire must abandon its waiter"
+                );
+                assert_eq!(
+                    state.busy.len(),
+                    1,
+                    "timed-out acquire must not steal the caller's held slot"
+                );
+            }
+        }
+    }
+
+    fn explore_dpor_pool_mode(mode: PoolDporMode) -> asupersync::lab::ExplorationReport {
+        // Full acquire_wait_future/Notify polling inside LabRuntime did not
+        // quiesce: the production async waiter can remain parked waiting for a
+        // wake managed outside the finite DPOR task body. Keep DPOR on finite
+        // enqueue/release/close ordering, and keep the real timed-wait future
+        // covered by async_acquire_timedwait_honors_deadline.
+        let mut explorer = DporExplorer::new(
+            ExplorerConfig::new(dpor_pool_seed(mode), DPOR_POOL_MAX_ITERS).max_steps(100_000),
+        );
+        explorer.explore(|runtime: &mut LabRuntime| {
+            let (inner, backend, held) = make_dpor_pool_inner();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let root = runtime.state.create_root_region(Budget::INFINITE);
+
+            let acquire_inner = Arc::clone(&inner);
+            let acquire_events = Arc::clone(&events);
+            let wait_timeout_ms = match mode {
+                PoolDporMode::ReleaseClose => None,
+                PoolDporMode::ImmediateTimedExpiry => Some(0),
+            };
+            let (acquire, _acquire_handle) = runtime
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    dpor_pool_acquire_waiter(acquire_inner, wait_timeout_ms, acquire_events).await;
+                })
+                .expect("create DPOR pool acquire task");
+            runtime.scheduler.lock().schedule(acquire, 0);
+
+            if matches!(mode, PoolDporMode::ReleaseClose) {
+                let release_inner = Arc::clone(&inner);
+                let release_events = Arc::clone(&events);
+                let (release, _release_handle) = runtime
+                    .state
+                    .create_task(root, Budget::INFINITE, async move {
+                        dpor_pool_release_held(release_inner, held, release_events).await;
+                    })
+                    .expect("create DPOR pool release task");
+                let close_inner = Arc::clone(&inner);
+                let close_events = Arc::clone(&events);
+                let (close, _close_handle) = runtime
+                    .state
+                    .create_task(root, Budget::INFINITE, async move {
+                        dpor_pool_force_close(close_inner, close_events).await;
+                    })
+                    .expect("create DPOR pool close task");
+                let mut scheduler = runtime.scheduler.lock();
+                scheduler.schedule(release, 0);
+                scheduler.schedule(close, 0);
+            }
+
+            runtime.run_until_quiescent();
+            assert!(
+                runtime.is_quiescent(),
+                "DPOR pool ordering model did not quiesce"
+            );
+            let events = events.lock().expect("read DPOR pool events").clone();
+            assert_dpor_pool_async_invariants(mode, &inner, &backend, &events);
+        })
+    }
+
+    #[test]
+    fn dpor_pool_async_waiter_release_close_and_timeout_saturate() {
+        for mode in [
+            PoolDporMode::ReleaseClose,
+            PoolDporMode::ImmediateTimedExpiry,
+        ] {
+            let report = explore_dpor_pool_mode(mode);
+            eprintln!(
+                "[dpor-pool-async] mode={mode:?} seed={} max_iters={} runs={} classes={} saturated={}",
+                dpor_pool_seed(mode),
+                DPOR_POOL_MAX_ITERS,
+                report.total_runs,
+                report.unique_classes,
+                report.coverage.is_saturated(DPOR_POOL_SATURATION_WINDOW)
+            );
+            assert!(
+                !report.has_violations(),
+                "DPOR pool {mode:?} found violations at seeds {:?}",
+                report.violation_seeds()
+            );
+            assert!(
+                report.total_runs == DPOR_POOL_MAX_ITERS,
+                "DPOR pool fallback seed space did not complete for {mode:?}: runs={}, classes={}, new={}",
+                report.total_runs,
+                report.unique_classes,
+                report.coverage.new_class_discoveries
+            );
+        }
     }
 
     struct FakeConn {

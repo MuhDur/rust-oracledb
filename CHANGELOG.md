@@ -5,6 +5,29 @@ is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows the SemVer contract described in
 [`docs/adr/0002-semver-contract.md`](docs/adr/0002-semver-contract.md).
 
+## [Unreleased]
+
+### Fixed
+
+- **Pool close race**: a `force`-close racing an in-flight connection open
+  failure or an unhealthy ping no longer requeues the associated waiter after
+  the pool has begun closing. Previously this could leave a closed pool with a
+  stale waiter in its queue, blocking clean close finalization. The in-flight
+  failure paths now suppress waiter requeue while closing; the close drain owns
+  waiter resolution (the awaiting caller is woken with the pool-closed error).
+  Found by exhaustive depth-7 model-checking of the pool lifecycle
+  (road-to-1.0 W3-E4).
+
+### Added
+
+- **Deterministic concurrency model-checking** (road-to-1.0 Wave-3 qualification):
+  DPOR / exhaustive-enumeration test harnesses over the wire cancel/timeout
+  recovery path (W3-E3: cancel maps to `Error::Cancelled`, timeout to
+  `Error::CallTimeout`, exactly one BREAK + one RESET, recovery ends at a clean
+  `Ready` boundary) and the async pool lifecycle (W3-E4: no missed wakeup, FIFO
+  fairness, no double-hand-out, force-close drains all waiters). Test-only; no
+  public API change.
+
 ## [0.3.0] — 2026-06-21
 
 The migration release: it ships the permanent 1.0 query/execute API (the four
