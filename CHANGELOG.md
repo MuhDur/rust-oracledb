@@ -17,6 +17,14 @@ and the project follows the SemVer contract described in
   waiter resolution (the awaiting caller is woken with the pool-closed error).
   Found by exhaustive depth-7 model-checking of the pool lifecycle
   (road-to-1.0 W3-E4).
+- **`query_one` / `query_opt` cardinality on single-row LONG results**: these no
+  longer raise `Error::TooManyRows` for a query that returns exactly one row
+  whose column is `LONG` / `LONG RAW`. The per-row LONG define-fetch ignores the
+  requested arraysize and returns one row with `more_rows` still set; the
+  cardinality check misread that "end not yet confirmed" flag as a second row.
+  `query_one` / `query_opt` now fetch ahead (at most one extra round trip, only
+  when a single row is in hand with `more_rows` set) to confirm whether a real
+  second row follows. Found by the W3-E1.2 live typed round-trip matrix.
 
 ### Added
 

@@ -2460,6 +2460,37 @@ impl Rows<'_> {
         Ok(rows)
     }
 
+    /// Fetch ahead until the batch holds at least two rows or the server has
+    /// confirmed end-of-data, so the cardinality check in [`one`](Self::one) /
+    /// [`opt`](Self::opt) cannot mistake a still-pending `more_rows` flag for a
+    /// second row.
+    ///
+    /// `more_rows` means only "the server has not yet signalled end-of-data",
+    /// not ">1 row". A LONG / LONG RAW column forces a per-row define-fetch that
+    /// ignores the requested arraysize, so a genuine single-row result comes
+    /// back with one row and `more_rows` still set; without this confirmation
+    /// `one()` would wrongly raise [`Error::TooManyRows`]. Bounded: at most one
+    /// extra round trip for a single-row result, and it stops the moment a
+    /// second row is in hand.
+    async fn materialize_for_cardinality(&mut self, cx: &Cx) -> Result<()> {
+        let mut held: Vec<Row> = Vec::new();
+        while held.len() + self.batch.len() < 2 && self.more_rows && self.cursor_id != 0 {
+            // `next_batch` keys the LONG/LOB define-fetch continuation off
+            // `self.batch.last()` and then REPLACES `self.batch`. Clone the row
+            // we already hold into `held` (leaving the original in place as the
+            // continuation key) so it survives the fetch.
+            if let Some(last) = self.batch.last() {
+                held.push(last.clone());
+            }
+            self.next_batch(cx).await?;
+        }
+        if !held.is_empty() {
+            held.append(&mut self.batch);
+            self.batch = held;
+        }
+        Ok(())
+    }
+
     pub fn one(mut self) -> Result<Row> {
         let too_many = self.more_rows || self.batch.len() > 1;
         self.release_cursor();
@@ -4744,15 +4775,17 @@ impl Connection {
         sql: &str,
         params: impl Into<crate::Params<'p>>,
     ) -> Result<Row> {
-        self.query_with(
-            cx,
-            Query::owned_sql(sql.to_string())
-                .bind(params)
-                .arraysize(NonZeroU32::new(2).expect("two is non-zero"))
-                .prefetch(2),
-        )
-        .await?
-        .one()
+        let mut rows = self
+            .query_with(
+                cx,
+                Query::owned_sql(sql.to_string())
+                    .bind(params)
+                    .arraysize(NonZeroU32::new(2).expect("two is non-zero"))
+                    .prefetch(2),
+            )
+            .await?;
+        rows.materialize_for_cardinality(cx).await?;
+        rows.one()
     }
 
     /// Run a query that may return zero or one row.
@@ -4762,15 +4795,17 @@ impl Connection {
         sql: &str,
         params: impl Into<crate::Params<'p>>,
     ) -> Result<Option<Row>> {
-        self.query_with(
-            cx,
-            Query::owned_sql(sql.to_string())
-                .bind(params)
-                .arraysize(NonZeroU32::new(2).expect("two is non-zero"))
-                .prefetch(2),
-        )
-        .await?
-        .opt()
+        let mut rows = self
+            .query_with(
+                cx,
+                Query::owned_sql(sql.to_string())
+                    .bind(params)
+                    .arraysize(NonZeroU32::new(2).expect("two is non-zero"))
+                    .prefetch(2),
+            )
+            .await?;
+        rows.materialize_for_cardinality(cx).await?;
+        rows.opt()
     }
 
     /// Run a query and eagerly drain every fetch batch.

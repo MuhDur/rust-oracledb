@@ -1391,6 +1391,16 @@ fn exercise_long_matrix(conn: &mut Connection) {
         vec![BindValue::Number("1".to_string())],
     );
     assert_text(&row, "LONG", text);
+    // Regression for rust-oracledb-hzz2: query_one over a single-row LONG result
+    // must return the row, not Error::TooManyRows. The per-row LONG define-fetch
+    // leaves `more_rows` set on a single row; query_one now fetches ahead to
+    // confirm cardinality before reporting TooManyRows.
+    let one_row = query_one_with_binds(
+        conn,
+        "select v from rust_e12_long_t where id = :1",
+        vec![BindValue::Number("1".to_string())],
+    );
+    assert_text(&one_row, "LONG via query_one", text);
     assert_typed_null(
         conn,
         "LONG",
@@ -1419,6 +1429,17 @@ fn exercise_long_matrix(conn: &mut Connection) {
         vec![BindValue::Number("1".to_string())],
     );
     assert_raw(&row, "LONG RAW", &[0, 1, 2, 0x7f, 0x80, 0xfe, 0xff]);
+    // Regression for rust-oracledb-hzz2 (LONG RAW variant).
+    let one_row = query_one_with_binds(
+        conn,
+        "select v from rust_e12_long_raw_t where id = :1",
+        vec![BindValue::Number("1".to_string())],
+    );
+    assert_raw(
+        &one_row,
+        "LONG RAW via query_one",
+        &[0, 1, 2, 0x7f, 0x80, 0xfe, 0xff],
+    );
     assert_typed_null(conn, "LONG RAW", typed_null(ORA_TYPE_NUM_LONG_RAW, 0, 4096));
     drop_live_table(conn, "rust_e12_long_raw_t");
 }
