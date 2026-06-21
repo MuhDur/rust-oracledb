@@ -1816,6 +1816,47 @@ mod tests {
     }
 
     #[test]
+    fn pure_pool_state_cancelled_checked_out_hands_slot_to_next_waiter() {
+        let mut state = PurePoolState::new(0, 1);
+        let first = state.request_acquire().unwrap();
+        assert_eq!(
+            state.take_effects(),
+            vec![PoolEffect::Open {
+                slot: 1,
+                waiter: Some(first),
+            }]
+        );
+        state.complete_open(1, true).unwrap();
+        assert_eq!(
+            state.state_of(1),
+            Some(PoolSlotState::CheckedOut { waiter: first })
+        );
+
+        let second = state.request_acquire().unwrap();
+        assert!(state.take_effects().is_empty());
+        state.cancel_acquire(first).unwrap();
+        assert_eq!(
+            state.take_effects(),
+            vec![PoolEffect::Ping {
+                slot: 1,
+                waiter: second,
+            }]
+        );
+        state.complete_ping(1, true).unwrap();
+        assert_eq!(
+            state.state_of(1),
+            Some(PoolSlotState::CheckedOut { waiter: second })
+        );
+        assert_eq!(
+            state.counts(),
+            PoolCounts {
+                checked_out: 1,
+                ..PoolCounts::default()
+            }
+        );
+    }
+
+    #[test]
     fn pure_pool_state_release_respects_fifo_waiter_order() {
         let mut state = PurePoolState::new(1, 1);
         assert_eq!(state.take_effects().len(), 1);
@@ -2313,6 +2354,100 @@ mod tests {
         assert_eq!(
             reacquired, held,
             "cancelled waiter must not retain the returned connection or block later acquires"
+        );
+        engine.return_connection(reacquired).unwrap();
+        engine.close(false).unwrap();
+    }
+
+    #[test]
+    fn async_acquire_dropped_future_abandons_registered_waiter() {
+        let backend = Arc::new(FakeBackend::new());
+        let engine = PoolEngine::start(
+            Arc::clone(&backend),
+            test_config(1, 1, 1, POOL_GETMODE_WAIT),
+        )
+        .unwrap();
+        wait_for_open_count(&engine, 1);
+        let held = engine.acquire(AcquireOptions::default()).unwrap();
+
+        let runtime = crate::build_io_runtime().expect("asupersync runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("asupersync installs an ambient Cx");
+            let acquire_engine = engine.clone();
+            let mut pending =
+                Box::pin(acquire_engine.acquire_async(&cx, AcquireOptions::default()));
+            poll_fn(|task_cx| {
+                let first_poll = pending.as_mut().poll(task_cx);
+                assert!(
+                    first_poll.is_pending(),
+                    "contended async acquire completed before it could be dropped: {first_poll:?}"
+                );
+                Poll::Ready(())
+            })
+            .await;
+            drop(pending);
+        });
+
+        assert_eq!(
+            engine.busy_count().unwrap(),
+            1,
+            "dropping a registered acquire must not release the caller's held connection"
+        );
+        engine.return_connection(held).unwrap();
+        let reacquired = engine.acquire(AcquireOptions::default()).unwrap();
+        assert_eq!(
+            reacquired, held,
+            "dropped async waiter must de-register and leave the returned connection reusable"
+        );
+        engine.return_connection(reacquired).unwrap();
+        engine.close(false).unwrap();
+    }
+
+    #[test]
+    fn async_acquire_dropped_after_handoff_returns_granted_connection() {
+        let backend = Arc::new(FakeBackend::new());
+        let engine = PoolEngine::start(
+            Arc::clone(&backend),
+            test_config(1, 1, 1, POOL_GETMODE_WAIT),
+        )
+        .unwrap();
+        wait_for_open_count(&engine, 1);
+        let held = engine.acquire(AcquireOptions::default()).unwrap();
+
+        let runtime = crate::build_io_runtime().expect("asupersync runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("asupersync installs an ambient Cx");
+            let acquire_engine = engine.clone();
+            let mut pending =
+                Box::pin(acquire_engine.acquire_async(&cx, AcquireOptions::default()));
+            poll_fn(|task_cx| {
+                let first_poll = pending.as_mut().poll(task_cx);
+                assert!(
+                    first_poll.is_pending(),
+                    "contended async acquire completed before it could be handed off: {first_poll:?}"
+                );
+                Poll::Ready(())
+            })
+            .await;
+
+            engine.return_connection(held).unwrap();
+            assert_eq!(
+                engine.busy_count().unwrap(),
+                0,
+                "returned connection is granted to the pending request before future drop"
+            );
+            drop(pending);
+        });
+
+        let reacquired = engine.acquire(AcquireOptions::default()).unwrap();
+        assert_eq!(
+            reacquired, held,
+            "dropping after handoff must return the granted connection to the pool"
+        );
+        assert_eq!(
+            engine.busy_count().unwrap(),
+            1,
+            "the reacquired connection must be the only busy connection"
         );
         engine.return_connection(reacquired).unwrap();
         engine.close(false).unwrap();
