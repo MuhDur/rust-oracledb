@@ -643,51 +643,51 @@ pub struct TpcChangeStateResponse {
 /// Optional execute modes (reference ExecuteMessage attributes).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExecuteOptions {
-    pub batcherrors: bool,
-    pub arraydmlrowcounts: bool,
+    pub(crate) batcherrors: bool,
+    pub(crate) arraydmlrowcounts: bool,
     /// Parse/describe without executing (reference `parse_only`).
-    pub parse_only: bool,
+    pub(crate) parse_only: bool,
     /// Pipeline token; pipelined operations carry tokens 1..N
     /// (impl/thin/connection.pyx `_create_messages_for_pipeline`),
     /// everything else carries 0.
-    pub token_num: u64,
+    pub(crate) token_num: u64,
     /// Server cursor id of an already-parsed statement; non-zero skips the
     /// PARSE option and SQL text (reference Statement._cursor_id).
-    pub cursor_id: u32,
+    pub(crate) cursor_id: u32,
     /// Whether the statement may be kept in the connection statement cache
     /// (reference `cursor.prepare(cache_statement=...)`).
-    pub cache_statement: bool,
+    pub(crate) cache_statement: bool,
     /// Whether the cursor was opened scrollable; sets the scrollable execute
     /// flags and primes the fetch orientation (reference `cursor_impl.scrollable`).
-    pub scrollable: bool,
+    pub(crate) scrollable: bool,
     /// Fetch orientation for the next fetch (reference `fetch_orientation`,
     /// al8i4[10]); one of the `TNS_FETCH_ORIENTATION_*` constants. Zero leaves
     /// the server default.
-    pub fetch_orientation: u32,
+    pub(crate) fetch_orientation: u32,
     /// Desired row position paired with `fetch_orientation` (reference
     /// `fetch_pos`, al8i4[11]).
-    pub fetch_pos: u32,
+    pub(crate) fetch_pos: u32,
     /// True when this execute is a scroll request: the EXECUTE/BIND options are
     /// suppressed so the server only repositions the open cursor and fetches
     /// (reference `scroll_operation`).
-    pub scroll_operation: bool,
+    pub(crate) scroll_operation: bool,
     /// Suspend the active sessionless transaction once this execute succeeds
     /// (reference `cursor_impl.suspend_on_success`); the driver folds a
     /// post-detach into the sessionless piggyback. Does not affect the execute
     /// wire body itself.
-    pub suspend_on_success: bool,
+    pub(crate) suspend_on_success: bool,
     /// Suppress the FETCH execute option so the server does not prefetch any
     /// rows during the execute round trip (reference `stmt._no_prefetch`,
     /// execute.pyx:99). Set when re-executing an open cursor whose columns
     /// require a client-side define (VECTOR): a prefetched row would otherwise
     /// exhaust the cursor before the define-fetch runs, yielding ORA-01002 on
     /// the subsequent fetch.
-    pub no_prefetch: bool,
+    pub(crate) no_prefetch: bool,
     /// CQN registration id threaded into the execute body (split into lsb/msb
     /// at the al8i4 slots) when registering a query against a subscription
     /// (reference `cursor_impl._registration_id`, execute.pyx:116-163). Zero
     /// for ordinary executes.
-    pub registration_id: u64,
+    pub(crate) registration_id: u64,
 }
 
 impl Default for ExecuteOptions {
@@ -707,6 +707,138 @@ impl Default for ExecuteOptions {
             no_prefetch: false,
             registration_id: 0,
         }
+    }
+}
+
+impl ExecuteOptions {
+    pub fn batcherrors(&self) -> bool {
+        self.batcherrors
+    }
+
+    #[must_use]
+    pub fn with_batcherrors(mut self, enabled: bool) -> Self {
+        self.batcherrors = enabled;
+        self
+    }
+
+    pub fn arraydmlrowcounts(&self) -> bool {
+        self.arraydmlrowcounts
+    }
+
+    #[must_use]
+    pub fn with_arraydmlrowcounts(mut self, enabled: bool) -> Self {
+        self.arraydmlrowcounts = enabled;
+        self
+    }
+
+    pub fn parse_only(&self) -> bool {
+        self.parse_only
+    }
+
+    #[must_use]
+    pub fn with_parse_only(mut self, enabled: bool) -> Self {
+        self.parse_only = enabled;
+        self
+    }
+
+    pub fn token_num(&self) -> u64 {
+        self.token_num
+    }
+
+    #[must_use]
+    pub fn with_token_num(mut self, token_num: u64) -> Self {
+        self.token_num = token_num;
+        self
+    }
+
+    pub fn cursor_id(&self) -> u32 {
+        self.cursor_id
+    }
+
+    #[must_use]
+    pub fn with_cursor_id(mut self, cursor_id: u32) -> Self {
+        self.cursor_id = cursor_id;
+        self
+    }
+
+    pub fn cache_statement(&self) -> bool {
+        self.cache_statement
+    }
+
+    #[must_use]
+    pub fn with_cache_statement(mut self, enabled: bool) -> Self {
+        self.cache_statement = enabled;
+        self
+    }
+
+    pub fn scrollable(&self) -> bool {
+        self.scrollable
+    }
+
+    #[must_use]
+    pub fn with_scrollable(mut self, enabled: bool) -> Self {
+        self.scrollable = enabled;
+        self
+    }
+
+    pub fn fetch_orientation(&self) -> u32 {
+        self.fetch_orientation
+    }
+
+    #[must_use]
+    pub fn with_fetch_orientation(mut self, fetch_orientation: u32) -> Self {
+        self.fetch_orientation = fetch_orientation;
+        self
+    }
+
+    pub fn fetch_pos(&self) -> u32 {
+        self.fetch_pos
+    }
+
+    #[must_use]
+    pub fn with_fetch_pos(mut self, fetch_pos: u32) -> Self {
+        self.fetch_pos = fetch_pos;
+        self
+    }
+
+    pub fn scroll_operation(&self) -> bool {
+        self.scroll_operation
+    }
+
+    #[must_use]
+    pub fn with_scroll_operation(mut self, enabled: bool) -> Self {
+        self.scroll_operation = enabled;
+        self
+    }
+
+    pub fn suspend_on_success(&self) -> bool {
+        self.suspend_on_success
+    }
+
+    #[must_use]
+    pub fn with_suspend_on_success(mut self, enabled: bool) -> Self {
+        self.suspend_on_success = enabled;
+        self
+    }
+
+    pub fn no_prefetch(&self) -> bool {
+        self.no_prefetch
+    }
+
+    #[must_use]
+    pub fn with_no_prefetch(mut self, enabled: bool) -> Self {
+        self.no_prefetch = enabled;
+        self
+    }
+
+    pub fn registration_id(&self) -> u64 {
+        self.registration_id
+    }
+
+    #[must_use]
+    pub fn with_registration_id(mut self, registration_id: u64) -> Self {
+        self.registration_id = registration_id;
+        self
     }
 }
 

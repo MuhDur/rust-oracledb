@@ -67,8 +67,12 @@ pub fn oracledb::arrow::VectorFormat::fmt(&self, &mut core::fmt::Formatter<'_>) 
 impl core::marker::Copy for oracledb::arrow::VectorFormat
 impl core::marker::StructuralPartialEq for oracledb::arrow::VectorFormat
 pub struct oracledb::arrow::ArrowFetchOptions
-pub oracledb::arrow::ArrowFetchOptions::fetch_decimals: bool
-pub oracledb::arrow::ArrowFetchOptions::requested_schema: core::option::Option<arrow_schema::schema::SchemaRef>
+impl oracledb::arrow::ArrowFetchOptions
+pub fn oracledb::arrow::ArrowFetchOptions::fetch_decimals(&self) -> bool
+pub fn oracledb::arrow::ArrowFetchOptions::new() -> Self
+pub fn oracledb::arrow::ArrowFetchOptions::requested_schema(&self) -> core::option::Option<&arrow_schema::schema::SchemaRef>
+pub fn oracledb::arrow::ArrowFetchOptions::with_fetch_decimals(self, bool) -> Self
+pub fn oracledb::arrow::ArrowFetchOptions::with_requested_schema(self, arrow_schema::schema::SchemaRef) -> Self
 impl core::clone::Clone for oracledb::arrow::ArrowFetchOptions
 pub fn oracledb::arrow::ArrowFetchOptions::clone(&self) -> oracledb::arrow::ArrowFetchOptions
 impl core::default::Default for oracledb::arrow::ArrowFetchOptions
@@ -136,8 +140,13 @@ pub fn oracledb::pool::PoolError::fmt(&self, &mut core::fmt::Formatter<'_>) -> c
 impl core::fmt::Display for oracledb::pool::PoolError
 pub fn oracledb::pool::PoolError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct oracledb::pool::AcquireOptions
-pub oracledb::pool::AcquireOptions::cclass: core::option::Option<alloc::string::String>
-pub oracledb::pool::AcquireOptions::wants_new: bool
+impl oracledb::pool::AcquireOptions
+pub fn oracledb::pool::AcquireOptions::cclass(&self) -> core::option::Option<&str>
+pub fn oracledb::pool::AcquireOptions::new() -> Self
+pub fn oracledb::pool::AcquireOptions::wants_new(&self) -> bool
+pub fn oracledb::pool::AcquireOptions::with_cclass(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oracledb::pool::AcquireOptions::with_optional_cclass(self, core::option::Option<alloc::string::String>) -> Self
+pub fn oracledb::pool::AcquireOptions::with_wants_new(self, bool) -> Self
 impl core::clone::Clone for oracledb::pool::AcquireOptions
 pub fn oracledb::pool::AcquireOptions::clone(&self) -> oracledb::pool::AcquireOptions
 impl core::default::Default for oracledb::pool::AcquireOptions
@@ -192,16 +201,25 @@ pub fn oracledb::pool::Pool<B>::wait_timeout_ms(&self) -> core::result::Result<c
 impl<B: oracledb::pool::PoolBackend> core::clone::Clone for oracledb::pool::Pool<B>
 pub fn oracledb::pool::Pool<B>::clone(&self) -> Self
 pub struct oracledb::pool::PoolConfig
-pub oracledb::pool::PoolConfig::creation_cclass: core::option::Option<alloc::string::String>
-pub oracledb::pool::PoolConfig::getmode: u32
-pub oracledb::pool::PoolConfig::increment: u32
-pub oracledb::pool::PoolConfig::max: u32
-pub oracledb::pool::PoolConfig::max_lifetime_session_secs: u32
-pub oracledb::pool::PoolConfig::min: u32
-pub oracledb::pool::PoolConfig::ping_interval_secs: i64
-pub oracledb::pool::PoolConfig::ping_timeout_ms: u32
-pub oracledb::pool::PoolConfig::timeout_secs: u32
-pub oracledb::pool::PoolConfig::wait_timeout_ms: u32
+impl oracledb::pool::PoolConfig
+pub fn oracledb::pool::PoolConfig::creation_cclass(&self) -> core::option::Option<&str>
+pub fn oracledb::pool::PoolConfig::getmode(&self) -> u32
+pub fn oracledb::pool::PoolConfig::increment(&self) -> u32
+pub fn oracledb::pool::PoolConfig::max(&self) -> u32
+pub fn oracledb::pool::PoolConfig::max_lifetime_session_secs(&self) -> u32
+pub fn oracledb::pool::PoolConfig::min(&self) -> u32
+pub fn oracledb::pool::PoolConfig::new(u32, u32, u32) -> Self
+pub fn oracledb::pool::PoolConfig::ping_interval_secs(&self) -> i64
+pub fn oracledb::pool::PoolConfig::ping_timeout_ms(&self) -> u32
+pub fn oracledb::pool::PoolConfig::timeout_secs(&self) -> u32
+pub fn oracledb::pool::PoolConfig::wait_timeout_ms(&self) -> u32
+pub fn oracledb::pool::PoolConfig::with_creation_cclass(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oracledb::pool::PoolConfig::with_getmode(self, u32) -> Self
+pub fn oracledb::pool::PoolConfig::with_max_lifetime_session_secs(self, u32) -> Self
+pub fn oracledb::pool::PoolConfig::with_ping_interval_secs(self, i64) -> Self
+pub fn oracledb::pool::PoolConfig::with_ping_timeout_ms(self, u32) -> Self
+pub fn oracledb::pool::PoolConfig::with_timeout_secs(self, u32) -> Self
+pub fn oracledb::pool::PoolConfig::with_wait_timeout_ms(self, u32) -> Self
 impl core::clone::Clone for oracledb::pool::PoolConfig
 pub fn oracledb::pool::PoolConfig::clone(&self) -> oracledb::pool::PoolConfig
 impl core::fmt::Debug for oracledb::pool::PoolConfig
@@ -689,10 +707,17 @@ pub fn oracledb::Params<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::
 impl<'a> core::marker::StructuralPartialEq for oracledb::Params<'a>
 pub enum oracledb::PipelineRequest
 pub oracledb::PipelineRequest::Commit
-pub oracledb::PipelineRequest::Execute
+#[non_exhaustive] pub oracledb::PipelineRequest::Execute
 pub oracledb::PipelineRequest::Execute::bind_rows: alloc::vec::Vec<alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>>
 pub oracledb::PipelineRequest::Execute::prefetch_rows: u32
 pub oracledb::PipelineRequest::Execute::sql: alloc::string::String
+impl oracledb::PipelineRequest
+pub fn oracledb::PipelineRequest::bind_rows(&self) -> core::option::Option<&[alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>]>
+pub fn oracledb::PipelineRequest::commit() -> Self
+pub fn oracledb::PipelineRequest::execute(impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>>, u32) -> Self
+pub fn oracledb::PipelineRequest::is_commit(&self) -> bool
+pub fn oracledb::PipelineRequest::prefetch_rows(&self) -> core::option::Option<u32>
+pub fn oracledb::PipelineRequest::sql(&self) -> core::option::Option<&str>
 impl core::clone::Clone for oracledb::PipelineRequest
 pub fn oracledb::PipelineRequest::clone(&self) -> oracledb::PipelineRequest
 impl core::fmt::Debug for oracledb::PipelineRequest
@@ -758,9 +783,13 @@ pub fn oracledb::AccessToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core:
 impl<'a> oracledb::Batch<'a>
 pub fn oracledb::Batch<'a>::collect_errors(self) -> Self
 pub fn oracledb::Batch<'a>::new(&'a str, impl core::convert::Into<oracledb::BatchRows<'a>>) -> Self
+pub fn oracledb::Batch<'a>::options(&self) -> oracledb_protocol::thin::types::ExecuteOptions
 pub fn oracledb::Batch<'a>::raw_options(self, oracledb_protocol::thin::types::ExecuteOptions) -> Self
 pub fn oracledb::Batch<'a>::row_counts(self) -> Self
+pub fn oracledb::Batch<'a>::rows(&self) -> &oracledb::BatchRows<'a>
+pub fn oracledb::Batch<'a>::sql(&self) -> &str
 pub fn oracledb::Batch<'a>::timeout(self, core::time::Duration) -> Self
+pub fn oracledb::Batch<'a>::timeout_duration(&self) -> core::option::Option<core::time::Duration>
 impl<'a> core::clone::Clone for oracledb::Batch<'a>
 pub fn oracledb::Batch<'a>::clone(&self) -> oracledb::Batch<'a>
 impl<'a> core::cmp::PartialEq for oracledb::Batch<'a>
@@ -905,25 +934,25 @@ impl core::fmt::Debug for oracledb::CollectionElement
 pub fn oracledb::CollectionElement::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb::CollectionElement
 pub struct oracledb::ConnectOptions
-pub oracledb::ConnectOptions::access_token: core::option::Option<oracledb::AccessToken>
-pub oracledb::ConnectOptions::app_context: alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String)>
-pub oracledb::ConnectOptions::connect_string: alloc::string::String
-pub oracledb::ConnectOptions::edition: core::option::Option<alloc::string::String>
-pub oracledb::ConnectOptions::identity: oracledb_protocol::ClientIdentity
-pub oracledb::ConnectOptions::password: alloc::string::String
-pub oracledb::ConnectOptions::protocol_limits: oracledb_protocol::wire::ProtocolLimits
-pub oracledb::ConnectOptions::proxy_user: core::option::Option<alloc::string::String>
-pub oracledb::ConnectOptions::sdu: u16
-pub oracledb::ConnectOptions::server_type_emon: bool
-pub oracledb::ConnectOptions::ssl_server_cert_dn: core::option::Option<alloc::string::String>
-pub oracledb::ConnectOptions::ssl_server_dn_match: bool
-pub oracledb::ConnectOptions::statement_cache_size: usize
-pub oracledb::ConnectOptions::use_sni: bool
-pub oracledb::ConnectOptions::user: alloc::string::String
-pub oracledb::ConnectOptions::wallet_location: core::option::Option<alloc::string::String>
-pub oracledb::ConnectOptions::wallet_password: core::option::Option<alloc::string::String>
 impl oracledb::ConnectOptions
+pub fn oracledb::ConnectOptions::access_token(&self) -> core::option::Option<&oracledb::AccessToken>
+pub fn oracledb::ConnectOptions::app_context(&self) -> &[(alloc::string::String, alloc::string::String, alloc::string::String)]
+pub fn oracledb::ConnectOptions::connect_string(&self) -> &str
+pub fn oracledb::ConnectOptions::edition(&self) -> core::option::Option<&str>
+pub fn oracledb::ConnectOptions::identity(&self) -> &oracledb_protocol::ClientIdentity
 pub fn oracledb::ConnectOptions::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
+pub fn oracledb::ConnectOptions::password(&self) -> &str
+pub fn oracledb::ConnectOptions::protocol_limits(&self) -> oracledb_protocol::wire::ProtocolLimits
+pub fn oracledb::ConnectOptions::proxy_user(&self) -> core::option::Option<&str>
+pub fn oracledb::ConnectOptions::sdu(&self) -> u16
+pub fn oracledb::ConnectOptions::server_type_emon(&self) -> bool
+pub fn oracledb::ConnectOptions::ssl_server_cert_dn(&self) -> core::option::Option<&str>
+pub fn oracledb::ConnectOptions::ssl_server_dn_match(&self) -> bool
+pub fn oracledb::ConnectOptions::statement_cache_size(&self) -> usize
+pub fn oracledb::ConnectOptions::use_sni(&self) -> bool
+pub fn oracledb::ConnectOptions::user(&self) -> &str
+pub fn oracledb::ConnectOptions::wallet_location(&self) -> core::option::Option<&str>
+pub fn oracledb::ConnectOptions::wallet_password(&self) -> core::option::Option<&str>
 pub fn oracledb::ConnectOptions::with_access_token(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_app_context(self, alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String)>) -> Self
 pub fn oracledb::ConnectOptions::with_edition(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -1072,9 +1101,13 @@ impl core::marker::StructuralPartialEq for oracledb::DecodedObject
 impl<'a> oracledb::Execute<'a>
 pub fn oracledb::Execute<'a>::bind(self, impl core::convert::Into<oracledb::Params<'a>>) -> Self
 pub fn oracledb::Execute<'a>::new(&'a str) -> Self
+pub fn oracledb::Execute<'a>::options(&self) -> oracledb_protocol::thin::types::ExecuteOptions
+pub fn oracledb::Execute<'a>::params(&self) -> &oracledb::Params<'a>
 pub fn oracledb::Execute<'a>::parse_only(self) -> Self
 pub fn oracledb::Execute<'a>::raw_options(self, oracledb_protocol::thin::types::ExecuteOptions) -> Self
+pub fn oracledb::Execute<'a>::sql(&self) -> &str
 pub fn oracledb::Execute<'a>::timeout(self, core::time::Duration) -> Self
+pub fn oracledb::Execute<'a>::timeout_duration(&self) -> core::option::Option<core::time::Duration>
 impl<'a> core::clone::Clone for oracledb::Execute<'a>
 pub fn oracledb::Execute<'a>::clone(&self) -> oracledb::Execute<'a>
 impl<'a> core::fmt::Debug for oracledb::Execute<'a>
@@ -1155,12 +1188,19 @@ impl core::marker::StructuralPartialEq for oracledb::OutBinds
 #[non_exhaustive] pub struct oracledb::Query<'a>
 impl<'a> oracledb::Query<'a>
 pub fn oracledb::Query<'a>::arraysize(self, core::num::nonzero::NonZeroU32) -> Self
+pub fn oracledb::Query<'a>::arraysize_value(&self) -> core::num::nonzero::NonZeroU32
 pub fn oracledb::Query<'a>::bind(self, impl core::convert::Into<oracledb::Params<'a>>) -> Self
+pub fn oracledb::Query<'a>::is_scrollable(&self) -> bool
+pub fn oracledb::Query<'a>::materialize_lobs(&self) -> bool
 pub fn oracledb::Query<'a>::new(&'a str) -> Self
+pub fn oracledb::Query<'a>::params(&self) -> &oracledb::Params<'a>
 pub fn oracledb::Query<'a>::prefetch(self, u32) -> Self
+pub fn oracledb::Query<'a>::prefetch_rows(&self) -> u32
 pub fn oracledb::Query<'a>::scrollable(self) -> Self
+pub fn oracledb::Query<'a>::sql(&self) -> &str
 pub fn oracledb::Query<'a>::stream_lobs(self) -> Self
 pub fn oracledb::Query<'a>::timeout(self, core::time::Duration) -> Self
+pub fn oracledb::Query<'a>::timeout_duration(&self) -> core::option::Option<core::time::Duration>
 impl<'a> core::clone::Clone for oracledb::Query<'a>
 pub fn oracledb::Query<'a>::clone(&self) -> oracledb::Query<'a>
 impl<'a> core::fmt::Debug for oracledb::Query<'a>
@@ -1169,7 +1209,11 @@ pub fn oracledb::Query<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::f
 impl<'a> oracledb::Registration<'a>
 pub fn oracledb::Registration<'a>::bind(self, impl core::convert::Into<oracledb::Params<'a>>) -> Self
 pub fn oracledb::Registration<'a>::new(&'a str, u64) -> Self
+pub fn oracledb::Registration<'a>::params(&self) -> &oracledb::Params<'a>
+pub fn oracledb::Registration<'a>::registration_id(&self) -> u64
+pub fn oracledb::Registration<'a>::sql(&self) -> &str
 pub fn oracledb::Registration<'a>::timeout(self, core::time::Duration) -> Self
+pub fn oracledb::Registration<'a>::timeout_duration(&self) -> core::option::Option<core::time::Duration>
 impl<'a> core::clone::Clone for oracledb::Registration<'a>
 pub fn oracledb::Registration<'a>::clone(&self) -> oracledb::Registration<'a>
 impl<'a> core::fmt::Debug for oracledb::Registration<'a>

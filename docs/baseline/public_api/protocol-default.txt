@@ -962,19 +962,33 @@ pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::remaining(&self) -> us
 pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::with_capacity_bounded<T>(&self, usize, usize) -> alloc::vec::Vec<T>
 pub fn oracledb_protocol::thin::DbObjectPackedReader<'_>::with_capacity_limited<T, F>(&self, usize, usize, F) -> oracledb_protocol::Result<alloc::vec::Vec<T>> where F: core::ops::function::FnOnce(&oracledb_protocol::wire::ProtocolLimits, usize) -> oracledb_protocol::Result<()>
 pub struct oracledb_protocol::thin::ExecuteOptions
-pub oracledb_protocol::thin::ExecuteOptions::arraydmlrowcounts: bool
-pub oracledb_protocol::thin::ExecuteOptions::batcherrors: bool
-pub oracledb_protocol::thin::ExecuteOptions::cache_statement: bool
-pub oracledb_protocol::thin::ExecuteOptions::cursor_id: u32
-pub oracledb_protocol::thin::ExecuteOptions::fetch_orientation: u32
-pub oracledb_protocol::thin::ExecuteOptions::fetch_pos: u32
-pub oracledb_protocol::thin::ExecuteOptions::no_prefetch: bool
-pub oracledb_protocol::thin::ExecuteOptions::parse_only: bool
-pub oracledb_protocol::thin::ExecuteOptions::registration_id: u64
-pub oracledb_protocol::thin::ExecuteOptions::scroll_operation: bool
-pub oracledb_protocol::thin::ExecuteOptions::scrollable: bool
-pub oracledb_protocol::thin::ExecuteOptions::suspend_on_success: bool
-pub oracledb_protocol::thin::ExecuteOptions::token_num: u64
+impl oracledb_protocol::thin::ExecuteOptions
+pub fn oracledb_protocol::thin::ExecuteOptions::arraydmlrowcounts(&self) -> bool
+pub fn oracledb_protocol::thin::ExecuteOptions::batcherrors(&self) -> bool
+pub fn oracledb_protocol::thin::ExecuteOptions::cache_statement(&self) -> bool
+pub fn oracledb_protocol::thin::ExecuteOptions::cursor_id(&self) -> u32
+pub fn oracledb_protocol::thin::ExecuteOptions::fetch_orientation(&self) -> u32
+pub fn oracledb_protocol::thin::ExecuteOptions::fetch_pos(&self) -> u32
+pub fn oracledb_protocol::thin::ExecuteOptions::no_prefetch(&self) -> bool
+pub fn oracledb_protocol::thin::ExecuteOptions::parse_only(&self) -> bool
+pub fn oracledb_protocol::thin::ExecuteOptions::registration_id(&self) -> u64
+pub fn oracledb_protocol::thin::ExecuteOptions::scroll_operation(&self) -> bool
+pub fn oracledb_protocol::thin::ExecuteOptions::scrollable(&self) -> bool
+pub fn oracledb_protocol::thin::ExecuteOptions::suspend_on_success(&self) -> bool
+pub fn oracledb_protocol::thin::ExecuteOptions::token_num(&self) -> u64
+pub fn oracledb_protocol::thin::ExecuteOptions::with_arraydmlrowcounts(self, bool) -> Self
+pub fn oracledb_protocol::thin::ExecuteOptions::with_batcherrors(self, bool) -> Self
+pub fn oracledb_protocol::thin::ExecuteOptions::with_cache_statement(self, bool) -> Self
+pub fn oracledb_protocol::thin::ExecuteOptions::with_cursor_id(self, u32) -> Self
+pub fn oracledb_protocol::thin::ExecuteOptions::with_fetch_orientation(self, u32) -> Self
+pub fn oracledb_protocol::thin::ExecuteOptions::with_fetch_pos(self, u32) -> Self
+pub fn oracledb_protocol::thin::ExecuteOptions::with_no_prefetch(self, bool) -> Self
+pub fn oracledb_protocol::thin::ExecuteOptions::with_parse_only(self, bool) -> Self
+pub fn oracledb_protocol::thin::ExecuteOptions::with_registration_id(self, u64) -> Self
+pub fn oracledb_protocol::thin::ExecuteOptions::with_scroll_operation(self, bool) -> Self
+pub fn oracledb_protocol::thin::ExecuteOptions::with_scrollable(self, bool) -> Self
+pub fn oracledb_protocol::thin::ExecuteOptions::with_suspend_on_success(self, bool) -> Self
+pub fn oracledb_protocol::thin::ExecuteOptions::with_token_num(self, u64) -> Self
 impl core::clone::Clone for oracledb_protocol::thin::ExecuteOptions
 pub fn oracledb_protocol::thin::ExecuteOptions::clone(&self) -> oracledb_protocol::thin::ExecuteOptions
 impl core::cmp::Eq for oracledb_protocol::thin::ExecuteOptions

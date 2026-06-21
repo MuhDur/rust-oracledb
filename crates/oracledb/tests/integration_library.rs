@@ -370,10 +370,7 @@ fn executemany_array_dml() {
                 vec![BindValue::Number("1".to_string())],
                 vec![BindValue::Number("2".to_string())],
             ],
-            ExecuteOptions {
-                arraydmlrowcounts: true,
-                ..ExecuteOptions::default()
-            },
+            ExecuteOptions::default().with_arraydmlrowcounts(true),
             None,
         )
         .expect("array DML delete with row counts");
@@ -671,18 +668,11 @@ fn connection_pool_acquire_release() {
         created: std::sync::Arc::new(AtomicU64::new(0)),
         closed: std::sync::Arc::new(AtomicU64::new(0)),
     };
-    let config = PoolConfig {
-        min: 1,
-        max: 2,
-        increment: 1,
-        getmode: POOL_GETMODE_WAIT,
-        wait_timeout_ms: 10_000,
-        timeout_secs: 0,
-        max_lifetime_session_secs: 0,
-        ping_interval_secs: -1,
-        ping_timeout_ms: 5_000,
-        creation_cclass: None,
-    };
+    let config = PoolConfig::new(1, 2, 1)
+        .with_getmode(POOL_GETMODE_WAIT)
+        .with_wait_timeout_ms(10_000)
+        .with_ping_interval_secs(-1)
+        .with_ping_timeout_ms(5_000);
     let pool = Pool::start(backend.clone(), config)
         .expect("pool starts")
         .blocking();

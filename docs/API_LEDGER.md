@@ -51,7 +51,7 @@ pub use oracledb::transport::CassetteError	keep	Cassette diagnostics are part of
 *oracledb::BlockingRows*	keep	Public blocking lazy row facade returned by the blocking query family.
 *oracledb::CancelHandle*	keep	Public cancellation handle.
 *oracledb::CollectionElement*	keep	Public object/collection conversion type.
-pub oracledb::ConnectOptions::*	consolidate	Keep ConnectOptions public but privatize fields behind builders/getters for redaction and SemVer evolution.
+pub fn oracledb::ConnectOptions::*	consolidate	Keep ConnectOptions public but privatize fields behind builders/getters for redaction and SemVer evolution.
 *oracledb::ConnectOptions*	keep	Public connection configuration surface.
 *oracledb::Connection::execute_query_for_registration*	rename	Keep the registration capability but rename it into an explicit registration API.
 *oracledb::Connection::execute_query*	consolidate	Query execution overloads should collapse into operation-specific request types.

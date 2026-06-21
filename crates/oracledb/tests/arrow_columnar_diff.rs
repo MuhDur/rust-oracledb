@@ -140,10 +140,7 @@ fn columnar_fetch_decimals_byte_identical_to_row_path() {
     const NUM_ROWS: usize = 777;
     let (payload, columns) = build_mixed_frame(NUM_ROWS);
     let caps = ClientCapabilities::default();
-    let options = ArrowFetchOptions {
-        fetch_decimals: true,
-        requested_schema: None,
-    };
+    let options = ArrowFetchOptions::new().with_fetch_decimals(true);
     let owned = parse_fetch_response_with_context(&payload, caps, &columns, None).unwrap();
     let row_batch = build_record_batch(&columns, &owned.rows, &options).expect("row batch");
     let borrowed = parse_query_response_borrowed(&payload, caps, &columns, None).unwrap();
@@ -241,10 +238,7 @@ mod live {
 
     #[test]
     fn live_columnar_equals_row_path_fetch_decimals() {
-        run_diff(&ArrowFetchOptions {
-            fetch_decimals: true,
-            requested_schema: None,
-        });
+        run_diff(&ArrowFetchOptions::new().with_fetch_decimals(true));
     }
 }
 

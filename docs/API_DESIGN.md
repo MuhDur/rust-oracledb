@@ -149,7 +149,7 @@ impl<'a> Execute<'a> {
     pub fn bind(self, p: impl Into<Params<'a>>) -> Self;
     pub fn timeout(self, d: Duration) -> Self;
     pub fn parse_only(self) -> Self;                      // validate without executing
-    pub fn raw_options(self, o: ExecuteOptions) -> Self;  // escape hatch: the full 13-field struct
+    pub fn raw_options(self, o: ExecuteOptions) -> Self;  // escape hatch: all 13 knobs via builders/getters
 }
 ```
 ```rust
@@ -166,12 +166,12 @@ impl ExecuteOutcome {
 ```
 - **OUT/IN-OUT, RETURNING, implicit result sets** are surfaced as typed accessors over
   what is today `QueryResult.out_values` / `return_values` / `implicit_resultsets`.
-- **All 13 `ExecuteOptions` fields survive:** common ones get builder methods
+- **All 13 `ExecuteOptions` knobs survive:** common ones get builder methods
   (`parse_only`; batch flags live on `Batch`, §5; `registration_id` on `Registration`,
   §6; scroll fields on `Query::scrollable`/`Rows::scroll`); the rest
   (`cursor_id` reuse, `cache_statement`, `no_prefetch`, `token_num`, `suspend_on_success`)
   are driver-internal or other-family, **and** `Execute::raw_options(ExecuteOptions)` is a
-  documented escape hatch so power users lose nothing.
+  documented method-based escape hatch so power users lose nothing without depending on field layout.
 - **DBMS_OUTPUT** stays as `enable_dbms_output` / `read_dbms_output` (retained convenience
   over the OUT-bind machinery; §6).
 
@@ -275,8 +275,8 @@ execute/fetch/define/cursor machinery the SODA/Arrow/direct-path facades sit on.
 | AQ: `aq_enq_one/deq_one/enq_many/deq_many` + option/props/payload types | **Retained** |
 | Objects: `describe_object_type`, `decode_object`, object binds | **Retained** |
 | Transactions: `commit`/`rollback`/`transaction_in_progress`, TPC (`tpc_*`), sessionless (`begin/resume/suspend/prepare_*`) | **Retained** |
-| Pooling: `Pool`/`BlockingPool`/`PooledConnection`/`BlockingPooledConnection` guards, `PoolStats`, `PoolBackend`, `PoolConfig`(10 fields), `AcquireOptions`, getmode+purity constants, live setters, `PoolError` | **Retained** (async-native facade; sync facade is `block_on`; low-level `PoolEngine` is crate-private) |
-| Pipelining: `run_pipeline`/`run_pipeline_decoded` + `PipelineRequest` | **Retained** (note the known ExecuteOptions gap — preserve as a conscious choice) |
+| Pooling: `Pool`/`BlockingPool`/`PooledConnection`/`BlockingPooledConnection` guards, `PoolStats`, `PoolBackend`, `PoolConfig` builders/getters, `AcquireOptions` builders/getters, getmode+purity constants, live setters, `PoolError` | **Retained** (async-native facade; sync facade is `block_on`; low-level `PoolEngine` is crate-private) |
+| Pipelining: `run_pipeline`/`run_pipeline_decoded` + `PipelineRequest` constructors/getters | **Retained** |
 | Lifecycle/accessors: `connect`/`close`/`cancel`/`ping`/`change_password`, `CancelHandle`, `release_cursor`/`close_cursor`, `session_id`/`serial_num`/`server_version[_tuple]`/`sdu`/`descriptor`/`identity`/`supports_pipelining`/`supports_oob`/`is_dead` | **Retained** |
 | `ConnectOptions` (all knobs: access-token TCPS-required+redacted, edition, wallet/TLS, app_context, proxy_user, sdu, server_type_emon, statement_cache_size) | **Retained** (audit-tidied to builders/getters per W1-T4) |
 | DBMS_OUTPUT: `enable_dbms_output`/`read_dbms_output` | **Retained** |
@@ -334,7 +334,7 @@ execute/fetch/define/cursor machinery the SODA/Arrow/direct-path facades sit on.
 | C23 | Blocking mirror | W1-T3.8 adds a 1:1 blocking family mirror; deprecated blocking old names remain shims until then. |
 | C24 | Arrow, direct-path load, SODA, profiling, protocol re-export | Retained facades and `oracledb::protocol` re-export. |
 
-**`ExecuteOptions` field mapping (13/13):**
+**`ExecuteOptions` knob mapping (13/13):**
 
 | Field | Family surface |
 |---|---|

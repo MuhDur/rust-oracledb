@@ -69,25 +69,156 @@ impl std::fmt::Display for PoolError {
 /// (getmode, timeouts, ping interval) have engine setters.
 #[derive(Clone, Debug)]
 pub struct PoolConfig {
-    pub min: u32,
-    pub max: u32,
-    pub increment: u32,
-    pub getmode: u32,
-    pub wait_timeout_ms: u32,
-    pub timeout_secs: u32,
-    pub max_lifetime_session_secs: u32,
-    pub ping_interval_secs: i64,
-    pub ping_timeout_ms: u32,
-    pub creation_cclass: Option<String>,
+    min: u32,
+    max: u32,
+    increment: u32,
+    getmode: u32,
+    wait_timeout_ms: u32,
+    timeout_secs: u32,
+    max_lifetime_session_secs: u32,
+    ping_interval_secs: i64,
+    ping_timeout_ms: u32,
+    creation_cclass: Option<String>,
+}
+
+impl PoolConfig {
+    pub fn new(min: u32, max: u32, increment: u32) -> Self {
+        Self {
+            min,
+            max,
+            increment,
+            getmode: POOL_GETMODE_WAIT,
+            wait_timeout_ms: 0,
+            timeout_secs: 0,
+            max_lifetime_session_secs: 0,
+            ping_interval_secs: 60,
+            ping_timeout_ms: 5_000,
+            creation_cclass: None,
+        }
+    }
+
+    pub fn min(&self) -> u32 {
+        self.min
+    }
+
+    pub fn max(&self) -> u32 {
+        self.max
+    }
+
+    pub fn increment(&self) -> u32 {
+        self.increment
+    }
+
+    pub fn getmode(&self) -> u32 {
+        self.getmode
+    }
+
+    #[must_use]
+    pub fn with_getmode(mut self, getmode: u32) -> Self {
+        self.getmode = getmode;
+        self
+    }
+
+    pub fn wait_timeout_ms(&self) -> u32 {
+        self.wait_timeout_ms
+    }
+
+    #[must_use]
+    pub fn with_wait_timeout_ms(mut self, wait_timeout_ms: u32) -> Self {
+        self.wait_timeout_ms = wait_timeout_ms;
+        self
+    }
+
+    pub fn timeout_secs(&self) -> u32 {
+        self.timeout_secs
+    }
+
+    #[must_use]
+    pub fn with_timeout_secs(mut self, timeout_secs: u32) -> Self {
+        self.timeout_secs = timeout_secs;
+        self
+    }
+
+    pub fn max_lifetime_session_secs(&self) -> u32 {
+        self.max_lifetime_session_secs
+    }
+
+    #[must_use]
+    pub fn with_max_lifetime_session_secs(mut self, max_lifetime_session_secs: u32) -> Self {
+        self.max_lifetime_session_secs = max_lifetime_session_secs;
+        self
+    }
+
+    pub fn ping_interval_secs(&self) -> i64 {
+        self.ping_interval_secs
+    }
+
+    #[must_use]
+    pub fn with_ping_interval_secs(mut self, ping_interval_secs: i64) -> Self {
+        self.ping_interval_secs = ping_interval_secs;
+        self
+    }
+
+    pub fn ping_timeout_ms(&self) -> u32 {
+        self.ping_timeout_ms
+    }
+
+    #[must_use]
+    pub fn with_ping_timeout_ms(mut self, ping_timeout_ms: u32) -> Self {
+        self.ping_timeout_ms = ping_timeout_ms;
+        self
+    }
+
+    pub fn creation_cclass(&self) -> Option<&str> {
+        self.creation_cclass.as_deref()
+    }
+
+    #[must_use]
+    pub fn with_creation_cclass(mut self, creation_cclass: impl Into<String>) -> Self {
+        self.creation_cclass = Some(creation_cclass.into());
+        self
+    }
 }
 
 /// Per-acquire options derived from the acquire-time connect params.
 #[derive(Clone, Debug, Default)]
 pub struct AcquireOptions {
     /// PURITY_NEW was requested: never reuse a previously used connection.
-    pub wants_new: bool,
+    wants_new: bool,
     /// Connection class requested at acquire time.
-    pub cclass: Option<String>,
+    cclass: Option<String>,
+}
+
+impl AcquireOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn wants_new(&self) -> bool {
+        self.wants_new
+    }
+
+    #[must_use]
+    pub fn with_wants_new(mut self, wants_new: bool) -> Self {
+        self.wants_new = wants_new;
+        self
+    }
+
+    pub fn cclass(&self) -> Option<&str> {
+        self.cclass.as_deref()
+    }
+
+    #[must_use]
+    pub fn with_cclass(mut self, cclass: impl Into<String>) -> Self {
+        self.cclass = Some(cclass.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_optional_cclass(mut self, cclass: Option<String>) -> Self {
+        self.cclass = cclass;
+        self
+    }
 }
 
 /// Snapshot of derived pool lifecycle counts.
@@ -2752,18 +2883,11 @@ mod tests {
     }
 
     fn test_config(min: u32, max: u32, increment: u32, getmode: u32) -> PoolConfig {
-        PoolConfig {
-            min,
-            max,
-            increment,
-            getmode,
-            wait_timeout_ms: 1_000,
-            timeout_secs: 0,
-            max_lifetime_session_secs: 0,
-            ping_interval_secs: -1,
-            ping_timeout_ms: 5_000,
-            creation_cclass: None,
-        }
+        PoolConfig::new(min, max, increment)
+            .with_getmode(getmode)
+            .with_wait_timeout_ms(1_000)
+            .with_ping_interval_secs(-1)
+            .with_ping_timeout_ms(5_000)
     }
 
     fn wait_for_open_count<B: PoolBackend>(engine: &PoolEngine<B>, expected: u32) {
@@ -3146,15 +3270,11 @@ mod tests {
     #[test]
     fn cclass_mismatch_uses_dedicated_opening_without_pool_growth_leak() {
         let backend = Arc::new(FakeBackend::new());
-        let mut config = test_config(0, 2, 1, POOL_GETMODE_WAIT);
-        config.creation_cclass = Some("pool".to_string());
+        let config = test_config(0, 2, 1, POOL_GETMODE_WAIT).with_creation_cclass("pool");
         let engine = PoolEngine::start(Arc::clone(&backend), config).unwrap();
 
         let custom = engine
-            .acquire(AcquireOptions {
-                wants_new: false,
-                cclass: Some("custom".to_string()),
-            })
+            .acquire(AcquireOptions::new().with_cclass("custom"))
             .unwrap();
 
         assert_eq!(engine.open_count().unwrap(), 1);
@@ -3177,10 +3297,7 @@ mod tests {
         );
 
         let reused = engine
-            .acquire(AcquireOptions {
-                wants_new: false,
-                cclass: Some("custom".to_string()),
-            })
+            .acquire(AcquireOptions::new().with_cclass("custom"))
             .unwrap();
         assert_eq!(reused, custom);
         engine.return_connection(reused).unwrap();
@@ -3237,10 +3354,7 @@ mod tests {
         engine.return_connection(a).unwrap();
         engine.return_connection(b).unwrap();
         let c = engine
-            .acquire(AcquireOptions {
-                wants_new: true,
-                cclass: None,
-            })
+            .acquire(AcquireOptions::new().with_wants_new(true))
             .unwrap();
         assert_ne!(c, a);
         assert_ne!(c, b);
@@ -3282,8 +3396,7 @@ mod tests {
     #[test]
     fn async_acquire_timedwait_honors_deadline() {
         let backend = Arc::new(FakeBackend::new());
-        let mut config = test_config(1, 1, 1, POOL_GETMODE_TIMEDWAIT);
-        config.wait_timeout_ms = 20;
+        let config = test_config(1, 1, 1, POOL_GETMODE_TIMEDWAIT).with_wait_timeout_ms(20);
         let engine = PoolEngine::start(Arc::clone(&backend), config).unwrap();
         wait_for_open_count(&engine, 1);
         let held = engine.acquire(AcquireOptions::default()).unwrap();

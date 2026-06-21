@@ -116,11 +116,37 @@ type Result<T> = std::result::Result<T, ArrowConversionError>;
 pub struct ArrowFetchOptions {
     /// `fetch_decimals` semantics: NUMBER columns with `0 < precision <= 38`
     /// become `decimal128(precision, scale)` instead of int64/float64.
-    pub fetch_decimals: bool,
+    fetch_decimals: bool,
     /// Caller-requested output schema (`fetch_df_*(requested_schema=...)`).
     /// Must have exactly one field per fetched column; renames the output
     /// columns and coerces values per the reference conversion matrix.
-    pub requested_schema: Option<SchemaRef>,
+    requested_schema: Option<SchemaRef>,
+}
+
+impl ArrowFetchOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn fetch_decimals(&self) -> bool {
+        self.fetch_decimals
+    }
+
+    #[must_use]
+    pub fn with_fetch_decimals(mut self, enabled: bool) -> Self {
+        self.fetch_decimals = enabled;
+        self
+    }
+
+    pub fn requested_schema(&self) -> Option<&SchemaRef> {
+        self.requested_schema.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_requested_schema(mut self, schema: SchemaRef) -> Self {
+        self.requested_schema = Some(schema);
+        self
+    }
 }
 
 /// Oracle VECTOR storage formats (reference `VECTOR_FORMAT_*`).
@@ -2423,10 +2449,7 @@ mod tests {
 
     #[test]
     fn fetch_decimals_maps_constrained_number_to_decimal128() {
-        let options = ArrowFetchOptions {
-            fetch_decimals: true,
-            ..ArrowFetchOptions::default()
-        };
+        let options = ArrowFetchOptions::new().with_fetch_decimals(true);
         let columns = vec![
             column("ID", ORA_TYPE_NUM_NUMBER, 9, 0),
             column("PRICE", ORA_TYPE_NUM_NUMBER, 9, 2),
@@ -2781,10 +2804,7 @@ mod tests {
             Field::new("STR_COL", DataType::Utf8, true),
             Field::new("DAY", DataType::Date32, true),
         ]));
-        let options = ArrowFetchOptions {
-            requested_schema: Some(requested),
-            ..ArrowFetchOptions::default()
-        };
+        let options = ArrowFetchOptions::new().with_requested_schema(requested);
         let columns = vec![
             column("N", ORA_TYPE_NUM_NUMBER, 9, 0),
             column("S", ORA_TYPE_NUM_VARCHAR, 0, 0),
@@ -2810,10 +2830,7 @@ mod tests {
     #[test]
     fn requested_schema_uint_and_truncation_semantics() {
         let requested = Arc::new(Schema::new(vec![Field::new("U", DataType::UInt16, true)]));
-        let options = ArrowFetchOptions {
-            requested_schema: Some(requested),
-            ..ArrowFetchOptions::default()
-        };
+        let options = ArrowFetchOptions::new().with_requested_schema(requested);
         let columns = vec![column("N", ORA_TYPE_NUM_NUMBER, 0, -127)];
         // strtoll semantics: "1.9" truncates to 1
         let rows = vec![vec![number("1.9")], vec![number("65535")]];
@@ -2826,10 +2843,7 @@ mod tests {
     #[test]
     fn requested_schema_out_of_range_integer_errors() {
         let requested = Arc::new(Schema::new(vec![Field::new("I", DataType::Int8, true)]));
-        let options = ArrowFetchOptions {
-            requested_schema: Some(requested),
-            ..ArrowFetchOptions::default()
-        };
+        let options = ArrowFetchOptions::new().with_requested_schema(requested);
         let columns = vec![column("N", ORA_TYPE_NUM_NUMBER, 9, 0)];
         let rows = vec![vec![number("300")]];
         let err = build_record_batch(&columns, &rows, &options).expect_err("must overflow");
@@ -2841,10 +2855,7 @@ mod tests {
     #[test]
     fn requested_schema_length_mismatch_raises_dpy_2069() {
         let requested = Arc::new(Schema::new(vec![Field::new("A", DataType::Int64, true)]));
-        let options = ArrowFetchOptions {
-            requested_schema: Some(requested),
-            ..ArrowFetchOptions::default()
-        };
+        let options = ArrowFetchOptions::new().with_requested_schema(requested);
         let columns = vec![
             column("A", ORA_TYPE_NUM_NUMBER, 9, 0),
             column("B", ORA_TYPE_NUM_NUMBER, 9, 0),
@@ -2857,10 +2868,7 @@ mod tests {
     #[test]
     fn requested_schema_bad_pairing_raises_dpy_3038() {
         let requested = Arc::new(Schema::new(vec![Field::new("S", DataType::Utf8, true)]));
-        let options = ArrowFetchOptions {
-            requested_schema: Some(requested),
-            ..ArrowFetchOptions::default()
-        };
+        let options = ArrowFetchOptions::new().with_requested_schema(requested);
         let columns = vec![column("N", ORA_TYPE_NUM_NUMBER, 9, 0)];
         let err = build_record_batch(&columns, &[], &options).expect_err("bad pairing");
         assert!(err.to_string().starts_with("DPY-3038:"), "{err}");
@@ -2877,10 +2885,7 @@ mod tests {
             DataType::Timestamp(TimeUnit::Nanosecond, None),
             true,
         )]));
-        let options = ArrowFetchOptions {
-            requested_schema: Some(requested),
-            ..ArrowFetchOptions::default()
-        };
+        let options = ArrowFetchOptions::new().with_requested_schema(requested);
         let columns = vec![column("D", ORA_TYPE_NUM_DATE, 0, 0)];
         let rows = vec![vec![datetime(2024, 1, 2, 3, 4, 5, 0)]];
         let batch = build_record_batch(&columns, &rows, &options).expect("batch");

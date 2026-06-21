@@ -547,10 +547,12 @@ impl ThinCursorImpl {
             .schema_impl
             .as_ref()
             .map(|schema_impl| schema_impl.borrow(py).schema());
-        Ok(oracledb::arrow::ArrowFetchOptions {
-            fetch_decimals: self.fetch_decimals,
-            requested_schema,
-        })
+        let mut options =
+            oracledb::arrow::ArrowFetchOptions::new().with_fetch_decimals(self.fetch_decimals);
+        if let Some(schema) = requested_schema {
+            options = options.with_requested_schema(schema);
+        }
+        Ok(options)
     }
 
     /// Replaces `QueryValue::Lob` cells with their full inline value so the
@@ -1079,10 +1081,7 @@ impl ThinCursorImpl {
                     &statement,
                     1,
                     &[],
-                    ExecuteOptions {
-                        parse_only: true,
-                        ..ExecuteOptions::default()
-                    },
+                    ExecuteOptions::default().with_parse_only(true),
                     call_timeout,
                 )
                 .map_err(TaskError::from)
@@ -1340,13 +1339,11 @@ impl ThinCursorImpl {
         if (batcherrors || arraydmlrowcounts) && !statement_is_dml(statement) {
             return Err(raise_oracledb_driver_error("ERR_EXECUTE_MODE_ONLY_FOR_DML"));
         }
-        let exec_options = ExecuteOptions {
-            batcherrors,
-            arraydmlrowcounts,
-            cache_statement: self.cache_statement,
-            suspend_on_success: self.suspend_on_success,
-            ..ExecuteOptions::default()
-        };
+        let exec_options = ExecuteOptions::default()
+            .with_batcherrors(batcherrors)
+            .with_arraydmlrowcounts(arraydmlrowcounts)
+            .with_cache_statement(self.cache_statement)
+            .with_suspend_on_success(self.suspend_on_success);
         let start = usize::try_from(offset).map_err(runtime_error)?;
         let count = usize::try_from(num_execs).map_err(runtime_error)?;
         let end = start
@@ -1590,20 +1587,16 @@ impl ThinCursorImpl {
         // CURRENT at the first row (reference `_create_execute_message`:
         // fetch_orientation = CURRENT, fetch_pos = rowcount + 1)
         let exec_options = if self.scrollable {
-            ExecuteOptions {
-                cache_statement: self.cache_statement,
-                scrollable: true,
-                fetch_orientation: oracledb::protocol::thin::TNS_FETCH_ORIENTATION_CURRENT,
-                fetch_pos: u32::try_from(self.rowcount.max(0) + 1).unwrap_or(u32::MAX),
-                suspend_on_success: self.suspend_on_success,
-                ..ExecuteOptions::default()
-            }
+            ExecuteOptions::default()
+                .with_cache_statement(self.cache_statement)
+                .with_scrollable(true)
+                .with_fetch_orientation(oracledb::protocol::thin::TNS_FETCH_ORIENTATION_CURRENT)
+                .with_fetch_pos(u32::try_from(self.rowcount.max(0) + 1).unwrap_or(u32::MAX))
+                .with_suspend_on_success(self.suspend_on_success)
         } else {
-            ExecuteOptions {
-                cache_statement: self.cache_statement,
-                suspend_on_success: self.suspend_on_success,
-                ..ExecuteOptions::default()
-            }
+            ExecuteOptions::default()
+                .with_cache_statement(self.cache_statement)
+                .with_suspend_on_success(self.suspend_on_success)
         };
         let prior_cursor_id = self.cursor_id;
         let mut result = match cursor.py().detach({

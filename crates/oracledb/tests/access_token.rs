@@ -31,7 +31,7 @@ fn access_token_is_redacted_in_debug() {
         !shown.contains(SECRET),
         "ConnectOptions Debug must not leak the access token"
     );
-    assert!(opts.access_token.is_some());
+    assert!(opts.access_token().is_some());
 }
 
 #[test]

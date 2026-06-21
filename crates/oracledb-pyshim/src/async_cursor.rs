@@ -572,13 +572,11 @@ impl AsyncThinCursorImpl {
         if (batcherrors || arraydmlrowcounts) && !statement_is_dml(&statement) {
             return Err(raise_oracledb_driver_error("ERR_EXECUTE_MODE_ONLY_FOR_DML"));
         }
-        let exec_options = ExecuteOptions {
-            batcherrors,
-            arraydmlrowcounts,
-            cache_statement: self.inner.cache_statement,
-            suspend_on_success: self.inner.suspend_on_success,
-            ..ExecuteOptions::default()
-        };
+        let exec_options = ExecuteOptions::default()
+            .with_batcherrors(batcherrors)
+            .with_arraydmlrowcounts(arraydmlrowcounts)
+            .with_cache_statement(self.inner.cache_statement)
+            .with_suspend_on_success(self.inner.suspend_on_success);
         let start = usize::try_from(offset).map_err(runtime_error)?;
         let count = usize::try_from(num_execs).map_err(runtime_error)?;
         let end = start
@@ -720,20 +718,16 @@ impl AsyncThinCursorImpl {
         // a scrollable cursor primes the open result set with orientation
         // CURRENT at the first row (reference `_create_execute_message`)
         let exec_options = if self.inner.scrollable {
-            ExecuteOptions {
-                cache_statement: self.inner.cache_statement,
-                scrollable: true,
-                fetch_orientation: oracledb::protocol::thin::TNS_FETCH_ORIENTATION_CURRENT,
-                fetch_pos: u32::try_from(self.inner.rowcount.max(0) + 1).unwrap_or(u32::MAX),
-                suspend_on_success: self.inner.suspend_on_success,
-                ..ExecuteOptions::default()
-            }
+            ExecuteOptions::default()
+                .with_cache_statement(self.inner.cache_statement)
+                .with_scrollable(true)
+                .with_fetch_orientation(oracledb::protocol::thin::TNS_FETCH_ORIENTATION_CURRENT)
+                .with_fetch_pos(u32::try_from(self.inner.rowcount.max(0) + 1).unwrap_or(u32::MAX))
+                .with_suspend_on_success(self.inner.suspend_on_success)
         } else {
-            ExecuteOptions {
-                cache_statement: self.inner.cache_statement,
-                suspend_on_success: self.inner.suspend_on_success,
-                ..ExecuteOptions::default()
-            }
+            ExecuteOptions::default()
+                .with_cache_statement(self.inner.cache_statement)
+                .with_suspend_on_success(self.inner.suspend_on_success)
         };
         let prior_cursor_id = self.inner.cursor_id;
         let query = spawn_async_execute_task(

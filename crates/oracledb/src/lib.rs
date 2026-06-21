@@ -1431,6 +1431,34 @@ impl<'a> Query<'a> {
         self.timeout = Some(d);
         self
     }
+
+    pub fn sql(&self) -> &str {
+        self.sql.as_ref()
+    }
+
+    pub fn params(&self) -> &Params<'a> {
+        &self.params
+    }
+
+    pub fn arraysize_value(&self) -> NonZeroU32 {
+        self.arraysize
+    }
+
+    pub fn prefetch_rows(&self) -> u32 {
+        self.prefetch
+    }
+
+    pub fn materialize_lobs(&self) -> bool {
+        self.materialize_lobs
+    }
+
+    pub fn is_scrollable(&self) -> bool {
+        self.scrollable
+    }
+
+    pub fn timeout_duration(&self) -> Option<Duration> {
+        self.timeout
+    }
 }
 
 /// Execute builder for DML, DDL, and PL/SQL operations that use at most one
@@ -1474,13 +1502,29 @@ impl<'a> Execute<'a> {
     }
 
     pub fn parse_only(mut self) -> Self {
-        self.options.parse_only = true;
+        self.options = self.options.with_parse_only(true);
         self
     }
 
     pub fn raw_options(mut self, options: ExecuteOptions) -> Self {
         self.options = options;
         self
+    }
+
+    pub fn sql(&self) -> &str {
+        self.sql.as_ref()
+    }
+
+    pub fn params(&self) -> &Params<'a> {
+        &self.params
+    }
+
+    pub fn timeout_duration(&self) -> Option<Duration> {
+        self.timeout
+    }
+
+    pub fn options(&self) -> ExecuteOptions {
+        self.options
     }
 }
 
@@ -1579,12 +1623,12 @@ impl<'a> Batch<'a> {
     }
 
     pub fn collect_errors(mut self) -> Self {
-        self.options.batcherrors = true;
+        self.options = self.options.with_batcherrors(true);
         self
     }
 
     pub fn row_counts(mut self) -> Self {
-        self.options.arraydmlrowcounts = true;
+        self.options = self.options.with_arraydmlrowcounts(true);
         self
     }
 
@@ -1596,6 +1640,22 @@ impl<'a> Batch<'a> {
     pub fn raw_options(mut self, options: ExecuteOptions) -> Self {
         self.options = options;
         self
+    }
+
+    pub fn sql(&self) -> &str {
+        self.sql.as_ref()
+    }
+
+    pub fn rows(&self) -> &BatchRows<'a> {
+        &self.rows
+    }
+
+    pub fn timeout_duration(&self) -> Option<Duration> {
+        self.timeout
+    }
+
+    pub fn options(&self) -> ExecuteOptions {
+        self.options
     }
 }
 
@@ -1858,6 +1918,22 @@ impl<'a> Registration<'a> {
     pub fn timeout(mut self, d: Duration) -> Self {
         self.timeout = Some(d);
         self
+    }
+
+    pub fn sql(&self) -> &str {
+        self.sql.as_ref()
+    }
+
+    pub fn params(&self) -> &Params<'a> {
+        &self.params
+    }
+
+    pub fn registration_id(&self) -> u64 {
+        self.registration_id
+    }
+
+    pub fn timeout_duration(&self) -> Option<Duration> {
+        self.timeout
     }
 }
 
@@ -2619,63 +2695,63 @@ impl std::fmt::Debug for AccessToken {
 pub struct ConnectOptions {
     /// EasyConnect descriptor, `host:port/service_name` (the port and service
     /// may be omitted to take the listener defaults).
-    pub connect_string: String,
+    connect_string: String,
     /// Database user to authenticate as.
-    pub user: String,
+    user: String,
     /// Password for `user`.
-    pub password: String,
+    password: String,
     /// Session identity reported to the database (`v$session`).
-    pub identity: ClientIdentity,
+    identity: ClientIdentity,
     /// Application-context triples `(namespace, key, value)` set on the
     /// session at logon (reference `connection.appcontext`).
-    pub app_context: Vec<(String, String, String)>,
+    app_context: Vec<(String, String, String)>,
     /// Session Data Unit (negotiated packet size) in bytes.
-    pub sdu: u16,
+    sdu: u16,
     /// Proxy user for `[proxy_user]` style connections, if any.
-    pub proxy_user: Option<String>,
+    proxy_user: Option<String>,
     /// When set, `(SERVER=emon)` is injected into the connect descriptor's
     /// `CONNECT_DATA`. This routes the connection to the database EMON process
     /// used to push CQN notifications (reference `subscr.pyx` rewrites
     /// `description.server_type = "emon"` for the background connection).
-    pub server_type_emon: bool,
+    server_type_emon: bool,
     /// TCPS wallet directory (`MY_WALLET_DIRECTORY` / `wallet_location`). The
     /// directory should contain `ewallet.pem` (or, with the `experimental`
     /// feature, `cwallet.sso`). When `None`, `TNS_ADMIN` is consulted; the
     /// special value `SYSTEM` (case-insensitive) forces the system trust store.
     /// Only consulted for TCPS connections.
-    pub wallet_location: Option<String>,
+    wallet_location: Option<String>,
     /// Password for an encrypted wallet (mTLS key). `None` for auto-login or
     /// verify-only wallets.
-    pub wallet_password: Option<String>,
+    wallet_password: Option<String>,
     /// Oracle edition for Edition-Based Redefinition (`AUTH_ORA_EDITION`),
     /// applied during authentication before any user SQL. `None` uses the
     /// database default edition.
-    pub edition: Option<String>,
+    edition: Option<String>,
     /// Run the Oracle server-DN match after the TLS handshake
     /// (`ssl_server_dn_match`, reference default `true`).
-    pub ssl_server_dn_match: bool,
+    ssl_server_dn_match: bool,
     /// Explicit expected server-certificate distinguished name
     /// (`ssl_server_cert_dn`). When set, the server's subject DN must equal
     /// this exactly; when `None`, the host name is matched against the
     /// certificate's SAN DNS names and common names.
-    pub ssl_server_cert_dn: Option<String>,
+    ssl_server_cert_dn: Option<String>,
     /// Send the Oracle TCPS SNI string (`use_sni`, reference default `false`).
     /// See [`tls::TlsParams::use_sni`] for the rustls-name-validity caveat.
-    pub use_sni: bool,
+    use_sni: bool,
     /// Authenticate with a database access token (OCI IAM / OAuth2) instead of
     /// `password`. When set, the token is sent as `AUTH_TOKEN` and no password
     /// verifier is exchanged. Token auth requires a TLS/TCPS transport; see
     /// [`ConnectOptions::with_access_token`]. The token is redacted from `Debug`.
-    pub access_token: Option<AccessToken>,
+    access_token: Option<AccessToken>,
     /// Maximum number of open statements kept in this connection's statement
     /// cache. Defaults to 20 (the reference default). `0` disables caching
     /// entirely (every statement's cursor is closed after use, never retained),
     /// matching python-oracledb's `stmtcachesize=0`. The cache holds at most this
     /// many entries, each a small `(sql, cursor_id)` pair, so it is bounded by
     /// construction. Set with [`ConnectOptions::with_statement_cache_size`].
-    pub statement_cache_size: usize,
+    statement_cache_size: usize,
     /// Resource policy for thin-protocol decoding and packet reassembly.
-    pub protocol_limits: ProtocolLimits,
+    protocol_limits: ProtocolLimits,
 }
 
 impl ConnectOptions {
@@ -2822,6 +2898,74 @@ impl ConnectOptions {
         self.sdu = u16::try_from(clamped).unwrap_or(u16::MAX);
         self
     }
+
+    pub fn connect_string(&self) -> &str {
+        &self.connect_string
+    }
+
+    pub fn user(&self) -> &str {
+        &self.user
+    }
+
+    pub fn password(&self) -> &str {
+        &self.password
+    }
+
+    pub fn identity(&self) -> &ClientIdentity {
+        &self.identity
+    }
+
+    pub fn app_context(&self) -> &[(String, String, String)] {
+        &self.app_context
+    }
+
+    pub fn sdu(&self) -> u16 {
+        self.sdu
+    }
+
+    pub fn proxy_user(&self) -> Option<&str> {
+        self.proxy_user.as_deref()
+    }
+
+    pub fn server_type_emon(&self) -> bool {
+        self.server_type_emon
+    }
+
+    pub fn wallet_location(&self) -> Option<&str> {
+        self.wallet_location.as_deref()
+    }
+
+    pub fn wallet_password(&self) -> Option<&str> {
+        self.wallet_password.as_deref()
+    }
+
+    pub fn edition(&self) -> Option<&str> {
+        self.edition.as_deref()
+    }
+
+    pub fn ssl_server_dn_match(&self) -> bool {
+        self.ssl_server_dn_match
+    }
+
+    pub fn ssl_server_cert_dn(&self) -> Option<&str> {
+        self.ssl_server_cert_dn.as_deref()
+    }
+
+    pub fn use_sni(&self) -> bool {
+        self.use_sni
+    }
+
+    pub fn access_token(&self) -> Option<&AccessToken> {
+        self.access_token.as_ref()
+    }
+
+    pub fn statement_cache_size(&self) -> usize {
+        self.statement_cache_size
+    }
+
+    pub fn protocol_limits(&self) -> ProtocolLimits {
+        self.protocol_limits
+    }
 }
 
 /// A live asynchronous connection to an Oracle Database session.
@@ -2967,12 +3111,56 @@ const STATEMENT_CACHE_SIZE: usize = 20;
 /// One operation in a pipelined batch (`Connection::run_pipeline`).
 #[derive(Clone, Debug)]
 pub enum PipelineRequest {
+    #[non_exhaustive]
     Execute {
         sql: String,
         bind_rows: Vec<Vec<BindValue>>,
         prefetch_rows: u32,
     },
     Commit,
+}
+
+impl PipelineRequest {
+    pub fn execute(
+        sql: impl Into<String>,
+        bind_rows: Vec<Vec<BindValue>>,
+        prefetch_rows: u32,
+    ) -> Self {
+        Self::Execute {
+            sql: sql.into(),
+            bind_rows,
+            prefetch_rows,
+        }
+    }
+
+    pub fn commit() -> Self {
+        Self::Commit
+    }
+
+    pub fn sql(&self) -> Option<&str> {
+        match self {
+            Self::Execute { sql, .. } => Some(sql),
+            Self::Commit => None,
+        }
+    }
+
+    pub fn bind_rows(&self) -> Option<&[Vec<BindValue>]> {
+        match self {
+            Self::Execute { bind_rows, .. } => Some(bind_rows),
+            Self::Commit => None,
+        }
+    }
+
+    pub fn prefetch_rows(&self) -> Option<u32> {
+        match self {
+            Self::Execute { prefetch_rows, .. } => Some(*prefetch_rows),
+            Self::Commit => None,
+        }
+    }
+
+    pub fn is_commit(&self) -> bool {
+        matches!(self, Self::Commit)
+    }
 }
 
 #[derive(Debug)]
@@ -4376,10 +4564,7 @@ impl Connection {
         } else {
             vec![binds]
         };
-        let exec_options = ExecuteOptions {
-            scrollable,
-            ..ExecuteOptions::default()
-        };
+        let exec_options = ExecuteOptions::default().with_scrollable(scrollable);
         let deadline = QueryDeadline::new(cx, timeout);
         let mut result = match deadline
             .run(self.execute_query_with_bind_rows_and_options_core(
@@ -4508,7 +4693,7 @@ impl Connection {
         } = batch;
         rows.validate_rectangular()?;
         if rows.is_empty() {
-            return Ok(BatchOutcome::empty(options.arraydmlrowcounts));
+            return Ok(BatchOutcome::empty(options.arraydmlrowcounts()));
         }
         let sql_owned = sql.into_owned();
         let deadline = QueryDeadline::new(cx, timeout);
@@ -4551,10 +4736,7 @@ impl Connection {
         } else {
             vec![binds]
         };
-        let exec_options = ExecuteOptions {
-            registration_id,
-            ..ExecuteOptions::default()
-        };
+        let exec_options = ExecuteOptions::default().with_registration_id(registration_id);
         let deadline = QueryDeadline::new(cx, timeout);
         let result = match deadline
             .run(self.execute_query_with_bind_rows_and_options_core(
@@ -4760,7 +4942,7 @@ impl Connection {
         );
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
-        if !exec_options.scroll_operation {
+        if !exec_options.scroll_operation() {
             crate::sql_convert::validate_bind_rows_shape(sql, bind_rows)?;
         }
         // If a prior cancellable round trip was dropped mid-read, break + drain
@@ -4770,29 +4952,29 @@ impl Connection {
         // a `suspend_on_success` execute folds a post-detach into the pending
         // sessionless piggyback; validate (DPY-3034/3036) before any wire work
         // (reference execute.pyx `_handle_sessionless_suspend`)
-        if exec_options.suspend_on_success {
+        if exec_options.suspend_on_success() {
             self.prepare_sessionless_suspend_on_success()?;
         }
-        let use_cache = exec_options.cache_statement && !exec_options.parse_only;
+        let use_cache = exec_options.cache_statement() && !exec_options.parse_only();
         // Whether the cursor produced by this execute may be returned to the
         // statement cache (reference `Statement._return_to_cache`). A statement
         // that had to be copied because the cached cursor was in use is NOT
         // returnable: returning it would evict the still-live original from the
         // cache and reset its fetch position (ORA-01002).
         let mut is_copy = false;
-        if exec_options.cursor_id == 0 && !exec_options.parse_only {
+        if exec_options.cursor_id() == 0 && !exec_options.parse_only() {
             if use_cache {
                 if self.statement_is_in_use(sql) {
                     // cached cursor busy: this execute parses a fresh (copy)
                     // cursor that must not be returned to the cache
                     is_copy = true;
                 } else if let Some(cursor_id) = self.statement_cache_get(sql) {
-                    exec_options.cursor_id = cursor_id;
+                    exec_options = exec_options.with_cursor_id(cursor_id);
                 }
             } else if let Some(cursor_id) = self.statement_cache_take(sql) {
                 // reference pops the statement from the cache even when
                 // cache_statement=False, reusing its open cursor once
-                exec_options.cursor_id = cursor_id;
+                exec_options = exec_options.with_cursor_id(cursor_id);
             }
         }
         // Re-executing an open cursor whose columns require a client-side define
@@ -4801,12 +4983,12 @@ impl Connection {
         // 1159-1164 and persisted on the cached statement). Otherwise the
         // re-execute prefetches the row inline and exhausts the cursor before
         // the define-fetch runs, raising ORA-01002 on the next fetch.
-        if exec_options.cursor_id != 0 && statement_is_query(sql) {
-            if let Some(columns) = self.cursor_columns.get(&exec_options.cursor_id) {
+        if exec_options.cursor_id() != 0 && statement_is_query(sql) {
+            if let Some(columns) = self.cursor_columns.get(&exec_options.cursor_id()) {
                 if columns.iter().any(|column| {
                     column.ora_type_num == oracledb_protocol::thin::ORA_TYPE_NUM_VECTOR
                 }) {
-                    exec_options.no_prefetch = true;
+                    exec_options = exec_options.with_no_prefetch(true);
                 }
             }
         }
@@ -4862,9 +5044,9 @@ impl Connection {
         // next operation's break + drain.
         let response = self.read_flushing_out_binds_cancellable(cx).await?;
         trace_query_bytes("EXECUTE query response", &response);
-        let known_columns = if exec_options.cursor_id != 0 {
+        let known_columns = if exec_options.cursor_id() != 0 {
             self.cursor_columns
-                .get(&exec_options.cursor_id)
+                .get(&exec_options.cursor_id())
                 .cloned()
                 .unwrap_or_default()
         } else {
@@ -4906,7 +5088,7 @@ impl Connection {
                 // by `release_cursor` when the owning cursor closes or
                 // re-prepares (reference `Statement._in_use`). Only query
                 // cursors hold a fetch position vulnerable to ORA-01002.
-                if result.cursor_id != 0 && statement_is_query(sql) && !exec_options.parse_only {
+                if result.cursor_id != 0 && statement_is_query(sql) && !exec_options.parse_only() {
                     self.in_use_cursors.insert(result.cursor_id);
                 }
                 // A cursor passed as an IN REF CURSOR bind may be closed
@@ -4918,7 +5100,7 @@ impl Connection {
                 self.invalidate_bound_ref_cursors(bind_rows);
                 self.remember_cursor_columns(&result);
                 obs_record!(_span, db.rows_fetched = result.rows.len() as u64);
-                if exec_options.parse_only {
+                if exec_options.parse_only() {
                     return Ok(result);
                 }
                 self.apply_refetch_metadata(cx, sql, result, prefetch_rows.max(2))
@@ -4928,7 +5110,7 @@ impl Connection {
                 // drop the cached cursor so the next execute re-parses
                 // (reference base.pyx:1186-1189 clear_cursor on errors)
                 if use_cache {
-                    self.statement_cache_invalidate(sql, exec_options.cursor_id);
+                    self.statement_cache_invalidate(sql, exec_options.cursor_id());
                 }
                 Err(err)
             }
@@ -5631,15 +5813,13 @@ impl Connection {
     ) -> Result<QueryResult> {
         cx.checkpoint()
             .map_err(|err| Error::Runtime(err.to_string()))?;
-        let exec_options = ExecuteOptions {
-            cursor_id,
-            scrollable: true,
-            scroll_operation: true,
-            fetch_orientation,
-            fetch_pos,
-            cache_statement: false,
-            ..ExecuteOptions::default()
-        };
+        let exec_options = ExecuteOptions::default()
+            .with_cursor_id(cursor_id)
+            .with_scrollable(true)
+            .with_scroll_operation(true)
+            .with_fetch_orientation(fetch_orientation)
+            .with_fetch_pos(fetch_pos)
+            .with_cache_statement(false);
         let piggyback = self.take_close_cursors_piggyback();
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let mut payload = build_execute_payload_with_bind_rows_and_options_with_seq(
@@ -9711,21 +9891,20 @@ mod tests {
 
     #[test]
     fn execute_raw_options_preserves_full_escape_hatch() {
-        let options = ExecuteOptions {
-            batcherrors: true,
-            arraydmlrowcounts: true,
-            parse_only: true,
-            token_num: 7,
-            cursor_id: 11,
-            cache_statement: false,
-            scrollable: true,
-            fetch_orientation: TNS_FETCH_ORIENTATION_ABSOLUTE,
-            fetch_pos: 3,
-            scroll_operation: true,
-            suspend_on_success: true,
-            no_prefetch: true,
-            registration_id: 13,
-        };
+        let options = ExecuteOptions::default()
+            .with_batcherrors(true)
+            .with_arraydmlrowcounts(true)
+            .with_parse_only(true)
+            .with_token_num(7)
+            .with_cursor_id(11)
+            .with_cache_statement(false)
+            .with_scrollable(true)
+            .with_fetch_orientation(TNS_FETCH_ORIENTATION_ABSOLUTE)
+            .with_fetch_pos(3)
+            .with_scroll_operation(true)
+            .with_suspend_on_success(true)
+            .with_no_prefetch(true)
+            .with_registration_id(13);
 
         let execute = Execute::new("begin null; end;").raw_options(options);
 
@@ -9784,29 +9963,28 @@ mod tests {
             .timeout(Duration::from_secs(3));
 
         assert!(matches!(batch.rows, BatchRows::Borrowed(_)));
-        assert!(batch.options.batcherrors);
-        assert!(batch.options.arraydmlrowcounts);
+        assert!(batch.options.batcherrors());
+        assert!(batch.options.arraydmlrowcounts());
         assert_eq!(batch.timeout, Some(Duration::from_secs(3)));
     }
 
     #[test]
     fn batch_raw_options_preserves_escape_hatch() {
         let rows = vec![vec![BindValue::Number("1".to_string())]];
-        let options = ExecuteOptions {
-            batcherrors: true,
-            arraydmlrowcounts: true,
-            parse_only: true,
-            token_num: 9,
-            cursor_id: 17,
-            cache_statement: false,
-            scrollable: true,
-            fetch_orientation: TNS_FETCH_ORIENTATION_ABSOLUTE,
-            fetch_pos: 4,
-            scroll_operation: true,
-            suspend_on_success: true,
-            no_prefetch: true,
-            registration_id: 21,
-        };
+        let options = ExecuteOptions::default()
+            .with_batcherrors(true)
+            .with_arraydmlrowcounts(true)
+            .with_parse_only(true)
+            .with_token_num(9)
+            .with_cursor_id(17)
+            .with_cache_statement(false)
+            .with_scrollable(true)
+            .with_fetch_orientation(TNS_FETCH_ORIENTATION_ABSOLUTE)
+            .with_fetch_pos(4)
+            .with_scroll_operation(true)
+            .with_suspend_on_success(true)
+            .with_no_prefetch(true)
+            .with_registration_id(21);
 
         let batch = Batch::new("begin null; end;", rows).raw_options(options);
 

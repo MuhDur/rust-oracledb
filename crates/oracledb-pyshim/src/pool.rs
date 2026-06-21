@@ -257,10 +257,9 @@ fn extract_acquire_options(params_impl: &Bound<'_, PyAny>) -> PyResult<AcquireOp
             }
         }
     }
-    Ok(AcquireOptions {
-        wants_new: purity == PURITY_NEW,
-        cclass,
-    })
+    Ok(AcquireOptions::new()
+        .with_wants_new(purity == PURITY_NEW)
+        .with_optional_cclass(cclass))
 }
 
 type PoolConnRefs = (
@@ -317,18 +316,13 @@ impl ShimPool {
             is_async,
             registry: Arc::clone(&registry),
         };
-        let config = PoolConfig {
-            min,
-            max,
-            increment,
-            getmode,
-            wait_timeout_ms: wait_timeout,
-            timeout_secs: timeout,
-            max_lifetime_session_secs: max_lifetime_session,
-            ping_interval_secs: ping_interval,
-            ping_timeout_ms: ping_timeout,
-            creation_cclass: None,
-        };
+        let config = PoolConfig::new(min, max, increment)
+            .with_getmode(getmode)
+            .with_wait_timeout_ms(wait_timeout)
+            .with_timeout_secs(timeout)
+            .with_max_lifetime_session_secs(max_lifetime_session)
+            .with_ping_interval_secs(ping_interval)
+            .with_ping_timeout_ms(ping_timeout);
         let engine = Pool::start(backend, config)
             .map_err(pool_error_to_pyerr)?
             .blocking();

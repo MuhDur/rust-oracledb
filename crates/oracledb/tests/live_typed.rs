@@ -317,10 +317,8 @@ fn async_execute_family_surfaces_outcome() {
         let parsed = conn
             .execute_with(
                 &cx,
-                Execute::new("select 1 from dual").raw_options(ExecuteOptions {
-                    parse_only: true,
-                    ..ExecuteOptions::default()
-                }),
+                Execute::new("select 1 from dual")
+                    .raw_options(ExecuteOptions::default().with_parse_only(true)),
             )
             .await
             .expect("parse-only via raw options");

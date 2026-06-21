@@ -185,10 +185,7 @@ fn captured_fetch_decimals_response_builds_decimal128_columns() {
     assert_eq!(result.columns.len(), 3);
     assert_eq!(result.rows.len(), 3);
 
-    let options = ArrowFetchOptions {
-        fetch_decimals: true,
-        ..ArrowFetchOptions::default()
-    };
+    let options = ArrowFetchOptions::new().with_fetch_decimals(true);
     let batch = build_record_batch(&result.columns, &result.rows, &options)
         .expect("captured rows should convert to arrow");
     // schema recorded in fetch_df_session.meta.txt (fetch_decimals=True)

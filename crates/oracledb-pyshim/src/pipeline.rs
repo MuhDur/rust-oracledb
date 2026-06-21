@@ -541,11 +541,7 @@ pub(crate) fn build_native_plan(
                 } else {
                     vec![inner.bind_values.clone()]
                 };
-                PipelineRequest::Execute {
-                    sql,
-                    bind_rows,
-                    prefetch_rows: inner.prefetchrows.max(1),
-                }
+                PipelineRequest::execute(sql, bind_rows, inner.prefetchrows.max(1))
             }
         };
         requests.push(request);

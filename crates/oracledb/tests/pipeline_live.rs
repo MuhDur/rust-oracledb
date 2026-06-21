@@ -50,25 +50,25 @@ fn pipeline_round_trips_against_local_container() {
 
     // abort-on-error batch: insert, bound insert, commit, select
     let requests = [
-        PipelineRequest::Execute {
-            sql: "insert into pipe_live_rust values (1, 'one')".to_string(),
-            bind_rows: Vec::new(),
-            prefetch_rows: 1,
-        },
-        PipelineRequest::Execute {
-            sql: "insert into pipe_live_rust values (:1, :2)".to_string(),
-            bind_rows: vec![vec![
+        PipelineRequest::execute(
+            "insert into pipe_live_rust values (1, 'one')",
+            Vec::new(),
+            1,
+        ),
+        PipelineRequest::execute(
+            "insert into pipe_live_rust values (:1, :2)",
+            vec![vec![
                 BindValue::Number("2".to_string()),
                 BindValue::Text("two".to_string()),
             ]],
-            prefetch_rows: 1,
-        },
+            1,
+        ),
         PipelineRequest::Commit,
-        PipelineRequest::Execute {
-            sql: "select id, val from pipe_live_rust order by id".to_string(),
-            bind_rows: Vec::new(),
-            prefetch_rows: 100,
-        },
+        PipelineRequest::execute(
+            "select id, val from pipe_live_rust order by id",
+            Vec::new(),
+            100,
+        ),
     ];
     let responses =
         BlockingConnection::run_pipeline(&mut conn, &requests, false).expect("pipeline runs");
@@ -112,21 +112,17 @@ fn pipeline_round_trips_against_local_container() {
     // continue-on-error batch: a mid-pipeline server error (missing table)
     // must not wedge the connection; later operations still get answers
     let requests = [
-        PipelineRequest::Execute {
-            sql: "insert into pipe_live_rust values (3, 'three')".to_string(),
-            bind_rows: Vec::new(),
-            prefetch_rows: 1,
-        },
-        PipelineRequest::Execute {
-            sql: "insert into pipe_live_rust_missing values (1)".to_string(),
-            bind_rows: Vec::new(),
-            prefetch_rows: 1,
-        },
-        PipelineRequest::Execute {
-            sql: "select count(*) from pipe_live_rust".to_string(),
-            bind_rows: Vec::new(),
-            prefetch_rows: 2,
-        },
+        PipelineRequest::execute(
+            "insert into pipe_live_rust values (3, 'three')",
+            Vec::new(),
+            1,
+        ),
+        PipelineRequest::execute(
+            "insert into pipe_live_rust_missing values (1)",
+            Vec::new(),
+            1,
+        ),
+        PipelineRequest::execute("select count(*) from pipe_live_rust", Vec::new(), 2),
     ];
     let responses = BlockingConnection::run_pipeline(&mut conn, &requests, true)
         .expect("continue-on-error pipeline runs");
@@ -181,25 +177,21 @@ fn pipeline_decoded_matches_raw_parse() {
     }
 
     let requests = [
-        PipelineRequest::Execute {
-            sql: "insert into pipe_dec_rust values (1, 'one')".to_string(),
-            bind_rows: Vec::new(),
-            prefetch_rows: 1,
-        },
-        PipelineRequest::Execute {
-            sql: "insert into pipe_dec_rust values (:1, :2)".to_string(),
-            bind_rows: vec![vec![
+        PipelineRequest::execute("insert into pipe_dec_rust values (1, 'one')", Vec::new(), 1),
+        PipelineRequest::execute(
+            "insert into pipe_dec_rust values (:1, :2)",
+            vec![vec![
                 BindValue::Number("2".to_string()),
                 BindValue::Text("two".to_string()),
             ]],
-            prefetch_rows: 1,
-        },
+            1,
+        ),
         PipelineRequest::Commit,
-        PipelineRequest::Execute {
-            sql: "select id, val from pipe_dec_rust order by id".to_string(),
-            bind_rows: Vec::new(),
-            prefetch_rows: 100,
-        },
+        PipelineRequest::execute(
+            "select id, val from pipe_dec_rust order by id",
+            Vec::new(),
+            100,
+        ),
     ];
 
     // Reference: raw payloads parsed by hand with each op's binds.
