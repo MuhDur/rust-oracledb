@@ -181,12 +181,15 @@ jobs:
 
       - name: Install cargo-semver-checks
         if: ${{ inputs.profile != 'canary' }}
-        continue-on-error: true
         run: cargo install cargo-semver-checks --version "$CARGO_SEMVER_CHECKS_VERSION" --locked
 
+      # BLOCKING since 0.3.0 (road-to-1.0 W2-T1.5): the 0.3.0 public surface is
+      # the published SemVer baseline. A breaking change without an appropriate
+      # version bump now fails CI. (0.x minor bumps may still break — e.g. the
+      # pre-1.0 removal of the 0.3.0-deprecated methods — which semver-checks
+      # permits under a 0.x minor bump.)
       - name: SemVer advisory checks
         if: ${{ inputs.profile != 'canary' }}
-        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
