@@ -33,6 +33,7 @@ pub const PURITY_SELF: u32 = 2;
 /// Error surface of the pool engine. The embedder maps these onto the
 /// corresponding python-oracledb driver errors.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum PoolError {
     /// Pool is closed (DPY-1002 / ERR_POOL_NOT_OPEN).
     Closed,

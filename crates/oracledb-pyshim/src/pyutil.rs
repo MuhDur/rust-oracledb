@@ -190,6 +190,10 @@ pub(crate) fn query_value_to_string(value: &Option<QueryValue>) -> Option<String
         Some(QueryValue::Object(_)) => None,
         Some(QueryValue::Lob(_)) => None,
         Some(QueryValue::Json(_)) => None,
+        // `QueryValue` is `#[non_exhaustive]`: a future variant has no canonical
+        // string form here until one is added, consistent with the other
+        // non-stringifiable variants above.
+        Some(_) => None,
         None => None,
     }
 }

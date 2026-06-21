@@ -6,6 +6,7 @@ use crate::Error;
 /// database. Driver/server errors are surfaced through the wrapped
 /// [`crate::Error`] in the `Driver` variant.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SodaError {
     /// The collection metadata JSON could not be parsed into a usable shape.
     InvalidMetadata(String),

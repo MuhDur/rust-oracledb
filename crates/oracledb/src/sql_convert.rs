@@ -44,6 +44,7 @@ use oracledb_protocol::thin::{BindValue, ColumnMetadata, QueryResult, QueryValue
 /// `NULL`, the Oracle type does not map to the requested Rust type, or the
 /// value was the right type but out of the Rust type's range / unparseable.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum ConversionError {
     /// The cell was SQL `NULL` but the requested type is not nullable. Convert
     /// into `Option<T>` to accept nulls.
@@ -173,6 +174,9 @@ fn value_kind(value: &QueryValue) -> &'static str {
         QueryValue::Vector(_) => "VECTOR",
         QueryValue::Json(_) => "JSON",
         QueryValue::Array(_) => "collection",
+        // `QueryValue` is `#[non_exhaustive]`: a future Oracle type still yields a
+        // sensible (if generic) description for the `TypeMismatch` message.
+        _ => "Oracle value",
     }
 }
 

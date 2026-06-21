@@ -467,7 +467,9 @@ fn run_emon_task(
                 }
             }
             Ok(oracledb::NotificationOutcome::TimedOut) => {}
-            Ok(oracledb::NotificationOutcome::Closed) | Err(_) => break,
+            // `NotificationOutcome` is `#[non_exhaustive]`: `Closed`, any
+            // future terminal outcome, and a receive error all stop the loop.
+            Ok(oracledb::NotificationOutcome::Closed) | Ok(_) | Err(_) => break,
         }
     }
     let _ = BlockingConnection::close(connection);

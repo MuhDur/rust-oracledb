@@ -326,6 +326,7 @@ pub struct LobValue {
 // below for the enforced upper bound. (Perf pre-req for borrowed-fetch and
 // decode-offload work.)
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum QueryValue {
     Text(String),
     /// Character data that could not be decoded as valid text; the raw bytes
@@ -484,6 +485,32 @@ impl QueryValue {
             _ => None,
         }
     }
+
+    /// A short, stable name for this value's variant (e.g. `"Text"`, `"Number"`).
+    /// Lets callers identify a fetched cell's shape for logging / diagnostics
+    /// without an exhaustive `match` that would break the moment a variant is
+    /// added. The `match` lives inside the defining crate, so it stays the single
+    /// exhaustiveness tripwire that flags a new variant at compile time.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            QueryValue::Text(_) => "Text",
+            QueryValue::TextRaw { .. } => "TextRaw",
+            QueryValue::Raw(_) => "Raw",
+            QueryValue::Rowid(_) => "Rowid",
+            QueryValue::BinaryDouble(_) => "BinaryDouble",
+            QueryValue::IntervalDS { .. } => "IntervalDS",
+            QueryValue::IntervalYM { .. } => "IntervalYM",
+            QueryValue::Number(_) => "Number",
+            QueryValue::Boolean(_) => "Boolean",
+            QueryValue::Cursor(_) => "Cursor",
+            QueryValue::DateTime { .. } => "DateTime",
+            QueryValue::Object(_) => "Object",
+            QueryValue::Lob(_) => "Lob",
+            QueryValue::Vector(_) => "Vector",
+            QueryValue::Json(_) => "Json",
+            QueryValue::Array(_) => "Array",
+        }
+    }
 }
 
 /// A borrowed, zero-copy mirror of the hot scalar [`QueryValue`] variants whose
@@ -517,6 +544,7 @@ impl QueryValue {
 /// `QueryValueRef` is a flat, cache-friendly slice. Convert to the owned form
 /// with [`QueryValueRef::to_owned_value`].
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum QueryValueRef<'buf> {
     /// Decoded text borrowing the wire buffer (single-chunk `VARCHAR2` / `CHAR`
     /// / `LONG` that decoded as valid UTF-8).
@@ -641,6 +669,7 @@ impl QueryValueRef<'_> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum BindValue {
     Null,
     TypedNull {
@@ -731,6 +760,108 @@ pub enum BindValue {
     Cursor {
         cursor_id: u32,
     },
+}
+
+impl BindValue {
+    /// A short, stable name for this value's variant (e.g. `"Text"`, `"Number"`).
+    /// Lets callers identify a bind's shape for logging / diagnostics without an
+    /// exhaustive `match` that would break the moment a variant is added. The
+    /// `match` lives inside the defining crate, so it remains the single
+    /// exhaustiveness tripwire that flags a new variant at compile time.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            BindValue::Null => "Null",
+            BindValue::TypedNull { .. } => "TypedNull",
+            BindValue::Output { .. } => "Output",
+            BindValue::ReturnOutput { .. } => "ReturnOutput",
+            BindValue::ObjectOutput { .. } => "ObjectOutput",
+            BindValue::ObjectInput { .. } => "ObjectInput",
+            BindValue::Text(_) => "Text",
+            BindValue::Raw(_) => "Raw",
+            BindValue::Lob { .. } => "Lob",
+            BindValue::Number(_) => "Number",
+            BindValue::BinaryInteger(_) => "BinaryInteger",
+            BindValue::BinaryDouble(_) => "BinaryDouble",
+            BindValue::BinaryFloat(_) => "BinaryFloat",
+            BindValue::Boolean(_) => "Boolean",
+            BindValue::IntervalDS { .. } => "IntervalDS",
+            BindValue::IntervalYM { .. } => "IntervalYM",
+            BindValue::DateTime { .. } => "DateTime",
+            BindValue::Timestamp { .. } => "Timestamp",
+            BindValue::Array { .. } => "Array",
+            BindValue::Vector(_) => "Vector",
+            BindValue::Json(_) => "Json",
+            BindValue::Cursor { .. } => "Cursor",
+        }
+    }
+
+    /// Whether this bind is a plain SQL `NULL` ([`BindValue::Null`]). The typed
+    /// `NULL` placeholder ([`BindValue::TypedNull`]) is *not* considered null by
+    /// this accessor — it carries a concrete Oracle type for the server.
+    pub fn is_null(&self) -> bool {
+        matches!(self, BindValue::Null)
+    }
+
+    /// Borrow the string of a [`BindValue::Text`] bind, otherwise `None`.
+    /// Convenience accessor so callers can read text binds without matching the
+    /// full enum.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            BindValue::Text(text) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Borrow the bytes of a [`BindValue::Raw`] bind, otherwise `None`.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            BindValue::Raw(bytes) => Some(bytes.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// Return the boolean of a [`BindValue::Boolean`] bind, otherwise `None`.
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            BindValue::Boolean(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// Borrow the canonical decimal text of a [`BindValue::Number`] or
+    /// [`BindValue::BinaryInteger`] bind (both carry their value as decimal
+    /// text), otherwise `None`.
+    pub fn as_number_text(&self) -> Option<&str> {
+        match self {
+            BindValue::Number(text) | BindValue::BinaryInteger(text) => Some(text.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Interpret this bind as an `f64`. Works for [`BindValue::BinaryDouble`] /
+    /// [`BindValue::BinaryFloat`] (carried as `f64`), and for the decimal-text
+    /// [`BindValue::Number`] / [`BindValue::BinaryInteger`] binds when the text
+    /// parses. Returns `None` for any other variant. Models the reference shim's
+    /// own numeric read of a bound vector element (convert.rs).
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            BindValue::BinaryDouble(value) | BindValue::BinaryFloat(value) => Some(*value),
+            BindValue::Number(text) | BindValue::BinaryInteger(text) => text.parse::<f64>().ok(),
+            _ => None,
+        }
+    }
+
+    /// Interpret this bind as an `i64`. Works for the decimal-text
+    /// [`BindValue::Number`] / [`BindValue::BinaryInteger`] binds when the text
+    /// parses as an integer, and for [`BindValue::Boolean`] (`true` -> 1,
+    /// `false` -> 0). Returns `None` otherwise.
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            BindValue::Number(text) | BindValue::BinaryInteger(text) => text.parse::<i64>().ok(),
+            BindValue::Boolean(value) => Some(i64::from(*value)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

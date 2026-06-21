@@ -1,4 +1,5 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SqlError {
     #[error("missing ending single quote")]
     MissingEndingSingleQuote,

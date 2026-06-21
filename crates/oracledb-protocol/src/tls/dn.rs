@@ -19,6 +19,7 @@
 /// reference's two distinct errors (ERR_INVALID_SERVER_CERT_DN vs
 /// ERR_INVALID_SERVER_NAME).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DnMatchError {
     /// `ssl_server_cert_dn` was supplied but did not equal the server's
     /// subject DN (reference ERR_INVALID_SERVER_CERT_DN).

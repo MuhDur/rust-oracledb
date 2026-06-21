@@ -28,6 +28,7 @@ pub const SSO_WALLET_FILE_NAME: &str = "cwallet.sso";
 
 /// Errors raised while resolving or reading a wallet.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum WalletError {
     /// The wallet directory did not contain the expected file.
     #[error("wallet file is missing: {0}")]

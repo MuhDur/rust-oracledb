@@ -224,6 +224,9 @@ fn pool_error_to_pyerr(err: PoolError) -> PyErr {
         PoolError::Backend(message) => runtime_error(message),
         PoolError::Cancelled(message) => PyRuntimeError::new_err(message),
         PoolError::Internal(message) => PyRuntimeError::new_err(message),
+        // `PoolError` is `#[non_exhaustive]`: a future pool failure with no
+        // dedicated reference code surfaces as a generic runtime error.
+        other => PyRuntimeError::new_err(other.to_string()),
     }
 }
 

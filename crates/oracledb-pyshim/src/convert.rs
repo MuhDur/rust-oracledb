@@ -1380,6 +1380,13 @@ pub(crate) fn query_value_to_py(
         // Native Oracle JSON (DB_TYPE_JSON): the OSON image was decoded by the
         // protocol layer into an OsonValue tree; marshal it to Python objects.
         Some(QueryValue::Json(value)) => oson_value_to_py(py, value),
+        // `QueryValue` is `#[non_exhaustive]`: a future fetched type with no
+        // Python mapping yet surfaces as a clear "not implemented" rather than a
+        // silent misconversion.
+        Some(other) => Err(not_implemented(&format!(
+            "QueryValue::{} to Python conversion",
+            other.variant_name()
+        ))),
     }
 }
 

@@ -32,6 +32,7 @@ pub struct ResourceLimit {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ProtocolError {
     #[error("truncated packet header: got {got} bytes")]
     TruncatedHeader { got: usize },

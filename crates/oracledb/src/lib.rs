@@ -1434,6 +1434,7 @@ pub enum RetryHint {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     #[error(transparent)]
     Protocol(#[from] oracledb_protocol::ProtocolError),
@@ -2797,6 +2798,7 @@ impl Error {
 /// Client-API misuse of the sessionless transaction API, mirroring the
 /// reference `ERR_SESSIONLESS_*` errors (impl/oracledb/errors.py:338-340).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum SessionlessError {
     /// DPY-3034: suspend/resume was attempted on a transaction started with
     /// DBMS_TRANSACTION (or vice versa).
@@ -3298,6 +3300,7 @@ enum PacketRead {
 
 /// Outcome of [`Connection::recv_notification`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum NotificationOutcome {
     /// A decoded notification record to deliver to the callback.
     Record(NotificationRecord),
@@ -9824,59 +9827,14 @@ mod tests {
 
     #[test]
     fn api_design_nothing_lost_map_covers_current_surface() {
-        fn bind_value_variant_name(value: &BindValue) -> &'static str {
-            match value {
-                BindValue::Null => "Null",
-                BindValue::TypedNull { .. } => "TypedNull",
-                BindValue::Output { .. } => "Output",
-                BindValue::ReturnOutput { .. } => "ReturnOutput",
-                BindValue::ObjectOutput { .. } => "ObjectOutput",
-                BindValue::ObjectInput { .. } => "ObjectInput",
-                BindValue::Text(_) => "Text",
-                BindValue::Raw(_) => "Raw",
-                BindValue::Lob { .. } => "Lob",
-                BindValue::Number(_) => "Number",
-                BindValue::BinaryInteger(_) => "BinaryInteger",
-                BindValue::BinaryDouble(_) => "BinaryDouble",
-                BindValue::BinaryFloat(_) => "BinaryFloat",
-                BindValue::Boolean(_) => "Boolean",
-                BindValue::IntervalDS { .. } => "IntervalDS",
-                BindValue::IntervalYM { .. } => "IntervalYM",
-                BindValue::DateTime { .. } => "DateTime",
-                BindValue::Timestamp { .. } => "Timestamp",
-                BindValue::Array { .. } => "Array",
-                BindValue::Vector(_) => "Vector",
-                BindValue::Json(_) => "Json",
-                BindValue::Cursor { .. } => "Cursor",
-            }
-        }
-
-        fn query_value_variant_name(value: &QueryValue) -> &'static str {
-            match value {
-                QueryValue::Text(_) => "Text",
-                QueryValue::TextRaw { .. } => "TextRaw",
-                QueryValue::Raw(_) => "Raw",
-                QueryValue::Rowid(_) => "Rowid",
-                QueryValue::BinaryDouble(_) => "BinaryDouble",
-                QueryValue::IntervalDS { .. } => "IntervalDS",
-                QueryValue::IntervalYM { .. } => "IntervalYM",
-                QueryValue::Number(_) => "Number",
-                QueryValue::Boolean(_) => "Boolean",
-                QueryValue::Cursor(_) => "Cursor",
-                QueryValue::DateTime { .. } => "DateTime",
-                QueryValue::Object(_) => "Object",
-                QueryValue::Lob(_) => "Lob",
-                QueryValue::Vector(_) => "Vector",
-                QueryValue::Json(_) => "Json",
-                QueryValue::Array(_) => "Array",
-            }
-        }
-
-        assert_eq!(bind_value_variant_name(&BindValue::Null), "Null");
-        assert_eq!(
-            query_value_variant_name(&QueryValue::Text(String::new())),
-            "Text"
-        );
+        // `BindValue` / `QueryValue` are `#[non_exhaustive]`: the exhaustive
+        // variant-name `match` that flags a newly-added variant now lives on the
+        // types themselves (in oracledb-protocol), so this cross-crate test reads
+        // through the stable `variant_name()` accessor instead of a fragile
+        // external match. The compile-time tripwire is preserved where the enums
+        // are defined.
+        assert_eq!(BindValue::Null.variant_name(), "Null");
+        assert_eq!(QueryValue::Text(String::new()).variant_name(), "Text");
 
         let design = include_str!("../../../docs/API_DESIGN.md");
         for method in [

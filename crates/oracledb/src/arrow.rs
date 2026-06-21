@@ -49,6 +49,7 @@ const ORA_TYPE_NUM_INTERVAL_DS: u8 = 183;
 /// Messages are prefixed with the python-oracledb error number they
 /// correspond to so the shim layer can surface exact reference errors.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ArrowConversionError {
     #[error(
         "DPY-3030: conversion from Oracle Database type {db_type_name} \

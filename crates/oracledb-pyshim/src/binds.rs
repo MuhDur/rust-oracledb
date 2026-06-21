@@ -1396,6 +1396,10 @@ pub(crate) fn sql_parse_error(err: sql::SqlError) -> PyErr {
         sql::SqlError::MissingEndingDoubleQuote => {
             raise_oracledb_driver_error("ERR_MISSING_ENDING_DOUBLE_QUOTE")
         }
+        // `SqlError` is `#[non_exhaustive]`: a future scan error with no
+        // dedicated reference code surfaces as a generic driver error built
+        // from its Display text.
+        other => runtime_error(other),
     }
 }
 
