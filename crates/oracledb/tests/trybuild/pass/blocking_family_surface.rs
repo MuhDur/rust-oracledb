@@ -7,6 +7,9 @@ use oracledb::{
     Batch, BatchOutcome, BlockingConnection, BlockingRows, Connection, Execute, ExecuteOutcome,
     NotificationOutcome, Query, Registration, RegistrationOutcome, Result, Row,
 };
+use oracledb::pool::{
+    AcquireOptions, BlockingPool, BlockingPooledConnection, PoolBackend, PoolError, PoolStats,
+};
 
 fn blocking_family_surface(conn: &mut Connection) {
     {
@@ -50,6 +53,39 @@ fn blocking_family_surface(conn: &mut Connection) {
     let _: Result<LobReadResult> = BlockingConnection::trim_lob(conn, &locator, 0);
     let locators = vec![locator];
     let _: Result<()> = BlockingConnection::free_temp_lobs(conn, &locators);
+}
+
+fn blocking_pool_surface<B: PoolBackend>(pool: &BlockingPool<B>) {
+    let _: std::result::Result<BlockingPooledConnection<B>, PoolError> =
+        pool.acquire(AcquireOptions::default());
+    let _: std::result::Result<(), PoolError> = pool.drain();
+    let _: std::result::Result<PoolStats, PoolError> = pool.stats();
+    let _: std::result::Result<u32, PoolError> = pool.busy_count();
+    let _: std::result::Result<u32, PoolError> = pool.open_count();
+    let _: std::result::Result<(), PoolError> = pool.close(false);
+}
+
+fn blocking_pool_stats_surface(stats: PoolStats) {
+    let _: u32 = stats.open_count();
+    let _: u32 = stats.busy_count();
+    let _: u32 = stats.idle_count();
+    let _: u32 = stats.opening_count();
+    let _: u32 = stats.validating_count();
+    let _: u32 = stats.retiring_count();
+    let _: u32 = stats.waiter_count();
+}
+
+fn blocking_pooled_connection_release_surface<B: PoolBackend>(
+    guard: BlockingPooledConnection<B>,
+) {
+    let _: u64 = guard.id();
+    let _: std::result::Result<(), PoolError> = guard.release();
+}
+
+fn blocking_pooled_connection_drop_surface<B: PoolBackend>(
+    guard: BlockingPooledConnection<B>,
+) {
+    let _: std::result::Result<(), PoolError> = guard.drop_from_pool();
 }
 
 fn main() {}

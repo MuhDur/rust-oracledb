@@ -699,13 +699,13 @@ fn connection_pool_acquire_release() {
     assert_eq!(pool.busy_count().expect("busy count"), 2);
 
     // release one and re-acquire: the freed connection is reused (LIFO)
-    a.release_blocking().expect("return a");
+    a.release().expect("return a");
     assert_eq!(pool.busy_count().expect("busy count"), 1);
     let c = pool.acquire(AcquireOptions::default()).expect("re-acquire");
     assert_eq!(c.id(), a_id, "released connection is reused");
 
-    b.release_blocking().expect("return b");
-    c.release_blocking().expect("return c");
+    b.release().expect("return b");
+    c.release().expect("return c");
     pool.close(false).expect("close pool");
 
     assert!(backend.created.load(Ordering::SeqCst) >= 2);

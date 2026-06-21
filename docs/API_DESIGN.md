@@ -275,7 +275,7 @@ execute/fetch/define/cursor machinery the SODA/Arrow/direct-path facades sit on.
 | AQ: `aq_enq_one/deq_one/enq_many/deq_many` + option/props/payload types | **Retained** |
 | Objects: `describe_object_type`, `decode_object`, object binds | **Retained** |
 | Transactions: `commit`/`rollback`/`transaction_in_progress`, TPC (`tpc_*`), sessionless (`begin/resume/suspend/prepare_*`) | **Retained** |
-| Pooling: `Pool`/`BlockingPool`/`PooledConnection` guard, `PoolBackend`, `PoolConfig`(10 fields), `AcquireOptions`, getmode+purity constants, live setters, `PoolError` | **Retained** (async-native facade; sync facade is `block_on`; low-level `PoolEngine` is crate-private) |
+| Pooling: `Pool`/`BlockingPool`/`PooledConnection`/`BlockingPooledConnection` guards, `PoolStats`, `PoolBackend`, `PoolConfig`(10 fields), `AcquireOptions`, getmode+purity constants, live setters, `PoolError` | **Retained** (async-native facade; sync facade is `block_on`; low-level `PoolEngine` is crate-private) |
 | Pipelining: `run_pipeline`/`run_pipeline_decoded` + `PipelineRequest` | **Retained** (note the known ExecuteOptions gap — preserve as a conscious choice) |
 | Lifecycle/accessors: `connect`/`close`/`cancel`/`ping`/`change_password`, `CancelHandle`, `release_cursor`/`close_cursor`, `session_id`/`serial_num`/`server_version[_tuple]`/`sdu`/`descriptor`/`identity`/`supports_pipelining`/`supports_oob`/`is_dead` | **Retained** |
 | `ConnectOptions` (all knobs: access-token TCPS-required+redacted, edition, wallet/TLS, app_context, proxy_user, sdu, server_type_emon, statement_cache_size) | **Retained** (audit-tidied to builders/getters per W1-T4) |

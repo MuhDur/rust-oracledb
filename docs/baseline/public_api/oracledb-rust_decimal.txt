@@ -59,9 +59,10 @@ impl core::fmt::Debug for oracledb::pool::AcquireOptions
 pub fn oracledb::pool::AcquireOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct oracledb::pool::BlockingPool<B: oracledb::pool::PoolBackend>
 impl<B: oracledb::pool::PoolBackend> oracledb::pool::BlockingPool<B>
-pub fn oracledb::pool::BlockingPool<B>::acquire(&self, oracledb::pool::AcquireOptions) -> core::result::Result<oracledb::pool::PooledConnection<B>, oracledb::pool::PoolError>
+pub fn oracledb::pool::BlockingPool<B>::acquire(&self, oracledb::pool::AcquireOptions) -> core::result::Result<oracledb::pool::BlockingPooledConnection<B>, oracledb::pool::PoolError>
 pub fn oracledb::pool::BlockingPool<B>::busy_count(&self) -> core::result::Result<u32, oracledb::pool::PoolError>
 pub fn oracledb::pool::BlockingPool<B>::close(&self, bool) -> core::result::Result<(), oracledb::pool::PoolError>
+pub fn oracledb::pool::BlockingPool<B>::drain(&self) -> core::result::Result<(), oracledb::pool::PoolError>
 pub fn oracledb::pool::BlockingPool<B>::getmode(&self) -> core::result::Result<u32, oracledb::pool::PoolError>
 pub fn oracledb::pool::BlockingPool<B>::max_lifetime_session_secs(&self) -> core::result::Result<u32, oracledb::pool::PoolError>
 pub fn oracledb::pool::BlockingPool<B>::open_count(&self) -> core::result::Result<u32, oracledb::pool::PoolError>
@@ -71,16 +72,23 @@ pub fn oracledb::pool::BlockingPool<B>::set_max_lifetime_session_secs(&self, u32
 pub fn oracledb::pool::BlockingPool<B>::set_ping_interval_secs(&self, i64) -> core::result::Result<(), oracledb::pool::PoolError>
 pub fn oracledb::pool::BlockingPool<B>::set_timeout_secs(&self, u32) -> core::result::Result<(), oracledb::pool::PoolError>
 pub fn oracledb::pool::BlockingPool<B>::set_wait_timeout_ms(&self, u32) -> core::result::Result<(), oracledb::pool::PoolError>
+pub fn oracledb::pool::BlockingPool<B>::stats(&self) -> core::result::Result<oracledb::pool::PoolStats, oracledb::pool::PoolError>
 pub fn oracledb::pool::BlockingPool<B>::timeout_secs(&self) -> core::result::Result<u32, oracledb::pool::PoolError>
 pub fn oracledb::pool::BlockingPool<B>::wait_timeout_ms(&self) -> core::result::Result<core::option::Option<u32>, oracledb::pool::PoolError>
 impl<B: oracledb::pool::PoolBackend> core::clone::Clone for oracledb::pool::BlockingPool<B>
 pub fn oracledb::pool::BlockingPool<B>::clone(&self) -> Self
+pub struct oracledb::pool::BlockingPooledConnection<B: oracledb::pool::PoolBackend>
+impl<B: oracledb::pool::PoolBackend> oracledb::pool::BlockingPooledConnection<B>
+pub fn oracledb::pool::BlockingPooledConnection<B>::drop_from_pool(self) -> core::result::Result<(), oracledb::pool::PoolError>
+pub fn oracledb::pool::BlockingPooledConnection<B>::id(&self) -> u64
+pub fn oracledb::pool::BlockingPooledConnection<B>::release(self) -> core::result::Result<(), oracledb::pool::PoolError>
 pub struct oracledb::pool::Pool<B: oracledb::pool::PoolBackend>
 impl<B: oracledb::pool::PoolBackend> oracledb::pool::Pool<B>
 pub async fn oracledb::pool::Pool<B>::acquire(&self, &asupersync::cx::cx::Cx, oracledb::pool::AcquireOptions) -> core::result::Result<oracledb::pool::PooledConnection<B>, oracledb::pool::PoolError>
 pub fn oracledb::pool::Pool<B>::blocking(&self) -> oracledb::pool::BlockingPool<B>
 pub async fn oracledb::pool::Pool<B>::busy_count(&self, &asupersync::cx::cx::Cx) -> core::result::Result<u32, oracledb::pool::PoolError>
 pub async fn oracledb::pool::Pool<B>::close(&self, &asupersync::cx::cx::Cx, bool) -> core::result::Result<(), oracledb::pool::PoolError>
+pub async fn oracledb::pool::Pool<B>::drain(&self, &asupersync::cx::cx::Cx) -> core::result::Result<(), oracledb::pool::PoolError>
 pub fn oracledb::pool::Pool<B>::getmode(&self) -> core::result::Result<u32, oracledb::pool::PoolError>
 pub fn oracledb::pool::Pool<B>::max_lifetime_session_secs(&self) -> core::result::Result<u32, oracledb::pool::PoolError>
 pub async fn oracledb::pool::Pool<B>::open_count(&self, &asupersync::cx::cx::Cx) -> core::result::Result<u32, oracledb::pool::PoolError>
@@ -91,6 +99,7 @@ pub fn oracledb::pool::Pool<B>::set_ping_interval_secs(&self, i64) -> core::resu
 pub fn oracledb::pool::Pool<B>::set_timeout_secs(&self, u32) -> core::result::Result<(), oracledb::pool::PoolError>
 pub fn oracledb::pool::Pool<B>::set_wait_timeout_ms(&self, u32) -> core::result::Result<(), oracledb::pool::PoolError>
 pub fn oracledb::pool::Pool<B>::start(B, oracledb::pool::PoolConfig) -> core::result::Result<Self, oracledb::pool::PoolError>
+pub async fn oracledb::pool::Pool<B>::stats(&self, &asupersync::cx::cx::Cx) -> core::result::Result<oracledb::pool::PoolStats, oracledb::pool::PoolError>
 pub fn oracledb::pool::Pool<B>::timeout_secs(&self) -> core::result::Result<u32, oracledb::pool::PoolError>
 pub fn oracledb::pool::Pool<B>::wait_timeout_ms(&self) -> core::result::Result<core::option::Option<u32>, oracledb::pool::PoolError>
 impl<B: oracledb::pool::PoolBackend> core::clone::Clone for oracledb::pool::Pool<B>
@@ -110,13 +119,31 @@ impl core::clone::Clone for oracledb::pool::PoolConfig
 pub fn oracledb::pool::PoolConfig::clone(&self) -> oracledb::pool::PoolConfig
 impl core::fmt::Debug for oracledb::pool::PoolConfig
 pub fn oracledb::pool::PoolConfig::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb::pool::PoolStats
+impl oracledb::pool::PoolStats
+pub fn oracledb::pool::PoolStats::busy_count(&self) -> u32
+pub fn oracledb::pool::PoolStats::idle_count(&self) -> u32
+pub fn oracledb::pool::PoolStats::open_count(&self) -> u32
+pub fn oracledb::pool::PoolStats::opening_count(&self) -> u32
+pub fn oracledb::pool::PoolStats::retiring_count(&self) -> u32
+pub fn oracledb::pool::PoolStats::validating_count(&self) -> u32
+pub fn oracledb::pool::PoolStats::waiter_count(&self) -> u32
+impl core::clone::Clone for oracledb::pool::PoolStats
+pub fn oracledb::pool::PoolStats::clone(&self) -> oracledb::pool::PoolStats
+impl core::cmp::Eq for oracledb::pool::PoolStats
+impl core::cmp::PartialEq for oracledb::pool::PoolStats
+pub fn oracledb::pool::PoolStats::eq(&self, &oracledb::pool::PoolStats) -> bool
+impl core::default::Default for oracledb::pool::PoolStats
+pub fn oracledb::pool::PoolStats::default() -> oracledb::pool::PoolStats
+impl core::fmt::Debug for oracledb::pool::PoolStats
+pub fn oracledb::pool::PoolStats::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb::pool::PoolStats
+impl core::marker::StructuralPartialEq for oracledb::pool::PoolStats
 pub struct oracledb::pool::PooledConnection<B: oracledb::pool::PoolBackend>
 impl<B: oracledb::pool::PoolBackend> oracledb::pool::PooledConnection<B>
 pub async fn oracledb::pool::PooledConnection<B>::drop_from_pool(self, &asupersync::cx::cx::Cx) -> core::result::Result<(), oracledb::pool::PoolError>
-pub fn oracledb::pool::PooledConnection<B>::drop_from_pool_blocking(self) -> core::result::Result<(), oracledb::pool::PoolError>
 pub fn oracledb::pool::PooledConnection<B>::id(&self) -> u64
 pub async fn oracledb::pool::PooledConnection<B>::release(self, &asupersync::cx::cx::Cx) -> core::result::Result<(), oracledb::pool::PoolError>
-pub fn oracledb::pool::PooledConnection<B>::release_blocking(self) -> core::result::Result<(), oracledb::pool::PoolError>
 impl<B: oracledb::pool::PoolBackend> core::ops::drop::Drop for oracledb::pool::PooledConnection<B>
 pub fn oracledb::pool::PooledConnection<B>::drop(&mut self)
 pub const oracledb::pool::POOL_GETMODE_FORCEGET: u32

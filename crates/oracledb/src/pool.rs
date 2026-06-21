@@ -90,6 +90,48 @@ pub struct AcquireOptions {
     pub cclass: Option<String>,
 }
 
+/// Snapshot of derived pool lifecycle counts.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PoolStats {
+    open: u32,
+    busy: u32,
+    idle: u32,
+    opening: u32,
+    validating: u32,
+    retiring: u32,
+    waiters: u32,
+}
+
+impl PoolStats {
+    pub fn open_count(&self) -> u32 {
+        self.open
+    }
+
+    pub fn busy_count(&self) -> u32 {
+        self.busy
+    }
+
+    pub fn idle_count(&self) -> u32 {
+        self.idle
+    }
+
+    pub fn opening_count(&self) -> u32 {
+        self.opening
+    }
+
+    pub fn validating_count(&self) -> u32 {
+        self.validating
+    }
+
+    pub fn retiring_count(&self) -> u32 {
+        self.retiring
+    }
+
+    pub fn waiter_count(&self) -> u32 {
+        self.waiters
+    }
+}
+
 /// Backend operations performed by the pool engine. All methods are invoked
 /// without any engine lock held (except [`PoolBackend::connection_is_open`],
 /// which must therefore be non-blocking and lock-free with respect to the
@@ -628,6 +670,16 @@ impl<B: PoolBackend> Pool<B> {
         self.engine.close_async(cx, force).await
     }
 
+    /// Drain queued guard-drop return events through the async facade.
+    pub async fn drain(&self, cx: &Cx) -> Result<(), PoolError> {
+        self.engine.drain_async(cx).await
+    }
+
+    /// Return a derived pool lifecycle snapshot through the async facade.
+    pub async fn stats(&self, cx: &Cx) -> Result<PoolStats, PoolError> {
+        self.engine.stats_async(cx).await
+    }
+
     pub async fn busy_count(&self, cx: &Cx) -> Result<u32, PoolError> {
         self.engine.busy_count_async(cx).await
     }
@@ -691,13 +743,21 @@ impl<B: PoolBackend> Clone for BlockingPool<B> {
 
 impl<B: PoolBackend> BlockingPool<B> {
     /// Blocking facade for [`Pool::acquire`].
-    pub fn acquire(&self, opts: AcquireOptions) -> Result<PooledConnection<B>, PoolError> {
+    pub fn acquire(&self, opts: AcquireOptions) -> Result<BlockingPooledConnection<B>, PoolError> {
         let conn_id = self.pool.engine.acquire(opts)?;
-        Ok(PooledConnection::new(self.pool.clone(), conn_id))
+        Ok(BlockingPooledConnection::new(self.pool.clone(), conn_id))
     }
 
     pub fn close(&self, force: bool) -> Result<(), PoolError> {
         self.pool.engine.close(force)
+    }
+
+    pub fn drain(&self) -> Result<(), PoolError> {
+        self.pool.engine.drain()
+    }
+
+    pub fn stats(&self) -> Result<PoolStats, PoolError> {
+        self.pool.engine.stats()
     }
 
     pub fn busy_count(&self) -> Result<u32, PoolError> {
@@ -749,6 +809,33 @@ impl<B: PoolBackend> BlockingPool<B> {
     }
 }
 
+pub struct BlockingPooledConnection<B: PoolBackend> {
+    inner: PooledConnection<B>,
+}
+
+impl<B: PoolBackend> BlockingPooledConnection<B> {
+    fn new(pool: Pool<B>, conn_id: u64) -> Self {
+        Self {
+            inner: PooledConnection::new(pool, conn_id),
+        }
+    }
+
+    /// Engine-assigned identity for embedders that keep sidecar objects.
+    pub fn id(&self) -> u64 {
+        self.inner.id()
+    }
+
+    /// Eagerly return the connection to the pool through the blocking facade.
+    pub fn release(self) -> Result<(), PoolError> {
+        self.inner.release_blocking_impl()
+    }
+
+    /// Drop the physical connection from the pool through the blocking facade.
+    pub fn drop_from_pool(self) -> Result<(), PoolError> {
+        self.inner.drop_from_pool_blocking_impl()
+    }
+}
+
 pub struct PooledConnection<B: PoolBackend> {
     pool: Pool<B>,
     conn_id: u64,
@@ -782,8 +869,7 @@ impl<B: PoolBackend> PooledConnection<B> {
         }
     }
 
-    /// Blocking facade for [`Self::release`].
-    pub fn release_blocking(mut self) -> Result<(), PoolError> {
+    fn release_blocking_impl(mut self) -> Result<(), PoolError> {
         let conn_id = self.disarm();
         match self.pool.engine.return_connection(conn_id) {
             Ok(()) => Ok(()),
@@ -807,8 +893,7 @@ impl<B: PoolBackend> PooledConnection<B> {
         }
     }
 
-    /// Blocking facade for [`Self::drop_from_pool`].
-    pub fn drop_from_pool_blocking(mut self) -> Result<(), PoolError> {
+    fn drop_from_pool_blocking_impl(mut self) -> Result<(), PoolError> {
         let conn_id = self.disarm();
         match self.pool.engine.drop_connection(conn_id) {
             Ok(()) => Ok(()),
@@ -966,6 +1051,19 @@ fn derived_lifecycle_counts<C>(state: &PoolState<C>) -> lifecycle::PoolCounts {
             .filter(|request| request.waiting && !request.completed && request.error.is_none())
             .count(),
         ..lifecycle::PoolCounts::default()
+    }
+}
+
+fn pool_stats<C>(state: &PoolState<C>) -> PoolStats {
+    let counts = derived_lifecycle_counts(state);
+    PoolStats {
+        open: active_open_count(state),
+        busy: saturating_u32(counts.checked_out),
+        idle: saturating_u32(counts.idle),
+        opening: saturating_u32(counts.opening),
+        validating: saturating_u32(counts.validating),
+        retiring: saturating_u32(counts.retiring),
+        waiters: saturating_u32(counts.waiters),
     }
 }
 
@@ -1393,6 +1491,32 @@ impl<B: PoolBackend> PoolEngine<B> {
                 .map_err(|_| PoolError::Internal("pool worker panicked".to_string()))?;
         }
         Ok(())
+    }
+
+    pub fn drain(&self) -> Result<(), PoolError> {
+        block_on_pool(|cx| async move { self.drain_async(&cx).await })
+    }
+
+    pub(crate) async fn drain_async(&self, cx: &Cx) -> Result<(), PoolError> {
+        checkpoint_pool(cx)?;
+        let mut state = lock_state(&self.inner)?;
+        if drain_drop_returns(&mut state, &self.inner)? {
+            wake_waiters(&self.inner);
+        }
+        Ok(())
+    }
+
+    pub fn stats(&self) -> Result<PoolStats, PoolError> {
+        block_on_pool(|cx| async move { self.stats_async(&cx).await })
+    }
+
+    pub(crate) async fn stats_async(&self, cx: &Cx) -> Result<PoolStats, PoolError> {
+        checkpoint_pool(cx)?;
+        let mut state = lock_state(&self.inner)?;
+        if drain_drop_returns(&mut state, &self.inner)? {
+            wake_waiters(&self.inner);
+        }
+        Ok(pool_stats(&state))
     }
 
     pub fn busy_count(&self) -> Result<u32, PoolError> {
@@ -2752,7 +2876,11 @@ mod tests {
         let first = blocking.acquire(AcquireOptions::default()).unwrap();
         let first_id = first.id();
         assert_eq!(blocking.busy_count().unwrap(), 1);
-        first.release_blocking().unwrap();
+        let stats = blocking.stats().unwrap();
+        assert_eq!(stats.open_count(), 1);
+        assert_eq!(stats.busy_count(), 1);
+        assert_eq!(stats.idle_count(), 0);
+        first.release().unwrap();
         assert_eq!(
             blocking.busy_count().unwrap(),
             0,
@@ -2761,7 +2889,7 @@ mod tests {
 
         let second = blocking.acquire(AcquireOptions::default()).unwrap();
         assert_eq!(second.id(), first_id);
-        second.release_blocking().unwrap();
+        second.release().unwrap();
         blocking.close(false).unwrap();
         assert_eq!(backend.closed.load(Ordering::SeqCst), 1);
     }
@@ -2781,6 +2909,12 @@ mod tests {
         let first_id = first.id();
         assert_eq!(blocking.busy_count().unwrap(), 1);
         drop(first);
+        blocking.drain().unwrap();
+        assert_eq!(
+            blocking.busy_count().unwrap(),
+            0,
+            "explicit drain must reconcile queued guard return events"
+        );
 
         let second = blocking.acquire(AcquireOptions::default()).unwrap();
         assert_eq!(
@@ -2793,7 +2927,7 @@ mod tests {
             1,
             "reacquired guard must be the only busy connection"
         );
-        second.release_blocking().unwrap();
+        second.release().unwrap();
         blocking.close(false).unwrap();
         assert_eq!(backend.closed.load(Ordering::SeqCst), 1);
     }
@@ -2808,17 +2942,19 @@ mod tests {
         .unwrap();
         wait_for_open_count(&pool.engine, 1);
         let blocking = pool.blocking();
-        let conn = blocking.acquire(AcquireOptions::default()).unwrap();
-        let conn_id = conn.id();
+        let async_pool = pool.clone();
 
         let runtime = crate::build_io_runtime().expect("asupersync runtime");
-        let err = runtime
-            .block_on(async {
-                let cx = Cx::current().expect("asupersync installs an ambient Cx");
-                cx.cancel_fast(asupersync::CancelKind::Shutdown);
-                conn.release(&cx).await
-            })
-            .unwrap_err();
+        let (conn_id, err) = runtime.block_on(async {
+            let cx = Cx::current().expect("asupersync installs an ambient Cx");
+            let conn = async_pool
+                .acquire(&cx, AcquireOptions::default())
+                .await
+                .unwrap();
+            let conn_id = conn.id();
+            cx.cancel_fast(asupersync::CancelKind::Shutdown);
+            (conn_id, conn.release(&cx).await.unwrap_err())
+        });
 
         assert!(matches!(err, PoolError::Cancelled(_)));
         assert_eq!(
@@ -2828,7 +2964,7 @@ mod tests {
         );
         let reacquired = blocking.acquire(AcquireOptions::default()).unwrap();
         assert_eq!(reacquired.id(), conn_id);
-        reacquired.release_blocking().unwrap();
+        reacquired.release().unwrap();
         blocking.close(false).unwrap();
     }
 

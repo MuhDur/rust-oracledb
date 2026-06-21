@@ -82,9 +82,26 @@ rows	oracledb::Rows	next_batch	oracledb::BlockingRows	next_batch	covered	blockin
 rows	oracledb::Rows	scroll	oracledb::BlockingRows	scroll	covered	blocking twin present
 cancel-handle	oracledb::CancelHandle	cancel	oracledb::CancelHandle	cancel_blocking	covered	blocking twin present
 pool	oracledb::pool::Pool	acquire	oracledb::pool::BlockingPool	acquire	covered	blocking twin present
+pool	oracledb::pool::Pool	blocking	oracledb::pool::BlockingPool	blocking	exception	Adapter that returns the blocking facade; not itself mirrored.
 pool	oracledb::pool::Pool	busy_count	oracledb::pool::BlockingPool	busy_count	covered	blocking twin present
 pool	oracledb::pool::Pool	close	oracledb::pool::BlockingPool	close	covered	blocking twin present
+pool	oracledb::pool::Pool	drain	oracledb::pool::BlockingPool	drain	covered	blocking twin present
+pool	oracledb::pool::Pool	getmode	oracledb::pool::BlockingPool	getmode	covered	blocking twin present
+pool	oracledb::pool::Pool	max_lifetime_session_secs	oracledb::pool::BlockingPool	max_lifetime_session_secs	covered	blocking twin present
 pool	oracledb::pool::Pool	open_count	oracledb::pool::BlockingPool	open_count	covered	blocking twin present
-pooled-connection	oracledb::pool::PooledConnection	drop_from_pool	oracledb::pool::PooledConnection	drop_from_pool_blocking	covered	blocking twin present
-pooled-connection	oracledb::pool::PooledConnection	release	oracledb::pool::PooledConnection	release_blocking	covered	blocking twin present
+pool	oracledb::pool::Pool	ping_interval_secs	oracledb::pool::BlockingPool	ping_interval_secs	covered	blocking twin present
+pool	oracledb::pool::Pool	set_getmode	oracledb::pool::BlockingPool	set_getmode	covered	blocking twin present
+pool	oracledb::pool::Pool	set_max_lifetime_session_secs	oracledb::pool::BlockingPool	set_max_lifetime_session_secs	covered	blocking twin present
+pool	oracledb::pool::Pool	set_ping_interval_secs	oracledb::pool::BlockingPool	set_ping_interval_secs	covered	blocking twin present
+pool	oracledb::pool::Pool	set_timeout_secs	oracledb::pool::BlockingPool	set_timeout_secs	covered	blocking twin present
+pool	oracledb::pool::Pool	set_wait_timeout_ms	oracledb::pool::BlockingPool	set_wait_timeout_ms	covered	blocking twin present
+pool	oracledb::pool::Pool	start	oracledb::pool::BlockingPool	start	exception	Constructor stays on Pool; BlockingPool is obtained with Pool::blocking.
+pool	oracledb::pool::Pool	stats	oracledb::pool::BlockingPool	stats	covered	blocking twin present
+pool	oracledb::pool::Pool	timeout_secs	oracledb::pool::BlockingPool	timeout_secs	covered	blocking twin present
+pool	oracledb::pool::Pool	wait_timeout_ms	oracledb::pool::BlockingPool	wait_timeout_ms	covered	blocking twin present
+pool	oracledb::pool::Pool	clone	oracledb::pool::BlockingPool	clone	covered	blocking twin present
+pooled-connection	oracledb::pool::PooledConnection	drop_from_pool	oracledb::pool::BlockingPooledConnection	drop_from_pool	covered	blocking twin present
+pooled-connection	oracledb::pool::PooledConnection	id	oracledb::pool::BlockingPooledConnection	id	covered	blocking twin present
+pooled-connection	oracledb::pool::PooledConnection	release	oracledb::pool::BlockingPooledConnection	release	covered	blocking twin present
+pooled-connection	oracledb::pool::PooledConnection	drop	oracledb::pool::BlockingPooledConnection	drop	exception	Drop is the RAII fallback, not a callable facade operation.
 arrow-record-batch	oracledb::arrow::RecordBatchFetch	next_batch	oracledb::BlockingConnection	next_record_batch	covered	blocking twin present

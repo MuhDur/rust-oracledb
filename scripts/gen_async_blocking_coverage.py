@@ -37,6 +37,7 @@ class Surface:
     blocking_owner: str
     method_map: dict[str, str] = field(default_factory=dict)
     exceptions: dict[str, str] = field(default_factory=dict)
+    include_sync: bool = False
 
 
 SURFACES = [
@@ -68,15 +69,21 @@ SURFACES = [
         name="pool",
         async_owner="oracledb::pool::Pool",
         blocking_owner="oracledb::pool::BlockingPool",
+        exceptions={
+            "blocking": "Adapter that returns the blocking facade; not itself mirrored.",
+            "clone": "Clone is a trait method, not a pool operation.",
+            "start": "Constructor stays on Pool; BlockingPool is obtained with Pool::blocking.",
+        },
+        include_sync=True,
     ),
     Surface(
         name="pooled-connection",
         async_owner="oracledb::pool::PooledConnection",
-        blocking_owner="oracledb::pool::PooledConnection",
-        method_map={
-            "drop_from_pool": "drop_from_pool_blocking",
-            "release": "release_blocking",
+        blocking_owner="oracledb::pool::BlockingPooledConnection",
+        exceptions={
+            "drop": "Drop is the RAII fallback, not a callable facade operation.",
         },
+        include_sync=True,
     ),
     Surface(
         name="arrow-record-batch",
@@ -125,7 +132,7 @@ def generate_rows(public_api: Path) -> tuple[list[list[str]], int]:
         async_methods = [
             method
             for method in methods.get(surface.async_owner, [])
-            if method.is_async
+            if surface.include_sync or method.is_async
         ]
         async_methods.sort(key=lambda method: (method.line_no, method.name))
         blocking_methods = by_owner.get(surface.blocking_owner, {})

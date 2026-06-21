@@ -9,8 +9,8 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use oracledb::pool::{
-    AcquireOptions, BlockingPool, Pool, PoolBackend, PoolConfig, PoolError, PooledConnection,
-    PURITY_NEW,
+    AcquireOptions, BlockingPool, BlockingPooledConnection, Pool, PoolBackend, PoolConfig,
+    PoolError, PURITY_NEW,
 };
 use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::PyRuntimeError;
@@ -208,7 +208,7 @@ pub(crate) struct ShimPool {
     min: u32,
     engine: BlockingPool<ShimPoolBackend>,
     registry: Registry,
-    guards: Mutex<HashMap<u64, PooledConnection<ShimPoolBackend>>>,
+    guards: Mutex<HashMap<u64, BlockingPooledConnection<ShimPoolBackend>>>,
     stmt_cache_size: Mutex<u32>,
 }
 
@@ -400,7 +400,7 @@ impl ShimPool {
         }
         let guard = self.guards.lock().map_err(runtime_error)?.remove(id);
         if let Some(guard) = guard {
-            guard.release_blocking().map_err(pool_error_to_pyerr)
+            guard.release().map_err(pool_error_to_pyerr)
         } else {
             Ok(())
         }
@@ -413,7 +413,7 @@ impl ShimPool {
             .map_err(|err| PoolError::Internal(err.to_string()))?
             .remove(&conn_id);
         if let Some(guard) = guard {
-            guard.drop_from_pool_blocking()
+            guard.drop_from_pool()
         } else {
             Ok(())
         }
