@@ -7,3 +7,7 @@ not hand-edit them; update them by rerunning the generator. The
 `source_commit.txt` pin is intentionally stable across normal runs. Use
 `scripts/gen_baseline.sh --refresh-pin` only when intentionally moving the
 reviewed baseline.
+
+`async_blocking_coverage.tsv` is generated from the all-features public API
+snapshot. It records every tracked async facade method, its blocking twin, or a
+documented exception; an unexpected missing twin fails generation.

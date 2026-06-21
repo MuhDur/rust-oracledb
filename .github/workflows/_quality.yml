@@ -171,6 +171,10 @@ jobs:
         if: ${{ inputs.profile != 'canary' }}
         run: bash scripts/check_api_ledger.sh
 
+      - name: Async/blocking coverage
+        if: ${{ inputs.profile != 'canary' }}
+        run: bash scripts/check_async_blocking_coverage.sh
+
       - name: Install cargo-semver-checks
         if: ${{ inputs.profile != 'canary' }}
         continue-on-error: true

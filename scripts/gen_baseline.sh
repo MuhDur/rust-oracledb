@@ -77,6 +77,7 @@ need awk
 need cargo
 need git
 need jq
+need python3
 need rg
 need rustc
 
@@ -103,6 +104,10 @@ not hand-edit them; update them by rerunning the generator. The
 `source_commit.txt` pin is intentionally stable across normal runs. Use
 `scripts/gen_baseline.sh --refresh-pin` only when intentionally moving the
 reviewed baseline.
+
+`async_blocking_coverage.tsv` is generated from the all-features public API
+snapshot. It records every tracked async facade method, its blocking twin, or a
+documented exception; an unexpected missing twin fails generation.
 EOF
 
 {
@@ -209,6 +214,17 @@ run_public_api() {
     printf 'unavailable\tall\t%s\tmissing cargo-public-api\n' "$(relpath "$unavailable")"
   fi
 } > "$OUT/public_api_profiles.tsv"
+
+if [ -f "$OUT/public_api/oracledb-all-features.txt" ]; then
+  python3 "$ROOT/scripts/gen_async_blocking_coverage.py" \
+    "$OUT/public_api/oracledb-all-features.txt" \
+    "$OUT/async_blocking_coverage.tsv"
+else
+  {
+    printf 'surface\tasync_owner\tasync_method\tblocking_owner\tblocking_method\tstatus\tnote\n'
+    printf 'unavailable\tall\tall\tall\tall\tunavailable\tcargo-public-api snapshot unavailable\n'
+  } > "$OUT/async_blocking_coverage.tsv"
+fi
 
 {
   printf 'target\tpath\n'
