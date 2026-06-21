@@ -10541,15 +10541,19 @@ mod tests {
         read: transport::OracleReadHalf,
         write: transport::OracleWriteHalf,
     ) -> Connection {
+        loopback_connection_from_core(ConnectionCore::<DriverTransport>::from_halves(
+            read,
+            write,
+            "loopback_test_write",
+        ))
+    }
+
+    fn loopback_connection_from_core(core: DriverCore) -> Connection {
         Connection {
             descriptor: EasyConnect::parse("127.0.0.1:1521/FREEPDB1")
                 .expect("test connect string should parse"),
             identity: identity(),
-            core: ConnectionCore::<DriverTransport>::from_halves(
-                read,
-                write,
-                "loopback_test_write",
-            ),
+            core,
             session_id: 0,
             serial_num: 0,
             server_version: None,
@@ -10577,6 +10581,223 @@ mod tests {
             transaction_context: None,
             txn_in_progress: false,
         }
+    }
+
+    #[cfg(feature = "cassette")]
+    fn synthetic_number_columns() -> Vec<ColumnMetadata> {
+        vec![
+            ColumnMetadata::new("INTCOL", oracledb_protocol::thin::ORA_TYPE_NUM_NUMBER)
+                .with_csfrm(oracledb_protocol::thin::CS_FORM_IMPLICIT)
+                .with_buffer_size(22)
+                .with_max_size(22)
+                .with_nulls_allowed(true),
+            ColumnMetadata::new("NUMBERCOL", oracledb_protocol::thin::ORA_TYPE_NUM_NUMBER)
+                .with_csfrm(oracledb_protocol::thin::CS_FORM_IMPLICIT)
+                .with_buffer_size(22)
+                .with_max_size(22)
+                .with_nulls_allowed(true),
+        ]
+    }
+
+    #[cfg(feature = "cassette")]
+    fn synthetic_connect_packet() -> Result<Vec<u8>> {
+        let payload = build_connect_packet_payload(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=fixture-host)(PORT=0))\
+             (CONNECT_DATA=(SERVICE_NAME=SYNTHETIC)(CID=(PROGRAM=rust-oracledb)\
+             (HOST=fixture-host)(USER=fixture-user))))",
+            8192,
+        )?;
+        Ok(encode_packet(
+            TNS_PACKET_TYPE_CONNECT,
+            0,
+            None,
+            &payload,
+            PacketLengthWidth::Legacy16,
+        )?)
+    }
+
+    #[cfg(feature = "cassette")]
+    fn synthetic_accept_packet() -> Result<Vec<u8>> {
+        Ok(encode_packet(
+            TNS_PACKET_TYPE_ACCEPT,
+            0,
+            None,
+            b"SYNTHETIC-ACCEPT",
+            PacketLengthWidth::Legacy16,
+        )?)
+    }
+
+    #[cfg(feature = "cassette")]
+    fn synthetic_execute_packet() -> Result<Vec<u8>> {
+        let payload = build_execute_payload_with_bind_rows_and_options_with_seq(
+            "select value from synthetic_fixture",
+            2,
+            1,
+            true,
+            &[],
+            ExecuteOptions::default(),
+        )?;
+        Ok(encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            &payload,
+            PacketLengthWidth::Large32,
+        )?)
+    }
+
+    #[cfg(feature = "cassette")]
+    fn synthetic_fetch_packet() -> Result<Vec<u8>> {
+        let payload = build_fetch_payload_with_seq(42, 2, 2);
+        Ok(encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            &payload,
+            PacketLengthWidth::Large32,
+        )?)
+    }
+
+    #[cfg(feature = "cassette")]
+    fn synthetic_function_packet(function_code: u8, seq_num: u8) -> Result<Vec<u8>> {
+        let payload = build_function_payload_with_seq(function_code, seq_num);
+        Ok(encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            &payload,
+            PacketLengthWidth::Large32,
+        )?)
+    }
+
+    #[cfg(feature = "cassette")]
+    fn hex_value(byte: u8) -> Result<u8> {
+        match byte {
+            b'0'..=b'9' => Ok(byte - b'0'),
+            b'a'..=b'f' => Ok(byte - b'a' + 10),
+            b'A'..=b'F' => Ok(byte - b'A' + 10),
+            _ => Err(Error::Runtime(format!(
+                "invalid synthetic fixture hex byte {byte:#04x}"
+            ))),
+        }
+    }
+
+    #[cfg(feature = "cassette")]
+    fn decode_hex_fixture(hex: &str) -> Result<Vec<u8>> {
+        let clean = hex
+            .bytes()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .collect::<Vec<_>>();
+        if clean.len() % 2 != 0 {
+            return Err(Error::Runtime(
+                "synthetic fixture hex must contain an even number of digits".into(),
+            ));
+        }
+        let mut out = Vec::with_capacity(clean.len() / 2);
+        for pair in clean.chunks_exact(2) {
+            out.push((hex_value(pair[0])? << 4) | hex_value(pair[1])?);
+        }
+        Ok(out)
+    }
+
+    #[cfg(feature = "cassette")]
+    fn synthetic_execute_response_payload() -> Result<Vec<u8>> {
+        decode_hex_fixture(concat!(
+            "101710740fb986350b6010fbcb6e06a74ed0787e060a110328014001018201800000",
+            "014000000000020369010140023ffe010501050556414c554500000000000000000000",
+            "010707787e060a110b1000021fe8010a010a00062201010001020000000708414c33",
+            "32555446380801060323a4d500010100000000000004010102013b010102057b0000",
+            "01010003000000000000000000000000030001010000000002057b0101010300194f",
+            "52412d30313430333a206e6f206461746120666f756e640a1d",
+        ))
+    }
+
+    #[cfg(feature = "cassette")]
+    fn synthetic_fetch_response_payload() -> Result<Vec<u8>> {
+        decode_hex_fixture("06020101000205dc0001010101000702c1041d")
+    }
+
+    #[cfg(feature = "cassette")]
+    fn synthetic_plain_function_response_payload() -> [u8; 1] {
+        [TNS_MSG_TYPE_END_OF_RESPONSE]
+    }
+
+    #[cfg(feature = "cassette")]
+    #[allow(deprecated)]
+    #[test]
+    fn synthetic_cassette_replays_connect_execute_fetch_close_offline() -> Result<()> {
+        let cassette = include_bytes!("../tests/fixtures/cassettes/select_7_plus_5.tns-cassette");
+        let (read, write, audit) =
+            transport::replay_split_with_audit(cassette, transport::ReplayWriteMode::Check)
+                .map_err(|err| Error::Runtime(format!("invalid replay cassette: {err}")))?;
+        let mut core = ConnectionCore::<DriverTransport>::from_halves(
+            read,
+            write,
+            "synthetic_fixture_replay_write",
+        );
+        let runtime = build_io_runtime()?;
+
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let connect_packet = synthetic_connect_packet()?;
+            core.write_all(&cx, &connect_packet).await?;
+            let accept = core.read_packet(PacketLengthWidth::Legacy16).await?;
+            assert_eq!(accept.packet_type, TNS_PACKET_TYPE_ACCEPT);
+            assert_eq!(accept.payload, b"SYNTHETIC-ACCEPT");
+
+            let mut conn = loopback_connection_from_core(core);
+            let execute = conn
+                .execute_query(&cx, "select value from synthetic_fixture", 2)
+                .await?;
+            assert_eq!(execute.columns.len(), 1);
+            assert_eq!(execute.rows.len(), 1);
+            assert_eq!(
+                execute.cell(0, 0).and_then(QueryValue::as_text),
+                Some("AL32UTF8")
+            );
+
+            let previous_row = vec![
+                Some(QueryValue::number_from_text("2", true)),
+                Some(QueryValue::number_from_text("0.5", false)),
+            ];
+            let columns = synthetic_number_columns();
+            let fetched = conn
+                .fetch_rows_with_columns(&cx, 42, 2, &columns, Some(&previous_row))
+                .await?;
+            assert_eq!(fetched.rows.len(), 1);
+            assert_eq!(
+                fetched
+                    .cell(0, 0)
+                    .and_then(QueryValue::as_number_text)
+                    .as_deref(),
+                Some("3")
+            );
+            assert_eq!(
+                fetched
+                    .cell(0, 1)
+                    .and_then(QueryValue::as_number_text)
+                    .as_deref(),
+                Some("0.5")
+            );
+
+            conn.close(&cx).await?;
+            Ok::<_, Error>(())
+        })?;
+
+        audit
+            .assert_finished()
+            .map_err(|err| Error::Runtime(err.to_string()))?;
+        let _ = (
+            synthetic_accept_packet()?,
+            synthetic_execute_packet()?,
+            synthetic_fetch_packet()?,
+            synthetic_function_packet(TNS_FUNC_ROLLBACK, 3)?,
+            synthetic_function_packet(TNS_FUNC_LOGOFF, 4)?,
+            synthetic_execute_response_payload()?,
+            synthetic_fetch_response_payload()?,
+            synthetic_plain_function_response_payload(),
+        );
+        Ok(())
     }
 
     fn server_error(message: &str) -> Error {

@@ -1,0 +1,12 @@
+schema_version = 1
+format_version = 1
+commit = "64e9a923b82cd6da717c95e0e443e3386fea009c"
+profile = "synthetic-post-auth"
+charset = "AL32UTF8"
+timezone = "+00:00"
+scenario = "synthetic_connect_execute_fetch_close"
+sanitizer_version = "e6.2.0"
+checksum_sha256 = "f1a5270718f4eff34041e28924049628c1ce53a5ba40fd318940b9f02e637d5d"
+expected_writes = 6
+expected_write_sha256 = "79cbccc785145a4926d25866c76ce9ff51b48ab494939ac756f81e92233a8729,a64989a2085d04272daed0bb13baf135872c75e4034a56778cdb33660f28e057,24f620e01fa2706b9467e8ec93af1014b6142d234c25350f2a38be140ec66f28,7181a90135a6aa4032f3727dfa59689b897c7b210eb2a6040bd23328c29c1b27,f940a09bfd0734ce57d86c1926a6fd0c283aec58dcaf094ae676d06e90cc85e2,375f5017b0110f5efb13612e895aed0fc1ba8482bf1488b7812621177b4ffc7f"
+sanitized = true

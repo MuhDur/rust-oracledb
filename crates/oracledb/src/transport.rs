@@ -28,12 +28,12 @@ use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::net::{OwnedReadHalf, OwnedWriteHalf, TcpStream};
 use asupersync::tls::TlsStream;
 
-#[cfg(all(test, feature = "cassette"))]
-pub(crate) use cassette_seam::replay_split;
 #[cfg(feature = "cassette")]
 pub use cassette_seam::{
     capture_scope, CaptureScope, CassetteError, CassetteRecorder, ReplayMismatch, ReplayWriteMode,
 };
+#[cfg(all(test, feature = "cassette"))]
+pub(crate) use cassette_seam::{replay_split, replay_split_with_audit};
 
 /// A TLS stream shared between the read and write halves.
 type SharedTls = Arc<Mutex<TlsStream<TcpStream>>>;
@@ -289,6 +289,9 @@ mod cassette_seam {
     use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
     use oracledb_protocol::net::cassette::{self, Direction, Frame};
 
+    #[cfg(test)]
+    use std::fmt;
+
     use super::{OracleReadHalf, OracleWriteHalf};
 
     /// Re-exported decode error from the cassette wire format.
@@ -483,6 +486,137 @@ mod cassette_seam {
         pub actual: Vec<u8>,
     }
 
+    /// End-of-replay accounting for strict tests. The replay halves update this
+    /// shared state as bytes are consumed, letting tests prove that a cassette
+    /// was consumed exactly: no unread `S->C` bytes, no unchecked expected
+    /// `C->S` writes, and no earlier mismatch.
+    #[derive(Clone, Debug)]
+    pub(crate) struct ReplayAudit {
+        inner: Arc<Mutex<ReplayAuditState>>,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct ReplayAuditState {
+        read_frames_remaining: usize,
+        read_bytes_remaining: usize,
+        write_frames_remaining: usize,
+        write_bytes_remaining: usize,
+        mismatch: Option<ReplayMismatch>,
+    }
+
+    /// Strict replay completion failure.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    #[cfg(test)]
+    pub(crate) enum ReplayAuditError {
+        /// A replay write diverged from the recorded request stream.
+        Mismatch(ReplayMismatch),
+        /// Recorded `S->C` bytes remained unread at the end of replay.
+        UnreadFrames { frames: usize, bytes: usize },
+        /// Recorded `C->S` writes remained unmatched at the end of replay.
+        UnwrittenFrames { frames: usize, bytes: usize },
+        /// The audit mutex was poisoned.
+        Poisoned,
+    }
+
+    #[cfg(test)]
+    impl fmt::Display for ReplayAuditError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Mismatch(mismatch) => write!(
+                    f,
+                    "replay: write mismatch at frame {} (expected {} bytes, got {} bytes)",
+                    mismatch.frame_index,
+                    mismatch.expected.len(),
+                    mismatch.actual.len()
+                ),
+                Self::UnreadFrames { frames, bytes } => write!(
+                    f,
+                    "replay: unread server frames remain ({frames} frames, {bytes} bytes)"
+                ),
+                Self::UnwrittenFrames { frames, bytes } => write!(
+                    f,
+                    "replay: expected client writes remain ({frames} frames, {bytes} bytes)"
+                ),
+                Self::Poisoned => f.write_str("replay: audit mutex poisoned"),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    impl std::error::Error for ReplayAuditError {}
+
+    impl ReplayAudit {
+        fn new(reads: &VecDeque<Vec<u8>>, writes: &VecDeque<Vec<u8>>) -> Self {
+            Self {
+                inner: Arc::new(Mutex::new(ReplayAuditState {
+                    read_frames_remaining: reads.len(),
+                    read_bytes_remaining: reads.iter().map(Vec::len).sum(),
+                    write_frames_remaining: writes.len(),
+                    write_bytes_remaining: writes.iter().map(Vec::len).sum(),
+                    mismatch: None,
+                })),
+            }
+        }
+
+        fn note_read_bytes(&self, n: usize) {
+            if let Ok(mut state) = self.inner.lock() {
+                state.read_bytes_remaining = state.read_bytes_remaining.saturating_sub(n);
+            }
+        }
+
+        fn note_read_frame_consumed(&self) {
+            if let Ok(mut state) = self.inner.lock() {
+                state.read_frames_remaining = state.read_frames_remaining.saturating_sub(1);
+            }
+        }
+
+        fn note_write_bytes(&self, n: usize) {
+            if let Ok(mut state) = self.inner.lock() {
+                state.write_bytes_remaining = state.write_bytes_remaining.saturating_sub(n);
+            }
+        }
+
+        fn note_write_frame_consumed(&self) {
+            if let Ok(mut state) = self.inner.lock() {
+                state.write_frames_remaining = state.write_frames_remaining.saturating_sub(1);
+            }
+        }
+
+        fn note_mismatch(&self, mismatch: ReplayMismatch) {
+            if let Ok(mut state) = self.inner.lock() {
+                if state.mismatch.is_none() {
+                    state.mismatch = Some(mismatch);
+                }
+            }
+        }
+
+        /// Assert that replay consumed the entire cassette exactly.
+        #[cfg(test)]
+        pub(crate) fn assert_finished(&self) -> Result<(), ReplayAuditError> {
+            let state = self
+                .inner
+                .lock()
+                .map_err(|_| ReplayAuditError::Poisoned)?
+                .clone();
+            if let Some(mismatch) = state.mismatch {
+                return Err(ReplayAuditError::Mismatch(mismatch));
+            }
+            if state.read_frames_remaining != 0 || state.read_bytes_remaining != 0 {
+                return Err(ReplayAuditError::UnreadFrames {
+                    frames: state.read_frames_remaining,
+                    bytes: state.read_bytes_remaining,
+                });
+            }
+            if state.write_frames_remaining != 0 || state.write_bytes_remaining != 0 {
+                return Err(ReplayAuditError::UnwrittenFrames {
+                    frames: state.write_frames_remaining,
+                    bytes: state.write_bytes_remaining,
+                });
+            }
+            Ok(())
+        }
+    }
+
     /// Build a socket-free replay transport from `.tns-cassette` bytes. The read
     /// half serves the recorded `S->C` transfers in order; the write half
     /// handles `C->S` writes per `write_mode`.
@@ -495,6 +629,21 @@ mod cassette_seam {
         data: &[u8],
         write_mode: ReplayWriteMode,
     ) -> Result<(OracleReadHalf, OracleWriteHalf), CassetteError> {
+        replay_split_inner(data, write_mode).map(|(read, write, _audit)| (read, write))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replay_split_with_audit(
+        data: &[u8],
+        write_mode: ReplayWriteMode,
+    ) -> Result<(OracleReadHalf, OracleWriteHalf, ReplayAudit), CassetteError> {
+        replay_split_inner(data, write_mode)
+    }
+
+    fn replay_split_inner(
+        data: &[u8],
+        write_mode: ReplayWriteMode,
+    ) -> Result<(OracleReadHalf, OracleWriteHalf, ReplayAudit), CassetteError> {
         let frames = cassette::decode_all(data)?;
         let mut reads: VecDeque<Vec<u8>> = VecDeque::new();
         let mut writes: VecDeque<Vec<u8>> = VecDeque::new();
@@ -504,11 +653,18 @@ mod cassette_seam {
                 Direction::ClientToServer => writes.push_back(frame.bytes),
             }
         }
+        let audit_writes = if matches!(write_mode, ReplayWriteMode::Check) {
+            writes.clone()
+        } else {
+            VecDeque::new()
+        };
+        let audit = ReplayAudit::new(&reads, &audit_writes);
         let mismatch = Arc::new(Mutex::new(None));
         Ok((
             OracleReadHalf::Replay(ReplayRead {
                 pending: reads,
                 offset: 0,
+                audit: audit.clone(),
             }),
             OracleWriteHalf::Replay(ReplayWrite {
                 expected: writes,
@@ -516,7 +672,9 @@ mod cassette_seam {
                 index: 0,
                 mode: write_mode,
                 mismatch,
+                audit: audit.clone(),
             }),
+            audit,
         ))
     }
 
@@ -584,6 +742,7 @@ mod cassette_seam {
         pending: VecDeque<Vec<u8>>,
         /// Byte offset consumed within the front transfer.
         offset: usize,
+        audit: ReplayAudit,
     }
 
     impl ReplayRead {
@@ -593,6 +752,7 @@ mod cassette_seam {
                 if self.offset >= front.len() {
                     self.pending.pop_front();
                     self.offset = 0;
+                    self.audit.note_read_frame_consumed();
                 } else {
                     break;
                 }
@@ -607,6 +767,16 @@ mod cassette_seam {
             let take = available.len().min(buf.remaining());
             buf.put_slice(&available[..take]);
             self.offset += take;
+            self.audit.note_read_bytes(take);
+            if self
+                .pending
+                .front()
+                .is_some_and(|front| self.offset >= front.len())
+            {
+                self.pending.pop_front();
+                self.offset = 0;
+                self.audit.note_read_frame_consumed();
+            }
             Poll::Ready(Ok(()))
         }
     }
@@ -622,6 +792,7 @@ mod cassette_seam {
         mode: ReplayWriteMode,
         /// First mismatch seen, surfaced via [`ReplayWrite::take_mismatch`].
         mismatch: Arc<Mutex<Option<ReplayMismatch>>>,
+        audit: ReplayAudit,
     }
 
     impl ReplayWrite {
@@ -634,6 +805,16 @@ mod cassette_seam {
             // a logical request differently than it was recorded).
             let mut cursor = 0usize;
             while cursor < buf.len() {
+                while let Some(front) = self.expected.front() {
+                    if self.offset >= front.len() {
+                        self.expected.pop_front();
+                        self.offset = 0;
+                        self.index += 1;
+                        self.audit.note_write_frame_consumed();
+                    } else {
+                        break;
+                    }
+                }
                 let Some(front) = self.expected.front() else {
                     self.note_mismatch(self.index, &[], &buf[cursor..]);
                     return Poll::Ready(Err(io::Error::other(
@@ -649,25 +830,29 @@ mod cassette_seam {
                 }
                 cursor += take;
                 self.offset += take;
+                self.audit.note_write_bytes(take);
                 if self.offset >= front.len() {
                     self.expected.pop_front();
                     self.offset = 0;
                     self.index += 1;
+                    self.audit.note_write_frame_consumed();
                 }
             }
             Poll::Ready(Ok(buf.len()))
         }
 
         fn note_mismatch(&self, frame_index: usize, expected: &[u8], actual: &[u8]) {
+            let mismatch = ReplayMismatch {
+                frame_index,
+                expected: expected.to_vec(),
+                actual: actual.to_vec(),
+            };
             if let Ok(mut slot) = self.mismatch.lock() {
                 if slot.is_none() {
-                    *slot = Some(ReplayMismatch {
-                        frame_index,
-                        expected: expected.to_vec(),
-                        actual: actual.to_vec(),
-                    });
+                    *slot = Some(mismatch.clone());
                 }
             }
+            self.audit.note_mismatch(mismatch);
         }
     }
 
@@ -780,6 +965,40 @@ mod cassette_seam {
                 .clone()
                 .expect("a mismatch");
             assert_eq!(mismatch.frame_index, 0);
+        }
+
+        #[test]
+        fn replay_audit_rejects_unread_server_frames() {
+            let recorder = CassetteRecorder::new();
+            recorder.record(Direction::ServerToClient, &[0xAA, 0xBB]);
+            let bytes = recorder.into_cassette_bytes();
+            let (_read, _write, audit) =
+                replay_split_with_audit(&bytes, ReplayWriteMode::Check).expect("valid cassette");
+
+            let err = audit
+                .assert_finished()
+                .expect_err("strict replay must reject unread server bytes");
+            assert!(
+                err.to_string().contains("unread server frames"),
+                "unexpected error: {err}"
+            );
+        }
+
+        #[test]
+        fn replay_audit_rejects_unmatched_expected_writes() {
+            let recorder = CassetteRecorder::new();
+            recorder.record(Direction::ClientToServer, &[0x10, 0x20]);
+            let bytes = recorder.into_cassette_bytes();
+            let (_read, _write, audit) =
+                replay_split_with_audit(&bytes, ReplayWriteMode::Check).expect("valid cassette");
+
+            let err = audit
+                .assert_finished()
+                .expect_err("strict replay must reject unmatched client writes");
+            assert!(
+                err.to_string().contains("expected client writes"),
+                "unexpected error: {err}"
+            );
         }
 
         #[test]

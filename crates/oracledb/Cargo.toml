@@ -94,6 +94,7 @@ criterion = { version = "0.5", default-features = false, features = ["cargo_benc
 proptest.workspace = true
 # TLS handshake integration test: a blocking rustls server stub + PEM loading.
 rustls-pemfile.workspace = true
+sha2.workspace = true
 # Span-capture subscriber for the feature-gated observability test
 # (tests/observability.rs, compiled only under `--features tracing`).
 tracing-subscriber.workspace = true

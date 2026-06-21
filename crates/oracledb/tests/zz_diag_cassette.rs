@@ -1,4 +1,4 @@
-//! Regression guard for the captured `.tns-cassette` fixture's framing shape.
+//! Regression guard for the synthetic `.tns-cassette` fixture's framing shape.
 //!
 //! The replay path relies on two facts that this test pins down, so a
 //! re-captured fixture that violates them fails loudly here rather than with a
@@ -20,7 +20,7 @@ fn fixture_bytes() -> Vec<u8> {
         env!("CARGO_MANIFEST_DIR")
     );
     std::fs::read(&path).unwrap_or_else(|e| {
-        panic!("missing cassette fixture {path} ({e}); capture it via the live record test")
+        panic!("missing synthetic cassette fixture {path} ({e}); regenerate it via the ignored fixture writer")
     })
 }
 
@@ -36,7 +36,7 @@ fn fixture_is_a_real_bidirectional_cassette() {
         .iter()
         .filter(|f| f.direction == Direction::ServerToClient)
         .count();
-    assert!(c2s > 0, "must contain captured C->S writes");
+    assert!(c2s > 0, "must contain expected C->S writes");
     assert!(s2c > 0, "must contain captured S->C reads");
 }
 

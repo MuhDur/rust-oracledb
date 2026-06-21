@@ -65,6 +65,7 @@ jobs:
           toolchain: nightly-2026-05-11
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
       - run: cargo test --workspace --exclude oracledb-pyshim
+      - run: cargo test -p oracledb --features cassette
       - run: cargo test --workspace --exclude oracledb-pyshim --doc
 
   docs:

@@ -118,6 +118,9 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace --exclude oracledb-pyshim
 
+      - name: Test cassette replay
+        run: cargo test -p oracledb --features cassette
+
       - name: Test docs
         run: cargo test --workspace --exclude oracledb-pyshim --doc
 

@@ -161,19 +161,24 @@ the listener. It is purely a function of the cassette.
 
 The integration tests in
 [`crates/oracledb/tests/cassette_record_replay.rs`](../crates/oracledb/tests/cassette_record_replay.rs)
-demonstrate the full loop for `select 7+5 from dual`:
+demonstrate the secure fixture loop with a synthetic transcript:
 
-* **Live capture** (`record_select_7_plus_5_session`, `#[ignore]`, needs the
-  container): `capture_scope()` around a real connect + `select 7+5 from dual` +
-  fetch + close, asserts the **live** result is `12`, and writes the fixture
-  [`tests/fixtures/cassettes/select_7_plus_5.tns-cassette`](../crates/oracledb/tests/fixtures/cassettes/select_7_plus_5.tns-cassette).
+* **Synthetic fixture generation** (`write_synthetic_connect_execute_fetch_close_fixture`,
+  `#[ignore]`): builds a deterministic connect + execute + fetch + close
+  transcript from protocol encoders and decoder golden payloads, then writes the
+  cassette plus a sidecar manifest. It does not connect to Oracle and never
+  writes a real auth exchange.
 
-* **Offline replay** (`replay_select_7_plus_5_offline`, runs everywhere, **no
-  DB**): loads the checked-in fixture, builds a `replay_split` transport, drives
-  the **real** TNS packet framing over `ReplayRead` and the **real**
-  `parse_query_response` decoder, and asserts the decoded value is `12`. With a
-  bogus/unreachable DSN in the environment it still passes in milliseconds —
-  proof that it never connects.
+* **Offline replay and validation** (runs everywhere, **no DB**): loads the
+  checked-in fixture, validates the manifest checksum and expected write hashes,
+  runs the leak scanner, drives the **real** TNS packet framing and decoders,
+  and the crate unit test replays the same fixture through `ConnectionCore`,
+  `execute_query`, `fetch_rows_with_columns`, and `close`.
+
+The committed fixture policy is security-first: use only synthetic transcripts
+or fully scrubbed post-auth transcripts. Do not check in raw live captures,
+password verifier exchanges, session keys, salts, tokens, or server banners
+that expose hostnames. The leak scanner intentionally fails on those fields.
 
 Unit tests for the wire format live in `net::cassette` (header layout, frame
 round-trip, lazy reader, corruption handling) and for the transport decorators
@@ -186,29 +191,31 @@ check/ignore, mismatch flagging, capture-scope wrap/restore).
 # Build & test with the feature on (default build is unaffected).
 cargo test --workspace --features cassette
 
-# (Re)capture the fixture against a live listener:
-eval "$(ORACLEDB_CONTAINER_NAME=rust-oracledb-free ORACLEDB_HOST_PORT=1521 scripts/container.sh env)"
+# Regenerate the synthetic fixture and manifest:
 cargo test -p oracledb --features cassette --test cassette_record_replay \
-  record_select_7_plus_5_session -- --ignored --nocapture
+  write_synthetic_connect_execute_fetch_close_fixture -- --ignored --nocapture
 
 # Replay it offline (no DB needed):
 cargo test -p oracledb --features cassette --test cassette_record_replay \
-  replay_select_7_plus_5_offline
+  replay_synthetic_fixture_decodes_execute_and_fetch_offline
 ```
 
 ---
 
 ## 6. Capturing a real bug for repro
 
-1. Reproduce the failing session against the live database with a
-   `capture_scope()` installed before `connect` (see §3), and persist the
-   cassette the moment the bug manifests.
-2. Ship the `.tns-cassette` to whoever debugs it — it is a single self-contained
-   file; no database, schema, or credentials travel with it.
-3. They `replay_split` it offline (§4) and step the decoder over the exact bytes
-   the server sent, as many times as needed, under a debugger, with zero
-   database flakiness or timing dependence. Use `ReplayWriteMode::Check` to also
-   confirm the request side matches the capture.
+1. Reproduce the failing session against a disposable database account with a
+   `capture_scope()` installed before `connect` (see §3).
+2. Before sharing or committing anything, scrub the cassette or trim it to a
+   post-auth transcript. Raw auth-era captures contain verifier material,
+   session keys, salts, tokens, and host-identifying banners.
+3. Add a manifest with provenance, sanitizer version, checksum, and expected
+   write hashes, then run the cassette tests so the leak scanner verifies the
+   fixture.
+4. `replay_split` the scrubbed fixture offline (§4) and step the decoder over
+   the exact bytes the server sent, as many times as needed, under a debugger,
+   with zero database flakiness or timing dependence. Use
+   `ReplayWriteMode::Check` to also confirm the request side matches.
 
 The result is a deterministic, offline, file-sized reproduction of a production
 wire condition — the kind of repro python-oracledb has no mechanism to produce.
