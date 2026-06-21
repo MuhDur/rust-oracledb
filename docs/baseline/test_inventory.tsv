@@ -45,7 +45,7 @@ crates/oracledb/src/arrow.rs	34
 crates/oracledb/src/cursor_logic.rs	14
 crates/oracledb/src/lib.rs	56
 crates/oracledb/src/obs.rs	3
-crates/oracledb/src/pool.rs	18
+crates/oracledb/src/pool.rs	19
 crates/oracledb/src/soda/metadata.rs	4
 crates/oracledb/src/soda/operation.rs	10
 crates/oracledb/src/soda/qbe.rs	23

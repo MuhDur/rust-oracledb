@@ -1,14 +1,14 @@
 //! Connection pool engine mirroring python-oracledb's thin pool algebra
 //! (`impl/thin/pool.pyx`). The engine owns the pool state machine (free
 //! lists, busy list, growth planning, getmode semantics, ping policy, idle
-//! timeout, max lifetime) and a background worker thread that creates,
-//! pings and closes connections through a [`PoolBackend`].
+//! timeout, max lifetime) and a background worker thread that creates, pings
+//! and closes connections through a [`PoolBackend`].
 //!
 //! The engine is deliberately free of any Python types; the pyshim provides
 //! a backend whose `Conn` payload carries shared handles to the underlying
-//! transport. The blocking facade waits on a [`Condvar`] with no foreign locks
-//! held, while [`PoolEngine::acquire_async`] waits on an async notification and
-//! checkpoints the caller's [`asupersync::Cx`] between waits.
+//! transport. [`PoolEngine::acquire_async`] waits on an async notification and
+//! checkpoints the caller's [`asupersync::Cx`] between waits; the blocking
+//! facade is a thin `block_on` wrapper over that async path.
 
 use asupersync::{time, Cx};
 use std::collections::VecDeque;
@@ -579,9 +579,7 @@ struct PoolState<C> {
 struct EngineInner<B: PoolBackend> {
     backend: B,
     state: Mutex<PoolState<B::Conn>>,
-    /// Woken whenever a waiter's `fulfill` predicate may have changed.
-    waiters: Condvar,
-    /// Async counterpart to [`EngineInner::waiters`].
+    /// Woken whenever an async waiter's `fulfill` predicate may have changed.
     async_waiters: asupersync::sync::Notify,
     /// Woken whenever the background worker has work to do.
     bg: Condvar,
@@ -614,8 +612,21 @@ fn checkpoint_pool(cx: &Cx) -> Result<(), PoolError> {
         .map_err(|err| PoolError::Cancelled(err.to_string()))
 }
 
+fn block_on_pool<F, Fut, T>(operation: F) -> Result<T, PoolError>
+where
+    F: FnOnce(Cx) -> Fut,
+    Fut: Future<Output = Result<T, PoolError>>,
+{
+    let runtime = crate::build_io_runtime().map_err(|err| PoolError::Internal(err.to_string()))?;
+    runtime.block_on(async {
+        let cx = Cx::current().ok_or_else(|| {
+            PoolError::Internal("asupersync did not install an ambient Cx".to_string())
+        })?;
+        operation(cx).await
+    })
+}
+
 fn wake_waiters<B: PoolBackend>(inner: &EngineInner<B>) {
-    inner.waiters.notify_all();
     inner.async_waiters.notify_waiters();
 }
 
@@ -775,7 +786,6 @@ impl<B: PoolBackend> PoolEngine<B> {
         let inner = Arc::new(EngineInner {
             backend,
             state: Mutex::new(state),
-            waiters: Condvar::new(),
             async_waiters: asupersync::sync::Notify::new(),
             bg: Condvar::new(),
             bg_handle: Mutex::new(None),
@@ -792,47 +802,12 @@ impl<B: PoolBackend> PoolEngine<B> {
         Ok(Self { inner })
     }
 
-    /// Acquire a connection following the reference `fulfill` algebra.
-    /// Returns the engine id of the connection now recorded as busy.
+    /// Blocking facade for [`Self::acquire_async`].
     ///
-    /// Blocking: callers must not hold the GIL or any embedder lock.
+    /// Returns the engine id of the connection now recorded as busy. Callers
+    /// must not hold the GIL or any embedder lock.
     pub fn acquire(&self, opts: AcquireOptions) -> Result<u64, PoolError> {
-        let inner = &*self.inner;
-        let mut state = lock_state(inner)?;
-        let request_id = enqueue_request(&mut state, opts)?;
-        let deadline = state
-            .wait_timeout_ms
-            .map(|ms| Instant::now() + Duration::from_millis(u64::from(ms)));
-        loop {
-            if let Some(conn_id) = poll_request_completion(&mut state, inner, request_id)? {
-                return Ok(conn_id);
-            }
-            if let Some(deadline) = deadline {
-                let now = Instant::now();
-                if now >= deadline {
-                    // Re-check completion before failing: the worker may have
-                    // satisfied the request between the wait and this point.
-                    if request_position(&state, request_id)
-                        .map(|ix| state.requests[ix].completed)
-                        .unwrap_or(false)
-                    {
-                        continue;
-                    }
-                    abandon_request(&mut state, inner, request_id);
-                    return Err(PoolError::NoConnectionAvailable);
-                }
-                let (next, _) = inner
-                    .waiters
-                    .wait_timeout(state, deadline - now)
-                    .map_err(|err| PoolError::Internal(err.to_string()))?;
-                state = next;
-            } else {
-                state = inner
-                    .waiters
-                    .wait(state)
-                    .map_err(|err| PoolError::Internal(err.to_string()))?;
-            }
-        }
+        block_on_pool(|cx| async move { self.acquire_async(&cx, opts).await })
     }
 
     /// Acquire a connection without parking the current OS thread.
@@ -879,6 +854,20 @@ impl<B: PoolBackend> PoolEngine<B> {
     /// end-of-request work (rollback) before calling this. No-op when the
     /// pool is already closed (mirrors the reference).
     pub fn return_connection(&self, conn_id: u64) -> Result<(), PoolError> {
+        block_on_pool(|cx| async move { self.return_connection_async(&cx, conn_id).await })
+    }
+
+    /// Return a busy connection through the async pool facade.
+    pub(crate) async fn return_connection_async(
+        &self,
+        cx: &Cx,
+        conn_id: u64,
+    ) -> Result<(), PoolError> {
+        checkpoint_pool(cx)?;
+        self.return_connection_impl(conn_id)
+    }
+
+    fn return_connection_impl(&self, conn_id: u64) -> Result<(), PoolError> {
         let inner = &*self.inner;
         let mut state = lock_state(inner)?;
         if !state.open {
@@ -896,6 +885,20 @@ impl<B: PoolBackend> PoolEngine<B> {
 
     /// Drop a busy connection from the pool (`ConnectionPool.drop`).
     pub fn drop_connection(&self, conn_id: u64) -> Result<(), PoolError> {
+        block_on_pool(|cx| async move { self.drop_connection_async(&cx, conn_id).await })
+    }
+
+    /// Drop a busy connection through the async pool facade.
+    pub(crate) async fn drop_connection_async(
+        &self,
+        cx: &Cx,
+        conn_id: u64,
+    ) -> Result<(), PoolError> {
+        checkpoint_pool(cx)?;
+        self.drop_connection_impl(conn_id)
+    }
+
+    fn drop_connection_impl(&self, conn_id: u64) -> Result<(), PoolError> {
         let inner = &*self.inner;
         let mut state = lock_state(inner)?;
         if !state.open {
@@ -917,6 +920,16 @@ impl<B: PoolBackend> PoolEngine<B> {
     ///
     /// Blocking: callers must not hold the GIL or any embedder lock.
     pub fn close(&self, force: bool) -> Result<(), PoolError> {
+        block_on_pool(|cx| async move { self.close_async(&cx, force).await })
+    }
+
+    /// Close the pool through the async facade.
+    pub(crate) async fn close_async(&self, cx: &Cx, force: bool) -> Result<(), PoolError> {
+        checkpoint_pool(cx)?;
+        self.close_impl(force)
+    }
+
+    fn close_impl(&self, force: bool) -> Result<(), PoolError> {
         let inner = &*self.inner;
         {
             let mut state = lock_state(inner)?;
@@ -954,11 +967,21 @@ impl<B: PoolBackend> PoolEngine<B> {
     }
 
     pub fn busy_count(&self) -> Result<u32, PoolError> {
+        block_on_pool(|cx| async move { self.busy_count_async(&cx).await })
+    }
+
+    pub(crate) async fn busy_count_async(&self, cx: &Cx) -> Result<u32, PoolError> {
+        checkpoint_pool(cx)?;
         let state = lock_state(&self.inner)?;
         Ok(u32::try_from(state.busy.len()).unwrap_or(u32::MAX))
     }
 
     pub fn open_count(&self) -> Result<u32, PoolError> {
+        block_on_pool(|cx| async move { self.open_count_async(&cx).await })
+    }
+
+    pub(crate) async fn open_count_async(&self, cx: &Cx) -> Result<u32, PoolError> {
+        checkpoint_pool(cx)?;
         let state = lock_state(&self.inner)?;
         Ok(state.open_count)
     }
@@ -2141,6 +2164,33 @@ mod tests {
     }
 
     #[test]
+    fn sync_acquire_block_on_waits_for_async_returned_connection() {
+        let backend = Arc::new(FakeBackend::new());
+        let engine = PoolEngine::start(
+            Arc::clone(&backend),
+            test_config(1, 1, 1, POOL_GETMODE_WAIT),
+        )
+        .unwrap();
+        wait_for_open_count(&engine, 1);
+        let held = engine.acquire(AcquireOptions::default()).unwrap();
+
+        let returner_engine = engine.clone();
+        let returner = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(25));
+            returner_engine.return_connection(held).unwrap();
+        });
+
+        let acquired = engine.acquire(AcquireOptions::default()).unwrap();
+        returner.join().expect("returner thread");
+        assert_eq!(
+            acquired, held,
+            "sync acquire must block_on the async waiter path and receive the returned connection"
+        );
+        engine.return_connection(acquired).unwrap();
+        engine.close(false).unwrap();
+    }
+
+    #[test]
     fn nowait_raises_when_full_and_forceget_exceeds_max() {
         let backend = Arc::new(FakeBackend::new());
         let engine = PoolEngine::start(
@@ -2430,9 +2480,9 @@ mod tests {
             })
             .await;
 
-            engine.return_connection(held).unwrap();
+            engine.return_connection_async(&cx, held).await.unwrap();
             assert_eq!(
-                engine.busy_count().unwrap(),
+                engine.busy_count_async(&cx).await.unwrap(),
                 0,
                 "returned connection is granted to the pending request before future drop"
             );
