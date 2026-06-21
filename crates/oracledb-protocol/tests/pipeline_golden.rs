@@ -272,7 +272,7 @@ fn abort_mode_responses_parse_with_tokens() {
 
     let fetched = parse_query_response(&frames.responses[3], caps()).expect("fetchall response");
     assert_eq!(fetched.token_num, Some(4));
-    let names: Vec<&str> = fetched.columns.iter().map(|c| c.name.as_str()).collect();
+    let names: Vec<&str> = fetched.columns.iter().map(|c| c.name()).collect();
     assert_eq!(names, ["ID", "VAL"]);
     let rows: Vec<(String, String)> = fetched
         .rows

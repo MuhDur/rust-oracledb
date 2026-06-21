@@ -926,7 +926,7 @@ fn py_value_to_direct_path(
     value: &Bound<'_, PyAny>,
     metadata: Option<&ColumnMetadata>,
 ) -> PyResult<DirectPathColumnValue> {
-    let ora_type_num = metadata.map(|m| m.ora_type_num);
+    let ora_type_num = metadata.map(ColumnMetadata::ora_type_num);
     if value.is_none() {
         return Ok(DirectPathColumnValue::Null);
     }
@@ -945,7 +945,7 @@ fn py_value_to_direct_path(
         // NCHAR-form columns (incl. CLOBs streamed as LONG over a multi-byte DB
         // charset) carry UTF-16BE bytes on the direct-path wire; other character
         // columns are UTF-8.
-        let is_nchar = metadata.is_some_and(|m| m.csfrm == CS_FORM_NCHAR);
+        let is_nchar = metadata.is_some_and(|m| m.csfrm() == CS_FORM_NCHAR);
         let encoded = if is_nchar {
             text.encode_utf16().flat_map(u16::to_be_bytes).collect()
         } else {

@@ -471,7 +471,7 @@ fn object_type_fetch() {
         // the column metadata identifies the object type
         let column = &select.columns[0];
         assert_eq!(
-            column.object_type_name.as_deref().map(str::to_uppercase),
+            column.object_type_name().map(str::to_uppercase),
             Some("RUST_ITEST_POINT".to_string()),
         );
         // the value is a packed object image (decoding the pickle is the shim's

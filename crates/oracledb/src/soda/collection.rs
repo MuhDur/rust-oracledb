@@ -749,7 +749,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 fn columns_require_define(columns: &[ColumnMetadata]) -> bool {
     columns.iter().any(|c| {
         matches!(
-            c.ora_type_num,
+            c.ora_type_num(),
             ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR | ORA_TYPE_NUM_JSON
         )
     })

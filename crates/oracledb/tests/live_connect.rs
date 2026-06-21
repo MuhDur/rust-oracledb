@@ -59,8 +59,8 @@ fn live_connect_ping_and_close() {
             .await
             .expect("Rust thin query should describe varchar and nvarchar");
         assert_eq!(ratios.columns.len(), 2);
-        assert!(ratios.columns[0].buffer_size > 0);
-        assert!(ratios.columns[1].buffer_size > 0);
+        assert!(ratios.columns[0].buffer_size() > 0);
+        assert!(ratios.columns[1].buffer_size() > 0);
         conn.ping(&cx)
             .await
             .expect("Rust thin ping should round-trip");

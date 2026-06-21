@@ -45,18 +45,18 @@ fn describe_and_decode_simple_object() {
         other => panic!("expected an object value, got {other:?}"),
     };
     let d0 = decode_object(obj0, &ty).unwrap();
-    assert_eq!(d0.type_name, "VX6_ADDR");
-    assert_eq!(d0.attributes[0].0, "STREET");
+    assert_eq!(d0.type_name(), "VX6_ADDR");
+    assert_eq!(d0.attributes()[0].0, "STREET");
     assert_eq!(
-        d0.attributes[0].1.as_ref().and_then(QueryValue::as_text),
+        d0.attributes()[0].1.as_ref().and_then(QueryValue::as_text),
         Some("12 Oak St")
     );
     assert_eq!(
-        d0.attributes[1].1.as_ref().and_then(QueryValue::as_i64),
+        d0.attributes()[1].1.as_ref().and_then(QueryValue::as_i64),
         Some(90210)
     );
     assert_eq!(
-        d0.attributes[2].1.as_ref().and_then(QueryValue::as_i64),
+        d0.attributes()[2].1.as_ref().and_then(QueryValue::as_i64),
         Some(1)
     );
 
@@ -66,9 +66,9 @@ fn describe_and_decode_simple_object() {
         other => panic!("expected an object value, got {other:?}"),
     };
     let d1 = decode_object(obj1, &ty).unwrap();
-    assert_eq!(d1.attributes[1].1, None, "NULL attribute decodes to None");
+    assert_eq!(d1.attributes()[1].1, None, "NULL attribute decodes to None");
     assert_eq!(
-        d1.attributes[2].1.as_ref().and_then(QueryValue::as_i64),
+        d1.attributes()[2].1.as_ref().and_then(QueryValue::as_i64),
         Some(0)
     );
 
@@ -107,7 +107,7 @@ fn describe_and_decode_collection() {
                 other => panic!("expected a collection object, got {other:?}"),
             };
             let d = decode_object(obj, &ty).unwrap();
-            d.elements
+            d.elements()
                 .expect("a collection decodes into `elements`")
                 .iter()
                 .map(|e| e.as_ref().and_then(QueryValue::as_i64))

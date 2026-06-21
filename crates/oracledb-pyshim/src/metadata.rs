@@ -20,7 +20,7 @@ pub(crate) struct FetchMetadataImpl {
 impl FetchMetadataImpl {
     #[getter]
     fn name(&self) -> &str {
-        &self.metadata.name
+        self.metadata.name()
     }
 
     #[getter]
@@ -40,42 +40,42 @@ impl FetchMetadataImpl {
 
     #[getter]
     fn max_size(&self) -> u32 {
-        self.metadata.max_size
+        self.metadata.max_size()
     }
 
     #[getter]
     fn buffer_size(&self) -> u32 {
-        self.metadata.buffer_size
+        self.metadata.buffer_size()
     }
 
     #[getter]
     fn precision(&self) -> i8 {
-        self.metadata.precision
+        self.metadata.precision()
     }
 
     #[getter]
     fn scale(&self) -> i8 {
-        self.metadata.scale
+        self.metadata.scale()
     }
 
     #[getter]
     fn nulls_allowed(&self) -> bool {
-        self.metadata.nulls_allowed
+        self.metadata.nulls_allowed()
     }
 
     #[getter]
     fn is_json(&self) -> bool {
-        self.metadata.is_json
+        self.metadata.is_json()
     }
 
     #[getter]
     fn is_oson(&self) -> bool {
-        self.metadata.is_oson
+        self.metadata.is_oson()
     }
 
     #[getter]
     fn objtype(&self) -> Option<DbObjectTypeImpl> {
-        if self.metadata.ora_type_num == ORA_TYPE_NUM_OBJECT {
+        if self.metadata.ora_type_num() == ORA_TYPE_NUM_OBJECT {
             return DbObjectTypeImpl::from_column_metadata(&self.metadata);
         }
         None
@@ -83,7 +83,7 @@ impl FetchMetadataImpl {
 
     #[getter]
     fn annotations(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        match &self.metadata.annotations {
+        match self.metadata.annotations() {
             None => Ok(None),
             Some(pairs) => {
                 let dict = pyo3::types::PyDict::new(py);
@@ -97,26 +97,26 @@ impl FetchMetadataImpl {
 
     #[getter]
     fn domain_name(&self) -> Option<&str> {
-        self.metadata.domain_name.as_deref()
+        self.metadata.domain_name()
     }
 
     #[getter]
     fn domain_schema(&self) -> Option<&str> {
-        self.metadata.domain_schema.as_deref()
+        self.metadata.domain_schema()
     }
 
     #[getter]
     fn vector_dimensions(&self) -> Option<u32> {
-        self.metadata.vector_dimensions
+        self.metadata.vector_dimensions()
     }
 
     #[getter]
     fn vector_format(&self) -> u8 {
-        self.metadata.vector_format
+        self.metadata.vector_format()
     }
 
     #[getter]
     fn vector_flags(&self) -> u8 {
-        self.metadata.vector_flags
+        self.metadata.vector_flags()
     }
 }

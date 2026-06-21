@@ -427,11 +427,13 @@ impl ThinCursorImpl {
     /// Native DB_TYPE_JSON columns (ora_type_num 119) are left untouched.
     fn adjust_oson_lob_define_columns(&mut self) {
         for column in &mut self.fetch_define_columns {
-            if column.is_oson && column.ora_type_num != ORA_TYPE_NUM_JSON {
-                column.ora_type_num = ORA_TYPE_NUM_LONG_RAW;
-                column.csfrm = 0;
-                column.buffer_size = TNS_MAX_LONG_LENGTH;
-                column.max_size = TNS_MAX_LONG_LENGTH;
+            if column.is_oson() && column.ora_type_num() != ORA_TYPE_NUM_JSON {
+                *column = column
+                    .clone()
+                    .with_ora_type_num(ORA_TYPE_NUM_LONG_RAW)
+                    .with_csfrm(0)
+                    .with_buffer_size(TNS_MAX_LONG_LENGTH)
+                    .with_max_size(TNS_MAX_LONG_LENGTH);
                 self.requires_define = true;
             }
         }
@@ -444,7 +446,7 @@ impl ThinCursorImpl {
     fn is_oson_lob_column(&self, index: usize) -> bool {
         self.fetch_define_columns
             .get(index)
-            .is_some_and(|column| column.is_oson && column.ora_type_num != ORA_TYPE_NUM_JSON)
+            .is_some_and(|column| column.is_oson() && column.ora_type_num() != ORA_TYPE_NUM_JSON)
     }
 
     pub(crate) fn clear_input_sizes_state(&mut self) {
@@ -566,7 +568,7 @@ impl ThinCursorImpl {
             .columns
             .iter()
             .enumerate()
-            .filter(|(_, column)| is_lob_ora_type(column.ora_type_num))
+            .filter(|(_, column)| is_lob_ora_type(column.ora_type_num()))
             .map(|(index, _)| index)
             .collect();
         if lob_indices.is_empty() {
@@ -585,7 +587,7 @@ impl ThinCursorImpl {
                     Some(QueryValue::Lob(lob)) => {
                         let column = &columns[index];
                         let data = self.read_full_lob(&lob.locator, call_timeout)?;
-                        Some(lob_bytes_to_query_value(column.ora_type_num, data))
+                        Some(lob_bytes_to_query_value(column.ora_type_num(), data))
                     }
                     other => other,
                 };
@@ -1522,7 +1524,7 @@ impl ThinCursorImpl {
             && self
                 .columns
                 .iter()
-                .any(|metadata| metadata.ora_type_num == ORA_TYPE_NUM_VECTOR)
+                .any(|metadata| metadata.ora_type_num() == ORA_TYPE_NUM_VECTOR)
         {
             self.rows = Vec::new();
             self.more_rows = true;
@@ -1702,7 +1704,7 @@ impl ThinCursorImpl {
             && self
                 .columns
                 .iter()
-                .any(|metadata| metadata.ora_type_num == ORA_TYPE_NUM_VECTOR)
+                .any(|metadata| metadata.ora_type_num() == ORA_TYPE_NUM_VECTOR)
         {
             self.rows = Vec::new();
             self.more_rows = true;
@@ -1876,7 +1878,7 @@ impl ThinCursorImpl {
                     && self
                         .columns
                         .get(index)
-                        .is_some_and(|metadata| metadata.is_json)
+                        .is_some_and(|metadata| metadata.is_json())
                 {
                     return json_query_value_to_py(py, value, Some(_cursor), Some(&lob_context));
                 }
@@ -1884,7 +1886,7 @@ impl ThinCursorImpl {
                 // fetch_decimals is in effect (impl/base/cursor.pyx:211-214).
                 if self.fetch_decimals
                     && self.columns.get(index).is_some_and(|metadata| {
-                        metadata.ora_type_num == oracledb::protocol::thin::ORA_TYPE_NUM_NUMBER
+                        metadata.ora_type_num() == oracledb::protocol::thin::ORA_TYPE_NUM_NUMBER
                     })
                 {
                     if let Some(QueryValue::Number(num)) = value {
@@ -2096,11 +2098,11 @@ impl ThinCursorImpl {
         let mut result = Vec::with_capacity(batch_errors.len());
         for batch_error in batch_errors {
             let kwargs = PyDict::new(py);
-            if !batch_error.message.is_empty() {
-                kwargs.set_item("message", &batch_error.message)?;
+            if !batch_error.message().is_empty() {
+                kwargs.set_item("message", batch_error.message())?;
             }
-            kwargs.set_item("code", batch_error.code)?;
-            kwargs.set_item("offset", batch_error.offset)?;
+            kwargs.set_item("code", batch_error.code())?;
+            kwargs.set_item("offset", batch_error.offset())?;
             result.push(error_type.call((), Some(&kwargs))?.unbind());
         }
         Ok(Some(result))

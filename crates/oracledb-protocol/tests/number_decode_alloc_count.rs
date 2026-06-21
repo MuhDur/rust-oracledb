@@ -22,13 +22,9 @@ const TNS_MSG_TYPE_ROW_DATA: u8 = 7;
 const TNS_MSG_TYPE_END_OF_RESPONSE: u8 = 29;
 
 fn col(name: &str, ora_type_num: u8, buffer_size: u32) -> ColumnMetadata {
-    ColumnMetadata {
-        name: name.to_string(),
-        ora_type_num,
-        csfrm: 1,
-        buffer_size,
-        ..ColumnMetadata::default()
-    }
+    ColumnMetadata::new(name, ora_type_num)
+        .with_csfrm(1)
+        .with_buffer_size(buffer_size)
 }
 
 #[test]

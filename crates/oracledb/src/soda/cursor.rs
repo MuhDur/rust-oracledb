@@ -85,7 +85,7 @@ impl SodaCursor {
     async fn fetch_more(&mut self, conn: &mut Connection, cx: &Cx) -> Result<()> {
         let needs_define = self.columns.iter().any(|c| {
             matches!(
-                c.ora_type_num,
+                c.ora_type_num(),
                 ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR | ORA_TYPE_NUM_JSON
             )
         });

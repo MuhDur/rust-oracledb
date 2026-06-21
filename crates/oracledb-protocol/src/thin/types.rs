@@ -45,37 +45,237 @@ impl Default for ClientCapabilities {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ColumnMetadata {
-    pub name: String,
-    pub ora_type_num: u8,
-    pub csfrm: u8,
-    pub precision: i8,
-    pub scale: i8,
-    pub buffer_size: u32,
-    pub max_size: u32,
-    pub nulls_allowed: bool,
-    pub is_json: bool,
-    pub is_oson: bool,
-    pub object_schema: Option<String>,
-    pub object_type_name: Option<String>,
-    pub is_array: bool,
+    pub(crate) name: String,
+    pub(crate) ora_type_num: u8,
+    pub(crate) csfrm: u8,
+    pub(crate) precision: i8,
+    pub(crate) scale: i8,
+    pub(crate) buffer_size: u32,
+    pub(crate) max_size: u32,
+    pub(crate) nulls_allowed: bool,
+    pub(crate) is_json: bool,
+    pub(crate) is_oson: bool,
+    pub(crate) object_schema: Option<String>,
+    pub(crate) object_type_name: Option<String>,
+    pub(crate) is_array: bool,
     /// VECTOR columns only: the fixed dimension count, or `None` for a
     /// flexible-dimension column (server sends 0).
-    pub vector_dimensions: Option<u32>,
+    pub(crate) vector_dimensions: Option<u32>,
     /// VECTOR columns only: the storage format byte (`VECTOR_FORMAT_*`); 0
     /// for a flexible-format column.
-    pub vector_format: u8,
+    pub(crate) vector_format: u8,
     /// VECTOR columns only: the metadata flags byte (sparse / flexible).
-    pub vector_flags: u8,
+    pub(crate) vector_flags: u8,
     /// SQL data-use-case domain schema (23ai+), or `None` if the column has no
     /// domain.
-    pub domain_schema: Option<String>,
+    pub(crate) domain_schema: Option<String>,
     /// SQL data-use-case domain name (23ai+), or `None` if the column has no
     /// domain.
-    pub domain_name: Option<String>,
+    pub(crate) domain_name: Option<String>,
     /// Ordered column annotations (23ai+), as (key, value) pairs preserving
     /// server order; `None` if the column has no annotations. A null annotation
     /// value is normalized to an empty string, matching python-oracledb.
-    pub annotations: Option<Vec<(String, String)>>,
+    pub(crate) annotations: Option<Vec<(String, String)>>,
+}
+
+impl ColumnMetadata {
+    pub fn new(name: impl Into<String>, ora_type_num: u8) -> Self {
+        Self {
+            name: name.into(),
+            ora_type_num,
+            ..Self::default()
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    pub fn ora_type_num(&self) -> u8 {
+        self.ora_type_num
+    }
+
+    #[must_use]
+    pub fn with_ora_type_num(mut self, ora_type_num: u8) -> Self {
+        self.ora_type_num = ora_type_num;
+        self
+    }
+
+    pub fn csfrm(&self) -> u8 {
+        self.csfrm
+    }
+
+    #[must_use]
+    pub fn with_csfrm(mut self, csfrm: u8) -> Self {
+        self.csfrm = csfrm;
+        self
+    }
+
+    pub fn precision(&self) -> i8 {
+        self.precision
+    }
+
+    #[must_use]
+    pub fn with_precision(mut self, precision: i8) -> Self {
+        self.precision = precision;
+        self
+    }
+
+    pub fn scale(&self) -> i8 {
+        self.scale
+    }
+
+    #[must_use]
+    pub fn with_scale(mut self, scale: i8) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    pub fn buffer_size(&self) -> u32 {
+        self.buffer_size
+    }
+
+    #[must_use]
+    pub fn with_buffer_size(mut self, buffer_size: u32) -> Self {
+        self.buffer_size = buffer_size;
+        self
+    }
+
+    pub fn max_size(&self) -> u32 {
+        self.max_size
+    }
+
+    #[must_use]
+    pub fn with_max_size(mut self, max_size: u32) -> Self {
+        self.max_size = max_size;
+        self
+    }
+
+    pub fn nulls_allowed(&self) -> bool {
+        self.nulls_allowed
+    }
+
+    #[must_use]
+    pub fn with_nulls_allowed(mut self, nulls_allowed: bool) -> Self {
+        self.nulls_allowed = nulls_allowed;
+        self
+    }
+
+    pub fn is_json(&self) -> bool {
+        self.is_json
+    }
+
+    #[must_use]
+    pub fn with_is_json(mut self, is_json: bool) -> Self {
+        self.is_json = is_json;
+        self
+    }
+
+    pub fn is_oson(&self) -> bool {
+        self.is_oson
+    }
+
+    #[must_use]
+    pub fn with_is_oson(mut self, is_oson: bool) -> Self {
+        self.is_oson = is_oson;
+        self
+    }
+
+    pub fn object_schema(&self) -> Option<&str> {
+        self.object_schema.as_deref()
+    }
+
+    #[must_use]
+    pub fn with_object_schema(mut self, object_schema: Option<String>) -> Self {
+        self.object_schema = object_schema;
+        self
+    }
+
+    pub fn object_type_name(&self) -> Option<&str> {
+        self.object_type_name.as_deref()
+    }
+
+    #[must_use]
+    pub fn with_object_type_name(mut self, object_type_name: Option<String>) -> Self {
+        self.object_type_name = object_type_name;
+        self
+    }
+
+    pub fn is_array(&self) -> bool {
+        self.is_array
+    }
+
+    #[must_use]
+    pub fn with_is_array(mut self, is_array: bool) -> Self {
+        self.is_array = is_array;
+        self
+    }
+
+    pub fn vector_dimensions(&self) -> Option<u32> {
+        self.vector_dimensions
+    }
+
+    #[must_use]
+    pub fn with_vector_dimensions(mut self, vector_dimensions: Option<u32>) -> Self {
+        self.vector_dimensions = vector_dimensions;
+        self
+    }
+
+    pub fn vector_format(&self) -> u8 {
+        self.vector_format
+    }
+
+    #[must_use]
+    pub fn with_vector_format(mut self, vector_format: u8) -> Self {
+        self.vector_format = vector_format;
+        self
+    }
+
+    pub fn vector_flags(&self) -> u8 {
+        self.vector_flags
+    }
+
+    #[must_use]
+    pub fn with_vector_flags(mut self, vector_flags: u8) -> Self {
+        self.vector_flags = vector_flags;
+        self
+    }
+
+    pub fn domain_schema(&self) -> Option<&str> {
+        self.domain_schema.as_deref()
+    }
+
+    #[must_use]
+    pub fn with_domain_schema(mut self, domain_schema: Option<String>) -> Self {
+        self.domain_schema = domain_schema;
+        self
+    }
+
+    pub fn domain_name(&self) -> Option<&str> {
+        self.domain_name.as_deref()
+    }
+
+    #[must_use]
+    pub fn with_domain_name(mut self, domain_name: Option<String>) -> Self {
+        self.domain_name = domain_name;
+        self
+    }
+
+    pub fn annotations(&self) -> Option<&[(String, String)]> {
+        self.annotations.as_deref()
+    }
+
+    #[must_use]
+    pub fn with_annotations(mut self, annotations: Option<Vec<(String, String)>>) -> Self {
+        self.annotations = annotations;
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -846,9 +1046,35 @@ impl ExecuteOptions {
 /// impl/thin/messages/base.pyx batch error codes/offsets/messages arrays).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BatchServerError {
-    pub code: u32,
-    pub offset: u32,
-    pub message: String,
+    pub(crate) code: u32,
+    pub(crate) offset: u32,
+    pub(crate) message: String,
+}
+
+impl BatchServerError {
+    pub fn new(code: u32, offset: u32, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            offset,
+            message: message.into(),
+        }
+    }
+
+    pub fn code(&self) -> u32 {
+        self.code
+    }
+
+    pub fn offset(&self) -> u32 {
+        self.offset
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn into_parts(self) -> (u32, u32, String) {
+        (self.code, self.offset, self.message)
+    }
 }
 
 #[cfg(test)]

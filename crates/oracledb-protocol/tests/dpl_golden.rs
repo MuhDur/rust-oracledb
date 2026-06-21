@@ -230,11 +230,7 @@ fn prepare_response_parses_and_overrides_metadata() {
         parse_direct_path_prepare_response(response.data_payload(), ClientCapabilities::default())
             .expect("prepare response should parse");
 
-    let names: Vec<&str> = result
-        .column_metadata
-        .iter()
-        .map(|c| c.name.as_str())
-        .collect();
+    let names: Vec<&str> = result.column_metadata.iter().map(|c| c.name()).collect();
     assert_eq!(
         names,
         ["ID", "NAME", "SALARY", "HIRED", "UPDATED", "PAYLOAD", "RATING"]
@@ -242,7 +238,7 @@ fn prepare_response_parses_and_overrides_metadata() {
     let types: Vec<u8> = result
         .column_metadata
         .iter()
-        .map(|c| c.ora_type_num)
+        .map(|c| c.ora_type_num())
         .collect();
     assert_eq!(
         types,
@@ -256,12 +252,15 @@ fn prepare_response_parses_and_overrides_metadata() {
             ORA_TYPE_NUM_BINARY_DOUBLE,
         ]
     );
-    assert!(!result.column_metadata[0].nulls_allowed, "id is NOT NULL");
-    assert!(!result.column_metadata[1].nulls_allowed, "name is NOT NULL");
-    assert!(result.column_metadata[2].nulls_allowed);
-    assert_eq!(result.column_metadata[1].max_size, 100);
-    assert_eq!(result.column_metadata[2].precision, 9);
-    assert_eq!(result.column_metadata[2].scale, 2);
+    assert!(!result.column_metadata[0].nulls_allowed(), "id is NOT NULL");
+    assert!(
+        !result.column_metadata[1].nulls_allowed(),
+        "name is NOT NULL"
+    );
+    assert!(result.column_metadata[2].nulls_allowed());
+    assert_eq!(result.column_metadata[1].max_size(), 100);
+    assert_eq!(result.column_metadata[2].precision(), 9);
+    assert_eq!(result.column_metadata[2].scale(), 2);
     assert!(result.cursor_id > 0);
 }
 

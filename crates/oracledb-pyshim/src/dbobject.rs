@@ -64,10 +64,9 @@ impl DbObjectTypeImpl {
     }
 
     pub(crate) fn from_column_metadata(metadata: &ColumnMetadata) -> Option<Self> {
-        let name = metadata.object_type_name.as_ref()?.to_ascii_uppercase();
+        let name = metadata.object_type_name()?.to_ascii_uppercase();
         let schema = metadata
-            .object_schema
-            .as_deref()
+            .object_schema()
             .unwrap_or_default()
             .to_ascii_uppercase();
         Some(Self::new(

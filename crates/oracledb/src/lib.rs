@@ -1020,14 +1020,47 @@ pub fn render_caret(sql: &str, offset: usize, headline: &str) -> String {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DbmsOutput {
     /// The captured lines, in the order `DBMS_OUTPUT.GET_LINE` returned them.
-    pub lines: Vec<String>,
+    lines: Vec<String>,
     /// Number of lines captured (`== lines.len()`).
-    pub line_count: usize,
+    line_count: usize,
     /// Total characters (Unicode scalar values) across all captured lines.
-    pub char_count: usize,
+    char_count: usize,
     /// `true` if capture stopped at a `max_lines`/`max_chars` bound while more
     /// output was still buffered server-side; `false` if it drained to the end.
-    pub truncated: bool,
+    truncated: bool,
+}
+
+impl DbmsOutput {
+    pub fn new(lines: Vec<String>, truncated: bool) -> Self {
+        let line_count = lines.len();
+        let char_count = lines.iter().map(|line| line.chars().count()).sum();
+        Self {
+            lines,
+            line_count,
+            char_count,
+            truncated,
+        }
+    }
+
+    pub fn lines(&self) -> &[String] {
+        &self.lines
+    }
+
+    pub fn line_count(&self) -> usize {
+        self.line_count
+    }
+
+    pub fn char_count(&self) -> usize {
+        self.char_count
+    }
+
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    pub fn into_lines(self) -> Vec<String> {
+        self.lines
+    }
 }
 
 /// A scalar attribute of an Oracle ADT/object type (from the data dictionary).
@@ -1078,15 +1111,71 @@ pub struct ObjectType {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DecodedObject {
     /// The object type's schema.
-    pub type_schema: String,
+    type_schema: String,
     /// The object type's name.
-    pub type_name: String,
+    type_name: String,
     /// `(attribute name, value)` in declaration order; `None` is SQL `NULL`.
     /// Empty when the decoded value is a collection (see `elements`).
-    pub attributes: Vec<(String, Option<oracledb_protocol::thin::QueryValue>)>,
+    attributes: Vec<(String, Option<oracledb_protocol::thin::QueryValue>)>,
     /// `Some(elements)` when the decoded value is a collection; each entry is one
     /// element in order (`None` is a NULL element). `None` for object values.
-    pub elements: Option<Vec<Option<oracledb_protocol::thin::QueryValue>>>,
+    elements: Option<Vec<Option<oracledb_protocol::thin::QueryValue>>>,
+}
+
+impl DecodedObject {
+    pub fn object(
+        type_schema: impl Into<String>,
+        type_name: impl Into<String>,
+        attributes: Vec<(String, Option<oracledb_protocol::thin::QueryValue>)>,
+    ) -> Self {
+        Self {
+            type_schema: type_schema.into(),
+            type_name: type_name.into(),
+            attributes,
+            elements: None,
+        }
+    }
+
+    pub fn collection(
+        type_schema: impl Into<String>,
+        type_name: impl Into<String>,
+        elements: Vec<Option<oracledb_protocol::thin::QueryValue>>,
+    ) -> Self {
+        Self {
+            type_schema: type_schema.into(),
+            type_name: type_name.into(),
+            attributes: Vec::new(),
+            elements: Some(elements),
+        }
+    }
+
+    pub fn type_schema(&self) -> &str {
+        &self.type_schema
+    }
+
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn attributes(&self) -> &[(String, Option<oracledb_protocol::thin::QueryValue>)] {
+        &self.attributes
+    }
+
+    pub fn elements(&self) -> Option<&[Option<oracledb_protocol::thin::QueryValue>]> {
+        self.elements.as_deref()
+    }
+
+    pub fn is_collection(&self) -> bool {
+        self.elements.is_some()
+    }
+
+    pub fn into_attributes(self) -> Vec<(String, Option<oracledb_protocol::thin::QueryValue>)> {
+        self.attributes
+    }
+
+    pub fn into_elements(self) -> Option<Vec<Option<oracledb_protocol::thin::QueryValue>>> {
+        self.elements
+    }
 }
 
 /// Decode a returned Oracle ADT object value (the payload of a
@@ -1801,10 +1890,11 @@ pub struct BatchError {
 
 impl BatchError {
     fn from_server(error: BatchServerError) -> Self {
+        let (code, row_index, message) = error.into_parts();
         Self {
-            row_index: error.offset,
-            code: error.code,
-            message: error.message,
+            row_index,
+            code,
+            message,
         }
     }
 
@@ -2051,7 +2141,7 @@ impl ColumnIndex for &str {
     fn resolve(self, columns: &[ColumnMetadata]) -> std::result::Result<usize, ConversionError> {
         columns
             .iter()
-            .position(|col| col.name.eq_ignore_ascii_case(self))
+            .position(|col| col.name().eq_ignore_ascii_case(self))
             .ok_or_else(|| ConversionError::OutOfRange {
                 expected: "column name",
                 detail: format!("no column named {self:?}"),
@@ -4986,7 +5076,7 @@ impl Connection {
         if exec_options.cursor_id() != 0 && statement_is_query(sql) {
             if let Some(columns) = self.cursor_columns.get(&exec_options.cursor_id()) {
                 if columns.iter().any(|column| {
-                    column.ora_type_num == oracledb_protocol::thin::ORA_TYPE_NUM_VECTOR
+                    column.ora_type_num() == oracledb_protocol::thin::ORA_TYPE_NUM_VECTOR
                 }) {
                     exec_options = exec_options.with_no_prefetch(true);
                 }
@@ -7258,7 +7348,7 @@ impl Connection {
                 )
                 .await?;
             if !result.rows.is_empty() {
-                columns[index].is_json = true;
+                columns[index] = columns[index].clone().with_is_json(true);
             }
         }
         Ok(())
@@ -9526,7 +9616,7 @@ fn columns_require_define(columns: &[ColumnMetadata]) -> bool {
     };
     columns.iter().any(|column| {
         matches!(
-            column.ora_type_num,
+            column.ora_type_num(),
             ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_VECTOR | ORA_TYPE_NUM_JSON
         )
     })
@@ -9543,11 +9633,14 @@ fn json_lob_probe_candidates(columns: &[ColumnMetadata]) -> Vec<(usize, String)>
         .iter()
         .enumerate()
         .filter(|(_, metadata)| {
-            !metadata.is_json
-                && matches!(metadata.ora_type_num, ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB)
-                && !metadata.name.is_empty()
+            !metadata.is_json()
+                && matches!(
+                    metadata.ora_type_num(),
+                    ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB
+                )
+                && !metadata.name().is_empty()
         })
-        .map(|(index, metadata)| (index, metadata.name.to_ascii_uppercase()))
+        .map(|(index, metadata)| (index, metadata.name().to_ascii_uppercase()))
         .collect()
 }
 
@@ -9842,18 +9935,9 @@ mod tests {
 
         let columns: Arc<[ColumnMetadata]> = Arc::from(
             vec![
-                ColumnMetadata {
-                    name: "ID".to_string(),
-                    ..ColumnMetadata::default()
-                },
-                ColumnMetadata {
-                    name: "NAME".to_string(),
-                    ..ColumnMetadata::default()
-                },
-                ColumnMetadata {
-                    name: "NICK".to_string(),
-                    ..ColumnMetadata::default()
-                },
+                ColumnMetadata::new("ID", 0),
+                ColumnMetadata::new("NAME", 0),
+                ColumnMetadata::new("NICK", 0),
             ]
             .into_boxed_slice(),
         );
@@ -9995,11 +10079,7 @@ mod tests {
     fn batch_outcome_projects_query_result_fields() {
         let result = QueryResult {
             row_count: 3,
-            batch_errors: vec![BatchServerError {
-                code: 1,
-                offset: 2,
-                message: "bad row".to_string(),
-            }],
+            batch_errors: vec![BatchServerError::new(1, 2, "bad row")],
             array_dml_row_counts: Some(vec![1, 0, 1]),
             return_values: vec![(0, vec![Some(QueryValue::Text("AAABBB".to_string()))])],
             ..QueryResult::default()
@@ -10211,12 +10291,7 @@ mod tests {
     }
 
     fn column(name: &str, ora_type_num: u8, is_json: bool) -> ColumnMetadata {
-        ColumnMetadata {
-            name: name.to_string(),
-            ora_type_num,
-            is_json,
-            ..ColumnMetadata::default()
-        }
+        ColumnMetadata::new(name, ora_type_num).with_is_json(is_json)
     }
 
     #[test]

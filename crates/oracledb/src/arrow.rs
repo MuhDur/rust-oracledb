@@ -199,7 +199,7 @@ const VECTOR_META_FLAG_SPARSE_VECTOR: u8 = 0x02;
 /// when a query produces vectors of differing element formats; the reference
 /// raises `ERR_ARROW_UNSUPPORTED_VECTOR_FORMAT` (our DPY-3031).
 fn vector_data_type(column: &ColumnMetadata) -> Result<DataType> {
-    let format = match column.vector_format {
+    let format = match column.vector_format() {
         VECTOR_FORMAT_FLOAT32 => VectorFormat::Float32,
         VECTOR_FORMAT_FLOAT64 => VectorFormat::Float64,
         VECTOR_FORMAT_INT8 => VectorFormat::Int8,
@@ -207,15 +207,15 @@ fn vector_data_type(column: &ColumnMetadata) -> Result<DataType> {
         // 0 == flexible format -> DPY-3031.
         _ => return Err(ArrowConversionError::UnsupportedVectorFormat),
     };
-    let sparse = column.vector_flags & VECTOR_META_FLAG_SPARSE_VECTOR != 0;
+    let sparse = column.vector_flags() & VECTOR_META_FLAG_SPARSE_VECTOR != 0;
     Ok(vector_arrow_type(format, sparse))
 }
 
 /// Reference-style `DB_TYPE_*` name for a fetched column (used in DPY-3030 /
 /// DPY-3038 message parity).
 pub fn db_type_name(column: &ColumnMetadata) -> String {
-    let nchar = column.csfrm == CS_FORM_NCHAR;
-    let name = match column.ora_type_num {
+    let nchar = column.csfrm() == CS_FORM_NCHAR;
+    let name = match column.ora_type_num() {
         ORA_TYPE_NUM_VARCHAR if nchar => "DB_TYPE_NVARCHAR",
         ORA_TYPE_NUM_VARCHAR => "DB_TYPE_VARCHAR",
         ORA_TYPE_NUM_NUMBER => "DB_TYPE_NUMBER",
@@ -283,14 +283,14 @@ pub fn arrow_type_name(data_type: &DataType) -> String {
 
 fn is_char_like(column: &ColumnMetadata) -> bool {
     matches!(
-        column.ora_type_num,
+        column.ora_type_num(),
         ORA_TYPE_NUM_VARCHAR | ORA_TYPE_NUM_CHAR | ORA_TYPE_NUM_LONG
     )
 }
 
 fn is_datetime_like(column: &ColumnMetadata) -> bool {
     matches!(
-        column.ora_type_num,
+        column.ora_type_num(),
         ORA_TYPE_NUM_DATE
             | ORA_TYPE_NUM_TIMESTAMP
             | ORA_TYPE_NUM_TIMESTAMP_TZ
@@ -301,13 +301,16 @@ fn is_datetime_like(column: &ColumnMetadata) -> bool {
 /// Default DB->Arrow type for one fetched column
 /// (metadata.pyx `_create_arrow_schema`).
 fn default_arrow_type(column: &ColumnMetadata, options: &ArrowFetchOptions) -> Result<DataType> {
-    match column.ora_type_num {
+    match column.ora_type_num() {
         ORA_TYPE_NUM_NUMBER => {
-            if options.fetch_decimals && (1..=38).contains(&column.precision) {
-                Ok(DataType::Decimal128(column.precision as u8, column.scale))
+            if options.fetch_decimals && (1..=38).contains(&column.precision()) {
+                Ok(DataType::Decimal128(
+                    column.precision() as u8,
+                    column.scale(),
+                ))
             } else if !options.fetch_decimals
-                && column.scale == 0
-                && (1..=18).contains(&column.precision)
+                && column.scale() == 0
+                && (1..=18).contains(&column.precision())
             {
                 Ok(DataType::Int64)
             } else {
@@ -325,7 +328,7 @@ fn default_arrow_type(column: &ColumnMetadata, options: &ArrowFetchOptions) -> R
         | ORA_TYPE_NUM_TIMESTAMP_LTZ => {
             // DATE describes with scale 0 -> seconds; fractional-second scale
             // picks ms/us/ns (metadata.pyx:65-75)
-            let unit = match column.scale {
+            let unit = match column.scale() {
                 1..=3 => TimeUnit::Millisecond,
                 4..=6 => TimeUnit::Microsecond,
                 7..=9 => TimeUnit::Nanosecond,
@@ -344,7 +347,7 @@ fn default_arrow_type(column: &ColumnMetadata, options: &ArrowFetchOptions) -> R
 /// (metadata.pyx `check_convert_to_arrow`). Note that string_view /
 /// binary_view are NOT accepted on the fetch side.
 fn check_convert_to_arrow(column: &ColumnMetadata, requested: &DataType) -> Result<()> {
-    let ok = match column.ora_type_num {
+    let ok = match column.ora_type_num() {
         ORA_TYPE_NUM_NUMBER => matches!(
             requested,
             DataType::Decimal128(_, _)
@@ -416,7 +419,7 @@ pub fn arrow_schema_for_columns(
     let mut fields = Vec::with_capacity(columns.len());
     for column in columns {
         let data_type = default_arrow_type(column, options)?;
-        fields.push(Field::new(&column.name, data_type, true));
+        fields.push(Field::new(column.name(), data_type, true));
     }
     Ok(Schema::new(fields))
 }
@@ -429,17 +432,19 @@ pub fn arrow_define_columns(columns: &[ColumnMetadata]) -> Vec<ColumnMetadata> {
         .iter()
         .map(|column| {
             let mut column = column.clone();
-            match column.ora_type_num {
+            match column.ora_type_num() {
                 ORA_TYPE_NUM_CLOB => {
-                    column.ora_type_num = ORA_TYPE_NUM_LONG;
-                    column.buffer_size = TNS_MAX_LONG_LENGTH;
-                    column.max_size = TNS_MAX_LONG_LENGTH;
+                    column = column
+                        .with_ora_type_num(ORA_TYPE_NUM_LONG)
+                        .with_buffer_size(TNS_MAX_LONG_LENGTH)
+                        .with_max_size(TNS_MAX_LONG_LENGTH);
                 }
                 ORA_TYPE_NUM_BLOB => {
-                    column.ora_type_num = ORA_TYPE_NUM_LONG_RAW;
-                    column.csfrm = 0;
-                    column.buffer_size = TNS_MAX_LONG_LENGTH;
-                    column.max_size = TNS_MAX_LONG_LENGTH;
+                    column = column
+                        .with_ora_type_num(ORA_TYPE_NUM_LONG_RAW)
+                        .with_csfrm(0)
+                        .with_buffer_size(TNS_MAX_LONG_LENGTH)
+                        .with_max_size(TNS_MAX_LONG_LENGTH);
                 }
                 _ => {}
             }
@@ -496,7 +501,7 @@ pub fn build_record_batch_with_schema(
 
 fn invalid_value(column: &ColumnMetadata, reason: impl Into<String>) -> ArrowConversionError {
     ArrowConversionError::InvalidValue {
-        column_name: column.name.clone(),
+        column_name: column.name().to_string(),
         reason: reason.into(),
     }
 }
@@ -1201,10 +1206,10 @@ pub fn check_convert_from_arrow(arrow_type: &DataType, column: &ColumnMetadata) 
         | DataType::BinaryView
         | DataType::FixedSizeBinary(_)
         | DataType::LargeBinary => matches!(
-            column.ora_type_num,
+            column.ora_type_num(),
             ORA_TYPE_NUM_RAW | ORA_TYPE_NUM_LONG_RAW
         ),
-        DataType::Boolean => column.ora_type_num == ORA_TYPE_NUM_BOOLEAN,
+        DataType::Boolean => column.ora_type_num() == ORA_TYPE_NUM_BOOLEAN,
         DataType::Decimal128(_, _)
         | DataType::Int8
         | DataType::Int16
@@ -1213,12 +1218,12 @@ pub fn check_convert_from_arrow(arrow_type: &DataType, column: &ColumnMetadata) 
         | DataType::UInt8
         | DataType::UInt16
         | DataType::UInt32
-        | DataType::UInt64 => column.ora_type_num == ORA_TYPE_NUM_NUMBER,
+        | DataType::UInt64 => column.ora_type_num() == ORA_TYPE_NUM_NUMBER,
         DataType::Date32 | DataType::Date64 | DataType::Timestamp(_, None) => {
             is_datetime_like(column)
         }
         DataType::Float32 | DataType::Float64 => matches!(
-            column.ora_type_num,
+            column.ora_type_num(),
             ORA_TYPE_NUM_BINARY_DOUBLE | ORA_TYPE_NUM_BINARY_FLOAT | ORA_TYPE_NUM_NUMBER
         ),
         DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8 => is_char_like(column),
@@ -1270,9 +1275,9 @@ pub fn record_batch_to_direct_path_rows(
 
     for (array, column) in batch.columns().iter().zip(column_metadata) {
         check_convert_from_arrow(array.data_type(), column)?;
-        let number_target = column.ora_type_num == ORA_TYPE_NUM_NUMBER;
+        let number_target = column.ora_type_num() == ORA_TYPE_NUM_NUMBER;
         let utf16_target =
-            column.ora_type_num == ORA_TYPE_NUM_LONG && column.csfrm == CS_FORM_NCHAR;
+            column.ora_type_num() == ORA_TYPE_NUM_LONG && column.csfrm() == CS_FORM_NCHAR;
         for (row_index, row) in rows.iter_mut().enumerate() {
             if array.is_null(row_index) {
                 row.push(DirectPathColumnValue::Null);
@@ -1338,7 +1343,7 @@ pub fn record_batch_to_direct_path_rows(
                     let value = array.as_primitive::<Float64Type>().value(row_index);
                     if number_target {
                         DirectPathColumnValue::Number(float_to_number_text(value))
-                    } else if column.ora_type_num == ORA_TYPE_NUM_BINARY_FLOAT {
+                    } else if column.ora_type_num() == ORA_TYPE_NUM_BINARY_FLOAT {
                         DirectPathColumnValue::BinaryFloat(value as f32)
                     } else {
                         DirectPathColumnValue::BinaryDouble(value)
@@ -1348,7 +1353,7 @@ pub fn record_batch_to_direct_path_rows(
                     let value = array.as_primitive::<Float32Type>().value(row_index);
                     if number_target {
                         DirectPathColumnValue::Number(float_to_number_text(f64::from(value)))
-                    } else if column.ora_type_num == ORA_TYPE_NUM_BINARY_DOUBLE {
+                    } else if column.ora_type_num() == ORA_TYPE_NUM_BINARY_DOUBLE {
                         DirectPathColumnValue::BinaryDouble(f64::from(value))
                     } else {
                         DirectPathColumnValue::BinaryFloat(value)
@@ -2351,25 +2356,10 @@ mod tests {
     };
 
     fn column(name: &str, ora_type_num: u8, precision: i8, scale: i8) -> ColumnMetadata {
-        ColumnMetadata {
-            name: name.to_string(),
-            ora_type_num,
-            csfrm: 0,
-            precision,
-            scale,
-            buffer_size: 0,
-            max_size: 0,
-            nulls_allowed: true,
-            is_json: false,
-            is_oson: false,
-            object_schema: None,
-            object_type_name: None,
-            is_array: false,
-            vector_dimensions: None,
-            vector_format: 0,
-            vector_flags: 0,
-            ..Default::default()
-        }
+        ColumnMetadata::new(name, ora_type_num)
+            .with_precision(precision)
+            .with_scale(scale)
+            .with_nulls_allowed(true)
     }
 
     fn number(text: &str) -> Option<QueryValue> {
@@ -2650,11 +2640,9 @@ mod tests {
     }
 
     fn vector_column(name: &str, vector_format: u8, vector_flags: u8) -> ColumnMetadata {
-        ColumnMetadata {
-            vector_format,
-            vector_flags,
-            ..column(name, 127, 0, 0)
-        }
+        column(name, 127, 0, 0)
+            .with_vector_format(vector_format)
+            .with_vector_flags(vector_flags)
     }
 
     #[test]
@@ -2906,9 +2894,9 @@ mod tests {
             column("KEEP", ORA_TYPE_NUM_VARCHAR, 0, 0),
         ];
         let defined = arrow_define_columns(&columns);
-        assert_eq!(defined[0].ora_type_num, ORA_TYPE_NUM_LONG);
-        assert_eq!(defined[1].ora_type_num, ORA_TYPE_NUM_LONG_RAW);
-        assert_eq!(defined[2].ora_type_num, ORA_TYPE_NUM_VARCHAR);
+        assert_eq!(defined[0].ora_type_num(), ORA_TYPE_NUM_LONG);
+        assert_eq!(defined[1].ora_type_num(), ORA_TYPE_NUM_LONG_RAW);
+        assert_eq!(defined[2].ora_type_num(), ORA_TYPE_NUM_VARCHAR);
     }
 
     #[test]

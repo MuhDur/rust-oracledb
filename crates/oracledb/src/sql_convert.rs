@@ -883,7 +883,7 @@ impl TypedRow<'_> {
 fn column_index(columns: &[ColumnMetadata], name: &str) -> Option<usize> {
     columns
         .iter()
-        .position(|col| col.name.eq_ignore_ascii_case(name))
+        .position(|col| col.name().eq_ignore_ascii_case(name))
 }
 
 // ---------------------------------------------------------------------------
@@ -1642,16 +1642,7 @@ mod tests {
     #[test]
     fn query_result_typed_get() {
         let result = QueryResult {
-            columns: vec![
-                ColumnMetadata {
-                    name: "ID".into(),
-                    ..Default::default()
-                },
-                ColumnMetadata {
-                    name: "NAME".into(),
-                    ..Default::default()
-                },
-            ],
+            columns: vec![ColumnMetadata::new("ID", 0), ColumnMetadata::new("NAME", 0)],
             rows: vec![vec![Some(num("7")), Some(QueryValue::Text("bob".into()))]],
             ..Default::default()
         };

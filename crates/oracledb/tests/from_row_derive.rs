@@ -20,10 +20,7 @@ use oracledb::{FromRow, QueryResultExt};
 // ---------------------------------------------------------------------------
 
 fn col(name: &str) -> ColumnMetadata {
-    ColumnMetadata {
-        name: name.to_string(),
-        ..Default::default()
-    }
+    ColumnMetadata::new(name, 0)
 }
 
 fn num(text: &str) -> QueryValue {

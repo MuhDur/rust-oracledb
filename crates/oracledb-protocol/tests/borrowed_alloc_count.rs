@@ -29,13 +29,9 @@ const TNS_MSG_TYPE_END_OF_RESPONSE: u8 = 29;
 type DecodeErr = ProtocolError;
 
 fn col(name: &str, ora_type_num: u8, buffer_size: u32) -> ColumnMetadata {
-    ColumnMetadata {
-        name: name.to_string(),
-        ora_type_num,
-        csfrm: CS_FORM_IMPLICIT,
-        buffer_size,
-        ..ColumnMetadata::default()
-    }
+    ColumnMetadata::new(name, ora_type_num)
+        .with_csfrm(CS_FORM_IMPLICIT)
+        .with_buffer_size(buffer_size)
 }
 
 /// Build a fetch-response frame of `num_rows` rows of

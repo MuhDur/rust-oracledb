@@ -41,15 +41,11 @@ const TNS_MSG_TYPE_ROW_DATA: u8 = 7;
 const TNS_MSG_TYPE_END_OF_RESPONSE: u8 = 29;
 
 fn col(name: &str, ora_type_num: u8, precision: i8, scale: i8, buffer_size: u32) -> ColumnMetadata {
-    ColumnMetadata {
-        name: name.to_string(),
-        ora_type_num,
-        csfrm: CS_FORM_IMPLICIT,
-        precision,
-        scale,
-        buffer_size,
-        ..ColumnMetadata::default()
-    }
+    ColumnMetadata::new(name, ora_type_num)
+        .with_csfrm(CS_FORM_IMPLICIT)
+        .with_precision(precision)
+        .with_scale(scale)
+        .with_buffer_size(buffer_size)
 }
 
 /// A wide analytics frame: 10 typed columns (NUMBER int x4, NUMBER decimal x2,
