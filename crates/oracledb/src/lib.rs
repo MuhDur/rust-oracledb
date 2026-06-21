@@ -5721,13 +5721,14 @@ impl Connection {
         previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
     ) -> Result<BorrowedFetchResult> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
         trace_query_bytes("FETCH payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let profile = fetch_profile::enabled();
         let read_start = profile.then(time::wall_now);
-        let response = self.core.read_data_response(cx).await?;
+        let response = self.read_response_cancellable(cx).await?;
         if let Some(start) = read_start {
             fetch_profile::add_read(time::wall_now().duration_since(start));
         }
@@ -12981,6 +12982,69 @@ mod tests {
             received, None,
             "cancelled fetch continuation must not write a FETCH packet"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn fetch_rows_ref_drop_mid_read_arms_break_recovery() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let (packet_tx, packet_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            let mut buf = [0u8; 1024];
+            let read = socket.read(&mut buf)?;
+            packet_tx
+                .send(read)
+                .expect("test packet notification receiver is alive");
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+            Ok(())
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+
+            {
+                let mut fetch = pin!(connection.fetch_rows_ref(&cx, 42, 10, None));
+                let first_poll = poll_fn(|task_cx| Poll::Ready(fetch.as_mut().poll(task_cx))).await;
+                assert!(
+                    matches!(first_poll, Poll::Pending),
+                    "fetch_rows_ref must wait for the server response"
+                );
+                let packet_len = packet_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("fetch request should be sent before the response read waits");
+                assert!(packet_len > 0, "fetch request packet must not be empty");
+
+                let second_poll =
+                    poll_fn(|task_cx| Poll::Ready(fetch.as_mut().poll(task_cx))).await;
+                assert!(
+                    matches!(second_poll, Poll::Pending),
+                    "fetch_rows_ref response read should still be pending"
+                );
+            }
+
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::BreakSent,
+                "dropping fetch_rows_ref mid-read must arm break/drain recovery"
+            );
+            release_tx
+                .send(())
+                .expect("test server release receiver is alive");
+            Ok::<_, Error>(())
+        })?;
+
+        server
+            .join()
+            .expect("server thread joins")
+            .map_err(Error::Io)?;
         Ok(())
     }
 

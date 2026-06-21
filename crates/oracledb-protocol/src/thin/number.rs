@@ -207,7 +207,8 @@ impl OracleNumber {
     /// Construct from already-canonical decimal text (the bind / parse path).
     /// Parses the text into the inline form when it fits, else keeps it boxed.
     /// The text MUST already be canonical Oracle `NUMBER` text (the form the
-    /// decoder emits); this does not re-canonicalize.
+    /// decoder emits). Integral trailing-zero values are folded into the same
+    /// coefficient/negative-scale form the wire decoder emits.
     pub fn from_canonical_text(text: &str) -> Self {
         Self::from_canonical_text_with_flag(text, !text.contains('.'))
     }
@@ -429,6 +430,10 @@ fn fmt_inline_into(coefficient: i128, scale: i16, out: &mut String) {
 /// text). The input is the decoder's canonical form: an optional `-`, digits,
 /// an optional single `.`, no exponent (except the `-1e126` sentinel, which has
 /// an `e` and is therefore rejected here -> text fallback).
+///
+/// For integral values, trim trailing decimal zeros into a negative scale so
+/// text materialization of a borrowed NUMBER matches the owned wire decoder's
+/// inline representation for values like `1000`.
 fn parse_canonical_inline(text: &str) -> Option<(i128, i16)> {
     let (is_negative, rest) = match text.strip_prefix('-') {
         Some(r) => (true, r),
@@ -451,8 +456,17 @@ fn parse_canonical_inline(text: &str) -> Option<(i128, i16)> {
     for b in int_part.bytes().chain(frac_part.bytes()) {
         acc = acc.checked_mul(10)?.checked_add(i128::from(b - b'0'))?;
     }
-    let coefficient = if is_negative { acc.checked_neg()? } else { acc };
-    let scale = i16::try_from(frac_part.len()).ok()?;
+    let mut coefficient = if is_negative { acc.checked_neg()? } else { acc };
+    let mut scale = i16::try_from(frac_part.len()).ok()?;
+    if coefficient == 0 && scale == 0 {
+        return None;
+    }
+    if scale == 0 {
+        while coefficient % 10 == 0 {
+            coefficient /= 10;
+            scale = scale.checked_sub(1)?;
+        }
+    }
     Some((coefficient, scale))
 }
 
@@ -582,6 +596,20 @@ mod tests {
         ] {
             let n = OracleNumber::from_canonical_text(text);
             assert_eq!(n.to_canonical_string(), text);
+        }
+    }
+
+    #[test]
+    fn from_canonical_text_matches_wire_decoder_for_trailing_zero_integers() {
+        for text in ["10", "100", "-1000", "1000000000000000000"] {
+            let wire = encode_number_text(text).expect("encode trailing-zero integer");
+            let from_wire = OracleNumber::from_wire(&wire).expect("decode trailing-zero integer");
+            let from_text = OracleNumber::from_canonical_text(text);
+            assert_eq!(
+                from_text, from_wire,
+                "canonical text materialization should match wire decode for {text}"
+            );
+            assert_eq!(from_text.to_canonical_string(), text);
         }
     }
 

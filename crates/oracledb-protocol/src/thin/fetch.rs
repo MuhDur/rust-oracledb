@@ -2283,6 +2283,48 @@ mod borrowed_fetch_tests {
         );
     }
 
+    #[test]
+    fn borrowed_number_to_owned_matches_owned_for_trailing_zero_number() {
+        let column = col("N", ORA_TYPE_NUM_NUMBER, CS_FORM_IMPLICIT, 22);
+        let number = encode_number_text("1000").expect("encode trailing-zero number");
+        let mut writer = TtcWriter::new();
+        writer
+            .write_bytes_with_length(&number)
+            .expect("write framed number");
+        let buffer = writer.into_bytes();
+
+        let mut owned_reader = TtcReader::new(&buffer);
+        let owned = parse_column_value(&mut owned_reader, &column)
+            .expect("owned decode")
+            .expect("owned number should be non-null");
+
+        let batch = BorrowedRowBatch::new(buffer, vec![column], vec![0]);
+        let mut borrowed_owned = Vec::new();
+        batch
+            .for_each_row_ref(|row| {
+                borrowed_owned.push(
+                    row[0]
+                        .expect("borrowed number should be non-null")
+                        .to_owned_value(),
+                );
+                Ok::<(), ProtocolError>(())
+            })
+            .expect("borrowed decode");
+        let borrowed = borrowed_owned
+            .pop()
+            .expect("borrowed decode should yield one row");
+
+        assert_eq!(
+            borrowed.as_number_text().as_deref(),
+            owned.as_number_text().as_deref(),
+            "borrowed and owned paths must expose identical canonical NUMBER text"
+        );
+        assert_eq!(
+            borrowed, owned,
+            "borrowed to_owned_value should materialize the same trailing-zero NUMBER"
+        );
+    }
+
     // The borrowed response parser walks the *same* message framing as the owned
     // `parse_fetch_response_with_context` (ROW_HEADER / BIT_VECTOR / ROW_DATA /
     // END_OF_RESPONSE), but instead of building owned rows it captures each

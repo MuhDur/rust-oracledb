@@ -342,7 +342,12 @@ pub fn pack_bindvalue_into_image(buf: &mut Vec<u8>, value: &BindValue, csfrm: u8
             seconds,
             microseconds,
         } => {
-            let bytes = encode_interval_ds(*days, *seconds, *microseconds)?;
+            let nanoseconds = microseconds
+                .checked_mul(1000)
+                .ok_or(ProtocolError::TtcDecode(
+                    "INTERVAL DS fractional seconds out of range",
+                ))?;
+            let bytes = encode_interval_ds(*days, *seconds, nanoseconds)?;
             image_write_value_bytes(buf, &bytes)
         }
         BindValue::IntervalYM { years, months } => {

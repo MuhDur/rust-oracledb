@@ -287,7 +287,15 @@ impl FromSql for f64 {
 
 impl FromSql for f32 {
     fn from_sql(value: &QueryValue) -> Result<Self, ConversionError> {
-        Ok(f64::from_sql(value)? as f32)
+        let wide = f64::from_sql(value)?;
+        let narrowed = wide as f32;
+        if !narrowed.is_finite() {
+            return Err(ConversionError::OutOfRange {
+                expected: "f32",
+                detail: format!("{wide:?} is out of range for f32"),
+            });
+        }
+        Ok(narrowed)
     }
 }
 
@@ -1394,6 +1402,23 @@ mod tests {
         assert_eq!(
             Vec::<u8>::from_sql(&QueryValue::Raw(vec![1, 2, 3])).unwrap(),
             vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn f32_from_sql_rejects_number_overflow() {
+        let err = f32::from_sql(&num("1e39")).expect_err("finite f64 outside f32 range must fail");
+        assert!(matches!(
+            err,
+            ConversionError::OutOfRange {
+                expected: "f32",
+                ..
+            }
+        ));
+
+        assert_eq!(
+            f32::from_sql(&num("1.5")).expect("normal f32 value must convert"),
+            1.5_f32
         );
     }
 

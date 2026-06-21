@@ -1002,8 +1002,7 @@ impl TreeSegment {
                 fseconds,
             } => {
                 let total_seconds = hours * 3600 + minutes * 60 + seconds;
-                let microseconds = fseconds / 1000;
-                let bytes = encode_interval_ds(*days, total_seconds, microseconds)?;
+                let bytes = encode_interval_ds(*days, total_seconds, *fseconds)?;
                 self.buffer.push(TNS_JSON_TYPE_INTERVAL_DS);
                 self.buffer.extend_from_slice(&bytes);
             }
@@ -1481,6 +1480,20 @@ mod tests {
         ]);
         let encoded = encode_oson(&value, false).unwrap();
         let decoded = decode_oson(&encoded).unwrap();
+        assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn interval_ds_round_trip_preserves_nanoseconds() {
+        let value = OsonValue::IntervalDS {
+            days: 8,
+            hours: 12,
+            minutes: 34,
+            seconds: 56,
+            fseconds: 123_456_789,
+        };
+        let encoded = encode_oson(&value, false).expect("encode interval ds");
+        let decoded = decode_oson(&encoded).expect("decode interval ds");
         assert_eq!(decoded, value);
     }
 

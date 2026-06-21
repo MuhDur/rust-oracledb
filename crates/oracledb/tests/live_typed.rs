@@ -32,7 +32,7 @@ use oracledb::protocol::thin::{
 };
 use oracledb::protocol::vector::{Vector, VectorValues};
 use oracledb::{
-    params, Batch, BlockingConnection, ConnectOptions, Connection, Error, Execute, Query,
+    params, Batch, BlockingConnection, ConnectOptions, Connection, Error, Execute, FromRow, Query,
     QueryResultExt, Registration, Row,
 };
 use oracledb_protocol::ClientIdentity;

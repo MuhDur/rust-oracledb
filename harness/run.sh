@@ -72,13 +72,19 @@ run_pytest_segmented() {
     counter=$((counter + 1))
     part_path="$(printf '%s/%03d-%s.json' "$parts_dir" "$counter" "$(basename "$test_path" .py)")"
     reports+=("$part_path")
-    if ! "$PYTHON_BIN" -m pytest \
+    if "$PYTHON_BIN" -m pytest \
       "$test_path" \
       --tb=short \
       --json-report \
       --json-report-file "$part_path" \
       "$@"; then
-      exit_code=1
+      :
+    else
+      status=$?
+      # Pytest uses exit code 5 when a selected diagnostic module collects no tests.
+      if [ "$status" -ne 5 ]; then
+        exit_code=1
+      fi
     fi
   done
 

@@ -977,7 +977,12 @@ pub(crate) fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm:
             seconds,
             microseconds,
         } => {
-            let bytes = encode_interval_ds(*days, *seconds, *microseconds)?;
+            let nanoseconds = microseconds
+                .checked_mul(1000)
+                .ok_or(ProtocolError::TtcDecode(
+                    "INTERVAL DS fractional seconds out of range",
+                ))?;
+            let bytes = encode_interval_ds(*days, *seconds, nanoseconds)?;
             writer.write_bytes_with_length(&bytes)
         }
         BindValue::IntervalYM { years, months } => {

@@ -225,7 +225,7 @@ pub(crate) fn decode_binary_float(bytes: &[u8]) -> Result<f32> {
     Ok(f32::from_bits(u32::from_be_bytes(decoded)))
 }
 
-pub(crate) fn encode_interval_ds(days: i32, seconds: i32, microseconds: i32) -> Result<[u8; 11]> {
+pub(crate) fn encode_interval_ds(days: i32, seconds: i32, nanoseconds: i32) -> Result<[u8; 11]> {
     let mut bytes = [0u8; 11];
     let wire_days = u32::try_from(i64::from(days) + TNS_DURATION_MID)
         .map_err(|_| ProtocolError::TtcDecode("INTERVAL DS days out of range"))?;
@@ -237,7 +237,7 @@ pub(crate) fn encode_interval_ds(days: i32, seconds: i32, microseconds: i32) -> 
     bytes[4] = to_offset_byte(seconds / 3600)?;
     bytes[5] = to_offset_byte((seconds % 3600) / 60)?;
     bytes[6] = to_offset_byte(seconds % 60)?;
-    let fseconds = i64::from(microseconds) * 1000;
+    let fseconds = i64::from(nanoseconds);
     let wire_fseconds = u32::try_from(fseconds + TNS_DURATION_MID)
         .map_err(|_| ProtocolError::TtcDecode("INTERVAL DS fractional seconds out of range"))?;
     bytes[7..].copy_from_slice(&wire_fseconds.to_be_bytes());
@@ -771,5 +771,21 @@ mod tests {
         ] {
             assert!(encode_number_text(ok).is_ok(), "expected {ok} to encode");
         }
+    }
+
+    #[test]
+    fn interval_ds_roundtrip_preserves_nanoseconds() {
+        let wire = encode_interval_ds(2, 3 * 3600 + 4 * 60 + 5, 123_456_789)
+            .expect("encode nanosecond interval");
+        assert_eq!(
+            decode_interval_ds(&wire).expect("decode nanosecond interval"),
+            QueryValue::IntervalDS {
+                days: 2,
+                hours: 3,
+                minutes: 4,
+                seconds: 5,
+                fseconds: 123_456_789,
+            }
+        );
     }
 }

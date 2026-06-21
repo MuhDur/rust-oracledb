@@ -447,21 +447,21 @@ proptest! {
     }
 
     /// ROUND-TRIP INTERVAL DAY TO SECOND. seconds is the total seconds field
-    /// (hours/min/sec are derived); microseconds carries the fractional part.
+    /// (hours/min/sec are derived); nanoseconds carries the fractional part.
     #[test]
     fn interval_ds_round_trip(
         days in -100_000i32..=100_000,
         hours in 0i32..=23,
         minutes in 0i32..=59,
         secs in 0i32..=59,
-        microseconds in 0i32..=999_999,
+        nanoseconds in 0i32..=999_999_999,
     ) {
         let total_seconds = hours * 3600 + minutes * 60 + secs;
-        let wire = encode_interval_ds(days, total_seconds, microseconds).expect("encode ds");
+        let wire = encode_interval_ds(days, total_seconds, nanoseconds).expect("encode ds");
         prop_assert_eq!(wire.len(), 11, "INTERVAL DS is 11 bytes");
         let decoded = decode_interval_ds(&wire).expect("decode ds");
         prop_assert_eq!(decoded, QueryValue::IntervalDS {
-            days, hours, minutes, seconds: secs, fseconds: microseconds * 1000,
+            days, hours, minutes, seconds: secs, fseconds: nanoseconds,
         });
     }
 }
@@ -481,14 +481,14 @@ fn interval_boundary_cases() {
         );
     }
     // DS: zero and large.
-    for (d, total, us) in [(0, 0, 0), (100_000, 86_399, 999_999), (-100_000, 0, 0)] {
-        let wire = encode_interval_ds(d, total, us).expect("encode ds boundary");
+    for (d, total, ns) in [(0, 0, 0), (100_000, 86_399, 999_999_999), (-100_000, 0, 0)] {
+        let wire = encode_interval_ds(d, total, ns).expect("encode ds boundary");
         let decoded = decode_interval_ds(&wire).expect("decode ds boundary");
         let QueryValue::IntervalDS { days, fseconds, .. } = decoded else {
             panic!("not DS")
         };
         assert_eq!(days, d);
-        assert_eq!(fseconds, us * 1000);
+        assert_eq!(fseconds, ns);
     }
 }
 

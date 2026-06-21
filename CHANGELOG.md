@@ -40,6 +40,20 @@ and the project follows the SemVer contract described in
   tracks per-cursor LOB-prefetch state and selects the locator-only vs prefetch decode
   shape accordingly (BFILE always uses the locator-only shape). Default LOB
   materialization is unchanged. Found by the W3-E7.4 live e2e suite (rust-oracledb-jbh9).
+- **`f32` conversion overflow** (`FromSql for f32`): a finite NUMBER / BINARY_DOUBLE that
+  exceeds the `f32` range now returns `ConversionError::OutOfRange` instead of silently
+  yielding `inf` (the `f64` path already rejected non-finite). Found by W3-E8.
+- **INTERVAL DAY TO SECOND sub-microsecond precision**: interval encoding is now
+  nanosecond-native, so a fractional-seconds value with more than 6 significant digits no
+  longer truncates on round-trip (notably OSON/JSON `IntervalDS`). `encode_interval_ds`
+  became symmetric with the nanosecond-returning decoder. Found by W3-E8.
+- **Borrowed-fetch cancel recovery** (`fetch_rows_ref`): a borrowed (zero-copy) fetch
+  future dropped mid-read now arms BREAK → drain recovery like the owned fetch path, so the
+  next operation on the connection is not desynchronized by a stranded response. Found by
+  W3-E8.
+- **Borrowed vs owned NUMBER canonicalization**: the borrowed (zero-copy) and owned fetch
+  paths now produce identical canonical text for trailing-zero `NUMBER` values. Found by
+  W3-E8.
 
 ### Added
 
