@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Live integration tests for the typed read/write surface (beads qxn + zjd).
 //!
 //! Exercises [`FromSql`] / [`QueryResultExt::get`] (typed extraction), [`ToSql`]
@@ -18,13 +20,20 @@ use std::num::NonZeroU32;
 
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
+use oracledb::protocol::oson::OsonValue;
 use oracledb::protocol::thin::{
-    BindValue, ExecuteOptions, QueryValue, CS_FORM_IMPLICIT, ORA_TYPE_NUM_VARCHAR,
-    SUBSCR_QOS_QUERY, TNS_SUBSCR_NAMESPACE_DBCHANGE,
+    decode_lob_text, BindValue, ExecuteOptions, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR,
+    ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_FLOAT, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_BOOLEAN,
+    ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_INTERVAL_DS,
+    ORA_TYPE_NUM_INTERVAL_YM, ORA_TYPE_NUM_JSON, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW,
+    ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_ROWID, ORA_TYPE_NUM_TIMESTAMP,
+    ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR,
+    ORA_TYPE_NUM_VECTOR, SUBSCR_QOS_QUERY, TNS_SUBSCR_NAMESPACE_DBCHANGE,
 };
+use oracledb::protocol::vector::{Vector, VectorValues};
 use oracledb::{
     params, Batch, BlockingConnection, ConnectOptions, Connection, Error, Execute, Query,
-    QueryResultExt, Registration,
+    QueryResultExt, Registration, Row,
 };
 use oracledb_protocol::ClientIdentity;
 
@@ -949,5 +958,846 @@ fn vector_roundtrip_live() {
         assert_eq!(back, embedding, "VECTOR(float32) must round-trip exactly");
 
         let _ = BlockingConnection::execute_query(conn, "drop table vec_rt_t", 1);
+    });
+}
+
+fn query_one_with_binds(conn: &mut Connection, sql: &str, binds: Vec<BindValue>) -> Row {
+    try_query_one_with_binds(conn, sql, binds)
+        .unwrap_or_else(|err| panic!("query one with explicit binds failed for {sql}: {err}"))
+}
+
+fn try_query_one_with_binds(
+    conn: &mut Connection,
+    sql: &str,
+    binds: Vec<BindValue>,
+) -> Result<Row, Error> {
+    BlockingConnection::query_with(conn, Query::new(sql).bind(binds))?.one()
+}
+
+fn query_all_one_with_binds(conn: &mut Connection, sql: &str, binds: Vec<BindValue>) -> Row {
+    let rows = BlockingConnection::query_with(conn, Query::new(sql).bind(binds))
+        .unwrap_or_else(|err| panic!("query with explicit binds failed for {sql}: {err}"))
+        .collect()
+        .unwrap_or_else(|err| panic!("collect explicit-bind query failed for {sql}: {err}"));
+    assert_eq!(rows.len(), 1, "expected one row for {sql}");
+    rows.into_iter().next().expect("one collected row")
+}
+
+fn execute_with_binds(conn: &mut Connection, sql: &str, binds: Vec<BindValue>) {
+    BlockingConnection::execute_with(conn, Execute::new(sql).bind(binds))
+        .expect("execute with explicit binds");
+}
+
+fn drop_live_table(conn: &mut Connection, name: &str) {
+    let sql = format!("drop table {name} purge");
+    let _ = BlockingConnection::execute(conn, &sql, ());
+}
+
+fn create_optional_table(conn: &mut Connection, name: &str, ddl: &str, label: &str) -> bool {
+    drop_live_table(conn, name);
+    match BlockingConnection::execute(conn, ddl, ()) {
+        Ok(_) => {
+            drop_live_table(conn, name);
+            true
+        }
+        Err(err) => {
+            eprintln!("skipped {label}: database type unavailable: {err}");
+            false
+        }
+    }
+}
+
+fn typed_null(ora_type_num: u8, csfrm: u8, buffer_size: u32) -> BindValue {
+    BindValue::TypedNull {
+        ora_type_num,
+        csfrm,
+        buffer_size,
+    }
+}
+
+fn assert_typed_null(conn: &mut Connection, label: &str, bind: BindValue) {
+    let row = query_one_with_binds(conn, "select :1 as v from dual", vec![bind]);
+    assert!(
+        row.value(0).is_none(),
+        "{label} NULL should fetch as None, got {:?}",
+        row.value(0)
+    );
+}
+
+fn assert_cast_null(conn: &mut Connection, label: &str, sql_type: &str) {
+    let sql = format!("select cast(null as {sql_type}) as v from dual");
+    let row = BlockingConnection::query_one(conn, &sql, ()).expect("select cast null");
+    assert!(
+        row.value(0).is_none(),
+        "{label} NULL should fetch as None, got {:?}",
+        row.value(0)
+    );
+}
+
+fn cell<'a>(row: &'a Row, label: &str) -> &'a QueryValue {
+    row.value(0)
+        .unwrap_or_else(|| panic!("{label} should not be NULL"))
+}
+
+fn assert_number_text(row: &Row, label: &str, expected: &str) {
+    let text = cell(row, label)
+        .as_number_text()
+        .unwrap_or_else(|| panic!("{label} should fetch as NUMBER"));
+    assert_eq!(text.as_ref(), expected, "{label} NUMBER text mismatch");
+}
+
+fn assert_text(row: &Row, label: &str, expected: &str) {
+    assert_eq!(
+        row.get::<String>(0)
+            .unwrap_or_else(|err| panic!("{label} should fetch as String: {err}")),
+        expected,
+        "{label} text mismatch"
+    );
+}
+
+fn assert_raw(row: &Row, label: &str, expected: &[u8]) {
+    assert_eq!(
+        row.get::<Vec<u8>>(0)
+            .unwrap_or_else(|err| panic!("{label} should fetch as Vec<u8>: {err}")),
+        expected,
+        "{label} bytes mismatch"
+    );
+}
+
+fn read_lob_bytes(conn: &mut Connection, row: &Row, label: &str) -> (u8, Vec<u8>, Vec<u8>) {
+    match cell(row, label) {
+        QueryValue::Lob(lob) => {
+            let amount = lob.size.max(1);
+            let read = BlockingConnection::read_lob(conn, &lob.locator, 1, amount)
+                .unwrap_or_else(|err| panic!("{label} LOB read failed: {err}"));
+            (
+                lob.csfrm,
+                lob.locator.clone(),
+                read.data
+                    .unwrap_or_else(|| panic!("{label} LOB read returned no data")),
+            )
+        }
+        other => panic!("{label} should fetch as LOB locator, got {other:?}"),
+    }
+}
+
+fn assert_lob_text(conn: &mut Connection, row: &Row, label: &str, expected: &str) {
+    match cell(row, label) {
+        QueryValue::Text(text) => assert_eq!(text, expected, "{label} text mismatch"),
+        QueryValue::Lob(_) => {
+            let (csfrm, locator, data) = read_lob_bytes(conn, row, label);
+            let text = decode_lob_text(&data, csfrm, Some(&locator))
+                .unwrap_or_else(|err| panic!("{label} LOB text decode failed: {err}"));
+            assert_eq!(text, expected, "{label} streamed text mismatch");
+        }
+        other => panic!("{label} should fetch as Text or LOB locator, got {other:?}"),
+    }
+}
+
+fn assert_lob_raw(conn: &mut Connection, row: &Row, label: &str, expected: &[u8]) {
+    match cell(row, label) {
+        QueryValue::Raw(bytes) => assert_eq!(bytes.as_slice(), expected, "{label} bytes mismatch"),
+        QueryValue::Lob(_) => {
+            let (_, _, data) = read_lob_bytes(conn, row, label);
+            assert_eq!(data, expected, "{label} streamed bytes mismatch");
+        }
+        other => panic!("{label} should fetch as Raw or LOB locator, got {other:?}"),
+    }
+}
+
+fn assert_datetime(row: &Row, label: &str, expected: (i32, u8, u8, u8, u8, u8, u32)) {
+    match cell(row, label) {
+        QueryValue::DateTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+        } => assert_eq!(
+            (*year, *month, *day, *hour, *minute, *second, *nanosecond),
+            expected,
+            "{label} datetime mismatch"
+        ),
+        other => panic!("{label} should fetch as DateTime, got {other:?}"),
+    }
+}
+
+fn assert_binary_double_bits(row: &Row, label: &str, expected: f64) {
+    let actual = row
+        .get::<f64>(0)
+        .unwrap_or_else(|err| panic!("{label} should fetch as f64: {err}"));
+    assert_eq!(
+        actual.to_bits(),
+        expected.to_bits(),
+        "{label} f64 bits mismatch"
+    );
+}
+
+fn assert_binary_float_bits(row: &Row, label: &str, expected: f32) {
+    let actual = row
+        .get::<f32>(0)
+        .unwrap_or_else(|err| panic!("{label} should fetch as f32: {err}"));
+    assert_eq!(
+        actual.to_bits(),
+        expected.to_bits(),
+        "{label} f32 bits mismatch"
+    );
+}
+
+fn assert_vector_f32(row: &Row, expected: &[f32]) {
+    let typed = row
+        .get::<Vec<f32>>(0)
+        .expect("VECTOR should fetch through typed Vec<f32>");
+    assert_eq!(
+        typed
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        expected
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        "typed VECTOR(float32) bits mismatch"
+    );
+
+    match cell(row, "VECTOR") {
+        QueryValue::Vector(vector) => match vector.as_ref() {
+            Vector::Dense(VectorValues::Float32(values)) => assert_eq!(
+                values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "raw VECTOR(float32) bits mismatch"
+            ),
+            other => panic!("VECTOR should fetch as dense float32, got {other:?}"),
+        },
+        other => panic!("VECTOR should fetch as QueryValue::Vector, got {other:?}"),
+    }
+}
+
+fn json_field<'a>(entries: &'a [(String, OsonValue)], name: &str) -> &'a OsonValue {
+    entries
+        .iter()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value)
+        .unwrap_or_else(|| panic!("JSON object should contain field {name:?}"))
+}
+
+fn exercise_number_matrix(conn: &mut Connection) {
+    for (label, text) in [
+        ("NUMBER zero", "0"),
+        ("NUMBER negative", "-42"),
+        ("NUMBER decimal", "7922816251426433759354.395033"),
+    ] {
+        let row = query_one_with_binds(
+            conn,
+            "select :1 as v from dual",
+            vec![BindValue::Number(text.to_string())],
+        );
+        assert_number_text(&row, label, text);
+    }
+
+    let large_i128_text = "99999999999999999999999999999999999999";
+    let large_i128 = large_i128_text
+        .parse::<i128>()
+        .expect("large NUMBER fixture fits i128");
+    let row = query_one_with_binds(
+        conn,
+        "select :1 as v from dual",
+        vec![BindValue::Number(large_i128_text.to_string())],
+    );
+    assert_eq!(
+        row.get::<i128>(0).expect("NUMBER should fetch as i128"),
+        large_i128,
+        "large i128 NUMBER mismatch"
+    );
+    assert_number_text(&row, "NUMBER large i128", large_i128_text);
+
+    for (label, value) in [
+        ("NUMBER rejects NaN", f64::NAN),
+        ("NUMBER rejects +Inf", f64::INFINITY),
+        ("NUMBER rejects -Inf", f64::NEG_INFINITY),
+    ] {
+        let result = try_query_one_with_binds(
+            conn,
+            "select cast(:1 as number) as v from dual",
+            vec![BindValue::BinaryDouble(value)],
+        );
+        assert!(
+            result.is_err(),
+            "{label}: non-finite BINARY_DOUBLE should not cast to NUMBER"
+        );
+    }
+
+    assert_typed_null(conn, "NUMBER", typed_null(ORA_TYPE_NUM_NUMBER, 0, 22));
+}
+
+fn exercise_binary_float_matrix(conn: &mut Connection) {
+    let row = query_one_with_binds(
+        conn,
+        "select cast(:1 as binary_float) as v from dual",
+        vec![BindValue::BinaryFloat(f64::from(-0.0_f32))],
+    );
+    assert_binary_float_bits(&row, "BINARY_FLOAT negative zero", -0.0);
+
+    let row = query_one_with_binds(
+        conn,
+        "select cast(:1 as binary_float) as v from dual",
+        vec![BindValue::BinaryFloat(f64::from(3.25_f32))],
+    );
+    assert_binary_float_bits(&row, "BINARY_FLOAT finite", 3.25);
+
+    let row = query_one_with_binds(
+        conn,
+        "select cast(:1 as binary_double) as v from dual",
+        vec![BindValue::BinaryDouble(-42.5)],
+    );
+    assert_binary_double_bits(&row, "BINARY_DOUBLE finite", -42.5);
+
+    let row = query_one_with_binds(
+        conn,
+        "select cast(:1 as binary_double) as v from dual",
+        vec![BindValue::BinaryDouble(-0.0)],
+    );
+    assert_binary_double_bits(&row, "BINARY_DOUBLE negative zero", -0.0);
+
+    assert_typed_null(
+        conn,
+        "BINARY_FLOAT",
+        typed_null(ORA_TYPE_NUM_BINARY_FLOAT, 0, 4),
+    );
+    assert_typed_null(
+        conn,
+        "BINARY_DOUBLE",
+        typed_null(ORA_TYPE_NUM_BINARY_DOUBLE, 0, 8),
+    );
+}
+
+fn exercise_character_matrix(conn: &mut Connection) {
+    let row = query_one_with_binds(
+        conn,
+        "select cast(:1 as varchar2(80 char)) as v from dual",
+        vec![BindValue::Text("hello varchar2".to_string())],
+    );
+    assert_text(&row, "VARCHAR2", "hello varchar2");
+
+    let ntext = "nchar-\u{03b4}-\u{0444}";
+    let row = query_one_with_binds(
+        conn,
+        "select cast(:1 as nvarchar2(80)) as v from dual",
+        vec![BindValue::Text(ntext.to_string())],
+    );
+    assert_text(&row, "NVARCHAR2", ntext);
+
+    let row = query_one_with_binds(
+        conn,
+        "select cast(:1 as char(6)) as v from dual",
+        vec![BindValue::Text("xy".to_string())],
+    );
+    // Oracle CHAR is blank-padded to the declared width; assert the documented
+    // server-side asymmetry rather than trimming silently.
+    assert_text(&row, "CHAR padded", "xy    ");
+
+    assert_typed_null(
+        conn,
+        "VARCHAR2",
+        typed_null(ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 80),
+    );
+    assert_typed_null(
+        conn,
+        "NVARCHAR2",
+        typed_null(ORA_TYPE_NUM_VARCHAR, CS_FORM_NCHAR, 80),
+    );
+    assert_typed_null(
+        conn,
+        "CHAR",
+        typed_null(ORA_TYPE_NUM_CHAR, CS_FORM_IMPLICIT, 6),
+    );
+}
+
+fn exercise_lob_and_raw_matrix(conn: &mut Connection) {
+    let clob_text = "clob round trip\nsecond line";
+    let row = query_one_with_binds(
+        conn,
+        "select to_clob(:1) as v from dual",
+        vec![BindValue::Text(clob_text.to_string())],
+    );
+    assert_lob_text(conn, &row, "CLOB", clob_text);
+
+    let nclob_text = "nclob-\u{05d0}-\u{03a9}";
+    let row = query_one_with_binds(
+        conn,
+        "select to_nclob(:1) as v from dual",
+        vec![BindValue::Text(nclob_text.to_string())],
+    );
+    assert_lob_text(conn, &row, "NCLOB", nclob_text);
+
+    let bytes = vec![0, 1, 2, 0x7f, 0x80, 0xfe, 0xff];
+    let row = query_one_with_binds(
+        conn,
+        "select cast(:1 as raw(16)) as v from dual",
+        vec![BindValue::Raw(bytes.clone())],
+    );
+    assert_raw(&row, "RAW", &bytes);
+
+    let row = query_one_with_binds(
+        conn,
+        "select to_blob(:1) as v from dual",
+        vec![BindValue::Raw(bytes.clone())],
+    );
+    assert_lob_raw(conn, &row, "BLOB", &bytes);
+
+    assert_typed_null(
+        conn,
+        "CLOB",
+        typed_null(ORA_TYPE_NUM_CLOB, CS_FORM_IMPLICIT, 4096),
+    );
+    assert_typed_null(
+        conn,
+        "NCLOB",
+        typed_null(ORA_TYPE_NUM_CLOB, CS_FORM_NCHAR, 4096),
+    );
+    assert_typed_null(conn, "BLOB", typed_null(ORA_TYPE_NUM_BLOB, 0, 4096));
+    assert_typed_null(conn, "RAW", typed_null(ORA_TYPE_NUM_RAW, 0, 16));
+}
+
+fn exercise_long_matrix(conn: &mut Connection) {
+    drop_live_table(conn, "rust_e12_long_t");
+    BlockingConnection::execute(
+        conn,
+        "create table rust_e12_long_t (id number primary key, v long)",
+        (),
+    )
+    .expect("create LONG table");
+
+    let text = "long text through table";
+    execute_with_binds(
+        conn,
+        "insert into rust_e12_long_t (id, v) values (:1, :2)",
+        vec![
+            BindValue::Number("1".to_string()),
+            BindValue::Text(text.to_string()),
+        ],
+    );
+    let row = query_all_one_with_binds(
+        conn,
+        "select v from rust_e12_long_t where id = :1",
+        vec![BindValue::Number("1".to_string())],
+    );
+    assert_text(&row, "LONG", text);
+    assert_typed_null(
+        conn,
+        "LONG",
+        typed_null(ORA_TYPE_NUM_LONG, CS_FORM_IMPLICIT, 4096),
+    );
+    drop_live_table(conn, "rust_e12_long_t");
+
+    drop_live_table(conn, "rust_e12_long_raw_t");
+    BlockingConnection::execute(
+        conn,
+        "create table rust_e12_long_raw_t (id number primary key, v long raw)",
+        (),
+    )
+    .expect("create LONG RAW table");
+    execute_with_binds(
+        conn,
+        "insert into rust_e12_long_raw_t (id, v) values (:1, hextoraw(:2))",
+        vec![
+            BindValue::Number("1".to_string()),
+            BindValue::Text("0001027F80FEFF".to_string()),
+        ],
+    );
+    let row = query_all_one_with_binds(
+        conn,
+        "select v from rust_e12_long_raw_t where id = :1",
+        vec![BindValue::Number("1".to_string())],
+    );
+    assert_raw(&row, "LONG RAW", &[0, 1, 2, 0x7f, 0x80, 0xfe, 0xff]);
+    assert_typed_null(conn, "LONG RAW", typed_null(ORA_TYPE_NUM_LONG_RAW, 0, 4096));
+    drop_live_table(conn, "rust_e12_long_raw_t");
+}
+
+fn exercise_datetime_interval_matrix(conn: &mut Connection) {
+    BlockingConnection::execute(conn, "alter session set time_zone = '+00:00'", ())
+        .expect("set deterministic session time zone");
+
+    let date_bind = BindValue::DateTime {
+        year: 2026,
+        month: 6,
+        day: 21,
+        hour: 13,
+        minute: 45,
+        second: 30,
+    };
+    let row = query_one_with_binds(
+        conn,
+        "select cast(:1 as date) as v from dual",
+        vec![date_bind],
+    );
+    assert_datetime(&row, "DATE", (2026, 6, 21, 13, 45, 30, 0));
+
+    let timestamp_bind = BindValue::Timestamp {
+        ora_type_num: ORA_TYPE_NUM_TIMESTAMP,
+        year: 2026,
+        month: 6,
+        day: 21,
+        hour: 14,
+        minute: 5,
+        second: 6,
+        nanosecond: 987_654_321,
+    };
+    let row = query_one_with_binds(
+        conn,
+        "select cast(:1 as timestamp(9)) as v from dual",
+        vec![timestamp_bind],
+    );
+    assert_datetime(&row, "TIMESTAMP", (2026, 6, 21, 14, 5, 6, 987_654_321));
+
+    let timestamp_tz_bind = BindValue::Timestamp {
+        ora_type_num: ORA_TYPE_NUM_TIMESTAMP_TZ,
+        year: 2026,
+        month: 6,
+        day: 21,
+        hour: 15,
+        minute: 6,
+        second: 7,
+        nanosecond: 123_456_789,
+    };
+    let row = query_one_with_binds(
+        conn,
+        "select cast(:1 as timestamp(9) with time zone) as v from dual",
+        vec![timestamp_tz_bind],
+    );
+    // The thin bind encoder currently supplies a +00:00 offset and the fetch
+    // decoder normalizes TIMESTAMP WITH TIME ZONE into QueryValue::DateTime, so
+    // no zone identity is available to assert here.
+    assert_datetime(
+        &row,
+        "TIMESTAMP WITH TIME ZONE",
+        (2026, 6, 21, 15, 6, 7, 123_456_789),
+    );
+
+    let timestamp_ltz_bind = BindValue::Timestamp {
+        ora_type_num: ORA_TYPE_NUM_TIMESTAMP_LTZ,
+        year: 2026,
+        month: 6,
+        day: 21,
+        hour: 16,
+        minute: 7,
+        second: 8,
+        nanosecond: 555_000_111,
+    };
+    let row = query_one_with_binds(
+        conn,
+        "select cast(:1 as timestamp(9) with local time zone) as v from dual",
+        vec![timestamp_ltz_bind],
+    );
+    // With the session time zone fixed at +00:00, TIMESTAMP WITH LOCAL TIME ZONE
+    // comes back in that session-local wall clock.
+    assert_datetime(
+        &row,
+        "TIMESTAMP WITH LOCAL TIME ZONE",
+        (2026, 6, 21, 16, 7, 8, 555_000_111),
+    );
+
+    let row = query_one_with_binds(
+        conn,
+        "select :1 as v from dual",
+        vec![BindValue::IntervalYM {
+            years: -2,
+            months: 7,
+        }],
+    );
+    assert_eq!(
+        cell(&row, "INTERVAL YEAR TO MONTH"),
+        &QueryValue::IntervalYM {
+            years: -2,
+            months: 7,
+        },
+        "INTERVAL YEAR TO MONTH mismatch"
+    );
+
+    let row = query_one_with_binds(
+        conn,
+        "select :1 as v from dual",
+        vec![BindValue::IntervalDS {
+            days: 3,
+            seconds: 4 * 3600 + 5 * 60 + 6,
+            microseconds: 456_789,
+        }],
+    );
+    assert_eq!(
+        cell(&row, "INTERVAL DAY TO SECOND"),
+        &QueryValue::IntervalDS {
+            days: 3,
+            hours: 4,
+            minutes: 5,
+            seconds: 6,
+            fseconds: 456_789_000,
+        },
+        "INTERVAL DAY TO SECOND mismatch"
+    );
+
+    assert_typed_null(conn, "DATE", typed_null(ORA_TYPE_NUM_DATE, 0, 7));
+    assert_typed_null(conn, "TIMESTAMP", typed_null(ORA_TYPE_NUM_TIMESTAMP, 0, 11));
+    assert_typed_null(
+        conn,
+        "TIMESTAMP WITH TIME ZONE",
+        typed_null(ORA_TYPE_NUM_TIMESTAMP_TZ, 0, 13),
+    );
+    assert_typed_null(
+        conn,
+        "TIMESTAMP WITH LOCAL TIME ZONE",
+        typed_null(ORA_TYPE_NUM_TIMESTAMP_LTZ, 0, 11),
+    );
+    assert_typed_null(
+        conn,
+        "INTERVAL YEAR TO MONTH",
+        typed_null(ORA_TYPE_NUM_INTERVAL_YM, 0, 5),
+    );
+    assert_typed_null(
+        conn,
+        "INTERVAL DAY TO SECOND",
+        typed_null(ORA_TYPE_NUM_INTERVAL_DS, 0, 11),
+    );
+}
+
+fn exercise_boolean_matrix(conn: &mut Connection) {
+    if !create_optional_table(
+        conn,
+        "rust_e12_boolean_probe_t",
+        "create table rust_e12_boolean_probe_t (v boolean)",
+        "BOOLEAN",
+    ) {
+        return;
+    }
+
+    let row = query_one_with_binds(
+        conn,
+        "select :1 as v from dual",
+        vec![BindValue::Boolean(true)],
+    );
+    assert_eq!(
+        row.get::<bool>(0).expect("BOOLEAN should fetch as bool"),
+        true,
+        "BOOLEAN true mismatch"
+    );
+    assert_typed_null(conn, "BOOLEAN", typed_null(ORA_TYPE_NUM_BOOLEAN, 0, 4));
+}
+
+fn exercise_json_matrix(conn: &mut Connection) {
+    if !create_optional_table(
+        conn,
+        "rust_e12_json_probe_t",
+        "create table rust_e12_json_probe_t (doc json)",
+        "JSON",
+    ) {
+        return;
+    }
+
+    drop_live_table(conn, "rust_e12_json_t");
+    BlockingConnection::execute(
+        conn,
+        "create table rust_e12_json_t (id number primary key, doc json)",
+        (),
+    )
+    .expect("create JSON table");
+
+    execute_with_binds(
+        conn,
+        "insert into rust_e12_json_t (id, doc) values (:1, json(:2))",
+        vec![
+            BindValue::Number("1".to_string()),
+            BindValue::Text(r#"{"id":7,"name":"bob","tags":["a","b"]}"#.to_string()),
+        ],
+    );
+    execute_with_binds(
+        conn,
+        "insert into rust_e12_json_t (id, doc) values (:1, :2)",
+        vec![
+            BindValue::Number("2".to_string()),
+            typed_null(ORA_TYPE_NUM_JSON, 0, 1_048_576),
+        ],
+    );
+
+    let row = query_one_with_binds(
+        conn,
+        "select doc from rust_e12_json_t where id = :1",
+        vec![BindValue::Number("1".to_string())],
+    );
+    match cell(&row, "JSON") {
+        QueryValue::Json(value) => match value.as_ref() {
+            OsonValue::Object(entries) => {
+                assert_eq!(
+                    json_field(entries, "id"),
+                    &OsonValue::Number("7".to_string())
+                );
+                assert_eq!(
+                    json_field(entries, "name"),
+                    &OsonValue::String("bob".to_string())
+                );
+                assert_eq!(
+                    json_field(entries, "tags"),
+                    &OsonValue::Array(vec![
+                        OsonValue::String("a".to_string()),
+                        OsonValue::String("b".to_string()),
+                    ])
+                );
+            }
+            other => panic!("JSON should fetch as OSON object, got {other:?}"),
+        },
+        other => panic!("JSON should fetch as QueryValue::Json, got {other:?}"),
+    }
+
+    let null_row = query_one_with_binds(
+        conn,
+        "select doc from rust_e12_json_t where id = :1",
+        vec![BindValue::Number("2".to_string())],
+    );
+    assert!(
+        null_row.value(0).is_none(),
+        "JSON NULL should fetch as None, got {:?}",
+        null_row.value(0)
+    );
+
+    drop_live_table(conn, "rust_e12_json_t");
+}
+
+fn exercise_vector_matrix(conn: &mut Connection) {
+    if !create_optional_table(
+        conn,
+        "rust_e12_vector_probe_t",
+        "create table rust_e12_vector_probe_t (v vector(3, float32))",
+        "VECTOR",
+    ) {
+        return;
+    }
+
+    drop_live_table(conn, "rust_e12_vector_t");
+    BlockingConnection::execute(
+        conn,
+        "create table rust_e12_vector_t (id number primary key, v vector(3, float32))",
+        (),
+    )
+    .expect("create VECTOR table");
+
+    let embedding = vec![1.5_f32, -2.0, 3.25];
+    BlockingConnection::execute(
+        conn,
+        "insert into rust_e12_vector_t (id, v) values (:1, :2)",
+        (1_i64, embedding.clone()),
+    )
+    .expect("insert VECTOR");
+    execute_with_binds(
+        conn,
+        "insert into rust_e12_vector_t (id, v) values (:1, :2)",
+        vec![
+            BindValue::Number("2".to_string()),
+            typed_null(ORA_TYPE_NUM_VECTOR, 0, 1_048_576),
+        ],
+    );
+
+    let row = query_one_with_binds(
+        conn,
+        "select v from rust_e12_vector_t where id = :1",
+        vec![BindValue::Number("1".to_string())],
+    );
+    assert_vector_f32(&row, &embedding);
+
+    let null_row = query_one_with_binds(
+        conn,
+        "select v from rust_e12_vector_t where id = :1",
+        vec![BindValue::Number("2".to_string())],
+    );
+    assert!(
+        null_row.value(0).is_none(),
+        "VECTOR NULL should fetch as None, got {:?}",
+        null_row.value(0)
+    );
+
+    drop_live_table(conn, "rust_e12_vector_t");
+}
+
+fn exercise_rowid_matrix(conn: &mut Connection) {
+    drop_live_table(conn, "rust_e12_rowid_t");
+    BlockingConnection::execute(
+        conn,
+        "create table rust_e12_rowid_t (id number primary key, txt varchar2(20))",
+        (),
+    )
+    .expect("create ROWID table");
+    BlockingConnection::execute(
+        conn,
+        "insert into rust_e12_rowid_t (id, txt) values (:1, :2)",
+        (1_i64, "rowid"),
+    )
+    .expect("insert ROWID fixture");
+
+    let source = BlockingConnection::query_one(
+        conn,
+        "select rowid from rust_e12_rowid_t where id = :1",
+        (1_i64,),
+    )
+    .expect("select source ROWID");
+    let rowid = match cell(&source, "ROWID source") {
+        QueryValue::Rowid(rowid) => rowid.clone(),
+        other => panic!("ROWID source should fetch as Rowid, got {other:?}"),
+    };
+    assert!(!rowid.is_empty(), "ROWID should not be empty");
+
+    let echoed = query_one_with_binds(
+        conn,
+        "select rowid from rust_e12_rowid_t where rowid = chartorowid(:1)",
+        vec![BindValue::Text(rowid.clone())],
+    );
+    assert_eq!(
+        echoed
+            .get::<String>(0)
+            .expect("ROWID should fetch as String"),
+        rowid,
+        "ROWID string mismatch"
+    );
+    assert_eq!(
+        cell(&echoed, "ROWID"),
+        &QueryValue::Rowid(rowid),
+        "ROWID raw value mismatch"
+    );
+    assert_cast_null(conn, "ROWID", "rowid");
+    assert_typed_null(
+        conn,
+        "ROWID typed bind",
+        typed_null(ORA_TYPE_NUM_ROWID, 0, 18),
+    );
+    drop_live_table(conn, "rust_e12_rowid_t");
+}
+
+/// Wave-3 E1.2: live typed round-trip matrix against a real Oracle database.
+///
+/// Ignored by default so the normal test suite remains offline. Run with:
+/// `eval "$(scripts/container.sh env)" cargo test -p oracledb --test live_typed -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn live_typed_roundtrip_matrix_e12() {
+    with_connection("live_typed_roundtrip_matrix_e12", |conn| {
+        exercise_number_matrix(conn);
+        exercise_binary_float_matrix(conn);
+        exercise_character_matrix(conn);
+        exercise_lob_and_raw_matrix(conn);
+        exercise_long_matrix(conn);
+        exercise_datetime_interval_matrix(conn);
+        exercise_boolean_matrix(conn);
+        exercise_json_matrix(conn);
+        exercise_vector_matrix(conn);
+        exercise_rowid_matrix(conn);
+
+        eprintln!(
+            "covered live typed matrix: NUMBER, BINARY_FLOAT, BINARY_DOUBLE, VARCHAR2, NVARCHAR2, CHAR, CLOB, NCLOB, BLOB, RAW, LONG, LONG RAW, DATE, TIMESTAMP, TIMESTAMP WITH TIME ZONE, TIMESTAMP WITH LOCAL TIME ZONE, INTERVAL YEAR TO MONTH, INTERVAL DAY TO SECOND, BOOLEAN when available, JSON when available, VECTOR when available, ROWID, and NULL checks"
+        );
     });
 }
