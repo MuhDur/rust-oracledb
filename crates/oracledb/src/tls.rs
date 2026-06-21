@@ -22,7 +22,8 @@ use asupersync::net::TcpStream;
 use asupersync::tls::{TlsConnector, TlsStream};
 use oracledb_protocol::net::EasyConnect;
 use oracledb_protocol::tls::dn::{check_cert_dn, check_server_name, DnMatchError};
-use oracledb_protocol::tls::{build_sni, resolve_wallet_dir, WalletContents};
+use oracledb_protocol::tls::sni::build_sni;
+use oracledb_protocol::tls::wallet::{resolve_wallet_dir, WalletContents};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, WebPkiSupportedAlgorithms};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -361,7 +362,7 @@ fn load_wallet(dir: &std::path::Path, password: Option<&str>) -> Result<WalletCo
     let sso = sso_wallet_path(dir);
     if sso.exists() {
         let bytes = std::fs::read(&sso).map_err(|e| Error::Tls(e.to_string()))?;
-        return oracledb_protocol::tls::parse_cwallet_sso(&bytes)
+        return oracledb_protocol::tls::sso::parse_cwallet_sso(&bytes)
             .map_err(|e| Error::Tls(e.to_string()));
     }
     Err(Error::Tls(format!(

@@ -37,15 +37,16 @@ crates/oracledb-protocol/tests/framing_harness.rs	5
 crates/oracledb-protocol/tests/number_decode_alloc_count.rs	1
 crates/oracledb-protocol/tests/number_inline_byte_identical.rs	7
 crates/oracledb-protocol/tests/pipeline_golden.rs	4
+crates/oracledb-protocol/tests/protocol_limits_properties.rs	8
 crates/oracledb-protocol/tests/reference_contract.rs	1
 crates/oracledb-protocol/tests/sessionless_golden.rs	2
 crates/oracledb-protocol/tests/tls_wallet.rs	9
 crates/oracledb-protocol/tests/tpc_golden.rs	3
 crates/oracledb/src/arrow.rs	34
 crates/oracledb/src/cursor_logic.rs	14
-crates/oracledb/src/lib.rs	56
-crates/oracledb/src/obs.rs	3
-crates/oracledb/src/pool.rs	27
+crates/oracledb/src/lib.rs	61
+crates/oracledb/src/obs.rs	6
+crates/oracledb/src/pool.rs	28
 crates/oracledb/src/soda/metadata.rs	4
 crates/oracledb/src/soda/operation.rs	10
 crates/oracledb/src/soda/qbe.rs	23
@@ -78,6 +79,7 @@ crates/oracledb/tests/live_statement_cache.rs	3
 crates/oracledb/tests/live_typed.rs	14
 crates/oracledb/tests/observability.rs	1
 crates/oracledb/tests/pipeline_live.rs	2
+crates/oracledb/tests/pool_reaper_async.rs	4
 crates/oracledb/tests/prefetch_overlap.rs	4
 crates/oracledb/tests/repro_repeated_named_bind.rs	1
 crates/oracledb/tests/reuse_after_call_timeout.rs	1

@@ -36,8 +36,6 @@ pub struct ProtocolLimits {
     pub max_vector_dimensions: usize,
     /// Maximum number of LOB chunks in one logical LOB operation.
     pub max_lob_chunks: usize,
-    /// Maximum redirect hops while opening a connection.
-    pub max_redirects: usize,
     /// Maximum elements in generic length-prefixed wire collections.
     pub max_length_prefixed_elements: usize,
 }
@@ -60,7 +58,6 @@ impl ProtocolLimits {
         max_object_elements: 1_000_000,
         max_vector_dimensions: 1_000_000,
         max_lob_chunks: 1_000_000,
-        max_redirects: 8,
         max_length_prefixed_elements: 1_000_000,
     };
 
@@ -132,10 +129,6 @@ impl ProtocolLimits {
         self.check("lob_chunks", observed, self.max_lob_chunks)
     }
 
-    pub fn check_redirects(&self, observed: usize) -> Result<()> {
-        self.check("redirects", observed, self.max_redirects)
-    }
-
     pub fn check_length_prefixed_elements(&self, observed: usize) -> Result<()> {
         self.check(
             "length_prefixed_elements",
@@ -156,7 +149,7 @@ impl ProtocolLimits {
         }
     }
 
-    fn named_limits(&self) -> [(&'static str, usize); 12] {
+    fn named_limits(&self) -> [(&'static str, usize); 11] {
         [
             ("packet_bytes", self.max_packet_bytes),
             ("frame_bytes", self.max_frame_bytes),
@@ -168,7 +161,6 @@ impl ProtocolLimits {
             ("object_elements", self.max_object_elements),
             ("vector_dimensions", self.max_vector_dimensions),
             ("lob_chunks", self.max_lob_chunks),
-            ("redirects", self.max_redirects),
             (
                 "length_prefixed_elements",
                 self.max_length_prefixed_elements,
@@ -956,7 +948,6 @@ mod tests {
                 "object_elements",
                 "vector_dimensions",
                 "lob_chunks",
-                "redirects",
                 "length_prefixed_elements",
             ]
         );
@@ -975,7 +966,6 @@ mod tests {
             max_object_elements: 6,
             max_vector_dimensions: 7,
             max_lob_chunks: 8,
-            max_redirects: 1,
             max_length_prefixed_elements: 9,
         }
         .validate()
@@ -993,7 +983,6 @@ mod tests {
             .check_vector_dimensions(7)
             .expect("boundary accepted");
         limits.check_lob_chunks(8).expect("boundary accepted");
-        limits.check_redirects(1).expect("boundary accepted");
         limits
             .check_length_prefixed_elements(9)
             .expect("boundary accepted");
@@ -1008,7 +997,6 @@ mod tests {
         assert_resource_limit(limits.check_object_elements(7), "object_elements", 7, 6);
         assert_resource_limit(limits.check_vector_dimensions(8), "vector_dimensions", 8, 7);
         assert_resource_limit(limits.check_lob_chunks(9), "lob_chunks", 9, 8);
-        assert_resource_limit(limits.check_redirects(2), "redirects", 2, 1);
         assert_resource_limit(
             limits.check_length_prefixed_elements(10),
             "length_prefixed_elements",

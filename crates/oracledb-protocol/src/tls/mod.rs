@@ -21,10 +21,8 @@ pub mod sni;
 pub mod sso;
 pub mod wallet;
 
-pub use dn::{check_cert_dn, check_server_name, name_matches, parse_dn, DnMatchError};
-pub use sni::build_sni;
-pub use sso::parse_cwallet_sso;
-pub use wallet::{
-    parse_ewallet_pem, read_ewallet_pem, resolve_wallet_dir, WalletContents, WalletError,
-    PEM_WALLET_FILE_NAME, SSO_WALLET_FILE_NAME,
-};
+// The TLS helpers live in their submodules (`dn`, `sni`, `sso`, `wallet`), which
+// are themselves the public surface (`tls::dn::check_cert_dn`,
+// `tls::wallet::WalletContents`, ...). We deliberately do NOT re-export them flat
+// at `tls::`: a second public path per item is the module-coherence smell W1-T9
+// closes (one obvious path per type).

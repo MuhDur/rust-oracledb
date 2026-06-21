@@ -22,7 +22,7 @@ use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
 use oracledb::tls::{self, TlsParams};
 use oracledb_protocol::net::EasyConnect;
-use oracledb_protocol::tls::parse_ewallet_pem;
+use oracledb_protocol::tls::wallet::parse_ewallet_pem;
 use rustls::pki_types::CertificateDer;
 use rustls::{ServerConfig, ServerConnection};
 

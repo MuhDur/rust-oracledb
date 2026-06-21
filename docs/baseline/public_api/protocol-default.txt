@@ -421,7 +421,7 @@ pub fn oracledb_protocol::packet::TnsPacket::fmt(&self, &mut core::fmt::Formatte
 impl core::marker::StructuralPartialEq for oracledb_protocol::packet::TnsPacket
 pub const oracledb_protocol::packet::TNS_HEADER_LEN: usize
 pub mod oracledb_protocol::sql
-pub enum oracledb_protocol::sql::SqlError
+#[non_exhaustive] pub enum oracledb_protocol::sql::SqlError
 pub oracledb_protocol::sql::SqlError::MissingEndingDoubleQuote
 pub oracledb_protocol::sql::SqlError::MissingEndingSingleQuote
 impl core::clone::Clone for oracledb_protocol::sql::SqlError
@@ -588,7 +588,7 @@ pub fn oracledb_protocol::thin::aq::parse_aq_deq_response(&[u8], oracledb_protoc
 pub fn oracledb_protocol::thin::aq::parse_aq_deq_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, &oracledb_protocol::thin::aq::AqPayloadKind, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<oracledb_protocol::thin::aq::AqDeqResult>
 pub fn oracledb_protocol::thin::aq::parse_aq_enq_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn oracledb_protocol::thin::aq::parse_aq_enq_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<core::option::Option<alloc::vec::Vec<u8>>>
-pub enum oracledb_protocol::thin::BindValue
+#[non_exhaustive] pub enum oracledb_protocol::thin::BindValue
 pub oracledb_protocol::thin::BindValue::Array
 pub oracledb_protocol::thin::BindValue::Array::buffer_size: u32
 pub oracledb_protocol::thin::BindValue::Array::csfrm: u8
@@ -660,6 +660,15 @@ pub oracledb_protocol::thin::BindValue::TypedNull::buffer_size: u32
 pub oracledb_protocol::thin::BindValue::TypedNull::csfrm: u8
 pub oracledb_protocol::thin::BindValue::TypedNull::ora_type_num: u8
 pub oracledb_protocol::thin::BindValue::Vector(oracledb_protocol::vector::Vector)
+impl oracledb_protocol::thin::BindValue
+pub fn oracledb_protocol::thin::BindValue::as_bool(&self) -> core::option::Option<bool>
+pub fn oracledb_protocol::thin::BindValue::as_bytes(&self) -> core::option::Option<&[u8]>
+pub fn oracledb_protocol::thin::BindValue::as_f64(&self) -> core::option::Option<f64>
+pub fn oracledb_protocol::thin::BindValue::as_i64(&self) -> core::option::Option<i64>
+pub fn oracledb_protocol::thin::BindValue::as_number_text(&self) -> core::option::Option<&str>
+pub fn oracledb_protocol::thin::BindValue::as_str(&self) -> core::option::Option<&str>
+pub fn oracledb_protocol::thin::BindValue::is_null(&self) -> bool
+pub fn oracledb_protocol::thin::BindValue::variant_name(&self) -> &'static str
 impl core::clone::Clone for oracledb_protocol::thin::BindValue
 pub fn oracledb_protocol::thin::BindValue::clone(&self) -> oracledb_protocol::thin::BindValue
 impl core::cmp::PartialEq for oracledb_protocol::thin::BindValue
@@ -711,7 +720,7 @@ pub fn oracledb_protocol::thin::OracleNumber::fmt(&self, &mut core::fmt::Formatt
 impl core::fmt::Display for oracledb_protocol::thin::OracleNumber
 pub fn oracledb_protocol::thin::OracleNumber::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb_protocol::thin::OracleNumber
-pub enum oracledb_protocol::thin::QueryValue
+#[non_exhaustive] pub enum oracledb_protocol::thin::QueryValue
 pub oracledb_protocol::thin::QueryValue::Array(alloc::vec::Vec<core::option::Option<oracledb_protocol::thin::QueryValue>>)
 pub oracledb_protocol::thin::QueryValue::BinaryDouble(alloc::string::String)
 pub oracledb_protocol::thin::QueryValue::Boolean(bool)
@@ -754,6 +763,7 @@ pub fn oracledb_protocol::thin::QueryValue::as_raw(&self) -> core::option::Optio
 pub fn oracledb_protocol::thin::QueryValue::as_rowid(&self) -> core::option::Option<&str>
 pub fn oracledb_protocol::thin::QueryValue::as_text(&self) -> core::option::Option<&str>
 pub fn oracledb_protocol::thin::QueryValue::number_from_text(&str, bool) -> Self
+pub fn oracledb_protocol::thin::QueryValue::variant_name(&self) -> &'static str
 impl core::clone::Clone for oracledb_protocol::thin::QueryValue
 pub fn oracledb_protocol::thin::QueryValue::clone(&self) -> oracledb_protocol::thin::QueryValue
 impl core::cmp::PartialEq for oracledb_protocol::thin::QueryValue
@@ -761,7 +771,7 @@ pub fn oracledb_protocol::thin::QueryValue::eq(&self, &oracledb_protocol::thin::
 impl core::fmt::Debug for oracledb_protocol::thin::QueryValue
 pub fn oracledb_protocol::thin::QueryValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb_protocol::thin::QueryValue
-pub enum oracledb_protocol::thin::QueryValueRef<'buf>
+#[non_exhaustive] pub enum oracledb_protocol::thin::QueryValueRef<'buf>
 pub oracledb_protocol::thin::QueryValueRef::Boolean(bool)
 pub oracledb_protocol::thin::QueryValueRef::DateTime
 pub oracledb_protocol::thin::QueryValueRef::DateTime::day: u8
@@ -843,9 +853,12 @@ impl core::fmt::Debug for oracledb_protocol::thin::AuthResponse
 pub fn oracledb_protocol::thin::AuthResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb_protocol::thin::AuthResponse
 pub struct oracledb_protocol::thin::BatchServerError
-pub oracledb_protocol::thin::BatchServerError::code: u32
-pub oracledb_protocol::thin::BatchServerError::message: alloc::string::String
-pub oracledb_protocol::thin::BatchServerError::offset: u32
+impl oracledb_protocol::thin::BatchServerError
+pub fn oracledb_protocol::thin::BatchServerError::code(&self) -> u32
+pub fn oracledb_protocol::thin::BatchServerError::into_parts(self) -> (u32, u32, alloc::string::String)
+pub fn oracledb_protocol::thin::BatchServerError::message(&self) -> &str
+pub fn oracledb_protocol::thin::BatchServerError::new(u32, u32, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oracledb_protocol::thin::BatchServerError::offset(&self) -> u32
 impl core::clone::Clone for oracledb_protocol::thin::BatchServerError
 pub fn oracledb_protocol::thin::BatchServerError::clone(&self) -> oracledb_protocol::thin::BatchServerError
 impl core::cmp::Eq for oracledb_protocol::thin::BatchServerError
@@ -904,25 +917,46 @@ pub fn oracledb_protocol::thin::ClientCapabilities::fmt(&self, &mut core::fmt::F
 impl core::marker::Copy for oracledb_protocol::thin::ClientCapabilities
 impl core::marker::StructuralPartialEq for oracledb_protocol::thin::ClientCapabilities
 pub struct oracledb_protocol::thin::ColumnMetadata
-pub oracledb_protocol::thin::ColumnMetadata::annotations: core::option::Option<alloc::vec::Vec<(alloc::string::String, alloc::string::String)>>
-pub oracledb_protocol::thin::ColumnMetadata::buffer_size: u32
-pub oracledb_protocol::thin::ColumnMetadata::csfrm: u8
-pub oracledb_protocol::thin::ColumnMetadata::domain_name: core::option::Option<alloc::string::String>
-pub oracledb_protocol::thin::ColumnMetadata::domain_schema: core::option::Option<alloc::string::String>
-pub oracledb_protocol::thin::ColumnMetadata::is_array: bool
-pub oracledb_protocol::thin::ColumnMetadata::is_json: bool
-pub oracledb_protocol::thin::ColumnMetadata::is_oson: bool
-pub oracledb_protocol::thin::ColumnMetadata::max_size: u32
-pub oracledb_protocol::thin::ColumnMetadata::name: alloc::string::String
-pub oracledb_protocol::thin::ColumnMetadata::nulls_allowed: bool
-pub oracledb_protocol::thin::ColumnMetadata::object_schema: core::option::Option<alloc::string::String>
-pub oracledb_protocol::thin::ColumnMetadata::object_type_name: core::option::Option<alloc::string::String>
-pub oracledb_protocol::thin::ColumnMetadata::ora_type_num: u8
-pub oracledb_protocol::thin::ColumnMetadata::precision: i8
-pub oracledb_protocol::thin::ColumnMetadata::scale: i8
-pub oracledb_protocol::thin::ColumnMetadata::vector_dimensions: core::option::Option<u32>
-pub oracledb_protocol::thin::ColumnMetadata::vector_flags: u8
-pub oracledb_protocol::thin::ColumnMetadata::vector_format: u8
+impl oracledb_protocol::thin::ColumnMetadata
+pub fn oracledb_protocol::thin::ColumnMetadata::annotations(&self) -> core::option::Option<&[(alloc::string::String, alloc::string::String)]>
+pub fn oracledb_protocol::thin::ColumnMetadata::buffer_size(&self) -> u32
+pub fn oracledb_protocol::thin::ColumnMetadata::csfrm(&self) -> u8
+pub fn oracledb_protocol::thin::ColumnMetadata::domain_name(&self) -> core::option::Option<&str>
+pub fn oracledb_protocol::thin::ColumnMetadata::domain_schema(&self) -> core::option::Option<&str>
+pub fn oracledb_protocol::thin::ColumnMetadata::is_array(&self) -> bool
+pub fn oracledb_protocol::thin::ColumnMetadata::is_json(&self) -> bool
+pub fn oracledb_protocol::thin::ColumnMetadata::is_oson(&self) -> bool
+pub fn oracledb_protocol::thin::ColumnMetadata::max_size(&self) -> u32
+pub fn oracledb_protocol::thin::ColumnMetadata::name(&self) -> &str
+pub fn oracledb_protocol::thin::ColumnMetadata::new(impl core::convert::Into<alloc::string::String>, u8) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::nulls_allowed(&self) -> bool
+pub fn oracledb_protocol::thin::ColumnMetadata::object_schema(&self) -> core::option::Option<&str>
+pub fn oracledb_protocol::thin::ColumnMetadata::object_type_name(&self) -> core::option::Option<&str>
+pub fn oracledb_protocol::thin::ColumnMetadata::ora_type_num(&self) -> u8
+pub fn oracledb_protocol::thin::ColumnMetadata::precision(&self) -> i8
+pub fn oracledb_protocol::thin::ColumnMetadata::scale(&self) -> i8
+pub fn oracledb_protocol::thin::ColumnMetadata::vector_dimensions(&self) -> core::option::Option<u32>
+pub fn oracledb_protocol::thin::ColumnMetadata::vector_flags(&self) -> u8
+pub fn oracledb_protocol::thin::ColumnMetadata::vector_format(&self) -> u8
+pub fn oracledb_protocol::thin::ColumnMetadata::with_annotations(self, core::option::Option<alloc::vec::Vec<(alloc::string::String, alloc::string::String)>>) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_buffer_size(self, u32) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_csfrm(self, u8) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_domain_name(self, core::option::Option<alloc::string::String>) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_domain_schema(self, core::option::Option<alloc::string::String>) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_is_array(self, bool) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_is_json(self, bool) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_is_oson(self, bool) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_max_size(self, u32) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_name(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_nulls_allowed(self, bool) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_object_schema(self, core::option::Option<alloc::string::String>) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_object_type_name(self, core::option::Option<alloc::string::String>) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_ora_type_num(self, u8) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_precision(self, i8) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_scale(self, i8) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_vector_dimensions(self, core::option::Option<u32>) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_vector_flags(self, u8) -> Self
+pub fn oracledb_protocol::thin::ColumnMetadata::with_vector_format(self, u8) -> Self
 impl core::clone::Clone for oracledb_protocol::thin::ColumnMetadata
 pub fn oracledb_protocol::thin::ColumnMetadata::clone(&self) -> oracledb_protocol::thin::ColumnMetadata
 impl core::cmp::Eq for oracledb_protocol::thin::ColumnMetadata
@@ -1444,7 +1478,7 @@ pub fn oracledb_protocol::thin::try_parse_oac_record_with_limits(&[u8], u32, u32
 pub fn oracledb_protocol::thin::write_dbobject_bind(&mut oracledb_protocol::wire::TtcWriter, &[u8], &[u8]) -> oracledb_protocol::Result<()>
 pub mod oracledb_protocol::tls
 pub mod oracledb_protocol::tls::dn
-pub enum oracledb_protocol::tls::dn::DnMatchError
+#[non_exhaustive] pub enum oracledb_protocol::tls::dn::DnMatchError
 pub oracledb_protocol::tls::dn::DnMatchError::CertDnMismatch
 pub oracledb_protocol::tls::dn::DnMatchError::CertDnMismatch::expected_dn: alloc::string::String
 pub oracledb_protocol::tls::dn::DnMatchError::NameMismatch
@@ -1469,7 +1503,7 @@ pub fn oracledb_protocol::tls::sni::build_sni(&str, core::option::Option<&str>) 
 pub mod oracledb_protocol::tls::sso
 pub fn oracledb_protocol::tls::sso::parse_cwallet_sso(&[u8]) -> core::result::Result<oracledb_protocol::tls::wallet::WalletContents, oracledb_protocol::tls::wallet::WalletError>
 pub mod oracledb_protocol::tls::wallet
-pub enum oracledb_protocol::tls::wallet::WalletError
+#[non_exhaustive] pub enum oracledb_protocol::tls::wallet::WalletError
 pub oracledb_protocol::tls::wallet::WalletError::FileMissing(alloc::string::String)
 pub oracledb_protocol::tls::wallet::WalletError::Io
 pub oracledb_protocol::tls::wallet::WalletError::Io::path: alloc::string::String
@@ -1504,60 +1538,6 @@ pub fn oracledb_protocol::tls::wallet::pem_wallet_path(&std::path::Path) -> std:
 pub fn oracledb_protocol::tls::wallet::read_ewallet_pem(&std::path::Path, core::option::Option<&str>) -> core::result::Result<oracledb_protocol::tls::wallet::WalletContents, oracledb_protocol::tls::wallet::WalletError>
 pub fn oracledb_protocol::tls::wallet::resolve_wallet_dir(core::option::Option<&str>, core::option::Option<&str>) -> core::option::Option<std::path::PathBuf>
 pub fn oracledb_protocol::tls::wallet::sso_wallet_path(&std::path::Path) -> std::path::PathBuf
-pub enum oracledb_protocol::tls::DnMatchError
-pub oracledb_protocol::tls::DnMatchError::CertDnMismatch
-pub oracledb_protocol::tls::DnMatchError::CertDnMismatch::expected_dn: alloc::string::String
-pub oracledb_protocol::tls::DnMatchError::NameMismatch
-pub oracledb_protocol::tls::DnMatchError::NameMismatch::expected_name: alloc::string::String
-impl core::clone::Clone for oracledb_protocol::tls::dn::DnMatchError
-pub fn oracledb_protocol::tls::dn::DnMatchError::clone(&self) -> oracledb_protocol::tls::dn::DnMatchError
-impl core::cmp::Eq for oracledb_protocol::tls::dn::DnMatchError
-impl core::cmp::PartialEq for oracledb_protocol::tls::dn::DnMatchError
-pub fn oracledb_protocol::tls::dn::DnMatchError::eq(&self, &oracledb_protocol::tls::dn::DnMatchError) -> bool
-impl core::error::Error for oracledb_protocol::tls::dn::DnMatchError
-impl core::fmt::Debug for oracledb_protocol::tls::dn::DnMatchError
-pub fn oracledb_protocol::tls::dn::DnMatchError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for oracledb_protocol::tls::dn::DnMatchError
-pub fn oracledb_protocol::tls::dn::DnMatchError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for oracledb_protocol::tls::dn::DnMatchError
-pub enum oracledb_protocol::tls::WalletError
-pub oracledb_protocol::tls::WalletError::FileMissing(alloc::string::String)
-pub oracledb_protocol::tls::WalletError::Io
-pub oracledb_protocol::tls::WalletError::Io::path: alloc::string::String
-pub oracledb_protocol::tls::WalletError::Io::source: std::io::error::Error
-pub oracledb_protocol::tls::WalletError::NoCertificates
-pub oracledb_protocol::tls::WalletError::Pem(alloc::string::String)
-pub oracledb_protocol::tls::WalletError::Sso(alloc::string::String)
-pub oracledb_protocol::tls::WalletError::SsoNotEnabled
-impl core::error::Error for oracledb_protocol::tls::wallet::WalletError
-pub fn oracledb_protocol::tls::wallet::WalletError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
-impl core::fmt::Debug for oracledb_protocol::tls::wallet::WalletError
-pub fn oracledb_protocol::tls::wallet::WalletError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for oracledb_protocol::tls::wallet::WalletError
-pub fn oracledb_protocol::tls::wallet::WalletError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub struct oracledb_protocol::tls::WalletContents
-pub oracledb_protocol::tls::WalletContents::ca_certificates: alloc::vec::Vec<alloc::vec::Vec<u8>>
-pub oracledb_protocol::tls::WalletContents::client_cert_chain: alloc::vec::Vec<alloc::vec::Vec<u8>>
-pub oracledb_protocol::tls::WalletContents::client_private_key: core::option::Option<alloc::vec::Vec<u8>>
-impl oracledb_protocol::tls::wallet::WalletContents
-pub fn oracledb_protocol::tls::wallet::WalletContents::has_client_identity(&self) -> bool
-impl core::clone::Clone for oracledb_protocol::tls::wallet::WalletContents
-pub fn oracledb_protocol::tls::wallet::WalletContents::clone(&self) -> oracledb_protocol::tls::wallet::WalletContents
-impl core::default::Default for oracledb_protocol::tls::wallet::WalletContents
-pub fn oracledb_protocol::tls::wallet::WalletContents::default() -> oracledb_protocol::tls::wallet::WalletContents
-impl core::fmt::Debug for oracledb_protocol::tls::wallet::WalletContents
-pub fn oracledb_protocol::tls::wallet::WalletContents::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-pub const oracledb_protocol::tls::PEM_WALLET_FILE_NAME: &str
-pub const oracledb_protocol::tls::SSO_WALLET_FILE_NAME: &str
-pub fn oracledb_protocol::tls::build_sni(&str, core::option::Option<&str>) -> alloc::string::String
-pub fn oracledb_protocol::tls::check_cert_dn(&str, &str) -> core::result::Result<(), oracledb_protocol::tls::dn::DnMatchError>
-pub fn oracledb_protocol::tls::check_server_name(&str, &[alloc::string::String], &[alloc::string::String]) -> core::result::Result<(), oracledb_protocol::tls::dn::DnMatchError>
-pub fn oracledb_protocol::tls::name_matches(&str, &str) -> bool
-pub fn oracledb_protocol::tls::parse_cwallet_sso(&[u8]) -> core::result::Result<oracledb_protocol::tls::wallet::WalletContents, oracledb_protocol::tls::wallet::WalletError>
-pub fn oracledb_protocol::tls::parse_dn(&str) -> alloc::vec::Vec<(alloc::string::String, alloc::string::String)>
-pub fn oracledb_protocol::tls::parse_ewallet_pem(&[u8], core::option::Option<&str>) -> core::result::Result<oracledb_protocol::tls::wallet::WalletContents, oracledb_protocol::tls::wallet::WalletError>
-pub fn oracledb_protocol::tls::read_ewallet_pem(&std::path::Path, core::option::Option<&str>) -> core::result::Result<oracledb_protocol::tls::wallet::WalletContents, oracledb_protocol::tls::wallet::WalletError>
-pub fn oracledb_protocol::tls::resolve_wallet_dir(core::option::Option<&str>, core::option::Option<&str>) -> core::option::Option<std::path::PathBuf>
 pub mod oracledb_protocol::vector
 pub enum oracledb_protocol::vector::Vector
 pub oracledb_protocol::vector::Vector::Dense(oracledb_protocol::vector::VectorValues)
@@ -1639,7 +1619,6 @@ pub oracledb_protocol::wire::ProtocolLimits::max_lob_chunks: usize
 pub oracledb_protocol::wire::ProtocolLimits::max_object_depth: usize
 pub oracledb_protocol::wire::ProtocolLimits::max_object_elements: usize
 pub oracledb_protocol::wire::ProtocolLimits::max_packet_bytes: usize
-pub oracledb_protocol::wire::ProtocolLimits::max_redirects: usize
 pub oracledb_protocol::wire::ProtocolLimits::max_response_bytes: usize
 pub oracledb_protocol::wire::ProtocolLimits::max_vector_dimensions: usize
 impl oracledb_protocol::wire::ProtocolLimits
@@ -1653,7 +1632,6 @@ pub fn oracledb_protocol::wire::ProtocolLimits::check_lob_chunks(&self, usize) -
 pub fn oracledb_protocol::wire::ProtocolLimits::check_object_depth(&self, usize) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::wire::ProtocolLimits::check_object_elements(&self, usize) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::wire::ProtocolLimits::check_packet_bytes(&self, usize) -> oracledb_protocol::Result<()>
-pub fn oracledb_protocol::wire::ProtocolLimits::check_redirects(&self, usize) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::wire::ProtocolLimits::check_response_bytes(&self, usize) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::wire::ProtocolLimits::check_vector_dimensions(&self, usize) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::wire::ProtocolLimits::validate(self) -> oracledb_protocol::Result<Self>
@@ -1759,7 +1737,7 @@ pub fn oracledb_protocol::wire::TtcReader<'_>::remaining(&self) -> usize
 pub fn oracledb_protocol::wire::TtcReader<'_>::with_capacity_bounded<T>(&self, usize, usize) -> alloc::vec::Vec<T>
 pub fn oracledb_protocol::wire::TtcReader<'_>::with_capacity_limited<T, F>(&self, usize, usize, F) -> oracledb_protocol::Result<alloc::vec::Vec<T>> where F: core::ops::function::FnOnce(&oracledb_protocol::wire::ProtocolLimits, usize) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::wire::encode_packet(u8, u8, core::option::Option<u16>, &[u8], oracledb_protocol::wire::PacketLengthWidth) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
-pub enum oracledb_protocol::ProtocolError
+#[non_exhaustive] pub enum oracledb_protocol::ProtocolError
 pub oracledb_protocol::ProtocolError::DirectPathLoadTooMuchData
 pub oracledb_protocol::ProtocolError::IncompletePacket
 pub oracledb_protocol::ProtocolError::IncompletePacket::available: usize

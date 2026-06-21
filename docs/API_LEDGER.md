@@ -26,7 +26,7 @@ Dispositions:
 pattern	disposition	reason
 pub mod oracledb	keep	Driver crate root.
 pub use oracledb::FromRow	keep	Derive output is part of the typed row API.
-pub use oracledb::protocol	consolidate	Low-level protocol access is useful for advanced users, but W1-T9 should decide whether the driver keeps this re-export or points users at the protocol crate.
+pub use oracledb::protocol	keep	W1-T9 decision: KEEP. The driver's public API returns protocol-crate types directly (QueryValue, BindValue, ColumnMetadata, ClientIdentity, ...) in 187 signature positions, so users must be able to name them; `oracledb::protocol` is the single canonical path for that without a separate version-coupled oracledb-protocol dependency. Removing it would break the public contract.
 pub use oracledb::transport::CassetteError	keep	Cassette diagnostics are part of the record/replay testing surface.
 *oracledb::AccessToken*	keep	Public credential wrapper used by token authentication.
 *oracledb::BlockingConnection::query<'*	keep	Blocking mirror of the query family.
@@ -62,8 +62,8 @@ pub fn oracledb::ConnectOptions::*	consolidate	Keep ConnectOptions public but pr
 *oracledb::ConversionError*	keep	Public conversion failure taxonomy.
 *oracledb::DbmsOutput*	keep	Public DBMS_OUTPUT result type.
 *oracledb::DecodedObject*	keep	Public object decoding result type.
-*oracledb::ExecutemanyManagerError*	pub(crate)	Same internal batch bookkeeping disposition as ExecutemanyManager.
-*oracledb::ExecutemanyManager*	pub(crate)	Batch offset bookkeeping is an implementation detail; public behavior should live on execute/executemany APIs.
+*oracledb::ExecutemanyManagerError*	keep	W1-T9: the cursor_logic module is now private, so this is reachable via the single crate-root path only. Kept public because the pyshim conformance harness (executemany_manager_error in cursor.rs) consumes it.
+*oracledb::ExecutemanyManager*	keep	W1-T9: cursor_logic is now a private module; the type is reachable via the single crate-root path only. Kept public because the pyshim conformance harness (#[pyclass] ExecutemanyManager wrapping oracledb::ExecutemanyManager) consumes it across the crate boundary.
 *oracledb::ExecuteOutcome*	keep	Public execute-family outcome type.
 *oracledb::Execute*	keep	Public execute-family request builder.
 *oracledb::Result*	keep	Public result alias.
@@ -94,12 +94,13 @@ pub fn oracledb::ConnectOptions::*	consolidate	Keep ConnectOptions public but pr
 *oracledb::TypedRow*	keep	Public typed-row accessor.
 *oracledb::arrow::*	keep	Feature-gated Arrow integration API.
 pub mod oracledb::arrow	keep	Feature-gated Arrow module.
-*oracledb::cursor_logic::*	pub(crate)	Implementation support for executemany batching, not a user-facing module.
-pub mod oracledb::cursor_logic	pub(crate)	Implementation support for executemany batching, not a user-facing module.
+*oracledb::bind_rows_need_iterative_plsql*	keep	W1-T9: cursor_logic is now private; this predicate is reachable via the single crate-root path only. Kept public because the pyshim conformance harness (async_cursor.rs / cursor.rs) consumes it.
 *oracledb::fetch_profile*	keep	Explicit diagnostic/profiling knobs exposed by the current crate.
 *oracledb::obs_record!*	keep	Public observability macro.
 *oracledb::obs_span!*	keep	Public observability macro.
 *oracledb::params!*	keep	Public bind helper macro.
+*oracledb::prelude::*	keep	W1-T9 prelude: curated glob-import convenience namespace re-exporting the everyday types/traits. Each item's canonical path is its non-prelude home; the prelude is the deliberate convenience exception to single-path.
+pub mod oracledb::prelude	keep	W1-T9 prelude module.
 *oracledb::pool::PoolBackend*	pub(crate)	Backend trait is the internal engine seam; W1-T7 introduces the async pool facade.
 *oracledb::pool::*	keep	Pool facades, guarded connection ownership, constants, config, options, and error type stay public.
 pub mod oracledb::pool	keep	Pool module remains the public namespace for pool configuration.
@@ -161,8 +162,8 @@ pub mod oracledb_protocol::wire	keep	Wire helper namespace.
 | `DirectPathStream` | `crates/oracledb-protocol/src/dpl.rs:722` | `keep` | Driver direct-path APIs accept this payload type directly. |
 | `BatchLoadState` | `crates/oracledb-protocol/src/dpl.rs:792` | `keep` | Validated batch state is used across the driver/protocol crate boundary and has private fields. |
 | `DirectPathPieceBuffer` | `crates/oracledb-protocol/src/dpl.rs:391` | `pub(crate)` | Piece assembly buffer is an encoder implementation detail. |
-| `ExecutemanyManager` | `crates/oracledb/src/cursor_logic.rs:45` | `pub(crate)` | Batch chunk management should be encapsulated by execute/executemany APIs. |
-| `ExecutemanyManagerError` | `crates/oracledb/src/cursor_logic.rs:15` | `pub(crate)` | Public errors should describe user-visible execution failures, not internal batch planning failures. |
+| `ExecutemanyManager` | `crates/oracledb/src/cursor_logic.rs:45` | `keep (module privatized)` | W1-T9: the `cursor_logic` module is now private, removing the `oracledb::cursor_logic::…` second path; the type stays `pub` at the crate root because the pyshim conformance harness consumes it across the crate boundary. |
+| `ExecutemanyManagerError` | `crates/oracledb/src/cursor_logic.rs:15` | `keep (module privatized)` | W1-T9: same disposition as `ExecutemanyManager` — private module, single crate-root path, kept public for the conformance harness. |
 
 ## Follow-Up Use
 

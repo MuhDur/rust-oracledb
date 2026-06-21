@@ -270,7 +270,10 @@ pub fn fetch_profile_arm(on: bool) {
 
 #[cfg(feature = "arrow")]
 pub mod arrow;
-pub mod cursor_logic;
+/// Executemany batch-chunk bookkeeping. Private module: the user-facing surface
+/// is the three items re-exported at the crate root below, so there is exactly
+/// one public path per item (no `oracledb::cursor_logic::…` second path).
+mod cursor_logic;
 /// Feature-gated observability seam (bead rust-oracledb-lv6). Always compiled so
 /// the `obs_span!` / `obs_record!` macros resolve, but its `tracing`-touching
 /// items are themselves `#[cfg(feature = "tracing")]`, so the off-build pulls in
@@ -328,6 +331,47 @@ pub use sql_convert::{
 /// attributes.
 #[cfg(feature = "derive")]
 pub use oracledb_derive::FromRow;
+
+/// The everyday types and traits, for a single glob import.
+///
+/// A typical program needs a connection type, [`ConnectOptions`], the
+/// [`ClientIdentity`](protocol::ClientIdentity) the database records, the value
+/// types it binds and reads back ([`BindValue`](protocol::thin::BindValue) /
+/// [`QueryValue`](protocol::thin::QueryValue)), and the typed-row helpers
+/// ([`FromRow`], [`QueryResultExt`], [`params!`]). Those live across two
+/// namespaces (the driver root and the [`protocol`] re-export), so the prelude
+/// gathers them so callers can write one line:
+///
+/// ```no_run
+/// use oracledb::prelude::*;
+///
+/// # fn main() -> oracledb::Result<()> {
+/// let identity = ClientIdentity::new("app", "host", "user", "term", "rust-oracledb")?;
+/// let options = ConnectOptions::new("dbhost:1521/FREEPDB1", "app_user", "app_pw", identity);
+/// let mut conn = BlockingConnection::connect(options)?;
+/// let binds = params! { "id" => 42_i64 };
+/// # let _ = (&mut conn, binds);
+/// # BlockingConnection::close(conn)?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// The prelude is a curated convenience namespace, not a second canonical home:
+/// each item's one obvious path is still its non-prelude path
+/// (`oracledb::Connection`, `oracledb::protocol::thin::QueryValue`, ...). Reach
+/// for an explicit `use` when you want exactly one name or a less common type.
+///
+/// It deliberately does **not** re-export [`Result`] or [`Error`]: a 1-argument
+/// `Result` alias and an `Error` type in a glob import shadow
+/// `std::result::Result` / `std::error::Error`, which surprises callers. Name
+/// those explicitly as `oracledb::Result` / `oracledb::Error`.
+pub mod prelude {
+    pub use crate::protocol::thin::{BindValue, QueryValue};
+    pub use crate::protocol::ClientIdentity;
+    pub use crate::{
+        params, BlockingConnection, ConnectOptions, Connection, FromRow, Params, QueryResultExt,
+    };
+}
 
 use transport::{Connector, WireTransport};
 

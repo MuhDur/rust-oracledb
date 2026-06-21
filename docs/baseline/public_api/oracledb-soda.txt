@@ -5,39 +5,8 @@
 pub mod oracledb
 pub use oracledb::FromRow
 pub use oracledb::protocol
-pub mod oracledb::cursor_logic
-pub enum oracledb::cursor_logic::ExecutemanyManagerError
-pub oracledb::cursor_logic::ExecutemanyManagerError::RowCountOverflow
-pub oracledb::cursor_logic::ExecutemanyManagerError::ZeroBatchSize
-impl core::clone::Clone for oracledb::cursor_logic::ExecutemanyManagerError
-pub fn oracledb::cursor_logic::ExecutemanyManagerError::clone(&self) -> oracledb::cursor_logic::ExecutemanyManagerError
-impl core::cmp::Eq for oracledb::cursor_logic::ExecutemanyManagerError
-impl core::cmp::PartialEq for oracledb::cursor_logic::ExecutemanyManagerError
-pub fn oracledb::cursor_logic::ExecutemanyManagerError::eq(&self, &oracledb::cursor_logic::ExecutemanyManagerError) -> bool
-impl core::error::Error for oracledb::cursor_logic::ExecutemanyManagerError
-impl core::fmt::Debug for oracledb::cursor_logic::ExecutemanyManagerError
-pub fn oracledb::cursor_logic::ExecutemanyManagerError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for oracledb::cursor_logic::ExecutemanyManagerError
-pub fn oracledb::cursor_logic::ExecutemanyManagerError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for oracledb::cursor_logic::ExecutemanyManagerError
-pub struct oracledb::cursor_logic::ExecutemanyManager
-impl oracledb::cursor_logic::ExecutemanyManager
-pub fn oracledb::cursor_logic::ExecutemanyManager::message_offset(&self) -> u32
-pub fn oracledb::cursor_logic::ExecutemanyManager::new(usize, u32) -> core::result::Result<Self, oracledb::cursor_logic::ExecutemanyManagerError>
-pub fn oracledb::cursor_logic::ExecutemanyManager::next_batch(&mut self)
-pub fn oracledb::cursor_logic::ExecutemanyManager::num_rows(&self) -> u32
-pub fn oracledb::cursor_logic::ExecutemanyManager::with_chunks(usize, u32, alloc::vec::Vec<usize>) -> core::result::Result<Self, oracledb::cursor_logic::ExecutemanyManagerError>
-impl core::clone::Clone for oracledb::cursor_logic::ExecutemanyManager
-pub fn oracledb::cursor_logic::ExecutemanyManager::clone(&self) -> oracledb::cursor_logic::ExecutemanyManager
-impl core::cmp::Eq for oracledb::cursor_logic::ExecutemanyManager
-impl core::cmp::PartialEq for oracledb::cursor_logic::ExecutemanyManager
-pub fn oracledb::cursor_logic::ExecutemanyManager::eq(&self, &oracledb::cursor_logic::ExecutemanyManager) -> bool
-impl core::fmt::Debug for oracledb::cursor_logic::ExecutemanyManager
-pub fn oracledb::cursor_logic::ExecutemanyManager::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for oracledb::cursor_logic::ExecutemanyManager
-pub fn oracledb::cursor_logic::bind_rows_need_iterative_plsql(&str, &[alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>]) -> bool
 pub mod oracledb::pool
-pub enum oracledb::pool::PoolError
+#[non_exhaustive] pub enum oracledb::pool::PoolError
 pub oracledb::pool::PoolError::Backend(alloc::string::String)
 pub oracledb::pool::PoolError::Cancelled(alloc::string::String)
 pub oracledb::pool::PoolError::Closed
@@ -173,6 +142,251 @@ pub fn oracledb::pool::PoolBackend::close_connection(&self, u64, Self::Conn)
 pub fn oracledb::pool::PoolBackend::connection_is_open(&self, &Self::Conn) -> bool
 pub fn oracledb::pool::PoolBackend::create_connection(&self, u64, core::option::Option<&str>) -> core::result::Result<Self::Conn, alloc::string::String>
 pub fn oracledb::pool::PoolBackend::ping_connection(&self, &Self::Conn, u32) -> bool
+pub mod oracledb::prelude
+pub use oracledb::prelude::BindValue
+pub use oracledb::prelude::ClientIdentity
+pub use oracledb::prelude::FromRow
+pub use oracledb::prelude::QueryValue
+pub macro oracledb::prelude::params!
+pub enum oracledb::prelude::Params<'a>
+pub oracledb::prelude::Params::Named(alloc::borrow::Cow<'a, [(alloc::string::String, oracledb_protocol::thin::types::BindValue)]>)
+pub oracledb::prelude::Params::None
+pub oracledb::prelude::Params::Positional(alloc::borrow::Cow<'a, [oracledb_protocol::thin::types::BindValue]>)
+impl<'a, T: oracledb::IntoBinds> core::convert::From<T> for oracledb::Params<'a>
+pub fn oracledb::Params<'a>::from(T) -> Self
+impl<'a> core::clone::Clone for oracledb::Params<'a>
+pub fn oracledb::Params<'a>::clone(&self) -> oracledb::Params<'a>
+impl<'a> core::cmp::PartialEq for oracledb::Params<'a>
+pub fn oracledb::Params<'a>::eq(&self, &oracledb::Params<'a>) -> bool
+impl<'a> core::convert::From<&'a [(alloc::string::String, oracledb_protocol::thin::types::BindValue)]> for oracledb::Params<'a>
+pub fn oracledb::Params<'a>::from(&'a [(alloc::string::String, oracledb_protocol::thin::types::BindValue)]) -> Self
+impl<'a> core::convert::From<&'a [oracledb_protocol::thin::types::BindValue]> for oracledb::Params<'a>
+pub fn oracledb::Params<'a>::from(&'a [oracledb_protocol::thin::types::BindValue]) -> Self
+impl<'a> core::convert::From<&'a alloc::vec::Vec<(alloc::string::String, oracledb_protocol::thin::types::BindValue)>> for oracledb::Params<'a>
+pub fn oracledb::Params<'a>::from(&'a alloc::vec::Vec<(alloc::string::String, oracledb_protocol::thin::types::BindValue)>) -> Self
+impl<'a> core::convert::From<&'a alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>> for oracledb::Params<'a>
+pub fn oracledb::Params<'a>::from(&'a alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>) -> Self
+impl<'a> core::convert::From<alloc::vec::Vec<(alloc::string::String, oracledb_protocol::thin::types::BindValue)>> for oracledb::Params<'a>
+pub fn oracledb::Params<'a>::from(alloc::vec::Vec<(alloc::string::String, oracledb_protocol::thin::types::BindValue)>) -> Self
+impl<'a> core::default::Default for oracledb::Params<'a>
+pub fn oracledb::Params<'a>::default() -> oracledb::Params<'a>
+impl<'a> core::fmt::Debug for oracledb::Params<'a>
+pub fn oracledb::Params<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::marker::StructuralPartialEq for oracledb::Params<'a>
+pub struct oracledb::prelude::BlockingConnection
+impl oracledb::BlockingConnection
+pub fn oracledb::BlockingConnection::aq_deq_many(&mut oracledb::Connection, &oracledb_protocol::thin::aq::AqQueueDesc, &oracledb_protocol::thin::aq::AqDeqOptions, u32) -> oracledb::Result<alloc::vec::Vec<oracledb_protocol::thin::aq::AqDeqMessage>>
+pub fn oracledb::BlockingConnection::aq_deq_one(&mut oracledb::Connection, &oracledb_protocol::thin::aq::AqQueueDesc, &oracledb_protocol::thin::aq::AqDeqOptions) -> oracledb::Result<oracledb_protocol::thin::aq::AqDeqResult>
+pub fn oracledb::BlockingConnection::aq_enq_many(&mut oracledb::Connection, &oracledb_protocol::thin::aq::AqQueueDesc, &[oracledb_protocol::thin::aq::AqMsgProps], &oracledb_protocol::thin::aq::AqEnqOptions) -> oracledb::Result<alloc::vec::Vec<alloc::vec::Vec<u8>>>
+pub fn oracledb::BlockingConnection::aq_enq_one(&mut oracledb::Connection, &oracledb_protocol::thin::aq::AqQueueDesc, &oracledb_protocol::thin::aq::AqMsgProps, &oracledb_protocol::thin::aq::AqEnqOptions) -> oracledb::Result<core::option::Option<alloc::vec::Vec<u8>>>
+pub fn oracledb::BlockingConnection::begin_sessionless_transaction(&mut oracledb::Connection, &[u8], u32, bool) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::cancel(&mut oracledb::Connection) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::change_password(&mut oracledb::Connection, &str, &str) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::close(oracledb::Connection) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::commit(&mut oracledb::Connection) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::connect(oracledb::ConnectOptions) -> oracledb::Result<oracledb::Connection>
+pub fn oracledb::BlockingConnection::create_temp_lob(&mut oracledb::Connection, u8, u8) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
+pub fn oracledb::BlockingConnection::define_and_fetch_rows_with_columns(&mut oracledb::Connection, u32, u32, &[oracledb_protocol::thin::types::ColumnMetadata], core::option::Option<&[core::option::Option<oracledb_protocol::thin::types::QueryValue>]>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::describe_object_type(&mut oracledb::Connection, &str, &str) -> oracledb::Result<oracledb::ObjectType>
+pub fn oracledb::BlockingConnection::direct_path_load(&mut oracledb::Connection, &str, &str, &[alloc::string::String], &[alloc::vec::Vec<oracledb_protocol::dpl::DirectPathColumnValue>], u32) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::direct_path_load_prepared(&mut oracledb::Connection, &oracledb_protocol::dpl::DirectPathPrepareResult, &[alloc::vec::Vec<oracledb_protocol::dpl::DirectPathColumnValue>], u32) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::direct_path_prepare(&mut oracledb::Connection, &str, &str, &[alloc::string::String]) -> oracledb::Result<oracledb_protocol::dpl::DirectPathPrepareResult>
+pub fn oracledb::BlockingConnection::enable_dbms_output(&mut oracledb::Connection, core::option::Option<u32>) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::execute<'p>(&mut oracledb::Connection, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::ExecuteOutcome>
+pub fn oracledb::BlockingConnection::execute_many<'b>(&mut oracledb::Connection, &str, impl core::convert::Into<oracledb::BatchRows<'b>>) -> oracledb::Result<oracledb::BatchOutcome>
+pub fn oracledb::BlockingConnection::execute_many_with<'b>(&mut oracledb::Connection, oracledb::Batch<'b>) -> oracledb::Result<oracledb::BatchOutcome>
+pub fn oracledb::BlockingConnection::execute_query(&mut oracledb::Connection, &str, u32) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::execute_query_collect(&mut oracledb::Connection, &str, u32) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::execute_query_for_registration(&mut oracledb::Connection, &str, u64) -> oracledb::Result<core::option::Option<u64>>
+pub fn oracledb::BlockingConnection::execute_query_with_bind_rows(&mut oracledb::Connection, &str, u32, &[alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>]) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::execute_query_with_bind_rows_and_options(&mut oracledb::Connection, &str, u32, &[alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>], oracledb_protocol::thin::types::ExecuteOptions) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::execute_query_with_bind_rows_and_timeout(&mut oracledb::Connection, &str, u32, &[alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>], core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::execute_query_with_bind_rows_options_and_timeout(&mut oracledb::Connection, &str, u32, &[alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>], oracledb_protocol::thin::types::ExecuteOptions, core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::execute_query_with_binds(&mut oracledb::Connection, &str, u32, &[oracledb_protocol::thin::types::BindValue]) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::execute_query_with_binds_and_timeout(&mut oracledb::Connection, &str, u32, &[oracledb_protocol::thin::types::BindValue], core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::execute_query_with_timeout(&mut oracledb::Connection, &str, u32, core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::execute_with<'e>(&mut oracledb::Connection, oracledb::Execute<'e>) -> oracledb::Result<oracledb::ExecuteOutcome>
+pub fn oracledb::BlockingConnection::fetch_cursor(&mut oracledb::Connection, &oracledb_protocol::thin::types::CursorValue, usize) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::fetch_rows(&mut oracledb::Connection, u32, u32, core::option::Option<&[core::option::Option<oracledb_protocol::thin::types::QueryValue>]>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::fetch_rows_with_columns(&mut oracledb::Connection, u32, u32, &[oracledb_protocol::thin::types::ColumnMetadata], core::option::Option<&[core::option::Option<oracledb_protocol::thin::types::QueryValue>]>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::free_temp_lobs(&mut oracledb::Connection, &[alloc::vec::Vec<u8>]) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::free_temp_lobs_with_timeout(&mut oracledb::Connection, &[alloc::vec::Vec<u8>], core::option::Option<u32>) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::notify_register(&mut oracledb::Connection, &[u8]) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::ping(&mut oracledb::Connection) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::ping_with_timeout(&mut oracledb::Connection, u32) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::query<'conn, 'p>(&'conn mut oracledb::Connection, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::BlockingRows<'conn>>
+pub fn oracledb::BlockingConnection::query_all<'p>(&mut oracledb::Connection, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<alloc::vec::Vec<oracledb::Row>>
+pub fn oracledb::BlockingConnection::query_named(&mut oracledb::Connection, &str, alloc::vec::Vec<(alloc::string::String, oracledb_protocol::thin::types::BindValue)>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::query_named_with_timeout(&mut oracledb::Connection, &str, alloc::vec::Vec<(alloc::string::String, oracledb_protocol::thin::types::BindValue)>, core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::query_one<'p>(&mut oracledb::Connection, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::Row>
+pub fn oracledb::BlockingConnection::query_opt<'p>(&mut oracledb::Connection, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<core::option::Option<oracledb::Row>>
+pub fn oracledb::BlockingConnection::query_with<'conn, 'q>(&'conn mut oracledb::Connection, oracledb::Query<'q>) -> oracledb::Result<oracledb::BlockingRows<'conn>>
+pub fn oracledb::BlockingConnection::read_dbms_output(&mut oracledb::Connection, usize, usize) -> oracledb::Result<oracledb::DbmsOutput>
+pub fn oracledb::BlockingConnection::read_lob(&mut oracledb::Connection, &[u8], u64, u64) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
+pub fn oracledb::BlockingConnection::read_lob_with_timeout(&mut oracledb::Connection, &[u8], u64, u64, core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
+pub fn oracledb::BlockingConnection::recv_notification(&mut oracledb::Connection, u32, u32, core::time::Duration) -> oracledb::Result<oracledb::NotificationOutcome>
+pub fn oracledb::BlockingConnection::register_query<'r>(&mut oracledb::Connection, oracledb::Registration<'r>) -> oracledb::Result<oracledb::RegistrationOutcome>
+pub fn oracledb::BlockingConnection::resume_sessionless_transaction(&mut oracledb::Connection, &[u8], u32, bool) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::rollback(&mut oracledb::Connection) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::run_pipeline(&mut oracledb::Connection, &[oracledb::PipelineRequest], bool) -> oracledb::Result<alloc::vec::Vec<alloc::vec::Vec<u8>>>
+pub fn oracledb::BlockingConnection::run_pipeline_decoded(&mut oracledb::Connection, &[oracledb::PipelineRequest], bool) -> oracledb::Result<alloc::vec::Vec<oracledb::Result<oracledb_protocol::thin::types::QueryResult>>>
+pub fn oracledb::BlockingConnection::scroll_cursor(&mut oracledb::Connection, &str, u32, u32, u32, u32) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::subscribe_register(&mut oracledb::Connection, u32, core::option::Option<&str>, u32, u32, u32, u8, u32, u8) -> oracledb::Result<oracledb_protocol::thin::subscr::SubscribeResult>
+pub fn oracledb::BlockingConnection::subscribe_unregister(&mut oracledb::Connection, u64, &[u8], u32, core::option::Option<&str>, u32, u32, u32, u8, u32, u8) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::supplement_json_column_metadata(&mut oracledb::Connection, &mut [oracledb_protocol::thin::types::ColumnMetadata], core::option::Option<u32>) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::suspend_sessionless_transaction(&mut oracledb::Connection) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::tpc_begin(&mut oracledb::Connection, u32, &[u8], &[u8], u32, u32) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::tpc_commit(&mut oracledb::Connection, core::option::Option<(u32, &[u8], &[u8])>, bool) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::tpc_end(&mut oracledb::Connection, core::option::Option<(u32, &[u8], &[u8])>, u32) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::tpc_prepare(&mut oracledb::Connection, core::option::Option<(u32, &[u8], &[u8])>) -> oracledb::Result<bool>
+pub fn oracledb::BlockingConnection::tpc_rollback(&mut oracledb::Connection, core::option::Option<(u32, &[u8], &[u8])>) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::trim_lob(&mut oracledb::Connection, &[u8], u64) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
+pub fn oracledb::BlockingConnection::trim_lob_with_timeout(&mut oracledb::Connection, &[u8], u64, core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
+pub fn oracledb::BlockingConnection::write_lob(&mut oracledb::Connection, &[u8], u64, &[u8]) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
+pub fn oracledb::BlockingConnection::write_lob_with_timeout(&mut oracledb::Connection, &[u8], u64, &[u8], core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
+pub struct oracledb::prelude::ConnectOptions
+impl oracledb::ConnectOptions
+pub fn oracledb::ConnectOptions::access_token(&self) -> core::option::Option<&oracledb::AccessToken>
+pub fn oracledb::ConnectOptions::app_context(&self) -> &[(alloc::string::String, alloc::string::String, alloc::string::String)]
+pub fn oracledb::ConnectOptions::connect_string(&self) -> &str
+pub fn oracledb::ConnectOptions::edition(&self) -> core::option::Option<&str>
+pub fn oracledb::ConnectOptions::identity(&self) -> &oracledb_protocol::ClientIdentity
+pub fn oracledb::ConnectOptions::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
+pub fn oracledb::ConnectOptions::password(&self) -> &str
+pub fn oracledb::ConnectOptions::protocol_limits(&self) -> oracledb_protocol::wire::ProtocolLimits
+pub fn oracledb::ConnectOptions::proxy_user(&self) -> core::option::Option<&str>
+pub fn oracledb::ConnectOptions::sdu(&self) -> u16
+pub fn oracledb::ConnectOptions::server_type_emon(&self) -> bool
+pub fn oracledb::ConnectOptions::ssl_server_cert_dn(&self) -> core::option::Option<&str>
+pub fn oracledb::ConnectOptions::ssl_server_dn_match(&self) -> bool
+pub fn oracledb::ConnectOptions::statement_cache_size(&self) -> usize
+pub fn oracledb::ConnectOptions::use_sni(&self) -> bool
+pub fn oracledb::ConnectOptions::user(&self) -> &str
+pub fn oracledb::ConnectOptions::wallet_location(&self) -> core::option::Option<&str>
+pub fn oracledb::ConnectOptions::wallet_password(&self) -> core::option::Option<&str>
+pub fn oracledb::ConnectOptions::with_access_token(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oracledb::ConnectOptions::with_app_context(self, alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String)>) -> Self
+pub fn oracledb::ConnectOptions::with_edition(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oracledb::ConnectOptions::with_protocol_limits(self, oracledb_protocol::wire::ProtocolLimits) -> Self
+pub fn oracledb::ConnectOptions::with_proxy_user(self, core::option::Option<alloc::string::String>) -> Self
+pub fn oracledb::ConnectOptions::with_sdu(self, u32) -> Self
+pub fn oracledb::ConnectOptions::with_server_type_emon(self, bool) -> Self
+pub fn oracledb::ConnectOptions::with_ssl_server_cert_dn(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oracledb::ConnectOptions::with_ssl_server_dn_match(self, bool) -> Self
+pub fn oracledb::ConnectOptions::with_statement_cache_size(self, usize) -> Self
+pub fn oracledb::ConnectOptions::with_use_sni(self, bool) -> Self
+pub fn oracledb::ConnectOptions::with_wallet_location(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oracledb::ConnectOptions::with_wallet_password(self, impl core::convert::Into<alloc::string::String>) -> Self
+impl core::clone::Clone for oracledb::ConnectOptions
+pub fn oracledb::ConnectOptions::clone(&self) -> oracledb::ConnectOptions
+impl core::fmt::Debug for oracledb::ConnectOptions
+pub fn oracledb::ConnectOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb::prelude::Connection
+impl oracledb::Connection
+pub async fn oracledb::Connection::aq_deq_many(&mut self, &asupersync::cx::cx::Cx, &oracledb_protocol::thin::aq::AqQueueDesc, &oracledb_protocol::thin::aq::AqDeqOptions, u32) -> oracledb::Result<alloc::vec::Vec<oracledb_protocol::thin::aq::AqDeqMessage>>
+pub async fn oracledb::Connection::aq_deq_one(&mut self, &asupersync::cx::cx::Cx, &oracledb_protocol::thin::aq::AqQueueDesc, &oracledb_protocol::thin::aq::AqDeqOptions) -> oracledb::Result<oracledb_protocol::thin::aq::AqDeqResult>
+pub async fn oracledb::Connection::aq_enq_many(&mut self, &asupersync::cx::cx::Cx, &oracledb_protocol::thin::aq::AqQueueDesc, &[oracledb_protocol::thin::aq::AqMsgProps], &oracledb_protocol::thin::aq::AqEnqOptions) -> oracledb::Result<alloc::vec::Vec<alloc::vec::Vec<u8>>>
+pub async fn oracledb::Connection::aq_enq_one(&mut self, &asupersync::cx::cx::Cx, &oracledb_protocol::thin::aq::AqQueueDesc, &oracledb_protocol::thin::aq::AqMsgProps, &oracledb_protocol::thin::aq::AqEnqOptions) -> oracledb::Result<core::option::Option<alloc::vec::Vec<u8>>>
+pub async fn oracledb::Connection::begin_sessionless_transaction(&mut self, &asupersync::cx::cx::Cx, &[u8], u32, bool) -> oracledb::Result<()>
+pub async fn oracledb::Connection::cancel(&mut self, &asupersync::cx::cx::Cx) -> oracledb::Result<()>
+pub fn oracledb::Connection::cancel_handle(&self) -> oracledb::Result<oracledb::CancelHandle>
+pub async fn oracledb::Connection::change_password(&mut self, &asupersync::cx::cx::Cx, &str, &str) -> oracledb::Result<()>
+pub async fn oracledb::Connection::close(self, &asupersync::cx::cx::Cx) -> oracledb::Result<()>
+pub fn oracledb::Connection::close_cursor(&mut self, u32)
+pub async fn oracledb::Connection::commit(&mut self, &asupersync::cx::cx::Cx) -> oracledb::Result<()>
+pub async fn oracledb::Connection::connect(&asupersync::cx::cx::Cx, oracledb::ConnectOptions) -> oracledb::Result<Self>
+pub async fn oracledb::Connection::create_temp_lob(&mut self, &asupersync::cx::cx::Cx, u8, u8) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
+pub async fn oracledb::Connection::define_and_fetch_rows_with_columns(&mut self, &asupersync::cx::cx::Cx, u32, u32, &[oracledb_protocol::thin::types::ColumnMetadata], core::option::Option<&[core::option::Option<oracledb_protocol::thin::types::QueryValue>]>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::describe_object_type(&mut self, &asupersync::cx::cx::Cx, &str, &str) -> oracledb::Result<oracledb::ObjectType>
+pub fn oracledb::Connection::descriptor(&self) -> &oracledb_protocol::net::EasyConnect
+pub async fn oracledb::Connection::direct_path_load(&mut self, &asupersync::cx::cx::Cx, &str, &str, &[alloc::string::String], &[alloc::vec::Vec<oracledb_protocol::dpl::DirectPathColumnValue>], u32) -> oracledb::Result<()>
+pub async fn oracledb::Connection::direct_path_load_prepared(&mut self, &asupersync::cx::cx::Cx, &oracledb_protocol::dpl::DirectPathPrepareResult, &[alloc::vec::Vec<oracledb_protocol::dpl::DirectPathColumnValue>], u32) -> oracledb::Result<()>
+pub async fn oracledb::Connection::direct_path_load_stream(&mut self, &asupersync::cx::cx::Cx, u16, &oracledb_protocol::dpl::DirectPathStream) -> oracledb::Result<()>
+pub async fn oracledb::Connection::direct_path_op(&mut self, &asupersync::cx::cx::Cx, u16, u32) -> oracledb::Result<()>
+pub async fn oracledb::Connection::direct_path_prepare(&mut self, &asupersync::cx::cx::Cx, &str, &str, &[alloc::string::String]) -> oracledb::Result<oracledb_protocol::dpl::DirectPathPrepareResult>
+pub async fn oracledb::Connection::enable_dbms_output(&mut self, &asupersync::cx::cx::Cx, core::option::Option<u32>) -> oracledb::Result<()>
+pub async fn oracledb::Connection::execute<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::ExecuteOutcome>
+pub async fn oracledb::Connection::execute_many<'b>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::BatchRows<'b>>) -> oracledb::Result<oracledb::BatchOutcome>
+pub async fn oracledb::Connection::execute_many_with<'b>(&mut self, &asupersync::cx::cx::Cx, oracledb::Batch<'b>) -> oracledb::Result<oracledb::BatchOutcome>
+pub async fn oracledb::Connection::execute_query(&mut self, &asupersync::cx::cx::Cx, &str, u32) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::execute_query_collect(&mut self, &asupersync::cx::cx::Cx, &str, u32) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::execute_query_for_registration(&mut self, &asupersync::cx::cx::Cx, &str, u64) -> oracledb::Result<core::option::Option<u64>>
+pub async fn oracledb::Connection::execute_query_with_bind_rows(&mut self, &asupersync::cx::cx::Cx, &str, u32, &[alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>]) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::execute_query_with_bind_rows_and_options(&mut self, &asupersync::cx::cx::Cx, &str, u32, &[alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>], oracledb_protocol::thin::types::ExecuteOptions) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::execute_query_with_bind_rows_and_timeout(&mut self, &asupersync::cx::cx::Cx, &str, u32, &[alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>], core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::execute_query_with_bind_rows_options_and_timeout(&mut self, &asupersync::cx::cx::Cx, &str, u32, &[alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>], oracledb_protocol::thin::types::ExecuteOptions, core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::execute_query_with_binds(&mut self, &asupersync::cx::cx::Cx, &str, u32, &[oracledb_protocol::thin::types::BindValue]) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::execute_query_with_binds_and_timeout(&mut self, &asupersync::cx::cx::Cx, &str, u32, &[oracledb_protocol::thin::types::BindValue], core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::execute_query_with_timeout(&mut self, &asupersync::cx::cx::Cx, &str, u32, core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::execute_with<'e>(&mut self, &asupersync::cx::cx::Cx, oracledb::Execute<'e>) -> oracledb::Result<oracledb::ExecuteOutcome>
+pub async fn oracledb::Connection::fetch_cursor(&mut self, &asupersync::cx::cx::Cx, &oracledb_protocol::thin::types::CursorValue, usize) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::fetch_rows(&mut self, &asupersync::cx::cx::Cx, u32, u32, core::option::Option<&[core::option::Option<oracledb_protocol::thin::types::QueryValue>]>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::fetch_rows_ref(&mut self, &asupersync::cx::cx::Cx, u32, u32, core::option::Option<&[core::option::Option<oracledb_protocol::thin::types::QueryValue>]>) -> oracledb::Result<oracledb_protocol::thin::fetch::BorrowedFetchResult>
+pub async fn oracledb::Connection::fetch_rows_ref_response(&mut self, &asupersync::cx::cx::Cx, u32, core::option::Option<&[core::option::Option<oracledb_protocol::thin::types::QueryValue>]>) -> oracledb::Result<oracledb_protocol::thin::fetch::BorrowedFetchResult>
+pub async fn oracledb::Connection::fetch_rows_request(&mut self, &asupersync::cx::cx::Cx, u32, u32) -> oracledb::Result<()>
+pub async fn oracledb::Connection::fetch_rows_with_columns(&mut self, &asupersync::cx::cx::Cx, u32, u32, &[oracledb_protocol::thin::types::ColumnMetadata], core::option::Option<&[core::option::Option<oracledb_protocol::thin::types::QueryValue>]>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::for_each_row_ref<F>(&mut self, &asupersync::cx::cx::Cx, &str, u32, F) -> oracledb::Result<()> where F: core::ops::function::FnMut(&[core::option::Option<oracledb_protocol::thin::types::QueryValueRef<'_>>]) -> oracledb::Result<()>
+pub async fn oracledb::Connection::free_temp_lobs(&mut self, &asupersync::cx::cx::Cx, &[alloc::vec::Vec<u8>]) -> oracledb::Result<()>
+pub async fn oracledb::Connection::free_temp_lobs_with_timeout(&mut self, &asupersync::cx::cx::Cx, &[alloc::vec::Vec<u8>], core::option::Option<u32>) -> oracledb::Result<()>
+pub fn oracledb::Connection::identity(&self) -> &oracledb_protocol::ClientIdentity
+pub fn oracledb::Connection::is_dead(&self) -> bool
+pub async fn oracledb::Connection::notify_register(&mut self, &asupersync::cx::cx::Cx, &[u8]) -> oracledb::Result<()>
+pub async fn oracledb::Connection::ping(&mut self, &asupersync::cx::cx::Cx) -> oracledb::Result<()>
+pub async fn oracledb::Connection::ping_with_timeout(&mut self, &asupersync::cx::cx::Cx, u32) -> oracledb::Result<()>
+pub fn oracledb::Connection::prepare_sessionless_suspend_on_success(&mut self) -> oracledb::Result<()>
+pub async fn oracledb::Connection::query<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::Rows<'_>>
+pub async fn oracledb::Connection::query_all<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<alloc::vec::Vec<oracledb::Row>>
+pub async fn oracledb::Connection::query_named(&mut self, &asupersync::cx::cx::Cx, &str, alloc::vec::Vec<(alloc::string::String, oracledb_protocol::thin::types::BindValue)>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::query_named_with_timeout(&mut self, &asupersync::cx::cx::Cx, &str, alloc::vec::Vec<(alloc::string::String, oracledb_protocol::thin::types::BindValue)>, core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub async fn oracledb::Connection::query_one<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::Row>
+pub async fn oracledb::Connection::query_opt<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<core::option::Option<oracledb::Row>>
+pub async fn oracledb::Connection::query_with<'conn, 'q>(&'conn mut self, &asupersync::cx::cx::Cx, oracledb::Query<'q>) -> oracledb::Result<oracledb::Rows<'conn>>
+pub async fn oracledb::Connection::read_dbms_output(&mut self, &asupersync::cx::cx::Cx, usize, usize) -> oracledb::Result<oracledb::DbmsOutput>
+pub async fn oracledb::Connection::read_lob(&mut self, &asupersync::cx::cx::Cx, &[u8], u64, u64) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
+pub async fn oracledb::Connection::read_lob_with_timeout(&mut self, &asupersync::cx::cx::Cx, &[u8], u64, u64, core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
+pub async fn oracledb::Connection::recv_notification(&mut self, &asupersync::cx::cx::Cx, u32, u32, core::time::Duration) -> oracledb::Result<oracledb::NotificationOutcome>
+pub async fn oracledb::Connection::register_query<'r>(&mut self, &asupersync::cx::cx::Cx, oracledb::Registration<'r>) -> oracledb::Result<oracledb::RegistrationOutcome>
+pub fn oracledb::Connection::release_cursor(&mut self, u32)
+pub async fn oracledb::Connection::resume_sessionless_transaction(&mut self, &asupersync::cx::cx::Cx, &[u8], u32, bool) -> oracledb::Result<()>
+pub async fn oracledb::Connection::rollback(&mut self, &asupersync::cx::cx::Cx) -> oracledb::Result<()>
+pub async fn oracledb::Connection::run_pipeline(&mut self, &asupersync::cx::cx::Cx, &[oracledb::PipelineRequest], bool) -> oracledb::Result<alloc::vec::Vec<alloc::vec::Vec<u8>>>
+pub async fn oracledb::Connection::run_pipeline_decoded(&mut self, &asupersync::cx::cx::Cx, &[oracledb::PipelineRequest], bool) -> oracledb::Result<alloc::vec::Vec<oracledb::Result<oracledb_protocol::thin::types::QueryResult>>>
+pub async fn oracledb::Connection::scroll_cursor(&mut self, &asupersync::cx::cx::Cx, &str, u32, u32, u32, u32) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::Connection::sdu(&self) -> usize
+pub fn oracledb::Connection::serial_num(&self) -> u16
+pub fn oracledb::Connection::server_version(&self) -> core::option::Option<&str>
+pub fn oracledb::Connection::server_version_tuple(&self) -> core::option::Option<(u8, u8, u8, u8, u8)>
+pub fn oracledb::Connection::session_id(&self) -> u32
+pub async fn oracledb::Connection::subscribe_register(&mut self, &asupersync::cx::cx::Cx, u32, core::option::Option<&str>, u32, u32, u32, u8, u32, u8) -> oracledb::Result<oracledb_protocol::thin::subscr::SubscribeResult>
+pub async fn oracledb::Connection::subscribe_unregister(&mut self, &asupersync::cx::cx::Cx, u64, &[u8], u32, core::option::Option<&str>, u32, u32, u32, u8, u32, u8) -> oracledb::Result<()>
+pub async fn oracledb::Connection::supplement_json_column_metadata(&mut self, &asupersync::cx::cx::Cx, &mut [oracledb_protocol::thin::types::ColumnMetadata], core::option::Option<u32>) -> oracledb::Result<()>
+pub fn oracledb::Connection::supports_oob(&self) -> bool
+pub fn oracledb::Connection::supports_pipelining(&self) -> bool
+pub async fn oracledb::Connection::suspend_sessionless_transaction(&mut self, &asupersync::cx::cx::Cx) -> oracledb::Result<()>
+pub async fn oracledb::Connection::tpc_begin(&mut self, &asupersync::cx::cx::Cx, u32, &[u8], &[u8], u32, u32) -> oracledb::Result<()>
+pub async fn oracledb::Connection::tpc_commit(&mut self, &asupersync::cx::cx::Cx, core::option::Option<(u32, &[u8], &[u8])>, bool) -> oracledb::Result<()>
+pub async fn oracledb::Connection::tpc_end(&mut self, &asupersync::cx::cx::Cx, core::option::Option<(u32, &[u8], &[u8])>, u32) -> oracledb::Result<()>
+pub async fn oracledb::Connection::tpc_prepare(&mut self, &asupersync::cx::cx::Cx, core::option::Option<(u32, &[u8], &[u8])>) -> oracledb::Result<bool>
+pub async fn oracledb::Connection::tpc_rollback(&mut self, &asupersync::cx::cx::Cx, core::option::Option<(u32, &[u8], &[u8])>) -> oracledb::Result<()>
+pub fn oracledb::Connection::transaction_in_progress(&self) -> bool
+pub async fn oracledb::Connection::trim_lob(&mut self, &asupersync::cx::cx::Cx, &[u8], u64) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
+pub async fn oracledb::Connection::trim_lob_with_timeout(&mut self, &asupersync::cx::cx::Cx, &[u8], u64, core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
+pub async fn oracledb::Connection::write_lob(&mut self, &asupersync::cx::cx::Cx, &[u8], u64, &[u8]) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
+pub async fn oracledb::Connection::write_lob_with_timeout(&mut self, &asupersync::cx::cx::Cx, &[u8], u64, &[u8], core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
+impl core::fmt::Debug for oracledb::Connection
+pub fn oracledb::Connection::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub trait oracledb::prelude::FromRow: core::marker::Sized
+pub fn oracledb::prelude::FromRow::from_row(&oracledb::TypedRow<'_>) -> core::result::Result<Self, oracledb::ConversionError>
+pub trait oracledb::prelude::QueryResultExt
+pub fn oracledb::prelude::QueryResultExt::get<T: oracledb::FromSql>(&self, usize, usize) -> oracledb::Result<T>
+pub fn oracledb::prelude::QueryResultExt::get_by_name<T: oracledb::FromSql>(&self, usize, &str) -> oracledb::Result<T>
+pub fn oracledb::prelude::QueryResultExt::rows_as<T: oracledb::FromRow>(&self) -> oracledb::Result<alloc::vec::Vec<T>>
+pub fn oracledb::prelude::QueryResultExt::typed_row(&self, usize) -> oracledb::TypedRow<'_>
+impl oracledb::QueryResultExt for oracledb_protocol::thin::types::QueryResult
+pub fn oracledb_protocol::thin::types::QueryResult::get<T: oracledb::FromSql>(&self, usize, usize) -> oracledb::Result<T>
+pub fn oracledb_protocol::thin::types::QueryResult::get_by_name<T: oracledb::FromSql>(&self, usize, &str) -> oracledb::Result<T>
+pub fn oracledb_protocol::thin::types::QueryResult::rows_as<T: oracledb::FromRow>(&self) -> oracledb::Result<alloc::vec::Vec<T>>
+pub fn oracledb_protocol::thin::types::QueryResult::typed_row(&self, usize) -> oracledb::TypedRow<'_>
 pub mod oracledb::soda
 pub mod oracledb::soda::qbe
 pub fn oracledb::soda::qbe::escape_json_path_string(&str) -> alloc::string::String
@@ -206,7 +420,7 @@ pub fn oracledb::soda::KeyAssignment::eq(&self, &oracledb::soda::KeyAssignment) 
 impl core::fmt::Debug for oracledb::soda::KeyAssignment
 pub fn oracledb::soda::KeyAssignment::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb::soda::KeyAssignment
-pub enum oracledb::soda::SodaError
+#[non_exhaustive] pub enum oracledb::soda::SodaError
 pub oracledb::soda::SodaError::Driver(oracledb::Error)
 pub oracledb::soda::SodaError::InvalidMetadata(alloc::string::String)
 pub oracledb::soda::SodaError::NotSupported(alloc::string::String)
@@ -432,7 +646,7 @@ impl core::hash::Hash for oracledb::ConnectionDisposition
 pub fn oracledb::ConnectionDisposition::hash<__H: core::hash::Hasher>(&self, &mut __H)
 impl core::marker::Copy for oracledb::ConnectionDisposition
 impl core::marker::StructuralPartialEq for oracledb::ConnectionDisposition
-pub enum oracledb::ConversionError
+#[non_exhaustive] pub enum oracledb::ConversionError
 pub oracledb::ConversionError::OutOfRange
 pub oracledb::ConversionError::OutOfRange::detail: alloc::string::String
 pub oracledb::ConversionError::OutOfRange::expected: &'static str
@@ -453,7 +667,7 @@ pub fn oracledb::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> c
 impl core::fmt::Display for oracledb::ConversionError
 pub fn oracledb::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb::ConversionError
-pub enum oracledb::Error
+#[non_exhaustive] pub enum oracledb::Error
 pub oracledb::Error::AccessTokenRequiresTcps
 pub oracledb::Error::Bind(oracledb::BindError)
 pub oracledb::Error::CallTimeout(u32)
@@ -523,18 +737,18 @@ impl core::marker::StructuralPartialEq for oracledb::ErrorKind
 pub enum oracledb::ExecutemanyManagerError
 pub oracledb::ExecutemanyManagerError::RowCountOverflow
 pub oracledb::ExecutemanyManagerError::ZeroBatchSize
-impl core::clone::Clone for oracledb::cursor_logic::ExecutemanyManagerError
-pub fn oracledb::cursor_logic::ExecutemanyManagerError::clone(&self) -> oracledb::cursor_logic::ExecutemanyManagerError
-impl core::cmp::Eq for oracledb::cursor_logic::ExecutemanyManagerError
-impl core::cmp::PartialEq for oracledb::cursor_logic::ExecutemanyManagerError
-pub fn oracledb::cursor_logic::ExecutemanyManagerError::eq(&self, &oracledb::cursor_logic::ExecutemanyManagerError) -> bool
-impl core::error::Error for oracledb::cursor_logic::ExecutemanyManagerError
-impl core::fmt::Debug for oracledb::cursor_logic::ExecutemanyManagerError
-pub fn oracledb::cursor_logic::ExecutemanyManagerError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for oracledb::cursor_logic::ExecutemanyManagerError
-pub fn oracledb::cursor_logic::ExecutemanyManagerError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for oracledb::cursor_logic::ExecutemanyManagerError
-pub enum oracledb::NotificationOutcome
+impl core::clone::Clone for oracledb::ExecutemanyManagerError
+pub fn oracledb::ExecutemanyManagerError::clone(&self) -> oracledb::ExecutemanyManagerError
+impl core::cmp::Eq for oracledb::ExecutemanyManagerError
+impl core::cmp::PartialEq for oracledb::ExecutemanyManagerError
+pub fn oracledb::ExecutemanyManagerError::eq(&self, &oracledb::ExecutemanyManagerError) -> bool
+impl core::error::Error for oracledb::ExecutemanyManagerError
+impl core::fmt::Debug for oracledb::ExecutemanyManagerError
+pub fn oracledb::ExecutemanyManagerError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oracledb::ExecutemanyManagerError
+pub fn oracledb::ExecutemanyManagerError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb::ExecutemanyManagerError
+#[non_exhaustive] pub enum oracledb::NotificationOutcome
 pub oracledb::NotificationOutcome::Closed
 pub oracledb::NotificationOutcome::Record(oracledb_protocol::thin::subscr::NotificationRecord)
 pub oracledb::NotificationOutcome::TimedOut
@@ -616,7 +830,7 @@ impl core::fmt::Debug for oracledb::Scroll
 pub fn oracledb::Scroll::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for oracledb::Scroll
 impl core::marker::StructuralPartialEq for oracledb::Scroll
-pub enum oracledb::SessionlessError
+#[non_exhaustive] pub enum oracledb::SessionlessError
 pub oracledb::SessionlessError::AlreadyActive
 pub oracledb::SessionlessError::DifferingMethods
 pub oracledb::SessionlessError::Inactive
@@ -922,10 +1136,13 @@ pub async fn oracledb::Connection::write_lob_with_timeout(&mut self, &asupersync
 impl core::fmt::Debug for oracledb::Connection
 pub fn oracledb::Connection::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct oracledb::DbmsOutput
-pub oracledb::DbmsOutput::char_count: usize
-pub oracledb::DbmsOutput::line_count: usize
-pub oracledb::DbmsOutput::lines: alloc::vec::Vec<alloc::string::String>
-pub oracledb::DbmsOutput::truncated: bool
+impl oracledb::DbmsOutput
+pub fn oracledb::DbmsOutput::char_count(&self) -> usize
+pub fn oracledb::DbmsOutput::into_lines(self) -> alloc::vec::Vec<alloc::string::String>
+pub fn oracledb::DbmsOutput::line_count(&self) -> usize
+pub fn oracledb::DbmsOutput::lines(&self) -> &[alloc::string::String]
+pub fn oracledb::DbmsOutput::new(alloc::vec::Vec<alloc::string::String>, bool) -> Self
+pub fn oracledb::DbmsOutput::truncated(&self) -> bool
 impl core::clone::Clone for oracledb::DbmsOutput
 pub fn oracledb::DbmsOutput::clone(&self) -> oracledb::DbmsOutput
 impl core::cmp::Eq for oracledb::DbmsOutput
@@ -937,10 +1154,16 @@ impl core::fmt::Debug for oracledb::DbmsOutput
 pub fn oracledb::DbmsOutput::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb::DbmsOutput
 pub struct oracledb::DecodedObject
-pub oracledb::DecodedObject::attributes: alloc::vec::Vec<(alloc::string::String, core::option::Option<oracledb_protocol::thin::types::QueryValue>)>
-pub oracledb::DecodedObject::elements: core::option::Option<alloc::vec::Vec<core::option::Option<oracledb_protocol::thin::types::QueryValue>>>
-pub oracledb::DecodedObject::type_name: alloc::string::String
-pub oracledb::DecodedObject::type_schema: alloc::string::String
+impl oracledb::DecodedObject
+pub fn oracledb::DecodedObject::attributes(&self) -> &[(alloc::string::String, core::option::Option<oracledb_protocol::thin::types::QueryValue>)]
+pub fn oracledb::DecodedObject::collection(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<core::option::Option<oracledb_protocol::thin::types::QueryValue>>) -> Self
+pub fn oracledb::DecodedObject::elements(&self) -> core::option::Option<&[core::option::Option<oracledb_protocol::thin::types::QueryValue>]>
+pub fn oracledb::DecodedObject::into_attributes(self) -> alloc::vec::Vec<(alloc::string::String, core::option::Option<oracledb_protocol::thin::types::QueryValue>)>
+pub fn oracledb::DecodedObject::into_elements(self) -> core::option::Option<alloc::vec::Vec<core::option::Option<oracledb_protocol::thin::types::QueryValue>>>
+pub fn oracledb::DecodedObject::is_collection(&self) -> bool
+pub fn oracledb::DecodedObject::object(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<(alloc::string::String, core::option::Option<oracledb_protocol::thin::types::QueryValue>)>) -> Self
+pub fn oracledb::DecodedObject::type_name(&self) -> &str
+pub fn oracledb::DecodedObject::type_schema(&self) -> &str
 impl core::clone::Clone for oracledb::DecodedObject
 pub fn oracledb::DecodedObject::clone(&self) -> oracledb::DecodedObject
 impl core::cmp::PartialEq for oracledb::DecodedObject
@@ -983,20 +1206,20 @@ impl core::fmt::Debug for oracledb::ExecuteOutcome
 pub fn oracledb::ExecuteOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb::ExecuteOutcome
 pub struct oracledb::ExecutemanyManager
-impl oracledb::cursor_logic::ExecutemanyManager
-pub fn oracledb::cursor_logic::ExecutemanyManager::message_offset(&self) -> u32
-pub fn oracledb::cursor_logic::ExecutemanyManager::new(usize, u32) -> core::result::Result<Self, oracledb::cursor_logic::ExecutemanyManagerError>
-pub fn oracledb::cursor_logic::ExecutemanyManager::next_batch(&mut self)
-pub fn oracledb::cursor_logic::ExecutemanyManager::num_rows(&self) -> u32
-pub fn oracledb::cursor_logic::ExecutemanyManager::with_chunks(usize, u32, alloc::vec::Vec<usize>) -> core::result::Result<Self, oracledb::cursor_logic::ExecutemanyManagerError>
-impl core::clone::Clone for oracledb::cursor_logic::ExecutemanyManager
-pub fn oracledb::cursor_logic::ExecutemanyManager::clone(&self) -> oracledb::cursor_logic::ExecutemanyManager
-impl core::cmp::Eq for oracledb::cursor_logic::ExecutemanyManager
-impl core::cmp::PartialEq for oracledb::cursor_logic::ExecutemanyManager
-pub fn oracledb::cursor_logic::ExecutemanyManager::eq(&self, &oracledb::cursor_logic::ExecutemanyManager) -> bool
-impl core::fmt::Debug for oracledb::cursor_logic::ExecutemanyManager
-pub fn oracledb::cursor_logic::ExecutemanyManager::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for oracledb::cursor_logic::ExecutemanyManager
+impl oracledb::ExecutemanyManager
+pub fn oracledb::ExecutemanyManager::message_offset(&self) -> u32
+pub fn oracledb::ExecutemanyManager::new(usize, u32) -> core::result::Result<Self, oracledb::ExecutemanyManagerError>
+pub fn oracledb::ExecutemanyManager::next_batch(&mut self)
+pub fn oracledb::ExecutemanyManager::num_rows(&self) -> u32
+pub fn oracledb::ExecutemanyManager::with_chunks(usize, u32, alloc::vec::Vec<usize>) -> core::result::Result<Self, oracledb::ExecutemanyManagerError>
+impl core::clone::Clone for oracledb::ExecutemanyManager
+pub fn oracledb::ExecutemanyManager::clone(&self) -> oracledb::ExecutemanyManager
+impl core::cmp::Eq for oracledb::ExecutemanyManager
+impl core::cmp::PartialEq for oracledb::ExecutemanyManager
+pub fn oracledb::ExecutemanyManager::eq(&self, &oracledb::ExecutemanyManager) -> bool
+impl core::fmt::Debug for oracledb::ExecutemanyManager
+pub fn oracledb::ExecutemanyManager::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb::ExecutemanyManager
 pub struct oracledb::ObjectAttribute
 pub oracledb::ObjectAttribute::name: alloc::string::String
 pub oracledb::ObjectAttribute::type_name: alloc::string::String

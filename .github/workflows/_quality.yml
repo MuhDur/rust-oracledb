@@ -171,6 +171,10 @@ jobs:
         if: ${{ inputs.profile != 'canary' }}
         run: bash scripts/check_api_ledger.sh
 
+      - name: Single public path per type
+        if: ${{ inputs.profile != 'canary' }}
+        run: bash scripts/check_single_path.sh
+
       - name: Async/blocking coverage
         if: ${{ inputs.profile != 'canary' }}
         run: bash scripts/check_async_blocking_coverage.sh

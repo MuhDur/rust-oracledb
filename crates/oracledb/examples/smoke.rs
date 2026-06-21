@@ -26,9 +26,7 @@
 
 use std::process::ExitCode;
 
-use oracledb::protocol::thin::QueryValue;
-use oracledb::protocol::ClientIdentity;
-use oracledb::{BlockingConnection, ConnectOptions};
+use oracledb::prelude::*;
 
 /// Resolve a connection parameter from (in order) a positional CLI argument,
 /// an environment variable, then a baked-in default.
