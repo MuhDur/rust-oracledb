@@ -45,18 +45,12 @@ SURFACES = [
         async_owner="oracledb::Connection",
         blocking_owner="oracledb::BlockingConnection",
         exceptions={
-            "cancel": "W1-T8.2 fills BlockingConnection::cancel; CancelHandle::cancel_blocking is available meanwhile.",
             "direct_path_load_stream": "Low-level direct-path streaming primitive stays async-only; blocking direct_path_load/load_prepared cover owned batches.",
             "direct_path_op": "Low-level direct-path operation primitive stays async-only; blocking direct_path_load/load_prepared cover owned batches.",
-            "execute_query_with_bind_rows_and_options": "W1-T8.2 adds the no-timeout blocking twin; options_and_timeout is present today.",
             "fetch_rows_ref": "Zero-copy borrowed fetch is async-only because borrowed buffers cannot cross the block_on facade.",
             "fetch_rows_ref_response": "Zero-copy borrowed fetch response is async-only because borrowed buffers cannot cross the block_on facade.",
             "fetch_rows_request": "Half-round-trip borrowed-fetch primitive is async-only; blocking callers use fetch_rows/fetch_rows_with_columns.",
             "for_each_row_ref": "Borrowed-row callback is async-only because QueryValueRef lifetimes cannot cross the block_on facade.",
-            "free_temp_lobs": "W1-T8.2 adds the no-timeout blocking twin; free_temp_lobs_with_timeout is present today.",
-            "notify_register": "W1-T8.2 adds the blocking CQN notification registration twin.",
-            "recv_notification": "W1-T8.2 adds the blocking CQN notification receive twin.",
-            "trim_lob": "W1-T8.2 adds the no-timeout blocking twin; trim_lob_with_timeout is present today.",
         },
     ),
     Surface(

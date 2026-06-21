@@ -214,7 +214,7 @@ impl ThinCursorImpl {
         let connection = guard
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-        BlockingConnection::drain_cancel_response(connection).map_err(runtime_error)
+        BlockingConnection::__pyshim_drain_cancel_response(connection).map_err(runtime_error)
     }
 
     /// Resolves a scroll request to either an in-buffer reposition (already

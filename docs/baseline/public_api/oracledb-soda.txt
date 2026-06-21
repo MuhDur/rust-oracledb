@@ -644,6 +644,7 @@ pub fn oracledb::BlockingConnection::aq_deq_one(&mut oracledb::Connection, &orac
 pub fn oracledb::BlockingConnection::aq_enq_many(&mut oracledb::Connection, &oracledb_protocol::thin::aq::AqQueueDesc, &[oracledb_protocol::thin::aq::AqMsgProps], &oracledb_protocol::thin::aq::AqEnqOptions) -> oracledb::Result<alloc::vec::Vec<alloc::vec::Vec<u8>>>
 pub fn oracledb::BlockingConnection::aq_enq_one(&mut oracledb::Connection, &oracledb_protocol::thin::aq::AqQueueDesc, &oracledb_protocol::thin::aq::AqMsgProps, &oracledb_protocol::thin::aq::AqEnqOptions) -> oracledb::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn oracledb::BlockingConnection::begin_sessionless_transaction(&mut oracledb::Connection, &[u8], u32, bool) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::cancel(&mut oracledb::Connection) -> oracledb::Result<()>
 pub fn oracledb::BlockingConnection::change_password(&mut oracledb::Connection, &str, &str) -> oracledb::Result<()>
 pub fn oracledb::BlockingConnection::close(oracledb::Connection) -> oracledb::Result<()>
 pub fn oracledb::BlockingConnection::commit(&mut oracledb::Connection) -> oracledb::Result<()>
@@ -654,7 +655,6 @@ pub fn oracledb::BlockingConnection::describe_object_type(&mut oracledb::Connect
 pub fn oracledb::BlockingConnection::direct_path_load(&mut oracledb::Connection, &str, &str, &[alloc::string::String], &[alloc::vec::Vec<oracledb_protocol::dpl::DirectPathColumnValue>], u32) -> oracledb::Result<()>
 pub fn oracledb::BlockingConnection::direct_path_load_prepared(&mut oracledb::Connection, &oracledb_protocol::dpl::DirectPathPrepareResult, &[alloc::vec::Vec<oracledb_protocol::dpl::DirectPathColumnValue>], u32) -> oracledb::Result<()>
 pub fn oracledb::BlockingConnection::direct_path_prepare(&mut oracledb::Connection, &str, &str, &[alloc::string::String]) -> oracledb::Result<oracledb_protocol::dpl::DirectPathPrepareResult>
-pub fn oracledb::BlockingConnection::drain_cancel_response(&mut oracledb::Connection) -> oracledb::Result<()>
 pub fn oracledb::BlockingConnection::enable_dbms_output(&mut oracledb::Connection, core::option::Option<u32>) -> oracledb::Result<()>
 pub fn oracledb::BlockingConnection::execute<'p>(&mut oracledb::Connection, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::ExecuteOutcome>
 pub fn oracledb::BlockingConnection::execute_many<'b>(&mut oracledb::Connection, &str, impl core::convert::Into<oracledb::BatchRows<'b>>) -> oracledb::Result<oracledb::BatchOutcome>
@@ -663,6 +663,7 @@ pub fn oracledb::BlockingConnection::execute_query(&mut oracledb::Connection, &s
 pub fn oracledb::BlockingConnection::execute_query_collect(&mut oracledb::Connection, &str, u32) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
 pub fn oracledb::BlockingConnection::execute_query_for_registration(&mut oracledb::Connection, &str, u64) -> oracledb::Result<core::option::Option<u64>>
 pub fn oracledb::BlockingConnection::execute_query_with_bind_rows(&mut oracledb::Connection, &str, u32, &[alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>]) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::execute_query_with_bind_rows_and_options(&mut oracledb::Connection, &str, u32, &[alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>], oracledb_protocol::thin::types::ExecuteOptions) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
 pub fn oracledb::BlockingConnection::execute_query_with_bind_rows_and_timeout(&mut oracledb::Connection, &str, u32, &[alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>], core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
 pub fn oracledb::BlockingConnection::execute_query_with_bind_rows_options_and_timeout(&mut oracledb::Connection, &str, u32, &[alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>], oracledb_protocol::thin::types::ExecuteOptions, core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
 pub fn oracledb::BlockingConnection::execute_query_with_binds(&mut oracledb::Connection, &str, u32, &[oracledb_protocol::thin::types::BindValue]) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
@@ -672,7 +673,9 @@ pub fn oracledb::BlockingConnection::execute_with<'e>(&mut oracledb::Connection,
 pub fn oracledb::BlockingConnection::fetch_cursor(&mut oracledb::Connection, &oracledb_protocol::thin::types::CursorValue, usize) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
 pub fn oracledb::BlockingConnection::fetch_rows(&mut oracledb::Connection, u32, u32, core::option::Option<&[core::option::Option<oracledb_protocol::thin::types::QueryValue>]>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
 pub fn oracledb::BlockingConnection::fetch_rows_with_columns(&mut oracledb::Connection, u32, u32, &[oracledb_protocol::thin::types::ColumnMetadata], core::option::Option<&[core::option::Option<oracledb_protocol::thin::types::QueryValue>]>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
+pub fn oracledb::BlockingConnection::free_temp_lobs(&mut oracledb::Connection, &[alloc::vec::Vec<u8>]) -> oracledb::Result<()>
 pub fn oracledb::BlockingConnection::free_temp_lobs_with_timeout(&mut oracledb::Connection, &[alloc::vec::Vec<u8>], core::option::Option<u32>) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::notify_register(&mut oracledb::Connection, &[u8]) -> oracledb::Result<()>
 pub fn oracledb::BlockingConnection::ping(&mut oracledb::Connection) -> oracledb::Result<()>
 pub fn oracledb::BlockingConnection::ping_with_timeout(&mut oracledb::Connection, u32) -> oracledb::Result<()>
 pub fn oracledb::BlockingConnection::query<'conn, 'p>(&'conn mut oracledb::Connection, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::BlockingRows<'conn>>
@@ -685,6 +688,7 @@ pub fn oracledb::BlockingConnection::query_with<'conn, 'q>(&'conn mut oracledb::
 pub fn oracledb::BlockingConnection::read_dbms_output(&mut oracledb::Connection, usize, usize) -> oracledb::Result<oracledb::DbmsOutput>
 pub fn oracledb::BlockingConnection::read_lob(&mut oracledb::Connection, &[u8], u64, u64) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
 pub fn oracledb::BlockingConnection::read_lob_with_timeout(&mut oracledb::Connection, &[u8], u64, u64, core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
+pub fn oracledb::BlockingConnection::recv_notification(&mut oracledb::Connection, u32, u32, core::time::Duration) -> oracledb::Result<oracledb::NotificationOutcome>
 pub fn oracledb::BlockingConnection::register_query<'r>(&mut oracledb::Connection, oracledb::Registration<'r>) -> oracledb::Result<oracledb::RegistrationOutcome>
 pub fn oracledb::BlockingConnection::resume_sessionless_transaction(&mut oracledb::Connection, &[u8], u32, bool) -> oracledb::Result<()>
 pub fn oracledb::BlockingConnection::rollback(&mut oracledb::Connection) -> oracledb::Result<()>
@@ -700,6 +704,7 @@ pub fn oracledb::BlockingConnection::tpc_commit(&mut oracledb::Connection, core:
 pub fn oracledb::BlockingConnection::tpc_end(&mut oracledb::Connection, core::option::Option<(u32, &[u8], &[u8])>, u32) -> oracledb::Result<()>
 pub fn oracledb::BlockingConnection::tpc_prepare(&mut oracledb::Connection, core::option::Option<(u32, &[u8], &[u8])>) -> oracledb::Result<bool>
 pub fn oracledb::BlockingConnection::tpc_rollback(&mut oracledb::Connection, core::option::Option<(u32, &[u8], &[u8])>) -> oracledb::Result<()>
+pub fn oracledb::BlockingConnection::trim_lob(&mut oracledb::Connection, &[u8], u64) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
 pub fn oracledb::BlockingConnection::trim_lob_with_timeout(&mut oracledb::Connection, &[u8], u64, core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
 pub fn oracledb::BlockingConnection::write_lob(&mut oracledb::Connection, &[u8], u64, &[u8]) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
 pub fn oracledb::BlockingConnection::write_lob_with_timeout(&mut oracledb::Connection, &[u8], u64, &[u8], core::option::Option<u32>) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>

@@ -6492,8 +6492,8 @@ impl Connection {
     /// dead and [`Error::ConnectionClosed`] is returned instead.
     ///
     /// Unlike [`Self::cancel_handle`] (which only fires a bare BREAK from another
-    /// thread, leaving the drain to a later [`Self::drain_cancel_response`]),
-    /// this is the single-call, self-contained cancel: break **and** drain in one
+    /// thread, leaving the owner-side drain to private recovery machinery), this
+    /// is the single-call, self-contained cancel: break **and** drain in one
     /// place.
     pub async fn cancel(&mut self, _cx: &Cx) -> Result<()> {
         self.core.recovery.begin_drain_after_break()?;
@@ -7204,6 +7204,11 @@ impl BlockingConnection {
         })
     }
 
+    /// Blocking wrapper for [`Connection::cancel`].
+    pub fn cancel(connection: &mut Connection) -> Result<()> {
+        block_on_io(|cx| async move { connection.cancel(&cx).await })
+    }
+
     pub fn commit(connection: &mut Connection) -> Result<()> {
         let runtime = build_io_runtime()?;
         runtime.block_on(async {
@@ -7281,6 +7286,26 @@ impl BlockingConnection {
                     grouping_value,
                     grouping_type,
                 )
+                .await
+        })
+    }
+
+    /// Send the blocking CQN NOTIFY registration message. See
+    /// [`Connection::notify_register`].
+    pub fn notify_register(connection: &mut Connection, client_id: &[u8]) -> Result<()> {
+        block_on_io(|cx| async move { connection.notify_register(&cx, client_id).await })
+    }
+
+    /// Blocking wrapper for [`Connection::recv_notification`].
+    pub fn recv_notification(
+        connection: &mut Connection,
+        namespace: u32,
+        public_qos: u32,
+        read_timeout: Duration,
+    ) -> Result<NotificationOutcome> {
+        block_on_io(|cx| async move {
+            connection
+                .recv_notification(&cx, namespace, public_qos, read_timeout)
                 .await
         })
     }
@@ -7753,6 +7778,32 @@ impl BlockingConnection {
     }
 
     #[deprecated(
+        note = "use Batch::raw_options with execute_many_with, Execute::raw_options with execute_with, or Query builders"
+    )]
+    pub fn execute_query_with_bind_rows_and_options(
+        connection: &mut Connection,
+        sql: &str,
+        prefetch_rows: u32,
+        bind_rows: &[Vec<BindValue>],
+        exec_options: ExecuteOptions,
+    ) -> Result<QueryResult> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection
+                .execute_query_with_bind_rows_and_options_core(
+                    &cx,
+                    sql,
+                    prefetch_rows,
+                    bind_rows,
+                    exec_options,
+                )
+                .await
+        })
+    }
+
+    #[deprecated(
         note = "use Batch::timeout with Connection::execute_many_with or Query::timeout with Connection::query_with"
     )]
     pub fn execute_query_with_bind_rows_and_timeout(
@@ -7997,6 +8048,19 @@ impl BlockingConnection {
         })
     }
 
+    pub fn trim_lob(
+        connection: &mut Connection,
+        locator: &[u8],
+        new_size: u64,
+    ) -> Result<LobReadResult> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.trim_lob(&cx, locator, new_size).await
+        })
+    }
+
     pub fn write_lob_with_timeout(
         connection: &mut Connection,
         locator: &[u8],
@@ -8027,6 +8091,15 @@ impl BlockingConnection {
             connection
                 .trim_lob_call_timeout(&cx, locator, new_size, timeout_ms)
                 .await
+        })
+    }
+
+    pub fn free_temp_lobs(connection: &mut Connection, locators: &[Vec<u8>]) -> Result<()> {
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            connection.free_temp_lobs(&cx, locators).await
         })
     }
 
@@ -8125,7 +8198,8 @@ impl BlockingConnection {
         })
     }
 
-    pub fn drain_cancel_response(connection: &mut Connection) -> Result<()> {
+    #[doc(hidden)]
+    pub fn __pyshim_drain_cancel_response(connection: &mut Connection) -> Result<()> {
         let runtime = build_io_runtime()?;
         runtime.block_on(async { connection.drain_cancel_response().await })
     }

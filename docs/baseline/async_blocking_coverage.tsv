@@ -4,7 +4,7 @@ connection	oracledb::Connection	aq_deq_one	oracledb::BlockingConnection	aq_deq_o
 connection	oracledb::Connection	aq_enq_many	oracledb::BlockingConnection	aq_enq_many	covered	blocking twin present
 connection	oracledb::Connection	aq_enq_one	oracledb::BlockingConnection	aq_enq_one	covered	blocking twin present
 connection	oracledb::Connection	begin_sessionless_transaction	oracledb::BlockingConnection	begin_sessionless_transaction	covered	blocking twin present
-connection	oracledb::Connection	cancel	oracledb::BlockingConnection	cancel	exception	W1-T8.2 fills BlockingConnection::cancel; CancelHandle::cancel_blocking is available meanwhile.
+connection	oracledb::Connection	cancel	oracledb::BlockingConnection	cancel	covered	blocking twin present
 connection	oracledb::Connection	change_password	oracledb::BlockingConnection	change_password	covered	blocking twin present
 connection	oracledb::Connection	close	oracledb::BlockingConnection	close	covered	blocking twin present
 connection	oracledb::Connection	commit	oracledb::BlockingConnection	commit	covered	blocking twin present
@@ -25,7 +25,7 @@ connection	oracledb::Connection	execute_query	oracledb::BlockingConnection	execu
 connection	oracledb::Connection	execute_query_collect	oracledb::BlockingConnection	execute_query_collect	covered	blocking twin present
 connection	oracledb::Connection	execute_query_for_registration	oracledb::BlockingConnection	execute_query_for_registration	covered	blocking twin present
 connection	oracledb::Connection	execute_query_with_bind_rows	oracledb::BlockingConnection	execute_query_with_bind_rows	covered	blocking twin present
-connection	oracledb::Connection	execute_query_with_bind_rows_and_options	oracledb::BlockingConnection	execute_query_with_bind_rows_and_options	exception	W1-T8.2 adds the no-timeout blocking twin; options_and_timeout is present today.
+connection	oracledb::Connection	execute_query_with_bind_rows_and_options	oracledb::BlockingConnection	execute_query_with_bind_rows_and_options	covered	blocking twin present
 connection	oracledb::Connection	execute_query_with_bind_rows_and_timeout	oracledb::BlockingConnection	execute_query_with_bind_rows_and_timeout	covered	blocking twin present
 connection	oracledb::Connection	execute_query_with_bind_rows_options_and_timeout	oracledb::BlockingConnection	execute_query_with_bind_rows_options_and_timeout	covered	blocking twin present
 connection	oracledb::Connection	execute_query_with_binds	oracledb::BlockingConnection	execute_query_with_binds	covered	blocking twin present
@@ -39,9 +39,9 @@ connection	oracledb::Connection	fetch_rows_ref_response	oracledb::BlockingConnec
 connection	oracledb::Connection	fetch_rows_request	oracledb::BlockingConnection	fetch_rows_request	exception	Half-round-trip borrowed-fetch primitive is async-only; blocking callers use fetch_rows/fetch_rows_with_columns.
 connection	oracledb::Connection	fetch_rows_with_columns	oracledb::BlockingConnection	fetch_rows_with_columns	covered	blocking twin present
 connection	oracledb::Connection	for_each_row_ref	oracledb::BlockingConnection	for_each_row_ref	exception	Borrowed-row callback is async-only because QueryValueRef lifetimes cannot cross the block_on facade.
-connection	oracledb::Connection	free_temp_lobs	oracledb::BlockingConnection	free_temp_lobs	exception	W1-T8.2 adds the no-timeout blocking twin; free_temp_lobs_with_timeout is present today.
+connection	oracledb::Connection	free_temp_lobs	oracledb::BlockingConnection	free_temp_lobs	covered	blocking twin present
 connection	oracledb::Connection	free_temp_lobs_with_timeout	oracledb::BlockingConnection	free_temp_lobs_with_timeout	covered	blocking twin present
-connection	oracledb::Connection	notify_register	oracledb::BlockingConnection	notify_register	exception	W1-T8.2 adds the blocking CQN notification registration twin.
+connection	oracledb::Connection	notify_register	oracledb::BlockingConnection	notify_register	covered	blocking twin present
 connection	oracledb::Connection	ping	oracledb::BlockingConnection	ping	covered	blocking twin present
 connection	oracledb::Connection	ping_with_timeout	oracledb::BlockingConnection	ping_with_timeout	covered	blocking twin present
 connection	oracledb::Connection	query	oracledb::BlockingConnection	query	covered	blocking twin present
@@ -54,7 +54,7 @@ connection	oracledb::Connection	query_with	oracledb::BlockingConnection	query_wi
 connection	oracledb::Connection	read_dbms_output	oracledb::BlockingConnection	read_dbms_output	covered	blocking twin present
 connection	oracledb::Connection	read_lob	oracledb::BlockingConnection	read_lob	covered	blocking twin present
 connection	oracledb::Connection	read_lob_with_timeout	oracledb::BlockingConnection	read_lob_with_timeout	covered	blocking twin present
-connection	oracledb::Connection	recv_notification	oracledb::BlockingConnection	recv_notification	exception	W1-T8.2 adds the blocking CQN notification receive twin.
+connection	oracledb::Connection	recv_notification	oracledb::BlockingConnection	recv_notification	covered	blocking twin present
 connection	oracledb::Connection	register_query	oracledb::BlockingConnection	register_query	covered	blocking twin present
 connection	oracledb::Connection	resume_sessionless_transaction	oracledb::BlockingConnection	resume_sessionless_transaction	covered	blocking twin present
 connection	oracledb::Connection	rollback	oracledb::BlockingConnection	rollback	covered	blocking twin present
@@ -70,7 +70,7 @@ connection	oracledb::Connection	tpc_commit	oracledb::BlockingConnection	tpc_comm
 connection	oracledb::Connection	tpc_end	oracledb::BlockingConnection	tpc_end	covered	blocking twin present
 connection	oracledb::Connection	tpc_prepare	oracledb::BlockingConnection	tpc_prepare	covered	blocking twin present
 connection	oracledb::Connection	tpc_rollback	oracledb::BlockingConnection	tpc_rollback	covered	blocking twin present
-connection	oracledb::Connection	trim_lob	oracledb::BlockingConnection	trim_lob	exception	W1-T8.2 adds the no-timeout blocking twin; trim_lob_with_timeout is present today.
+connection	oracledb::Connection	trim_lob	oracledb::BlockingConnection	trim_lob	covered	blocking twin present
 connection	oracledb::Connection	trim_lob_with_timeout	oracledb::BlockingConnection	trim_lob_with_timeout	covered	blocking twin present
 connection	oracledb::Connection	write_lob	oracledb::BlockingConnection	write_lob	covered	blocking twin present
 connection	oracledb::Connection	write_lob_with_timeout	oracledb::BlockingConnection	write_lob_with_timeout	covered	blocking twin present

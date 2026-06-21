@@ -44,7 +44,6 @@ pub use oracledb::transport::CassetteError	keep	Cassette diagnostics are part of
 *oracledb::BatchRows*	keep	Public execute-many bind-row payload type.
 *oracledb::Batch*	keep	Public execute-many request builder.
 *oracledb::BindError*	keep	Public client-side bind prevalidation error taxonomy.
-*oracledb::BlockingConnection::drain_cancel_response*	pub(crate)	Cancel response draining is private session recovery, not a blocking facade API.
 *oracledb::BlockingConnection::execute_query_for_registration*	rename	Keep the registration capability but rename it into an explicit registration API.
 *oracledb::BlockingConnection::execute_query*	consolidate	Query execution overloads should collapse into operation-specific request types.
 *oracledb::BlockingConnection::query_named*	consolidate	Named-query overloads should collapse into the same operation-family surface.

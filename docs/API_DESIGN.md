@@ -300,7 +300,7 @@ execute/fetch/define/cursor machinery the SODA/Arrow/direct-path facades sit on.
 | `query_named` | `query(cx, sql, params!{...})` or `Query::bind(params!{...})`. | `BlockingConnection::query_named` deprecated. |
 | `query_named_with_timeout` | `Query::bind(params!{...}).timeout(d)`. | `BlockingConnection::query_named_with_timeout` deprecated. |
 | `execute_query_with_bind_rows` | `execute_many(cx, sql, BatchRows)` / `Batch::new(sql, rows)`. Query-style raw first-batch compatibility uses the shared private operation core. | `BlockingConnection::execute_query_with_bind_rows` deprecated. |
-| `execute_query_with_bind_rows_and_options` | `Batch::raw_options`, `Execute::raw_options`, or `Query` builders depending on operation family. | No separate old blocking twin; use `execute_query_with_bind_rows_options_and_timeout(..., None)` compatibility if needed. |
+| `execute_query_with_bind_rows_and_options` | `Batch::raw_options`, `Execute::raw_options`, or `Query` builders depending on operation family. | `BlockingConnection::execute_query_with_bind_rows_and_options` remains as the deprecated 1:1 compatibility twin. |
 | `execute_query_with_bind_rows_and_timeout` | `Batch::timeout(d)` or `Query::timeout(d)` as appropriate. | `BlockingConnection::execute_query_with_bind_rows_and_timeout` deprecated. |
 | `execute_query_with_bind_rows_options_and_timeout` | `Batch::raw_options(...).timeout(d)`, `Execute::raw_options(...).timeout(d)`, or `Query` builders. | `BlockingConnection::execute_query_with_bind_rows_options_and_timeout` deprecated. |
 | Cardinality checks previously done manually | `query_one`, `query_opt`, `query_all`. | W1-T3.8 mirrors these on `BlockingConnection`. |
