@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Concurrent-throughput benchmark for the `oracledb` thin-mode driver.
 //!
 //! This is the missing half of `docs/PERFORMANCE.md`: that comparison is

@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Criterion micro-benchmarks for the `oracledb` thin-mode driver against a
 //! live Oracle container. These exercise the public crate API (the same code
 //! paths `BlockingConnection` and the PyO3 shim drive) so the numbers are an

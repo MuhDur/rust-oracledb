@@ -182,6 +182,19 @@ jobs:
         if: ${{ inputs.profile != 'canary' }}
         run: bash scripts/check_async_blocking_coverage.sh
 
+      - name: Musl binary size gate
+        if: ${{ inputs.profile == 'release-qualification' }}
+        shell: bash
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: |
+          set -euo pipefail
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          bash scripts/check_musl_size.sh
+
       - name: Install cargo-semver-checks
         if: ${{ inputs.profile != 'canary' }}
         run: cargo install cargo-semver-checks --version "$CARGO_SEMVER_CHECKS_VERSION" --locked

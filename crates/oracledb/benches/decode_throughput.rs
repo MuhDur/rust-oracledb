@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Per-thread decode-throughput benchmark for the `oracledb` thin-mode driver.
 //!
 //! This is the companion to `concurrent_throughput.rs`. That bench isolates the

@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "captured_utc": "2026-06-21T19:02:32Z",
+  "commit": "c453ff0",
+  "toolchain": "rustc 1.97.0-nightly (4b0c9d76a 2026-05-10)",
+  "machine": "durakovic; Linux 6.17.0-35-generic; AMD EPYC 7713 64-Core Processor; 128 logical CPUs; schedutil governor",
+  "max_regression_ratio": 2.0,
+  "benchmarks": {
+    "single_packet_passthrough_8000b": {
+      "criterion_path": "single_packet_8000b/passthrough_drain",
+      "median_ns": 167.985939
+    },
+    "multi_packet_4x8k_reassembly": {
+      "criterion_path": "deterministic_reassembly/multi_packet_4x8k_extend",
+      "median_ns": 626.870827
+    },
+    "number_decode_reused_scratch": {
+      "criterion_path": "deterministic_codec/number_decode_reused_scratch",
+      "median_ns": 582.871607
+    },
+    "lob_utf16_64k_decode": {
+      "criterion_path": "deterministic_codec/lob_utf16_64k_decode",
+      "median_ns": 77304.010453
+    },
+    "vector_image_decode_1024_f32": {
+      "criterion_path": "deterministic_codec/vector_image_decode_1024_f32",
+      "median_ns": 7474.773583
+    },
+    "typed_conversion_core": {
+      "criterion_path": "deterministic_binds/typed_conversion_core",
+      "median_ns": 44.498953
+    },
+    "execute_payload_256x3_binds": {
+      "criterion_path": "deterministic_binds/execute_payload_256x3_binds",
+      "median_ns": 33029.511438
+    },
+    "cassette_decode_256x512b_frames": {
+      "criterion_path": "deterministic_cassette/decode_256x512b_frames",
+      "median_ns": 10823.188453
+    }
+  }
+}
