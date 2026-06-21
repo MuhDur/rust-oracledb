@@ -19,6 +19,7 @@ libfuzzer-sys = "0.4"
 
 [dependencies.oracledb-protocol]
 path = ".."
+features = ["experimental"]
 
 # cargo-fuzz builds these with sanitizers; libFuzzer is the engine.
 [[bin]]
@@ -87,6 +88,69 @@ bench = false
 [[bin]]
 name = "connect_string"
 path = "fuzz_targets/connect_string.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "auth_response"
+path = "fuzz_targets/auth_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "accept_payload"
+path = "fuzz_targets/accept_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dbobject_image"
+path = "fuzz_targets/dbobject_image.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dbobject_scalars"
+path = "fuzz_targets/dbobject_scalars.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lob_responses"
+path = "fuzz_targets/lob_responses.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sessionless_tpc"
+path = "fuzz_targets/sessionless_tpc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oac_record"
+path = "fuzz_targets/oac_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wallet_parsers"
+path = "fuzz_targets/wallet_parsers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "borrowed_query_response"
+path = "fuzz_targets/borrowed_query_response.rs"
 test = false
 doc = false
 bench = false

@@ -1498,6 +1498,7 @@ dependencies = [
  "criterion",
  "oracledb-derive",
  "oracledb-protocol",
+ "proptest",
  "rust_decimal",
  "rustls",
  "rustls-pemfile",

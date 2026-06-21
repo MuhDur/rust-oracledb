@@ -211,7 +211,7 @@ fn sanitize_identity_field(field: &'static str, value: String) -> Result<String>
 /// malformed input (they must fail closed with a [`ProtocolError`]).
 #[cfg(fuzzing)]
 pub mod fuzz_api {
-    use crate::wire::TtcReader;
+    use crate::wire::{BoundedReader, TtcReader};
     use crate::Result;
 
     /// Fuzz the server-error trailer parser (`parse_server_error_info`).
@@ -239,6 +239,75 @@ pub mod fuzz_api {
         let _ = crate::thin::decode_interval_ym(data);
         let _ = crate::thin::decode_binary_float(data);
         let _ = crate::thin::decode_binary_double(data);
+    }
+
+    /// Fuzz the DbObject packed-image reader by walking arbitrary image bytes
+    /// through the same length/header/value readers used by ADT and collection
+    /// decoding. The selector bytes choose a bounded sequence of operations;
+    /// expected decode failures are ignored, but panics/OOMs are bugs.
+    pub fn fuzz_dbobject_image_walk(data: &[u8]) {
+        let (ops, payload) = data.split_at(data.len().min(64));
+        let mut reader = crate::thin::DbObjectPackedReader::new(payload);
+        for op in ops {
+            match op % 7 {
+                0 => {
+                    let _ = reader.read_u8();
+                }
+                1 => {
+                    let _ = reader.read_i32be();
+                }
+                2 => {
+                    let _ = reader.read_length();
+                }
+                3 => {
+                    let _ = reader.read_value_bytes();
+                }
+                4 => {
+                    let _ = reader.read_header();
+                }
+                5 => {
+                    let _ = reader.read_atomic_null(op & 0x80 != 0);
+                }
+                _ => {
+                    let count = usize::from(*op);
+                    let _ = reader.alloc_count_checked(count, 1);
+                    let _: Vec<u8> = reader.with_capacity_bounded(count, 1);
+                }
+            }
+            if reader.remaining() == 0 {
+                break;
+            }
+        }
+    }
+
+    /// Fuzz DbObject scalar/image-adjacent decoders that are not all reachable
+    /// through one public parser boundary. This includes text, XMLTYPE, BFILE
+    /// locator names, LOB text decoding, binary float/double, and the
+    /// crate-private BINARY_INTEGER text parser.
+    pub fn fuzz_dbobject_scalars(data: &[u8]) {
+        let (selector, payload) = data.split_first().map_or((0u8, data), |(v, r)| (*v, r));
+        let dbtype_name = match selector & 0x03 {
+            0 => "DB_TYPE_VARCHAR",
+            1 => "DB_TYPE_NVARCHAR",
+            2 => "DB_TYPE_CHAR",
+            _ => "DB_TYPE_NCHAR",
+        };
+        let csfrm = if selector & 0x04 == 0 {
+            crate::thin::CS_FORM_IMPLICIT
+        } else {
+            crate::thin::CS_FORM_NCHAR
+        };
+        let locator = (selector & 0x08 != 0).then_some(payload);
+
+        let _ = crate::thin::decode_dbobject_text(payload, dbtype_name);
+        let _ = crate::thin::decode_dbobject_xmltype_text(payload);
+        let _ = crate::thin::decode_lob_text(payload, csfrm, locator);
+        let _ = crate::thin::decode_bfile_locator_name(payload);
+        let _ = crate::thin::decode_dbobject_binary_float(payload);
+        let _ = crate::thin::decode_dbobject_binary_double(payload);
+        if let Ok(text) = core::str::from_utf8(payload) {
+            let _ = crate::thin::parse_binary_integer_u32(text);
+        }
     }
 
     /// Fuzz the Advanced Queuing response decoders (enqueue / dequeue / array).

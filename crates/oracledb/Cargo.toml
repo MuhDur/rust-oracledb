@@ -89,6 +89,9 @@ uuid = { version = "1", optional = true, default-features = false }
 # `#![forbid(unsafe_code)]`-clean.
 allocation-counter = "0.8"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# Property-based tests for the FromSql/ToSql value bridge
+# (tests/value_bridge_properties.rs). Same version the protocol crate pins.
+proptest.workspace = true
 # TLS handshake integration test: a blocking rustls server stub + PEM loading.
 rustls-pemfile.workspace = true
 # Span-capture subscriber for the feature-gated observability test

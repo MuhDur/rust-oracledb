@@ -110,12 +110,14 @@ jobs:
           toolchain: nightly-2026-05-11
       - run: bash scripts/release_preflight.sh
 
-  # The 8 cargo-fuzz targets live in the standalone crates/oracledb-protocol/fuzz
-  # crate (not a workspace member), so nothing else in CI compiles them. This
-  # non-blocking job keeps them from bit-rotting. Pinned to the gnu target
-  # (cargo-fuzz defaults to musl, which breaks the ASan build).
+  # The 19 cargo-fuzz targets are listed in
+  # crates/oracledb-protocol/fuzz/targets.toml and live in the standalone
+  # crates/oracledb-protocol/fuzz crate (not a workspace member), so nothing
+  # else in CI compiles them. This non-blocking job keeps them from bit-rotting.
+  # Pinned to the gnu target (cargo-fuzz defaults to musl, which breaks the
+  # ASan build).
   fuzz-build:
-    name: fuzz targets compile (nightly)
+    name: fuzz targets compile/smoke (nightly)
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -129,5 +131,16 @@ jobs:
       - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
         with:
           tool: cargo-fuzz
-      - run: cargo fuzz build --target x86_64-unknown-linux-gnu
+      - name: Build manifest targets and smoke required tier
         working-directory: crates/oracledb-protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 fuzz/scripts/check_targets_manifest.py check
+          while IFS= read -r target; do
+            cargo fuzz build "$target" --target x86_64-unknown-linux-gnu
+          done < <(python3 fuzz/scripts/check_targets_manifest.py list)
+          while IFS= read -r target; do
+            read -r -a fuzz_flags <<< "$(python3 fuzz/scripts/check_targets_manifest.py flags "$target")"
+            cargo fuzz run "$target" --target x86_64-unknown-linux-gnu -- "${fuzz_flags[@]}"
+          done < <(python3 fuzz/scripts/check_targets_manifest.py list --tier required)

@@ -69,9 +69,29 @@ const KEYWORDS: &[&str] = &[
 /// than only random bytes) makes the generated value side actually reach the
 /// numeric / boolean / duration / quoted-string parse arms.
 const ATOMS: &[&str] = &[
-    "tcp", "tcps", "1521", "0", "65536", "on", "off", "yes", "no", "true",
-    "dedicated", "pooled", "self", "new", "20sec", "100ms", "5min", "\"q\"",
-    "'q'", "a b", "::1", "[::1]", "host.example.com",
+    "tcp",
+    "tcps",
+    "1521",
+    "0",
+    "65536",
+    "on",
+    "off",
+    "yes",
+    "no",
+    "true",
+    "dedicated",
+    "pooled",
+    "self",
+    "new",
+    "20sec",
+    "100ms",
+    "5min",
+    "\"q\"",
+    "'q'",
+    "a b",
+    "::1",
+    "[::1]",
+    "host.example.com",
 ];
 
 /// The three input-shaping strategies; the selector byte chooses one.
@@ -155,7 +175,9 @@ impl<'a> Arbitrary<'a> for ConnectInput {
                 let prefix = "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=";
                 let tail: &[u8] = u.peek_bytes(u.len().min(256)).unwrap_or(&[]);
                 let tail_str = String::from_utf8_lossy(tail).into_owned();
-                Ok(ConnectInput::PrefixPlusGarbage(format!("{prefix}{tail_str}")))
+                Ok(ConnectInput::PrefixPlusGarbage(format!(
+                    "{prefix}{tail_str}"
+                )))
             }
             3 => {
                 // Deliberately exceed MAX_DESCRIPTOR_DEPTH (128) to keep that
@@ -174,7 +196,9 @@ impl<'a> Arbitrary<'a> for ConnectInput {
             }
             _ => {
                 let bytes = u.peek_bytes(u.len()).unwrap_or(&[]);
-                Ok(ConnectInput::Raw(String::from_utf8_lossy(bytes).into_owned()))
+                Ok(ConnectInput::Raw(
+                    String::from_utf8_lossy(bytes).into_owned(),
+                ))
             }
         }
     }
