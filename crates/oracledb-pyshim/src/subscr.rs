@@ -27,6 +27,7 @@ use asupersync::Cx;
 use oracledb::protocol::thin::{MsgQuery, MsgTable, NotificationMessage, NotificationRecord};
 use oracledb::{
     BlockingConnection, ConnectOptions, Connection as RustConnection, Error as DriverError,
+    Registration,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -333,7 +334,8 @@ impl ThinSubscrImpl {
         let conn_impl = self.conn_impl(py)?;
         let conn_ref = conn_impl.borrow(py);
         let query_id = conn_ref.with_connection(|connection| {
-            BlockingConnection::execute_query_for_registration(connection, sql, self.id)
+            BlockingConnection::register_query(connection, Registration::new(sql, self.id))
+                .map(|outcome| outcome.query_id())
         })?;
         // without SUBSCR_QOS_QUERY the server returns query id 0 -> public None
         match query_id {

@@ -47,6 +47,7 @@ pub use oracledb::transport::CassetteError	keep	Cassette diagnostics are part of
 *oracledb::BlockingConnection::execute_query_for_registration*	rename	Keep the registration capability but rename it into an explicit registration API.
 *oracledb::BlockingConnection::execute_query*	consolidate	Query execution overloads should collapse into operation-specific request types.
 *oracledb::BlockingConnection::query_named*	consolidate	Named-query overloads should collapse into the same operation-family surface.
+*oracledb::BlockingConnection::execute_raw*	keep	W2-T1: blocking mirror of the low-level raw-execute primitive (returns QueryResult). Execute-side counterpart to the retained fetch_rows*/define_and_fetch/scroll_cursor/fetch_cursor primitives; part of the 1.0 contract. Surfaced during the pyshim migration: the four families project QueryResult into curated outcomes, so a wire-faithful consumer needs an un-deprecated raw entry point. Keep before the broad BlockingConnection consolidate row.
 *oracledb::BlockingConnection*	consolidate	Keep the sync facade, but W1-T8 should reduce duplicated async/blocking method sprawl.
 *oracledb::BlockingRows*	keep	Public blocking lazy row facade returned by the blocking query family.
 *oracledb::CancelHandle*	keep	Public cancellation handle.
@@ -56,6 +57,7 @@ pub fn oracledb::ConnectOptions::*	consolidate	Keep ConnectOptions public but pr
 *oracledb::Connection::execute_query_for_registration*	rename	Keep the registration capability but rename it into an explicit registration API.
 *oracledb::Connection::execute_query*	consolidate	Query execution overloads should collapse into operation-specific request types.
 *oracledb::Connection::query_named*	consolidate	Named-query overloads should collapse into the same operation-family surface.
+*oracledb::Connection::execute_raw*	keep	W2-T1: low-level raw-execute primitive (returns the unprojected QueryResult). Execute-side counterpart to the retained fetch_rows*/define_and_fetch/scroll_cursor/fetch_cursor primitives; part of the 1.0 contract. Surfaced during the pyshim migration as the gap W1-T3 missed: the four families project QueryResult into curated outcomes, so a statement-type-agnostic / raw consumer needs an un-deprecated raw entry point.
 *oracledb::ConnectionDisposition*	keep	Public connection-reuse classification returned by Error::connection_disposition.
 *oracledb::Connection*	keep	Primary async connection API.
 *oracledb::ColumnIndex*	keep	Public owned-row index resolver for usize and &str access.

@@ -1078,7 +1078,7 @@ impl ThinCursorImpl {
                 let connection = guard
                     .as_mut()
                     .ok_or_else(|| TaskError::from("connection is closed"))?;
-                BlockingConnection::execute_query_with_bind_rows_options_and_timeout(
+                BlockingConnection::execute_raw(
                     connection,
                     &statement,
                     1,
@@ -1407,20 +1407,23 @@ impl ThinCursorImpl {
                             }
                         };
                         let row_result = if row.is_empty() {
-                            BlockingConnection::execute_query_with_timeout(
+                            BlockingConnection::execute_raw(
                                 connection,
                                 &statement,
                                 prefetchrows,
+                                &[],
+                                ExecuteOptions::default(),
                                 call_timeout,
                             )
                             .map_err(map_row_err)?
                         } else {
                             let one_row = vec![row.clone()];
-                            BlockingConnection::execute_query_with_bind_rows_and_timeout(
+                            BlockingConnection::execute_raw(
                                 connection,
                                 &statement,
                                 prefetchrows,
                                 &one_row,
+                                ExecuteOptions::default(),
                                 call_timeout,
                             )
                             .map_err(map_row_err)?
@@ -1442,7 +1445,7 @@ impl ThinCursorImpl {
                     result.return_values = return_values.into_iter().collect();
                     return Ok(result);
                 }
-                BlockingConnection::execute_query_with_bind_rows_options_and_timeout(
+                BlockingConnection::execute_raw(
                     connection,
                     &statement,
                     prefetchrows,
@@ -1635,7 +1638,7 @@ impl ThinCursorImpl {
                 } else {
                     vec![bind_values.clone()]
                 };
-                BlockingConnection::execute_query_with_bind_rows_options_and_timeout(
+                BlockingConnection::execute_raw(
                     connection,
                     &statement,
                     prefetchrows,

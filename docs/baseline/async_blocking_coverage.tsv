@@ -31,6 +31,7 @@ connection	oracledb::Connection	execute_query_with_bind_rows_options_and_timeout
 connection	oracledb::Connection	execute_query_with_binds	oracledb::BlockingConnection	execute_query_with_binds	covered	blocking twin present
 connection	oracledb::Connection	execute_query_with_binds_and_timeout	oracledb::BlockingConnection	execute_query_with_binds_and_timeout	covered	blocking twin present
 connection	oracledb::Connection	execute_query_with_timeout	oracledb::BlockingConnection	execute_query_with_timeout	covered	blocking twin present
+connection	oracledb::Connection	execute_raw	oracledb::BlockingConnection	execute_raw	covered	blocking twin present
 connection	oracledb::Connection	execute_with	oracledb::BlockingConnection	execute_with	covered	blocking twin present
 connection	oracledb::Connection	fetch_cursor	oracledb::BlockingConnection	fetch_cursor	covered	blocking twin present
 connection	oracledb::Connection	fetch_rows	oracledb::BlockingConnection	fetch_rows	covered	blocking twin present
@@ -109,6 +110,7 @@ connection	oracledb::Connection	execute_query_with_bind_rows_options_and_timeout
 connection	oracledb::Connection	execute_query_with_binds	oracledb::BlockingConnection	execute_query_with_binds	covered	blocking twin present
 connection	oracledb::Connection	execute_query_with_binds_and_timeout	oracledb::BlockingConnection	execute_query_with_binds_and_timeout	covered	blocking twin present
 connection	oracledb::Connection	execute_query_with_timeout	oracledb::BlockingConnection	execute_query_with_timeout	covered	blocking twin present
+connection	oracledb::Connection	execute_raw	oracledb::BlockingConnection	execute_raw	covered	blocking twin present
 connection	oracledb::Connection	execute_with	oracledb::BlockingConnection	execute_with	covered	blocking twin present
 connection	oracledb::Connection	fetch_cursor	oracledb::BlockingConnection	fetch_cursor	covered	blocking twin present
 connection	oracledb::Connection	fetch_rows	oracledb::BlockingConnection	fetch_rows	covered	blocking twin present

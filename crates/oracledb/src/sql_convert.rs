@@ -1324,11 +1324,22 @@ pub(crate) fn resolve_params(sql: &str, params: Params<'_>) -> Result<Vec<BindVa
 }
 
 pub(crate) fn validate_bind_rows_shape(
-    sql: &str,
+    _sql: &str,
     bind_rows: &[Vec<BindValue>],
 ) -> Result<(), BindError> {
+    // Only the *structural* shape is knowable at this raw execute layer: it does
+    // not know whether the caller supplied binds by name or by position, so it
+    // cannot validate the SQL placeholder *occurrence* count. A repeated named
+    // bind (e.g. `:v` used three times) is satisfied by a single supplied value,
+    // exactly as python-oracledb binds the same var to every occurrence
+    // (impl/thin/var.pyx _bind), and a parse-only describe supplies no binds at
+    // all (impl/thin/messages/execute.pyx sets the bind count to zero). True
+    // positional-count validation (DPY-4009 equivalent) belongs in the
+    // style-aware `resolve_params(Params::Positional)` path, where the driver
+    // knows the binds are positional. Here we only reject ragged batch rows,
+    // which is a genuine structural error in array DML.
     let Some(first_row) = bind_rows.first() else {
-        return validate_positional_bind_count(sql, 0);
+        return Ok(());
     };
     let expected = first_row.len();
     for (row_index, row) in bind_rows.iter().enumerate().skip(1) {
@@ -1340,7 +1351,7 @@ pub(crate) fn validate_bind_rows_shape(
             });
         }
     }
-    validate_positional_bind_count(sql, expected)
+    Ok(())
 }
 
 pub(crate) fn validate_positional_bind_count(sql: &str, actual: usize) -> Result<(), BindError> {
@@ -1641,6 +1652,30 @@ mod tests {
                 actual: 1
             }
         );
+    }
+
+    #[test]
+    fn validate_bind_rows_shape_accepts_repeated_named_bind_single_value() {
+        // `:v` appears three times but is one named bind: a single supplied
+        // value satisfies every occurrence (python-oracledb binds the same var
+        // to all occurrences, impl/thin/var.pyx). The raw validator must NOT
+        // treat this as a placeholder-occurrence count mismatch — that check
+        // belongs only to the style-aware positional path.
+        let rows = vec![vec![BindValue::Number("1".to_string())]];
+        validate_bind_rows_shape(
+            "select :v + 1 from dual union all select :v + 2 from dual \
+             union all select :v + 3 from dual",
+            &rows,
+        )
+        .expect("repeated named bind is satisfied by one supplied value");
+    }
+
+    #[test]
+    fn validate_bind_rows_shape_accepts_empty_rows_for_parse() {
+        // A parse-only describe (and any no-bind execute) supplies zero bind
+        // rows; the wire bind count is zero. This must be accepted.
+        validate_bind_rows_shape("select :v from dual", &[])
+            .expect("a no-bind execute / parse-only describe is valid");
     }
 
     #[test]

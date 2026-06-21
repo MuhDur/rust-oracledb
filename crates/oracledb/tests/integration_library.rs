@@ -17,8 +17,13 @@
 //! ```
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
-use oracledb::pool::{AcquireOptions, Pool, PoolBackend, PoolConfig, POOL_GETMODE_WAIT};
+use oracledb::pool::{
+    AcquireOptions, Pool, PoolBackend, PoolConfig, PoolError, POOL_GETMODE_TIMEDWAIT,
+    POOL_GETMODE_WAIT,
+};
 use oracledb::protocol::oson::OsonValue;
 use oracledb::protocol::thin::{BindValue, ExecuteOptions, QueryValue};
 use oracledb::protocol::vector::{Vector, VectorValues};
@@ -700,4 +705,69 @@ fn connection_pool_acquire_release() {
 
     assert!(backend.created.load(Ordering::SeqCst) >= 2);
     assert!(backend.closed.load(Ordering::SeqCst) >= 2);
+}
+
+#[test]
+fn timedwait_pool_two_sequential_acquires_honor_deadline() {
+    let Some(options) = connect_options() else {
+        eprintln!(
+            "skipped timedwait_pool_two_sequential_acquires_honor_deadline: PYO_TEST_* not configured"
+        );
+        return;
+    };
+    let backend = LiveBackend {
+        options,
+        created: std::sync::Arc::new(AtomicU64::new(0)),
+        closed: std::sync::Arc::new(AtomicU64::new(0)),
+    };
+    let config = PoolConfig::new(0, 0, 1)
+        .with_getmode(POOL_GETMODE_TIMEDWAIT)
+        .with_wait_timeout_ms(1)
+        .with_ping_interval_secs(-1)
+        .with_ping_timeout_ms(5_000);
+    let pool = Pool::start(backend.clone(), config)
+        .expect("timedwait pool starts")
+        .blocking();
+
+    let started = Instant::now();
+    assert_timedwait_no_connection(&pool, "first acquire");
+    assert_timedwait_no_connection(&pool, "second acquire");
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "two 1ms timedwait acquires should finish within a few hundred milliseconds"
+    );
+
+    pool.close(false).expect("close timedwait pool");
+    assert_eq!(
+        backend.created.load(Ordering::SeqCst),
+        0,
+        "zero-capacity pool must not create live connections"
+    );
+}
+
+fn assert_timedwait_no_connection(
+    pool: &oracledb::pool::BlockingPool<LiveBackend>,
+    label: &'static str,
+) {
+    let (tx, rx) = mpsc::channel();
+    let pool = pool.clone();
+    std::thread::spawn(move || {
+        let result = pool.acquire(AcquireOptions::default()).map(|_| ());
+        let _ = tx.send(result);
+    });
+
+    let result = match rx.recv_timeout(Duration::from_millis(250)) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("{label} did not complete within 250ms")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("{label} worker exited without reporting a result")
+        }
+    };
+    let err = result.expect_err("timedwait acquire should not succeed");
+    assert!(
+        matches!(err, PoolError::NoConnectionAvailable),
+        "{label} returned {err:?}"
+    );
 }

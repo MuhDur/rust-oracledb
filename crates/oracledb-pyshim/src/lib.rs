@@ -2,9 +2,12 @@
 // `arrow_capsule` module, which carries `#[allow(unsafe_code)]` for the Arrow
 // C Data Interface PyCapsule export. See that module for SAFETY documentation.
 #![deny(unsafe_code)]
-// The Python shim intentionally mirrors python-oracledb's raw cursor protocol.
-// It keeps using the Rust crate's deprecated compatibility shims until that
-// bridge gets its own non-deprecated raw cursor facade.
+// pyo3 emits a deprecated `HasAutomaticFromPyObject` impl for `#[pyclass]`
+// types that also derive `Clone`, which several shim modules do; allow it
+// crate-wide. (The shim no longer uses any of the Rust crate's deprecated
+// execute/query names — it drives the raw cursor protocol through the
+// non-deprecated `Connection::execute_raw` primitive and the retained
+// low-level fetch family.)
 #![allow(deprecated)]
 
 use pyo3::prelude::*;

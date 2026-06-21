@@ -18,7 +18,7 @@ use std::future::{poll_fn, Future};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, Weak};
-use std::task::Poll;
+use std::task::{Poll, Waker};
 use std::time::{Duration, Instant};
 
 pub const POOL_GETMODE_WAIT: u32 = 0;
@@ -1078,16 +1078,20 @@ pub(crate) struct PoolEngine<B: PoolBackend> {
     /// and can transiently hold the last `Arc<EngineInner>`; if the runtime lived
     /// in `EngineInner`, that final drop (on the worker thread) would drop the
     /// runtime and try to join the worker from within itself (EDEADLK). Owning
-    /// the runtime on the external handles means it is always dropped by the
-    /// thread that drops the last `PoolEngine`, never by the worker thread.
-    runtime: Arc<Runtime>,
+    /// the runtime on the external handles lets the last pool handle hand the
+    /// runtime join to a helper thread, never the worker thread itself.
+    runtime: Option<Arc<Runtime>>,
 }
 
 impl<B: PoolBackend> Clone for PoolEngine<B> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
-            runtime: Arc::clone(&self.runtime),
+            runtime: Some(Arc::clone(
+                self.runtime
+                    .as_ref()
+                    .expect("pool runtime present before drop"),
+            )),
         }
     }
 }
@@ -1100,19 +1104,47 @@ impl<B: PoolBackend> Drop for PoolEngine<B> {
         // the number of live pool handles (unperturbed by the reaper transiently
         // upgrading its `Weak` during a work phase). More than one means another
         // handle is still live; do nothing.
-        if Arc::strong_count(&self.runtime) > 1 {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return;
+        };
+        if Arc::strong_count(runtime) > 1 {
             return;
         }
         // Last handle. Close every connection RIGHT HERE, on the dropping thread,
-        // WITHOUT awaiting or waking the reaper (R11 — `Drop` never blocks or
-        // spawns). Doing the close synchronously here (rather than delegating to
-        // the reaper or to `EngineInner::drop`, which could run on the worker
-        // thread that the `runtime` field is about to tear down) makes transport
-        // release deterministic and race-free: it cannot lose a connection to the
-        // worker being force-stopped mid-drain. Then, after this method returns,
-        // the `inner` and `runtime` fields drop on THIS thread — the worker is
-        // joined from outside itself, never self-joined.
+        // WITHOUT awaiting the reaper. Doing the close synchronously here (rather
+        // than delegating to the reaper or to `EngineInner::drop`, which could
+        // run on the worker thread that the `runtime` field is about to tear
+        // down) makes transport release deterministic and race-free: it cannot
+        // lose a connection to the worker being force-stopped mid-drain.
         close_all_connections(&self.inner);
+        let runtime = self
+            .runtime
+            .take()
+            .expect("pool runtime present for last handle");
+        // Some embedders run finalizers while holding a VM lock (for example the
+        // Python GIL). The pool worker may be inside `backend.create_connection`
+        // and need that same lock to finish. Dropping the runtime here would join
+        // the worker while still holding the embedder's lock, so hand that final
+        // join to a detached helper thread. The handoff guarantees the runtime is
+        // NEVER dropped on this (possibly lock-holding) thread: if the helper
+        // cannot be spawned (or vanishes before receiving), we `mem::forget` the
+        // runtime — leaking it at pool/process teardown is strictly preferable to
+        // re-introducing the very GIL-vs-worker-join deadlock this avoids.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Arc<Runtime>>(1);
+        match std::thread::Builder::new()
+            .name("oracledb-pool-runtime-drop".to_string())
+            .spawn(move || {
+                if let Ok(runtime) = rx.recv() {
+                    drop(runtime);
+                }
+            }) {
+            Ok(_) => {
+                if let Err(std::sync::mpsc::SendError(runtime)) = tx.send(runtime) {
+                    std::mem::forget(runtime);
+                }
+            }
+            Err(_) => std::mem::forget(runtime),
+        }
     }
 }
 
@@ -1397,6 +1429,78 @@ impl<B: PoolBackend> Drop for AsyncAcquireRequest<'_, B> {
     }
 }
 
+struct TimedAcquireWakeState {
+    stop: AtomicBool,
+    waker: Mutex<Option<Waker>>,
+}
+
+struct TimedAcquireDeadline {
+    deadline: Instant,
+    wake_state: Arc<TimedAcquireWakeState>,
+    wake_thread: std::thread::Thread,
+}
+
+impl TimedAcquireDeadline {
+    fn new(wait_timeout: Duration) -> Self {
+        let start = Instant::now();
+        let deadline = start
+            .checked_add(wait_timeout)
+            .expect("u32 millisecond pool wait timeout must fit in Instant");
+        let wake_state = Arc::new(TimedAcquireWakeState {
+            stop: AtomicBool::new(false),
+            waker: Mutex::new(None),
+        });
+        let wake_state_for_thread = Arc::clone(&wake_state);
+        let join = std::thread::spawn(move || {
+            while !wake_state_for_thread.stop.load(Ordering::Acquire) {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                std::thread::park_timeout(deadline.saturating_duration_since(now));
+            }
+
+            if wake_state_for_thread.stop.load(Ordering::Acquire) {
+                return;
+            }
+            if let Ok(mut waker) = wake_state_for_thread.waker.lock() {
+                if let Some(waker) = waker.take() {
+                    waker.wake();
+                }
+            }
+        });
+        let wake_thread = join.thread().clone();
+        drop(join);
+        Self {
+            deadline,
+            wake_state,
+            wake_thread,
+        }
+    }
+
+    fn register_waker(&self, waker: &Waker) {
+        if let Ok(mut registered) = self.wake_state.waker.lock() {
+            let replace = registered
+                .as_ref()
+                .is_none_or(|current| !current.will_wake(waker));
+            if replace {
+                *registered = Some(waker.clone());
+            }
+        }
+    }
+
+    fn is_elapsed(&self) -> bool {
+        Instant::now() >= self.deadline
+    }
+}
+
+impl Drop for TimedAcquireDeadline {
+    fn drop(&mut self) {
+        self.wake_state.stop.store(true, Ordering::Release);
+        self.wake_thread.unpark();
+    }
+}
+
 fn enqueue_request<C>(state: &mut PoolState<C>, opts: AcquireOptions) -> Result<u64, PoolError> {
     if !state.open {
         return Err(PoolError::Closed);
@@ -1460,6 +1564,7 @@ fn acquire_wait_future<'a, B: PoolBackend>(
     cx: &'a Cx,
     inner: &'a EngineInner<B>,
     request_id: u64,
+    deadline: Option<&'a TimedAcquireDeadline>,
 ) -> impl Future<Output = Result<u64, PoolError>> + 'a {
     let mut notified = None;
     poll_fn(move |task_cx| loop {
@@ -1475,6 +1580,13 @@ fn acquire_wait_future<'a, B: PoolBackend>(
             Ok(Some(conn_id)) => return Poll::Ready(Ok(conn_id)),
             Ok(None) => {}
             Err(err) => return Poll::Ready(Err(err)),
+        }
+
+        if let Some(deadline) = deadline {
+            deadline.register_waker(task_cx.waker());
+            if deadline.is_elapsed() {
+                return Poll::Ready(Err(PoolError::NoConnectionAvailable));
+            }
         }
 
         let waiter = notified.get_or_insert_with(|| Box::pin(inner.async_waiters.notified()));
@@ -1544,7 +1656,10 @@ impl<B: PoolBackend> PoolEngine<B> {
             .reaper_handle
             .lock()
             .map_err(|err| PoolError::Internal(err.to_string()))? = Some(handle);
-        Ok(Self { inner, runtime })
+        Ok(Self {
+            inner,
+            runtime: Some(runtime),
+        })
     }
 
     fn enqueue_drop_return(&self, conn_id: u64) {
@@ -1583,15 +1698,8 @@ impl<B: PoolBackend> PoolEngine<B> {
             (request_id, wait_timeout)
         };
         let mut request = AsyncAcquireRequest::new(inner, request_id);
-        let acquire = acquire_wait_future(cx, inner, request_id);
-        let result = if let Some(wait_timeout) = wait_timeout {
-            match time::timeout(time::wall_now(), wait_timeout, Box::pin(acquire)).await {
-                Ok(result) => result,
-                Err(_) => Err(PoolError::NoConnectionAvailable),
-            }
-        } else {
-            acquire.await
-        };
+        let deadline = wait_timeout.map(TimedAcquireDeadline::new);
+        let result = acquire_wait_future(cx, inner, request_id, deadline.as_ref()).await;
 
         match result {
             Ok(conn_id) => {

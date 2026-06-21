@@ -126,11 +126,12 @@ impl PoolBackend for ShimPoolBackend {
         let cancel_handle = connection.cancel_handle().map_err(|err| err.to_string())?;
         if let Some(edition) = &prepared.edition {
             let identifier = plain_identifier(edition)?;
-            BlockingConnection::execute_query_with_timeout(
+            BlockingConnection::execute_with(
                 &mut connection,
-                &format!("alter session set edition = {identifier}"),
-                1,
-                None,
+                execute_with_call_timeout(
+                    &format!("alter session set edition = {identifier}"),
+                    None,
+                ),
             )
             .map_err(|err| err.to_string())?;
         }

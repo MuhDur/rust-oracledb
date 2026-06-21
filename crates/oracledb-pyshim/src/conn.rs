@@ -5,12 +5,15 @@ use std::sync::{Arc, Mutex};
 use asupersync::Cx;
 use oracledb::protocol::thin::{
     dbobject_attr_max_size, dbobject_attr_precision_scale, dbobject_rowtype_attr_max_size,
-    public_dbtype_name_from_oracle_type_name, BindValue, QueryResult, QueryValue, CS_FORM_IMPLICIT,
+    public_dbtype_name_from_oracle_type_name, BindValue, QueryValue, CS_FORM_IMPLICIT,
     CS_FORM_NCHAR, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_NUMBER,
     ORA_TYPE_NUM_RAW,
 };
 use oracledb::protocol::ClientIdentity;
-use oracledb::{BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection};
+use oracledb::{
+    BlockingConnection, CancelHandle, ConnectOptions, Connection as RustConnection, Execute,
+    ExecuteOutcome, Query,
+};
 use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
@@ -19,6 +22,47 @@ use crate::*;
 
 /// An owned TPC transaction id: `(format_id, gtid_bytes, bqual_bytes)`.
 pub(crate) type OwnedXid = (u32, Vec<u8>, Vec<u8>);
+
+/// Attach a per-call timeout to an [`Execute`] builder, matching the old
+/// `execute_query_with_timeout(..)` semantics: a `None`/zero `call_timeout`
+/// leaves the operation un-timed (no `Duration`), so it never adopts an
+/// ambient deadline the old path ignored.
+pub(crate) fn execute_with_call_timeout(sql: &str, call_timeout: Option<u32>) -> Execute<'_> {
+    let execute = Execute::new(sql);
+    match call_timeout {
+        Some(ms) if ms > 0 => execute.timeout(std::time::Duration::from_millis(u64::from(ms))),
+        _ => execute,
+    }
+}
+
+/// Run a SELECT through the [`Query`] family and return ONLY the first fetch
+/// batch as raw `QueryValue` rows, reproducing the old
+/// `execute_query_with_binds_and_timeout(sql, prefetch, binds, ct)` shape used by
+/// the connection's data-dictionary probes: the same `prefetch_rows`, no
+/// continuation fetch (the old call read `result.rows` — the first batch only),
+/// and `stream_lobs()` so define-requiring columns keep their describe-only
+/// behavior instead of being materialized (the old path did not materialize).
+fn query_first_batch_with_binds(
+    connection: &mut RustConnection,
+    sql: &str,
+    prefetch_rows: u32,
+    binds: Vec<BindValue>,
+    call_timeout: Option<u32>,
+) -> Result<Vec<Vec<Option<QueryValue>>>, oracledb::Error> {
+    let mut query = Query::new(sql)
+        .prefetch(prefetch_rows)
+        .stream_lobs()
+        .bind(binds);
+    if let Some(ms) = call_timeout.filter(|value| *value > 0) {
+        query = query.timeout(std::time::Duration::from_millis(u64::from(ms)));
+    }
+    let rows = BlockingConnection::query_with(connection, query)?;
+    Ok(rows
+        .batch()
+        .iter()
+        .map(|row| row.values().to_vec())
+        .collect())
+}
 
 /// Extract an `Xid` (reference `Xid` namedtuple: `(format_id, gtid, bqual)`)
 /// into `(format_id, gtid_bytes, bqual_bytes)`. The gtid / bqual members may be
@@ -139,11 +183,12 @@ pub(crate) fn apply_pending_current_schema_from_state(
         return Ok(());
     };
     let identifier = sql_identifier(&schema)?;
-    let result = BlockingConnection::execute_query_with_timeout(
+    let result = BlockingConnection::execute_with(
         connection,
-        &format!("alter session set current_schema = {identifier}"),
-        1,
-        call_timeout,
+        execute_with_call_timeout(
+            &format!("alter session set current_schema = {identifier}"),
+            call_timeout,
+        ),
     )
     .map_err(runtime_error);
     if result.is_err() {
@@ -181,11 +226,12 @@ pub(crate) async fn apply_pending_current_schema_from_state_async(
         }
     };
     let result = connection
-        .execute_query_with_timeout(
+        .execute_with(
             cx,
-            &format!("alter session set current_schema = {identifier}"),
-            1,
-            call_timeout,
+            execute_with_call_timeout(
+                &format!("alter session set current_schema = {identifier}"),
+                call_timeout,
+            ),
         )
         .await
         .map_err(|err| err.to_string());
@@ -323,21 +369,15 @@ impl ThinConnImpl {
         apply_pending_current_schema_from_state(&self.state, connection, call_timeout)
     }
 
-    fn execute_with_binds(&self, sql: &str, binds: &[BindValue]) -> PyResult<QueryResult> {
+    fn execute_with_binds(&self, sql: &str, binds: &[BindValue]) -> PyResult<ExecuteOutcome> {
         let call_timeout = self.call_timeout()?;
         let mut guard = self.connection.lock().map_err(runtime_error)?;
         let connection = guard
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
         self.apply_pending_current_schema(connection, call_timeout)?;
-        BlockingConnection::execute_query_with_binds_and_timeout(
-            connection,
-            sql,
-            1,
-            binds,
-            call_timeout,
-        )
-        .map_err(runtime_error)
+        let execute = execute_with_call_timeout(sql, call_timeout).bind(binds.to_vec());
+        BlockingConnection::execute_with(connection, execute).map_err(runtime_error)
     }
 
     fn execute_statement(&self, sql: &str) -> PyResult<()> {
@@ -347,7 +387,7 @@ impl ThinConnImpl {
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
         self.apply_pending_current_schema(connection, call_timeout)?;
-        BlockingConnection::execute_query_with_timeout(connection, sql, 1, call_timeout)
+        BlockingConnection::execute_with(connection, execute_with_call_timeout(sql, call_timeout))
             .map_err(runtime_error)?;
         Ok(())
     }
@@ -364,15 +404,9 @@ impl ThinConnImpl {
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
         self.apply_pending_current_schema(connection, call_timeout)?;
-        let result =
-            BlockingConnection::execute_query_with_timeout(connection, sql, 1, call_timeout)
-                .map_err(runtime_error)?;
-        Ok(result
-            .rows
-            .first()
-            .and_then(|row| row.first())
-            .cloned()
-            .flatten())
+        let rows = query_first_batch_with_binds(connection, sql, 1, Vec::new(), call_timeout)
+            .map_err(runtime_error)?;
+        Ok(rows.first().and_then(|row| row.first()).cloned().flatten())
     }
 
     fn query_first_row_with_binds(
@@ -380,8 +414,15 @@ impl ThinConnImpl {
         sql: &str,
         binds: &[BindValue],
     ) -> PyResult<Option<Vec<Option<QueryValue>>>> {
-        let result = self.execute_with_binds(sql, binds)?;
-        Ok(result.rows.into_iter().next())
+        let call_timeout = self.call_timeout()?;
+        let mut guard = self.connection.lock().map_err(runtime_error)?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+        self.apply_pending_current_schema(connection, call_timeout)?;
+        let rows = query_first_batch_with_binds(connection, sql, 1, binds.to_vec(), call_timeout)
+            .map_err(runtime_error)?;
+        Ok(rows.into_iter().next())
     }
 
     fn query_rows_with_binds(
@@ -395,15 +436,8 @@ impl ThinConnImpl {
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
         self.apply_pending_current_schema(connection, call_timeout)?;
-        let result = BlockingConnection::execute_query_with_binds_and_timeout(
-            connection,
-            sql,
-            100,
-            binds,
-            call_timeout,
-        )
-        .map_err(runtime_error)?;
-        Ok(result.rows)
+        query_first_batch_with_binds(connection, sql, 100, binds.to_vec(), call_timeout)
+            .map_err(runtime_error)
     }
 
     fn query_first_text(&self, sql: &str) -> PyResult<Option<String>> {
@@ -779,7 +813,8 @@ impl ThinConnImpl {
             ],
         )?;
         let oid = result
-            .out_values
+            .out_binds()
+            .values()
             .iter()
             .find_map(|(index, value)| match (index, value) {
                 (2, Some(QueryValue::Raw(bytes))) => Some(bytes.clone()),
@@ -787,7 +822,8 @@ impl ThinConnImpl {
             })
             .or(oid_from_catalog);
         let version = result
-            .out_values
+            .out_binds()
+            .values()
             .iter()
             .find_map(|(index, value)| {
                 (*index == 3)

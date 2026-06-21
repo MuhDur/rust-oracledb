@@ -71,10 +71,12 @@ pub(crate) fn spawn_async_executemany_task(
                         };
                         let row_result = if row.is_empty() {
                             connection
-                                .execute_query_with_timeout(
+                                .execute_raw(
                                     cx,
                                     &statement,
                                     prefetchrows,
+                                    &[],
+                                    ExecuteOptions::default(),
                                     call_timeout,
                                 )
                                 .await
@@ -82,11 +84,12 @@ pub(crate) fn spawn_async_executemany_task(
                         } else {
                             let one_row = vec![row.clone()];
                             connection
-                                .execute_query_with_bind_rows_and_timeout(
+                                .execute_raw(
                                     cx,
                                     &statement,
                                     prefetchrows,
                                     &one_row,
+                                    ExecuteOptions::default(),
                                     call_timeout,
                                 )
                                 .await
@@ -114,7 +117,7 @@ pub(crate) fn spawn_async_executemany_task(
                     return Ok(AsyncExecuteOutcome { result });
                 }
                 let mut result = connection
-                    .execute_query_with_bind_rows_options_and_timeout(
+                    .execute_raw(
                         cx,
                         &statement,
                         prefetchrows,
@@ -198,7 +201,7 @@ pub(crate) fn spawn_async_execute_task(
                 vec![bind_values.clone()]
             };
             let mut result = connection
-                .execute_query_with_bind_rows_options_and_timeout(
+                .execute_raw(
                     &cx,
                     &statement,
                     prefetchrows,

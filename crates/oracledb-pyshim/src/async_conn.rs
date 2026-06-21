@@ -133,7 +133,7 @@ impl AsyncThinConnImpl {
                 move |cx, connection| {
                     Box::pin(async move {
                         connection
-                            .execute_query_with_timeout(cx, &sql, 1, call_timeout)
+                            .execute_with(cx, execute_with_call_timeout(&sql, call_timeout))
                             .await
                             .map(|_| ())
                             .map_err(TaskError::from)

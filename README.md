@@ -87,7 +87,7 @@ Each of these is detailed in [The ledger](#the-better-than-python-oracledb-ledge
 ## Quick example
 
 ```rust
-use oracledb::{BlockingConnection, ConnectOptions, FromRow, QueryResultExt};
+use oracledb::{BlockingConnection, ConnectOptions, FromRow};
 use oracledb::protocol::ClientIdentity;
 
 #[derive(FromRow)]
@@ -455,8 +455,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         let mut conn = Connection::connect(&cx, options).await?;
-        let result = conn.query(&cx, "select 7 + 5 from dual", ()).await?;
-        let sum: i64 = result.get(0, 0)?; // QueryResultExt::get
+        // `query_one` enforces exactly one row and hands back a `Row`.
+        let sum: i64 = conn.query_one(&cx, "select 7 + 5 from dual", ()).await?.get(0)?;
         assert_eq!(sum, 12);
         conn.close(&cx).await?;
         Ok::<_, oracledb::Error>(())
@@ -468,29 +468,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Binds and named parameters
 
 ```rust
-use oracledb::{QueryResultExt, params};
+use oracledb::params;
 
-// Positional: a tuple, a slice, or `params![...]`.
-let r = conn.query(&cx, "select :1 + :2 from dual", (40, 2)).await?;
+// Positional: a tuple, a slice, or `params!{...}`. `query` returns a streaming
+// `Rows` handle; `collect(&cx)` drains every batch into `Vec<Row>`.
+let positional = conn
+    .query(&cx, "select :1 + :2 from dual", (40, 2))
+    .await?
+    .collect(&cx)
+    .await?;
 
 // Named: order-independent; placeholder order in the SQL is resolved for you.
-let r = conn
-    .query_named(
+// `query_one` enforces exactly one row and hands back a single `Row`.
+let row = conn
+    .query_one(
         &cx,
-        "select * from emp where id = :id and name = :name",
+        "select id, name from emp where id = :id and name = :name",
         params!{ ":id" => 40, ":name" => "alice" },
     )
     .await?;
 
-// Pull typed cells out by index or by (case-insensitive) column name.
-let id: i64 = r.get(0, 0)?;
-let name: String = r.get_by_name(0, "name")?;
+// Pull typed cells out of a `Row` by index or by (case-insensitive) column name.
+let id: i64 = row.get(0)?;
+let name: String = row.get("name")?;
 ```
 
 ### Typed rows with `#[derive(FromRow)]`
 
 ```rust
-use oracledb::{FromRow, QueryResultExt};
+use oracledb::FromRow;
 
 #[derive(FromRow)]
 struct Emp {
@@ -499,9 +505,21 @@ struct Emp {
     hired: Option<String>, // NULL -> None; a non-Option NULL is a hard error
 }
 
-let result = conn.query(&cx, "select id, name, hired from emp", ()).await?;
-let emps: Vec<Emp> = result.rows_as::<Emp>()?;
+// `collect(&cx)` drains every batch; map each `Row` through the derived `FromRow`.
+let emps: Vec<Emp> = conn
+    .query(&cx, "select id, name, hired from emp", ())
+    .await?
+    .collect(&cx)
+    .await?
+    .iter()
+    .map(|row| Emp::from_row(&row.typed_row()).map_err(oracledb::Error::Conversion))
+    .collect::<Result<_, _>>()?;
 ```
+
+> The blocking facade has the all-rows shortcut `BlockingConnection::query(...)?.into_typed::<Emp>()`,
+> which collects every batch and maps it in one call (used in the [Quick example](#quick-example)).
+> On the async `Rows`, `into_typed()` maps only the buffered first batch, so the
+> drain-then-map form above is the one to use when you want every row.
 
 ### Feature flags
 
