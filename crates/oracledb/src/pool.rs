@@ -570,8 +570,8 @@ struct PoolState<C> {
     busy: Vec<PooledConn<C>>,
     to_drop: VecDeque<PooledConn<C>>,
     requests: Vec<Request<C>>,
-    open_count: u32,
-    num_to_create: u32,
+    open_effects: VecDeque<lifecycle::PoolEffect>,
+    in_flight_open_effects: VecDeque<lifecycle::PoolEffect>,
     next_conn_id: u64,
     next_request_id: u64,
 }
@@ -649,12 +649,102 @@ fn wake_waiters<B: PoolBackend>(inner: &EngineInner<B>) {
     inner.async_waiters.notify_waiters();
 }
 
+fn saturating_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn request_is_opening<C>(request: &Request<C>) -> bool {
+    request.bg_processing
+        && !request.requires_ping
+        && !request.completed
+        && request.error.is_none()
+        && (request.in_progress || request.is_extra || request.is_replacing)
+}
+
+fn pending_open_count<C>(state: &PoolState<C>) -> u32 {
+    let effect_count = state
+        .open_effects
+        .iter()
+        .chain(state.in_flight_open_effects.iter())
+        .filter(|effect| matches!(effect, lifecycle::PoolEffect::Open { .. }))
+        .count();
+    let request_count = state
+        .requests
+        .iter()
+        .filter(|request| request_is_opening(request))
+        .count();
+    saturating_u32(effect_count.saturating_add(request_count))
+}
+
+fn active_open_count<C>(state: &PoolState<C>) -> u32 {
+    let request_connections = state
+        .requests
+        .iter()
+        .filter(|request| request.conn.is_some())
+        .count();
+    saturating_u32(
+        state
+            .free_new
+            .len()
+            .saturating_add(state.free_used.len())
+            .saturating_add(state.busy.len())
+            .saturating_add(request_connections),
+    )
+}
+
+fn reserved_open_count<C>(state: &PoolState<C>) -> u32 {
+    active_open_count(state).saturating_add(pending_open_count(state))
+}
+
+fn derived_lifecycle_counts<C>(state: &PoolState<C>) -> lifecycle::PoolCounts {
+    lifecycle::PoolCounts {
+        opening: pending_open_count(state) as usize,
+        idle: state.free_new.len().saturating_add(state.free_used.len()),
+        checked_out: state.busy.len(),
+        validating: state
+            .requests
+            .iter()
+            .filter(|request| {
+                request.requires_ping && (request.bg_processing || request.in_progress)
+            })
+            .count(),
+        retiring: state.to_drop.len(),
+        waiters: state
+            .requests
+            .iter()
+            .filter(|request| request.waiting && !request.completed && request.error.is_none())
+            .count(),
+        ..lifecycle::PoolCounts::default()
+    }
+}
+
+fn schedule_open_effects<C>(state: &mut PoolState<C>, count: u32) {
+    for _ in 0..count {
+        let slot = state.next_conn_id;
+        state.next_conn_id += 1;
+        state
+            .open_effects
+            .push_back(lifecycle::PoolEffect::Open { slot, waiter: None });
+    }
+}
+
+fn complete_open_effect<C>(state: &mut PoolState<C>, conn_id: u64) {
+    if let Some(position) = state.in_flight_open_effects.iter().position(|effect| {
+        matches!(
+            effect,
+            lifecycle::PoolEffect::Open { slot, .. } if *slot == conn_id
+        )
+    }) {
+        state.in_flight_open_effects.remove(position);
+    }
+}
+
 fn request_worker_shutdown_locked<B: PoolBackend>(
     state: &mut PoolState<B::Conn>,
     inner: &EngineInner<B>,
 ) {
     state.open = false;
-    state.num_to_create = 0;
+    state.open_effects.clear();
     let free_new = std::mem::take(&mut state.free_new);
     let free_used = std::mem::take(&mut state.free_used);
     let busy = std::mem::take(&mut state.busy);
@@ -833,8 +923,7 @@ impl<B: PoolBackend> PoolEngine<B> {
         } else {
             None
         };
-        let num_to_create = config.min;
-        let state = PoolState {
+        let mut state = PoolState {
             open: true,
             config,
             force_get,
@@ -844,11 +933,13 @@ impl<B: PoolBackend> PoolEngine<B> {
             busy: Vec::new(),
             to_drop: VecDeque::new(),
             requests: Vec::new(),
-            open_count: 0,
-            num_to_create,
+            open_effects: VecDeque::new(),
+            in_flight_open_effects: VecDeque::new(),
             next_conn_id: 1,
             next_request_id: 1,
         };
+        let min = state.config.min;
+        schedule_open_effects(&mut state, min);
         let inner = Arc::new(EngineInner {
             backend,
             state: Mutex::new(state),
@@ -973,7 +1064,6 @@ impl<B: PoolBackend> PoolEngine<B> {
         let Some(position) = state.busy.iter().position(|conn| conn.id == conn_id) else {
             return Ok(());
         };
-        state.open_count = state.open_count.saturating_sub(1);
         let conn = state.busy.remove(position);
         drop_conn(&mut state, inner, conn);
         wake_waiters(inner);
@@ -1019,7 +1109,7 @@ impl<B: PoolBackend> PoolEngine<B> {
     pub(crate) async fn busy_count_async(&self, cx: &Cx) -> Result<u32, PoolError> {
         checkpoint_pool(cx)?;
         let state = lock_state(&self.inner)?;
-        Ok(u32::try_from(state.busy.len()).unwrap_or(u32::MAX))
+        Ok(saturating_u32(derived_lifecycle_counts(&state).checked_out))
     }
 
     pub fn open_count(&self) -> Result<u32, PoolError> {
@@ -1029,7 +1119,7 @@ impl<B: PoolBackend> PoolEngine<B> {
     pub(crate) async fn open_count_async(&self, cx: &Cx) -> Result<u32, PoolError> {
         checkpoint_pool(cx)?;
         let state = lock_state(&self.inner)?;
-        Ok(state.open_count)
+        Ok(active_open_count(&state))
     }
 
     pub fn getmode(&self) -> Result<u32, PoolError> {
@@ -1171,8 +1261,11 @@ fn drop_conn<B: PoolBackend>(
 }
 
 fn ensure_min_connections<B: PoolBackend>(state: &mut PoolState<B::Conn>, inner: &EngineInner<B>) {
-    if state.open && state.open_count < state.config.min {
-        state.num_to_create = state.num_to_create.max(state.config.min - state.open_count);
+    if state.open {
+        let reserved = reserved_open_count(state);
+        if reserved < state.config.min {
+            schedule_open_effects(state, state.config.min - reserved);
+        }
         inner.bg.notify_all();
     }
 }
@@ -1187,7 +1280,6 @@ fn check_connection<B: PoolBackend>(
     conn: PooledConn<B::Conn>,
 ) {
     if !inner.backend.connection_is_open(&conn.conn) {
-        state.open_count = state.open_count.saturating_sub(1);
         drop_conn(state, inner, conn);
         return;
     }
@@ -1195,7 +1287,6 @@ fn check_connection<B: PoolBackend>(
     if max_lifetime > 0
         && conn.time_created.elapsed() > Duration::from_secs(u64::from(max_lifetime))
     {
-        state.open_count = state.open_count.saturating_sub(1);
         drop_conn(state, inner, conn);
         return;
     }
@@ -1322,7 +1413,7 @@ fn fulfill<B: PoolBackend>(
     if let Some(position) = request_position(state, request_id) {
         state.requests[position].requires_ping = false;
     }
-    if state.open_count + state.num_to_create >= state.config.max {
+    if reserved_open_count(state) >= state.config.max {
         if let Some(victim) = state.free_new.pop() {
             if let Some(position) = request_position(state, request_id) {
                 state.requests[position].is_replacing = true;
@@ -1346,11 +1437,9 @@ fn fulfill<B: PoolBackend>(
         } else if state.config.getmode == POOL_GETMODE_NOWAIT {
             return Err(PoolError::NoConnectionAvailable);
         }
-    } else if cclass_matches && state.num_to_create == 0 {
-        state.num_to_create = state
-            .config
-            .increment
-            .min(state.config.max - state.open_count);
+    } else if cclass_matches && pending_open_count(state) == 0 {
+        let remaining_capacity = state.config.max.saturating_sub(reserved_open_count(state));
+        schedule_open_effects(state, state.config.increment.min(remaining_capacity));
     }
     add_request_for_bg(state, inner, request_id);
     Ok(false)
@@ -1383,7 +1472,7 @@ fn peek_next_request<C>(state: &PoolState<C>) -> Option<u64> {
             || request.requires_ping
             || request.is_replacing
             || request.is_extra
-            || state.open_count < state.config.max
+            || (!request.cclass_matches && reserved_open_count(state) < state.config.max)
         {
             return Some(request.id);
         }
@@ -1406,10 +1495,6 @@ fn post_process_request<B: PoolBackend>(
     request.bg_processing = false;
     if request.conn.is_some() {
         request.completed = true;
-        if !request.is_replacing && !request.requires_ping {
-            state.open_count += 1;
-            state.num_to_create = state.num_to_create.saturating_sub(1);
-        }
         let request = &mut state.requests[position];
         if !request.waiting {
             let mut request = state.requests.remove(position);
@@ -1417,10 +1502,7 @@ fn post_process_request<B: PoolBackend>(
         }
     } else {
         if request.requires_ping {
-            state.open_count = state.open_count.saturating_sub(1);
-            if state.num_to_create == 0 && state.open_count < state.config.min {
-                state.num_to_create = state.config.min - state.open_count;
-            }
+            ensure_min_connections(state, inner);
         }
         let request = &mut state.requests[position];
         if !request.waiting {
@@ -1435,22 +1517,40 @@ fn post_process_request<B: PoolBackend>(
 fn post_create_conn<B: PoolBackend>(
     state: &mut PoolState<B::Conn>,
     inner: &EngineInner<B>,
-    created: Option<PooledConn<B::Conn>>,
+    conn_id: u64,
+    created: Result<PooledConn<B::Conn>, String>,
 ) {
-    let Some(conn) = created else {
-        state.num_to_create = 0;
-        return;
+    complete_open_effect(state, conn_id);
+    let conn = match created {
+        Ok(conn) => conn,
+        Err(error) => {
+            if state.open {
+                if let Some(request) = state.requests.iter_mut().find(|request| {
+                    request.bg_processing
+                        && request.waiting
+                        && !request.requires_ping
+                        && !request.is_extra
+                        && !request.is_replacing
+                        && request.cclass_matches
+                        && request.conn.is_none()
+                }) {
+                    request.bg_processing = false;
+                    request.error = Some(error);
+                    wake_waiters(inner);
+                }
+            }
+            return;
+        }
     };
+    debug_assert_eq!(conn.id, conn_id);
     if !state.open {
         state.to_drop.push_back(conn);
         inner.bg.notify_all();
         return;
     }
-    state.open_count += 1;
-    state.num_to_create = state.num_to_create.saturating_sub(1);
     let mut conn = Some(conn);
     let max = state.config.max;
-    let open_count = state.open_count;
+    let open_count = active_open_count(state).saturating_add(1);
     for request in &mut state.requests {
         if request.in_progress
             || request.conn.is_some()
@@ -1487,20 +1587,14 @@ fn return_connection_helper<B: PoolBackend>(
     mut is_open: bool,
 ) {
     if !is_open {
-        state.open_count = state.open_count.saturating_sub(1);
         ensure_min_connections(state, inner);
     }
     if conn.is_pool_extra {
         conn.is_pool_extra = false;
-        if is_open && state.open_count >= state.config.max {
-            if !state.free_new.is_empty() && state.open_count == state.config.max {
-                let victim = state.free_new.remove(0);
-                drop_conn(state, inner, victim);
-            } else {
-                state.open_count = state.open_count.saturating_sub(1);
-                drop_conn(state, inner, conn);
-                return;
-            }
+        let count_with_returned = active_open_count(state).saturating_add(u32::from(is_open));
+        if is_open && count_with_returned > state.config.max {
+            drop_conn(state, inner, conn);
+            return;
         }
     }
     let mut returned = Some(conn);
@@ -1511,7 +1605,6 @@ fn return_connection_helper<B: PoolBackend>(
         if max_lifetime != 0
             && conn.time_created.elapsed() > Duration::from_secs(u64::from(max_lifetime))
         {
-            state.open_count = state.open_count.saturating_sub(1);
             let conn = returned.take().expect("connection still available");
             drop_conn(state, inner, conn);
             is_open = false;
@@ -1557,7 +1650,7 @@ fn sweep_idle_timeout<B: PoolBackend>(state: &mut PoolState<B::Conn>, inner: &En
     let limit = Duration::from_secs(u64::from(timeout_secs));
     for list in ["new", "used"] {
         loop {
-            if state.open_count <= state.config.min {
+            if active_open_count(state) <= state.config.min {
                 return;
             }
             let conns = if list == "new" {
@@ -1572,7 +1665,6 @@ fn sweep_idle_timeout<B: PoolBackend>(state: &mut PoolState<B::Conn>, inner: &En
                 break;
             }
             let conn = conns.remove(0);
-            state.open_count = state.open_count.saturating_sub(1);
             drop_conn(state, inner, conn);
         }
     }
@@ -1607,27 +1699,26 @@ fn bg_main<B: PoolBackend>(inner: Arc<EngineInner<B>>) {
             }
         }
 
-        // Create a connection for pool growth if requested.
-        let (num_to_create, conn_id, cclass) = {
+        // Create a connection for an explicit pool growth effect if requested.
+        let (open_effect, cclass) = {
             let Ok(mut state) = inner.state.lock() else {
                 return;
             };
             open = state.open;
-            let id = state.next_conn_id;
-            if state.num_to_create > 0 && open {
-                state.next_conn_id += 1;
-            }
-            (
-                state.num_to_create,
-                id,
-                state.config.creation_cclass.clone(),
-            )
+            let effect = if open {
+                if let Some(effect) = state.open_effects.pop_front() {
+                    state.in_flight_open_effects.push_back(effect);
+                }
+                state.in_flight_open_effects.back().copied()
+            } else {
+                None
+            };
+            (effect, state.config.creation_cclass.clone())
         };
-        if num_to_create > 0 && open {
+        if let Some(lifecycle::PoolEffect::Open { slot: conn_id, .. }) = open_effect {
             let created = inner
                 .backend
                 .create_connection(conn_id, cclass.as_deref())
-                .ok()
                 .map(|conn| PooledConn {
                     id: conn_id,
                     conn,
@@ -1640,7 +1731,7 @@ fn bg_main<B: PoolBackend>(inner: Arc<EngineInner<B>>) {
             let Ok(mut state) = inner.state.lock() else {
                 return;
             };
-            post_create_conn(&mut state, &inner, created);
+            post_create_conn(&mut state, &inner, conn_id, created);
             continue;
         }
 
@@ -1665,14 +1756,14 @@ fn bg_main<B: PoolBackend>(inner: Arc<EngineInner<B>>) {
             if !state.open && state.to_drop.is_empty() {
                 return;
             }
-            let has_work = state.num_to_create > 0
+            let has_work = !state.open_effects.is_empty()
                 || !state.to_drop.is_empty()
                 || peek_next_request(&state).is_some();
             if has_work {
                 continue;
             }
             let timeout_armed = state.config.timeout_secs > 0
-                && state.open_count > state.config.min
+                && active_open_count(&state) > state.config.min
                 && (!state.free_new.is_empty() || !state.free_used.is_empty());
             if timeout_armed {
                 match inner.bg.wait_timeout(state, Duration::from_secs(1)) {
@@ -1720,7 +1811,7 @@ fn process_request<B: PoolBackend>(inner: &Arc<EngineInner<B>>, request_id: u64)
                 },
                 None => Work::Nothing,
             }
-        } else if request.requires_ping || request.is_replacing || request.waiting {
+        } else if request.is_replacing || request.is_extra || !request.cclass_matches {
             let cclass = request.cclass.clone();
             let is_extra = request.is_extra;
             let replaced = request.conn.take();
@@ -2295,6 +2386,11 @@ mod tests {
         );
     }
 
+    fn pool_counts<B: PoolBackend>(engine: &PoolEngine<B>) -> PoolCounts {
+        let state = engine.inner.state.lock().unwrap();
+        derived_lifecycle_counts(&state)
+    }
+
     #[test]
     fn grows_to_min_and_reuses_lifo() {
         let backend = Arc::new(FakeBackend::new());
@@ -2304,10 +2400,35 @@ mod tests {
         )
         .unwrap();
         wait_for_open_count(&engine, 2);
+        assert_eq!(
+            pool_counts(&engine),
+            PoolCounts {
+                idle: 2,
+                ..PoolCounts::default()
+            },
+            "production counts must be derived from idle payload state after min growth"
+        );
         let first = engine.acquire(AcquireOptions::default()).unwrap();
         assert_eq!(engine.busy_count().unwrap(), 1);
+        assert_eq!(
+            pool_counts(&engine),
+            PoolCounts {
+                idle: 1,
+                checked_out: 1,
+                ..PoolCounts::default()
+            },
+            "public busy count must mirror derived checked-out lifecycle state"
+        );
         engine.return_connection(first).unwrap();
         assert_eq!(engine.busy_count().unwrap(), 0);
+        assert_eq!(
+            pool_counts(&engine),
+            PoolCounts {
+                idle: 2,
+                ..PoolCounts::default()
+            },
+            "returning a connection must restore derived idle state without a stored counter"
+        );
         let second = engine.acquire(AcquireOptions::default()).unwrap();
         assert_eq!(second, first, "expected LIFO reuse of returned connection");
         engine.return_connection(second).unwrap();
@@ -2388,6 +2509,14 @@ mod tests {
         let closer = std::thread::spawn(move || close_engine.close(true));
         wait_for_pool_closed_flag(&engine);
         assert_eq!(
+            pool_counts(&engine),
+            PoolCounts {
+                opening: 1,
+                ..PoolCounts::default()
+            },
+            "force close must retain the in-flight open as a derived opening effect"
+        );
+        assert_eq!(
             backend.closed.load(Ordering::SeqCst),
             0,
             "close must wait for the in-flight create result before returning"
@@ -2403,6 +2532,11 @@ mod tests {
             backend.closed.load(Ordering::SeqCst),
             1,
             "created connection must be rejected into the close queue"
+        );
+        assert_eq!(
+            pool_counts(&engine),
+            PoolCounts::default(),
+            "joined close must drain request lifecycle metadata and close effects"
         );
     }
 
@@ -2452,6 +2586,50 @@ mod tests {
         wait_for_open_count(&engine, 2);
         engine.return_connection(a).unwrap();
         engine.return_connection(b).unwrap();
+        engine.close(false).unwrap();
+    }
+
+    #[test]
+    fn cclass_mismatch_uses_dedicated_opening_without_pool_growth_leak() {
+        let backend = Arc::new(FakeBackend::new());
+        let mut config = test_config(0, 2, 1, POOL_GETMODE_WAIT);
+        config.creation_cclass = Some("pool".to_string());
+        let engine = PoolEngine::start(Arc::clone(&backend), config).unwrap();
+
+        let custom = engine
+            .acquire(AcquireOptions {
+                wants_new: false,
+                cclass: Some("custom".to_string()),
+            })
+            .unwrap();
+
+        assert_eq!(engine.open_count().unwrap(), 1);
+        assert_eq!(
+            pool_counts(&engine),
+            PoolCounts {
+                checked_out: 1,
+                ..PoolCounts::default()
+            },
+            "custom cclass request creates must be represented as checked-out payload state"
+        );
+        engine.return_connection(custom).unwrap();
+        assert_eq!(
+            pool_counts(&engine),
+            PoolCounts {
+                idle: 1,
+                ..PoolCounts::default()
+            },
+            "dedicated cclass create must not leave queued pool-growth effects behind"
+        );
+
+        let reused = engine
+            .acquire(AcquireOptions {
+                wants_new: false,
+                cclass: Some("custom".to_string()),
+            })
+            .unwrap();
+        assert_eq!(reused, custom);
+        engine.return_connection(reused).unwrap();
         engine.close(false).unwrap();
     }
 
@@ -2637,6 +2815,14 @@ mod tests {
 
         assert!(matches!(err, PoolError::Cancelled(_)));
         assert_eq!(engine.busy_count().unwrap(), 0);
+        assert_eq!(
+            pool_counts(&engine),
+            PoolCounts {
+                idle: 1,
+                ..PoolCounts::default()
+            },
+            "cancelled waiter must leave no queued lifecycle metadata"
+        );
         let reacquired = engine.acquire(AcquireOptions::default()).unwrap();
         assert_eq!(
             reacquired, held,
@@ -2675,6 +2861,14 @@ mod tests {
             drop(pending);
         });
 
+        assert_eq!(
+            pool_counts(&engine),
+            PoolCounts {
+                checked_out: 1,
+                ..PoolCounts::default()
+            },
+            "dropping a pending acquire must remove the waiter from derived lifecycle counts"
+        );
         assert_eq!(
             engine.busy_count().unwrap(),
             1,
