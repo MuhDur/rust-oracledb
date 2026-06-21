@@ -598,6 +598,25 @@ impl<B: PoolBackend> Clone for PoolEngine<B> {
     }
 }
 
+impl<B: PoolBackend> Drop for PoolEngine<B> {
+    fn drop(&mut self) {
+        // The worker owns one Arc. Seeing at most two strong refs here means
+        // this is the last external pool handle, so Drop must request shutdown
+        // without waiting for the worker to finish.
+        if Arc::strong_count(&self.inner) > 2 {
+            return;
+        }
+        if let Ok(mut state) = self.inner.state.lock() {
+            if state.open {
+                request_worker_shutdown_locked(&mut state, &self.inner);
+            } else {
+                self.inner.bg.notify_all();
+                wake_waiters(&self.inner);
+            }
+        }
+    }
+}
+
 type Locked<'a, C> = std::sync::MutexGuard<'a, PoolState<C>>;
 
 fn lock_state<B: PoolBackend>(inner: &EngineInner<B>) -> Result<Locked<'_, B::Conn>, PoolError> {
@@ -628,6 +647,53 @@ where
 
 fn wake_waiters<B: PoolBackend>(inner: &EngineInner<B>) {
     inner.async_waiters.notify_waiters();
+}
+
+fn request_worker_shutdown_locked<B: PoolBackend>(
+    state: &mut PoolState<B::Conn>,
+    inner: &EngineInner<B>,
+) {
+    state.open = false;
+    state.num_to_create = 0;
+    let free_new = std::mem::take(&mut state.free_new);
+    let free_used = std::mem::take(&mut state.free_used);
+    let busy = std::mem::take(&mut state.busy);
+    state
+        .to_drop
+        .extend(free_new.into_iter().chain(free_used).chain(busy));
+    let mut in_flight = Vec::new();
+    for mut request in std::mem::take(&mut state.requests) {
+        request.waiting = false;
+        if let Some(conn) = request.conn.take() {
+            state.to_drop.push_back(conn);
+        }
+        if request.in_progress {
+            in_flight.push(request);
+        }
+    }
+    state.requests = in_flight;
+    inner.bg.notify_all();
+    wake_waiters(inner);
+}
+
+fn request_worker_shutdown<B: PoolBackend>(
+    inner: &EngineInner<B>,
+    force: bool,
+) -> Result<(), PoolError> {
+    let mut state = lock_state(inner)?;
+    if !state.open {
+        inner.bg.notify_all();
+        wake_waiters(inner);
+        return Ok(());
+    }
+    if !force {
+        let has_waiters = state.requests.iter().any(|request| request.waiting);
+        if !state.busy.is_empty() || has_waiters {
+            return Err(PoolError::HasBusyConnections);
+        }
+    }
+    request_worker_shutdown_locked(&mut state, inner);
+    Ok(())
 }
 
 struct AsyncAcquireRequest<'a, B: PoolBackend> {
@@ -931,27 +997,7 @@ impl<B: PoolBackend> PoolEngine<B> {
 
     fn close_impl(&self, force: bool) -> Result<(), PoolError> {
         let inner = &*self.inner;
-        {
-            let mut state = lock_state(inner)?;
-            if !state.open {
-                return Ok(());
-            }
-            if !force {
-                let has_waiters = state.requests.iter().any(|request| request.waiting);
-                if !state.busy.is_empty() || has_waiters {
-                    return Err(PoolError::HasBusyConnections);
-                }
-            }
-            state.open = false;
-            let free_new = std::mem::take(&mut state.free_new);
-            let free_used = std::mem::take(&mut state.free_used);
-            let busy = std::mem::take(&mut state.busy);
-            state
-                .to_drop
-                .extend(free_new.into_iter().chain(free_used).chain(busy));
-            inner.bg.notify_all();
-            wake_waiters(inner);
-        }
+        request_worker_shutdown(inner, force)?;
         let handle = self
             .inner
             .bg_handle
@@ -1093,6 +1139,13 @@ fn reject<B: PoolBackend>(
     request: &mut Request<B::Conn>,
 ) {
     if let Some(mut conn) = request.conn.take() {
+        if !state.open {
+            conn.is_pool_extra = false;
+            state.to_drop.push_back(conn);
+            inner.bg.notify_all();
+            wake_waiters(inner);
+            return;
+        }
         if conn.is_pool_extra {
             conn.is_pool_extra = false;
             state.to_drop.push_back(conn);
@@ -1118,7 +1171,7 @@ fn drop_conn<B: PoolBackend>(
 }
 
 fn ensure_min_connections<B: PoolBackend>(state: &mut PoolState<B::Conn>, inner: &EngineInner<B>) {
-    if state.open_count < state.config.min {
+    if state.open && state.open_count < state.config.min {
         state.num_to_create = state.num_to_create.max(state.config.min - state.open_count);
         inner.bg.notify_all();
     }
@@ -2086,12 +2139,80 @@ mod tests {
         }
     }
 
+    struct BlockingCreateBackend {
+        created: AtomicU64,
+        closed: AtomicU64,
+        entered_create: AtomicBool,
+        allow_create: Mutex<bool>,
+        create_ready: Condvar,
+    }
+
+    impl BlockingCreateBackend {
+        fn new() -> Self {
+            Self {
+                created: AtomicU64::new(0),
+                closed: AtomicU64::new(0),
+                entered_create: AtomicBool::new(false),
+                allow_create: Mutex::new(false),
+                create_ready: Condvar::new(),
+            }
+        }
+
+        fn wait_for_create_started(&self) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if self.entered_create.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                self.entered_create.load(Ordering::SeqCst),
+                "worker never started the in-flight create"
+            );
+        }
+
+        fn release_create(&self) {
+            *self.allow_create.lock().unwrap() = true;
+            self.create_ready.notify_all();
+        }
+    }
+
     impl PoolBackend for Arc<FakeBackend> {
         type Conn = FakeConn;
 
         fn create_connection(&self, _id: u64, _cclass: Option<&str>) -> Result<FakeConn, String> {
             if self.fail_creation.load(Ordering::SeqCst) {
                 return Err("server returned Oracle error: ORA-01017: bad password".to_string());
+            }
+            self.created.fetch_add(1, Ordering::SeqCst);
+            Ok(FakeConn {
+                alive: Arc::new(AtomicBool::new(true)),
+            })
+        }
+
+        fn ping_connection(&self, conn: &FakeConn, _ping_timeout_ms: u32) -> bool {
+            conn.alive.load(Ordering::SeqCst)
+        }
+
+        fn close_connection(&self, _id: u64, conn: FakeConn) {
+            conn.alive.store(false, Ordering::SeqCst);
+            self.closed.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn connection_is_open(&self, conn: &FakeConn) -> bool {
+            conn.alive.load(Ordering::SeqCst)
+        }
+    }
+
+    impl PoolBackend for Arc<BlockingCreateBackend> {
+        type Conn = FakeConn;
+
+        fn create_connection(&self, _id: u64, _cclass: Option<&str>) -> Result<FakeConn, String> {
+            self.entered_create.store(true, Ordering::SeqCst);
+            let mut allow_create = self.allow_create.lock().unwrap();
+            while !*allow_create {
+                allow_create = self.create_ready.wait(allow_create).unwrap();
             }
             self.created.fetch_add(1, Ordering::SeqCst);
             Ok(FakeConn {
@@ -2143,6 +2264,37 @@ mod tests {
         );
     }
 
+    fn wait_for_worker_exit<B: PoolBackend>(weak: &std::sync::Weak<EngineInner<B>>) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if weak.upgrade().is_none() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            weak.upgrade().is_none(),
+            "pool worker kept EngineInner alive after the last external handle was dropped"
+        );
+    }
+
+    fn wait_for_pool_closed_flag<B: PoolBackend>(engine: &PoolEngine<B>) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Ok(state) = engine.inner.state.try_lock() {
+                if !state.open {
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let state = engine.inner.state.lock().unwrap();
+        assert!(
+            !state.open,
+            "close could not mark the pool closed while backend create was in flight"
+        );
+    }
+
     #[test]
     fn grows_to_min_and_reuses_lifo() {
         let backend = Arc::new(FakeBackend::new());
@@ -2188,6 +2340,91 @@ mod tests {
         );
         engine.return_connection(acquired).unwrap();
         engine.close(false).unwrap();
+    }
+
+    #[test]
+    fn async_close_joins_worker_and_closes_idle_connections() {
+        let backend = Arc::new(FakeBackend::new());
+        let engine = PoolEngine::start(
+            Arc::clone(&backend),
+            test_config(1, 1, 1, POOL_GETMODE_WAIT),
+        )
+        .unwrap();
+        wait_for_open_count(&engine, 1);
+
+        let runtime = crate::build_io_runtime().expect("asupersync runtime");
+        runtime
+            .block_on(async {
+                let cx = Cx::current().expect("asupersync installs an ambient Cx");
+                engine.close_async(&cx, false).await
+            })
+            .unwrap();
+
+        assert!(
+            engine.inner.bg_handle.lock().unwrap().is_none(),
+            "async close must join and consume the worker handle"
+        );
+        assert_eq!(
+            backend.closed.load(Ordering::SeqCst),
+            1,
+            "close must let the worker close idle connections before returning"
+        );
+    }
+
+    #[test]
+    fn force_close_waits_for_in_flight_create_and_closes_result() {
+        let backend = Arc::new(BlockingCreateBackend::new());
+        let engine = PoolEngine::start(
+            Arc::clone(&backend),
+            test_config(0, 1, 1, POOL_GETMODE_WAIT),
+        )
+        .unwrap();
+
+        let acquire_engine = engine.clone();
+        let acquire = std::thread::spawn(move || acquire_engine.acquire(AcquireOptions::default()));
+        backend.wait_for_create_started();
+
+        let close_engine = engine.clone();
+        let closer = std::thread::spawn(move || close_engine.close(true));
+        wait_for_pool_closed_flag(&engine);
+        assert_eq!(
+            backend.closed.load(Ordering::SeqCst),
+            0,
+            "close must wait for the in-flight create result before returning"
+        );
+
+        backend.release_create();
+        closer.join().expect("close thread").unwrap();
+        assert!(matches!(
+            acquire.join().expect("acquire thread"),
+            Err(PoolError::Closed)
+        ));
+        assert_eq!(
+            backend.closed.load(Ordering::SeqCst),
+            1,
+            "created connection must be rejected into the close queue"
+        );
+    }
+
+    #[test]
+    fn dropping_last_pool_handle_stops_worker_without_joining() {
+        let backend = Arc::new(FakeBackend::new());
+        let engine = PoolEngine::start(
+            Arc::clone(&backend),
+            test_config(1, 1, 1, POOL_GETMODE_WAIT),
+        )
+        .unwrap();
+        wait_for_open_count(&engine, 1);
+        let weak = Arc::downgrade(&engine.inner);
+
+        drop(engine);
+
+        wait_for_worker_exit(&weak);
+        assert_eq!(
+            backend.closed.load(Ordering::SeqCst),
+            1,
+            "dropping the last pool handle must request forced worker shutdown"
+        );
     }
 
     #[test]

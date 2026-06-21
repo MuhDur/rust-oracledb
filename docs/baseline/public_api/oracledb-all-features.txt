@@ -181,6 +181,8 @@ pub fn oracledb::pool::PoolEngine<B>::timeout_secs(&self) -> core::result::Resul
 pub fn oracledb::pool::PoolEngine<B>::wait_timeout_ms(&self) -> core::result::Result<core::option::Option<u32>, oracledb::pool::PoolError>
 impl<B: oracledb::pool::PoolBackend> core::clone::Clone for oracledb::pool::PoolEngine<B>
 pub fn oracledb::pool::PoolEngine<B>::clone(&self) -> Self
+impl<B: oracledb::pool::PoolBackend> core::ops::drop::Drop for oracledb::pool::PoolEngine<B>
+pub fn oracledb::pool::PoolEngine<B>::drop(&mut self)
 pub const oracledb::pool::POOL_GETMODE_FORCEGET: u32
 pub const oracledb::pool::POOL_GETMODE_NOWAIT: u32
 pub const oracledb::pool::POOL_GETMODE_TIMEDWAIT: u32
