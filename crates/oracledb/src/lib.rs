@@ -130,6 +130,7 @@ use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use asupersync::net::TcpStream;
 use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
 use asupersync::sync::Mutex as AsyncMutex;
+use asupersync::types::{CancelKind, CancelReason};
 use asupersync::{time, Cx};
 use oracledb_protocol::thin::aq::{
     build_aq_array_deq_payload, build_aq_array_enq_payload, build_aq_deq_payload,
@@ -615,16 +616,127 @@ where
     classify_recovery_result(action, result)
 }
 
+/// How a driver operation should dispose of the connection when asupersync
+/// cancels it, derived from the structured [`CancelKind`] — never from a display
+/// string. This is the internal half of the W1-T6 *Outcome/CancelKind
+/// discipline*: cancellation is not "just another error", so each kind drives a
+/// specific recovery posture before we flatten to the public [`Error`] at the
+/// boundary.
+///
+/// The mapping mirrors the asupersync severity model (`Timeout` ≈ retry/degrade,
+/// `Shutdown` ≈ stop and close, `RaceLost` ≈ loser drains quietly):
+///
+/// | [`CancelKind`]                                   | [`CancelDisposition`] | Public [`Error`]              | Connection |
+/// |--------------------------------------------------|-----------------------|-------------------------------|------------|
+/// | `Timeout`/`Deadline`/`PollQuota`/`CostBudget`    | `Timeout`             | [`Error::CallTimeout`]        | reusable, retryable |
+/// | `Shutdown`/`ResourceUnavailable`/`LinkedExit`    | `Close`               | [`Error::ConnectionClosed`]   | dead       |
+/// | `User`/`RaceLost`/`FailFast`/`ParentCancelled`   | `Cancel`              | [`Error::Cancelled`]          | reusable, retryable |
+///
+/// `Timeout` and `Cancel` both leave the session alive (the wire is drained to a
+/// clean boundary by the call-timeout / cancel recovery path), so the surfaced
+/// error is connection-*reusable* and carries a conservative `retry_hint()`.
+/// `Close` is the only disposition that marks the connection dead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CancelDisposition {
+    /// Budget/deadline exhaustion: drain the wire and surface a retryable
+    /// timeout on a still-reusable connection.
+    Timeout,
+    /// Runtime shutdown / unrecoverable resource loss: the connection must be
+    /// discarded.
+    Close,
+    /// An explicit or topological cancel (user cancel, race loser, fail-fast
+    /// sibling, parent region closing): drain quietly and surface a distinct,
+    /// retryable cancel — never a generic I/O or runtime error.
+    Cancel,
+}
+
+impl CancelDisposition {
+    /// Classify a [`CancelKind`] into the driver's recovery posture. Pure and
+    /// total over the asupersync enum. The match is exhaustive (no `_` arm) on
+    /// purpose: if a future asupersync release adds a `CancelKind` variant, this
+    /// fails to compile and forces a deliberate disposition choice rather than
+    /// silently defaulting a new kind to a connection close.
+    fn from_kind(kind: CancelKind) -> Self {
+        match kind {
+            // Deadline / quota exhaustion is the timeout family: the operation
+            // ran out of its budget. The session survives once the wire drains,
+            // so it composes exactly like a `call_timeout` (DPY-4024).
+            CancelKind::Timeout
+            | CancelKind::Deadline
+            | CancelKind::PollQuota
+            | CancelKind::CostBudget => CancelDisposition::Timeout,
+            // Runtime is shutting down, or a resource the connection depends on
+            // is gone, or a linked task died abnormally — stop acquiring work
+            // and discard this connection rather than reuse it.
+            CancelKind::Shutdown | CancelKind::ResourceUnavailable | CancelKind::LinkedExit => {
+                CancelDisposition::Close
+            }
+            // Explicit user cancel, or topological cancellation (race loser,
+            // fail-fast sibling, parent region closing). The session is alive;
+            // the loser/owner just drains quietly.
+            CancelKind::User
+            | CancelKind::RaceLost
+            | CancelKind::FailFast
+            | CancelKind::ParentCancelled => CancelDisposition::Cancel,
+        }
+    }
+
+    /// The public-boundary [`Error`] this disposition flattens to. This is the
+    /// ONLY place a cancellation crosses from the internal Outcome/CancelKind
+    /// world into a `Result`; `Cancelled` is always a distinct variant, never a
+    /// generic [`Error::Runtime`] or [`Error::Io`].
+    fn into_error(self, timeout_ms: u32) -> Error {
+        match self {
+            CancelDisposition::Timeout => Error::CallTimeout(timeout_ms),
+            CancelDisposition::Close => {
+                Error::ConnectionClosed("operation cancelled by runtime shutdown".into())
+            }
+            CancelDisposition::Cancel => Error::Cancelled,
+        }
+    }
+}
+
+/// Read the structured cancel disposition for a context known to be cancelled.
+/// Falls back to [`CancelDisposition::Cancel`] when no [`CancelReason`] is
+/// attached (a cancel with no recorded kind is still a cancel, never a runtime
+/// error). Pure inspection of [`CancelReason::kind`] — no display parsing.
+fn cancel_disposition(reason: Option<CancelReason>) -> CancelDisposition {
+    reason
+        .map(|reason| CancelDisposition::from_kind(reason.kind))
+        .unwrap_or(CancelDisposition::Cancel)
+}
+
 /// Contract checkpoint for multi-round-trip loops: call after the previous
 /// round trip has reached a clean boundary and before issuing the next one.
+///
+/// On a clean checkpoint this is `Ok(())`. When asupersync has cancelled the
+/// context, the checkpoint fails and we branch on the structured [`CancelKind`]
+/// to flatten it to the right *distinct* public error — a timeout
+/// ([`Error::CallTimeout`]), a shutdown close ([`Error::ConnectionClosed`]), or
+/// an explicit cancel ([`Error::Cancelled`]) — instead of the old
+/// `Error::Runtime(display_string)`. Because this runs at a clean between-round-
+/// trip boundary (no bytes in flight), there is nothing to drain here; the
+/// recovery drain happens in the in-operation timeout/cancel path
+/// ([`Connection::recover_from_call_timeout`]).
 ///
 /// Recovery drains are the exception: they run without the expired caller `Cx`
 /// and are bounded by their fresh recovery deadline instead.
 /// Single wire round trips that internally write/read multiple frames (pipeline,
 /// packet reassembly) are not clean boundaries until the whole response drains.
 fn observe_cancellation_between_round_trips(cx: &Cx) -> Result<()> {
-    cx.checkpoint()
-        .map_err(|err| Error::Runtime(err.to_string()))
+    if cx.checkpoint().is_ok() {
+        return Ok(());
+    }
+    // Cancelled: map the structured kind to a distinct public error. The
+    // between-round-trip boundary has no in-flight wire, so the `timeout_ms`
+    // here is the context's remaining budget (best-effort) for the timeout
+    // family; the cancel/close arms ignore it.
+    let timeout_ms = cx
+        .budget()
+        .remaining_time(time::wall_now())
+        .map(duration_to_millis_saturating)
+        .unwrap_or(0);
+    Err(cancel_disposition(cx.cancel_reason()).into_error(timeout_ms))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3266,8 +3378,7 @@ impl Connection {
     /// session whose `program` / `machine` / `osuser` / `terminal` are exactly
     /// the identity fields.
     pub async fn connect(cx: &Cx, options: ConnectOptions) -> Result<Self> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let protocol_limits = options.protocol_limits.validate()?;
         let descriptor = EasyConnect::parse(&options.connect_string)?;
         // Connect span (feature-gated, zero-cost when off). Carries only the
@@ -3592,8 +3703,7 @@ impl Connection {
         old_password: &str,
         new_password: &str,
     ) -> Result<()> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let (encoded_password, encoded_newpassword) =
             oracledb_protocol::crypto::encrypt_change_password_pair(
                 &self.combo_key,
@@ -3633,8 +3743,7 @@ impl Connection {
         grouping_value: u32,
         grouping_type: u8,
     ) -> Result<SubscribeResult> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_subscribe_payload_with_seq(
             seq_num,
@@ -3680,8 +3789,7 @@ impl Connection {
         grouping_value: u32,
         grouping_type: u8,
     ) -> Result<()> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         // unregister reuses the same `_write_message` path: the name/qos/
         // operations/grouping fields mirror the original registration so the
@@ -3718,8 +3826,7 @@ impl Connection {
     /// packets are consumed by [`Self::recv_notification`]. Reference
     /// `ThinSubscrImpl._bg_task_func` (sends NOTIFY then blocks reading).
     pub async fn notify_register(&mut self, cx: &Cx, client_id: &[u8]) -> Result<()> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload =
             build_notify_payload_with_seq(seq_num, client_id, self.capabilities.ttc_field_version)?;
@@ -3747,8 +3854,7 @@ impl Connection {
         public_qos: u32,
         read_timeout: Duration,
     ) -> Result<NotificationOutcome> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let db_name = self.descriptor.service_name.clone();
         loop {
             observe_cancellation_between_round_trips(cx)?;
@@ -4000,8 +4106,7 @@ impl Connection {
             return Ok(());
         }
         // send the begin/resume immediately
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_tpc_txn_switch_payload_with_seq(
             seq_num,
@@ -4073,8 +4178,7 @@ impl Connection {
             }
             Some(_) => {}
         }
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_tpc_txn_switch_payload_with_seq(
             seq_num,
@@ -4109,8 +4213,7 @@ impl Connection {
         xid: Option<&TpcXid<'_>>,
         context: Option<&[u8]>,
     ) -> Result<TpcSwitchResponse> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload =
             build_tpc_switch_payload_with_seq(seq_num, operation, flags, timeout, xid, context);
@@ -4134,8 +4237,7 @@ impl Connection {
         xid: Option<&TpcXid<'_>>,
         context: Option<&[u8]>,
     ) -> Result<TpcChangeStateResponse> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_tpc_change_state_payload_with_seq(
             seq_num,
@@ -5030,8 +5132,7 @@ impl Connection {
             db.bind_rows = bind_rows.len() as u64,
             db.rows_fetched = tracing::field::Empty,
         );
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         if !exec_options.scroll_operation() {
             crate::sql_convert::validate_bind_rows_shape(sql, bind_rows)?;
         }
@@ -5374,8 +5475,7 @@ impl Connection {
             db.arraysize = arraysize as u64,
             db.rows_fetched = tracing::field::Empty,
         );
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         // If a prior fetch future was cancelled mid-read, break + drain the
         // stranded call before issuing this fetch (Scope-based cancel-on-drop).
         self.ensure_clean_before_request().await?;
@@ -5432,8 +5532,7 @@ impl Connection {
         arraysize: u32,
         previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
     ) -> Result<BorrowedFetchResult> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
         trace_query_bytes("FETCH payload", &payload);
@@ -5498,8 +5597,7 @@ impl Connection {
         cursor_id: u32,
         arraysize: u32,
     ) -> Result<()> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         // A request must start from a clean boundary: if a prior cancelled op
         // left a drain pending, break + drain it first.
         self.ensure_clean_before_request().await?;
@@ -5539,8 +5637,7 @@ impl Connection {
         cursor_id: u32,
         previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
     ) -> Result<BorrowedFetchResult> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         // Read under the cancel-on-drop guard. NOTE: do NOT
         // `ensure_clean_before_request` here — the InFlight phase is set by our
         // own `fetch_rows_request` and marks the response we are about to read
@@ -5705,8 +5802,7 @@ impl Connection {
         define_columns: &[ColumnMetadata],
         previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
     ) -> Result<QueryResult> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload =
             build_define_fetch_payload_with_seq(cursor_id, arraysize, seq_num, define_columns)?;
@@ -5901,8 +5997,7 @@ impl Connection {
         fetch_orientation: u32,
         fetch_pos: u32,
     ) -> Result<QueryResult> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let exec_options = ExecuteOptions::default()
             .with_cursor_id(cursor_id)
             .with_scrollable(true)
@@ -5970,8 +6065,7 @@ impl Connection {
             db.lob_offset = offset,
             db.lob_amount = amount,
         );
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_lob_read_payload_with_seq(
             locator,
@@ -6013,8 +6107,7 @@ impl Connection {
         props: &AqMsgProps,
         enq_options: &AqEnqOptions,
     ) -> Result<Option<Vec<u8>>> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         self.protocol_limits.check_frame_bytes(queue.name.len())?;
         self.protocol_limits
             .check_frame_bytes(queue.payload_toid.len())?;
@@ -6046,8 +6139,7 @@ impl Connection {
         queue: &AqQueueDesc,
         deq_options: &AqDeqOptions,
     ) -> Result<AqDeqResult> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         self.protocol_limits.check_frame_bytes(queue.name.len())?;
         self.protocol_limits
             .check_frame_bytes(queue.payload_toid.len())?;
@@ -6079,8 +6171,7 @@ impl Connection {
         props_list: &[AqMsgProps],
         enq_options: &AqEnqOptions,
     ) -> Result<Vec<Vec<u8>>> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         self.protocol_limits.check_batch_rows(props_list.len())?;
         self.protocol_limits.check_frame_bytes(queue.name.len())?;
         self.protocol_limits
@@ -6118,8 +6209,7 @@ impl Connection {
         deq_options: &AqDeqOptions,
         max_num_messages: u32,
     ) -> Result<Vec<oracledb_protocol::thin::aq::AqDeqMessage>> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         self.protocol_limits
             .check_batch_rows(max_num_messages as usize)?;
         self.protocol_limits.check_frame_bytes(queue.name.len())?;
@@ -6154,8 +6244,7 @@ impl Connection {
         ora_type_num: u8,
         csfrm: u8,
     ) -> Result<LobReadResult> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_lob_create_temp_payload_with_seq(
             ora_type_num,
@@ -6189,8 +6278,7 @@ impl Connection {
             db.lob_offset = offset,
             db.lob_bytes = data.len() as u64,
         );
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         self.protocol_limits.check_frame_bytes(locator.len())?;
         self.protocol_limits.check_frame_bytes(data.len())?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
@@ -6231,8 +6319,7 @@ impl Connection {
         locator: &[u8],
         new_size: u64,
     ) -> Result<LobReadResult> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         self.protocol_limits.check_frame_bytes(locator.len())?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_lob_trim_payload_with_seq(
@@ -6265,8 +6352,7 @@ impl Connection {
     }
 
     pub async fn free_temp_lobs(&mut self, cx: &Cx, locators: &[Vec<u8>]) -> Result<()> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         if locators.is_empty() {
             return Ok(());
         }
@@ -6507,8 +6593,7 @@ impl Connection {
         table_name: &str,
         column_names: &[String],
     ) -> Result<oracledb_protocol::dpl::DirectPathPrepareResult> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         self.protocol_limits.check_columns(column_names.len())?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = oracledb_protocol::dpl::build_direct_path_prepare_payload(
@@ -6536,8 +6621,7 @@ impl Connection {
         cursor_id: u16,
         stream: &oracledb_protocol::dpl::DirectPathStream,
     ) -> Result<()> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = oracledb_protocol::dpl::build_direct_path_load_stream_payload(
             cursor_id, stream, seq_num,
@@ -6558,8 +6642,7 @@ impl Connection {
     /// [`oracledb_protocol::dpl::TNS_DP_OP_FINISH`] commits the load
     /// server-side; [`oracledb_protocol::dpl::TNS_DP_OP_ABORT`] discards it.
     pub async fn direct_path_op(&mut self, cx: &Cx, cursor_id: u16, op_code: u32) -> Result<()> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload =
             oracledb_protocol::dpl::build_direct_path_op_payload(cursor_id, op_code, seq_num);
@@ -6700,15 +6783,51 @@ impl Connection {
     }
 
     /// Common tail for every `*_call_timeout` arm: the in-flight operation hit
-    /// the user's `call_timeout`, so break + drain the wire and then surface the
-    /// right error. On a clean drain the connection survives and we return
-    /// [`Error::CallTimeout`] (`DPY-4024`); on a failed drain the connection is
-    /// dead and [`Error::ConnectionClosed`] (`DPY-4011`) is propagated. Always
-    /// returns `Err`, so it composes as the `Err(_)` branch of the timeout
-    /// `match`.
-    async fn recover_from_call_timeout<T>(&mut self, _cx: &Cx, timeout_ms: u32) -> Result<T> {
+    /// its deadline (the user's `call_timeout`) or the caller's `Cx` was
+    /// cancelled, so break + drain the wire and then surface the right error.
+    ///
+    /// The drain is unconditional — whatever the reason, the cancelled call's
+    /// in-flight bytes must be cleared off the socket before the connection can
+    /// be reused or discarded cleanly. After a clean drain we branch on the
+    /// asupersync [`CancelKind`] (via [`CancelDisposition`]) to flatten to the
+    /// right public error:
+    ///
+    /// * **No `Cx` cancel recorded** (a pure `call_timeout` deadline): the
+    ///   classic [`Error::CallTimeout`] (`DPY-4024`) — the session survives and
+    ///   the error is connection-reusable + retryable.
+    /// * **Timeout/deadline/quota cancel**: same — [`Error::CallTimeout`].
+    /// * **Shutdown / resource-loss cancel** ([`CancelDisposition::Close`]):
+    ///   even though the drain succeeded, the runtime is going away, so the
+    ///   connection is marked **dead** and [`Error::ConnectionClosed`] is
+    ///   surfaced — the caller must discard it.
+    /// * **Explicit / topological cancel** ([`CancelDisposition::Cancel`]): the
+    ///   distinct [`Error::Cancelled`] (`ORA-01013`), connection-reusable.
+    ///
+    /// On a **failed** drain the connection is already dead and
+    /// [`Error::ConnectionClosed`] (`DPY-4011`) is propagated regardless of the
+    /// cancel kind. Always returns `Err`, so it composes as the `Err(_)` branch
+    /// of the timeout `match`.
+    async fn recover_from_call_timeout<T>(&mut self, cx: &Cx, timeout_ms: u32) -> Result<T> {
         match self.break_and_drain().await {
-            Ok(()) => Err(Error::CallTimeout(timeout_ms)),
+            Ok(()) => {
+                // This arm is reached because a deadline elapsed. If the `Cx`
+                // also carries a structured cancel, its kind drives the
+                // disposition; otherwise (no recorded cancel) it is a pure
+                // `call_timeout` deadline, which is the `Timeout` disposition —
+                // NOT the generic `Cancel` fallback used at the between-round-
+                // trip checkpoint boundary.
+                let disposition = cx
+                    .cancel_reason()
+                    .map(|reason| CancelDisposition::from_kind(reason.kind))
+                    .unwrap_or(CancelDisposition::Timeout);
+                if disposition == CancelDisposition::Close {
+                    // Drain left the wire clean, but a runtime shutdown means the
+                    // connection must not be handed back to the pool.
+                    self.core.recovery.mark_dead();
+                    self.dead = true;
+                }
+                Err(disposition.into_error(timeout_ms))
+            }
             Err(closed) => Err(closed),
         }
     }
@@ -7042,8 +7161,7 @@ impl Connection {
     /// Log off and close the connection, consuming it. Any uncommitted
     /// transaction is rolled back by the server.
     pub async fn close(mut self, cx: &Cx) -> Result<()> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         match time::timeout(time::wall_now(), Duration::from_secs(5), self.rollback(cx)).await {
             Ok(result) => result?,
             Err(_) => {
@@ -7111,8 +7229,7 @@ impl Connection {
         requests: &[PipelineRequest],
         continue_on_error: bool,
     ) -> Result<Vec<Vec<u8>>> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         if requests.is_empty() {
             return Ok(Vec::new());
         }
@@ -7288,8 +7405,7 @@ impl Connection {
     }
 
     async fn send_function(&mut self, cx: &Cx, function_code: u8) -> Result<()> {
-        cx.checkpoint()
-            .map_err(|err| Error::Runtime(err.to_string()))?;
+        observe_cancellation_between_round_trips(cx)?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         self.core
             .send_data_packet(
@@ -10423,6 +10539,188 @@ mod tests {
         assert_eq!(session_dead.retry_hint(), RetryHint::Never);
     }
 
+    // ---- W1-T6.2: internal Outcome/CancelKind discipline ----------------------
+    //
+    // Cancellation is not "just another error". Each asupersync `CancelKind`
+    // drives a specific connection disposition BEFORE we flatten to the public
+    // `Error` at the boundary, and the mapping is METHOD-based (it reads
+    // `CancelReason::kind`), never a display-string parse.
+
+    #[test]
+    fn cancel_kind_maps_to_disposition() {
+        // The timeout family (deadline / quota exhaustion) drains and stays
+        // reusable — it composes like a `call_timeout`.
+        for kind in [
+            CancelKind::Timeout,
+            CancelKind::Deadline,
+            CancelKind::PollQuota,
+            CancelKind::CostBudget,
+        ] {
+            assert_eq!(
+                CancelDisposition::from_kind(kind),
+                CancelDisposition::Timeout,
+                "{kind:?} must drain + stay reusable (timeout disposition)"
+            );
+        }
+
+        // Runtime shutdown / resource loss / linked-exit closes the connection.
+        for kind in [
+            CancelKind::Shutdown,
+            CancelKind::ResourceUnavailable,
+            CancelKind::LinkedExit,
+        ] {
+            assert_eq!(
+                CancelDisposition::from_kind(kind),
+                CancelDisposition::Close,
+                "{kind:?} must close the connection"
+            );
+        }
+
+        // Explicit / topological cancels drain quietly and stay reusable.
+        for kind in [
+            CancelKind::User,
+            CancelKind::RaceLost,
+            CancelKind::FailFast,
+            CancelKind::ParentCancelled,
+        ] {
+            assert_eq!(
+                CancelDisposition::from_kind(kind),
+                CancelDisposition::Cancel,
+                "{kind:?} must drain quietly + stay reusable (cancel disposition)"
+            );
+        }
+    }
+
+    #[test]
+    fn cancel_disposition_flattens_to_distinct_error_variants() {
+        // The boundary flatten: each disposition produces a DISTINCT public
+        // error variant — a cancel is NEVER a generic `Runtime`/`Io` error — and
+        // the resulting error classifies correctly via the W1-T6.1 methods.
+
+        // Timeout -> CallTimeout: reusable + retryable on the same connection.
+        let timeout = CancelDisposition::Timeout.into_error(750);
+        assert!(matches!(timeout, Error::CallTimeout(750)));
+        assert_eq!(timeout.kind(), ErrorKind::Timeout);
+        assert_eq!(
+            timeout.connection_disposition(),
+            ConnectionDisposition::Reusable
+        );
+        assert_eq!(
+            timeout.retry_hint(),
+            RetryHint::RetrySameConnectionIfIdempotent,
+            "a drained timeout may be retried on the same connection"
+        );
+
+        // Cancel -> Cancelled (ORA-01013): distinct cancel variant, reusable +
+        // retryable — explicitly NOT Error::Runtime / Error::Io.
+        let cancelled = CancelDisposition::Cancel.into_error(750);
+        assert!(matches!(cancelled, Error::Cancelled));
+        assert!(
+            !matches!(cancelled, Error::Runtime(_) | Error::Io(_)),
+            "a cancel must be a distinct variant, never a generic runtime/io error"
+        );
+        assert_eq!(cancelled.kind(), ErrorKind::Cancel);
+        assert_eq!(cancelled.oracle_code(), Some(1013));
+        assert_eq!(
+            cancelled.connection_disposition(),
+            ConnectionDisposition::Reusable
+        );
+        assert_eq!(
+            cancelled.retry_hint(),
+            RetryHint::RetrySameConnectionIfIdempotent
+        );
+
+        // Close -> ConnectionClosed: connection is dead; reconnect before retry.
+        let closed = CancelDisposition::Close.into_error(750);
+        assert!(matches!(closed, Error::ConnectionClosed(_)));
+        assert_eq!(closed.kind(), ErrorKind::Network);
+        assert_eq!(closed.connection_disposition(), ConnectionDisposition::Dead);
+        assert_eq!(
+            closed.retry_hint(),
+            RetryHint::ReconnectThenRetryIfIdempotent
+        );
+    }
+
+    #[test]
+    fn missing_cancel_reason_is_a_plain_cancel_at_checkpoint() {
+        // A cancel with no recorded `CancelReason` is still a cancel — never a
+        // runtime error. (The in-operation timeout path defaults the OTHER way,
+        // to Timeout, because it is entered by a deadline elapse; see
+        // `recover_from_call_timeout`.)
+        assert_eq!(cancel_disposition(None), CancelDisposition::Cancel);
+    }
+
+    #[test]
+    fn cancelled_cx_resolves_to_the_kind_mapped_distinct_error() {
+        // End-to-end against a real asupersync context: inject a cancel of a
+        // given kind, confirm `checkpoint()` actually fails and `cancel_reason()`
+        // carries the kind, then assert the SAME mapping the between-round-trip
+        // helper applies surfaces the kind-mapped DISTINCT error (never the old
+        // Error::Runtime(display_string)). A `detached_cancel_context` carries
+        // cancellation + budget state with no effect caps — exactly what a unit
+        // test of the cancel mapping needs, with no live runtime required.
+        fn err_for(kind: CancelKind) -> Error {
+            let cx = Cx::detached_cancel_context();
+            cx.cancel_with(kind, Some("test cancel"));
+            // The cancel must actually be observable through the methods the
+            // driver relies on — not a display string.
+            assert!(
+                cx.checkpoint().is_err(),
+                "{kind:?}: a cancelled context must fail its checkpoint"
+            );
+            let reason = cx.cancel_reason().unwrap_or_else(|| {
+                panic!("{kind:?}: cancel_reason must carry the structured kind")
+            });
+            assert_eq!(reason.kind, kind, "cancel_reason must round-trip the kind");
+            cancel_disposition(Some(reason)).into_error(750)
+        }
+
+        // Timeout family -> Error::CallTimeout (Timeout kind, reusable).
+        for kind in [CancelKind::Timeout, CancelKind::Deadline] {
+            let err = err_for(kind);
+            assert!(
+                matches!(err, Error::CallTimeout(_)),
+                "{kind:?} should surface CallTimeout, got {err:?}"
+            );
+            assert_eq!(err.kind(), ErrorKind::Timeout);
+        }
+
+        // Shutdown -> Error::ConnectionClosed (dead).
+        let shutdown = err_for(CancelKind::Shutdown);
+        assert!(
+            matches!(shutdown, Error::ConnectionClosed(_)),
+            "Shutdown should surface ConnectionClosed, got {shutdown:?}"
+        );
+        assert_eq!(
+            shutdown.connection_disposition(),
+            ConnectionDisposition::Dead
+        );
+
+        // User / RaceLost -> Error::Cancelled (distinct, reusable) — and crucially
+        // NOT the old Error::Runtime(display_string).
+        for kind in [CancelKind::User, CancelKind::RaceLost] {
+            let err = err_for(kind);
+            assert!(
+                matches!(err, Error::Cancelled),
+                "{kind:?} should surface Cancelled, got {err:?}"
+            );
+            assert!(
+                !matches!(err, Error::Runtime(_)),
+                "{kind:?} must NOT be flattened to a generic Error::Runtime"
+            );
+            assert_eq!(err.kind(), ErrorKind::Cancel);
+        }
+    }
+
+    #[test]
+    fn uncancelled_checkpoint_is_ok() {
+        // The fast path: a healthy context passes the checkpoint untouched, so
+        // the cancel-mapping branch is never taken.
+        let cx = Cx::detached_cancel_context();
+        assert!(cx.checkpoint().is_ok());
+        assert!(cx.cancel_reason().is_none());
+    }
+
     #[test]
     fn offset_only_from_structured_nonzero() {
         assert_eq!(structured_error(942, 14).offset(), Some(14));
@@ -11666,10 +11964,13 @@ mod tests {
             Ok::<_, Error>(err)
         })?;
 
+        // W1-T6.2: a cancel checkpoint surfaces the DISTINCT Error::Cancelled
+        // (ORA-01013), never a generic Error::Runtime(display_string).
         assert!(
-            matches!(&err, Error::Runtime(message) if message.to_ascii_lowercase().contains("cancel")),
-            "flush continuation should stop on the cancellation checkpoint, got {err:?}"
+            matches!(&err, Error::Cancelled),
+            "flush continuation should stop on the cancellation checkpoint with a distinct cancel error, got {err:?}"
         );
+        assert_eq!(err.kind(), ErrorKind::Cancel);
         let state = script
             .lock()
             .map_err(|_| Error::Runtime("scripted I/O state lock poisoned".into()))?;
@@ -11721,10 +12022,13 @@ mod tests {
                 .fetch_rows_request(&cx, 42, 10)
                 .await
                 .expect_err("fetch continuation must checkpoint before writing");
+            // W1-T6.2: an explicit user cancel surfaces the distinct
+            // Error::Cancelled, not a generic Error::Runtime(display_string).
             assert!(
-                matches!(&err, Error::Runtime(message) if message.to_ascii_lowercase().contains("cancel")),
-                "fetch continuation should stop on the cancellation checkpoint, got {err:?}"
+                matches!(&err, Error::Cancelled),
+                "fetch continuation should stop on the cancellation checkpoint with a distinct cancel error, got {err:?}"
             );
+            assert_eq!(err.kind(), ErrorKind::Cancel);
             assert_eq!(
                 connection.ttc_seq_num, before_seq,
                 "checkpoint must run before allocating the next TTC sequence number"
