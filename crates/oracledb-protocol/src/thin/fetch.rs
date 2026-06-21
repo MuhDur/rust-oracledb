@@ -25,6 +25,12 @@ fn validate_utf8(slice: &[u8]) -> core::result::Result<&str, ()> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LobDecodeMode {
+    PlainLocator,
+    DefineMetadata,
+}
+
 pub fn build_fetch_payload(cursor_id: u32, arraysize: u32) -> Vec<u8> {
     build_fetch_payload_with_seq(cursor_id, arraysize, 1)
 }
@@ -307,7 +313,7 @@ pub fn parse_fetch_response_with_context_and_limits(
     previous_row: Option<&[Option<QueryValue>]>,
     limits: ProtocolLimits,
 ) -> Result<QueryResult> {
-    parse_query_response_with_context_and_binds(
+    parse_query_response_with_context_binds_options_lob_mode_and_limits(
         payload,
         capabilities,
         previous_columns,
@@ -315,6 +321,29 @@ pub fn parse_fetch_response_with_context_and_limits(
         &[],
         &[],
         true,
+        ExecuteOptions::default(),
+        LobDecodeMode::PlainLocator,
+        limits,
+    )
+}
+
+pub fn parse_define_fetch_response_with_context_and_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    previous_columns: &[ColumnMetadata],
+    previous_row: Option<&[Option<QueryValue>]>,
+    limits: ProtocolLimits,
+) -> Result<QueryResult> {
+    parse_query_response_with_context_binds_options_lob_mode_and_limits(
+        payload,
+        capabilities,
+        previous_columns,
+        previous_row,
+        &[],
+        &[],
+        true,
+        ExecuteOptions::default(),
+        LobDecodeMode::DefineMetadata,
         limits,
     )
 }
@@ -379,6 +408,33 @@ pub(crate) fn parse_query_response_with_context_binds_options_and_limits(
     exec_options: ExecuteOptions,
     limits: ProtocolLimits,
 ) -> Result<QueryResult> {
+    parse_query_response_with_context_binds_options_lob_mode_and_limits(
+        payload,
+        capabilities,
+        previous_columns,
+        previous_row,
+        bind_columns,
+        output_bind_indexes,
+        fetch_long_status,
+        exec_options,
+        LobDecodeMode::DefineMetadata,
+        limits,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // mirrors the reference message attribute set
+fn parse_query_response_with_context_binds_options_lob_mode_and_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    previous_columns: &[ColumnMetadata],
+    previous_row: Option<&[Option<QueryValue>]>,
+    bind_columns: &[ColumnMetadata],
+    output_bind_indexes: &[usize],
+    fetch_long_status: bool,
+    exec_options: ExecuteOptions,
+    lob_decode_mode: LobDecodeMode,
+    limits: ProtocolLimits,
+) -> Result<QueryResult> {
     let mut reader = TtcReader::with_limits(payload, limits)?;
     let mut result = QueryResult {
         columns: previous_columns.to_vec(),
@@ -432,6 +488,7 @@ pub(crate) fn parse_query_response_with_context_binds_options_and_limits(
                         bit_vector.as_deref(),
                         previous_row,
                         fetch_long_status,
+                        lob_decode_mode,
                     )?;
                 }
                 bit_vector = None;
@@ -789,6 +846,7 @@ pub(crate) fn parse_row_data(
     bit_vector: Option<&[u8]>,
     previous_row: Option<&[Option<QueryValue>]>,
     fetch_long_status: bool,
+    lob_decode_mode: LobDecodeMode,
 ) -> Result<()> {
     let mut row = Vec::with_capacity(result.columns.len());
     for (index, metadata) in result.columns.iter().enumerate() {
@@ -806,7 +864,11 @@ pub(crate) fn parse_row_data(
             row.push(previous);
             continue;
         }
-        row.push(parse_column_value(reader, metadata)?);
+        row.push(parse_column_value_with_lob_mode(
+            reader,
+            metadata,
+            lob_decode_mode,
+        )?);
         if fetch_long_status
             && matches!(
                 metadata.ora_type_num,
@@ -914,6 +976,14 @@ pub(crate) fn parse_column_value(
     reader: &mut TtcReader<'_>,
     metadata: &ColumnMetadata,
 ) -> Result<Option<QueryValue>> {
+    parse_column_value_with_lob_mode(reader, metadata, LobDecodeMode::DefineMetadata)
+}
+
+fn parse_column_value_with_lob_mode(
+    reader: &mut TtcReader<'_>,
+    metadata: &ColumnMetadata,
+    lob_decode_mode: LobDecodeMode,
+) -> Result<Option<QueryValue>> {
     if metadata.buffer_size == 0
         && !matches!(
             metadata.ora_type_num,
@@ -994,7 +1064,7 @@ pub(crate) fn parse_column_value(
             decode_datetime_value(&bytes).map(Some)
         }
         ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB | ORA_TYPE_NUM_BFILE => {
-            parse_lob_value(reader, metadata)
+            parse_lob_value(reader, metadata, lob_decode_mode)
         }
         ORA_TYPE_NUM_VECTOR => parse_vector_value(reader),
         ORA_TYPE_NUM_JSON => parse_json_value(reader),
@@ -1042,6 +1112,7 @@ fn parse_column_slot<'buf>(
     number_arena: &mut String,
     owned_arena: &mut Vec<QueryValue>,
     digits: &mut Vec<u8>,
+    lob_decode_mode: LobDecodeMode,
 ) -> Result<ColumnSlot<'buf>> {
     // Park an owned QueryValue in the arena and return the deferred slot. Used
     // for the cold / non-borrowable variants so the hot grid stays borrowed.
@@ -1188,7 +1259,7 @@ fn parse_column_slot<'buf>(
         // Json, Cursor, Object, UROWID) goes through the owned decode and is
         // parked in the owned arena. These are the cold / non-borrowable cases.
         _ => {
-            let value = parse_column_value(reader, metadata)?;
+            let value = parse_column_value_with_lob_mode(reader, metadata, lob_decode_mode)?;
             Ok(park(owned_arena, value))
         }
     }
@@ -1251,6 +1322,7 @@ pub struct BorrowedRowBatch {
     /// Whether this batch carried `LONG`/`LONG RAW` status trailers after each
     /// such column (the fetch path sets this; the plain execute path does not).
     fetch_long_status: bool,
+    lob_decode_mode: LobDecodeMode,
     /// The caller's previous (owned) row, used to resolve duplicate columns in
     /// the *first* compressed row of the batch (whose duplicates repeat the row
     /// that ended the prior page). `None` outside the compressed-fetch case.
@@ -1270,6 +1342,7 @@ impl BorrowedRowBatch {
             row_starts,
             row_bit_vectors: Vec::new(),
             fetch_long_status: false,
+            lob_decode_mode: LobDecodeMode::PlainLocator,
             previous_row_seed: None,
         }
     }
@@ -1361,6 +1434,7 @@ impl BorrowedRowBatch {
                     &mut number_arena,
                     &mut owned_arena,
                     &mut digits,
+                    self.lob_decode_mode,
                 )?;
                 slots.push(match slot {
                     ColumnSlot::Null => None,
@@ -1512,6 +1586,7 @@ pub fn parse_query_response_borrowed_with_limits(
                     &result_columns,
                     bit_vector.as_deref(),
                     fetch_long_status,
+                    LobDecodeMode::PlainLocator,
                 )?;
             }
             TNS_MSG_TYPE_PARAMETER => {
@@ -1588,6 +1663,7 @@ pub fn parse_query_response_borrowed_with_limits(
         row_starts,
         row_bit_vectors,
         fetch_long_status,
+        lob_decode_mode: LobDecodeMode::PlainLocator,
         // Seed the first compressed row's duplicate resolution from the caller's
         // prior-page row (only consulted when the batch uses bit vectors).
         previous_row_seed: any_bit_vector.then(|| {
@@ -1619,6 +1695,7 @@ fn skip_row_data(
     columns: &[ColumnMetadata],
     bit_vector: Option<&[u8]>,
     fetch_long_status: bool,
+    lob_decode_mode: LobDecodeMode,
 ) -> Result<()> {
     for (index, metadata) in columns.iter().enumerate() {
         if is_duplicate_column(bit_vector, index) {
@@ -1649,7 +1726,7 @@ fn skip_row_data(
         } else {
             // Cold / non-byte-field type, or a zero-buffer-size column: defer to
             // the full owned decode purely to advance the reader correctly.
-            let _ = parse_column_value(reader, metadata)?;
+            let _ = parse_column_value_with_lob_mode(reader, metadata, lob_decode_mode)?;
         }
         if fetch_long_status
             && matches!(
@@ -1770,13 +1847,17 @@ pub(crate) fn parse_urowid_value(reader: &mut TtcReader<'_>) -> Result<Option<St
 pub(crate) fn parse_lob_value(
     reader: &mut TtcReader<'_>,
     metadata: &ColumnMetadata,
+    lob_decode_mode: LobDecodeMode,
 ) -> Result<Option<QueryValue>> {
     let num_bytes = reader.read_ub4()?;
     reader.limits().check_response_bytes(num_bytes as usize)?;
     if num_bytes == 0 {
         return Ok(None);
     }
-    let (size, chunk_size) = if matches!(metadata.ora_type_num, ORA_TYPE_NUM_BFILE) {
+    let (size, chunk_size) = if matches!(
+        (lob_decode_mode, metadata.ora_type_num),
+        (_, ORA_TYPE_NUM_BFILE) | (LobDecodeMode::PlainLocator, _)
+    ) {
         (0, 0)
     } else {
         (reader.read_ub8()?, reader.read_ub4()?)
@@ -1791,6 +1872,98 @@ pub(crate) fn parse_lob_value(
         size,
         chunk_size,
     }))))
+}
+
+#[cfg(test)]
+mod lob_fetch_shape_tests {
+    use super::*;
+
+    fn clob_column() -> ColumnMetadata {
+        ColumnMetadata {
+            name: "BODY".into(),
+            ora_type_num: ORA_TYPE_NUM_CLOB,
+            csfrm: CS_FORM_IMPLICIT,
+            precision: 0,
+            scale: 0,
+            buffer_size: 4000,
+            max_size: 4000,
+            nulls_allowed: true,
+            is_json: false,
+            is_oson: false,
+            object_schema: None,
+            object_type_name: None,
+            is_array: false,
+            vector_dimensions: None,
+            vector_format: 0,
+            vector_flags: 0,
+            domain_schema: None,
+            domain_name: None,
+            annotations: None,
+        }
+    }
+
+    fn lob_row_payload(locator: &[u8], metadata: Option<(u64, u32)>) -> Vec<u8> {
+        let mut writer = TtcWriter::new();
+        writer.write_u8(TNS_MSG_TYPE_ROW_DATA);
+        writer.write_ub4(u32::try_from(locator.len()).expect("locator length fits ub4"));
+        if let Some((size, chunk_size)) = metadata {
+            writer.write_ub8(size);
+            writer.write_ub4(chunk_size);
+        }
+        writer
+            .write_bytes_with_length(locator)
+            .expect("synthetic locator length is encodable");
+        writer.write_u8(TNS_MSG_TYPE_END_OF_RESPONSE);
+        writer.into_bytes()
+    }
+
+    fn first_lob(result: &QueryResult) -> &LobValue {
+        match &result.rows[0][0] {
+            Some(QueryValue::Lob(lob)) => lob.as_ref(),
+            other => panic!("expected LOB value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plain_fetch_lob_locator_omits_size_and_chunk_fields() {
+        let locator: Vec<u8> = (0u8..114).collect();
+        let payload = lob_row_payload(&locator, None);
+        let columns = [clob_column()];
+
+        let result = parse_fetch_response_with_context(
+            &payload,
+            ClientCapabilities::default(),
+            &columns,
+            None,
+        )
+        .expect("plain fetch CLOB locator should decode");
+
+        let lob = first_lob(&result);
+        assert_eq!(lob.locator, locator);
+        assert_eq!(lob.size, 0);
+        assert_eq!(lob.chunk_size, 0);
+    }
+
+    #[test]
+    fn define_fetch_lob_locator_includes_size_and_chunk_fields() {
+        let locator: Vec<u8> = (0u8..114).collect();
+        let payload = lob_row_payload(&locator, Some((23, 8060)));
+        let columns = [clob_column()];
+
+        let result = parse_define_fetch_response_with_context_and_limits(
+            &payload,
+            ClientCapabilities::default(),
+            &columns,
+            None,
+            ProtocolLimits::DEFAULT,
+        )
+        .expect("define fetch CLOB locator should decode");
+
+        let lob = first_lob(&result);
+        assert_eq!(lob.locator, locator);
+        assert_eq!(lob.size, 23);
+        assert_eq!(lob.chunk_size, 8060);
+    }
 }
 
 /// Reads a VECTOR value (reference `ReadBuffer.read_vector` in `packet.pyx`).

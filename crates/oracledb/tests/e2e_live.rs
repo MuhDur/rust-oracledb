@@ -1312,13 +1312,15 @@ fn lob_streaming_and_transactions_are_logged() {
             "rows_affected=1 transaction=commit bind_values=redacted",
         );
 
-        log.skip(
+        log.step(
             "lob_stream_lobs_locator_mode",
-            "live Query::stream_lobs() over CLOB currently fails with Protocol(TtcDecode(\"invalid ub8 length\")); default Query materialization is exercised",
+            "stream_lobs=true expected_shape=Lob read_amount=inserted_text_chars",
         );
+        let expected_text = "persistent clob payload";
         let lob_rows = BlockingConnection::query_with(
             conn,
             Query::new("select body from rust_e2e_lob_t where id = 1")
+                .stream_lobs()
                 .arraysize(NonZeroU32::new(1).expect("non-zero arraysize")),
         )
         .expect("query LOB locator")
@@ -1343,8 +1345,10 @@ fn lob_streaming_and_transactions_are_logged() {
         let mut offset = 1u64;
         let mut total = Vec::new();
         let chunk = 8u64;
-        while offset <= lob.size.max(1) {
-            let amount = (lob.size - offset + 1).min(chunk);
+        let mut remaining_chars = u64::try_from(expected_text.chars().count())
+            .expect("expected text char count fits u64");
+        while remaining_chars > 0 {
+            let amount = remaining_chars.min(chunk);
             let read = BlockingConnection::read_lob(conn, &lob.locator, offset, amount)
                 .expect("read LOB chunk");
             let data = read.data.expect("LOB read returns data");
@@ -1360,10 +1364,11 @@ fn lob_streaming_and_transactions_are_logged() {
             );
             total.extend_from_slice(&data);
             offset += amount;
+            remaining_chars -= amount;
         }
         let text = decode_lob_text(&total, lob.csfrm, Some(&lob.locator))
             .expect("decode streamed CLOB text");
-        assert_eq!(text, "persistent clob payload");
+        assert_eq!(text, expected_text);
         log.step(
             "lob_read_complete",
             &format!(

@@ -32,6 +32,14 @@ and the project follows the SemVer contract described in
   now coalesces groups that share a bind index (single-statement `RETURNING` is
   unaffected — it already arrives as one group per bind). Found by the W3-E7.4
   live e2e suite.
+- **`Query::stream_lobs()` over CLOB/NCLOB**: streamed (locator-only) LOB fetches no
+  longer fail with `Protocol(TtcDecode("invalid ub8 length"))`. The LOB column decoder
+  unconditionally read the `size` (ub8) and `chunk_size` (ub4) fields, but those are
+  present only in LOB-prefetch (define-fetch) responses — a plain streamed locator fetch
+  omits them, so the decoder misaligned onto the locator's length prefix. The decoder now
+  tracks per-cursor LOB-prefetch state and selects the locator-only vs prefetch decode
+  shape accordingly (BFILE always uses the locator-only shape). Default LOB
+  materialization is unchanged. Found by the W3-E7.4 live e2e suite (rust-oracledb-jbh9).
 
 ### Added
 

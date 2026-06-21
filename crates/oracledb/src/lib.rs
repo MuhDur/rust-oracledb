@@ -112,7 +112,7 @@
 //! connection is created, pinged, and closed.
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::pin::pin;
@@ -144,11 +144,11 @@ use oracledb_protocol::thin::{
     build_function_payload_with_seq_and_token, build_lob_create_temp_payload_with_seq,
     build_lob_free_temp_payload_with_seq, build_lob_read_payload_with_seq,
     build_lob_trim_payload_with_seq, build_lob_write_payload_with_seq, parse_accept_payload,
-    parse_auth_response_with_limits, parse_fetch_response_with_context_and_limits,
-    parse_lob_create_temp_response_with_limits, parse_lob_free_temp_response_with_limits,
-    parse_lob_read_response_with_limits, parse_lob_trim_response_with_limits,
-    parse_lob_write_response_with_limits, parse_plain_function_response_with_limits,
-    parse_query_response_borrowed_with_limits,
+    parse_auth_response_with_limits, parse_define_fetch_response_with_context_and_limits,
+    parse_fetch_response_with_context_and_limits, parse_lob_create_temp_response_with_limits,
+    parse_lob_free_temp_response_with_limits, parse_lob_read_response_with_limits,
+    parse_lob_trim_response_with_limits, parse_lob_write_response_with_limits,
+    parse_plain_function_response_with_limits, parse_query_response_borrowed_with_limits,
     parse_query_response_with_binds_options_columns_and_limits,
     parse_tpc_txn_switch_response_with_limits, BatchServerError, BindValue, BorrowedFetchResult,
     ClientCapabilities, ColumnMetadata, CursorValue, ExecuteOptions, LobReadResult, QueryResult,
@@ -3324,6 +3324,10 @@ pub struct Connection {
     /// position (ORA-01002 fetch out of sequence). Cleared when the owning
     /// cursor releases the id (close / re-prepare to a different statement).
     in_use_cursors: HashSet<u32>,
+    /// Cursor ids whose active server define returns LOB locator rows with the
+    /// extra size/chunk fields. Plain `stream_lobs()` cursors are intentionally
+    /// absent even when their describe metadata contains CLOB/BLOB columns.
+    lob_prefetch_cursors: BTreeSet<u32>,
     /// Server cursor ids that were parsed as a fresh copy because the cached
     /// statement was in use (reference statement with `_return_to_cache =
     /// False`). These are never returned to the statement cache; when the
@@ -3693,6 +3697,7 @@ impl Connection {
             statement_cache: Vec::new(),
             statement_cache_size: options.statement_cache_size,
             in_use_cursors: HashSet::new(),
+            lob_prefetch_cursors: BTreeSet::new(),
             copied_cursors: HashSet::new(),
             cursors_to_close: Vec::new(),
             sessionless_data: None,
@@ -5372,6 +5377,12 @@ impl Connection {
         );
         match self.note_parse(parsed) {
             Ok(result) => {
+                if result.cursor_id != 0
+                    && !result.rows.is_empty()
+                    && columns_have_lob_prefetch_fields(&result.columns)
+                {
+                    self.lob_prefetch_cursors.insert(result.cursor_id);
+                }
                 // a deferred begin/resume or a suspend-on-success reports its
                 // outcome through the response's SYNC piggyback
                 self.apply_sessionless_state(result.sessionless_txn_state);
@@ -5664,13 +5675,24 @@ impl Connection {
             .cloned()
             .unwrap_or_else(|| known_columns.to_vec());
         let decode_start = profile.then(time::wall_now);
-        let parsed = parse_fetch_response_with_context_and_limits(
-            &response,
-            self.capabilities,
-            &columns,
-            previous_row,
-            self.protocol_limits,
-        );
+        let lob_prefetch = self.lob_prefetch_cursors.contains(&cursor_id);
+        let parsed = if lob_prefetch {
+            parse_define_fetch_response_with_context_and_limits(
+                &response,
+                self.capabilities,
+                &columns,
+                previous_row,
+                self.protocol_limits,
+            )
+        } else {
+            parse_fetch_response_with_context_and_limits(
+                &response,
+                self.capabilities,
+                &columns,
+                previous_row,
+                self.protocol_limits,
+            )
+        };
         if let Some(start) = decode_start {
             fetch_profile::add_decode(time::wall_now().duration_since(start));
         }
@@ -5976,7 +5998,7 @@ impl Connection {
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
         trace_query_bytes("DEFINE FETCH response", &response);
-        let result = parse_fetch_response_with_context_and_limits(
+        let result = parse_define_fetch_response_with_context_and_limits(
             &response,
             self.capabilities,
             define_columns,
@@ -5984,6 +6006,17 @@ impl Connection {
             self.protocol_limits,
         )
         .map_err(Error::from)?;
+        if columns_have_lob_prefetch_fields(define_columns) {
+            self.lob_prefetch_cursors.insert(cursor_id);
+            if result.cursor_id != 0 {
+                self.lob_prefetch_cursors.insert(result.cursor_id);
+            }
+        } else {
+            self.lob_prefetch_cursors.remove(&cursor_id);
+            if result.cursor_id != 0 {
+                self.lob_prefetch_cursors.remove(&result.cursor_id);
+            }
+        }
         self.cursor_columns
             .insert(cursor_id, define_columns.to_vec());
         self.remember_cursor_columns(&result);
@@ -7223,6 +7256,10 @@ impl Connection {
             sql,
             cursor_id,
         );
+        for cursor_id in &to_close {
+            self.lob_prefetch_cursors.remove(cursor_id);
+            self.cursor_columns.remove(cursor_id);
+        }
         self.cursors_to_close.extend(to_close);
     }
 
@@ -7241,6 +7278,7 @@ impl Connection {
                     self.statement_cache
                         .retain(|(_, cached_id)| cached_id != cursor_id);
                     self.cursor_columns.remove(cursor_id);
+                    self.lob_prefetch_cursors.remove(cursor_id);
                 }
             }
         }
@@ -7263,6 +7301,7 @@ impl Connection {
         if self.copied_cursors.remove(&cursor_id) {
             self.cursors_to_close.push(cursor_id);
             self.cursor_columns.remove(&cursor_id);
+            self.lob_prefetch_cursors.remove(&cursor_id);
         }
     }
 
@@ -7282,6 +7321,7 @@ impl Connection {
         self.in_use_cursors.remove(&cursor_id);
         self.copied_cursors.remove(&cursor_id);
         self.cursor_columns.remove(&cursor_id);
+        self.lob_prefetch_cursors.remove(&cursor_id);
         if !self.cursors_to_close.contains(&cursor_id) {
             self.cursors_to_close.push(cursor_id);
         }
@@ -7312,6 +7352,7 @@ impl Connection {
         if cursor_id != 0 {
             self.cursors_to_close.push(cursor_id);
             self.cursor_columns.remove(&cursor_id);
+            self.lob_prefetch_cursors.remove(&cursor_id);
             self.in_use_cursors.remove(&cursor_id);
             self.copied_cursors.remove(&cursor_id);
         }
@@ -9974,6 +10015,13 @@ fn columns_require_define(columns: &[ColumnMetadata]) -> bool {
     })
 }
 
+fn columns_have_lob_prefetch_fields(columns: &[ColumnMetadata]) -> bool {
+    use oracledb_protocol::thin::{ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB};
+    columns
+        .iter()
+        .any(|column| matches!(column.ora_type_num(), ORA_TYPE_NUM_CLOB | ORA_TYPE_NUM_BLOB))
+}
+
 /// Columns that warrant an `ALL_JSON_COLUMNS` probe to learn whether a CLOB/BLOB
 /// actually stores JSON: not already flagged JSON, of LOB type, and named (an
 /// unnamed expression column cannot be looked up by name). Returns each
@@ -10675,6 +10723,7 @@ mod tests {
             statement_cache: Vec::new(),
             statement_cache_size: STATEMENT_CACHE_SIZE,
             in_use_cursors: HashSet::new(),
+            lob_prefetch_cursors: BTreeSet::new(),
             copied_cursors: HashSet::new(),
             cursors_to_close: Vec::new(),
             sessionless_data: None,
