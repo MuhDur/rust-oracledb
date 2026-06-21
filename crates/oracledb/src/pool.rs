@@ -10,13 +10,15 @@
 //! checkpoints the caller's [`asupersync::Cx`] between waits; the blocking
 //! facade is a thin `block_on` wrapper over that async path.
 
+use asupersync::runtime::{JoinHandle as TaskJoinHandle, Runtime};
+use asupersync::sync::Notify;
 use asupersync::{time, Cx};
 use std::collections::VecDeque;
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex, Weak};
 use std::task::Poll;
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 pub const POOL_GETMODE_WAIT: u32 = 0;
@@ -755,10 +757,23 @@ struct EngineInner<B: PoolBackend> {
     drop_returns_tx: mpsc::Sender<u64>,
     drop_returns_rx: Mutex<mpsc::Receiver<u64>>,
     /// Woken whenever an async waiter's `fulfill` predicate may have changed.
-    async_waiters: asupersync::sync::Notify,
-    /// Woken whenever the background worker has work to do.
-    bg: Condvar,
-    bg_handle: Mutex<Option<JoinHandle<()>>>,
+    async_waiters: Notify,
+    /// Woken whenever the region-owned reaper task has work to do (a request to
+    /// process, a connection to create or close, or a shutdown request). This
+    /// replaces the previous `Condvar` that parked a detached OS thread.
+    ///
+    /// Held behind an `Arc` so the reaper can park on it (`bg.notified().await`)
+    /// without keeping `EngineInner` itself alive across the park — that lets the
+    /// last external handle drop `EngineInner` (and its runtime) even while the
+    /// reaper is asleep.
+    bg: Arc<Notify>,
+    /// Cooperative stop flag for the reaper task. Set under the state lock when
+    /// the pool is closed; the reaper observes it at the top of its loop, drains
+    /// the close queue, and returns. The async path joins the task afterwards.
+    reaper_stop: AtomicBool,
+    /// The asupersync task handle for the region-owned reaper, joined (awaited,
+    /// never blocked) by [`PoolEngine::close_async`].
+    reaper_handle: Mutex<Option<TaskJoinHandle<()>>>,
 }
 
 pub struct Pool<B: PoolBackend> {
@@ -1055,31 +1070,80 @@ impl<B: PoolBackend> Drop for PooledConnection<B> {
 
 pub(crate) struct PoolEngine<B: PoolBackend> {
     inner: Arc<EngineInner<B>>,
+    /// The dedicated single-thread asupersync runtime that hosts the reaper task.
+    ///
+    /// CRITICAL: the runtime is owned **here**, by the external pool handles —
+    /// NOT inside `EngineInner`. The reaper runs on this runtime's worker thread
+    /// and can transiently hold the last `Arc<EngineInner>`; if the runtime lived
+    /// in `EngineInner`, that final drop (on the worker thread) would drop the
+    /// runtime and try to join the worker from within itself (EDEADLK). Owning
+    /// the runtime on the external handles means it is always dropped by the
+    /// thread that drops the last `PoolEngine`, never by the worker thread.
+    runtime: Arc<Runtime>,
 }
 
 impl<B: PoolBackend> Clone for PoolEngine<B> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            runtime: Arc::clone(&self.runtime),
         }
     }
 }
 
 impl<B: PoolBackend> Drop for PoolEngine<B> {
     fn drop(&mut self) {
-        // The worker owns one Arc. Seeing at most two strong refs here means
-        // this is the last external pool handle, so Drop must request shutdown
-        // without waiting for the worker to finish.
-        if Arc::strong_count(&self.inner) > 2 {
+        // Detect the last pool handle via the `runtime` Arc, which is held ONLY
+        // by `PoolEngine` clones — the reaper captures a `Weak<EngineInner>` and
+        // a `RuntimeHandle`, never the `Arc<Runtime>`, so this count is exactly
+        // the number of live pool handles (unperturbed by the reaper transiently
+        // upgrading its `Weak` during a work phase). More than one means another
+        // handle is still live; do nothing.
+        if Arc::strong_count(&self.runtime) > 1 {
             return;
         }
-        if let Ok(mut state) = self.inner.state.lock() {
-            if state.open {
-                request_worker_shutdown_locked(&mut state, &self.inner);
-            } else {
-                self.inner.bg.notify_all();
-                wake_waiters(&self.inner);
+        // Last handle. Close every connection RIGHT HERE, on the dropping thread,
+        // WITHOUT awaiting or waking the reaper (R11 — `Drop` never blocks or
+        // spawns). Doing the close synchronously here (rather than delegating to
+        // the reaper or to `EngineInner::drop`, which could run on the worker
+        // thread that the `runtime` field is about to tear down) makes transport
+        // release deterministic and race-free: it cannot lose a connection to the
+        // worker being force-stopped mid-drain. Then, after this method returns,
+        // the `inner` and `runtime` fields drop on THIS thread — the worker is
+        // joined from outside itself, never self-joined.
+        close_all_connections(&self.inner);
+    }
+}
+
+impl<B: PoolBackend> Drop for EngineInner<B> {
+    fn drop(&mut self) {
+        // Backstop: if `EngineInner` is dropped through any path other than the
+        // last `PoolEngine` handle, still release every remaining transport.
+        // `close_all_connections` is idempotent — connections are removed from
+        // state as they are closed — so running it here too never double-closes.
+        self.bg.notify_one();
+        close_all_connections(self);
+    }
+}
+
+/// Mark the pool closed and synchronously close every connection it still owns
+/// (idle, busy, queued-to-drop, or attached to an in-flight request). Removing
+/// each connection from `state` as it is closed makes repeated calls idempotent.
+fn close_all_connections<B: PoolBackend>(inner: &EngineInner<B>) {
+    if let Ok(mut state) = inner.state.lock() {
+        state.open = false;
+        inner.reaper_stop.store(true, Ordering::SeqCst);
+        let mut leftovers: Vec<PooledConn<B::Conn>> = std::mem::take(&mut state.free_new);
+        leftovers.append(&mut state.free_used);
+        leftovers.append(&mut state.busy);
+        leftovers.extend(state.to_drop.drain(..));
+        for request in &mut state.requests {
+            if let Some(conn) = request.conn.take() {
+                leftovers.push(conn);
             }
+        }
+        for conn in leftovers {
+            inner.backend.close_connection(conn.id, conn.conn);
         }
     }
 }
@@ -1248,6 +1312,8 @@ fn request_worker_shutdown_locked<B: PoolBackend>(
     inner: &EngineInner<B>,
 ) {
     state.open = false;
+    // Flip the cooperative stop flag the reaper observes at the top of its loop.
+    inner.reaper_stop.store(true, Ordering::SeqCst);
     state.open_effects.clear();
     let free_new = std::mem::take(&mut state.free_new);
     let free_used = std::mem::take(&mut state.free_used);
@@ -1266,7 +1332,7 @@ fn request_worker_shutdown_locked<B: PoolBackend>(
         }
     }
     state.requests = in_flight;
-    inner.bg.notify_all();
+    inner.bg.notify_one();
     wake_waiters(inner);
 }
 
@@ -1279,7 +1345,7 @@ fn request_worker_shutdown<B: PoolBackend>(
         wake_waiters(inner);
     }
     if !state.open {
-        inner.bg.notify_all();
+        inner.bg.notify_one();
         wake_waiters(inner);
         return Ok(());
     }
@@ -1448,30 +1514,41 @@ impl<B: PoolBackend> PoolEngine<B> {
         let min = state.config.min;
         schedule_open_effects(&mut state, min);
         let (drop_returns_tx, drop_returns_rx) = mpsc::channel();
+        // The pool owns a dedicated single-thread asupersync runtime. Its one
+        // worker thread runs the scheduler loop continuously, so the spawned
+        // reaper task makes progress independently of any `block_on`. The runtime
+        // is held by the external `PoolEngine` handles (see the field docs), NOT
+        // by `EngineInner`, so the worker thread never drops/joins itself.
+        let runtime = Arc::new(
+            crate::new_pool_runtime().map_err(|err| PoolError::Internal(err.to_string()))?,
+        );
         let inner = Arc::new(EngineInner {
             backend,
             state: Mutex::new(state),
             drop_returns_tx,
             drop_returns_rx: Mutex::new(drop_returns_rx),
-            async_waiters: asupersync::sync::Notify::new(),
-            bg: Condvar::new(),
-            bg_handle: Mutex::new(None),
+            async_waiters: Notify::new(),
+            bg: Arc::new(Notify::new()),
+            reaper_stop: AtomicBool::new(false),
+            reaper_handle: Mutex::new(None),
         });
-        let bg_inner = Arc::clone(&inner);
-        let handle = std::thread::Builder::new()
-            .name("oracledb-pool-bg".to_string())
-            .spawn(move || bg_main(bg_inner))
-            .map_err(|err| PoolError::Internal(err.to_string()))?;
+        // The reaper holds a `Weak` so it never keeps `EngineInner` alive across a
+        // park; it also holds a strong `Arc` to the `bg` notifier so it can park
+        // without upgrading the `Weak`. When the last pool handle is dropped, the
+        // runtime (owned by that handle) is shut down, which stops the reaper.
+        let reaper_inner = Arc::downgrade(&inner);
+        let reaper_bg = Arc::clone(&inner.bg);
+        let handle = runtime.handle().spawn(reaper_main(reaper_inner, reaper_bg));
         *inner
-            .bg_handle
+            .reaper_handle
             .lock()
             .map_err(|err| PoolError::Internal(err.to_string()))? = Some(handle);
-        Ok(Self { inner })
+        Ok(Self { inner, runtime })
     }
 
     fn enqueue_drop_return(&self, conn_id: u64) {
         if self.inner.drop_returns_tx.send(conn_id).is_ok() {
-            self.inner.bg.notify_all();
+            self.inner.bg.notify_one();
             wake_waiters(&self.inner);
         }
     }
@@ -1593,8 +1670,8 @@ impl<B: PoolBackend> PoolEngine<B> {
     }
 
     /// Close the pool. With `force == false`, fails when busy connections or
-    /// live waiters exist (DPY-1005). Joins the background worker, so all
-    /// transports are closed by the time this returns.
+    /// live waiters exist (DPY-1005). Cooperatively joins the region-owned
+    /// reaper task, so all transports are closed by the time this returns.
     ///
     /// Blocking: callers must not hold the GIL or any embedder lock.
     pub fn close(&self, force: bool) -> Result<(), PoolError> {
@@ -1602,24 +1679,31 @@ impl<B: PoolBackend> PoolEngine<B> {
     }
 
     /// Close the pool through the async facade.
+    ///
+    /// This requests shutdown and then **awaits** the region-owned reaper task to
+    /// completion — it never parks the executor on a synchronous OS-thread join.
+    /// The reaper, observing the cooperative stop flag, drains the close queue
+    /// (closing every transport) and returns, which completes the task handle we
+    /// await here.
     pub(crate) async fn close_async(&self, cx: &Cx, force: bool) -> Result<(), PoolError> {
         checkpoint_pool(cx)?;
-        self.close_impl(force)
-    }
-
-    fn close_impl(&self, force: bool) -> Result<(), PoolError> {
         let inner = &*self.inner;
         request_worker_shutdown(inner, force)?;
-        let handle = self
-            .inner
-            .bg_handle
+        // Wake the reaper so it observes the stop flag promptly, then take its
+        // join handle. Taking under the lock makes concurrent/duplicate closes
+        // race-free: only the first close awaits; later ones find `None`.
+        inner.bg.notify_one();
+        let handle = inner
+            .reaper_handle
             .lock()
             .map_err(|err| PoolError::Internal(err.to_string()))?
             .take();
         if let Some(handle) = handle {
-            handle
-                .join()
-                .map_err(|_| PoolError::Internal("pool worker panicked".to_string()))?;
+            checkpoint_pool(cx)?;
+            // Cooperative async join: the reaper runs on the pool's own runtime;
+            // this await is woken when it finishes. No std-thread join, so the
+            // executor worker polling this future is never blocked.
+            handle.await;
         }
         Ok(())
     }
@@ -1723,7 +1807,7 @@ impl<B: PoolBackend> PoolEngine<B> {
     pub fn set_timeout_secs(&self, value: u32) -> Result<(), PoolError> {
         let mut state = lock_state(&self.inner)?;
         state.config.timeout_secs = value;
-        self.inner.bg.notify_all();
+        self.inner.bg.notify_one();
         Ok(())
     }
 
@@ -1786,14 +1870,14 @@ fn reject<B: PoolBackend>(
         if !state.open {
             conn.is_pool_extra = false;
             state.to_drop.push_back(conn);
-            inner.bg.notify_all();
+            inner.bg.notify_one();
             wake_waiters(inner);
             return;
         }
         if conn.is_pool_extra {
             conn.is_pool_extra = false;
             state.to_drop.push_back(conn);
-            inner.bg.notify_all();
+            inner.bg.notify_one();
         } else if !conn.ever_acquired {
             state.free_new.push(conn);
         } else {
@@ -1811,7 +1895,7 @@ fn drop_conn<B: PoolBackend>(
 ) {
     state.to_drop.push_back(conn);
     ensure_min_connections(state, inner);
-    inner.bg.notify_all();
+    inner.bg.notify_one();
 }
 
 fn ensure_min_connections<B: PoolBackend>(state: &mut PoolState<B::Conn>, inner: &EngineInner<B>) {
@@ -1820,7 +1904,7 @@ fn ensure_min_connections<B: PoolBackend>(state: &mut PoolState<B::Conn>, inner:
         if reserved < state.config.min {
             schedule_open_effects(state, state.config.min - reserved);
         }
-        inner.bg.notify_all();
+        inner.bg.notify_one();
     }
 }
 
@@ -1892,7 +1976,7 @@ fn add_request_for_bg<B: PoolBackend>(
         let request = &mut state.requests[position];
         request.bg_processing = true;
         request.completed = false;
-        inner.bg.notify_all();
+        inner.bg.notify_one();
     }
 }
 
@@ -2099,7 +2183,7 @@ fn post_create_conn<B: PoolBackend>(
     debug_assert_eq!(conn.id, conn_id);
     if !state.open {
         state.to_drop.push_back(conn);
-        inner.bg.notify_all();
+        inner.bg.notify_one();
         return;
     }
     let mut conn = Some(conn);
@@ -2224,12 +2308,39 @@ fn sweep_idle_timeout<B: PoolBackend>(state: &mut PoolState<B::Conn>, inner: &En
     }
 }
 
-/// Background worker: process queued requests (pings and dedicated creates),
-/// grow the pool, close queued connections and sweep idle timeouts. Mirrors
-/// the reference `_bg_task_func` structure.
-fn bg_main<B: PoolBackend>(inner: Arc<EngineInner<B>>) {
+/// Region-owned reaper: process queued requests (pings and dedicated creates),
+/// grow the pool, close queued connections and sweep idle timeouts. Mirrors the
+/// reference `_bg_task_func` structure.
+///
+/// This is the async successor to the former detached-OS-thread `bg_main`. It
+/// runs as an asupersync task owned by the pool's dedicated runtime: connection
+/// create/ping/close still happen off the state lock (the original perf
+/// rationale), the former `Condvar` parking becomes an awaited
+/// [`Notify::notified`], and a `cx.checkpoint()` rides each loop iteration so a
+/// runtime/region cancel is observed promptly.
+///
+/// The task holds a [`Weak`] to `EngineInner`: it never keeps the pool (and the
+/// runtime it lives on) alive. When the last pool handle is dropped, the upgrade
+/// fails and the reaper exits; a [`PoolEngine::close_async`] instead flips the
+/// cooperative `reaper_stop` flag, drains the close queue, and the close path
+/// awaits this task to completion.
+async fn reaper_main<B: PoolBackend>(weak: Weak<EngineInner<B>>, bg: Arc<Notify>) {
+    let cx = Cx::current();
     let mut current_request: Option<u64> = None;
     loop {
+        let Some(inner) = weak.upgrade() else {
+            // Last pool handle dropped: nothing left to reconcile.
+            return;
+        };
+        // Observe runtime/region cancellation cooperatively. A cancelled Cx
+        // means the owning runtime is shutting down, so stop reconciling.
+        if let Some(cx) = cx.as_ref() {
+            if cx.checkpoint().is_err() {
+                return;
+            }
+        }
+        let stopping = inner.reaper_stop.load(Ordering::SeqCst);
+
         // Pick up a request to process if none is pending.
         let mut open;
         {
@@ -2304,13 +2415,14 @@ fn bg_main<B: PoolBackend>(inner: Arc<EngineInner<B>>) {
             continue;
         }
 
-        // Idle-timeout sweep and worker parking.
+        // Idle-timeout sweep, then decide whether to park or exit.
+        let timeout_armed;
         {
             let Ok(mut state) = inner.state.lock() else {
                 return;
             };
             sweep_idle_timeout(&mut state, &inner);
-            if !state.open && state.to_drop.is_empty() {
+            if (!state.open || stopping) && state.to_drop.is_empty() {
                 return;
             }
             let has_work = !state.open_effects.is_empty()
@@ -2319,18 +2431,23 @@ fn bg_main<B: PoolBackend>(inner: Arc<EngineInner<B>>) {
             if has_work {
                 continue;
             }
-            let timeout_armed = state.config.timeout_secs > 0
+            timeout_armed = state.config.timeout_secs > 0
                 && active_open_count(&state) > state.config.min
                 && (!state.free_new.is_empty() || !state.free_used.is_empty());
-            if timeout_armed {
-                match inner.bg.wait_timeout(state, Duration::from_secs(1)) {
-                    Ok(_) | Err(_) => {}
-                }
-            } else {
-                match inner.bg.wait(state) {
-                    Ok(_) | Err(_) => {}
-                }
-            }
+        }
+        // Release the strong `EngineInner` ref BEFORE parking, so that a
+        // concurrent drop of the last pool handle can actually drop `EngineInner`
+        // (and the runtime) while the reaper is asleep. We park on the standalone
+        // `bg` notifier (an `Arc<Notify>` we own), not on `inner`. The guard is
+        // never held across an `.await`. A wakeup (`bg.notify_one`) or the 1s
+        // idle-sweep tick resumes us; `EngineInner::drop` also wakes us so the
+        // upgrade at the top of the next loop fails fast.
+        drop(inner);
+        let notified = bg.notified();
+        if timeout_armed {
+            let _ = time::timeout(time::wall_now(), Duration::from_secs(1), notified).await;
+        } else {
+            notified.await;
         }
     }
 }
@@ -2426,7 +2543,7 @@ fn process_request<B: PoolBackend>(inner: &Arc<EngineInner<B>>, request_id: u64)
                         is_pool_extra: false,
                         ever_acquired: false,
                     });
-                    inner.bg.notify_all();
+                    inner.bg.notify_one();
                 }
                 return;
             };
@@ -2456,6 +2573,11 @@ mod tests {
     use super::*;
     use lifecycle::{PoolCloseReason, PoolCounts, PoolEffect, PoolSlotState, PurePoolState};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    // Test-only: `BlockingCreateBackend` is a fake backend that blocks inside
+    // `create_connection` to exercise the in-flight-create close path. Its
+    // `Condvar` models a slow remote server; it is unrelated to the (now async)
+    // pool reaper, which no longer uses any `Condvar`.
+    use std::sync::Condvar;
 
     #[test]
     fn pure_pool_state_opens_min_and_derives_counts() {
@@ -3160,13 +3282,13 @@ mod tests {
             .unwrap();
 
         assert!(
-            engine.inner.bg_handle.lock().unwrap().is_none(),
-            "async close must join and consume the worker handle"
+            engine.inner.reaper_handle.lock().unwrap().is_none(),
+            "async close must consume the reaper task handle after joining it"
         );
         assert_eq!(
             backend.closed.load(Ordering::SeqCst),
             1,
-            "close must let the worker close idle connections before returning"
+            "close must let the reaper close idle connections before returning"
         );
     }
 
@@ -3598,6 +3720,113 @@ mod tests {
             "the reacquired connection must be the only busy connection"
         );
         engine.return_connection(reacquired).unwrap();
+        engine.close(false).unwrap();
+    }
+
+    /// W1-T7.4 regression: the idle/expiry reaper is an asupersync task owned by
+    /// the pool's dedicated runtime, and `close(&Cx, ...).await` cooperatively
+    /// *awaits* (never synchronously OS-thread-joins) it.
+    ///
+    /// Proof obligations exercised here:
+    ///   (a) The reaper makes progress purely as an async task: with no thread of
+    ///       our own poking the engine, the pool still grows to `min` and pings
+    ///       returned connections — work that only the spawned reaper performs.
+    ///   (b) `close_async` completes by joining the reaper cooperatively: while it
+    ///       is awaiting the reaper (which is wedged inside a slow create on the
+    ///       pool's *own* runtime), a second future on the *caller's* single
+    ///       worker thread still interleaves and makes progress. A synchronous
+    ///       `JoinHandle::join()` (the old behaviour) would have parked that one
+    ///       worker thread and starved the marker future.
+    ///   (c) The reaper task handle is consumed by the join, and a second close is
+    ///       an idempotent no-op.
+    #[test]
+    fn reaper_is_async_task_cooperatively_joined_on_close() {
+        use std::sync::atomic::AtomicU64 as Counter;
+
+        // (a) Async-task progress with nobody driving the engine by hand.
+        let backend = Arc::new(FakeBackend::new());
+        let engine = PoolEngine::start(
+            Arc::clone(&backend),
+            test_config(2, 4, 1, POOL_GETMODE_WAIT),
+        )
+        .unwrap();
+        // Only the spawned async reaper can satisfy this — there is no detached
+        // OS-thread worker any more.
+        wait_for_open_count(&engine, 2);
+        eprintln!("[reaper-test] reaper grew pool to min=2 as an async task");
+        assert!(
+            engine.inner.reaper_handle.lock().unwrap().is_some(),
+            "the reaper must be a live spawned task before close"
+        );
+
+        // (b) Cooperative async join. Use a backend that wedges inside create so
+        // the reaper is busy on the pool's own runtime while close awaits it.
+        let slow = Arc::new(BlockingCreateBackend::new());
+        let slow_engine =
+            PoolEngine::start(Arc::clone(&slow), test_config(1, 1, 1, POOL_GETMODE_WAIT)).unwrap();
+        slow.wait_for_create_started();
+        eprintln!("[reaper-test] slow-create reaper is wedged inside create_connection");
+
+        // Release the wedged create slightly later, from an ordinary thread, so
+        // the reaper can finish draining and the awaited close can resolve.
+        let releaser_slow = Arc::clone(&slow);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            releaser_slow.release_create();
+        });
+
+        let marker = Arc::new(Counter::new(0));
+        let marker_for_task = Arc::clone(&marker);
+        let close_engine = slow_engine.clone();
+        let runtime = crate::build_io_runtime().expect("asupersync runtime");
+        let close_result = runtime.block_on(async move {
+            let cx = Cx::current().expect("asupersync installs an ambient Cx");
+            // A marker future that yields repeatedly. If close synchronously
+            // joined an OS thread, this could not advance while close was
+            // outstanding because the close future would never return `Pending`.
+            let mut ticker = Box::pin(async {
+                for _ in 0..200u32 {
+                    marker_for_task.fetch_add(1, Ordering::SeqCst);
+                    asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(1))
+                        .await;
+                }
+            });
+            // Force-close (busy in-flight create) interleaved with the ticker on
+            // the SAME task. We poll the close future to completion, polling the
+            // ticker on every turn; both must make progress.
+            let mut closing = Box::pin(close_engine.close_async(&cx, true));
+            poll_fn(move |task_cx| {
+                // Always give the ticker a turn; it is cooperative.
+                let _ = Future::poll(Pin::as_mut(&mut ticker), task_cx);
+                Future::poll(Pin::as_mut(&mut closing), task_cx)
+            })
+            .await
+        });
+        close_result.expect("async close must complete");
+        releaser.join().expect("releaser thread");
+        assert!(
+            marker.load(Ordering::SeqCst) > 0,
+            "the caller's worker thread kept interleaving while close awaited the reaper \
+             — close did not synchronously block on an OS-thread join"
+        );
+        eprintln!(
+            "[reaper-test] caller thread advanced marker={} while close awaited the reaper",
+            marker.load(Ordering::SeqCst)
+        );
+        assert_eq!(
+            slow.closed.load(Ordering::SeqCst),
+            1,
+            "the cooperatively-joined reaper must have closed the wedged connection"
+        );
+
+        // (c) Handle consumed; second close is an idempotent no-op.
+        assert!(
+            slow_engine.inner.reaper_handle.lock().unwrap().is_none(),
+            "the reaper task handle must be consumed once close has joined it"
+        );
+        slow_engine.close(true).expect("second close is idempotent");
+
+        // Tidy the async-progress pool from part (a).
         engine.close(false).unwrap();
     }
 }

@@ -8514,6 +8514,26 @@ fn new_io_runtime() -> Result<Runtime> {
         .map_err(|err| Error::Runtime(err.to_string()))
 }
 
+/// Build a fresh single-thread asupersync runtime owned by a connection pool.
+///
+/// Unlike [`build_io_runtime`], which returns a thread-local runtime reused for
+/// every blocking-facade call on a thread, the pool needs a *persistent, owned*
+/// runtime whose worker thread hosts the region-owned reaper task for the pool's
+/// whole lifetime. Each call returns a brand-new runtime; the pool stores it and
+/// drops it (shutting the reaper down) when the last pool handle is dropped.
+///
+/// The worker thread carries the `oracledb-pool-bg` name prefix (the same name
+/// the old detached worker used) so it is identifiable in stack dumps and so the
+/// pool's threads are distinguishable from the shared blocking-facade runtime's.
+pub(crate) fn new_pool_runtime() -> Result<Runtime> {
+    let reactor = reactor::create_reactor()?;
+    RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .thread_name_prefix("oracledb-pool-bg")
+        .build()
+        .map_err(|err| Error::Runtime(err.to_string()))
+}
+
 thread_local! {
     /// One blocking-facade runtime per calling thread, built lazily on first
     /// use and reused for every subsequent `BlockingConnection` /
