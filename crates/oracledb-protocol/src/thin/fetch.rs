@@ -908,10 +908,12 @@ pub(crate) fn parse_out_bind_row_data(
             for _ in 0..num_elements {
                 let value = parse_column_value(reader, metadata)?;
                 let actual_num_bytes = reader.read_sb4()?;
-                if actual_num_bytes != 0 && value.is_some() {
-                    return Err(ProtocolError::TtcDecode("truncated array OUT bind value"));
-                }
-                values.push(value);
+                values.push(apply_out_bind_actual_num_bytes(
+                    metadata,
+                    value,
+                    actual_num_bytes,
+                    "truncated array OUT bind value",
+                )?);
             }
             result
                 .out_values
@@ -920,10 +922,15 @@ pub(crate) fn parse_out_bind_row_data(
         }
         let value = parse_column_value(reader, metadata)?;
         let actual_num_bytes = reader.read_sb4()?;
-        if actual_num_bytes != 0 && value.is_some() {
-            return Err(ProtocolError::TtcDecode("truncated OUT bind value"));
-        }
-        result.out_values.push((*index, value));
+        result.out_values.push((
+            *index,
+            apply_out_bind_actual_num_bytes(
+                metadata,
+                value,
+                actual_num_bytes,
+                "truncated OUT bind value",
+            )?,
+        ));
     }
     Ok(())
 }
@@ -951,14 +958,31 @@ pub(crate) fn parse_returning_row_data(
         for _ in 0..num_rows {
             let value = parse_column_value(reader, metadata)?;
             let actual_num_bytes = reader.read_sb4()?;
-            if actual_num_bytes != 0 && value.is_some() {
-                return Err(ProtocolError::TtcDecode("truncated DML RETURNING value"));
-            }
-            values.push(value);
+            values.push(apply_out_bind_actual_num_bytes(
+                metadata,
+                value,
+                actual_num_bytes,
+                "truncated DML RETURNING value",
+            )?);
         }
         result.return_values.push((*index, values));
     }
     Ok(())
+}
+
+fn apply_out_bind_actual_num_bytes(
+    metadata: &ColumnMetadata,
+    value: Option<QueryValue>,
+    actual_num_bytes: i32,
+    truncation_error: &'static str,
+) -> Result<Option<QueryValue>> {
+    if actual_num_bytes < 0 && metadata.ora_type_num == ORA_TYPE_NUM_BOOLEAN {
+        return Ok(None);
+    }
+    if actual_num_bytes != 0 && value.is_some() {
+        return Err(ProtocolError::TtcDecode(truncation_error));
+    }
+    Ok(value)
 }
 
 pub(crate) fn is_duplicate_column(bit_vector: Option<&[u8]>, column_num: usize) -> bool {
@@ -2385,6 +2409,91 @@ mod borrowed_fetch_tests {
             borrowed_owned, owned.rows,
             "borrowed batch must reproduce the owned fetch rows (incl. duplicate columns)"
         );
+    }
+}
+
+#[cfg(test)]
+mod out_bind_boolean_regression_tests {
+    use super::*;
+
+    fn boolean_column(is_array: bool) -> ColumnMetadata {
+        ColumnMetadata {
+            name: "B".to_string(),
+            ora_type_num: ORA_TYPE_NUM_BOOLEAN,
+            is_array,
+            ..ColumnMetadata::default()
+        }
+    }
+
+    fn boolean_value_with_negative_actual_bytes() -> Vec<u8> {
+        let mut writer = TtcWriter::new();
+        writer
+            .write_bytes_with_length(&[1])
+            .expect("write present boolean value");
+        writer.write_sb4(-1);
+        writer.into_bytes()
+    }
+
+    #[test]
+    fn scalar_boolean_out_bind_negative_actual_bytes_decodes_null() {
+        let bind_columns = [boolean_column(false)];
+        let out_bind_indexes = [0usize];
+        let payload = boolean_value_with_negative_actual_bytes();
+        let mut reader = TtcReader::new(&payload);
+        let mut result = QueryResult::default();
+
+        parse_out_bind_row_data(&mut reader, &mut result, &bind_columns, &out_bind_indexes)
+            .expect("parse scalar BOOLEAN OUT bind");
+
+        assert_eq!(result.out_values, vec![(0, None)]);
+    }
+
+    #[test]
+    fn array_boolean_out_bind_negative_actual_bytes_decodes_null_element() {
+        let bind_columns = [boolean_column(true)];
+        let out_bind_indexes = [0usize];
+        let mut writer = TtcWriter::new();
+        writer.write_ub4(1);
+        writer
+            .write_bytes_with_length(&[1])
+            .expect("write present boolean array element");
+        writer.write_sb4(-1);
+        let payload = writer.into_bytes();
+        let mut reader = TtcReader::new(&payload);
+        let mut result = QueryResult::default();
+
+        parse_out_bind_row_data(&mut reader, &mut result, &bind_columns, &out_bind_indexes)
+            .expect("parse array BOOLEAN OUT bind");
+
+        assert_eq!(
+            result.out_values,
+            vec![(0, Some(QueryValue::Array(vec![None])))]
+        );
+    }
+
+    #[test]
+    fn returning_boolean_negative_actual_bytes_decodes_null() {
+        let bind_columns = [boolean_column(false)];
+        let output_bind_indexes = [0usize];
+        let mut writer = TtcWriter::new();
+        writer.write_ub4(1);
+        writer
+            .write_bytes_with_length(&[1])
+            .expect("write present returning boolean value");
+        writer.write_sb4(-1);
+        let payload = writer.into_bytes();
+        let mut reader = TtcReader::new(&payload);
+        let mut result = QueryResult::default();
+
+        parse_returning_row_data(
+            &mut reader,
+            &mut result,
+            &bind_columns,
+            &output_bind_indexes,
+        )
+        .expect("parse BOOLEAN RETURNING value");
+
+        assert_eq!(result.return_values, vec![(0, vec![None])]);
     }
 }
 

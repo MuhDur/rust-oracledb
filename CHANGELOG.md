@@ -67,6 +67,29 @@ and the project follows the SemVer contract described in
 - **SODA mixed-case columns**: generated SODA SQL now quotes every descriptor column name
   (not only the media-type column), so collections mapped onto case-sensitive mixed-case
   columns work. (SODA is an experimental feature.) Found by W3-E8.
+- **Long-bind ordering on STANDARD databases** (data integrity): the threshold that decides
+  whether a bind is written in the trailing "long" section now uses the **negotiated**
+  `max_string_size` (4000 on a default `MAX_STRING_SIZE=STANDARD` database) instead of a
+  hard-coded 32767. Previously, on a STANDARD database a bind between 4001 and 32767 bytes
+  was mis-ordered and its value could land in the wrong column. Found by W3-E8.
+- **Connection wire-state after a dropped cancellable operation**: `read_lob`, `commit`,
+  `rollback`, `ping`, the AQ enqueue/dequeue calls, LOB write/trim/free, direct-path load,
+  `change_password`, CQN (un)subscribe, sessionless/TPC transaction control, `scroll_cursor`,
+  and pipeline run now break-and-drain a stranded server call before issuing their request —
+  matching the fetch/execute paths — so dropping a cancellable query/fetch future no longer
+  desynchronizes the next operation on the connection. Found by W3-E8.
+- **Pool growth under concurrent waiters**: with a growable pool (`min < max`,
+  `increment >= 1`), multiple concurrent `acquire()` calls on an empty pool now all grow the
+  pool toward `max` and are served, instead of only the first acquirer being served while the
+  rest wait forever. Found by W3-E8.
+- **DbObject image value format** (corrects a 0.3.x-unreleased fix): DbObject/collection
+  attribute values longer than 245 bytes are encoded and decoded as a single big-endian
+  `u32` length (no chunking), matching python-oracledb's `DbObjectPickleBuffer`. An earlier
+  unreleased change had matched the wrong (chunked) form on both sides. Found by W3-E8.
+- **NULL native BOOLEAN OUT/RETURNING binds**: a PL/SQL `OUT`/`IN OUT`/`RETURNING` native
+  `BOOLEAN` that comes back SQL NULL now decodes as NULL instead of raising a spurious
+  "truncated OUT bind value" error (the negative actual-length NULL signalling that some
+  server versions use is now special-cased, as in python-oracledb). Found by W3-E8.
 
 ### Added
 

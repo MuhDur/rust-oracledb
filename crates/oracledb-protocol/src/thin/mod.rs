@@ -448,11 +448,11 @@ mod tests {
         let metadata = row.iter().map(bind_metadata).collect::<Vec<_>>();
 
         assert_eq!(
-            bind_row_value_order(&row, &metadata, false),
+            bind_row_value_order(&row, &metadata, false, 32_767),
             vec![0, 2, 1, 3]
         );
         assert_eq!(
-            bind_row_value_order(&row, &metadata, true),
+            bind_row_value_order(&row, &metadata, true, 32_767),
             vec![0, 1, 2, 3]
         );
     }

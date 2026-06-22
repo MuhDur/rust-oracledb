@@ -1019,6 +1019,9 @@ pub struct ExecuteOptions {
     /// (reference `cursor_impl._registration_id`, execute.pyx:116-163). Zero
     /// for ordinary executes.
     pub(crate) registration_id: u64,
+    /// Negotiated maximum non-LONG string/raw bind size from server capabilities.
+    /// STANDARD databases report 4000; 32K-capable databases report 32767.
+    pub(crate) max_string_size: u32,
 }
 
 impl Default for ExecuteOptions {
@@ -1037,6 +1040,7 @@ impl Default for ExecuteOptions {
             suspend_on_success: false,
             no_prefetch: false,
             registration_id: 0,
+            max_string_size: 32_767,
         }
     }
 }
@@ -1169,6 +1173,16 @@ impl ExecuteOptions {
     #[must_use]
     pub fn with_registration_id(mut self, registration_id: u64) -> Self {
         self.registration_id = registration_id;
+        self
+    }
+
+    pub fn max_string_size(&self) -> u32 {
+        self.max_string_size
+    }
+
+    #[must_use]
+    pub fn with_max_string_size(mut self, max_string_size: u32) -> Self {
+        self.max_string_size = max_string_size;
         self
     }
 }

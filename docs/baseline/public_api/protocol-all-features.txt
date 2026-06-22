@@ -1060,6 +1060,7 @@ pub fn oracledb_protocol::thin::ExecuteOptions::cache_statement(&self) -> bool
 pub fn oracledb_protocol::thin::ExecuteOptions::cursor_id(&self) -> u32
 pub fn oracledb_protocol::thin::ExecuteOptions::fetch_orientation(&self) -> u32
 pub fn oracledb_protocol::thin::ExecuteOptions::fetch_pos(&self) -> u32
+pub fn oracledb_protocol::thin::ExecuteOptions::max_string_size(&self) -> u32
 pub fn oracledb_protocol::thin::ExecuteOptions::no_prefetch(&self) -> bool
 pub fn oracledb_protocol::thin::ExecuteOptions::parse_only(&self) -> bool
 pub fn oracledb_protocol::thin::ExecuteOptions::registration_id(&self) -> u64
@@ -1073,6 +1074,7 @@ pub fn oracledb_protocol::thin::ExecuteOptions::with_cache_statement(self, bool)
 pub fn oracledb_protocol::thin::ExecuteOptions::with_cursor_id(self, u32) -> Self
 pub fn oracledb_protocol::thin::ExecuteOptions::with_fetch_orientation(self, u32) -> Self
 pub fn oracledb_protocol::thin::ExecuteOptions::with_fetch_pos(self, u32) -> Self
+pub fn oracledb_protocol::thin::ExecuteOptions::with_max_string_size(self, u32) -> Self
 pub fn oracledb_protocol::thin::ExecuteOptions::with_no_prefetch(self, bool) -> Self
 pub fn oracledb_protocol::thin::ExecuteOptions::with_parse_only(self, bool) -> Self
 pub fn oracledb_protocol::thin::ExecuteOptions::with_registration_id(self, u64) -> Self

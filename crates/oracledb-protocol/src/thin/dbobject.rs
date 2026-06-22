@@ -63,21 +63,6 @@ impl<'a> DbObjectPackedReader<'a> {
         })?))
     }
 
-    fn read_ub4(&mut self) -> Result<u32> {
-        let len = self.read_u8()?;
-        if len == 0 {
-            return Ok(0);
-        }
-        if len > 4 {
-            return Err(ProtocolError::TtcDecode("invalid DbObject ub4 length"));
-        }
-        let mut value = 0u32;
-        for byte in self.read_raw(usize::from(len))? {
-            value = (value << 8) | u32::from(*byte);
-        }
-        Ok(value)
-    }
-
     pub fn read_i32be(&mut self) -> Result<i32> {
         let bytes = self.read_raw(4)?;
         Ok(i32::from_be_bytes(bytes.try_into().map_err(|_| {
@@ -102,40 +87,9 @@ impl<'a> DbObjectPackedReader<'a> {
 
     pub fn read_value_bytes(&mut self) -> Result<Option<Vec<u8>>> {
         let length = match self.read_u8()? {
-            0 | TNS_NULL_LENGTH_INDICATOR => return Ok(None),
-            TNS_LONG_LENGTH_INDICATOR => {
-                let mut out = Vec::new();
-                let mut chunks = 0usize;
-                let mut total = 0usize;
-                loop {
-                    let chunk_len = self.read_ub4()?;
-                    if chunk_len == 0 {
-                        break;
-                    }
-                    chunks = chunks.checked_add(1).ok_or(ProtocolError::ResourceLimit {
-                        limit: "lob_chunks",
-                        observed: usize::MAX,
-                        maximum: self.limits.max_lob_chunks,
-                    })?;
-                    self.limits.check_lob_chunks(chunks)?;
-                    let chunk_len = usize::try_from(chunk_len).map_err(|_| {
-                        ProtocolError::InvalidPacketLength {
-                            length: usize::MAX,
-                            minimum: 0,
-                        }
-                    })?;
-                    total = total
-                        .checked_add(chunk_len)
-                        .ok_or(ProtocolError::ResourceLimit {
-                            limit: "response_bytes",
-                            observed: usize::MAX,
-                            maximum: self.limits.max_response_bytes,
-                        })?;
-                    self.limits.check_response_bytes(total)?;
-                    out.extend_from_slice(self.read_raw(chunk_len)?);
-                }
-                return Ok(Some(out));
-            }
+            TNS_NULL_LENGTH_INDICATOR => return Ok(None),
+            TNS_LONG_LENGTH_INDICATOR => usize::try_from(self.read_u32be()?)
+                .map_err(|_| ProtocolError::TtcDecode("DbObject value length overflow"))?,
             length => usize::from(length),
         };
         Ok(Some(self.read_raw(length)?.to_vec()))
@@ -193,44 +147,22 @@ impl crate::wire::BoundedReader for DbObjectPackedReader<'_> {
 }
 
 /// Writes a length-prefixed value into a DbObject pickle image buffer using the
-/// inner-buffer scheme (252 short cutoff, 32767 chunks for the long form). This
-/// mirrors `Buffer.write_bytes_with_length` used by `_pack_value`
-/// (reference impl/thin/packet.pyx) — NOT the 245-cutoff `write_length`.
+/// DbObject image `write_length` format: 245-byte short cutoff, or `0xfe`
+/// followed by one big-endian `uint32` length and the full value bytes.
 pub fn image_write_value_bytes(buf: &mut Vec<u8>, value: &[u8]) -> Result<()> {
-    if value.len() <= crate::wire::TNS_MAX_SHORT_LENGTH {
+    if value.len() <= TNS_OBJ_MAX_SHORT_LENGTH {
         buf.push(value.len() as u8);
         buf.extend_from_slice(value);
         return Ok(());
     }
+    let length = u32::try_from(value.len()).map_err(|_| ProtocolError::InvalidPacketLength {
+        length: value.len(),
+        minimum: 0,
+    })?;
     buf.push(TNS_LONG_LENGTH_INDICATOR);
-    for chunk in value.chunks(32_767) {
-        image_write_ub4(
-            buf,
-            u32::try_from(chunk.len()).map_err(|_| ProtocolError::InvalidPacketLength {
-                length: chunk.len(),
-                minimum: 0,
-            })?,
-        );
-        buf.extend_from_slice(chunk);
-    }
-    image_write_ub4(buf, 0);
+    buf.extend_from_slice(&length.to_be_bytes());
+    buf.extend_from_slice(value);
     Ok(())
-}
-
-/// Writes a `ub4` into a pickle image buffer (reference `write_ub4`).
-pub(crate) fn image_write_ub4(buf: &mut Vec<u8>, value: u32) {
-    if value == 0 {
-        buf.push(0);
-    } else if value <= u32::from(u8::MAX) {
-        buf.push(1);
-        buf.push(value as u8);
-    } else if value <= u32::from(u16::MAX) {
-        buf.push(2);
-        buf.extend_from_slice(&(value as u16).to_be_bytes());
-    } else {
-        buf.push(4);
-        buf.extend_from_slice(&value.to_be_bytes());
-    }
 }
 
 /// Writes a collection/element count length into a pickle image buffer using
@@ -626,11 +558,29 @@ mod value_bytes_tests {
     use super::*;
 
     #[test]
-    fn value_bytes_roundtrip_short_and_chunked_boundaries() {
-        for len in [252usize, 253, 32_767, 32_768] {
+    fn value_bytes_roundtrip_uses_dbobject_single_u32be_length_format() {
+        for len in [244usize, 245, 246, 250, 65_535, 70_000] {
             let value = (0..len).map(|i| (i % 251) as u8).collect::<Vec<_>>();
             let mut image = Vec::new();
             image_write_value_bytes(&mut image, &value).expect("encode value bytes");
+
+            let mut expected = Vec::new();
+            if len <= TNS_OBJ_MAX_SHORT_LENGTH {
+                expected.push(len as u8);
+            } else {
+                expected.push(TNS_LONG_LENGTH_INDICATOR);
+                expected.extend_from_slice(&(len as u32).to_be_bytes());
+            }
+            expected.extend_from_slice(&value);
+            assert_eq!(image, expected, "wire bytes for length {len}");
+
+            if len == 250 {
+                assert_eq!(
+                    &image[..5],
+                    &[TNS_LONG_LENGTH_INDICATOR, 0x00, 0x00, 0x00, 0xfa],
+                    "250-byte values use one big-endian u32 length"
+                );
+            }
 
             let mut reader = DbObjectPackedReader::new(&image);
             let decoded = reader

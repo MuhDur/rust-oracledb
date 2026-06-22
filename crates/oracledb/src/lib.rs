@@ -139,12 +139,12 @@ use oracledb_protocol::thin::{
     build_begin_pipeline_piggyback, build_change_password_payload_with_seq,
     build_connect_packet_payload, build_define_fetch_payload_with_seq,
     build_end_pipeline_payload_with_seq, build_execute_payload_with_bind_rows_and_options_with_seq,
-    build_execute_payload_with_bind_rows_with_seq_and_token, build_fast_auth_phase_one_payload,
-    build_fast_auth_token_payload, build_fetch_payload_with_seq, build_function_payload_with_seq,
-    build_function_payload_with_seq_and_token, build_lob_create_temp_payload_with_seq,
-    build_lob_free_temp_payload_with_seq, build_lob_read_payload_with_seq,
-    build_lob_trim_payload_with_seq, build_lob_write_payload_with_seq, parse_accept_payload,
-    parse_auth_response_with_limits, parse_define_fetch_response_with_context_and_limits,
+    build_fast_auth_phase_one_payload, build_fast_auth_token_payload, build_fetch_payload_with_seq,
+    build_function_payload_with_seq, build_function_payload_with_seq_and_token,
+    build_lob_create_temp_payload_with_seq, build_lob_free_temp_payload_with_seq,
+    build_lob_read_payload_with_seq, build_lob_trim_payload_with_seq,
+    build_lob_write_payload_with_seq, parse_accept_payload, parse_auth_response_with_limits,
+    parse_define_fetch_response_with_context_and_limits,
     parse_fetch_response_with_context_and_limits, parse_lob_create_temp_response_with_limits,
     parse_lob_free_temp_response_with_limits, parse_lob_read_response_with_limits,
     parse_lob_trim_response_with_limits, parse_lob_write_response_with_limits,
@@ -3804,6 +3804,7 @@ impl Connection {
         new_password: &str,
     ) -> Result<()> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         let (encoded_password, encoded_newpassword) =
             oracledb_protocol::crypto::encrypt_change_password_pair(
                 &self.combo_key,
@@ -3844,6 +3845,7 @@ impl Connection {
         grouping_type: u8,
     ) -> Result<SubscribeResult> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_subscribe_payload_with_seq(
             seq_num,
@@ -3890,6 +3892,7 @@ impl Connection {
         grouping_type: u8,
     ) -> Result<()> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         // unregister reuses the same `_write_message` path: the name/qos/
         // operations/grouping fields mirror the original registration so the
@@ -3927,6 +3930,7 @@ impl Connection {
     /// `ThinSubscrImpl._bg_task_func` (sends NOTIFY then blocks reading).
     pub async fn notify_register(&mut self, cx: &Cx, client_id: &[u8]) -> Result<()> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload =
             build_notify_payload_with_seq(seq_num, client_id, self.capabilities.ttc_field_version)?;
@@ -4210,6 +4214,7 @@ impl Connection {
         }
         // send the begin/resume immediately
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_tpc_txn_switch_payload_with_seq(
             seq_num,
@@ -4282,6 +4287,7 @@ impl Connection {
             Some(_) => {}
         }
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_tpc_txn_switch_payload_with_seq(
             seq_num,
@@ -4317,6 +4323,7 @@ impl Connection {
         context: Option<&[u8]>,
     ) -> Result<TpcSwitchResponse> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload =
             build_tpc_switch_payload_with_seq(seq_num, operation, flags, timeout, xid, context);
@@ -4341,6 +4348,7 @@ impl Connection {
         context: Option<&[u8]>,
     ) -> Result<TpcChangeStateResponse> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_tpc_change_state_payload_with_seq(
             seq_num,
@@ -5263,7 +5271,7 @@ impl Connection {
         // If a prior cancellable round trip was dropped mid-read, break + drain
         // the stranded call before issuing this execute (Scope cancel-on-drop).
         self.ensure_clean_before_request().await?;
-        let mut exec_options = exec_options;
+        let mut exec_options = exec_options.with_max_string_size(self.capabilities.max_string_size);
         // a `suspend_on_success` execute folds a post-detach into the pending
         // sessionless piggyback; validate (DPY-3034/3036) before any wire work
         // (reference execute.pyx `_handle_sessionless_suspend`)
@@ -5992,6 +6000,7 @@ impl Connection {
         previous_row: Option<&[Option<oracledb_protocol::thin::QueryValue>]>,
     ) -> Result<QueryResult> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload =
             build_define_fetch_payload_with_seq(cursor_id, arraysize, seq_num, define_columns)?;
@@ -6198,7 +6207,9 @@ impl Connection {
         fetch_pos: u32,
     ) -> Result<QueryResult> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         let exec_options = ExecuteOptions::default()
+            .with_max_string_size(self.capabilities.max_string_size)
             .with_cursor_id(cursor_id)
             .with_scrollable(true)
             .with_scroll_operation(true)
@@ -6266,6 +6277,7 @@ impl Connection {
             db.lob_amount = amount,
         );
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_lob_read_payload_with_seq(
             locator,
@@ -6308,6 +6320,7 @@ impl Connection {
         enq_options: &AqEnqOptions,
     ) -> Result<Option<Vec<u8>>> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         self.protocol_limits.check_frame_bytes(queue.name.len())?;
         self.protocol_limits
             .check_frame_bytes(queue.payload_toid.len())?;
@@ -6340,6 +6353,7 @@ impl Connection {
         deq_options: &AqDeqOptions,
     ) -> Result<AqDeqResult> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         self.protocol_limits.check_frame_bytes(queue.name.len())?;
         self.protocol_limits
             .check_frame_bytes(queue.payload_toid.len())?;
@@ -6372,6 +6386,7 @@ impl Connection {
         enq_options: &AqEnqOptions,
     ) -> Result<Vec<Vec<u8>>> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         self.protocol_limits.check_batch_rows(props_list.len())?;
         self.protocol_limits.check_frame_bytes(queue.name.len())?;
         self.protocol_limits
@@ -6410,6 +6425,7 @@ impl Connection {
         max_num_messages: u32,
     ) -> Result<Vec<oracledb_protocol::thin::aq::AqDeqMessage>> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         self.protocol_limits
             .check_batch_rows(max_num_messages as usize)?;
         self.protocol_limits.check_frame_bytes(queue.name.len())?;
@@ -6445,6 +6461,7 @@ impl Connection {
         csfrm: u8,
     ) -> Result<LobReadResult> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_lob_create_temp_payload_with_seq(
             ora_type_num,
@@ -6479,6 +6496,7 @@ impl Connection {
             db.lob_bytes = data.len() as u64,
         );
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         self.protocol_limits.check_frame_bytes(locator.len())?;
         self.protocol_limits.check_frame_bytes(data.len())?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
@@ -6520,6 +6538,7 @@ impl Connection {
         new_size: u64,
     ) -> Result<LobReadResult> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         self.protocol_limits.check_frame_bytes(locator.len())?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = build_lob_trim_payload_with_seq(
@@ -6556,6 +6575,7 @@ impl Connection {
         if locators.is_empty() {
             return Ok(());
         }
+        self.ensure_clean_before_request().await?;
         self.protocol_limits.check_lob_chunks(locators.len())?;
         let returned_parameter_len = locators.iter().try_fold(0usize, |total, locator| {
             self.protocol_limits.check_frame_bytes(locator.len())?;
@@ -6794,6 +6814,7 @@ impl Connection {
         column_names: &[String],
     ) -> Result<oracledb_protocol::dpl::DirectPathPrepareResult> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         self.protocol_limits.check_columns(column_names.len())?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = oracledb_protocol::dpl::build_direct_path_prepare_payload(
@@ -6822,6 +6843,7 @@ impl Connection {
         stream: &oracledb_protocol::dpl::DirectPathStream,
     ) -> Result<()> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = oracledb_protocol::dpl::build_direct_path_load_stream_payload(
             cursor_id, stream, seq_num,
@@ -6843,6 +6865,7 @@ impl Connection {
     /// server-side; [`oracledb_protocol::dpl::TNS_DP_OP_ABORT`] discards it.
     pub async fn direct_path_op(&mut self, cx: &Cx, cursor_id: u16, op_code: u32) -> Result<()> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload =
             oracledb_protocol::dpl::build_direct_path_op_payload(cursor_id, op_code, seq_num);
@@ -7392,6 +7415,7 @@ impl Connection {
                 return Ok(());
             }
         }
+        self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         self.core
             .send_data_packet(
@@ -7448,6 +7472,7 @@ impl Connection {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
+        self.ensure_clean_before_request().await?;
         self.protocol_limits
             .check_length_prefixed_elements(requests.len())?;
         let pipeline_mode = if continue_on_error {
@@ -7492,13 +7517,15 @@ impl Connection {
                         self.protocol_limits.check_binds(first_row.len())?;
                     }
                     payload.extend_from_slice(
-                        &build_execute_payload_with_bind_rows_with_seq_and_token(
+                        &build_execute_payload_with_bind_rows_and_options_with_seq(
                             sql,
                             *prefetch_rows,
                             seq_num,
                             statement_is_query(sql),
                             bind_rows,
-                            token_num,
+                            ExecuteOptions::default()
+                                .with_token_num(token_num)
+                                .with_max_string_size(self.capabilities.max_string_size),
                         )?,
                     );
                 }
@@ -7621,6 +7648,7 @@ impl Connection {
 
     async fn send_function(&mut self, cx: &Cx, function_code: u8) -> Result<()> {
         observe_cancellation_between_round_trips(cx)?;
+        self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         self.core
             .send_data_packet(
@@ -10145,6 +10173,7 @@ mod tests {
             "suspend_on_success",
             "no_prefetch",
             "registration_id",
+            "max_string_size",
         ] {
             assert!(
                 design.contains(field),
@@ -10405,7 +10434,8 @@ mod tests {
             .with_scroll_operation(true)
             .with_suspend_on_success(true)
             .with_no_prefetch(true)
-            .with_registration_id(13);
+            .with_registration_id(13)
+            .with_max_string_size(4_000);
 
         let execute = Execute::new("begin null; end;").raw_options(options);
 
@@ -10485,7 +10515,8 @@ mod tests {
             .with_scroll_operation(true)
             .with_suspend_on_success(true)
             .with_no_prefetch(true)
-            .with_registration_id(21);
+            .with_registration_id(21)
+            .with_max_string_size(4_000);
 
         let batch = Batch::new("begin null; end;", rows).raw_options(options);
 
@@ -13045,6 +13076,95 @@ mod tests {
             .join()
             .expect("server thread joins")
             .map_err(Error::Io)?;
+        Ok(())
+    }
+
+    #[test]
+    fn dropped_cancellable_read_is_drained_before_commit_request() -> Result<()> {
+        const STRANDED_BODY: &[u8] = b"stranded response";
+        const TRAILING_CANCEL_ERROR: &[u8] = &[0x04, 0x01, 0x0d];
+
+        let commit_packet = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            &build_function_payload_with_seq(TNS_FUNC_COMMIT, 1),
+            PacketLengthWidth::Large32,
+        )?;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            use std::io::Write as _;
+
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_BREAK,
+                "commit must send BREAK before its own request when recovery is pending"
+            );
+            socket
+                .write_all(&data_packet(STRANDED_BODY, true))
+                .expect("write stranded response");
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))
+                .expect("write break-ack marker");
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_RESET,
+                "commit recovery drain must answer the server break marker with RESET"
+            );
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_RESET))
+                .expect("write reset-confirm marker");
+            socket
+                .write_all(&data_packet(TRAILING_CANCEL_ERROR, true))
+                .expect("write trailing cancel error packet");
+
+            let mut header = [0u8; 8];
+            socket
+                .read_exact(&mut header)
+                .expect("read fresh commit request header");
+            let len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+            let mut commit_request = header.to_vec();
+            let mut body = vec![0u8; len - header.len()];
+            socket
+                .read_exact(&mut body)
+                .expect("read fresh commit request body");
+            commit_request.extend_from_slice(&body);
+            assert_eq!(
+                commit_request, commit_packet,
+                "fresh COMMIT request must be written after BREAK/RESET drain"
+            );
+            socket
+                .write_all(&data_packet(&[TNS_MSG_TYPE_END_OF_RESPONSE], true))
+                .expect("write commit response");
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            {
+                let _guard = CancelDrainGuard::arm(Arc::clone(&connection.core.recovery))?;
+            }
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::BreakSent
+            );
+            connection.commit(&cx).await?;
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        server.join().expect("server thread joins");
         Ok(())
     }
 

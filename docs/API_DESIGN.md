@@ -149,7 +149,7 @@ impl<'a> Execute<'a> {
     pub fn bind(self, p: impl Into<Params<'a>>) -> Self;
     pub fn timeout(self, d: Duration) -> Self;
     pub fn parse_only(self) -> Self;                      // validate without executing
-    pub fn raw_options(self, o: ExecuteOptions) -> Self;  // escape hatch: all 13 knobs via builders/getters
+    pub fn raw_options(self, o: ExecuteOptions) -> Self;  // escape hatch: all 14 knobs via builders/getters
 }
 ```
 ```rust
@@ -166,10 +166,11 @@ impl ExecuteOutcome {
 ```
 - **OUT/IN-OUT, RETURNING, implicit result sets** are surfaced as typed accessors over
   what is today `QueryResult.out_values` / `return_values` / `implicit_resultsets`.
-- **All 13 `ExecuteOptions` knobs survive:** common ones get builder methods
+- **All 14 `ExecuteOptions` knobs survive:** common ones get builder methods
   (`parse_only`; batch flags live on `Batch`, §5; `registration_id` on `Registration`,
   §6; scroll fields on `Query::scrollable`/`Rows::scroll`); the rest
-  (`cursor_id` reuse, `cache_statement`, `no_prefetch`, `token_num`, `suspend_on_success`)
+  (`cursor_id` reuse, `cache_statement`, `no_prefetch`, `token_num`, `suspend_on_success`,
+  negotiated `max_string_size`)
   are driver-internal or other-family, **and** `Execute::raw_options(ExecuteOptions)` is a
   documented method-based escape hatch so power users lose nothing without depending on field layout.
 - **DBMS_OUTPUT** stays as `enable_dbms_output` / `read_dbms_output` (retained convenience
@@ -335,7 +336,7 @@ execute/fetch/define/cursor machinery the SODA/Arrow/direct-path facades sit on.
 | C23 | Blocking mirror | W1-T3.8 adds a 1:1 blocking family mirror; deprecated blocking old names remain shims until then. |
 | C24 | Arrow, direct-path load, SODA, profiling, protocol re-export | Retained facades and `oracledb::protocol` re-export. |
 
-**`ExecuteOptions` knob mapping (13/13):**
+**`ExecuteOptions` knob mapping (14/14):**
 
 | Field | Family surface |
 |---|---|
@@ -352,6 +353,7 @@ execute/fetch/define/cursor machinery the SODA/Arrow/direct-path facades sit on.
 | `suspend_on_success` | `Execute::raw_options` / `Batch::raw_options` for sessionless piggyback. |
 | `no_prefetch` | Private refetch/define logic and `raw_options` compatibility. |
 | `registration_id` | `Registration::new(sql, registration_id)` / `register_query`; `raw_options` still exact. |
+| `max_string_size` | Negotiated by the connection from server capabilities; `raw_options` preserves the builder for protocol-level tests/tools. |
 
 **Value variants retained:**
 

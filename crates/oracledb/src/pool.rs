@@ -1244,6 +1244,47 @@ fn pending_open_count<C>(state: &PoolState<C>) -> u32 {
     saturating_u32(effect_count.saturating_add(request_count))
 }
 
+fn compatible_idle_count<C>(
+    state: &PoolState<C>,
+    wants_new: bool,
+    request_cclass: Option<&str>,
+    cclass_matches: bool,
+) -> u32 {
+    if wants_new {
+        return 0;
+    }
+    let used = state
+        .free_used
+        .iter()
+        .filter(|conn| request_cclass.is_none() || conn.cclass.as_deref() == request_cclass)
+        .count();
+    let new = if cclass_matches {
+        state.free_new.len()
+    } else {
+        0
+    };
+    saturating_u32(used.saturating_add(new))
+}
+
+fn compatible_waiting_demand<C>(state: &PoolState<C>) -> u32 {
+    saturating_u32(
+        state
+            .requests
+            .iter()
+            .filter(|request| {
+                request.waiting
+                    && request.cclass_matches
+                    && !request.completed
+                    && !request.requires_ping
+                    && !request.is_extra
+                    && !request.is_replacing
+                    && request.conn.is_none()
+                    && request.error.is_none()
+            })
+            .count(),
+    )
+}
+
 fn active_open_count<C>(state: &PoolState<C>) -> u32 {
     let request_connections = state
         .requests
@@ -2188,9 +2229,22 @@ fn fulfill<B: PoolBackend>(
         } else if state.config.getmode == POOL_GETMODE_NOWAIT {
             return Err(PoolError::NoConnectionAvailable);
         }
-    } else if cclass_matches && pending_open_count(state) == 0 {
+    } else if cclass_matches {
         let remaining_capacity = state.config.max.saturating_sub(reserved_open_count(state));
-        schedule_open_effects(state, state.config.increment.min(remaining_capacity));
+        let pending = pending_open_count(state);
+        let idle =
+            compatible_idle_count(state, wants_new, request_cclass.as_deref(), cclass_matches);
+        let demand = compatible_waiting_demand(state);
+        let supply = pending.saturating_add(idle);
+        let shortfall = demand.saturating_sub(supply);
+        let desired = if pending == 0 {
+            state.config.increment.max(shortfall)
+        } else {
+            shortfall
+        };
+        if desired > 0 {
+            schedule_open_effects(state, desired.min(remaining_capacity));
+        }
     }
     add_request_for_bg(state, inner, request_id);
     Ok(false)
@@ -2695,7 +2749,7 @@ mod tests {
     // `create_connection` to exercise the in-flight-create close path. Its
     // `Condvar` models a slow remote server; it is unrelated to the (now async)
     // pool reaper, which no longer uses any `Condvar`.
-    use std::sync::Condvar;
+    use std::sync::{Barrier, Condvar};
 
     #[test]
     fn pure_pool_state_opens_min_and_derives_counts() {
@@ -4312,6 +4366,62 @@ mod tests {
         assert_eq!(acquired, held);
         engine.return_connection(acquired).unwrap();
         engine.close(false).unwrap();
+    }
+
+    #[test]
+    fn wait_acquires_beyond_increment_grow_pool_for_each_waiter() {
+        let backend = Arc::new(FakeBackend::new());
+        let engine = PoolEngine::start(
+            Arc::clone(&backend),
+            test_config(0, 4, 1, POOL_GETMODE_WAIT),
+        )
+        .expect("pool engine should start");
+        assert_eq!(engine.open_count().expect("open count"), 0);
+
+        let barrier = Arc::new(Barrier::new(4));
+        let handles = (0..3)
+            .map(|_| {
+                let engine = engine.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    engine.acquire(AcquireOptions::default())
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+
+        let mut acquired = Vec::new();
+        for handle in handles {
+            acquired.push(
+                handle
+                    .join()
+                    .expect("acquire thread should join")
+                    .expect("WAIT acquire should be served"),
+            );
+        }
+        acquired.sort_unstable();
+        acquired.dedup();
+
+        assert_eq!(
+            acquired.len(),
+            3,
+            "each waiter receives a distinct connection"
+        );
+        assert_eq!(engine.busy_count().expect("busy count"), 3);
+        assert_eq!(engine.open_count().expect("open count"), 3);
+        assert_eq!(
+            backend.created.load(Ordering::SeqCst),
+            3,
+            "pool grows beyond increment=1 to cover concurrent waiters"
+        );
+
+        for conn_id in acquired {
+            engine
+                .return_connection(conn_id)
+                .expect("return acquired connection");
+        }
+        engine.close(false).expect("close pool");
     }
 
     #[test]

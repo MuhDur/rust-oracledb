@@ -292,7 +292,12 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
                          // a scroll request carries no bind parameters (reference suppresses the
                          // BIND option and never writes bind params for scroll_operation)
     if !bind_rows.is_empty() && !scroll_operation {
-        write_bind_params(&mut writer, bind_rows, is_plsql)?;
+        write_bind_params(
+            &mut writer,
+            bind_rows,
+            is_plsql,
+            exec_options.max_string_size,
+        )?;
     }
     Ok(writer.into_bytes())
 }
@@ -301,6 +306,7 @@ pub(crate) fn write_bind_params(
     writer: &mut TtcWriter,
     bind_rows: &[Vec<BindValue>],
     is_plsql: bool,
+    max_string_size: u32,
 ) -> Result<()> {
     let Some(first_row) = bind_rows.first() else {
         return Ok(());
@@ -314,7 +320,7 @@ pub(crate) fn write_bind_params(
             continue;
         }
         writer.write_u8(TNS_MSG_TYPE_ROW_DATA);
-        for index in bind_row_value_order(row, &bind_metadata, is_plsql) {
+        for index in bind_row_value_order(row, &bind_metadata, is_plsql, max_string_size) {
             let value = &row[index];
             let (_ora_type_num, csfrm, _buffer_size) = bind_metadata
                 .get(index)
@@ -330,6 +336,7 @@ pub(crate) fn bind_row_value_order(
     row: &[BindValue],
     bind_metadata: &[(u8, u8, u32)],
     is_plsql: bool,
+    max_string_size: u32,
 ) -> Vec<usize> {
     let mut non_long = Vec::with_capacity(row.len());
     let mut long = Vec::new();
@@ -346,7 +353,7 @@ pub(crate) fn bind_row_value_order(
                 .get(index)
                 .is_some_and(|(ora_type_num, _, buffer_size)| {
                     matches!(*ora_type_num, ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_LONG_RAW)
-                        || *buffer_size > 32_767
+                        || *buffer_size > max_string_size
                 })
         {
             long.push(index);
@@ -423,6 +430,13 @@ pub(crate) fn promoted_bind_metadata_type(left: u8, right: u8) -> u8 {
 mod tests {
     use super::*;
 
+    fn find_subslice(haystack: &[u8], needle: &[u8], label: &str) -> usize {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .unwrap_or_else(|| panic!("{label} not found in execute payload"))
+    }
+
     #[test]
     fn register_query_execute_payload_splits_registration_id() {
         let registration_id = 0x1122_3344_5566_7788_u64;
@@ -453,6 +467,69 @@ mod tests {
         assert!(
             lsb_pos < msb_pos,
             "execute payload writes registration id lsb before msb"
+        );
+    }
+
+    #[test]
+    fn long_bind_split_uses_negotiated_max_string_size() {
+        let row = vec![
+            BindValue::Raw(vec![b'A'; 3_999]),
+            BindValue::Raw(vec![b'B'; 4_001]),
+            BindValue::Raw(vec![b'C'; 32_767]),
+            BindValue::Text("ZMARK".to_string()),
+        ];
+        let metadata = row.iter().map(bind_metadata).collect::<Vec<_>>();
+
+        assert_eq!(
+            bind_row_value_order(&row, &metadata, false, 4_000),
+            vec![0, 3, 1, 2],
+            "STANDARD max_string_size=4000 writes >4000-byte binds in the long section"
+        );
+        assert_eq!(
+            bind_row_value_order(&row, &metadata, false, 32_767),
+            vec![0, 1, 2, 3],
+            "32K-capable connections keep <=32767-byte binds in ordinary order"
+        );
+        assert_eq!(
+            bind_row_value_order(&row, &metadata, true, 4_000),
+            vec![0, 1, 2, 3],
+            "PL/SQL bind order is unchanged"
+        );
+
+        let standard = build_execute_payload_with_bind_rows_and_options_with_seq(
+            "insert into t values (:1, :2, :3, :4)",
+            1,
+            7,
+            false,
+            &[row.clone()],
+            ExecuteOptions::default().with_max_string_size(4_000),
+        )
+        .expect("STANDARD execute payload");
+        let standard_a = find_subslice(&standard, &[b'A'; 32], "STANDARD A value");
+        let standard_b = find_subslice(&standard, &[b'B'; 32], "STANDARD B value");
+        let standard_c = find_subslice(&standard, &[b'C'; 32], "STANDARD C value");
+        let standard_z = find_subslice(&standard, b"ZMARK", "STANDARD raw marker");
+        assert!(
+            standard_a < standard_z && standard_z < standard_b && standard_b < standard_c,
+            "STANDARD payload must write non-long values before >4000-byte long values"
+        );
+
+        let extended = build_execute_payload_with_bind_rows_and_options_with_seq(
+            "insert into t values (:1, :2, :3, :4)",
+            1,
+            8,
+            false,
+            &[row],
+            ExecuteOptions::default().with_max_string_size(32_767),
+        )
+        .expect("32K execute payload");
+        let extended_a = find_subslice(&extended, &[b'A'; 32], "32K A value");
+        let extended_b = find_subslice(&extended, &[b'B'; 32], "32K B value");
+        let extended_c = find_subslice(&extended, &[b'C'; 32], "32K C value");
+        let extended_z = find_subslice(&extended, b"ZMARK", "32K raw marker");
+        assert!(
+            extended_a < extended_b && extended_b < extended_c && extended_c < extended_z,
+            "32K payload must keep <=32767-byte values in bind order"
         );
     }
 }

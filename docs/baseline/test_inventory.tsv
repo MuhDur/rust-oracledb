@@ -12,8 +12,8 @@ crates/oracledb-protocol/src/thin/aq.rs	8
 crates/oracledb-protocol/src/thin/auth.rs	3
 crates/oracledb-protocol/src/thin/codecs.rs	3
 crates/oracledb-protocol/src/thin/dbobject.rs	7
-crates/oracledb-protocol/src/thin/execute.rs	1
-crates/oracledb-protocol/src/thin/fetch.rs	11
+crates/oracledb-protocol/src/thin/execute.rs	2
+crates/oracledb-protocol/src/thin/fetch.rs	14
 crates/oracledb-protocol/src/thin/mod.rs	30
 crates/oracledb-protocol/src/thin/number.rs	6
 crates/oracledb-protocol/src/thin/proptests.rs	23
@@ -46,9 +46,9 @@ crates/oracledb-protocol/tests/tls_wallet.rs	9
 crates/oracledb-protocol/tests/tpc_golden.rs	3
 crates/oracledb/src/arrow.rs	34
 crates/oracledb/src/cursor_logic.rs	14
-crates/oracledb/src/lib.rs	66
+crates/oracledb/src/lib.rs	67
 crates/oracledb/src/obs.rs	6
-crates/oracledb/src/pool.rs	30
+crates/oracledb/src/pool.rs	31
 crates/oracledb/src/soda/collection.rs	2
 crates/oracledb/src/soda/metadata.rs	4
 crates/oracledb/src/soda/operation.rs	11
