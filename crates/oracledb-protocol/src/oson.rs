@@ -1009,7 +1009,7 @@ impl TreeSegment {
             OsonValue::Vector(vector) => {
                 self.buffer.push(TNS_JSON_TYPE_EXTENDED);
                 self.buffer.push(TNS_JSON_TYPE_VECTOR);
-                let image = crate::vector::encode_vector(vector);
+                let image = crate::vector::encode_vector_checked(vector)?;
                 self.buffer
                     .extend_from_slice(&(image.len() as u32).to_be_bytes());
                 self.buffer.extend_from_slice(&image);

@@ -54,6 +54,19 @@ and the project follows the SemVer contract described in
 - **Borrowed vs owned NUMBER canonicalization**: the borrowed (zero-copy) and owned fetch
   paths now produce identical canonical text for trailing-zero `NUMBER` values. Found by
   W3-E8.
+- **DbObject long attribute values**: a DbObject/collection attribute value longer than 252
+  bytes is now decoded correctly. The encoder emits the long form as chunked `ub4` segments
+  (matching python-oracledb), but the decoder read a single fixed `u32` length, mis-decoding
+  such values on fetch; the decoder now consumes the chunked form. Found by W3-E8.
+- **Sparse VECTOR validation**: encoding a sparse VECTOR now validates that the index and
+  value counts match and that the dimension count fits the `u16` wire field (fail-closed
+  instead of silently wrapping at 65 536). Found by W3-E8.
+- **AQ dequeue truncation**: a RAW/JSON AQ dequeue whose declared payload-image length
+  exceeds the bytes actually present now returns a decode error instead of silently
+  returning truncated data. Found by W3-E8.
+- **SODA mixed-case columns**: generated SODA SQL now quotes every descriptor column name
+  (not only the media-type column), so collections mapped onto case-sensitive mixed-case
+  columns work. (SODA is an experimental feature.) Found by W3-E8.
 
 ### Added
 

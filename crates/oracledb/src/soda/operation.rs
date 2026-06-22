@@ -4,7 +4,7 @@
 use oracledb_protocol::thin::BindValue;
 
 use super::error::{Result, SodaError};
-use super::metadata::{KeyAssignment, SodaCollectionMetadata};
+use super::metadata::{quote_ident, KeyAssignment, SodaCollectionMetadata};
 use super::qbe;
 
 /// Criteria accumulated by a `find()` chain.
@@ -68,14 +68,14 @@ impl SodaOperation {
                 }
                 clauses.push(format!(
                     "{} IN ({})",
-                    meta.key_column,
+                    quote_ident(&meta.key_column),
                     placeholders.join(", ")
                 ));
             }
         } else if let Some(filter) = &self.filter {
             let value: serde_json::Value = serde_json::from_str(filter)
                 .map_err(|e| SodaError::Qbe(format!("invalid filter JSON: {e}")))?;
-            let frag = qbe::qbe_to_where_clause(&value, &meta.content_column)?;
+            let frag = qbe::qbe_to_where_clause(&value, &quote_ident(&meta.content_column))?;
             clauses.push(frag);
         }
 
@@ -92,7 +92,7 @@ impl SodaOperation {
         };
         let value: serde_json::Value = serde_json::from_str(filter)
             .map_err(|e| SodaError::Qbe(format!("invalid filter JSON: {e}")))?;
-        qbe::extract_orderby(&value, &meta.content_column)
+        qbe::extract_orderby(&value, &quote_ident(&meta.content_column))
     }
 
     /// Build the SELECT for fetching documents (content + metadata columns).
@@ -196,9 +196,9 @@ pub(crate) fn select_column_list(meta: &SodaCollectionMetadata) -> (String, Sele
     // Key: for RAW keys (native embedded OID) render as hex string so the key
     // round-trips as a portable string identifier.
     let key_expr = if meta.key_sql_type.eq_ignore_ascii_case("RAW") {
-        format!("RAWTOHEX({})", meta.key_column)
+        format!("RAWTOHEX({})", quote_ident(&meta.key_column))
     } else {
-        meta.key_column.clone()
+        quote_ident(&meta.key_column)
     };
     let key_idx = take(key_expr, &mut cols, &mut next);
 
@@ -216,10 +216,10 @@ pub(crate) fn select_column_list(meta: &SodaCollectionMetadata) -> (String, Sele
         {
             format!(
                 "JSON_SERIALIZE({} RETURNING VARCHAR2(32767))",
-                meta.content_column
+                quote_ident(&meta.content_column)
             )
         }
-        _ => meta.content_column.clone(),
+        _ => quote_ident(&meta.content_column),
     };
     let content_idx = take(content_expr, &mut cols, &mut next);
 
@@ -227,25 +227,24 @@ pub(crate) fn select_column_list(meta: &SodaCollectionMetadata) -> (String, Sele
         let expr =
             if matches!(meta.version_method, super::metadata::VersionMethod::None) && meta.native {
                 // ETAG is RAW; project as hex string.
-                format!("RAWTOHEX({c})")
+                format!("RAWTOHEX({})", quote_ident(c))
             } else {
-                c.clone()
+                quote_ident(c)
             };
         take(expr, &mut cols, &mut next)
     });
     let created_idx = meta
         .creation_time_column
         .as_ref()
-        .map(|c| take(timestamp_iso(c), &mut cols, &mut next));
+        .map(|c| take(timestamp_iso(&quote_ident(c)), &mut cols, &mut next));
     let last_modified_idx = meta
         .last_modified_column
         .as_ref()
-        .map(|c| take(timestamp_iso(c), &mut cols, &mut next));
+        .map(|c| take(timestamp_iso(&quote_ident(c)), &mut cols, &mut next));
     let media_type_idx = meta
         .media_type_column
         .as_ref()
-        // Media-type column names may be mixed-case (case-sensitive), so quote.
-        .map(|c| take(super::metadata::quote_ident(c), &mut cols, &mut next));
+        .map(|c| take(quote_ident(c), &mut cols, &mut next));
 
     (
         cols.join(", "),
@@ -268,7 +267,7 @@ fn timestamp_iso(col: &str) -> String {
 /// Build a key equality predicate, pushing the bind for the key value.
 fn key_predicate(meta: &SodaCollectionMetadata, binds: &mut Vec<BindValue>, key: &str) -> String {
     let placeholder = key_bind_placeholder(meta, binds, key);
-    format!("{} = {}", meta.key_column, placeholder)
+    format!("{} = {}", quote_ident(&meta.key_column), placeholder)
 }
 
 /// Push a bind for a key value and return the SQL placeholder expression.
@@ -327,7 +326,7 @@ fn version_predicate(
     } else {
         binds.push(BindValue::Text(version.to_string()));
     }
-    Ok(format!("{col} = :{n}"))
+    Ok(format!("{} = :{n}", quote_ident(col)))
 }
 
 /// True if the collection's key is client-assigned.
@@ -381,17 +380,37 @@ mod tests {
         }
     }
 
+    fn mixed_case_meta() -> SodaCollectionMetadata {
+        SodaCollectionMetadata {
+            table_name: "MixedCollection".into(),
+            schema_name: Some("PyTest".into()),
+            key_column: "CamelKey".into(),
+            key_sql_type: "VARCHAR2".into(),
+            key_assignment: KeyAssignment::Client,
+            key_path: None,
+            content_column: "JsonDoc".into(),
+            content_sql_type: ContentSqlType::Blob,
+            version_column: Some("DocVersion".into()),
+            version_method: VersionMethod::Uuid,
+            last_modified_column: Some("LastModifiedAt".into()),
+            creation_time_column: Some("CreatedAt".into()),
+            media_type_column: Some("MimeType".into()),
+            read_only: false,
+            native: false,
+        }
+    }
+
     #[test]
     fn native_select_by_key_uses_raw_bind_and_rawtohex_projection() {
         let op = SodaOperation {
             key: Some("0123ABCD".into()),
             ..Default::default()
         };
-        let (sql, binds, layout) = op.build_select_sql(&native_meta()).unwrap();
+        let (sql, binds, layout) = op.build_select_sql(&native_meta()).expect("build select");
         // Key projection is hex text; the WHERE binds the decoded RAW bytes and
         // compares the RAW column directly (HEXTORAW(:bind) does not match).
-        assert!(sql.contains("RAWTOHEX(RESID)"), "{sql}");
-        assert!(sql.contains("WHERE RESID = :1"), "{sql}");
+        assert!(sql.contains("RAWTOHEX(\"RESID\")"), "{sql}");
+        assert!(sql.contains("WHERE \"RESID\" = :1"), "{sql}");
         assert!(!sql.contains("HEXTORAW"), "{sql}");
         assert_eq!(binds.len(), 1);
         assert!(matches!(binds[0], BindValue::Raw(_)), "{binds:?}");
@@ -406,8 +425,8 @@ mod tests {
             key: Some("uuid-key".into()),
             ..Default::default()
         };
-        let (sql, binds, layout) = op.build_select_sql(&legacy_meta()).unwrap();
-        assert!(sql.contains("WHERE ID = :1"), "{sql}");
+        let (sql, binds, layout) = op.build_select_sql(&legacy_meta()).expect("build select");
+        assert!(sql.contains("WHERE \"ID\" = :1"), "{sql}");
         assert!(sql.contains("FROM \"MYLEGACY\""), "{sql}");
         assert_eq!(binds.len(), 1);
         // legacy has created + last_modified columns
@@ -421,8 +440,8 @@ mod tests {
             keys: Some(vec!["a".into(), "b".into(), "c".into()]),
             ..Default::default()
         };
-        let (sql, binds, _) = op.build_select_sql(&legacy_meta()).unwrap();
-        assert!(sql.contains("ID IN (:1, :2, :3)"), "{sql}");
+        let (sql, binds, _) = op.build_select_sql(&legacy_meta()).expect("build select");
+        assert!(sql.contains("\"ID\" IN (:1, :2, :3)"), "{sql}");
         assert_eq!(binds.len(), 3);
     }
 
@@ -432,9 +451,9 @@ mod tests {
             filter: Some(r#"{"age": {"$gt": 18}}"#.into()),
             ..Default::default()
         };
-        let (sql, binds, _) = op.build_select_sql(&legacy_meta()).unwrap();
+        let (sql, binds, _) = op.build_select_sql(&legacy_meta()).expect("build select");
         assert!(
-            sql.contains("JSON_EXISTS(JSON_DOCUMENT, '$.age?(@ > 18)')"),
+            sql.contains("JSON_EXISTS(\"JSON_DOCUMENT\", '$.age?(@ > 18)')"),
             "{sql}"
         );
         assert!(binds.is_empty());
@@ -446,7 +465,9 @@ mod tests {
             limit: Some(5),
             ..Default::default()
         };
-        let err = op.build_count_sql(&legacy_meta()).unwrap_err();
+        let err = op
+            .build_count_sql(&legacy_meta())
+            .expect_err("count with limit should fail");
         // Surfaces as an ORA-40748 server-style error.
         assert!(err.to_string().contains("ORA-40748"), "{err}");
     }
@@ -459,7 +480,7 @@ mod tests {
             limit: Some(1),
             ..Default::default()
         };
-        let (sql, _, _) = op.build_select_sql(&legacy_meta()).unwrap();
+        let (sql, _, _) = op.build_select_sql(&legacy_meta()).expect("build select");
         assert!(sql.contains("ORDER BY"), "{sql}");
         assert!(sql.contains("OFFSET 2 ROWS"), "{sql}");
         assert!(sql.contains("FETCH NEXT 1 ROWS ONLY"), "{sql}");
@@ -471,9 +492,9 @@ mod tests {
             filter: Some(r#"{"name": {"$like": "John%"}}"#.into()),
             ..Default::default()
         };
-        let (sql, _, _) = op.build_select_sql(&legacy_meta()).unwrap();
+        let (sql, _, _) = op.build_select_sql(&legacy_meta()).expect("build select");
         assert!(sql.contains("@ like \"John%\""), "{sql}");
-        let (dsql, _) = op.build_delete_sql(&legacy_meta()).unwrap();
+        let (dsql, _) = op.build_delete_sql(&legacy_meta()).expect("build delete");
         assert!(dsql.starts_with("DELETE FROM \"MYLEGACY\" WHERE"), "{dsql}");
     }
 
@@ -483,7 +504,7 @@ mod tests {
             lock: true,
             ..Default::default()
         };
-        let (sql, _, _) = op.build_select_sql(&legacy_meta()).unwrap();
+        let (sql, _, _) = op.build_select_sql(&legacy_meta()).expect("build select");
         assert!(sql.ends_with("FOR UPDATE"), "{sql}");
     }
 
@@ -494,8 +515,8 @@ mod tests {
             version: Some("v1".into()),
             ..Default::default()
         };
-        let (sql, binds, _) = op.build_select_sql(&legacy_meta()).unwrap();
-        assert!(sql.contains("VERSION = :2"), "{sql}");
+        let (sql, binds, _) = op.build_select_sql(&legacy_meta()).expect("build select");
+        assert!(sql.contains("\"VERSION\" = :2"), "{sql}");
         assert_eq!(binds.len(), 2);
     }
 
@@ -505,7 +526,46 @@ mod tests {
             keys: Some(vec![]),
             ..Default::default()
         };
-        let (sql, _) = op.build_count_sql(&legacy_meta()).unwrap();
+        let (sql, _) = op.build_count_sql(&legacy_meta()).expect("build count");
         assert!(sql.contains("1=0"), "{sql}");
+    }
+
+    #[test]
+    fn mixed_case_descriptor_columns_are_quoted_in_operation_sql() {
+        let meta = mixed_case_meta();
+        let op = SodaOperation {
+            key: Some("doc-key".into()),
+            version: Some("doc-version".into()),
+            filter: Some(r#"{"name": {"$eq": "Ada"}}"#.into()),
+            ..Default::default()
+        };
+
+        let (sql, binds, _) = op.build_select_sql(&meta).expect("build select");
+        assert!(sql.contains("\"CamelKey\""), "{sql}");
+        assert!(sql.contains("\"JsonDoc\""), "{sql}");
+        assert!(sql.contains("\"DocVersion\""), "{sql}");
+        assert!(sql.contains("TO_CHAR(\"CreatedAt\""), "{sql}");
+        assert!(sql.contains("TO_CHAR(\"LastModifiedAt\""), "{sql}");
+        assert!(sql.contains("\"MimeType\""), "{sql}");
+        assert!(sql.contains("WHERE \"CamelKey\" = :1"), "{sql}");
+        assert!(sql.contains("\"DocVersion\" = :2"), "{sql}");
+        assert_eq!(binds.len(), 2);
+
+        let filter_op = SodaOperation {
+            filter: Some(r#"{"name": {"$eq": "Ada"}}"#.into()),
+            ..Default::default()
+        };
+        let (filter_sql, _, _) = filter_op
+            .build_select_sql(&meta)
+            .expect("build filter select");
+        assert!(
+            filter_sql.contains("JSON_EXISTS(\"JsonDoc\", '$.name?(@ == \"Ada\")')"),
+            "{filter_sql}"
+        );
+        let (count_sql, _) = filter_op.build_count_sql(&meta).expect("build count");
+        assert!(
+            count_sql.contains("JSON_EXISTS(\"JsonDoc\", '$.name?(@ == \"Ada\")')"),
+            "{count_sql}"
+        );
     }
 }

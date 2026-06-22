@@ -213,3 +213,24 @@ server-response MAC mismatch → `ProtocolError::InvalidServerResponse`
 > 1.0 in the Road-to-1.0 program epic (`rust-oracledb-road-to-1-0-llv`, "Out of
 > scope"): Group-A auth (Kerberos, RADIUS/native-MFA, passwordless-external,
 > broader wallet — beads `o0b`/`qm4`/`x1p`) is post-1.0.
+
+## 6. Connection string and transport topology
+
+The driver connects to a **single resolved endpoint** (host, port, protocol,
+service name) per attempt. The structured `ConnectOptions` builder is the
+1.0-supported surface for connect tuning (TLS, DN match, wallet, SNI toggle,
+access token, proxy user, SDU). The following higher-availability / advanced
+connect-string behaviours are **not yet applied in 1.0** and are tracked as a
+transport-hardening follow-up (bead `rust-oracledb-clvm`). None cause silent
+data corruption; a single-endpoint connect is unaffected.
+
+| feature | 1.0 behaviour | citation |
+|---|---|---|
+| Multi-address `ADDRESS_LIST` failover / load-balance | The first usable address is used; there is **no** automatic failover/retry to subsequent addresses. Provide a single reachable endpoint, or retry at the application level. | `crates/oracledb-protocol/src/net/mod.rs:58` |
+| Listener `REDIRECT` (RAC / SCAN / shared-server handoff) | **Fail closed:** the driver returns `Error::RedirectUnsupported` rather than following the redirect. | `crates/oracledb/src/lib.rs:3553` |
+| DSN `DESCRIPTION` / EZConnect-Plus advanced parameters (`transport_connect_timeout`, `sdu`, security/wallet, `use_sni`, ...) | Parsed from the connect string but **not applied** to the live connect (which uses a fixed TCP connect timeout and the `ConnectOptions` values). Set these via `ConnectOptions`. | `crates/oracledb/src/lib.rs:3494` |
+| Oracle Server Name Indication (SNI) over TCPS | `use_sni=true` is honoured only when the Oracle SNI name is a valid rustls DNS name; otherwise SNI is omitted. Full Oracle-format SNI is a transport-hardening follow-up. | `crates/oracledb/src/tls.rs:406` |
+
+These are feature-completeness gaps, not defects in implemented behaviour, and
+are deliberately out of the W3-E8 correctness-bug scope (protocol/codec/
+multi-packet/async). They are revisited in the transport-hardening follow-up.

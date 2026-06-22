@@ -1047,7 +1047,7 @@ pub(crate) fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm:
         // reference WriteBuffer.write_vector: a QLocator carrying the image
         // length, then the image bytes-with-length
         BindValue::Vector(vector) => {
-            let image = crate::vector::encode_vector(vector);
+            let image = crate::vector::encode_vector_checked(vector)?;
             crate::vector::write_vector_image(writer, &image)
         }
         // reference WriteBuffer.write_oson: a QLocator carrying the OSON image

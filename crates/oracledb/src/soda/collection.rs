@@ -16,7 +16,7 @@ use crate::Connection;
 use super::cursor::SodaCursor;
 use super::document::SodaDocument;
 use super::error::{Result, SodaError};
-use super::metadata::{ContentSqlType, SodaCollectionMetadata, VersionMethod};
+use super::metadata::{quote_ident, ContentSqlType, SodaCollectionMetadata, VersionMethod};
 use super::operation::{self, SelectColumns, SodaOperation};
 
 /// A handle to a SODA collection: its name plus parsed metadata.
@@ -213,63 +213,10 @@ impl SodaCollection {
                 "ORA-40734: key not specified for SODA replaceOne",
             )));
         }
-        let key = op.key.as_ref().ok_or_else(|| {
-            SodaError::Driver(server_like_err(
-                "ORA-40734: key not specified for SODA replaceOne",
-            ))
-        })?;
-
-        let content_bind = self.content_bind(doc)?;
-        let meta = &self.metadata;
-        let mut binds = vec![content_bind];
-        let mut set_parts = vec![format!("{} = :1", meta.content_column)];
-
-        // bump last_modified if present
-        if let Some(lm) = &meta.last_modified_column {
-            set_parts.push(format!("{lm} = SYSTIMESTAMP"));
-        }
-        // version: regenerate UUID for UUID method; leave server-managed otherwise
-        if let (Some(vc), VersionMethod::Uuid) = (&meta.version_column, &meta.version_method) {
-            set_parts.push(format!("{vc} = SYS_GUID()"));
-        }
-
-        let mut next_bind = 2;
-        // RAW key/version columns bind decoded bytes (see operation.rs note on
-        // why HEXTORAW(:bind) does not match in a WHERE comparison).
-        let key_is_raw = meta.key_sql_type.eq_ignore_ascii_case("RAW");
-        if key_is_raw {
-            binds.push(BindValue::Raw(operation::hex_decode(key)));
-        } else {
-            binds.push(BindValue::Text(key.clone()));
-        }
-        let mut where_clause = format!("{} = :{next_bind}", meta.key_column);
-        next_bind += 1;
-        if let Some(version) = &op.version {
-            if let Some(vc) = &meta.version_column {
-                if matches!(meta.version_method, VersionMethod::None) && meta.native {
-                    binds.push(BindValue::Raw(operation::hex_decode(version)));
-                } else {
-                    binds.push(BindValue::Text(version.clone()));
-                }
-                where_clause.push_str(&format!(" AND {vc} = :{next_bind}"));
-            }
-        }
-
-        let mut sql = format!(
-            "UPDATE {} SET {} WHERE {}",
-            meta.quoted_table(),
-            set_parts.join(", "),
-            where_clause
-        );
-
-        let ret_layout = if return_doc {
-            let (clause, layout) = self.returning_clause(binds.len());
-            sql.push_str(&clause);
+        let (sql, mut binds, ret_layout) = self.build_replace_sql(op, doc, return_doc)?;
+        if let Some(layout) = &ret_layout {
             self.push_returning_binds(&mut binds, layout.bind_count);
-            Some(layout)
-        } else {
-            None
-        };
+        }
 
         let result = execute_with_binds_raw(conn, cx, &sql, 0, &binds).await?;
 
@@ -406,7 +353,7 @@ impl SodaCollection {
         with_returning: bool,
     ) -> Result<(String, Vec<BindValue>, ReturningLayout)> {
         let meta = &self.metadata;
-        let mut columns = vec![meta.content_column.clone()];
+        let mut columns = vec![quote_ident(&meta.content_column)];
         let mut values = vec![":1".to_string()];
         let mut input_binds: Vec<BindValue> = vec![self.content_bind(doc)?];
 
@@ -417,7 +364,7 @@ impl SodaCollection {
             use super::metadata::KeyAssignment;
             match meta.key_assignment {
                 KeyAssignment::Uuid | KeyAssignment::Guid => {
-                    columns.push(meta.key_column.clone());
+                    columns.push(quote_ident(&meta.key_column));
                     values.push("RAWTOHEX(SYS_GUID())".to_string());
                 }
                 KeyAssignment::Client => {
@@ -427,31 +374,30 @@ impl SodaCollection {
                             "ORA-40646: client-assigned key required",
                         ))
                     })?;
-                    columns.push(meta.key_column.clone());
+                    columns.push(quote_ident(&meta.key_column));
                     values.push(format!(":{}", input_binds.len() + 1));
                     input_binds.push(BindValue::Text(key));
                 }
                 KeyAssignment::Sequence | KeyAssignment::EmbeddedOid => {}
             }
             if let (Some(vc), VersionMethod::Uuid) = (&meta.version_column, &meta.version_method) {
-                columns.push(vc.clone());
+                columns.push(quote_ident(vc));
                 values.push("RAWTOHEX(SYS_GUID())".to_string());
             }
             if let Some(c) = &meta.creation_time_column {
-                columns.push(c.clone());
+                columns.push(quote_ident(c));
                 values.push("SYSTIMESTAMP".to_string());
             }
             if let Some(c) = &meta.last_modified_column {
-                columns.push(c.clone());
+                columns.push(quote_ident(c));
                 values.push("SYSTIMESTAMP".to_string());
             }
         }
 
         // Media-type column (mixed-media collections): bind the document's media
         // type so non-JSON content is round-tripped with its type. The column
-        // name may be mixed-case, so quote it.
         if let Some(mt_col) = &meta.media_type_column {
-            columns.push(super::metadata::quote_ident(mt_col));
+            columns.push(quote_ident(mt_col));
             values.push(format!(":{}", input_binds.len() + 1));
             input_binds.push(BindValue::Text(doc.media_type.clone()));
         }
@@ -475,6 +421,73 @@ impl SodaCollection {
         Ok((sql, input_binds, layout))
     }
 
+    /// Build the UPDATE statement used by replaceOne().
+    fn build_replace_sql(
+        &self,
+        op: &SodaOperation,
+        doc: &SodaDocument,
+        with_returning: bool,
+    ) -> Result<(String, Vec<BindValue>, Option<ReturningLayout>)> {
+        let key = op.key.as_ref().ok_or_else(|| {
+            SodaError::Driver(server_like_err(
+                "ORA-40734: key not specified for SODA replaceOne",
+            ))
+        })?;
+
+        let content_bind = self.content_bind(doc)?;
+        let meta = &self.metadata;
+        let mut binds = vec![content_bind];
+        let mut set_parts = vec![format!("{} = :1", quote_ident(&meta.content_column))];
+
+        // bump last_modified if present
+        if let Some(lm) = &meta.last_modified_column {
+            set_parts.push(format!("{} = SYSTIMESTAMP", quote_ident(lm)));
+        }
+        // version: regenerate UUID for UUID method; leave server-managed otherwise
+        if let (Some(vc), VersionMethod::Uuid) = (&meta.version_column, &meta.version_method) {
+            set_parts.push(format!("{} = SYS_GUID()", quote_ident(vc)));
+        }
+
+        let mut next_bind = 2;
+        // RAW key/version columns bind decoded bytes (see operation.rs note on
+        // why HEXTORAW(:bind) does not match in a WHERE comparison).
+        let key_is_raw = meta.key_sql_type.eq_ignore_ascii_case("RAW");
+        if key_is_raw {
+            binds.push(BindValue::Raw(operation::hex_decode(key)));
+        } else {
+            binds.push(BindValue::Text(key.clone()));
+        }
+        let mut where_clause = format!("{} = :{next_bind}", quote_ident(&meta.key_column));
+        next_bind += 1;
+        if let Some(version) = &op.version {
+            if let Some(vc) = &meta.version_column {
+                if matches!(meta.version_method, VersionMethod::None) && meta.native {
+                    binds.push(BindValue::Raw(operation::hex_decode(version)));
+                } else {
+                    binds.push(BindValue::Text(version.clone()));
+                }
+                where_clause.push_str(&format!(" AND {} = :{next_bind}", quote_ident(vc)));
+            }
+        }
+
+        let mut sql = format!(
+            "UPDATE {} SET {} WHERE {}",
+            meta.quoted_table(),
+            set_parts.join(", "),
+            where_clause
+        );
+
+        let layout = if with_returning {
+            let (clause, layout) = self.returning_clause(binds.len());
+            sql.push_str(&clause);
+            Some(layout)
+        } else {
+            None
+        };
+
+        Ok((sql, binds, layout))
+    }
+
     /// Build a `RETURNING key[,version][,created][,lastmod] INTO ...` clause,
     /// numbering bind placeholders starting after `existing_binds`.
     fn returning_clause(&self, existing_binds: usize) -> (String, ReturningLayout) {
@@ -488,9 +501,9 @@ impl SodaCollection {
         // key
         n += 1;
         if meta.key_sql_type.eq_ignore_ascii_case("RAW") {
-            ret_cols.push(format!("RAWTOHEX({})", meta.key_column));
+            ret_cols.push(format!("RAWTOHEX({})", quote_ident(&meta.key_column)));
         } else {
-            ret_cols.push(meta.key_column.clone());
+            ret_cols.push(quote_ident(&meta.key_column));
         }
         into.push(format!(":{n}"));
         layout.key_idx = Some(idx);
@@ -499,9 +512,9 @@ impl SodaCollection {
         if let Some(vc) = &meta.version_column {
             n += 1;
             if matches!(meta.version_method, VersionMethod::None) && meta.native {
-                ret_cols.push(format!("RAWTOHEX({vc})"));
+                ret_cols.push(format!("RAWTOHEX({})", quote_ident(vc)));
             } else {
-                ret_cols.push(vc.clone());
+                ret_cols.push(quote_ident(vc));
             }
             into.push(format!(":{n}"));
             layout.version_idx = Some(idx);
@@ -509,14 +522,20 @@ impl SodaCollection {
         }
         if let Some(cc) = &meta.creation_time_column {
             n += 1;
-            ret_cols.push(format!("TO_CHAR({cc}, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6')"));
+            ret_cols.push(format!(
+                "TO_CHAR({}, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6')",
+                quote_ident(cc)
+            ));
             into.push(format!(":{n}"));
             layout.created_idx = Some(idx);
             idx += 1;
         }
         if let Some(lm) = &meta.last_modified_column {
             n += 1;
-            ret_cols.push(format!("TO_CHAR({lm}, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6')"));
+            ret_cols.push(format!(
+                "TO_CHAR({}, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6')",
+                quote_ident(lm)
+            ));
             into.push(format!(":{n}"));
             layout.last_modified_idx = Some(idx);
             idx += 1;
@@ -698,6 +717,91 @@ impl SodaCollection {
                 buffer_size: 4000,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::soda::metadata::KeyAssignment;
+
+    fn mixed_case_collection() -> SodaCollection {
+        SodaCollection::new(
+            "MixedCollection".to_string(),
+            SodaCollectionMetadata {
+                table_name: "MixedCollection".into(),
+                schema_name: Some("PyTest".into()),
+                key_column: "CamelKey".into(),
+                key_sql_type: "VARCHAR2".into(),
+                key_assignment: KeyAssignment::Client,
+                key_path: None,
+                content_column: "JsonDoc".into(),
+                content_sql_type: ContentSqlType::Blob,
+                version_column: Some("DocVersion".into()),
+                version_method: VersionMethod::Uuid,
+                last_modified_column: Some("LastModifiedAt".into()),
+                creation_time_column: Some("CreatedAt".into()),
+                media_type_column: Some("MimeType".into()),
+                read_only: false,
+                native: false,
+            },
+        )
+    }
+
+    fn document() -> SodaDocument {
+        SodaDocument::from_bytes(
+            br#"{"name":"Ada"}"#.to_vec(),
+            Some("client-key".to_string()),
+            Some("application/json".to_string()),
+        )
+    }
+
+    #[test]
+    fn mixed_case_descriptor_columns_are_quoted_in_insert_and_returning_sql() {
+        let collection = mixed_case_collection();
+        let (sql, binds, layout) = collection
+            .build_insert_sql(&document(), None, true)
+            .expect("build insert");
+
+        assert!(sql.contains("INSERT INTO \"MixedCollection\""), "{sql}");
+        assert!(sql.contains("\"JsonDoc\""), "{sql}");
+        assert!(sql.contains("\"CamelKey\""), "{sql}");
+        assert!(sql.contains("\"DocVersion\""), "{sql}");
+        assert!(sql.contains("\"CreatedAt\""), "{sql}");
+        assert!(sql.contains("\"LastModifiedAt\""), "{sql}");
+        assert!(sql.contains("\"MimeType\""), "{sql}");
+        assert!(sql.contains("RETURNING \"CamelKey\""), "{sql}");
+        assert!(sql.contains("\"DocVersion\""), "{sql}");
+        assert!(sql.contains("TO_CHAR(\"CreatedAt\""), "{sql}");
+        assert!(sql.contains("TO_CHAR(\"LastModifiedAt\""), "{sql}");
+        assert_eq!(binds.len(), 3);
+        assert_eq!(layout.bind_count, 4);
+    }
+
+    #[test]
+    fn mixed_case_descriptor_columns_are_quoted_in_replace_and_returning_sql() {
+        let collection = mixed_case_collection();
+        let op = SodaOperation {
+            key: Some("client-key".into()),
+            version: Some("doc-version".into()),
+            ..Default::default()
+        };
+        let (sql, binds, layout) = collection
+            .build_replace_sql(&op, &document(), true)
+            .expect("build replace");
+
+        assert!(sql.contains("UPDATE \"MixedCollection\" SET"), "{sql}");
+        assert!(sql.contains("\"JsonDoc\" = :1"), "{sql}");
+        assert!(sql.contains("\"LastModifiedAt\" = SYSTIMESTAMP"), "{sql}");
+        assert!(sql.contains("\"DocVersion\" = SYS_GUID()"), "{sql}");
+        assert!(sql.contains("WHERE \"CamelKey\" = :2"), "{sql}");
+        assert!(sql.contains("\"DocVersion\" = :3"), "{sql}");
+        assert!(sql.contains("RETURNING \"CamelKey\""), "{sql}");
+        assert!(sql.contains("\"DocVersion\""), "{sql}");
+        assert!(sql.contains("TO_CHAR(\"CreatedAt\""), "{sql}");
+        assert!(sql.contains("TO_CHAR(\"LastModifiedAt\""), "{sql}");
+        assert_eq!(binds.len(), 3);
+        assert_eq!(layout.expect("returning layout").bind_count, 4);
     }
 }
 

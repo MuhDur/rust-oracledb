@@ -63,6 +63,21 @@ impl<'a> DbObjectPackedReader<'a> {
         })?))
     }
 
+    fn read_ub4(&mut self) -> Result<u32> {
+        let len = self.read_u8()?;
+        if len == 0 {
+            return Ok(0);
+        }
+        if len > 4 {
+            return Err(ProtocolError::TtcDecode("invalid DbObject ub4 length"));
+        }
+        let mut value = 0u32;
+        for byte in self.read_raw(usize::from(len))? {
+            value = (value << 8) | u32::from(*byte);
+        }
+        Ok(value)
+    }
+
     pub fn read_i32be(&mut self) -> Result<i32> {
         let bytes = self.read_raw(4)?;
         Ok(i32::from_be_bytes(bytes.try_into().map_err(|_| {
@@ -88,8 +103,39 @@ impl<'a> DbObjectPackedReader<'a> {
     pub fn read_value_bytes(&mut self) -> Result<Option<Vec<u8>>> {
         let length = match self.read_u8()? {
             0 | TNS_NULL_LENGTH_INDICATOR => return Ok(None),
-            TNS_LONG_LENGTH_INDICATOR => usize::try_from(self.read_u32be()?)
-                .map_err(|_| ProtocolError::TtcDecode("DbObject value length overflow"))?,
+            TNS_LONG_LENGTH_INDICATOR => {
+                let mut out = Vec::new();
+                let mut chunks = 0usize;
+                let mut total = 0usize;
+                loop {
+                    let chunk_len = self.read_ub4()?;
+                    if chunk_len == 0 {
+                        break;
+                    }
+                    chunks = chunks.checked_add(1).ok_or(ProtocolError::ResourceLimit {
+                        limit: "lob_chunks",
+                        observed: usize::MAX,
+                        maximum: self.limits.max_lob_chunks,
+                    })?;
+                    self.limits.check_lob_chunks(chunks)?;
+                    let chunk_len = usize::try_from(chunk_len).map_err(|_| {
+                        ProtocolError::InvalidPacketLength {
+                            length: usize::MAX,
+                            minimum: 0,
+                        }
+                    })?;
+                    total = total
+                        .checked_add(chunk_len)
+                        .ok_or(ProtocolError::ResourceLimit {
+                            limit: "response_bytes",
+                            observed: usize::MAX,
+                            maximum: self.limits.max_response_bytes,
+                        })?;
+                    self.limits.check_response_bytes(total)?;
+                    out.extend_from_slice(self.read_raw(chunk_len)?);
+                }
+                return Ok(Some(out));
+            }
             length => usize::from(length),
         };
         Ok(Some(self.read_raw(length)?.to_vec()))
@@ -576,6 +622,28 @@ pub fn decode_dbobject_binary_double(bytes: &[u8]) -> Result<f64> {
 }
 
 #[cfg(test)]
+mod value_bytes_tests {
+    use super::*;
+
+    #[test]
+    fn value_bytes_roundtrip_short_and_chunked_boundaries() {
+        for len in [252usize, 253, 32_767, 32_768] {
+            let value = (0..len).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+            let mut image = Vec::new();
+            image_write_value_bytes(&mut image, &value).expect("encode value bytes");
+
+            let mut reader = DbObjectPackedReader::new(&image);
+            let decoded = reader
+                .read_value_bytes()
+                .expect("decode value bytes")
+                .expect("non-null value bytes");
+            assert_eq!(decoded, value, "length {len}");
+            assert_eq!(reader.remaining(), 0, "length {len}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod bounded_reader_tests {
     use super::*;
     use crate::wire::BoundedReader;
@@ -722,7 +790,10 @@ mod decode_lob_text_tests {
         let sample = "café — utf8 path ✓";
         let bytes = sample.as_bytes();
         let got = decode_lob_text(bytes, 1, Some(&loc)).expect("utf8 decode");
-        assert_eq!(got, String::from_utf8(bytes.to_vec()).unwrap());
+        assert_eq!(
+            got,
+            String::from_utf8(bytes.to_vec()).expect("sample is valid UTF-8")
+        );
         assert_eq!(got, sample);
         // invalid UTF-8 errors like String::from_utf8.
         let bad = [0x66, 0x6f, 0xff, 0x6f];

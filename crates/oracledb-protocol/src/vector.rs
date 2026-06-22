@@ -214,6 +214,13 @@ fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<V
 /// Encode a VECTOR value into its image (the bytes that go inside the LOB
 /// wrapper). Mirrors `VectorEncoder.encode` in `vector.pyx`.
 pub fn encode_vector(vector: &Vector) -> Vec<u8> {
+    match encode_vector_checked(vector) {
+        Ok(image) => image,
+        Err(err) => panic!("invalid VECTOR value for encoding: {err}"),
+    }
+}
+
+pub(crate) fn encode_vector_checked(vector: &Vector) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
 
     let mut flags = TNS_VECTOR_FLAG_NORM_RESERVED;
@@ -257,7 +264,16 @@ pub fn encode_vector(vector: &Vector) -> Vec<u8> {
         Vector::Sparse {
             indices, values, ..
         } => {
-            let num_sparse = indices.len() as u16;
+            if indices.len() != values.len() {
+                return Err(ProtocolError::TtcDecode(
+                    "vector: sparse index/value count mismatch",
+                ));
+            }
+            let num_sparse =
+                u16::try_from(indices.len()).map_err(|_| ProtocolError::InvalidPacketLength {
+                    length: indices.len(),
+                    minimum: 0,
+                })?;
             buf.extend_from_slice(&num_sparse.to_be_bytes());
             for index in indices {
                 buf.extend_from_slice(&index.to_be_bytes());
@@ -266,7 +282,7 @@ pub fn encode_vector(vector: &Vector) -> Vec<u8> {
         }
     }
 
-    buf
+    Ok(buf)
 }
 
 fn encode_values(buf: &mut Vec<u8>, values: &VectorValues) {
@@ -472,6 +488,55 @@ mod tests {
             indices: vec![2],
             values: VectorValues::Int8(vec![42]),
         });
+    }
+
+    #[test]
+    fn sparse_int8_roundtrips_max_u16_count() {
+        let indices = (0..u16::MAX).map(u32::from).collect::<Vec<_>>();
+        let values = VectorValues::Int8((0..u16::MAX).map(|i| (i % 127) as i8).collect::<Vec<_>>());
+        let vector = Vector::Sparse {
+            num_dimensions: u32::from(u16::MAX),
+            indices,
+            values,
+        };
+
+        let image = encode_vector_checked(&vector).expect("encode max u16 sparse vector");
+        let decoded = decode_vector(&image).expect("decode max u16 sparse vector");
+        assert_eq!(decoded, vector);
+    }
+
+    #[test]
+    fn sparse_int8_rejects_count_that_exceeds_wire_field() {
+        let count = usize::from(u16::MAX) + 1;
+        let vector = Vector::Sparse {
+            num_dimensions: count as u32,
+            indices: (0..count as u32).collect(),
+            values: VectorValues::Int8(vec![1; count]),
+        };
+
+        let err = encode_vector_checked(&vector).expect_err("oversized sparse count must fail");
+        assert!(
+            matches!(
+                err,
+                ProtocolError::InvalidPacketLength {
+                    length,
+                    minimum: 0
+                } if length == count
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn sparse_encode_rejects_mismatched_index_value_counts() {
+        let vector = Vector::Sparse {
+            num_dimensions: 4,
+            indices: vec![0, 1, 2],
+            values: VectorValues::Int8(vec![7, 8]),
+        };
+
+        let err = encode_vector_checked(&vector).expect_err("mismatched sparse vector must fail");
+        assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
     }
 
     // Regression: VECTOR float elements use Oracle's BINARY_FLOAT/DOUBLE

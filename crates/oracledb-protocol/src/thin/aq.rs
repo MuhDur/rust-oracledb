@@ -1033,7 +1033,10 @@ fn process_payload(
         let raw = reader
             .read_bytes()?
             .ok_or(ProtocolError::TtcDecode("AQ payload missing"))?;
-        let end = image_length.min(raw.len());
+        if raw.len() < image_length {
+            return Err(ProtocolError::TtcDecode("AQ payload shorter than declared"));
+        }
+        let end = image_length;
         let start = 4.min(end);
         let payload = raw.get(start..end).unwrap_or_default().to_vec();
         if matches!(kind, AqPayloadKind::Json) {
@@ -1125,6 +1128,54 @@ mod tests {
         let caps = caps();
         let res = parse_aq_deq_response(&[], caps, &AqPayloadKind::Raw).expect("parse");
         assert!(res.message.is_none());
+    }
+
+    fn deq_response_with_raw_image(image_length: u32, raw_image: &[u8]) -> Vec<u8> {
+        let mut writer = TtcWriter::new();
+        writer.write_u8(TNS_MSG_TYPE_PARAMETER);
+        writer.write_ub4(1);
+        write_msg_props(&mut writer, &AqMsgProps::default(), FV).expect("write message props");
+        writer.write_ub4(0); // recipients
+        writer.write_ub4(0); // TOID
+        writer.write_ub4(0); // OID
+        writer.write_ub4(0); // snapshot
+        writer.write_ub2(0); // version
+        writer.write_ub4(image_length);
+        writer.write_ub2(0); // flags
+        writer
+            .write_bytes_with_length(raw_image)
+            .expect("write raw image field");
+        writer.write_raw(&[0u8; TNS_AQ_MESSAGE_ID_LENGTH]);
+        writer.write_u8(TNS_MSG_TYPE_END_OF_RESPONSE);
+        writer.into_bytes()
+    }
+
+    #[test]
+    fn raw_dequeue_rejects_declared_image_length_shortfall() {
+        let response = deq_response_with_raw_image(8, &[0, 0, 0, 0, b'A', b'B']);
+        let err = parse_aq_deq_response(&response, caps(), &AqPayloadKind::Raw)
+            .expect_err("short RAW image must fail");
+        assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn json_dequeue_rejects_declared_image_length_shortfall() {
+        let response = deq_response_with_raw_image(8, &[0, 0, 0, 0, b'A', b'B']);
+        let err = parse_aq_deq_response(&response, caps(), &AqPayloadKind::Json)
+            .expect_err("short JSON image must fail");
+        assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn raw_dequeue_accepts_exact_declared_image_length() {
+        let response = deq_response_with_raw_image(6, &[0, 0, 0, 0, b'A', b'B']);
+        let res = parse_aq_deq_response(&response, caps(), &AqPayloadKind::Raw)
+            .expect("exact RAW image should parse");
+        let message = res.message.expect("message present");
+        match message.payload {
+            Some(AqDeqPayload::Raw(payload)) => assert_eq!(payload, vec![b'A', b'B']),
+            other => panic!("unexpected payload {other:?}"),
+        }
     }
 
     #[test]
