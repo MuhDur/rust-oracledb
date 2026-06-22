@@ -25,7 +25,7 @@ use oracledb::pool::{
     POOL_GETMODE_WAIT,
 };
 use oracledb::protocol::oson::OsonValue;
-use oracledb::protocol::thin::{BindValue, ExecuteOptions, QueryValue};
+use oracledb::protocol::thin::{BindValue, ExecuteOptions, QueryResult, QueryValue};
 use oracledb::protocol::vector::{Vector, VectorValues};
 use oracledb::{BlockingConnection, ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;
@@ -68,7 +68,73 @@ fn with_connection(test: &str, body: impl FnOnce(&mut Connection)) {
 /// Best-effort DDL that ignores "object does not exist" style failures so a
 /// drop-then-create setup is idempotent across reruns.
 fn drop_if_exists(conn: &mut Connection, ddl: &str) {
-    let _ = BlockingConnection::execute_query(conn, ddl, 1);
+    let _ = execute_raw(conn, ddl, 1);
+}
+
+fn execute_raw(
+    conn: &mut Connection,
+    sql: &str,
+    prefetch_rows: u32,
+) -> oracledb::Result<QueryResult> {
+    BlockingConnection::execute_raw(
+        conn,
+        sql,
+        prefetch_rows,
+        &[],
+        ExecuteOptions::default(),
+        None,
+    )
+}
+
+fn execute_raw_rows(
+    conn: &mut Connection,
+    sql: &str,
+    prefetch_rows: u32,
+    bind_rows: &[Vec<BindValue>],
+) -> oracledb::Result<QueryResult> {
+    BlockingConnection::execute_raw(
+        conn,
+        sql,
+        prefetch_rows,
+        bind_rows,
+        ExecuteOptions::default(),
+        None,
+    )
+}
+
+fn execute_raw_binds(
+    conn: &mut Connection,
+    sql: &str,
+    prefetch_rows: u32,
+    binds: &[BindValue],
+) -> oracledb::Result<QueryResult> {
+    let bind_rows = [binds.to_vec()];
+    execute_raw_rows(conn, sql, prefetch_rows, &bind_rows)
+}
+
+fn execute_raw_collect(
+    conn: &mut Connection,
+    sql: &str,
+    prefetch_rows: u32,
+) -> oracledb::Result<QueryResult> {
+    let mut result = execute_raw(conn, sql, prefetch_rows)?;
+    if result.cursor_id != 0 && result.rows.is_empty() {
+        let cursor_id = result.cursor_id;
+        let columns = result.columns.clone();
+        let fetched = BlockingConnection::define_and_fetch_rows_with_columns(
+            conn,
+            cursor_id,
+            prefetch_rows.max(1),
+            &columns,
+            None,
+        )?;
+        result.rows = fetched.rows;
+        result.more_rows = fetched.more_rows;
+        if !fetched.columns.is_empty() {
+            result.columns = fetched.columns;
+        }
+    }
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +159,7 @@ fn connect_reports_session_and_server_version() {
 #[test]
 fn identity_masquerade_is_visible_in_v_session() {
     with_connection("identity_masquerade_is_visible_in_v_session", |conn| {
-        let result = BlockingConnection::execute_query(
+        let result = execute_raw(
             conn,
             "select program, osuser, machine, terminal \
              from v$session where sid = sys_context('USERENV','SID')",
@@ -131,7 +197,7 @@ fn identity_masquerade_is_visible_in_v_session() {
 #[test]
 fn typed_scalar_fetch_covers_core_types() {
     with_connection("typed_scalar_fetch_covers_core_types", |conn| {
-        let result = BlockingConnection::execute_query(
+        let result = execute_raw(
             conn,
             "select \
                 cast(1234567890123456789 as number(19))      as num_int, \
@@ -200,8 +266,8 @@ fn typed_scalar_fetch_covers_core_types() {
 fn rowid_and_boolean_fetch() {
     with_connection("rowid_and_boolean_fetch", |conn| {
         // ROWID: every heap row has one; fetch dual's pseudo-rowid
-        let rowid = BlockingConnection::execute_query(conn, "select rowid from dual", 2)
-            .expect("rowid select should fetch");
+        let rowid =
+            execute_raw(conn, "select rowid from dual", 2).expect("rowid select should fetch");
         let rid = rowid
             .cell(0, 0)
             .and_then(QueryValue::as_rowid)
@@ -209,7 +275,7 @@ fn rowid_and_boolean_fetch() {
         assert!(!rid.is_empty(), "rowid text should be non-empty");
 
         // BINARY (native DB_TYPE_BOOLEAN) requires 23ai; the container is 23ai.
-        let boolean = BlockingConnection::execute_query(conn, "select true, false from dual", 2);
+        let boolean = execute_raw(conn, "select true, false from dual", 2);
         match boolean {
             Ok(result) => {
                 assert_eq!(result.cell(0, 0).and_then(QueryValue::as_bool), Some(true));
@@ -231,7 +297,7 @@ fn rowid_and_boolean_fetch() {
 fn positional_and_named_binds() {
     with_connection("positional_and_named_binds", |conn| {
         // positional binds (:1, :2)
-        let positional = BlockingConnection::execute_query_with_binds(
+        let positional = execute_raw_binds(
             conn,
             "select :1 + :2 as total from dual",
             2,
@@ -244,7 +310,7 @@ fn positional_and_named_binds() {
         assert_eq!(positional.cell(0, 0).and_then(QueryValue::as_i64), Some(42));
 
         // named binds (:lo, :hi) bound in declaration order
-        let named = BlockingConnection::execute_query_with_binds(
+        let named = execute_raw_binds(
             conn,
             "select :greeting || ' ' || :who as msg from dual",
             2,
@@ -269,7 +335,7 @@ fn positional_and_named_binds() {
 fn dml_with_commit_and_rollback() {
     with_connection("dml_with_commit_and_rollback", |conn| {
         drop_if_exists(conn, "drop table rust_itest_dml purge");
-        BlockingConnection::execute_query(
+        execute_raw(
             conn,
             "create table rust_itest_dml (id number(9) primary key, val varchar2(40))",
             1,
@@ -277,7 +343,7 @@ fn dml_with_commit_and_rollback() {
         .expect("create table");
 
         // INSERT then commit -> visible after a fresh select
-        let ins = BlockingConnection::execute_query_with_binds(
+        let ins = execute_raw_binds(
             conn,
             "insert into rust_itest_dml (id, val) values (:1, :2)",
             1,
@@ -291,7 +357,7 @@ fn dml_with_commit_and_rollback() {
         BlockingConnection::commit(conn).expect("commit");
 
         // UPDATE
-        let upd = BlockingConnection::execute_query_with_binds(
+        let upd = execute_raw_binds(
             conn,
             "update rust_itest_dml set val = :1 where id = :2",
             1,
@@ -305,18 +371,12 @@ fn dml_with_commit_and_rollback() {
         BlockingConnection::commit(conn).expect("commit update");
 
         // DELETE without commit, then rollback -> row reappears
-        let del =
-            BlockingConnection::execute_query(conn, "delete from rust_itest_dml where id = 1", 1)
-                .expect("delete");
+        let del = execute_raw(conn, "delete from rust_itest_dml where id = 1", 1).expect("delete");
         assert_eq!(del.row_count, 1);
         BlockingConnection::rollback(conn).expect("rollback");
 
-        let after = BlockingConnection::execute_query(
-            conn,
-            "select val from rust_itest_dml where id = 1",
-            2,
-        )
-        .expect("select after rollback");
+        let after = execute_raw(conn, "select val from rust_itest_dml where id = 1", 2)
+            .expect("select after rollback");
         assert_eq!(
             after.cell(0, 0).and_then(QueryValue::as_text),
             Some("updated"),
@@ -335,7 +395,7 @@ fn dml_with_commit_and_rollback() {
 fn executemany_array_dml() {
     with_connection("executemany_array_dml", |conn| {
         drop_if_exists(conn, "drop table rust_itest_many purge");
-        BlockingConnection::execute_query(
+        execute_raw(
             conn,
             "create table rust_itest_many (id number(9), label varchar2(20))",
             1,
@@ -351,7 +411,7 @@ fn executemany_array_dml() {
                 ]
             })
             .collect();
-        let result = BlockingConnection::execute_query_with_bind_rows(
+        let result = execute_raw_rows(
             conn,
             "insert into rust_itest_many (id, label) values (:1, :2)",
             1,
@@ -361,13 +421,11 @@ fn executemany_array_dml() {
         assert_eq!(result.row_count, 4, "array DML inserts all rows");
         BlockingConnection::commit(conn).expect("commit");
 
-        let count =
-            BlockingConnection::execute_query(conn, "select count(*) from rust_itest_many", 2)
-                .expect("count");
+        let count = execute_raw(conn, "select count(*) from rust_itest_many", 2).expect("count");
         assert_eq!(count.cell(0, 0).and_then(QueryValue::as_i64), Some(4));
 
         // arraydmlrowcounts: ask the server for a per-iteration row count vector
-        let counted = BlockingConnection::execute_query_with_bind_rows_options_and_timeout(
+        let counted = BlockingConnection::execute_raw(
             conn,
             "delete from rust_itest_many where id = :1",
             1,
@@ -398,13 +456,13 @@ fn executemany_array_dml() {
 fn clob_read_round_trip() {
     with_connection("clob_read_round_trip", |conn| {
         drop_if_exists(conn, "drop table rust_itest_lob purge");
-        BlockingConnection::execute_query(
+        execute_raw(
             conn,
             "create table rust_itest_lob (id number(9), body clob)",
             1,
         )
         .expect("create table");
-        BlockingConnection::execute_query(
+        execute_raw(
             conn,
             "insert into rust_itest_lob values (1, to_clob('the quick brown fox'))",
             1,
@@ -413,14 +471,10 @@ fn clob_read_round_trip() {
         BlockingConnection::commit(conn).expect("commit");
 
         // selecting a CLOB returns a locator; read its bytes over the wire.
-        // `execute_query_collect` performs the client-side define-fetch that a
+        // `execute_raw_collect` performs the client-side define-fetch that a
         // CLOB column needs, materializing the locator in the first batch.
-        let select = BlockingConnection::execute_query_collect(
-            conn,
-            "select body from rust_itest_lob where id = 1",
-            2,
-        )
-        .expect("select clob locator");
+        let select = execute_raw_collect(conn, "select body from rust_itest_lob where id = 1", 2)
+            .expect("select clob locator");
         let (locator, size, csfrm) = match select.cell(0, 0) {
             Some(QueryValue::Lob(lob)) => (lob.locator.clone(), lob.size, lob.csfrm),
             other => panic!("expected a LOB locator, got {other:?}"),
@@ -450,19 +504,19 @@ fn object_type_fetch() {
     with_connection("object_type_fetch", |conn| {
         drop_if_exists(conn, "drop table rust_itest_obj purge");
         drop_if_exists(conn, "drop type rust_itest_point force");
-        BlockingConnection::execute_query(
+        execute_raw(
             conn,
             "create or replace type rust_itest_point as object (x number, y number)",
             1,
         )
         .expect("create type");
-        BlockingConnection::execute_query(
+        execute_raw(
             conn,
             "create table rust_itest_obj (id number(9), p rust_itest_point)",
             1,
         )
         .expect("create table");
-        BlockingConnection::execute_query(
+        execute_raw(
             conn,
             "insert into rust_itest_obj values (1, rust_itest_point(3, 4))",
             1,
@@ -470,9 +524,8 @@ fn object_type_fetch() {
         .expect("insert object");
         BlockingConnection::commit(conn).expect("commit");
 
-        let select =
-            BlockingConnection::execute_query(conn, "select p from rust_itest_obj where id = 1", 2)
-                .expect("select object column");
+        let select = execute_raw(conn, "select p from rust_itest_obj where id = 1", 2)
+            .expect("select object column");
         // the column metadata identifies the object type
         let column = &select.columns[0];
         assert_eq!(
@@ -505,7 +558,7 @@ fn object_type_fetch() {
 fn vector_round_trip() {
     with_connection("vector_round_trip", |conn| {
         drop_if_exists(conn, "drop table rust_itest_vec purge");
-        let created = BlockingConnection::execute_query(
+        let created = execute_raw(
             conn,
             "create table rust_itest_vec (id number(9), embedding vector(3, float32))",
             1,
@@ -517,7 +570,7 @@ fn vector_round_trip() {
 
         // bind a dense float32 vector IN, then fetch it back OUT
         let embedding = Vector::Dense(VectorValues::Float32(vec![1.5, -2.0, 3.25]));
-        BlockingConnection::execute_query_with_binds(
+        execute_raw_binds(
             conn,
             "insert into rust_itest_vec (id, embedding) values (1, :1)",
             1,
@@ -527,13 +580,10 @@ fn vector_round_trip() {
         BlockingConnection::commit(conn).expect("commit");
 
         // VECTOR columns need the client-side define-fetch that
-        // `execute_query_collect` runs automatically.
-        let select = BlockingConnection::execute_query_collect(
-            conn,
-            "select embedding from rust_itest_vec where id = 1",
-            2,
-        )
-        .expect("select vector");
+        // `execute_raw_collect` runs explicitly.
+        let select =
+            execute_raw_collect(conn, "select embedding from rust_itest_vec where id = 1", 2)
+                .expect("select vector");
         match select.cell(0, 0) {
             Some(QueryValue::Vector(vector)) => match vector.as_ref() {
                 Vector::Dense(VectorValues::Float32(values)) => {
@@ -556,7 +606,7 @@ fn vector_round_trip() {
 fn json_oson_round_trip() {
     with_connection("json_oson_round_trip", |conn| {
         drop_if_exists(conn, "drop table rust_itest_json purge");
-        let created = BlockingConnection::execute_query(
+        let created = execute_raw(
             conn,
             "create table rust_itest_json (id number(9), doc json)",
             1,
@@ -573,7 +623,7 @@ fn json_oson_round_trip() {
             ("active".to_string(), OsonValue::Bool(true)),
         ]);
         let image = oracledb::protocol::oson::encode_oson(&doc, true).expect("encode oson");
-        BlockingConnection::execute_query_with_binds(
+        execute_raw_binds(
             conn,
             "insert into rust_itest_json (id, doc) values (1, :1)",
             1,
@@ -583,13 +633,9 @@ fn json_oson_round_trip() {
         BlockingConnection::commit(conn).expect("commit");
 
         // native JSON columns need the client-side define-fetch that
-        // `execute_query_collect` runs automatically.
-        let select = BlockingConnection::execute_query_collect(
-            conn,
-            "select doc from rust_itest_json where id = 1",
-            2,
-        )
-        .expect("select json");
+        // `execute_raw_collect` runs explicitly.
+        let select = execute_raw_collect(conn, "select doc from rust_itest_json where id = 1", 2)
+            .expect("select json");
         match select.cell(0, 0) {
             Some(QueryValue::Json(json)) => match json.as_ref() {
                 OsonValue::Object(fields) => {

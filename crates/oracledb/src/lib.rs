@@ -91,16 +91,16 @@
 //!
 //! Columns that stream their value through a client-side define (`CLOB`,
 //! `BLOB`, `VECTOR`, native `JSON`) come back from a plain
-//! [`Connection::execute_query`] as describe-only metadata with a `None` cell,
+//! [`Connection::execute_raw`] as describe-only metadata with a `None` cell,
 //! matching the wire protocol. Use
-//! [`execute_query_collect`](Connection::execute_query_collect) to fetch the
-//! first batch with those cells fully materialized in a single call.
+//! [`Connection::define_and_fetch_rows_with_columns`] after opening the cursor
+//! when you need the first batch materialized explicitly.
 //!
 //! # Optional features
 //!
 //! - `arrow`: fetch result sets directly into Apache Arrow `RecordBatch`es via
-//!   [`Connection::fetch_all_record_batch`] and
-//!   [`Connection::fetch_record_batches`].
+//!   `Connection::fetch_all_record_batch` and
+//!   `Connection::fetch_record_batches`.
 //!
 //! # Connection pooling
 //!
@@ -281,7 +281,7 @@ pub mod pool;
 #[cfg(feature = "soda")]
 pub mod soda;
 mod sql_convert;
-pub mod tls;
+pub(crate) mod tls;
 pub mod transport;
 
 /// Re-export of the `tracing` crate for the `obs_span!` / `obs_record!` macros
@@ -2166,6 +2166,7 @@ impl<'a> Registration<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn owned_sql(sql: String, registration_id: u64) -> Self {
         Self {
             sql: std::borrow::Cow::Owned(sql),
@@ -2531,10 +2532,9 @@ impl Rows<'_> {
         Ok(self.batch.pop())
     }
 
-    pub fn into_typed<T: FromRow>(mut self) -> Result<Vec<T>> {
-        self.release_cursor();
-        self.batch
-            .iter()
+    pub async fn into_typed<T: FromRow>(self, cx: &Cx) -> Result<Vec<T>> {
+        let rows = self.collect(cx).await?;
+        rows.iter()
             .map(|row| T::from_row(&row.typed_row()).map_err(Error::Conversion))
             .collect()
     }
@@ -4032,30 +4032,6 @@ impl Connection {
         }
     }
 
-    /// Execute a registerquery: run `sql` with the CQN `registration_id`
-    /// threaded into the execute body and return the query id read back from the
-    /// registration-info block (reference `ThinSubscrImpl.register_query` ->
-    /// `cursor_impl._query_id`). Returns `Some(0)`/`None` when the server sent no
-    /// query id (qos without SUBSCR_QOS_QUERY). Server errors (ORA-00942,
-    /// ORA-29975) surface unchanged.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use Connection::register_query; see docs/MIGRATING-0.3.md"
-    )]
-    pub async fn execute_query_for_registration(
-        &mut self,
-        cx: &Cx,
-        sql: &str,
-        registration_id: u64,
-    ) -> Result<Option<u64>> {
-        self.register_query(
-            cx,
-            Registration::owned_sql(sql.to_string(), registration_id),
-        )
-        .await
-        .map(|outcome| outcome.query_id())
-    }
-
     /// Reads one DATA packet from the emon socket (bounded by `read_timeout`)
     /// and appends its TTC payload (after the 2-byte data flags) to
     /// `notification_buffer`. Reports a timeout (so the caller can poll its
@@ -4650,65 +4626,7 @@ impl Connection {
         }
     }
 
-    /// Execute `sql` with no binds and return the first fetch batch.
-    ///
-    /// For a query, up to `prefetch_rows` rows are returned in the
-    /// [`QueryResult`]; if [`QueryResult::more_rows`] is set, fetch the rest
-    /// with [`Self::fetch_rows`] on the result's `cursor_id`. For DML/DDL the
-    /// row count is in [`QueryResult::row_count`].
-    ///
-    /// Columns that need a client-side define (`CLOB` / `BLOB` / `VECTOR` /
-    /// native `JSON`) return describe-only metadata with `None` cells here;
-    /// use [`Self::execute_query_collect`] to materialize them in one call.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use Connection::query/query_with for rows or Connection::execute/execute_with for DML/PLSQL; see docs/MIGRATING-0.3.md"
-    )]
-    pub async fn execute_query(
-        &mut self,
-        cx: &Cx,
-        sql: &str,
-        prefetch_rows: u32,
-    ) -> Result<QueryResult> {
-        self.execute_query_with_bind_rows_and_options_core(
-            cx,
-            sql,
-            prefetch_rows,
-            &[],
-            ExecuteOptions::default(),
-        )
-        .await
-    }
-
-    /// Execute `sql` and return the first fetch batch with every cell fully
-    /// materialized, including columns that need a client-side define to
-    /// stream their value (`CLOB` / `BLOB` / `VECTOR` / native `JSON`).
-    ///
-    /// Plain [`Self::execute_query`] mirrors the wire protocol exactly: for a
-    /// define-requiring column it returns the describe metadata but a `None`
-    /// cell, because the value only arrives after a follow-up define-fetch
-    /// round trip. This convenience wrapper performs that round trip for the
-    /// first batch automatically, so a standalone caller selecting such a
-    /// column gets the actual value without hand-driving the cursor. For
-    /// scalar-only result sets it is identical to `execute_query`.
-    ///
-    /// `prefetch_rows` is the requested batch size. Rows beyond the first
-    /// batch (when `more_rows` is set) are fetched with the cursor's
-    /// `fetch_rows` / `define_and_fetch_rows_with_columns` methods as usual.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use Connection::query/query_with; Query materializes LOB/JSON/vector cells by default; see docs/MIGRATING-0.3.md"
-    )]
-    pub async fn execute_query_collect(
-        &mut self,
-        cx: &Cx,
-        sql: &str,
-        prefetch_rows: u32,
-    ) -> Result<QueryResult> {
-        self.execute_query_collect_core(cx, sql, prefetch_rows)
-            .await
-    }
-
+    #[allow(dead_code)]
     async fn execute_query_collect_core(
         &mut self,
         cx: &Cx,
@@ -4746,58 +4664,6 @@ impl Connection {
             result.cursor_id = cursor_id;
         }
         Ok(result)
-    }
-
-    #[deprecated(
-        since = "0.3.0",
-        note = "use Query::timeout with Connection::query/query_with or Execute::timeout with Connection::execute/execute_with; see docs/MIGRATING-0.3.md"
-    )]
-    pub async fn execute_query_with_timeout(
-        &mut self,
-        cx: &Cx,
-        sql: &str,
-        prefetch_rows: u32,
-        timeout_ms: Option<u32>,
-    ) -> Result<QueryResult> {
-        self.execute_query_call_timeout(cx, sql, prefetch_rows, timeout_ms)
-            .await
-    }
-
-    /// Execute `sql` with one row of bind values and return the first batch.
-    ///
-    /// Binds are positional: `binds[0]` fills `:1` (or the first named
-    /// placeholder in declaration order), `binds[1]` fills `:2`, and so on. Use
-    /// [`Self::execute_query_with_bind_rows`] to run the same statement over
-    /// many bind rows in a single array-DML round trip.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use Connection::query/query_with for rows or Connection::execute/execute_with for DML/PLSQL; see docs/MIGRATING-0.3.md"
-    )]
-    pub async fn execute_query_with_binds(
-        &mut self,
-        cx: &Cx,
-        sql: &str,
-        prefetch_rows: u32,
-        binds: &[BindValue],
-    ) -> Result<QueryResult> {
-        self.execute_query_with_binds_core(cx, sql, prefetch_rows, binds)
-            .await
-    }
-
-    #[deprecated(
-        since = "0.3.0",
-        note = "use Query::timeout with query/query_with or Execute::timeout with execute/execute_with; see docs/MIGRATING-0.3.md"
-    )]
-    pub async fn execute_query_with_binds_and_timeout(
-        &mut self,
-        cx: &Cx,
-        sql: &str,
-        prefetch_rows: u32,
-        binds: &[BindValue],
-        timeout_ms: Option<u32>,
-    ) -> Result<QueryResult> {
-        self.execute_query_with_binds_call_timeout(cx, sql, prefetch_rows, binds, timeout_ms)
-            .await
     }
 
     /// Ergonomic query: bind typed Rust values positionally and return a lazy
@@ -5100,112 +4966,6 @@ impl Connection {
         Ok(RegistrationOutcome::from_query_result(result))
     }
 
-    /// Ergonomic execute with *named* binds. Pass the
-    /// [`params!`](crate::params) named form
-    /// (`params!{ ":id" => 40, ":name" => "alice" }`), which yields a
-    /// `Vec<(String, BindValue)>`. The names are reordered to match the
-    /// first-appearance order of the placeholders in `sql`, so the caller never
-    /// has to track bind positions:
-    ///
-    /// ```no_run
-    /// # use oracledb::{Connection, params};
-    /// # use asupersync::Cx;
-    /// # async fn demo(conn: &mut Connection, cx: &Cx) -> Result<(), oracledb::Error> {
-    /// let rows = conn
-    ///     .query_named(
-    ///         cx,
-    ///         "select * from emp where id = :id and name = :name",
-    ///         params!{ ":id" => 40, ":name" => "alice" },
-    ///     )
-    ///     .await?;
-    /// # let _ = rows; Ok(()) }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use Connection::query with params!{} named parameters; see docs/MIGRATING-0.3.md"
-    )]
-    pub async fn query_named(
-        &mut self,
-        cx: &Cx,
-        sql: &str,
-        named_params: Vec<(String, BindValue)>,
-    ) -> Result<QueryResult> {
-        let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params))?;
-        self.execute_query_with_binds_core(cx, sql, 1, &binds).await
-    }
-
-    /// [`Self::query_named`] with a per-call timeout, for parity with the
-    /// positional [`Self::execute_query_with_binds_and_timeout`]. `timeout_ms`
-    /// bounds the round trip: on expiry the driver sends a BREAK and the call
-    /// fails with [`Error::CallTimeout`] (the connection stays usable). `None`
-    /// means no timeout. Like [`Self::query_named`], the named binds are
-    /// reordered to the placeholders' first-appearance order in `sql`.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use Query::timeout with Connection::query and params!{} named parameters; see docs/MIGRATING-0.3.md"
-    )]
-    pub async fn query_named_with_timeout(
-        &mut self,
-        cx: &Cx,
-        sql: &str,
-        named_params: Vec<(String, BindValue)>,
-        timeout_ms: Option<u32>,
-    ) -> Result<QueryResult> {
-        let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params))?;
-        self.execute_query_with_binds_call_timeout(cx, sql, 1, &binds, timeout_ms)
-            .await
-    }
-
-    /// Execute `sql` once per bind row (array DML / `executemany`). Each inner
-    /// `Vec<BindValue>` is one positional bind row; the server applies the
-    /// statement to every row in a single round trip and reports the total in
-    /// [`QueryResult::row_count`]. For per-iteration row counts or collected
-    /// batch errors, use
-    /// [`Self::execute_query_with_bind_rows_and_options`] with the matching
-    /// [`ExecuteOptions`] flags.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use Connection::execute_many/execute_many_with for array DML or Connection::query/query_with for rows; see docs/MIGRATING-0.3.md"
-    )]
-    pub async fn execute_query_with_bind_rows(
-        &mut self,
-        cx: &Cx,
-        sql: &str,
-        prefetch_rows: u32,
-        bind_rows: &[Vec<BindValue>],
-    ) -> Result<QueryResult> {
-        self.execute_query_with_bind_rows_and_options_core(
-            cx,
-            sql,
-            prefetch_rows,
-            bind_rows,
-            ExecuteOptions::default(),
-        )
-        .await
-    }
-
-    #[deprecated(
-        since = "0.3.0",
-        note = "use execute_raw for the byte-identical raw QueryResult, or the curated families (Batch::raw_options with execute_many_with, Execute::raw_options with execute_with, Query builders); see docs/MIGRATING-0.3.md"
-    )]
-    pub async fn execute_query_with_bind_rows_and_options(
-        &mut self,
-        cx: &Cx,
-        sql: &str,
-        prefetch_rows: u32,
-        bind_rows: &[Vec<BindValue>],
-        exec_options: ExecuteOptions,
-    ) -> Result<QueryResult> {
-        self.execute_query_with_bind_rows_and_options_core(
-            cx,
-            sql,
-            prefetch_rows,
-            bind_rows,
-            exec_options,
-        )
-        .await
-    }
-
     pub(crate) async fn execute_query_with_binds_core(
         &mut self,
         cx: &Cx,
@@ -5476,28 +5236,6 @@ impl Connection {
         }
     }
 
-    #[deprecated(
-        since = "0.3.0",
-        note = "use Batch::timeout with Connection::execute_many_with or Query::timeout with Connection::query_with; see docs/MIGRATING-0.3.md"
-    )]
-    pub async fn execute_query_with_bind_rows_and_timeout(
-        &mut self,
-        cx: &Cx,
-        sql: &str,
-        prefetch_rows: u32,
-        bind_rows: &[Vec<BindValue>],
-        timeout_ms: Option<u32>,
-    ) -> Result<QueryResult> {
-        self.execute_query_with_bind_rows_call_timeout(
-            cx,
-            sql,
-            prefetch_rows,
-            bind_rows,
-            timeout_ms,
-        )
-        .await
-    }
-
     /// Low-level raw execute: run `sql` once per bind row with explicit
     /// [`ExecuteOptions`] and an optional per-call timeout, returning the first
     /// fetch batch as a raw [`QueryResult`] (columns, `cursor_id`, `more_rows`,
@@ -5524,30 +5262,6 @@ impl Connection {
     /// `n > 0` bounds the round trip with a BREAK→drain→[`Error::CallTimeout`]
     /// recovery that leaves the session usable; `None`/`Some(0)` runs untimed.
     pub async fn execute_raw(
-        &mut self,
-        cx: &Cx,
-        sql: &str,
-        prefetch_rows: u32,
-        bind_rows: &[Vec<BindValue>],
-        exec_options: ExecuteOptions,
-        timeout_ms: Option<u32>,
-    ) -> Result<QueryResult> {
-        self.execute_query_with_bind_rows_options_call_timeout(
-            cx,
-            sql,
-            prefetch_rows,
-            bind_rows,
-            exec_options,
-            timeout_ms,
-        )
-        .await
-    }
-
-    #[deprecated(
-        since = "0.3.0",
-        note = "use execute_raw (pass timeout_ms) for the byte-identical raw QueryResult, or the curated families (Batch::raw_options(...).timeout(...) with execute_many_with, Execute::raw_options(...).timeout(...) with execute_with, Query builders); see docs/MIGRATING-0.3.md"
-    )]
-    pub async fn execute_query_with_bind_rows_options_and_timeout(
         &mut self,
         cx: &Cx,
         sql: &str,
@@ -5606,7 +5320,7 @@ impl Connection {
     }
 
     /// If a previous cancellable fetch future was dropped mid-read (its
-    /// [`CancelDrainGuard`] moved the recovery phase to `BreakSent`), break +
+    /// `CancelDrainGuard` moved the recovery phase to `BreakSent`), break +
     /// drain the stranded server call now — before this round trip sends its own
     /// request — so the leftover bytes / still-running call cannot poison this
     /// response. A failed drain marks the connection dead and surfaces
@@ -5631,7 +5345,7 @@ impl Connection {
         }
     }
 
-    /// Read one TTC response under a [`CancelDrainGuard`]: if THIS read future is
+    /// Read one TTC response under a `CancelDrainGuard`: if THIS read future is
     /// dropped mid-flight (the fetch was cancelled / raced), the guard moves the
     /// recovery phase to `BreakSent` so the next operation breaks + drains the
     /// stranded call. A normal completion disarms the guard, so the uncancelled
@@ -5825,7 +5539,7 @@ impl Connection {
     /// response is in flight — whether during the prior page's decode (no read
     /// yet) or during the response read itself — the next operation breaks +
     /// drains the stranded page before issuing its own request (the same
-    /// machinery that protects a dropped fetch, see [`CancelDrainGuard`]). A
+    /// machinery that protects a dropped fetch, see `CancelDrainGuard`). A
     /// request can only be issued from a clean wire boundary, so it first drains
     /// any *previously* stranded call.
     pub async fn fetch_rows_request(
@@ -5865,7 +5579,7 @@ impl Connection {
     /// Must be called exactly once per `fetch_rows_request`, with the request's
     /// `cursor_id` and the `previous_row` seed for duplicate-column decoding
     /// (the last row of the prior page — known by now because the prior page is
-    /// fully decoded). The read runs under a [`CancelDrainGuard`] (a mid-read
+    /// fully decoded). The read runs under a `CancelDrainGuard` (a mid-read
     /// drop re-arms the pending drain); a clean read disarms the
     /// `fetch_rows_request` arming, leaving no stranded page.
     pub async fn fetch_rows_ref_response(
@@ -5925,7 +5639,7 @@ impl Connection {
     /// the zero-copy fetch fast path. Scalar cells (Text / Number / Raw /
     /// Boolean / Interval / DateTime) borrow the fetch buffer directly, so a
     /// Rust consumer iterating a wide many-row result pays ~0 allocations per
-    /// cell, in contrast to the owned [`execute_query`](Self::execute_query) +
+    /// cell, in contrast to the owned [`execute_raw`](Self::execute_raw) +
     /// [`fetch_rows`](Self::fetch_rows) path which materializes a `String` /
     /// `Vec<u8>` per scalar cell of every row.
     ///
@@ -6667,6 +6381,7 @@ impl Connection {
             .await
     }
 
+    #[allow(dead_code)]
     async fn execute_query_call_timeout(
         &mut self,
         cx: &Cx,
@@ -6728,6 +6443,7 @@ impl Connection {
         }
     }
 
+    #[allow(dead_code)]
     async fn execute_query_with_bind_rows_call_timeout(
         &mut self,
         cx: &Cx,
@@ -7385,7 +7101,7 @@ impl Connection {
     /// drops the cursor entirely: its id is sent in the close-cursors piggyback
     /// that rides the next execute, and its retained describe metadata is
     /// forgotten. Use this for a non-cached cursor (for example one opened by
-    /// [`Self::execute_query_collect`]) once its result is fully consumed, to
+    /// [`Self::execute_raw`]) once its result is fully consumed, to
     /// keep a long-lived connection from accumulating open cursors. A cursor id
     /// of `0` is ignored.
     pub fn close_cursor(&mut self, cursor_id: u32) {
@@ -7613,7 +7329,7 @@ impl Connection {
         Ok(responses)
     }
 
-    /// Runs a batch as a true single-round-trip pipeline (like [`run_pipeline`])
+    /// Runs a batch as a true single-round-trip pipeline (like [`Self::run_pipeline`])
     /// and decodes each per-operation response into a [`QueryResult`], reusing
     /// the same `parse_query_response_*` decoders the ordinary execute path uses
     /// — no result-layer reimplementation. The end-pipeline response (the N+1th
@@ -7997,24 +7713,6 @@ impl BlockingConnection {
         block_on_io(|cx| async move { connection.register_query(&cx, registration).await })
     }
 
-    /// Execute a registerquery (registration id into the execute, query id out).
-    /// See [`Connection::execute_query_for_registration`].
-    #[deprecated(
-        since = "0.3.0",
-        note = "use BlockingConnection::register_query; see docs/MIGRATING-0.3.md"
-    )]
-    pub fn execute_query_for_registration(
-        connection: &mut Connection,
-        sql: &str,
-        registration_id: u64,
-    ) -> Result<Option<u64>> {
-        Self::register_query(
-            connection,
-            Registration::owned_sql(sql.to_string(), registration_id),
-        )
-        .map(|outcome| outcome.query_id())
-    }
-
     pub fn rollback(connection: &mut Connection) -> Result<()> {
         let runtime = build_io_runtime()?;
         runtime.block_on(async {
@@ -8198,114 +7896,6 @@ impl BlockingConnection {
         })
     }
 
-    #[deprecated(
-        since = "0.3.0",
-        note = "use BlockingConnection::query/query_with for rows or BlockingConnection::execute/execute_with for DML/PLSQL; see docs/MIGRATING-0.3.md"
-    )]
-    pub fn execute_query(
-        connection: &mut Connection,
-        sql: &str,
-        prefetch_rows: u32,
-    ) -> Result<QueryResult> {
-        let runtime = build_io_runtime()?;
-        runtime.block_on(async {
-            let cx = Cx::current()
-                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            connection
-                .execute_query_with_bind_rows_and_options_core(
-                    &cx,
-                    sql,
-                    prefetch_rows,
-                    &[],
-                    ExecuteOptions::default(),
-                )
-                .await
-        })
-    }
-
-    /// Blocking wrapper for [`Connection::execute_query_collect`]: execute and
-    /// return the first batch with `CLOB` / `BLOB` / `VECTOR` / native `JSON`
-    /// cells fully materialized via an automatic define-fetch round trip.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use BlockingConnection::query/query_with; Query materializes LOB/JSON/vector cells by default; see docs/MIGRATING-0.3.md"
-    )]
-    pub fn execute_query_collect(
-        connection: &mut Connection,
-        sql: &str,
-        prefetch_rows: u32,
-    ) -> Result<QueryResult> {
-        let runtime = build_io_runtime()?;
-        runtime.block_on(async {
-            let cx = Cx::current()
-                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            connection
-                .execute_query_collect_core(&cx, sql, prefetch_rows)
-                .await
-        })
-    }
-
-    #[deprecated(
-        since = "0.3.0",
-        note = "use Query::timeout with BlockingConnection::query/query_with or Execute::timeout with BlockingConnection::execute/execute_with; see docs/MIGRATING-0.3.md"
-    )]
-    pub fn execute_query_with_timeout(
-        connection: &mut Connection,
-        sql: &str,
-        prefetch_rows: u32,
-        timeout_ms: Option<u32>,
-    ) -> Result<QueryResult> {
-        let runtime = build_io_runtime()?;
-        runtime.block_on(async {
-            let cx = Cx::current()
-                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            connection
-                .execute_query_call_timeout(&cx, sql, prefetch_rows, timeout_ms)
-                .await
-        })
-    }
-
-    #[deprecated(
-        since = "0.3.0",
-        note = "use BlockingConnection::query/query_with for rows or BlockingConnection::execute/execute_with for DML/PLSQL; see docs/MIGRATING-0.3.md"
-    )]
-    pub fn execute_query_with_binds(
-        connection: &mut Connection,
-        sql: &str,
-        prefetch_rows: u32,
-        binds: &[BindValue],
-    ) -> Result<QueryResult> {
-        let runtime = build_io_runtime()?;
-        runtime.block_on(async {
-            let cx = Cx::current()
-                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            connection
-                .execute_query_with_binds_core(&cx, sql, prefetch_rows, binds)
-                .await
-        })
-    }
-
-    #[deprecated(
-        since = "0.3.0",
-        note = "use Query::timeout with BlockingConnection::query/query_with or Execute::timeout with BlockingConnection::execute/execute_with; see docs/MIGRATING-0.3.md"
-    )]
-    pub fn execute_query_with_binds_and_timeout(
-        connection: &mut Connection,
-        sql: &str,
-        prefetch_rows: u32,
-        binds: &[BindValue],
-        timeout_ms: Option<u32>,
-    ) -> Result<QueryResult> {
-        let runtime = build_io_runtime()?;
-        runtime.block_on(async {
-            let cx = Cx::current()
-                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            connection
-                .execute_query_with_binds_call_timeout(&cx, sql, prefetch_rows, binds, timeout_ms)
-                .await
-        })
-    }
-
     /// Blocking wrapper for [`Connection::query`]: bind typed Rust values
     /// positionally or by name, then return a blocking lazy row facade.
     pub fn query<'conn, 'p>(
@@ -8395,134 +7985,6 @@ impl BlockingConnection {
         block_on_io(|cx| async move { connection.execute_many_with(&cx, batch).await })
     }
 
-    /// Blocking wrapper for [`Connection::query_named`]: bind the
-    /// [`params!`](crate::params) named form
-    /// (`params!{ ":id" => 40 }`); names are reordered to the placeholder
-    /// first-appearance order in `sql`.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use BlockingConnection::query with params!{} named parameters; see docs/MIGRATING-0.3.md"
-    )]
-    pub fn query_named(
-        connection: &mut Connection,
-        sql: &str,
-        named_params: Vec<(String, BindValue)>,
-    ) -> Result<QueryResult> {
-        let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params))?;
-        let runtime = build_io_runtime()?;
-        runtime.block_on(async {
-            let cx = Cx::current()
-                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            connection
-                .execute_query_with_binds_core(&cx, sql, 1, &binds)
-                .await
-        })
-    }
-
-    /// Blocking wrapper for [`Connection::query_named_with_timeout`]: named binds
-    /// plus a per-call timeout (`Error::CallTimeout` on expiry; `None` = no
-    /// timeout).
-    #[deprecated(
-        since = "0.3.0",
-        note = "use Query::timeout with BlockingConnection::query_with and params!{} named parameters; see docs/MIGRATING-0.3.md"
-    )]
-    pub fn query_named_with_timeout(
-        connection: &mut Connection,
-        sql: &str,
-        named_params: Vec<(String, BindValue)>,
-        timeout_ms: Option<u32>,
-    ) -> Result<QueryResult> {
-        let binds = crate::sql_convert::resolve_params(sql, crate::Params::from(named_params))?;
-        let runtime = build_io_runtime()?;
-        runtime.block_on(async {
-            let cx = Cx::current()
-                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            connection
-                .execute_query_with_binds_call_timeout(&cx, sql, 1, &binds, timeout_ms)
-                .await
-        })
-    }
-
-    #[deprecated(
-        since = "0.3.0",
-        note = "use BlockingConnection::execute_many/execute_many_with for array DML or BlockingConnection::query/query_with for rows; see docs/MIGRATING-0.3.md"
-    )]
-    pub fn execute_query_with_bind_rows(
-        connection: &mut Connection,
-        sql: &str,
-        prefetch_rows: u32,
-        bind_rows: &[Vec<BindValue>],
-    ) -> Result<QueryResult> {
-        let runtime = build_io_runtime()?;
-        runtime.block_on(async {
-            let cx = Cx::current()
-                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            connection
-                .execute_query_with_bind_rows_and_options_core(
-                    &cx,
-                    sql,
-                    prefetch_rows,
-                    bind_rows,
-                    ExecuteOptions::default(),
-                )
-                .await
-        })
-    }
-
-    #[deprecated(
-        since = "0.3.0",
-        note = "use execute_raw for the byte-identical raw QueryResult, or the curated families (Batch::raw_options with execute_many_with, Execute::raw_options with execute_with, Query builders); see docs/MIGRATING-0.3.md"
-    )]
-    pub fn execute_query_with_bind_rows_and_options(
-        connection: &mut Connection,
-        sql: &str,
-        prefetch_rows: u32,
-        bind_rows: &[Vec<BindValue>],
-        exec_options: ExecuteOptions,
-    ) -> Result<QueryResult> {
-        let runtime = build_io_runtime()?;
-        runtime.block_on(async {
-            let cx = Cx::current()
-                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            connection
-                .execute_query_with_bind_rows_and_options_core(
-                    &cx,
-                    sql,
-                    prefetch_rows,
-                    bind_rows,
-                    exec_options,
-                )
-                .await
-        })
-    }
-
-    #[deprecated(
-        since = "0.3.0",
-        note = "use Batch::timeout with BlockingConnection::execute_many_with or Query::timeout with BlockingConnection::query_with; see docs/MIGRATING-0.3.md"
-    )]
-    pub fn execute_query_with_bind_rows_and_timeout(
-        connection: &mut Connection,
-        sql: &str,
-        prefetch_rows: u32,
-        bind_rows: &[Vec<BindValue>],
-        timeout_ms: Option<u32>,
-    ) -> Result<QueryResult> {
-        let runtime = build_io_runtime()?;
-        runtime.block_on(async {
-            let cx = Cx::current()
-                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            connection
-                .execute_query_with_bind_rows_call_timeout(
-                    &cx,
-                    sql,
-                    prefetch_rows,
-                    bind_rows,
-                    timeout_ms,
-                )
-                .await
-        })
-    }
-
     /// Blocking wrapper for [`Connection::execute_raw`]: the low-level raw
     /// execute primitive returning the unprojected [`QueryResult`], the
     /// execute-side counterpart to the retained blocking fetch primitives
@@ -8546,35 +8008,6 @@ impl BlockingConnection {
                 .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
             connection
                 .execute_raw(&cx, sql, prefetch_rows, bind_rows, exec_options, timeout_ms)
-                .await
-        })
-    }
-
-    #[deprecated(
-        since = "0.3.0",
-        note = "use execute_raw (pass timeout_ms) for the byte-identical raw QueryResult, or the curated families (Batch::raw_options(...).timeout(...) with execute_many_with, Execute::raw_options(...).timeout(...) with execute_with, Query builders); see docs/MIGRATING-0.3.md"
-    )]
-    pub fn execute_query_with_bind_rows_options_and_timeout(
-        connection: &mut Connection,
-        sql: &str,
-        prefetch_rows: u32,
-        bind_rows: &[Vec<BindValue>],
-        exec_options: ExecuteOptions,
-        timeout_ms: Option<u32>,
-    ) -> Result<QueryResult> {
-        let runtime = build_io_runtime()?;
-        runtime.block_on(async {
-            let cx = Cx::current()
-                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
-            connection
-                .execute_query_with_bind_rows_options_call_timeout(
-                    &cx,
-                    sql,
-                    prefetch_rows,
-                    bind_rows,
-                    exec_options,
-                    timeout_ms,
-                )
                 .await
         })
     }
@@ -9430,7 +8863,7 @@ where
 /// before issuing its own request — so a cancelled fetch never poisons the
 /// stream for the next one.
 ///
-/// A read that completes normally calls [`CancelDrainGuard::disarm`] first, so
+/// A read that completes normally calls `CancelDrainGuard::disarm` first, so
 /// the common (uncancelled) path never arms the flag and pays nothing.
 struct CancelDrainGuard {
     recovery: Arc<SessionRecovery>,
@@ -10293,10 +9726,11 @@ mod tests {
 
     #[test]
     fn migration_guide_covers_every_deprecated_method() {
-        // No orphan deprecation: every old execute/query name that carries a
-        // `#[deprecated(since = "0.3.0")]` shim must appear in the user-facing
-        // 0.3.0 migration guide, so an external consumer can always find the
-        // replacement. These are exactly the names listed in API_DESIGN.md §8.
+        // No orphan removal: every old execute/query name that carried a
+        // `#[deprecated(since = "0.3.0")]` shim and is now removed in
+        // 1.0.0-rc.1 must still appear in the user-facing 0.3.0 migration
+        // guide, so an external consumer can always find the replacement.
+        // These are exactly the names listed in API_DESIGN.md §8.
         let guide = include_str!("../../../docs/MIGRATING-0.3.md");
         for method in [
             "execute_query",
@@ -10969,7 +10403,6 @@ mod tests {
     }
 
     #[cfg(feature = "cassette")]
-    #[allow(deprecated)]
     #[test]
     fn synthetic_cassette_replays_connect_execute_fetch_close_offline() -> Result<()> {
         let cassette = include_bytes!("../tests/fixtures/cassettes/select_7_plus_5.tns-cassette");
@@ -10993,7 +10426,14 @@ mod tests {
 
             let mut conn = loopback_connection_from_core(core);
             let execute = conn
-                .execute_query(&cx, "select value from synthetic_fixture", 2)
+                .execute_raw(
+                    &cx,
+                    "select value from synthetic_fixture",
+                    2,
+                    &[],
+                    ExecuteOptions::default(),
+                    None,
+                )
                 .await?;
             assert_eq!(execute.columns.len(), 1);
             assert_eq!(execute.rows.len(), 1);

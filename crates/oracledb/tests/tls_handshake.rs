@@ -9,7 +9,8 @@
 //!
 //! The server runs on a blocking std thread (`rustls::ServerConnection` +
 //! `rustls::Stream`); the client runs on the asupersync runtime exactly as the
-//! driver does, calling the real `oracledb::tls` + `oracledb::transport` code.
+//! driver does, compiling the crate-local TLS module directly because it is not
+//! part of the public API.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -20,11 +21,18 @@ use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use asupersync::net::TcpStream;
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
-use oracledb::tls::{self, TlsParams};
 use oracledb_protocol::net::EasyConnect;
 use oracledb_protocol::tls::wallet::parse_ewallet_pem;
 use rustls::pki_types::CertificateDer;
 use rustls::{ServerConfig, ServerConnection};
+
+pub use oracledb::Error;
+
+#[allow(dead_code)]
+#[path = "../src/tls.rs"]
+mod tls;
+
+use tls::TlsParams;
 
 /// Build the asupersync I/O runtime the same way the driver does.
 fn io_runtime() -> asupersync::runtime::Runtime {

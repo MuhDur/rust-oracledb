@@ -166,7 +166,17 @@ fn execute_and_fetch_emit_spans_with_structured_fields() {
             // Execute with a small prefetch so the rest of the rows require an
             // explicit FETCH round trip -> an execute span AND a fetch span.
             let sql = "select level as n from dual connect by level <= 3 order by n";
-            let first = conn.execute_query(&cx, sql, 1).await.expect("execute");
+            let first = conn
+                .execute_raw(
+                    &cx,
+                    sql,
+                    1,
+                    &[],
+                    oracledb::protocol::thin::ExecuteOptions::default(),
+                    None,
+                )
+                .await
+                .expect("execute");
             let cursor_id = first.cursor_id;
             let mut values: Vec<i64> = (0..first.rows.len())
                 .filter_map(|r| first.cell(r, 0).and_then(QueryValue::as_i64))

@@ -25,7 +25,7 @@
 //! cargo test -p oracledb --test wide_row_multipacket
 //! ```
 
-use oracledb::protocol::thin::{BindValue, QueryValue};
+use oracledb::protocol::thin::{BindValue, ExecuteOptions, QueryResult, QueryValue};
 use oracledb::{BlockingConnection, ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;
 
@@ -84,7 +84,22 @@ fn str_value(id: i64, col: usize) -> String {
 }
 
 fn drop_if_exists(conn: &mut Connection, ddl: &str) {
-    let _ = BlockingConnection::execute_query(conn, ddl, 1);
+    let _ = execute_raw(conn, ddl, 1);
+}
+
+fn execute_raw(
+    conn: &mut Connection,
+    sql: &str,
+    prefetch_rows: u32,
+) -> oracledb::Result<QueryResult> {
+    BlockingConnection::execute_raw(
+        conn,
+        sql,
+        prefetch_rows,
+        &[],
+        ExecuteOptions::default(),
+        None,
+    )
 }
 
 #[test]
@@ -107,7 +122,7 @@ fn wide_row_multipacket_fetch_reassembles_every_row() {
         .join(", ");
     let create =
         format!("create table {TABLE} (id number(12) primary key, {num_defs}, {str_defs})");
-    BlockingConnection::execute_query(&mut conn, &create, 1).expect("create wide table");
+    execute_raw(&mut conn, &create, 1).expect("create wide table");
 
     // Build the parameterized INSERT once.
     let placeholders: Vec<String> = (1..=(1 + TOTAL_COLS)).map(|i| format!(":{i}")).collect();
@@ -139,16 +154,22 @@ fn wide_row_multipacket_fetch_reassembles_every_row() {
                 row
             })
             .collect();
-        BlockingConnection::execute_query_with_bind_rows(&mut conn, &insert, 1, &bind_rows)
-            .expect("array DML insert chunk");
+        BlockingConnection::execute_raw(
+            &mut conn,
+            &insert,
+            1,
+            &bind_rows,
+            ExecuteOptions::default(),
+            None,
+        )
+        .expect("array DML insert chunk");
         id = end + 1;
     }
     BlockingConnection::commit(&mut conn).expect("commit inserts");
 
     // Sanity: server-side count matches what we inserted.
     let count =
-        BlockingConnection::execute_query(&mut conn, &format!("select count(*) from {TABLE}"), 2)
-            .expect("count rows");
+        execute_raw(&mut conn, &format!("select count(*) from {TABLE}"), 2).expect("count rows");
     assert_eq!(
         count.cell(0, 0).and_then(QueryValue::as_i64),
         Some(ROW_COUNT),
@@ -172,7 +193,7 @@ fn wide_row_multipacket_fetch_reassembles_every_row() {
     );
 
     let arraysize = (ROW_COUNT as u32) + 100;
-    let first = BlockingConnection::execute_query_collect(&mut conn, &select, arraysize)
+    let first = execute_raw(&mut conn, &select, arraysize)
         .expect("wide multi-packet fetch must reassemble");
 
     assert_eq!(

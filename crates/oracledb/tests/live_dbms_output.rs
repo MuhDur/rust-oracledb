@@ -23,12 +23,12 @@ fn dbms_output_capture_roundtrip() {
     BlockingConnection::enable_dbms_output(&mut c, Some(20000)).unwrap();
 
     // Emit three lines from this exact session.
-    BlockingConnection::execute_query(
+    BlockingConnection::execute(
         &mut c,
         "begin dbms_output.put_line('alpha'); \
          dbms_output.put_line('beta'); \
          dbms_output.put_line('gamma'); end;",
-        0,
+        (),
     )
     .unwrap();
 
@@ -50,10 +50,10 @@ fn dbms_output_capture_roundtrip() {
 fn dbms_output_respects_max_lines() {
     let mut c = connect();
     BlockingConnection::enable_dbms_output(&mut c, None).unwrap();
-    BlockingConnection::execute_query(
+    BlockingConnection::execute(
         &mut c,
         "begin for i in 1..10 loop dbms_output.put_line('line ' || i); end loop; end;",
-        0,
+        (),
     )
     .unwrap();
 
@@ -73,10 +73,10 @@ fn dbms_output_respects_max_lines() {
 fn dbms_output_exact_boundary_is_not_truncated() {
     let mut c = connect();
     BlockingConnection::enable_dbms_output(&mut c, None).unwrap();
-    BlockingConnection::execute_query(
+    BlockingConnection::execute(
         &mut c,
         "begin for i in 1..5 loop dbms_output.put_line('row ' || i); end loop; end;",
-        0,
+        (),
     )
     .unwrap();
 

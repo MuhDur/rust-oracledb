@@ -1,5 +1,5 @@
 //! Regression test for bead `qp0`: a named placeholder that occurs more than
-//! once in plain SQL, bound ONCE by name via `query_named`, must bind correctly.
+//! once in plain SQL, bound ONCE by name via `query`, must bind correctly.
 //!
 //! Investigation outcome: NOT a bug. python-oracledb thin (and our pyshim) bind
 //! per-occurrence for SQL, but Oracle binds repeated placeholders BY NAME, so our
@@ -28,27 +28,27 @@ fn connect() -> oracledb::Connection {
 fn repeated_named_bind_in_sql() {
     let mut c = connect();
 
-    // :v occurs TWICE; bound ONCE by name via the native query_named API.
-    let res = BlockingConnection::query_named(
+    // :v occurs TWICE; bound ONCE by name via the native query API.
+    let res = BlockingConnection::query_one(
         &mut c,
         "select :v + :v as s from dual",
         params! { ":v" => 5_i64 },
     )
     .expect("repeated named bind must not under-bind (ORA-01008)");
     assert_eq!(
-        res.cell(0, 0).and_then(QueryValue::as_i64),
+        res.value(0).and_then(QueryValue::as_i64),
         Some(10),
         "Oracle binds the repeated :v by name; both occurrences see 5"
     );
 
     // Single-occurrence control.
-    let res1 = BlockingConnection::query_named(
+    let res1 = BlockingConnection::query_one(
         &mut c,
         "select :v as s from dual",
         params! { ":v" => 7_i64 },
     )
     .expect("single named bind");
-    assert_eq!(res1.cell(0, 0).and_then(QueryValue::as_i64), Some(7));
+    assert_eq!(res1.value(0).and_then(QueryValue::as_i64), Some(7));
 
     // Positional control where the user supplies both occurrences.
     let row2 = BlockingConnection::query_one(

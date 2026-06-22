@@ -58,7 +58,14 @@ fn connect_options() -> Option<ConnectOptions> {
 
 async fn assert_select_seven_plus_five(conn: &mut Connection, cx: &Cx, context: &str) {
     let reuse = conn
-        .execute_query(cx, "select 7 + 5 from dual", 2)
+        .execute_raw(
+            cx,
+            "select 7 + 5 from dual",
+            2,
+            &[],
+            oracledb::protocol::thin::ExecuteOptions::default(),
+            None,
+        )
         .await
         .unwrap_or_else(|err| panic!("{context}: the connection must be reusable, got {err:?}"));
     assert_eq!(
@@ -93,7 +100,14 @@ fn connection_is_reusable_after_explicit_cancel_and_after_drop_cancel() {
         // Sanity: the connection works BEFORE any cancel, so a later failure is
         // attributable to cancel recovery, not a broken connection.
         let before = conn
-            .execute_query(&cx, "select 1 + 1 from dual", 2)
+            .execute_raw(
+                &cx,
+                "select 1 + 1 from dual",
+                2,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
+            )
             .await
             .expect("pre-query");
         assert_eq!(
@@ -110,7 +124,14 @@ fn connection_is_reusable_after_explicit_cancel_and_after_drop_cancel() {
         let raced = time::timeout(
             time::wall_now(),
             Duration::from_millis(400),
-            conn.execute_query(&cx, slow, 1),
+            conn.execute_raw(
+                &cx,
+                slow,
+                1,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
+            ),
         )
         .await;
         assert!(
@@ -134,7 +155,14 @@ fn connection_is_reusable_after_explicit_cancel_and_after_drop_cancel() {
         let raced = time::timeout(
             time::wall_now(),
             Duration::from_millis(400),
-            conn.execute_query(&cx, slow, 1),
+            conn.execute_raw(
+                &cx,
+                slow,
+                1,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
+            ),
         )
         .await;
         assert!(
@@ -148,10 +176,13 @@ fn connection_is_reusable_after_explicit_cancel_and_after_drop_cancel() {
         // And it keeps working for more than one follow-up round trip, including
         // a multi-row fetch (exercises the paging path, not just scalar dual).
         let rows = conn
-            .execute_query_collect(
+            .execute_raw(
                 &cx,
                 "select level as n from dual connect by level <= 5 order by n",
                 10,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
             )
             .await
             .expect("multi-row fetch on the recovered connection");

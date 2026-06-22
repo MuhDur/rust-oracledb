@@ -202,9 +202,15 @@ fn connect_options() -> Option<ConnectOptions> {
 /// Crucially this *touches* every cell (`as_i64` / `as_text`) so the optimizer
 /// cannot elide the decode the benchmark exists to measure.
 fn run_workload_once(conn: &mut Connection, sql: &str) -> u64 {
-    let first =
-        BlockingConnection::execute_query_with_bind_rows(conn, sql, WORKLOAD_ARRAYSIZE, &[])
-            .expect("decode-heavy execute");
+    let first = BlockingConnection::execute_raw(
+        conn,
+        sql,
+        WORKLOAD_ARRAYSIZE,
+        &[],
+        oracledb::protocol::thin::ExecuteOptions::default(),
+        None,
+    )
+    .expect("decode-heavy execute");
     let cursor_id = first.cursor_id;
     let mut total = touch_all_cells(&first);
     let mut more_rows = first.more_rows;
@@ -256,10 +262,30 @@ fn touch_all_cells(result: &QueryResult) -> u64 {
 fn setup_table(options: &ConnectOptions) -> Result<(), oracledb::Error> {
     let mut conn = BlockingConnection::connect(options.clone())?;
     // Best-effort drop: a missing table is fine.
-    let _ =
-        BlockingConnection::execute_query(&mut conn, &format!("drop table {SCAN_TABLE} purge"), 1);
-    BlockingConnection::execute_query(&mut conn, &create_table_sql(), 1)?;
-    BlockingConnection::execute_query(&mut conn, &populate_sql(), 1)?;
+    let _ = BlockingConnection::execute_raw(
+        &mut conn,
+        &format!("drop table {SCAN_TABLE} purge"),
+        1,
+        &[],
+        oracledb::protocol::thin::ExecuteOptions::default(),
+        None,
+    );
+    BlockingConnection::execute_raw(
+        &mut conn,
+        &create_table_sql(),
+        1,
+        &[],
+        oracledb::protocol::thin::ExecuteOptions::default(),
+        None,
+    )?;
+    BlockingConnection::execute_raw(
+        &mut conn,
+        &populate_sql(),
+        1,
+        &[],
+        oracledb::protocol::thin::ExecuteOptions::default(),
+        None,
+    )?;
     BlockingConnection::commit(&mut conn)?;
     // Warm the buffer cache so the first measured scans are memory reads.
     let scan = scan_sql();
@@ -274,10 +300,13 @@ fn setup_table(options: &ConnectOptions) -> Result<(), oracledb::Error> {
 /// numbers already printed.
 fn teardown_table(options: &ConnectOptions) {
     if let Ok(mut conn) = BlockingConnection::connect(options.clone()) {
-        let _ = BlockingConnection::execute_query(
+        let _ = BlockingConnection::execute_raw(
             &mut conn,
             &format!("drop table {SCAN_TABLE} purge"),
             1,
+            &[],
+            oracledb::protocol::thin::ExecuteOptions::default(),
+            None,
         );
         let _ = BlockingConnection::close(conn);
     }

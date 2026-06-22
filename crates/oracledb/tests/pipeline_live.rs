@@ -5,8 +5,10 @@
 //! (PYO_TEST_* variables) is not configured, so plain `cargo test` stays
 //! green offline.
 
-use oracledb::protocol::thin::{parse_query_response, BindValue, QueryValue};
-use oracledb::{BlockingConnection, ConnectOptions, PipelineRequest};
+use oracledb::protocol::thin::{
+    parse_query_response, BindValue, ExecuteOptions, QueryResult, QueryValue,
+};
+use oracledb::{BlockingConnection, ConnectOptions, Connection, PipelineRequest};
 use oracledb_protocol::ClientIdentity;
 
 fn connect_options() -> Option<ConnectOptions> {
@@ -29,6 +31,21 @@ fn connect_options() -> Option<ConnectOptions> {
     ))
 }
 
+fn execute_raw(
+    conn: &mut Connection,
+    sql: &str,
+    prefetch_rows: u32,
+) -> oracledb::Result<QueryResult> {
+    BlockingConnection::execute_raw(
+        conn,
+        sql,
+        prefetch_rows,
+        &[],
+        ExecuteOptions::default(),
+        None,
+    )
+}
+
 #[test]
 fn pipeline_round_trips_against_local_container() {
     let Some(options) = connect_options() else {
@@ -45,7 +62,7 @@ fn pipeline_round_trips_against_local_container() {
         "drop table if exists pipe_live_rust purge",
         "create table pipe_live_rust (id number(9), val varchar2(50))",
     ] {
-        BlockingConnection::execute_query(&mut conn, ddl, 1).expect("setup ddl");
+        execute_raw(&mut conn, ddl, 1).expect("setup ddl");
     }
 
     // abort-on-error batch: insert, bound insert, commit, select
@@ -143,16 +160,14 @@ fn pipeline_round_trips_against_local_container() {
     }
 
     // the connection must remain healthy for ordinary traffic afterwards
-    let after =
-        BlockingConnection::execute_query(&mut conn, "select max(id) from pipe_live_rust", 2)
-            .expect("plain query after pipelines");
+    let after = execute_raw(&mut conn, "select max(id) from pipe_live_rust", 2)
+        .expect("plain query after pipelines");
     match &after.rows[0][0] {
         Some(v @ QueryValue::Number(_)) => assert_eq!(v.as_number_text().unwrap(), "3"),
         other => panic!("unexpected max id: {other:?}"),
     }
 
-    BlockingConnection::execute_query(&mut conn, "drop table pipe_live_rust purge", 1)
-        .expect("cleanup ddl");
+    execute_raw(&mut conn, "drop table pipe_live_rust purge", 1).expect("cleanup ddl");
     BlockingConnection::close(conn).expect("close connection");
 }
 
@@ -173,7 +188,7 @@ fn pipeline_decoded_matches_raw_parse() {
         "drop table if exists pipe_dec_rust purge",
         "create table pipe_dec_rust (id number(9), val varchar2(50))",
     ] {
-        BlockingConnection::execute_query(&mut conn, ddl, 1).expect("setup ddl");
+        execute_raw(&mut conn, ddl, 1).expect("setup ddl");
     }
 
     let requests = [
@@ -218,8 +233,7 @@ fn pipeline_decoded_matches_raw_parse() {
 
     // Reset the table so the decoded pipeline starts from the same empty state
     // the raw pipeline did (both insert the same two rows).
-    BlockingConnection::execute_query(&mut conn, "truncate table pipe_dec_rust", 1)
-        .expect("reset table");
+    execute_raw(&mut conn, "truncate table pipe_dec_rust", 1).expect("reset table");
 
     // Candidate: the decoded wrapper, fresh pipeline (same statements).
     let decoded = BlockingConnection::run_pipeline_decoded(&mut conn, &requests, false)
@@ -275,7 +289,6 @@ fn pipeline_decoded_matches_raw_parse() {
         ]
     );
 
-    BlockingConnection::execute_query(&mut conn, "drop table pipe_dec_rust purge", 1)
-        .expect("cleanup ddl");
+    execute_raw(&mut conn, "drop table pipe_dec_rust purge", 1).expect("cleanup ddl");
     BlockingConnection::close(conn).expect("close connection");
 }

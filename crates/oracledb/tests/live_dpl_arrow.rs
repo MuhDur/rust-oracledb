@@ -52,9 +52,16 @@ fn live_direct_path_load_then_arrow_fetch() {
             .expect("Rust thin connection should authenticate");
 
         let _ = conn
-            .execute_query(&cx, "drop table rust_dpl_live purge", 1)
+            .execute_raw(
+                &cx,
+                "drop table rust_dpl_live purge",
+                1,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
+            )
             .await;
-        conn.execute_query(
+        conn.execute_raw(
             &cx,
             "create table rust_dpl_live (
                  id      number(9) not null,
@@ -63,6 +70,9 @@ fn live_direct_path_load_then_arrow_fetch() {
                  hired   date
              )",
             1,
+            &[],
+            oracledb::protocol::thin::ExecuteOptions::default(),
+            None,
         )
         .await
         .expect("create table should succeed");
@@ -183,7 +193,14 @@ fn live_direct_path_load_then_arrow_fetch() {
             .expect_err("NULL into NOT NULL column must fail client-side");
         assert!(err.to_string().starts_with("DPY-8001:"), "{err}");
         let count = conn
-            .execute_query(&cx, "select count(*) from rust_dpl_live", 10)
+            .execute_raw(
+                &cx,
+                "select count(*) from rust_dpl_live",
+                10,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
+            )
             .await
             .expect("count should fetch");
         assert_eq!(
@@ -194,9 +211,16 @@ fn live_direct_path_load_then_arrow_fetch() {
             Some("5"),
         );
 
-        conn.execute_query(&cx, "drop table rust_dpl_live purge", 1)
-            .await
-            .expect("drop table should succeed");
+        conn.execute_raw(
+            &cx,
+            "drop table rust_dpl_live purge",
+            1,
+            &[],
+            oracledb::protocol::thin::ExecuteOptions::default(),
+            None,
+        )
+        .await
+        .expect("drop table should succeed");
         conn.close(&cx)
             .await
             .expect("Rust thin logoff should round-trip");

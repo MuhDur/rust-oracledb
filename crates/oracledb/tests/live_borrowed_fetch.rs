@@ -60,7 +60,14 @@ fn borrowed_fetch_matches_owned_fetch_for_wide_many_row_result() {
         // --- Owned path: collect every row as owned QueryValues. ---
         let owned_rows = {
             let first = conn
-                .execute_query_with_bind_rows(&cx, sql, arraysize, &[])
+                .execute_raw(
+                    &cx,
+                    sql,
+                    arraysize,
+                    &[],
+                    oracledb::protocol::thin::ExecuteOptions::default(),
+                    None,
+                )
                 .await
                 .expect("owned execute");
             let cursor_id = first.cursor_id;

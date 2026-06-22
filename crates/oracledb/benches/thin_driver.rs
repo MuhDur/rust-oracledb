@@ -91,7 +91,7 @@ where
 /// Execute a no-bind query through the statement-cache path so the open server
 /// cursor is reused across iterations (the equivalent of a prepared statement
 /// re-executed on one cursor object). Without this the lower-level
-/// `execute_query` allocates a fresh server cursor on every call and a long
+/// `execute_raw` allocates a fresh server cursor on every call and a long
 /// bench run exhausts `open_cursors`.
 async fn execute_cached(
     cx: &Cx,
@@ -99,9 +99,16 @@ async fn execute_cached(
     sql: &str,
     arraysize: u32,
 ) -> oracledb::protocol::thin::QueryResult {
-    conn.execute_query_with_bind_rows(cx, sql, arraysize, &[])
-        .await
-        .expect("cached execute")
+    conn.execute_raw(
+        cx,
+        sql,
+        arraysize,
+        &[],
+        oracledb::protocol::thin::ExecuteOptions::default(),
+        None,
+    )
+    .await
+    .expect("cached execute")
 }
 
 /// Drain a query that may return more rows than one batch holds, paging with
@@ -223,7 +230,16 @@ async fn drain_prefetched_borrowed(
 /// drop-then-create setup is idempotent across reruns.
 fn ddl_best_effort(runtime: &Runtime, conn: &mut Connection, sql: &str) {
     block_on(runtime, async |cx| {
-        let _ = conn.execute_query(cx, sql, 1).await;
+        let _ = conn
+            .execute_raw(
+                cx,
+                sql,
+                1,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
+            )
+            .await;
     });
 }
 
@@ -291,7 +307,7 @@ fn bench_thin_driver(c: &mut Criterion) {
     //      operation. Unlike `select_one_row` above (which reuses one runtime
     //      via this bench's `block_on` helper), this measures the facade's own
     //      per-call runtime handling, so it reflects what a synchronous Rust
-    //      caller — and the suite — actually pays. `execute_query` reuses the
+    //      caller — and the suite — actually pays. `execute_raw` reuses the
     //      cursor through the statement cache, so the loop does not exhaust
     //      `open_cursors`.
     // ----------------------------------------------------------------------
@@ -305,11 +321,13 @@ fn bench_thin_driver(c: &mut Criterion) {
                 // server cursor is reused across iterations, exactly as the
                 // async `select_one_row` bench does — the only difference being
                 // that this goes through the synchronous facade.
-                let result = BlockingConnection::execute_query_with_bind_rows(
+                let result = BlockingConnection::execute_raw(
                     &mut blocking_conn,
                     "select 1 from dual",
                     1,
                     &[],
+                    oracledb::protocol::thin::ExecuteOptions::default(),
+                    None,
                 )
                 .expect("blocking cached execute");
                 assert_eq!(result.rows.len(), 1, "select returns exactly one row");
@@ -356,10 +374,13 @@ fn bench_thin_driver(c: &mut Criterion) {
             &format!("drop table {SCRATCH_TABLE} purge"),
         );
         block_on(&runtime, async |cx| {
-            conn.execute_query(
+            conn.execute_raw(
                 cx,
                 &format!("create table {SCRATCH_TABLE} (id number(9), label varchar2(40))"),
                 1,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
             )
             .await
             .expect("create scratch table");
@@ -381,7 +402,14 @@ fn bench_thin_driver(c: &mut Criterion) {
             b.iter(|| {
                 block_on(&runtime, async |cx| {
                     let result = conn
-                        .execute_query_with_bind_rows(cx, &insert_sql, 1, &rows)
+                        .execute_raw(
+                            cx,
+                            &insert_sql,
+                            1,
+                            &rows,
+                            oracledb::protocol::thin::ExecuteOptions::default(),
+                            None,
+                        )
                         .await
                         .expect("array-DML insert of 1000 rows");
                     assert_eq!(result.row_count, 1000, "executemany inserts all 1000 rows");
@@ -401,10 +429,13 @@ fn bench_thin_driver(c: &mut Criterion) {
     {
         ddl_best_effort(&runtime, &mut conn, "drop table PERFTEST_CLOB purge");
         block_on(&runtime, async |cx| {
-            conn.execute_query(
+            conn.execute_raw(
                 cx,
                 "create table PERFTEST_CLOB (id number(9), body clob)",
                 1,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
             )
             .await
             .expect("create clob table");
@@ -412,7 +443,7 @@ fn bench_thin_driver(c: &mut Criterion) {
             // a bare SQL rpad() caps at the 4000-char VARCHAR2 limit, so it
             // cannot stand in for a large LOB. 64 chunks of 1024 chars give
             // exactly 65536 characters.
-            conn.execute_query(
+            conn.execute_raw(
                 cx,
                 "declare \
                    l_body clob; \
@@ -427,6 +458,9 @@ fn bench_thin_driver(c: &mut Criterion) {
                    dbms_lob.freetemporary(l_body); \
                  end;",
                 1,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
             )
             .await
             .expect("insert 64 KiB clob");
@@ -437,17 +471,42 @@ fn bench_thin_driver(c: &mut Criterion) {
         group.bench_function("read_clob", |b| {
             b.iter(|| {
                 block_on(&runtime, async |cx| {
-                    // `execute_query_collect` opens a fresh server cursor and
-                    // performs the client-side define-fetch a CLOB column needs
-                    // to materialize its locator in the first batch. The cursor
-                    // is non-cached, so close it explicitly afterward; the close
-                    // rides the next execute's piggyback, keeping at most one
-                    // CLOB cursor open at a time over the whole bench loop.
-                    let select = conn
-                        .execute_query_collect(cx, "select body from PERFTEST_CLOB where id = 1", 2)
+                    // `execute_raw` opens a fresh server cursor, then the
+                    // explicit define-fetch materializes the CLOB locator in
+                    // the first batch. The cursor is non-cached, so close it
+                    // explicitly afterward; the close rides the next execute's
+                    // piggyback, keeping at most one CLOB cursor open at a time
+                    // over the whole bench loop.
+                    let mut select = conn
+                        .execute_raw(
+                            cx,
+                            "select body from PERFTEST_CLOB where id = 1",
+                            2,
+                            &[],
+                            oracledb::protocol::thin::ExecuteOptions::default(),
+                            None,
+                        )
                         .await
                         .expect("select clob locator");
                     let select_cursor = select.cursor_id;
+                    if select.rows.is_empty() && select_cursor != 0 {
+                        let columns = select.columns.clone();
+                        let fetched = conn
+                            .define_and_fetch_rows_with_columns(
+                                cx,
+                                select_cursor,
+                                2,
+                                &columns,
+                                None,
+                            )
+                            .await
+                            .expect("define-fetch clob locator");
+                        select.rows = fetched.rows;
+                        select.more_rows = fetched.more_rows;
+                        if !fetched.columns.is_empty() {
+                            select.columns = fetched.columns;
+                        }
+                    }
                     let (locator, size, csfrm) = match select.cell(0, 0) {
                         Some(QueryValue::Lob(lob)) => (lob.locator.clone(), lob.size, lob.csfrm),
                         other => panic!("expected a LOB locator, got {other:?}"),

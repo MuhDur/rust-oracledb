@@ -31,7 +31,7 @@
 //! cargo test -p oracledb --test reuse_after_call_timeout
 //! ```
 
-use oracledb::protocol::thin::QueryValue;
+use oracledb::protocol::thin::{ExecuteOptions, QueryResult, QueryValue};
 use oracledb::{BlockingConnection, ConnectOptions, Connection, Error};
 use oracledb_protocol::ClientIdentity;
 
@@ -54,6 +54,21 @@ fn connect_options() -> Option<ConnectOptions> {
     ))
 }
 
+fn execute_raw(
+    conn: &mut Connection,
+    sql: &str,
+    prefetch_rows: u32,
+) -> oracledb::Result<QueryResult> {
+    BlockingConnection::execute_raw(
+        conn,
+        sql,
+        prefetch_rows,
+        &[],
+        ExecuteOptions::default(),
+        None,
+    )
+}
+
 #[test]
 fn connection_is_reusable_after_call_timeout() {
     let Some(options) = connect_options() else {
@@ -64,8 +79,7 @@ fn connection_is_reusable_after_call_timeout() {
 
     // Sanity: an ordinary query works BEFORE the timeout, so any post-timeout
     // failure is attributable to the timeout recovery, not a broken connection.
-    let before = BlockingConnection::execute_query(&mut conn, "select 1 + 1 from dual", 2)
-        .expect("pre-query");
+    let before = execute_raw(&mut conn, "select 1 + 1 from dual", 2).expect("pre-query");
     assert_eq!(
         before.cell(0, 0).and_then(QueryValue::as_i64),
         Some(2),
@@ -76,7 +90,14 @@ fn connection_is_reusable_after_call_timeout() {
     // is still sleeping when the timeout fires, so its response is genuinely
     // in-flight -- exactly the condition that poisoned the wire before the fix.
     let slow = "begin dbms_session.sleep(2); end;";
-    let timed_out = BlockingConnection::execute_query_with_timeout(&mut conn, slow, 1, Some(500));
+    let timed_out = BlockingConnection::execute_raw(
+        &mut conn,
+        slow,
+        1,
+        &[],
+        ExecuteOptions::default(),
+        Some(500),
+    );
     match timed_out {
         Err(Error::CallTimeout(ms)) => {
             assert_eq!(ms, 500, "the reported timeout is the one we set");
@@ -95,7 +116,7 @@ fn connection_is_reusable_after_call_timeout() {
     // THE REGRESSION: run an ordinary query on the SAME connection. Before the
     // fix this misframed onto the stale in-flight bytes (wrong value / decode
     // error / desync). After the fix the wire is clean and 7 + 5 == 12.
-    let reuse = BlockingConnection::execute_query(&mut conn, "select 7 + 5 from dual", 2)
+    let reuse = execute_raw(&mut conn, "select 7 + 5 from dual", 2)
         .expect("the connection must be reusable after a call timeout");
     assert_eq!(
         reuse.cell(0, 0).and_then(QueryValue::as_i64),
@@ -105,8 +126,7 @@ fn connection_is_reusable_after_call_timeout() {
     );
 
     // And it keeps working for more than one follow-up round trip.
-    let again = BlockingConnection::execute_query(&mut conn, "select 'reused' from dual", 2)
-        .expect("second reuse");
+    let again = execute_raw(&mut conn, "select 'reused' from dual", 2).expect("second reuse");
     assert_eq!(
         again
             .cell(0, 0)
@@ -124,10 +144,13 @@ fn connection_is_reusable_after_call_timeout() {
 /// One more multi-row round trip to exercise the fetch path (not just scalar
 /// `dual` selects) on the recovered connection.
 fn drop_table_select_count_roundtrip(conn: &mut Connection) {
-    let rows = BlockingConnection::execute_query_collect(
+    let rows = BlockingConnection::execute_raw(
         conn,
         "select level as n from dual connect by level <= 5 order by n",
         10,
+        &[],
+        ExecuteOptions::default(),
+        None,
     )
     .expect("multi-row fetch on the recovered connection");
     let values: Vec<i64> = (0..rows.rows.len())

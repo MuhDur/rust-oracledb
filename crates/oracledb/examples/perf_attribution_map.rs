@@ -63,7 +63,14 @@ fn median(v: &mut [f64]) -> f64 {
 /// Paged owned-row drain of one query (the row-materialization path).
 async fn drain(cx: &Cx, conn: &mut Connection, sql: &str, arraysize: u32) -> usize {
     let first = conn
-        .execute_query_with_bind_rows(cx, sql, arraysize, &[])
+        .execute_raw(
+            cx,
+            sql,
+            arraysize,
+            &[],
+            oracledb::protocol::thin::ExecuteOptions::default(),
+            None,
+        )
         .await
         .expect("execute");
     let cursor_id = first.cursor_id;
@@ -110,7 +117,14 @@ fn main() {
             let iters = 4000u32;
             for _ in 0..warm {
                 let r = conn
-                    .execute_query_with_bind_rows(&cx, "select 1 from dual", 1, &[])
+                    .execute_raw(
+                        &cx,
+                        "select 1 from dual",
+                        1,
+                        &[],
+                        oracledb::protocol::thin::ExecuteOptions::default(),
+                        None,
+                    )
                     .await
                     .expect("warm");
                 conn.release_cursor(r.cursor_id);
@@ -119,7 +133,14 @@ fn main() {
             for _ in 0..iters {
                 let t0 = Instant::now();
                 let r = conn
-                    .execute_query_with_bind_rows(&cx, "select 1 from dual", 1, &[])
+                    .execute_raw(
+                        &cx,
+                        "select 1 from dual",
+                        1,
+                        &[],
+                        oracledb::protocol::thin::ExecuteOptions::default(),
+                        None,
+                    )
                     .await
                     .expect("select 1");
                 let dt = t0.elapsed();
@@ -203,12 +224,22 @@ fn main() {
         // ---- (4) executemany 1000 rows: array-DML encode path ---------------
         {
             let _ = conn
-                .execute_query(&cx, "drop table PERFATTR_BENCH purge", 1)
+                .execute_raw(
+                    &cx,
+                    "drop table PERFATTR_BENCH purge",
+                    1,
+                    &[],
+                    oracledb::protocol::thin::ExecuteOptions::default(),
+                    None,
+                )
                 .await;
-            conn.execute_query(
+            conn.execute_raw(
                 &cx,
                 "create table PERFATTR_BENCH (id number(9), label varchar2(40))",
                 1,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
             )
             .await
             .expect("create");
@@ -224,7 +255,14 @@ fn main() {
             // warm
             for _ in 0..5 {
                 let r = conn
-                    .execute_query_with_bind_rows(&cx, sql, 1, &rows)
+                    .execute_raw(
+                        &cx,
+                        sql,
+                        1,
+                        &rows,
+                        oracledb::protocol::thin::ExecuteOptions::default(),
+                        None,
+                    )
                     .await
                     .expect("warm insert");
                 assert_eq!(r.row_count, 1000);
@@ -235,7 +273,14 @@ fn main() {
             for _ in 0..iters {
                 let t0 = Instant::now();
                 let r = conn
-                    .execute_query_with_bind_rows(&cx, sql, 1, &rows)
+                    .execute_raw(
+                        &cx,
+                        sql,
+                        1,
+                        &rows,
+                        oracledb::protocol::thin::ExecuteOptions::default(),
+                        None,
+                    )
                     .await
                     .expect("insert");
                 let dt = t0.elapsed();
@@ -249,7 +294,14 @@ fn main() {
             println!("    attribution : one round trip carries all 1000 rows; client CPU = bind-encode of 1000 rows.");
             println!("                  Server executes the array DML; the RT + server work dominate.\n");
             let _ = conn
-                .execute_query(&cx, "drop table PERFATTR_BENCH purge", 1)
+                .execute_raw(
+                    &cx,
+                    "drop table PERFATTR_BENCH purge",
+                    1,
+                    &[],
+                    oracledb::protocol::thin::ExecuteOptions::default(),
+                    None,
+                )
                 .await;
         }
 

@@ -88,17 +88,6 @@ pub fn oracledb_protocol::dpl::DirectPathPiece::eq(&self, &oracledb_protocol::dp
 impl core::fmt::Debug for oracledb_protocol::dpl::DirectPathPiece
 pub fn oracledb_protocol::dpl::DirectPathPiece::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb_protocol::dpl::DirectPathPiece
-pub struct oracledb_protocol::dpl::DirectPathPieceBuffer
-impl oracledb_protocol::dpl::DirectPathPieceBuffer
-pub fn oracledb_protocol::dpl::DirectPathPieceBuffer::add_column_value(&mut self, &oracledb_protocol::thin::ColumnMetadata, &oracledb_protocol::dpl::DirectPathColumnValue, u64) -> oracledb_protocol::Result<()>
-pub fn oracledb_protocol::dpl::DirectPathPieceBuffer::finish(self) -> oracledb_protocol::Result<(alloc::vec::Vec<oracledb_protocol::dpl::DirectPathPiece>, u32)>
-pub fn oracledb_protocol::dpl::DirectPathPieceBuffer::finish_row(&mut self) -> oracledb_protocol::Result<()>
-pub fn oracledb_protocol::dpl::DirectPathPieceBuffer::new() -> Self
-pub fn oracledb_protocol::dpl::DirectPathPieceBuffer::start_row(&mut self) -> oracledb_protocol::Result<()>
-impl core::default::Default for oracledb_protocol::dpl::DirectPathPieceBuffer
-pub fn oracledb_protocol::dpl::DirectPathPieceBuffer::default() -> oracledb_protocol::dpl::DirectPathPieceBuffer
-impl core::fmt::Debug for oracledb_protocol::dpl::DirectPathPieceBuffer
-pub fn oracledb_protocol::dpl::DirectPathPieceBuffer::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct oracledb_protocol::dpl::DirectPathPrepareResult
 pub oracledb_protocol::dpl::DirectPathPrepareResult::column_metadata: alloc::vec::Vec<oracledb_protocol::thin::ColumnMetadata>
 pub oracledb_protocol::dpl::DirectPathPrepareResult::cursor_id: u16
@@ -114,8 +103,6 @@ impl core::fmt::Debug for oracledb_protocol::dpl::DirectPathPrepareResult
 pub fn oracledb_protocol::dpl::DirectPathPrepareResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb_protocol::dpl::DirectPathPrepareResult
 pub struct oracledb_protocol::dpl::DirectPathStream
-pub oracledb_protocol::dpl::DirectPathStream::pieces: alloc::vec::Vec<oracledb_protocol::dpl::DirectPathPiece>
-pub oracledb_protocol::dpl::DirectPathStream::total_piece_length: u32
 impl core::clone::Clone for oracledb_protocol::dpl::DirectPathStream
 pub fn oracledb_protocol::dpl::DirectPathStream::clone(&self) -> oracledb_protocol::dpl::DirectPathStream
 impl core::cmp::Eq for oracledb_protocol::dpl::DirectPathStream

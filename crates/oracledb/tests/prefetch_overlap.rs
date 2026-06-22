@@ -59,7 +59,14 @@ async fn owned_rows(
     arraysize: u32,
 ) -> Vec<Vec<Option<QueryValue>>> {
     let first = conn
-        .execute_query_with_bind_rows(cx, sql, arraysize, &[])
+        .execute_raw(
+            cx,
+            sql,
+            arraysize,
+            &[],
+            oracledb::protocol::thin::ExecuteOptions::default(),
+            None,
+        )
         .await
         .expect("owned execute");
     let cursor_id = first.cursor_id;
@@ -169,7 +176,14 @@ fn low_level_request_response_split_matches_fused_fetch() {
         // next page's request, THEN read the prior response (one-page lookahead),
         // exactly as the overlap loop does.
         let first = conn
-            .execute_query_with_bind_rows(&cx, sql, arraysize, &[])
+            .execute_raw(
+                &cx,
+                sql,
+                arraysize,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
+            )
             .await
             .expect("execute");
         let cursor_id = first.cursor_id;
@@ -232,7 +246,14 @@ fn connection_is_reusable_after_drop_mid_prefetch() {
 
         // Sanity before any cancel.
         let before = conn
-            .execute_query(&cx, "select 1 + 1 from dual", 2)
+            .execute_raw(
+                &cx,
+                "select 1 + 1 from dual",
+                2,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
+            )
             .await
             .expect("pre-query");
         assert_eq!(before.cell(0, 0).and_then(QueryValue::as_i64), Some(2));
@@ -258,7 +279,14 @@ fn connection_is_reusable_after_drop_mid_prefetch() {
 
         // Reuse the SAME connection: must return 12, not stale prefetched bytes.
         let reuse = conn
-            .execute_query(&cx, "select 7 + 5 from dual", 2)
+            .execute_raw(
+                &cx,
+                "select 7 + 5 from dual",
+                2,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
+            )
             .await
             .expect("connection must be reusable after drop mid-prefetch");
         assert_eq!(
@@ -269,10 +297,13 @@ fn connection_is_reusable_after_drop_mid_prefetch() {
 
         // And keeps working for a multi-row fetch (exercises paging again).
         let rows = conn
-            .execute_query_collect(
+            .execute_raw(
                 &cx,
                 "select level as n from dual connect by level <= 5 order by n",
                 10,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
             )
             .await
             .expect("multi-row fetch on the recovered connection");
@@ -310,11 +341,13 @@ fn stranded_prefetch_request_is_drained_before_reuse() {
         // Open a cursor with more rows than one page, then read one page so the
         // cursor is mid-stream (more_rows = true) and a further FETCH is valid.
         let first = conn
-            .execute_query_with_bind_rows(
+            .execute_raw(
                 &cx,
                 "select level as n from dual connect by level <= 4000",
                 500,
                 &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
             )
             .await
             .expect("execute");
@@ -334,7 +367,14 @@ fn stranded_prefetch_request_is_drained_before_reuse() {
         // Reuse the SAME connection immediately. The pending-drain flag is armed,
         // so this execute breaks + drains the stranded page first.
         let reuse = conn
-            .execute_query(&cx, "select 7 + 5 from dual", 2)
+            .execute_raw(
+                &cx,
+                "select 7 + 5 from dual",
+                2,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
+            )
             .await
             .expect("connection must be reusable after a stranded prefetch request");
         assert_eq!(

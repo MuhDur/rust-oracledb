@@ -35,9 +35,15 @@ fn describe_and_decode_simple_object() {
     assert_eq!(ty.attributes[1].type_name, "NUMBER");
     assert!(ty.attributes.iter().all(|a| a.type_owner.is_none()));
 
-    let res =
-        BlockingConnection::execute_query(&mut c, "select home from vx6_people order by id", 10)
-            .unwrap();
+    let res = BlockingConnection::execute_raw(
+        &mut c,
+        "select home from vx6_people order by id",
+        10,
+        &[],
+        oracledb::protocol::thin::ExecuteOptions::default(),
+        None,
+    )
+    .unwrap();
 
     // Row 0: vx6_addr('12 Oak St', 90210, 1)
     let obj0 = match res.cell(0, 0) {
@@ -96,9 +102,15 @@ fn describe_and_decode_collection() {
     assert_eq!(elem.type_name, "NUMBER");
     assert!(elem.type_owner.is_none(), "scalar element has no owner");
 
-    let res =
-        BlockingConnection::execute_query(&mut c, "select vals from vx6_coll order by id", 10)
-            .unwrap();
+    let res = BlockingConnection::execute_raw(
+        &mut c,
+        "select vals from vx6_coll order by id",
+        10,
+        &[],
+        oracledb::protocol::thin::ExecuteOptions::default(),
+        None,
+    )
+    .unwrap();
 
     let decode_row =
         |res: &oracledb::protocol::thin::QueryResult, row: usize| -> Vec<Option<i64>> {

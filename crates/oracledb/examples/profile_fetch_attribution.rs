@@ -41,7 +41,14 @@ fn connect_options() -> Option<ConnectOptions> {
 
 async fn fetch_all(cx: &Cx, conn: &mut Connection, sql: &str, arraysize: u32) -> usize {
     let first = conn
-        .execute_query_with_bind_rows(cx, sql, arraysize, &[])
+        .execute_raw(
+            cx,
+            sql,
+            arraysize,
+            &[],
+            oracledb::protocol::thin::ExecuteOptions::default(),
+            None,
+        )
         .await
         .expect("execute");
     let cursor_id = first.cursor_id;
@@ -168,7 +175,14 @@ fn main() {
             let s_start = asupersync::time::wall_now();
             for _ in 0..ab_iters {
                 let first = conn
-                    .execute_query_with_bind_rows(&cx, sql, arraysize, &[])
+                    .execute_raw(
+                        &cx,
+                        sql,
+                        arraysize,
+                        &[],
+                        oracledb::protocol::thin::ExecuteOptions::default(),
+                        None,
+                    )
                     .await
                     .expect("exec");
                 let cursor_id = first.cursor_id;
@@ -272,7 +286,14 @@ fn main() {
             let s_start = asupersync::time::wall_now();
             for _ in 0..ab_iters {
                 let first = conn
-                    .execute_query_with_bind_rows(&cx, sql, arraysize, &[])
+                    .execute_raw(
+                        &cx,
+                        sql,
+                        arraysize,
+                        &[],
+                        oracledb::protocol::thin::ExecuteOptions::default(),
+                        None,
+                    )
                     .await
                     .expect("exec");
                 let cursor_id = first.cursor_id;

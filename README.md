@@ -505,21 +505,17 @@ struct Emp {
     hired: Option<String>, // NULL -> None; a non-Option NULL is a hard error
 }
 
-// `collect(&cx)` drains every batch; map each `Row` through the derived `FromRow`.
+// `into_typed(&cx).await` drains every batch and maps each row through FromRow.
 let emps: Vec<Emp> = conn
     .query(&cx, "select id, name, hired from emp", ())
     .await?
-    .collect(&cx)
-    .await?
-    .iter()
-    .map(|row| Emp::from_row(&row.typed_row()).map_err(oracledb::Error::Conversion))
-    .collect::<Result<_, _>>()?;
+    .into_typed(&cx)
+    .await?;
 ```
 
 > The blocking facade has the all-rows shortcut `BlockingConnection::query(...)?.into_typed::<Emp>()`,
 > which collects every batch and maps it in one call (used in the [Quick example](#quick-example)).
-> On the async `Rows`, `into_typed()` maps only the buffered first batch, so the
-> drain-then-map form above is the one to use when you want every row.
+> Async `Rows` has the matching `.into_typed(&cx).await?` shortcut.
 
 ### Feature flags
 

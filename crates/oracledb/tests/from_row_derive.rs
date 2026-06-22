@@ -221,7 +221,8 @@ fn empty_result_maps_to_empty_vec() {
 #[cfg(feature = "chrono")]
 mod live {
     use chrono::NaiveDate;
-    use oracledb::{BlockingConnection, ConnectOptions, FromRow, QueryResultExt};
+    use oracledb::protocol::thin::{ExecuteOptions, QueryResult};
+    use oracledb::{BlockingConnection, ConnectOptions, Connection, FromRow, QueryResultExt};
     use oracledb_protocol::ClientIdentity;
 
     const PROGRAM: &str = "rust-oracledb-fromrow-itest";
@@ -252,6 +253,21 @@ mod live {
         ))
     }
 
+    fn execute_raw(
+        conn: &mut Connection,
+        sql: &str,
+        prefetch_rows: u32,
+    ) -> oracledb::Result<QueryResult> {
+        BlockingConnection::execute_raw(
+            conn,
+            sql,
+            prefetch_rows,
+            &[],
+            ExecuteOptions::default(),
+            None,
+        )
+    }
+
     #[test]
     fn derive_from_row_live_roundtrip() {
         let Some(options) = connect_options() else {
@@ -260,8 +276,8 @@ mod live {
         };
         let mut conn = BlockingConnection::connect(options).expect("connect to test container");
 
-        let _ = BlockingConnection::execute_query(&mut conn, "drop table fromrow_emp_t", 1);
-        BlockingConnection::execute_query(
+        let _ = execute_raw(&mut conn, "drop table fromrow_emp_t", 1);
+        execute_raw(
             &mut conn,
             "create table fromrow_emp_t (id number, name varchar2(40), hired date, manager_id number)",
             1,
@@ -269,21 +285,21 @@ mod live {
         .expect("create table");
 
         // Row 1: fully populated. Row 2: NULL hired AND NULL manager_id.
-        BlockingConnection::execute_query(
+        execute_raw(
             &mut conn,
             "insert into fromrow_emp_t values (1, 'alice', DATE '2021-03-15', 7)",
             1,
         )
         .expect("insert row 1");
-        BlockingConnection::execute_query(
+        execute_raw(
             &mut conn,
             "insert into fromrow_emp_t values (2, 'bob', NULL, NULL)",
             1,
         )
         .expect("insert row 2");
-        BlockingConnection::execute_query(&mut conn, "commit", 1).expect("commit");
+        execute_raw(&mut conn, "commit", 1).expect("commit");
 
-        let result = BlockingConnection::execute_query(
+        let result = execute_raw(
             &mut conn,
             "select id, name, hired, manager_id from fromrow_emp_t order by id",
             10,
@@ -313,7 +329,7 @@ mod live {
             "derived FromRow must map real DB values, incl. NULL -> None"
         );
 
-        let _ = BlockingConnection::execute_query(&mut conn, "drop table fromrow_emp_t", 1);
+        let _ = execute_raw(&mut conn, "drop table fromrow_emp_t", 1);
         BlockingConnection::close(conn).expect("close connection");
     }
 }

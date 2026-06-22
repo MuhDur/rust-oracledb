@@ -24,13 +24,9 @@ const ROW_DATA: u8 = 7;
 const END_OF_RESPONSE: u8 = 29;
 
 fn col(name: &str, ora_type_num: u8, buffer_size: u32) -> ColumnMetadata {
-    ColumnMetadata {
-        name: name.to_string(),
-        ora_type_num,
-        csfrm: CS_IMPLICIT,
-        buffer_size,
-        ..ColumnMetadata::default()
-    }
+    ColumnMetadata::new(name, ora_type_num)
+        .with_csfrm(CS_IMPLICIT)
+        .with_buffer_size(buffer_size)
 }
 
 /// A wide-analytics page: `rows` rows of 10 columns alternating NUMBER and

@@ -46,18 +46,29 @@ fn with_connection(test: &str, body: impl FnOnce(&mut Connection)) {
     BlockingConnection::close(conn).expect("close connection");
 }
 
+fn execute_raw(
+    conn: &mut Connection,
+    sql: &str,
+    prefetch_rows: u32,
+) -> oracledb::Result<oracledb::protocol::thin::QueryResult> {
+    BlockingConnection::execute_raw(
+        conn,
+        sql,
+        prefetch_rows,
+        &[],
+        oracledb::protocol::thin::ExecuteOptions::default(),
+        None,
+    )
+}
+
 /// ORA-00942 (table or view does not exist) is a *permanent* error: not
 /// transient, not connection-lost, not retryable. The accessors must report
 /// the code and (for a parse error) a non-zero offset.
 #[test]
 fn missing_object_is_permanent_and_carries_code() {
     with_connection("missing_object_is_permanent_and_carries_code", |conn| {
-        let err = BlockingConnection::execute_query(
-            conn,
-            "select * from a_table_that_does_not_exist_42",
-            1,
-        )
-        .expect_err("selecting a missing table must error");
+        let err = execute_raw(conn, "select * from a_table_that_does_not_exist_42", 1)
+            .expect_err("selecting a missing table must error");
 
         eprintln!(
             "ORA error: code={:?} offset={:?} msg={err}",
@@ -85,7 +96,7 @@ fn missing_object_is_permanent_and_carries_code() {
 #[test]
 fn invalid_identifier_is_permanent() {
     with_connection("invalid_identifier_is_permanent", |conn| {
-        let err = BlockingConnection::execute_query(conn, "select not_a_column from dual", 1)
+        let err = execute_raw(conn, "select not_a_column from dual", 1)
             .expect_err("selecting a missing column must error");
         eprintln!(
             "ORA error: code={:?} offset={:?} msg={err}",
@@ -103,13 +114,12 @@ fn invalid_identifier_is_permanent() {
 #[test]
 fn unique_violation_is_permanent() {
     with_connection("unique_violation_is_permanent", |conn| {
-        let _ = BlockingConnection::execute_query(conn, "drop table err_uq_t", 1);
-        BlockingConnection::execute_query(conn, "create table err_uq_t (id number primary key)", 1)
+        let _ = execute_raw(conn, "drop table err_uq_t", 1);
+        execute_raw(conn, "create table err_uq_t (id number primary key)", 1)
             .expect("create table");
-        BlockingConnection::execute_query(conn, "insert into err_uq_t values (1)", 1)
-            .expect("first insert");
+        execute_raw(conn, "insert into err_uq_t values (1)", 1).expect("first insert");
 
-        let err = BlockingConnection::execute_query(conn, "insert into err_uq_t values (1)", 1)
+        let err = execute_raw(conn, "insert into err_uq_t values (1)", 1)
             .expect_err("duplicate key must error");
         eprintln!("ORA error: code={:?} msg={err}", err.ora_code());
         assert_eq!(err.ora_code(), Some(1), "ORA-00001 code surfaced");
@@ -118,7 +128,7 @@ fn unique_violation_is_permanent() {
             "ORA-00001 unique violation is permanent"
         );
 
-        let _ = BlockingConnection::execute_query(conn, "drop table err_uq_t", 1);
+        let _ = execute_raw(conn, "drop table err_uq_t", 1);
     });
 }
 
@@ -128,8 +138,8 @@ fn unique_violation_is_permanent() {
 #[test]
 fn divide_by_zero_reports_code() {
     with_connection("divide_by_zero_reports_code", |conn| {
-        let err = BlockingConnection::execute_query(conn, "select 1/0 from dual", 1)
-            .expect_err("divide by zero must error");
+        let err =
+            execute_raw(conn, "select 1/0 from dual", 1).expect_err("divide by zero must error");
         eprintln!("ORA error: code={:?} msg={err}", err.ora_code());
         assert_eq!(err.ora_code(), Some(1476), "ORA-01476 code surfaced");
         // a downstream caller can branch on the taxonomy without substring matching

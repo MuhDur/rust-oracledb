@@ -140,8 +140,15 @@ fn connect_options() -> Option<ConnectOptions> {
 /// `release_cursor` returns the server cursor to the statement cache so a
 /// later pass reuses it — matching how python-oracledb reuses a cursor object.
 fn decode_once(conn: &mut Connection, sql: &str) -> u64 {
-    let first = BlockingConnection::execute_query_with_bind_rows(conn, sql, FETCH_ARRAYSIZE, &[])
-        .expect("decode-heavy execute");
+    let first = BlockingConnection::execute_raw(
+        conn,
+        sql,
+        FETCH_ARRAYSIZE,
+        &[],
+        oracledb::protocol::thin::ExecuteOptions::default(),
+        None,
+    )
+    .expect("decode-heavy execute");
     let cursor_id = first.cursor_id;
     let mut total = touch_all_cells(&first);
     let mut more_rows = first.more_rows;

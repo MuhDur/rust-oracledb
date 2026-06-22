@@ -52,11 +52,13 @@ fn main() {
 
     // Warm the statement cache + server-side parse.
     for _ in 0..500 {
-        let r = BlockingConnection::execute_query_with_bind_rows(
+        let r = BlockingConnection::execute_raw(
             &mut conn,
             "select 1 from dual",
             1,
             &[],
+            oracledb::protocol::thin::ExecuteOptions::default(),
+            None,
         )
         .expect("warm");
         conn.release_cursor(r.cursor_id);
@@ -66,11 +68,13 @@ fn main() {
     // Measure one steady-state call (warm) so the count reflects the per-call
     // client allocations, not first-time cache growth.
     let measured = allocation_counter::measure(|| {
-        let r = BlockingConnection::execute_query_with_bind_rows(
+        let r = BlockingConnection::execute_raw(
             &mut conn,
             "select 1 from dual",
             1,
             &[],
+            oracledb::protocol::thin::ExecuteOptions::default(),
+            None,
         )
         .expect("select 1");
         std::hint::black_box(r.cursor_id);
@@ -84,11 +88,13 @@ fn main() {
     let mut samples = Vec::with_capacity(iters as usize);
     for _ in 0..iters {
         let t0 = Instant::now();
-        let r = BlockingConnection::execute_query_with_bind_rows(
+        let r = BlockingConnection::execute_raw(
             &mut conn,
             "select 1 from dual",
             1,
             &[],
+            oracledb::protocol::thin::ExecuteOptions::default(),
+            None,
         )
         .expect("select 1");
         let dt = t0.elapsed();

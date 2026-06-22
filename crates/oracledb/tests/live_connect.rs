@@ -36,10 +36,13 @@ fn live_connect_ping_and_close() {
         assert!(conn.session_id() > 0);
         assert!(conn.serial_num() > 0);
         let charset = conn
-            .execute_query(
+            .execute_raw(
                 &cx,
                 "select value from nls_database_parameters where parameter = 'NLS_CHARACTERSET'",
                 2,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
             )
             .await
             .expect("Rust thin query should execute and fetch text");
@@ -51,10 +54,13 @@ fn live_connect_ping_and_close() {
         ));
 
         let ratios = conn
-            .execute_query(
+            .execute_raw(
                 &cx,
                 "select cast('X' as varchar2(1)), cast('Y' as nvarchar2(1)) from dual",
                 2,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
             )
             .await
             .expect("Rust thin query should describe varchar and nvarchar");

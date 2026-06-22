@@ -25,10 +25,13 @@ fn identity() -> ClientIdentity {
 }
 
 fn current_edition(conn: &mut oracledb::Connection) -> String {
-    let r = BlockingConnection::execute_query(
+    let r = BlockingConnection::execute_raw(
         conn,
         "select sys_context('USERENV','CURRENT_EDITION_NAME') from dual",
         1,
+        &[],
+        oracledb::protocol::thin::ExecuteOptions::default(),
+        None,
     )
     .unwrap();
     r.cell(0, 0)

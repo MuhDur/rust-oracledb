@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use std::time::Duration;
 
 use oracledb::protocol::thin::{BindValue, ExecuteOptions, LobReadResult, QueryResult};
@@ -44,12 +42,13 @@ fn blocking_family_surface(conn: &mut Connection) {
     let _: Result<NotificationOutcome> =
         BlockingConnection::recv_notification(conn, 0, 0, Duration::from_millis(1));
 
-    let _: Result<QueryResult> = BlockingConnection::execute_query_with_bind_rows_and_options(
+    let _: Result<QueryResult> = BlockingConnection::execute_raw(
         conn,
         "insert into t values (:1)",
         1,
         &rows,
         ExecuteOptions::default(),
+        None,
     );
 
     let locator = vec![0_u8; 16];

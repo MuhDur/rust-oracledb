@@ -70,7 +70,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Headline arithmetic round trip: the literal proof the wire protocol works.
-    let arithmetic = BlockingConnection::execute_query(&mut conn, "select 7+5 from dual", 1)?;
+    let arithmetic = BlockingConnection::execute_raw(
+        &mut conn,
+        "select 7+5 from dual",
+        1,
+        &[],
+        oracledb::protocol::thin::ExecuteOptions::default(),
+        None,
+    )?;
     let sum = arithmetic
         .cell(0, 0)
         .and_then(QueryValue::as_i64)
@@ -81,10 +88,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // A small typed query: fetch a VARCHAR2 to exercise text describe + decode.
-    let typed = BlockingConnection::execute_query(
+    let typed = BlockingConnection::execute_raw(
         &mut conn,
         "select cast('rust-oracledb' as varchar2(32)) as label from dual",
         1,
+        &[],
+        oracledb::protocol::thin::ExecuteOptions::default(),
+        None,
     )?;
     let label = typed
         .cell(0, 0)

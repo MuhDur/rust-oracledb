@@ -81,7 +81,7 @@ crates/oracledb/tests/live_object_decode.rs	2
 crates/oracledb/tests/live_ref_cursor.rs	3
 crates/oracledb/tests/live_soda.rs	5
 crates/oracledb/tests/live_statement_cache.rs	3
-crates/oracledb/tests/live_typed.rs	15
+crates/oracledb/tests/live_typed.rs	16
 crates/oracledb/tests/observability.rs	1
 crates/oracledb/tests/pipeline_live.rs	2
 crates/oracledb/tests/pool_reaper_async.rs	4

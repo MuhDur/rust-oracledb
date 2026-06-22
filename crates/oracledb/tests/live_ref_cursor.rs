@@ -25,7 +25,15 @@ const RETURN_N: &str = "declare rc sys_refcursor; begin \
 #[ignore]
 fn implicit_result_set_full_fetch() {
     let mut c = connect();
-    let res = BlockingConnection::execute_query(&mut c, &RETURN_N.replace(":lim", "5"), 0).unwrap();
+    let res = BlockingConnection::execute_raw(
+        &mut c,
+        &RETURN_N.replace(":lim", "5"),
+        0,
+        &[],
+        oracledb::protocol::thin::ExecuteOptions::default(),
+        None,
+    )
+    .unwrap();
 
     let cursors = res
         .implicit_resultsets
@@ -60,8 +68,15 @@ fn implicit_result_set_full_fetch() {
 #[ignore]
 fn cursor_fetch_is_bounded() {
     let mut c = connect();
-    let res =
-        BlockingConnection::execute_query(&mut c, &RETURN_N.replace(":lim", "100"), 0).unwrap();
+    let res = BlockingConnection::execute_raw(
+        &mut c,
+        &RETURN_N.replace(":lim", "100"),
+        0,
+        &[],
+        oracledb::protocol::thin::ExecuteOptions::default(),
+        None,
+    )
+    .unwrap();
     let cv = match &res.implicit_resultsets.as_ref().unwrap()[0] {
         QueryValue::Cursor(cv) => cv.as_ref(),
         other => panic!("expected cursor, got {other:?}"),
@@ -81,8 +96,15 @@ fn cursor_fetch_spans_multiple_batches() {
     let mut c = connect();
 
     // Full drain across 3 batches (100 + 100 + 50).
-    let res =
-        BlockingConnection::execute_query(&mut c, &RETURN_N.replace(":lim", "250"), 0).unwrap();
+    let res = BlockingConnection::execute_raw(
+        &mut c,
+        &RETURN_N.replace(":lim", "250"),
+        0,
+        &[],
+        oracledb::protocol::thin::ExecuteOptions::default(),
+        None,
+    )
+    .unwrap();
     let cv = match &res.implicit_resultsets.as_ref().unwrap()[0] {
         QueryValue::Cursor(cv) => cv.as_ref(),
         other => panic!("expected cursor, got {other:?}"),
@@ -101,8 +123,15 @@ fn cursor_fetch_spans_multiple_batches() {
     );
 
     // A bound below one batch still stops at max_rows (no full-batch over-fetch).
-    let res2 =
-        BlockingConnection::execute_query(&mut c, &RETURN_N.replace(":lim", "250"), 0).unwrap();
+    let res2 = BlockingConnection::execute_raw(
+        &mut c,
+        &RETURN_N.replace(":lim", "250"),
+        0,
+        &[],
+        oracledb::protocol::thin::ExecuteOptions::default(),
+        None,
+    )
+    .unwrap();
     let cv2 = match &res2.implicit_resultsets.as_ref().unwrap()[0] {
         QueryValue::Cursor(cv) => cv.as_ref(),
         other => panic!("expected cursor, got {other:?}"),

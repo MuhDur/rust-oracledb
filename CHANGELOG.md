@@ -5,7 +5,43 @@ is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows the SemVer contract described in
 [`docs/adr/0002-semver-contract.md`](docs/adr/0002-semver-contract.md).
 
-## [Unreleased]
+## [1.0.0-rc.1] - 2026-06-22
+
+First release candidate for 1.0. This cut freezes the intended 1.x public API:
+the pre-1.0 deprecation shims are removed and the remaining accidental internals
+are made crate-private, so the surface is exactly the intended contract. See
+[`docs/MIGRATING-0.3.md`](docs/MIGRATING-0.3.md) for the upgrade path.
+
+### Removed (BREAKING)
+
+- The pre-1.0 `#[deprecated(since = "0.3.0")]` query/execute shims are removed
+  (each existed on both `Connection` and `BlockingConnection`): `execute_query`,
+  `execute_query_collect`, `execute_query_with_timeout`, `execute_query_with_binds`,
+  `execute_query_with_binds_and_timeout`, `query_named`, `query_named_with_timeout`,
+  `execute_query_with_bind_rows`, `execute_query_with_bind_rows_and_options`,
+  `execute_query_with_bind_rows_and_timeout`,
+  `execute_query_with_bind_rows_options_and_timeout`, and
+  `execute_query_for_registration`. Use the operation-family API instead —
+  `query` / `query_with` (rows), `execute` / `execute_with` (DML/PLSQL),
+  `execute_many` / `execute_many_with` (array DML), `register_query` (CQN), with
+  `Query::timeout` / `Execute::timeout` / `Batch::timeout` for deadlines and
+  `params!{}` for named binds — or `execute_raw` for the byte-identical raw
+  `QueryResult`. Every removed name and its replacement is documented in
+  `docs/MIGRATING-0.3.md`.
+- Accidental public internals are now crate-private (never part of the intended
+  API): the SODA query-by-example SQL helpers (`soda::qbe`), the driver-side TLS
+  handoff type (`tls::TlsParams`), the direct-path encoder buffer
+  (`DirectPathPieceBuffer`), and the raw `DirectPathStream` fields
+  (`pieces` / `total_piece_length`). The frozen 1.x public surface is now
+  exactly the API ledger's `keep` set.
+
+### Changed (BREAKING)
+
+- **`Rows::into_typed` (async) now takes `&Cx` and is `async`**, and drains the
+  full result set before typing. Previously it typed only the first fetch batch
+  and silently discarded every later batch on a multi-batch result (data loss).
+  Call it as `rows.into_typed::<T>(&cx).await`. The blocking
+  `BlockingRows::into_typed` is unchanged (it already collected all batches).
 
 ### Fixed
 

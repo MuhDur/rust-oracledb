@@ -421,8 +421,8 @@ fn regex_escape(s: &str) -> String {
     out
 }
 
-/// Public helper: escape a string for a JSON-path double-quoted literal.
-/// Exposed for reuse and to make injection-safety testable.
+/// Crate helper: escape a string for a JSON-path double-quoted literal.
+#[allow(dead_code)]
 pub fn escape_json_path_string(s: &str) -> String {
     escape_path_double_quoted(s)
 }

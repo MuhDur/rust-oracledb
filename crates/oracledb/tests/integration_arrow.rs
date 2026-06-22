@@ -51,18 +51,31 @@ fn with_connection(test: &str, body: impl FnOnce(&mut Connection)) {
 #[test]
 fn fetch_record_batch_from_live_query() {
     with_connection("fetch_record_batch_from_live_query", |conn| {
-        let _ = BlockingConnection::execute_query(conn, "drop table rust_itest_arrow purge", 1);
-        BlockingConnection::execute_query(
+        let _ = BlockingConnection::execute_raw(
+            conn,
+            "drop table rust_itest_arrow purge",
+            1,
+            &[],
+            oracledb::protocol::thin::ExecuteOptions::default(),
+            None,
+        );
+        BlockingConnection::execute_raw(
             conn,
             "create table rust_itest_arrow (id number(9), amount number(12,2))",
             1,
+            &[],
+            oracledb::protocol::thin::ExecuteOptions::default(),
+            None,
         )
         .expect("create table");
         for (id, amount) in [(1, "10.50"), (2, "20.25"), (3, "30.00")] {
-            BlockingConnection::execute_query(
+            BlockingConnection::execute_raw(
                 conn,
                 &format!("insert into rust_itest_arrow values ({id}, {amount})"),
                 1,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
             )
             .expect("insert");
         }
@@ -90,6 +103,13 @@ fn fetch_record_batch_from_live_query() {
         assert_eq!(amounts.value(0), 10.50);
         assert_eq!(amounts.value(2), 30.00);
 
-        let _ = BlockingConnection::execute_query(conn, "drop table rust_itest_arrow purge", 1);
+        let _ = BlockingConnection::execute_raw(
+            conn,
+            "drop table rust_itest_arrow purge",
+            1,
+            &[],
+            oracledb::protocol::thin::ExecuteOptions::default(),
+            None,
+        );
     });
 }

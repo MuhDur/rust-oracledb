@@ -3,7 +3,7 @@
 //! Live integration tests for the typed read/write surface (beads qxn + zjd).
 //!
 //! Exercises [`FromSql`] / [`QueryResultExt::get`] (typed extraction), [`ToSql`]
-//! / the [`params!`] macro / `query` / `query_named` (ergonomic binds), and the
+//! / the [`params!`] macro / `query` (ergonomic binds), and the
 //! LOSSLESS `rust_decimal::Decimal` NUMBER round trip against the real
 //! container.
 //!
@@ -22,13 +22,13 @@ use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
 use oracledb::protocol::oson::OsonValue;
 use oracledb::protocol::thin::{
-    decode_lob_text, BindValue, ExecuteOptions, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR,
-    ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_FLOAT, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_BOOLEAN,
-    ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_INTERVAL_DS,
-    ORA_TYPE_NUM_INTERVAL_YM, ORA_TYPE_NUM_JSON, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW,
-    ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_ROWID, ORA_TYPE_NUM_TIMESTAMP,
-    ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR,
-    ORA_TYPE_NUM_VECTOR, SUBSCR_QOS_QUERY, TNS_SUBSCR_NAMESPACE_DBCHANGE,
+    decode_lob_text, BindValue, ExecuteOptions, QueryResult, QueryValue, CS_FORM_IMPLICIT,
+    CS_FORM_NCHAR, ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_FLOAT, ORA_TYPE_NUM_BLOB,
+    ORA_TYPE_NUM_BOOLEAN, ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_DATE,
+    ORA_TYPE_NUM_INTERVAL_DS, ORA_TYPE_NUM_INTERVAL_YM, ORA_TYPE_NUM_JSON, ORA_TYPE_NUM_LONG,
+    ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_ROWID,
+    ORA_TYPE_NUM_TIMESTAMP, ORA_TYPE_NUM_TIMESTAMP_LTZ, ORA_TYPE_NUM_TIMESTAMP_TZ,
+    ORA_TYPE_NUM_VARCHAR, ORA_TYPE_NUM_VECTOR, SUBSCR_QOS_QUERY, TNS_SUBSCR_NAMESPACE_DBCHANGE,
 };
 use oracledb::protocol::vector::{Vector, VectorValues};
 use oracledb::{
@@ -64,6 +64,46 @@ fn with_connection(test: &str, body: impl FnOnce(&mut Connection)) {
     let mut conn = BlockingConnection::connect(options).expect("connect to test container");
     body(&mut conn);
     BlockingConnection::close(conn).expect("close connection");
+}
+
+fn execute_raw(
+    conn: &mut Connection,
+    sql: &str,
+    prefetch_rows: u32,
+) -> oracledb::Result<QueryResult> {
+    BlockingConnection::execute_raw(
+        conn,
+        sql,
+        prefetch_rows,
+        &[],
+        ExecuteOptions::default(),
+        None,
+    )
+}
+
+fn execute_raw_collect(
+    conn: &mut Connection,
+    sql: &str,
+    prefetch_rows: u32,
+) -> oracledb::Result<QueryResult> {
+    let mut result = execute_raw(conn, sql, prefetch_rows)?;
+    if result.cursor_id != 0 && result.rows.is_empty() {
+        let cursor_id = result.cursor_id;
+        let columns = result.columns.clone();
+        let fetched = BlockingConnection::define_and_fetch_rows_with_columns(
+            conn,
+            cursor_id,
+            prefetch_rows.max(1),
+            &columns,
+            None,
+        )?;
+        result.rows = fetched.rows;
+        result.more_rows = fetched.more_rows;
+        if !fetched.columns.is_empty() {
+            result.columns = fetched.columns;
+        }
+    }
+    Ok(result)
 }
 
 /// `query` with a positional tuple of typed Rust values, then typed `get`.
@@ -109,7 +149,7 @@ fn params_macro_positional() {
     });
 }
 
-/// `query_named` with `params!{ ":a" => .., ":b" => .. }` — the names are
+/// `query` with `params!{ ":a" => .., ":b" => .. }` — the names are
 /// reordered to placeholder first-appearance order, so swapping the param order
 /// still binds correctly.
 #[test]
@@ -117,13 +157,13 @@ fn query_named_reorders_correctly() {
     with_connection("query_named_reorders_correctly", |conn| {
         // :a appears first in the SQL; pass the params in the opposite order to
         // prove the reorder. 100 - 1 = 99 (not 1 - 100).
-        let result = BlockingConnection::query_named(
+        let result = BlockingConnection::query_one(
             conn,
             "select :a - :b as diff from dual",
             params! { ":b" => 1_i64, ":a" => 100_i64 },
         )
         .expect("named binds");
-        let diff: i64 = result.get_by_name(0, "DIFF").unwrap();
+        let diff: i64 = result.get_by_name("DIFF").expect("DIFF column");
         assert_eq!(diff, 99, "named binds must map by name, not order given");
         eprintln!("named ok: diff={diff}");
     });
@@ -231,6 +271,50 @@ fn async_query_family_eager_drains_and_checks_cardinality() {
         assert_eq!(one.get::<i64>(0).unwrap(), 42);
         assert_eq!(one.get::<i64>("N").unwrap(), 42);
         assert_eq!(one.get_by_name::<i64>("N").unwrap(), 42);
+    });
+}
+
+#[test]
+fn async_rows_into_typed_drains_all_batches() {
+    #[derive(Debug, PartialEq, FromRow)]
+    struct NumberRow {
+        n: i64,
+    }
+
+    let Some(options) = connect_options() else {
+        eprintln!("skipped async_rows_into_typed_drains_all_batches: PYO_TEST_* environment not configured");
+        return;
+    };
+    let reactor = reactor::create_reactor().expect("native reactor should build for live I/O");
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .expect("current-thread Asupersync runtime should build");
+
+    runtime.block_on(async {
+        let cx = Cx::current().expect("Runtime::block_on should install an ambient Cx");
+        let mut conn = Connection::connect(&cx, options)
+            .await
+            .expect("connect to test container");
+
+        let rows: Vec<NumberRow> = conn
+            .query_with(
+                &cx,
+                Query::new("select level as n from dual connect by level <= 105 order by n")
+                    .arraysize(NonZeroU32::new(25).expect("non-zero"))
+                    .prefetch(25),
+            )
+            .await
+            .expect("query_with")
+            .into_typed(&cx)
+            .await
+            .expect("into_typed drains all batches");
+
+        assert_eq!(rows.len(), 105);
+        assert_eq!(rows.first().expect("first row").n, 1);
+        assert_eq!(rows.last().expect("last row").n, 105);
+
+        conn.close(&cx).await.expect("close connection");
     });
 }
 
@@ -770,12 +854,8 @@ fn blocking_connection_mirrors_four_operation_families() {
 #[test]
 fn typed_extraction_scalars() {
     with_connection("typed_extraction_scalars", |conn| {
-        let result = BlockingConnection::execute_query(
-            conn,
-            "select 42 as n, 2.5 as d, 'hello' as s from dual",
-            1,
-        )
-        .expect("scalar select");
+        let result = execute_raw(conn, "select 42 as n, 2.5 as d, 'hello' as s from dual", 1)
+            .expect("scalar select");
         let row = result.typed_row(0);
         assert_eq!(row.get::<i64>(0).unwrap(), 42);
         assert_eq!(row.get::<f64>(1).unwrap(), 2.5);
@@ -794,9 +874,8 @@ fn decimal_roundtrip_lossless_live() {
     use std::str::FromStr;
 
     with_connection("decimal_roundtrip_lossless_live", |conn| {
-        let _ = BlockingConnection::execute_query(conn, "drop table dec_rt_t", 1);
-        BlockingConnection::execute_query(conn, "create table dec_rt_t (v number)", 1)
-            .expect("create dec table");
+        let _ = execute_raw(conn, "drop table dec_rt_t", 1);
+        execute_raw(conn, "create table dec_rt_t (v number)", 1).expect("create dec table");
 
         // 28 significant digits — the full precision rust_decimal can hold.
         let text = "7922816251426433759354.395033";
@@ -805,10 +884,9 @@ fn decimal_roundtrip_lossless_live() {
         // bind the Decimal directly via ToSql (query / params!)
         BlockingConnection::execute(conn, "insert into dec_rt_t values (:1)", (dec,))
             .expect("insert decimal");
-        BlockingConnection::execute_query(conn, "commit", 1).expect("commit");
+        execute_raw(conn, "commit", 1).expect("commit");
 
-        let result =
-            BlockingConnection::execute_query(conn, "select v from dec_rt_t", 1).expect("select");
+        let result = execute_raw(conn, "select v from dec_rt_t", 1).expect("select");
         let back: Decimal = result.get(0, 0).expect("typed get Decimal");
         eprintln!("decimal lossless: in={dec} out={back}");
         assert_eq!(back, dec, "Decimal must round-trip exactly through NUMBER");
@@ -826,7 +904,7 @@ fn decimal_roundtrip_lossless_live() {
             panic!("expected a NUMBER cell");
         }
 
-        let _ = BlockingConnection::execute_query(conn, "drop table dec_rt_t", 1);
+        let _ = execute_raw(conn, "drop table dec_rt_t", 1);
     });
 }
 
@@ -837,9 +915,8 @@ fn chrono_roundtrip_live() {
     use chrono::{NaiveDate, NaiveDateTime};
 
     with_connection("chrono_roundtrip_live", |conn| {
-        let _ = BlockingConnection::execute_query(conn, "drop table chrono_rt_t", 1);
-        BlockingConnection::execute_query(conn, "create table chrono_rt_t (d date)", 1)
-            .expect("create chrono table");
+        let _ = execute_raw(conn, "drop table chrono_rt_t", 1);
+        execute_raw(conn, "create table chrono_rt_t (d date)", 1).expect("create chrono table");
 
         let dt = NaiveDate::from_ymd_opt(2026, 6, 14)
             .unwrap()
@@ -847,10 +924,9 @@ fn chrono_roundtrip_live() {
             .unwrap();
         BlockingConnection::execute(conn, "insert into chrono_rt_t values (:1)", (dt,))
             .expect("insert datetime");
-        BlockingConnection::execute_query(conn, "commit", 1).expect("commit");
+        execute_raw(conn, "commit", 1).expect("commit");
 
-        let result = BlockingConnection::execute_query(conn, "select d from chrono_rt_t", 1)
-            .expect("select date");
+        let result = execute_raw(conn, "select d from chrono_rt_t", 1).expect("select date");
         let back: NaiveDateTime = result.get(0, 0).expect("typed get NaiveDateTime");
         eprintln!("chrono roundtrip: in={dt} out={back}");
         assert_eq!(back, dt, "DATE must round-trip to the second");
@@ -858,7 +934,7 @@ fn chrono_roundtrip_live() {
         let date: NaiveDate = result.get(0, 0).expect("typed get NaiveDate");
         assert_eq!(date, NaiveDate::from_ymd_opt(2026, 6, 14).unwrap());
 
-        let _ = BlockingConnection::execute_query(conn, "drop table chrono_rt_t", 1);
+        let _ = execute_raw(conn, "drop table chrono_rt_t", 1);
     });
 }
 
@@ -869,22 +945,20 @@ fn uuid_roundtrip_live() {
     use uuid::Uuid;
 
     with_connection("uuid_roundtrip_live", |conn| {
-        let _ = BlockingConnection::execute_query(conn, "drop table uuid_rt_t", 1);
-        BlockingConnection::execute_query(conn, "create table uuid_rt_t (id raw(16))", 1)
-            .expect("create uuid table");
+        let _ = execute_raw(conn, "drop table uuid_rt_t", 1);
+        execute_raw(conn, "create table uuid_rt_t (id raw(16))", 1).expect("create uuid table");
 
         let id = Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10);
         BlockingConnection::execute(conn, "insert into uuid_rt_t values (:1)", (id,))
             .expect("insert uuid");
-        BlockingConnection::execute_query(conn, "commit", 1).expect("commit");
+        execute_raw(conn, "commit", 1).expect("commit");
 
-        let result = BlockingConnection::execute_query(conn, "select id from uuid_rt_t", 1)
-            .expect("select uuid");
+        let result = execute_raw(conn, "select id from uuid_rt_t", 1).expect("select uuid");
         let back: Uuid = result.get(0, 0).expect("typed get Uuid");
         eprintln!("uuid roundtrip: in={id} out={back}");
         assert_eq!(back, id, "RAW(16) must round-trip the UUID");
 
-        let _ = BlockingConnection::execute_query(conn, "drop table uuid_rt_t", 1);
+        let _ = execute_raw(conn, "drop table uuid_rt_t", 1);
     });
 }
 
@@ -896,33 +970,31 @@ fn serde_json_from_native_json_live() {
     use serde_json::json;
 
     with_connection("serde_json_from_native_json_live", |conn| {
-        let _ = BlockingConnection::execute_query(conn, "drop table json_rt_t", 1);
+        let _ = execute_raw(conn, "drop table json_rt_t", 1);
         // 23ai native JSON type
-        if BlockingConnection::execute_query(conn, "create table json_rt_t (doc json)", 1).is_err()
-        {
+        if execute_raw(conn, "create table json_rt_t (doc json)", 1).is_err() {
             eprintln!("skipped serde_json test: native JSON type unavailable");
             return;
         }
 
-        BlockingConnection::execute_query(
+        execute_raw(
             conn,
             "insert into json_rt_t values (json('{\"id\": 7, \"name\": \"bob\", \"tags\": [\"a\", \"b\"]}'))",
             1,
         )
         .expect("insert json");
-        BlockingConnection::execute_query(conn, "commit", 1).expect("commit");
+        execute_raw(conn, "commit", 1).expect("commit");
 
-        // JSON streams through a client-side define; use execute_query_collect.
+        // JSON streams through a client-side define; use explicit collect.
         let result =
-            BlockingConnection::execute_query_collect(conn, "select doc from json_rt_t", 1)
-                .expect("select json");
+            execute_raw_collect(conn, "select doc from json_rt_t", 1).expect("select json");
         let value: serde_json::Value = result.get(0, 0).expect("typed get serde_json::Value");
         eprintln!("serde_json from native JSON: {value}");
         assert_eq!(value["id"], json!(7));
         assert_eq!(value["name"], json!("bob"));
         assert_eq!(value["tags"], json!(["a", "b"]));
 
-        let _ = BlockingConnection::execute_query(conn, "drop table json_rt_t", 1);
+        let _ = execute_raw(conn, "drop table json_rt_t", 1);
     });
 }
 
@@ -930,8 +1002,8 @@ fn serde_json_from_native_json_live() {
 #[test]
 fn vector_roundtrip_live() {
     with_connection("vector_roundtrip_live", |conn| {
-        let _ = BlockingConnection::execute_query(conn, "drop table vec_rt_t", 1);
-        if BlockingConnection::execute_query(
+        let _ = execute_raw(conn, "drop table vec_rt_t", 1);
+        if execute_raw(
             conn,
             "create table vec_rt_t (embedding vector(3, float32))",
             1,
@@ -949,17 +1021,16 @@ fn vector_roundtrip_live() {
             (embedding.clone(),),
         )
         .expect("insert vector");
-        BlockingConnection::execute_query(conn, "commit", 1).expect("commit");
+        execute_raw(conn, "commit", 1).expect("commit");
 
-        // VECTOR streams through a client-side define; use execute_query_collect.
+        // VECTOR streams through a client-side define; use explicit collect.
         let result =
-            BlockingConnection::execute_query_collect(conn, "select embedding from vec_rt_t", 1)
-                .expect("select vector");
+            execute_raw_collect(conn, "select embedding from vec_rt_t", 1).expect("select vector");
         let back: Vec<f32> = result.get(0, 0).expect("typed get Vec<f32>");
         eprintln!("vector roundtrip: in={embedding:?} out={back:?}");
         assert_eq!(back, embedding, "VECTOR(float32) must round-trip exactly");
 
-        let _ = BlockingConnection::execute_query(conn, "drop table vec_rt_t", 1);
+        let _ = execute_raw(conn, "drop table vec_rt_t", 1);
     });
 }
 

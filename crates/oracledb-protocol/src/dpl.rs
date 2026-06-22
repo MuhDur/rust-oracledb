@@ -414,7 +414,7 @@ struct PieceState {
 /// `start_row()` / `add_column_value(..)` per column / `finish_row()`, then
 /// [`DirectPathPieceBuffer::finish`].
 #[derive(Debug, Default)]
-pub struct DirectPathPieceBuffer {
+pub(crate) struct DirectPathPieceBuffer {
     pieces: Vec<DirectPathPiece>,
     total_piece_length: u64,
     data: Vec<u8>,
@@ -746,8 +746,8 @@ fn is_fast_dbtype(metadata: &ColumnMetadata) -> bool {
 /// Result of encoding one batch of rows into the piece stream format.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirectPathStream {
-    pub pieces: Vec<DirectPathPiece>,
-    pub total_piece_length: u32,
+    pub(crate) pieces: Vec<DirectPathPiece>,
+    pub(crate) total_piece_length: u32,
 }
 
 /// Encodes a batch of rows into direct path pieces.

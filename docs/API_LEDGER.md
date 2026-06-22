@@ -1,9 +1,9 @@
 # API Ledger
 
 This ledger records the intended disposition for the public API captured under
-`docs/baseline/public_api/`. It is a planning artifact for the Road to 1.0 API
-cleanup: entries marked `pub(crate)`, `rename`, `consolidate`, or `deprecate`
-are not changed by this file. Follow-up beads apply those decisions.
+`docs/baseline/public_api/`. At the 1.0.0-rc.1 freeze, every remaining
+`api-ledger` row is expected to be `keep`; the other disposition names are kept
+below as historical vocabulary for prior Road to 1.0 cleanup decisions.
 
 `scripts/check_api_ledger.sh` treats the `api-ledger` block below as the source
 of truth. Patterns are Bash globs matched, in order, against the exact
@@ -44,19 +44,13 @@ pub use oracledb::transport::CassetteError	keep	Cassette diagnostics are part of
 *oracledb::BatchRows*	keep	Public execute-many bind-row payload type.
 *oracledb::Batch*	keep	Public execute-many request builder.
 *oracledb::BindError*	keep	Public client-side bind prevalidation error taxonomy.
-*oracledb::BlockingConnection::execute_query_for_registration*	rename	Keep the registration capability but rename it into an explicit registration API.
-*oracledb::BlockingConnection::execute_query*	consolidate	Query execution overloads should collapse into operation-specific request types.
-*oracledb::BlockingConnection::query_named*	consolidate	Named-query overloads should collapse into the same operation-family surface.
 *oracledb::BlockingConnection::execute_raw*	keep	W2-T1: blocking mirror of the low-level raw-execute primitive (returns QueryResult). Execute-side counterpart to the retained fetch_rows*/define_and_fetch/scroll_cursor/fetch_cursor primitives; part of the 1.0 contract. Surfaced during the pyshim migration: the four families project QueryResult into curated outcomes, so a wire-faithful consumer needs an un-deprecated raw entry point. Keep before the broad BlockingConnection consolidate row.
-*oracledb::BlockingConnection*	consolidate	Keep the sync facade, but W1-T8 should reduce duplicated async/blocking method sprawl.
+*oracledb::BlockingConnection*	keep	The blocking facade deliberately mirrors the async API; it is the 1.x sync contract.
 *oracledb::BlockingRows*	keep	Public blocking lazy row facade returned by the blocking query family.
 *oracledb::CancelHandle*	keep	Public cancellation handle.
 *oracledb::CollectionElement*	keep	Public object/collection conversion type.
-pub fn oracledb::ConnectOptions::*	consolidate	Keep ConnectOptions public but privatize fields behind builders/getters for redaction and SemVer evolution.
+pub fn oracledb::ConnectOptions::*	keep	ConnectOptions fields are already private; the public surface is accessor/builder methods with secret-redacting Debug. Consolidate intent satisfied; the accessor API is the 1.x contract.
 *oracledb::ConnectOptions*	keep	Public connection configuration surface.
-*oracledb::Connection::execute_query_for_registration*	rename	Keep the registration capability but rename it into an explicit registration API.
-*oracledb::Connection::execute_query*	consolidate	Query execution overloads should collapse into operation-specific request types.
-*oracledb::Connection::query_named*	consolidate	Named-query overloads should collapse into the same operation-family surface.
 *oracledb::Connection::execute_raw*	keep	W2-T1: low-level raw-execute primitive (returns the unprojected QueryResult). Execute-side counterpart to the retained fetch_rows*/define_and_fetch/scroll_cursor/fetch_cursor primitives; part of the 1.0 contract. Surfaced during the pyshim migration as the gap W1-T3 missed: the four families project QueryResult into curated outcomes, so a statement-type-agnostic / raw consumer needs an un-deprecated raw entry point.
 *oracledb::ConnectionDisposition*	keep	Public connection-reuse classification returned by Error::connection_disposition.
 *oracledb::Connection*	keep	Primary async connection API.
@@ -103,29 +97,23 @@ pub mod oracledb::arrow	keep	Feature-gated Arrow module.
 *oracledb::params!*	keep	Public bind helper macro.
 *oracledb::prelude::*	keep	W1-T9 prelude: curated glob-import convenience namespace re-exporting the everyday types/traits. Each item's canonical path is its non-prelude home; the prelude is the deliberate convenience exception to single-path.
 pub mod oracledb::prelude	keep	W1-T9 prelude module.
-*oracledb::pool::PoolBackend*	pub(crate)	Backend trait is the internal engine seam; W1-T7 introduces the async pool facade.
+*oracledb::pool::PoolBackend*	keep	Public pool extension point: the entire pool API (Pool<B>/BlockingPool<B>/PooledConnection<B>) is generic over this trait and the conformance pyshim implements it (ShimPoolBackend); it is part of the 1.x contract. (Supersedes the early W1-T7 pub(crate) intent.)
 *oracledb::pool::*	keep	Pool facades, guarded connection ownership, constants, config, options, and error type stay public.
 pub mod oracledb::pool	keep	Pool module remains the public namespace for pool configuration.
-*oracledb::soda::qbe::*	pub(crate)	Query-by-example SQL generation is SODA implementation detail.
-pub mod oracledb::soda::qbe	pub(crate)	Query-by-example SQL generation is SODA implementation detail.
 *oracledb::soda::*	keep	Feature-gated SODA API.
 pub mod oracledb::soda	keep	Feature-gated SODA module.
-*oracledb::tls::*	pub(crate)	Driver-side TLS handoff types should sit behind ConnectOptions and the connector.
-pub mod oracledb::tls	pub(crate)	Driver-side TLS handoff types should sit behind ConnectOptions and the connector.
-*oracledb::transport::capture_scope*	consolidate	Keep capture capability, but W3 should expose it as a deliberate cassette API rather than raw transport internals.
-*oracledb::transport::CaptureScope*	consolidate	Keep record/replay capability, but W3 should expose it as a deliberate cassette API rather than raw transport internals.
-*oracledb::transport::Cassette*	consolidate	Keep record/replay capability, but W3 should expose it as a deliberate cassette API rather than raw transport internals.
-*oracledb::transport::Replay*	consolidate	Keep replay capability, but W3 should expose it as a deliberate cassette API rather than raw transport internals.
-pub mod oracledb::transport	consolidate	Transport module should shrink to cassette utilities or disappear from the driver surface.
+*oracledb::transport::capture_scope*	keep	Cassette record/replay testing surface.
+*oracledb::transport::CaptureScope*	keep	Cassette record/replay testing surface.
+*oracledb::transport::Cassette*	keep	Cassette record/replay testing surface (CassetteRecorder).
+*oracledb::transport::Replay*	keep	Cassette record/replay testing surface (ReplayMismatch/ReplayWriteMode).
+pub mod oracledb::transport	keep	Transport module is already shrunk to cassette record/replay utilities (raw socket halves are pub(crate)); this is the 1.x diagnostics surface.
 pub mod oracledb_protocol	keep	Protocol crate root.
 *oracledb_protocol::capabilities::*	keep	Public protocol capability negotiation helpers.
 pub mod oracledb_protocol::capabilities	keep	Public protocol capability namespace.
 *oracledb_protocol::ClientIdentity*	keep	Public client identity metadata.
-*oracledb_protocol::crypto::*	pub(crate)	Password verifier and encryption details are auth implementation internals.
-pub mod oracledb_protocol::crypto	pub(crate)	Password verifier and encryption details are auth implementation internals.
-pub oracledb_protocol::dpl::DirectPathStream::*	pub(crate)	DirectPathStream remains public, but raw mutable fields should be hidden behind constructors/accessors.
+*oracledb_protocol::crypto::*	keep	EncryptedPassword is a parameter of the retained public thin::build_auth_phase_two_payload* builders; the crypto auth primitives are part of the sans-io protocol contract.
+pub mod oracledb_protocol::crypto	keep	Auth crypto module backs the retained thin auth payload builders.
 *oracledb_protocol::dpl::BatchLoadState*	keep	Validated batch state is used across the driver/protocol crate boundary and has private fields.
-*oracledb_protocol::dpl::DirectPathPieceBuffer*	pub(crate)	Direct-path piece builder is an encoder implementation detail.
 *oracledb_protocol::dpl::DirectPathStream*	keep	Stream payload type is used by driver direct-path APIs.
 *oracledb_protocol::dpl::*	keep	Direct-path wire types and pure encode/decode helpers are the protocol crate's public surface.
 pub mod oracledb_protocol::dpl	keep	Direct-path protocol namespace.
@@ -133,7 +121,7 @@ pub mod oracledb_protocol::dpl	keep	Direct-path protocol namespace.
 pub mod oracledb_protocol::net	keep	Network descriptor namespace.
 *oracledb_protocol::oson::*	keep	OSON codec values and helpers are public protocol utilities.
 pub mod oracledb_protocol::oson	keep	OSON namespace.
-*oracledb_protocol::packet::*	consolidate	Raw TNS packet helpers need an explicit sans-I/O toolkit contract before 1.0.
+*oracledb_protocol::packet::*	keep	Sans-io TNS packet primitives are part of the protocol crate's deliberate low-level toolkit.
 pub mod oracledb_protocol::packet	keep	Packet namespace.
 *oracledb_protocol::ProtocolError*	keep	Public protocol error taxonomy.
 *oracledb_protocol::PYTHON_ORACLEDB_REFERENCE*	keep	Public reference-suite provenance constants.
@@ -149,7 +137,7 @@ pub mod oracledb_protocol::thin	keep	Thin-protocol namespace.
 pub mod oracledb_protocol::tls	keep	TLS helper namespace.
 *oracledb_protocol::vector::*	keep	Vector codec values and helpers are public protocol utilities.
 pub mod oracledb_protocol::vector	keep	Vector namespace.
-*oracledb_protocol::wire::*	consolidate	Low-level TTC reader/writer primitives need an explicit sans-I/O toolkit contract before 1.0.
+*oracledb_protocol::wire::*	keep	Sans-io TTC wire reader/writer primitives are part of the protocol crate's deliberate low-level toolkit.
 pub mod oracledb_protocol::wire	keep	Wire helper namespace.
 ```
 
@@ -169,6 +157,6 @@ pub mod oracledb_protocol::wire	keep	Wire helper namespace.
 
 ## Follow-Up Use
 
-Wave 1 applies the non-`keep` rows. W0-T5.2 records the expert disposition for
-breaking removals or renames; implementation beads apply those decisions without
-additional approval gates.
+The `api-ledger` block is now the frozen 1.x surface. Future changes should add
+or revise rows deliberately, then regenerate the baseline and run the ledger
+gate.

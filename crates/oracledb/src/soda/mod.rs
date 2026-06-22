@@ -21,7 +21,7 @@ mod document;
 mod error;
 mod metadata;
 mod operation;
-pub mod qbe;
+pub(crate) mod qbe;
 
 pub use collection::SodaCollection;
 pub use cursor::SodaCursor;
