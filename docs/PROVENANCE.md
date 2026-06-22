@@ -40,10 +40,9 @@ gh attestation verify oracledb-smoke-x86_64-unknown-linux-musl.tar.gz \
   --repo MuhDur/rust-oracledb
 ```
 
-> Hardening TODO: `actions/attest-build-provenance` is currently pinned to the
-> `@v2` major tag (see `docs/provenance/github-actions.tsv`); pin it to a commit
-> SHA (via Dependabot) before the 1.0.0 final cut. Every other external action is
-> already SHA-pinned.
+Every external action is pinned to a full-length commit SHA (enforced by review
+and surfaced in `docs/provenance/github-actions.tsv`), including
+`actions/attest-build-provenance` (`e8998f9…` == `v2`).
 
 ## Packaged-source guarantees
 

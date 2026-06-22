@@ -109,10 +109,9 @@ jobs:
           cp docs/provenance/dependencies.tsv   "oracledb-dependencies-$ref.tsv"
           cp docs/provenance/github-actions.tsv "oracledb-github-actions-$ref.tsv"
       # Records a signed, verifiable GitHub build-provenance attestation for the
-      # static binary (verify later with `gh attestation verify`). TODO: pin @v2
-      # to a commit SHA via dependabot before the 1.0.0 final cut.
+      # static binary (verify later with `gh attestation verify`).
       - name: Attest build provenance (static binary)
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: oracledb-smoke-x86_64-unknown-linux-musl.tar.gz
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
