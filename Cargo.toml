@@ -46,7 +46,10 @@ arrow-array = "59.0.0"
 arrow-buffer = "59.0.0"
 arrow-data = "59.0.0"
 arrow-schema = "59.0.0"
-asupersync = "0.3.4"
+# Exact pin: asupersync is the single load-bearing async-runtime dependency and
+# its `tls` feature pins the rustls/ring graph, so a 0.3.x point release could
+# silently re-shape the runtime. Bump deliberately, not via the caret floor.
+asupersync = "=0.3.4"
 hex = "0.4"
 md-5 = "0.10"
 pbkdf2 = "0.12"

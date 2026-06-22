@@ -3,10 +3,8 @@
 # Runnable locally and ready for CI:
 #     cargo deny check
 #
-# NOTE: this repo has no `.github/workflows/` yet, so there is no CI step to
-# wire this into. When CI lands, add a `cargo deny check` step (a `taiki-e/
-# install-action@cargo-deny` + `cargo deny check` job). The gate is exit-0
-# clean today, so adding it will not introduce a red build.
+# `cargo deny check` is wired into CI: ci.yml, _quality.yml (the reusable quality
+# suite), and release.yml all run it. The gate is exit-0 clean.
 #
 # Scope: this is a pure-Rust async Oracle driver workspace (oracledb-protocol,
 # oracledb, oracledb-pyshim). The license allow-list and advisory policy below
@@ -106,13 +104,12 @@ allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"]
 # ---------------------------------------------------------------------------
 [bans]
 multiple-versions = "warn"
-# Intra-workspace path dependencies (e.g. `oracledb-protocol = { path = ... }`)
-# carry no version requirement and so read as a `*` wildcard. `allow-wildcard-
-# paths` covers path deps of `publish = false` crates but, by design, NOT of a
-# publishable crate (`oracledb` -> `oracledb-protocol`), because crates.io
-# rejects pure path deps. That is a real pre-publish task (the path deps must
-# gain a version before the first crates.io release), so we surface it as a
-# warning rather than either hiding it or hard-failing the workspace gate.
+# The publishable crates now carry lockstep version requirements on their
+# intra-workspace path dependencies (`oracledb -> oracledb-protocol = { path,
+# version = "1.0.0-rc.1" }`), enforced by the inter-crate pin guard in
+# scripts/release_preflight.sh. `allow-wildcard-paths` still covers the remaining
+# pure path deps of `publish = false` crates (the pyshim harness); we keep
+# wildcards as a warning to surface any future un-versioned publishable path dep.
 wildcards = "warn"
 allow-wildcard-paths = true
 # No crates are banned and none are explicitly skipped: the duplicate-version
