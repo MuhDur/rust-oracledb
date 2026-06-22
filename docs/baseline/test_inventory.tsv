@@ -13,7 +13,7 @@ crates/oracledb-protocol/src/thin/auth.rs	3
 crates/oracledb-protocol/src/thin/codecs.rs	3
 crates/oracledb-protocol/src/thin/dbobject.rs	7
 crates/oracledb-protocol/src/thin/execute.rs	2
-crates/oracledb-protocol/src/thin/fetch.rs	14
+crates/oracledb-protocol/src/thin/fetch.rs	15
 crates/oracledb-protocol/src/thin/mod.rs	30
 crates/oracledb-protocol/src/thin/number.rs	6
 crates/oracledb-protocol/src/thin/proptests.rs	23
@@ -56,7 +56,7 @@ crates/oracledb/src/soda/qbe.rs	23
 crates/oracledb/src/sql_convert.rs	27
 crates/oracledb/src/tls.rs	2
 crates/oracledb/src/transport.rs	11
-crates/oracledb/tests/access_token.rs	2
+crates/oracledb/tests/access_token.rs	3
 crates/oracledb/tests/arrow_columnar_alloc.rs	1
 crates/oracledb/tests/arrow_columnar_diff.rs	7
 crates/oracledb/tests/arrow_golden.rs	2
@@ -68,7 +68,7 @@ crates/oracledb/tests/e2e_live.rs	6
 crates/oracledb/tests/from_row_derive.rs	10
 crates/oracledb/tests/integration_arrow.rs	1
 crates/oracledb/tests/integration_library.rs	13
-crates/oracledb/tests/live_borrowed_fetch.rs	1
+crates/oracledb/tests/live_borrowed_fetch.rs	2
 crates/oracledb/tests/live_connect.rs	1
 crates/oracledb/tests/live_connect_string.rs	1
 crates/oracledb/tests/live_dbms_output.rs	3

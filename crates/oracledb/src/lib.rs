@@ -144,6 +144,7 @@ use oracledb_protocol::thin::{
     build_lob_create_temp_payload_with_seq, build_lob_free_temp_payload_with_seq,
     build_lob_read_payload_with_seq, build_lob_trim_payload_with_seq,
     build_lob_write_payload_with_seq, parse_accept_payload, parse_auth_response_with_limits,
+    parse_define_fetch_response_borrowed_with_limits,
     parse_define_fetch_response_with_context_and_limits,
     parse_fetch_response_with_context_and_limits, parse_lob_create_temp_response_with_limits,
     parse_lob_free_temp_response_with_limits, parse_lob_read_response_with_limits,
@@ -2962,6 +2963,8 @@ fn refetch_retry_applies(err: &Error) -> bool {
 #[derive(Clone)]
 pub struct AccessToken(String);
 
+const REDACTED_SECRET: &str = "***redacted***";
+
 impl AccessToken {
     /// Wrap a token string. The value is never printed; see the type docs.
     pub fn new(token: impl Into<String>) -> Self {
@@ -2978,7 +2981,9 @@ impl AccessToken {
 impl std::fmt::Debug for AccessToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Never render the token, regardless of formatter flags.
-        f.write_str("AccessToken(***redacted***)")
+        f.write_str("AccessToken(")?;
+        f.write_str(REDACTED_SECRET)?;
+        f.write_str(")")
     }
 }
 
@@ -2987,7 +2992,7 @@ impl std::fmt::Debug for AccessToken {
 ///
 /// Build the required fields with [`ConnectOptions::new`], then layer optional
 /// settings with the `with_*` methods.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ConnectOptions {
     /// EasyConnect descriptor, `host:port/service_name` (the port and service
     /// may be omitted to take the listener defaults).
@@ -3048,6 +3053,31 @@ pub struct ConnectOptions {
     statement_cache_size: usize,
     /// Resource policy for thin-protocol decoding and packet reassembly.
     protocol_limits: ProtocolLimits,
+}
+
+impl std::fmt::Debug for ConnectOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let wallet_password = self.wallet_password.as_ref().map(|_| REDACTED_SECRET);
+        f.debug_struct("ConnectOptions")
+            .field("connect_string", &self.connect_string)
+            .field("user", &self.user)
+            .field("password", &REDACTED_SECRET)
+            .field("identity", &self.identity)
+            .field("app_context", &self.app_context)
+            .field("sdu", &self.sdu)
+            .field("proxy_user", &self.proxy_user)
+            .field("server_type_emon", &self.server_type_emon)
+            .field("wallet_location", &self.wallet_location)
+            .field("wallet_password", &wallet_password)
+            .field("edition", &self.edition)
+            .field("ssl_server_dn_match", &self.ssl_server_dn_match)
+            .field("ssl_server_cert_dn", &self.ssl_server_cert_dn)
+            .field("use_sni", &self.use_sni)
+            .field("access_token", &self.access_token)
+            .field("statement_cache_size", &self.statement_cache_size)
+            .field("protocol_limits", &self.protocol_limits)
+            .finish()
+    }
 }
 
 impl ConnectOptions {
@@ -5747,13 +5777,23 @@ impl Connection {
             .cloned()
             .unwrap_or_default();
         let decode_start = profile.then(time::wall_now);
-        let parsed = parse_query_response_borrowed_with_limits(
-            &response,
-            self.capabilities,
-            &columns,
-            previous_row,
-            self.protocol_limits,
-        );
+        let parsed = if self.lob_prefetch_cursors.contains(&cursor_id) {
+            parse_define_fetch_response_borrowed_with_limits(
+                &response,
+                self.capabilities,
+                &columns,
+                previous_row,
+                self.protocol_limits,
+            )
+        } else {
+            parse_query_response_borrowed_with_limits(
+                &response,
+                self.capabilities,
+                &columns,
+                previous_row,
+                self.protocol_limits,
+            )
+        };
         if let Some(start) = decode_start {
             fetch_profile::add_decode(time::wall_now().duration_since(start));
         }
@@ -5852,13 +5892,23 @@ impl Connection {
             .cloned()
             .unwrap_or_default();
         let decode_start = profile.then(time::wall_now);
-        let parsed = parse_query_response_borrowed_with_limits(
-            &response,
-            self.capabilities,
-            &columns,
-            previous_row,
-            self.protocol_limits,
-        );
+        let parsed = if self.lob_prefetch_cursors.contains(&cursor_id) {
+            parse_define_fetch_response_borrowed_with_limits(
+                &response,
+                self.capabilities,
+                &columns,
+                previous_row,
+                self.protocol_limits,
+            )
+        } else {
+            parse_query_response_borrowed_with_limits(
+                &response,
+                self.capabilities,
+                &columns,
+                previous_row,
+                self.protocol_limits,
+            )
+        };
         if let Some(start) = decode_start {
             fetch_profile::add_decode(time::wall_now().duration_since(start));
         }

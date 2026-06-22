@@ -1562,6 +1562,41 @@ pub fn parse_query_response_borrowed_with_limits(
     previous_row: Option<&[Option<QueryValue>]>,
     limits: ProtocolLimits,
 ) -> Result<BorrowedFetchResult> {
+    parse_query_response_borrowed_with_lob_mode_and_limits(
+        payload,
+        capabilities,
+        columns,
+        previous_row,
+        LobDecodeMode::PlainLocator,
+        limits,
+    )
+}
+
+pub fn parse_define_fetch_response_borrowed_with_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    columns: &[ColumnMetadata],
+    previous_row: Option<&[Option<QueryValue>]>,
+    limits: ProtocolLimits,
+) -> Result<BorrowedFetchResult> {
+    parse_query_response_borrowed_with_lob_mode_and_limits(
+        payload,
+        capabilities,
+        columns,
+        previous_row,
+        LobDecodeMode::DefineMetadata,
+        limits,
+    )
+}
+
+fn parse_query_response_borrowed_with_lob_mode_and_limits(
+    payload: &[u8],
+    capabilities: ClientCapabilities,
+    columns: &[ColumnMetadata],
+    previous_row: Option<&[Option<QueryValue>]>,
+    lob_decode_mode: LobDecodeMode,
+    limits: ProtocolLimits,
+) -> Result<BorrowedFetchResult> {
     let mut reader = TtcReader::with_limits(payload, limits)?;
     reader.limits().check_columns(columns.len())?;
     let mut result_columns = columns.to_vec();
@@ -1610,7 +1645,7 @@ pub fn parse_query_response_borrowed_with_limits(
                     &result_columns,
                     bit_vector.as_deref(),
                     fetch_long_status,
-                    LobDecodeMode::PlainLocator,
+                    lob_decode_mode,
                 )?;
             }
             TNS_MSG_TYPE_PARAMETER => {
@@ -1687,7 +1722,7 @@ pub fn parse_query_response_borrowed_with_limits(
         row_starts,
         row_bit_vectors,
         fetch_long_status,
-        lob_decode_mode: LobDecodeMode::PlainLocator,
+        lob_decode_mode,
         // Seed the first compressed row's duplicate resolution from the caller's
         // prior-page row (only consulted when the batch uses bit vectors).
         previous_row_seed: any_bit_vector.then(|| {
@@ -1926,6 +1961,30 @@ mod lob_fetch_shape_tests {
         }
     }
 
+    fn blob_column() -> ColumnMetadata {
+        ColumnMetadata {
+            name: "IMAGE".into(),
+            ora_type_num: ORA_TYPE_NUM_BLOB,
+            csfrm: 0,
+            precision: 0,
+            scale: 0,
+            buffer_size: 4000,
+            max_size: 4000,
+            nulls_allowed: true,
+            is_json: false,
+            is_oson: false,
+            object_schema: None,
+            object_type_name: None,
+            is_array: false,
+            vector_dimensions: None,
+            vector_format: 0,
+            vector_flags: 0,
+            domain_schema: None,
+            domain_name: None,
+            annotations: None,
+        }
+    }
+
     fn lob_row_payload(locator: &[u8], metadata: Option<(u64, u32)>) -> Vec<u8> {
         let mut writer = TtcWriter::new();
         writer.write_u8(TNS_MSG_TYPE_ROW_DATA);
@@ -1939,6 +1998,15 @@ mod lob_fetch_shape_tests {
             .expect("synthetic locator length is encodable");
         writer.write_u8(TNS_MSG_TYPE_END_OF_RESPONSE);
         writer.into_bytes()
+    }
+
+    fn write_define_lob_cell(writer: &mut TtcWriter, locator: &[u8], size: u64, chunk_size: u32) {
+        writer.write_ub4(u32::try_from(locator.len()).expect("locator length fits ub4"));
+        writer.write_ub8(size);
+        writer.write_ub4(chunk_size);
+        writer
+            .write_bytes_with_length(locator)
+            .expect("synthetic locator length is encodable");
     }
 
     fn first_lob(result: &QueryResult) -> &LobValue {
@@ -1987,6 +2055,66 @@ mod lob_fetch_shape_tests {
         assert_eq!(lob.locator, locator);
         assert_eq!(lob.size, 23);
         assert_eq!(lob.chunk_size, 8060);
+    }
+
+    #[test]
+    fn borrowed_define_fetch_lob_page_matches_owned_decode() {
+        let columns = [clob_column(), blob_column()];
+        let clob_locator_a: Vec<u8> = (0u8..114).collect();
+        let blob_locator_a: Vec<u8> = (128u8..242).collect();
+        let clob_locator_b: Vec<u8> = (32u8..146).collect();
+        let blob_locator_b: Vec<u8> = (64u8..178).collect();
+        let mut writer = TtcWriter::new();
+
+        writer.write_u8(TNS_MSG_TYPE_ROW_DATA);
+        write_define_lob_cell(&mut writer, &clob_locator_a, 23, 8060);
+        write_define_lob_cell(&mut writer, &blob_locator_a, 48, 4096);
+        writer.write_u8(TNS_MSG_TYPE_ROW_DATA);
+        write_define_lob_cell(&mut writer, &clob_locator_b, 31, 8060);
+        write_define_lob_cell(&mut writer, &blob_locator_b, 96, 4096);
+        writer.write_u8(TNS_MSG_TYPE_END_OF_RESPONSE);
+        let payload = writer.into_bytes();
+
+        let owned = parse_define_fetch_response_with_context_and_limits(
+            &payload,
+            ClientCapabilities::default(),
+            &columns,
+            None,
+            ProtocolLimits::DEFAULT,
+        )
+        .expect("owned define fetch CLOB/BLOB page should decode");
+        let borrowed = parse_define_fetch_response_borrowed_with_limits(
+            &payload,
+            ClientCapabilities::default(),
+            &columns,
+            None,
+            ProtocolLimits::DEFAULT,
+        )
+        .expect("borrowed define fetch CLOB/BLOB page should decode");
+
+        let mut borrowed_rows: Vec<Vec<Option<QueryValue>>> = Vec::new();
+        borrowed
+            .batch
+            .for_each_row_ref(|row| {
+                borrowed_rows.push(
+                    row.iter()
+                        .map(|cell| cell.map(|value| value.to_owned_value()))
+                        .collect(),
+                );
+                Ok::<(), ProtocolError>(())
+            })
+            .expect("borrowed define fetch CLOB/BLOB page should iterate");
+
+        assert_eq!(owned.rows.len(), 2, "owned decode sees both rows");
+        assert_eq!(
+            borrowed.batch.row_count(),
+            2,
+            "borrowed decode sees both rows"
+        );
+        assert_eq!(
+            borrowed_rows, owned.rows,
+            "borrowed DefineMetadata LOB decode must match owned decode"
+        );
     }
 }
 

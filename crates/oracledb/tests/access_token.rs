@@ -14,6 +14,8 @@ use oracledb::protocol::ClientIdentity;
 use oracledb::{AccessToken, BlockingConnection, ConnectOptions, Error};
 
 const SECRET: &str = "eyJ-this-is-a-fake-jwt-SECRET-value.signature";
+const PASSWORD_SECRET: &str = "plain-password-SECRET-value";
+const WALLET_SECRET: &str = "wallet-password-SECRET-value";
 
 #[test]
 fn access_token_is_redacted_in_debug() {
@@ -22,9 +24,9 @@ fn access_token_is_redacted_in_debug() {
     assert!(!shown.contains(SECRET), "token must never appear in Debug");
     assert!(shown.contains("redacted"));
 
-    // ...and it stays redacted when nested inside ConnectOptions (which derives
-    // Debug), so logging the options can't leak the credential.
-    let id = ClientIdentity::new("a", "h", "u", "t", "r").unwrap();
+    // ...and it stays redacted when nested inside ConnectOptions, so logging
+    // the options can't leak the credential.
+    let id = ClientIdentity::new("a", "h", "u", "t", "r").expect("test identity should be valid");
     let opts = ConnectOptions::new("localhost/FREEPDB1", "scott", "", id).with_access_token(SECRET);
     let shown = format!("{opts:?}");
     assert!(
@@ -35,11 +37,45 @@ fn access_token_is_redacted_in_debug() {
 }
 
 #[test]
+fn connect_options_debug_redacts_passwords() {
+    let id = ClientIdentity::new("a", "h", "u", "t", "r").expect("test identity should be valid");
+    let opts = ConnectOptions::new("localhost/FREEPDB1", "scott", PASSWORD_SECRET, id)
+        .with_wallet_location("/secure/wallet")
+        .with_wallet_password(WALLET_SECRET)
+        .with_access_token(SECRET);
+
+    let shown = format!("{opts:?}");
+    assert!(
+        !shown.contains(PASSWORD_SECRET),
+        "ConnectOptions Debug must not leak the login password"
+    );
+    assert!(
+        !shown.contains(WALLET_SECRET),
+        "ConnectOptions Debug must not leak the wallet password"
+    );
+    assert!(
+        !shown.contains(SECRET),
+        "ConnectOptions Debug must not leak the access token"
+    );
+    assert!(
+        shown.contains("***redacted***"),
+        "Debug should show explicit redaction"
+    );
+    assert!(
+        shown.contains("password") && shown.contains("wallet_password"),
+        "Debug should keep field names for diagnostics"
+    );
+}
+
+#[test]
 #[ignore]
 fn access_token_over_plain_tcp_is_typed_error() {
-    let cs = std::env::var("PYO_TEST_CONNECT_STRING").unwrap();
-    let user = std::env::var("PYO_TEST_MAIN_USER").unwrap();
-    let id = ClientIdentity::new("tok", "host", "user", "term", "rust").unwrap();
+    let cs = std::env::var("PYO_TEST_CONNECT_STRING")
+        .expect("PYO_TEST_CONNECT_STRING must be set for ignored live test");
+    let user = std::env::var("PYO_TEST_MAIN_USER")
+        .expect("PYO_TEST_MAIN_USER must be set for ignored live test");
+    let id = ClientIdentity::new("tok", "host", "user", "term", "rust")
+        .expect("test identity should be valid");
 
     // The local endpoint is plain TCP. A token there must be refused *before* any
     // bytes leave the client — with the precise, machine-classifiable variant,

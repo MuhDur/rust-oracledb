@@ -90,6 +90,16 @@ and the project follows the SemVer contract described in
   `BOOLEAN` that comes back SQL NULL now decodes as NULL instead of raising a spurious
   "truncated OUT bind value" error (the negative actual-length NULL signalling that some
   server versions use is now special-cased, as in python-oracledb). Found by W3-E8.
+- **Borrowed (zero-copy) CLOB/BLOB fetch on multi-page results**: the borrowed fetch path
+  (`Connection::for_each_row_ref`, Arrow columnar streaming) now selects the LOB decode mode
+  from the cursor's LOB-prefetch state, exactly like the owned fetch path, so a multi-page
+  query selecting a CLOB/BLOB column no longer desynchronizes (or errors) on the second and
+  later pages. This is the borrowed-path counterpart of the earlier `stream_lobs()` CLOB fix.
+  Found by W3-E8.
+- **`ConnectOptions` Debug no longer leaks secrets** (security): `ConnectOptions`'s `Debug`
+  output now redacts `password` and `wallet_password` (the access token was already redacted),
+  so logging or formatting an options value with `{:?}` cannot expose credentials. Found by
+  W3-E8.
 
 ### Added
 

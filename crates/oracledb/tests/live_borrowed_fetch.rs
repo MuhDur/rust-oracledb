@@ -10,7 +10,7 @@
 
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
-use oracledb::protocol::thin::{QueryValue, QueryValueRef};
+use oracledb::protocol::thin::{QueryValue, QueryValueRef, ORA_TYPE_NUM_CLOB};
 use oracledb::{ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;
 
@@ -111,6 +111,52 @@ fn borrowed_fetch_matches_owned_fetch_for_wide_many_row_result() {
             "every borrowed cell to_owned() must equal the owned-path value"
         );
 
+        conn.close(&cx).await.expect("close");
+    });
+}
+
+#[test]
+#[ignore = "requires local Oracle listener from scripts/container.sh up"]
+fn borrowed_fetch_handles_multipage_clob_lob_prefetch() {
+    let reactor = reactor::create_reactor().expect("native reactor should build for live I/O");
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .expect("current-thread Asupersync runtime should build");
+
+    runtime.block_on(async {
+        let cx = Cx::current().expect("block_on installs an ambient Cx");
+        let mut conn = Connection::connect(&cx, live_options())
+            .await
+            .expect("connect");
+
+        let sql = "select level as n, \
+                          to_clob(rpad('clob-', 4096, 'x')) as body \
+                   from dual connect by level <= 75";
+        let mut seen = 0usize;
+
+        conn.for_each_row_ref(&cx, sql, 10, |row: &[Option<QueryValueRef<'_>>]| {
+            let lob = match row
+                .get(1)
+                .and_then(|cell| cell.as_ref())
+                .expect("CLOB column should be present")
+            {
+                QueryValueRef::Owned(QueryValue::Lob(lob)) => lob,
+                other => panic!("expected borrowed CLOB locator, got {other:?}"),
+            };
+            assert_eq!(lob.ora_type_num, ORA_TYPE_NUM_CLOB);
+            assert!(lob.size > 0, "DefineMetadata CLOB decode should carry size");
+            assert!(
+                lob.chunk_size > 0,
+                "DefineMetadata CLOB decode should carry chunk size"
+            );
+            seen += 1;
+            Ok(())
+        })
+        .await
+        .expect("borrowed multi-page CLOB fetch");
+
+        assert_eq!(seen, 75, "borrowed CLOB path should drain every row");
         conn.close(&cx).await.expect("close");
     });
 }
