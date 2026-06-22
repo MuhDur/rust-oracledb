@@ -293,3 +293,50 @@ The comment-only edits preserve behavior exactly; all three match baseline.
 - Supply chain: 2 pyo3 advisories, both pyshim-only and both unreachable from
   our code; recommend a future pyo3 >=0.29 bump. cargo-deny licenses FAILED is a
   missing-`deny.toml` artifact, not a real issue.
+
+---
+
+## 9. Panic-safety addendum (1.0.0-rc.1 readiness, 2026-06-22)
+
+Added during the pre-1.0 hardening pass. §1–§8 above audit `unsafe`/UB; this
+section records the **panic-safety** posture (no untrusted server input may
+panic the driver) and two deliberate lint decisions. It also supersedes the
+stale parts of §5: a workspace `deny.toml` now exists and `cargo deny check` is
+exit-0 clean and wired into CI (`ci.yml`, `_quality.yml`, `release.yml`).
+
+### Active panic-relevant lint gates
+
+`[workspace.lints]` with the `-D warnings` clippy gate: `unsafe_code = "forbid"`,
+`clippy::unwrap_used = "deny"`, `clippy::todo = "deny"`, `clippy::dbg_macro =
+"deny"`. No `.unwrap()` / `todo!` / `unimplemented!` / `dbg!` in shipped code.
+
+### Decode-core panic-safety
+
+Confirmed by the W3-E8 multi-pass bug-hunt (5 adversarial rounds, ~25
+correctness bugs fixed) and the pre-1.0 analysis:
+
+- No `.unwrap()` / `.expect()` in production protocol decode paths. The ~636
+  `.expect()` in `src` are overwhelmingly in `#[cfg(test)]` modules, where
+  `.expect()` is the house style (`unwrap_used` denied, `expect_used` not).
+- Every wire read routes through `check_response_bytes` (`wire.rs`), enforcing a
+  running byte total against the response bound before any slice; `OsonReader`
+  bounds every offset; LOB/chunk reads enforce per-chunk + total caps.
+- Decode-path `[i]` / `[a..b]` indexing is preceded by a validated length prefix,
+  so it cannot panic on server input.
+- Fuzzing: 19 libFuzzer targets over the decode surface ran with **zero crashes**
+  in the 1.0.0-rc.1 qualification (`docs/qualification/1.0.0-rc.1/fuzz_summary.txt`).
+
+### Deliberately NOT enabled: `clippy::indexing_slicing` / `clippy::expect_used`
+
+We evaluated escalating both to a gate and chose not to, on purpose:
+
+- `clippy::indexing_slicing` fires ~345× in shipped lib code (≈294 protocol,
+  ≈51 driver), almost all on indexing already bounds-checked by an upstream
+  length-prefix validation. Mechanically rewriting those to `.get(i)?` would
+  change error surfaces and risk regressions for no real safety gain — the
+  upstream bound is the actual invariant, covered by the audit + fuzzing above.
+- `clippy::expect_used` cannot be scoped to non-test code from `[workspace.lints]`
+  (it applies to all targets) and would conflict with the test house style.
+
+Re-audit this decision if the decode surface ever gains a path that indexes
+server-controlled data without a prior length check.
