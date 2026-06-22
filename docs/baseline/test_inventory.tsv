@@ -46,7 +46,7 @@ crates/oracledb-protocol/tests/sessionless_golden.rs	2
 crates/oracledb-protocol/tests/tls_wallet.rs	9
 crates/oracledb-protocol/tests/tpc_golden.rs	3
 crates/oracledb-pyshim/src/dbobject.rs	3
-crates/oracledb/src/arrow.rs	34
+crates/oracledb/src/arrow/mod.rs	34
 crates/oracledb/src/cursor_logic.rs	14
 crates/oracledb/src/lib.rs	68
 crates/oracledb/src/obs.rs	6

@@ -262,6 +262,7 @@ pub fn fetch_profile_arm(on: bool) {
 }
 
 #[cfg(feature = "arrow")]
+#[path = "arrow/mod.rs"]
 pub mod arrow;
 /// Executemany batch-chunk bookkeeping. Private module: the user-facing surface
 /// is the three items re-exported at the crate root below, so there is exactly
