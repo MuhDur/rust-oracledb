@@ -638,14 +638,9 @@ impl DbObjectImpl {
         let bound = value.bind(py);
         if metadata.dbtype_name == "DB_TYPE_OBJECT" {
             if bound.is_none() {
-                // Non-collection object attr: atomic null (253); collection
-                // element or collection-typed attr: null indicator (255).
-                let child_is_collection = metadata
-                    .objtype
-                    .as_ref()
-                    .map(|objtype| objtype.is_collection)
-                    .unwrap_or(false);
-                image_write_null(image, !(parent_is_collection || child_is_collection));
+                // Object/null framing is based on the element's own type:
+                // non-collection objects use atomic null, collections use 255.
+                image_write_object_null(image, metadata);
                 return Ok(());
             }
             let Some(child) = py_db_object_impl(bound)? else {
@@ -692,6 +687,15 @@ fn image_csfrm_for(dbtype_name: &str) -> u8 {
     }
 }
 
+fn image_write_object_null(image: &mut Vec<u8>, metadata: &DbObjectAttrImpl) {
+    let child_is_collection = metadata
+        .objtype
+        .as_ref()
+        .map(|objtype| objtype.is_collection)
+        .unwrap_or(false);
+    image_write_null(image, !child_is_collection);
+}
+
 pub(crate) fn decode_dbobject_text(bytes: &[u8], dbtype_name: &str) -> PyResult<String> {
     protocol_decode_dbobject_text(bytes, dbtype_name).map_err(runtime_error)
 }
@@ -709,6 +713,16 @@ pub(crate) fn decode_dbobject_binary_float(bytes: &[u8]) -> PyResult<f32> {
 
 pub(crate) fn decode_dbobject_binary_double(bytes: &[u8]) -> PyResult<f64> {
     protocol_decode_dbobject_binary_double(bytes).map_err(runtime_error)
+}
+
+fn decode_dbobject_binary_integer(bytes: &[u8]) -> PyResult<i32> {
+    let mut buf = [0u8; 4];
+    let offset = buf
+        .len()
+        .checked_sub(bytes.len())
+        .ok_or_else(|| runtime_error("BINARY_INTEGER image value exceeds 4 bytes"))?;
+    buf[offset..].copy_from_slice(bytes);
+    Ok(i64::from(u32::from_be_bytes(buf)) as i32)
 }
 
 pub(crate) fn dbobject_unpack_value(
@@ -752,15 +766,10 @@ pub(crate) fn dbobject_unpack_value(
                 .into())
         }
         "DB_TYPE_RAW" => Ok(PyBytes::new(py, &bytes).unbind().into()),
-        // PL/SQL PLS_INTEGER / BINARY_INTEGER attributes pack as uint8(4) +
-        // uint32be inside the object image (reference dbobject.pyx:277-278);
-        // read_value_bytes already consumed the length byte, leaving 4 BE bytes.
+        // PL/SQL PLS_INTEGER / BINARY_INTEGER attributes pack as variable-width
+        // big-endian bytes inside object images.
         "DB_TYPE_BINARY_INTEGER" => {
-            let mut buf = [0u8; 4];
-            for (slot, byte) in buf.iter_mut().zip(bytes.iter()) {
-                *slot = *byte;
-            }
-            let value = i64::from(u32::from_be_bytes(buf)) as i32;
+            let value = decode_dbobject_binary_integer(&bytes)?;
             Ok(value.into_pyobject(py)?.unbind().into())
         }
         "DB_TYPE_BOOLEAN" => {
@@ -1129,5 +1138,69 @@ impl DbObjectImpl {
         let new_len = values.len().saturating_sub(num_to_trim as usize);
         values.truncate(new_len);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TNS_OBJ_ATOMIC_NULL: u8 = 253;
+    const TNS_NULL_LENGTH_INDICATOR: u8 = 255;
+
+    fn object_attr_with_child(typecode: &str) -> DbObjectAttrImpl {
+        let child = DbObjectTypeImpl::new(
+            "SCHEMA".to_string(),
+            None,
+            "CHILD".to_string(),
+            typecode,
+            Vec::new(),
+            None,
+            0,
+            false,
+        );
+        DbObjectAttrImpl {
+            name: "E".to_string(),
+            dbtype_name: "DB_TYPE_OBJECT".to_string(),
+            objtype: Some(child),
+            max_size: 0,
+            precision: 0,
+            scale: 0,
+        }
+    }
+
+    #[test]
+    fn dbobject_binary_integer_decodes_variable_width_big_endian() {
+        for (bytes, expected) in [
+            (&[0x05][..], 5),
+            (&[0x01, 0x02][..], 0x0102),
+            (&[0x01, 0x02, 0x03][..], 0x01_0203),
+            (&[0x01, 0x02, 0x03, 0x04][..], 0x0102_0304),
+        ] {
+            assert_eq!(
+                decode_dbobject_binary_integer(bytes).expect("decode BINARY_INTEGER bytes"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn null_object_element_inside_collection_uses_atomic_null_for_object_child() {
+        let metadata = object_attr_with_child("OBJECT");
+        let mut image = Vec::new();
+
+        image_write_object_null(&mut image, &metadata);
+
+        assert_eq!(image, vec![TNS_OBJ_ATOMIC_NULL]);
+    }
+
+    #[test]
+    fn null_collection_typed_object_still_uses_null_length_indicator() {
+        let metadata = object_attr_with_child("COLLECTION");
+        let mut image = Vec::new();
+
+        image_write_object_null(&mut image, &metadata);
+
+        assert_eq!(image, vec![TNS_NULL_LENGTH_INDICATOR]);
     }
 }

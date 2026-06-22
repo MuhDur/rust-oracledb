@@ -467,9 +467,9 @@ mod serde_json_impls {
     use oracledb_protocol::thin::QueryValue;
     use serde_json::{Map, Number, Value};
 
-    /// Convert one OSON node into a `serde_json::Value`. NUMBER text is parsed
-    /// into the widest JSON number that fits (i64 / u64 / f64); values outside
-    /// f64 range fall back to a JSON string so nothing is silently dropped.
+    /// Convert one OSON node into a `serde_json::Value`. Exact integers remain
+    /// JSON numbers; higher-precision decimal NUMBER text falls back to a JSON
+    /// string so no digits are silently rounded away.
     fn oson_to_json(node: &OsonValue) -> Value {
         match node {
             OsonValue::Null => Value::Null,
@@ -519,13 +519,31 @@ mod serde_json_impls {
         if let Ok(u) = trimmed.parse::<u64>() {
             return Value::Number(Number::from(u));
         }
-        if let Ok(f) = trimmed.parse::<f64>() {
-            if let Some(n) = Number::from_f64(f) {
-                return Value::Number(n);
+        if significant_digit_count(trimmed) <= 15 {
+            if let Ok(f) = trimmed.parse::<f64>() {
+                if let Some(n) = Number::from_f64(f) {
+                    return Value::Number(n);
+                }
             }
         }
         // Preserve the exact text rather than lose precision.
         Value::String(trimmed.to_string())
+    }
+
+    fn significant_digit_count(text: &str) -> usize {
+        let mantissa = text
+            .split_once(|ch| ch == 'e' || ch == 'E')
+            .map_or(text, |(mantissa, _)| mantissa)
+            .trim_start_matches(|ch| ch == '+' || ch == '-');
+        let mut seen_non_zero = false;
+        let mut count = 0usize;
+        for ch in mantissa.chars().filter(|ch| ch.is_ascii_digit()) {
+            if ch != '0' || seen_non_zero {
+                seen_non_zero = true;
+                count += 1;
+            }
+        }
+        count
     }
 
     fn f64_to_json(v: f64) -> Value {
@@ -1810,11 +1828,46 @@ mod tests {
                 ]),
             ),
         ]);
-        let value = serde_json::Value::from_sql(&QueryValue::Json(Box::new(oson))).unwrap();
+        let value = serde_json::Value::from_sql(&QueryValue::Json(Box::new(oson)))
+            .expect("OSON tree converts to serde_json");
         assert_eq!(
             value,
             json!({"id": 7, "name": "bob", "active": true, "tags": ["a", "b"]})
         );
+    }
+
+    #[cfg(feature = "serde_json")]
+    #[test]
+    fn serde_json_number_conversion_preserves_high_precision_text() {
+        use oracledb_protocol::oson::OsonValue;
+        use serde_json::{json, Value};
+
+        let oson = OsonValue::Object(vec![
+            (
+                "precise_decimal".into(),
+                OsonValue::Number("1.234567890123456789".into()),
+            ),
+            (
+                "wide_integer".into(),
+                OsonValue::Number("99999999999999999999999999999999999999".into()),
+            ),
+            ("small_int".into(), OsonValue::Number("42".into())),
+            ("small_decimal".into(), OsonValue::Number("12.5".into())),
+        ]);
+
+        let value = serde_json::Value::from_sql(&QueryValue::Json(Box::new(oson)))
+            .expect("OSON tree converts to serde_json");
+        assert_eq!(
+            value,
+            json!({
+                "precise_decimal": "1.234567890123456789",
+                "wide_integer": "99999999999999999999999999999999999999",
+                "small_int": 42,
+                "small_decimal": 12.5
+            })
+        );
+        assert!(matches!(value["small_int"], Value::Number(_)));
+        assert!(matches!(value["small_decimal"], Value::Number(_)));
     }
 
     #[test]

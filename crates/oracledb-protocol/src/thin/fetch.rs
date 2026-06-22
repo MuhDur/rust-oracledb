@@ -1011,7 +1011,7 @@ fn parse_column_value_with_lob_mode(
     if metadata.buffer_size == 0
         && !matches!(
             metadata.ora_type_num,
-            ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_LONG_RAW
+            ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_LONG_RAW | ORA_TYPE_NUM_UROWID
         )
     {
         return Ok(None);
@@ -1153,7 +1153,7 @@ fn parse_column_slot<'buf>(
     if metadata.buffer_size == 0
         && !matches!(
             metadata.ora_type_num,
-            ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_LONG_RAW
+            ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_LONG_RAW | ORA_TYPE_NUM_UROWID
         )
     {
         return Ok(ColumnSlot::Null);
@@ -2475,6 +2475,67 @@ mod borrowed_fetch_tests {
             borrowed, owned,
             "borrowed to_owned_value should materialize the same trailing-zero NUMBER"
         );
+    }
+
+    #[test]
+    fn describe_size_zero_urowid_decodes_and_preserves_following_column_alignment() {
+        let columns = vec![
+            col("RID", ORA_TYPE_NUM_UROWID, CS_FORM_IMPLICIT, 0),
+            col("NEXT", ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 4000),
+        ];
+        let rba: u32 = 0x0102_0304;
+        let partition_id: u16 = 0x0506;
+        let block_num: u32 = 0x0708_090a;
+        let slot_num: u16 = 0x0b0c;
+        let mut encoded_urowid = Vec::new();
+        encoded_urowid.push(1);
+        encoded_urowid.extend_from_slice(&rba.to_be_bytes());
+        encoded_urowid.extend_from_slice(&partition_id.to_be_bytes());
+        encoded_urowid.extend_from_slice(&block_num.to_be_bytes());
+        encoded_urowid.extend_from_slice(&slot_num.to_be_bytes());
+        let expected_rowid = encode_physical_rowid(rba, partition_id, block_num, slot_num);
+
+        let mut writer = TtcWriter::new();
+        writer
+            .write_bytes_with_length(&[1])
+            .expect("write UROWID null probe field");
+        writer
+            .write_bytes_with_length(&encoded_urowid)
+            .expect("write encoded UROWID");
+        writer
+            .write_bytes_with_length(b"after")
+            .expect("write following text column");
+        let buffer = writer.into_bytes();
+
+        let mut owned_reader = TtcReader::new(&buffer);
+        let owned = columns
+            .iter()
+            .map(|column| parse_column_value(&mut owned_reader, column).expect("owned decode"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            owned[0].as_ref().and_then(QueryValue::as_rowid),
+            Some(expected_rowid.as_str()),
+            "owned decode must not NULL a describe-size-0 UROWID"
+        );
+        assert_eq!(
+            owned[1].as_ref().and_then(QueryValue::as_text),
+            Some("after"),
+            "owned decode must consume UROWID bytes before the following column"
+        );
+
+        let batch = BorrowedRowBatch::new(buffer, columns, vec![0]);
+        let mut borrowed_rows = Vec::new();
+        batch
+            .for_each_row_ref(|row| {
+                borrowed_rows.push(
+                    row.iter()
+                        .map(|cell| cell.map(|value| value.to_owned_value()))
+                        .collect::<Vec<_>>(),
+                );
+                Ok::<(), ProtocolError>(())
+            })
+            .expect("borrowed decode");
+        assert_eq!(borrowed_rows, vec![owned]);
     }
 
     // The borrowed response parser walks the *same* message framing as the owned

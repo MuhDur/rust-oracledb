@@ -100,6 +100,20 @@ and the project follows the SemVer contract described in
   output now redacts `password` and `wallet_password` (the access token was already redacted),
   so logging or formatting an options value with `{:?}` cannot expose credentials. Found by
   W3-E8.
+- **UROWID fetch on describe-size-0 columns**: a `UROWID` column whose describe buffer size
+  is 0 is no longer wrongly nulled (which also desynced the rest of the row). The
+  `buffer_size == 0` short-circuit now exempts `UROWID` in addition to `LONG`/`LONG RAW`, as
+  python-oracledb does, on both the owned and borrowed decode paths. Found by W3-E8.
+- **NUMBER -> JSON precision**: converting a high-precision `NUMBER` to a `serde_json` value
+  no longer silently rounds through `f64`; values that do not fit `f64` losslessly are kept
+  as their exact text, honoring the no-loss intent. Small/exact values are unchanged. Found
+  by W3-E8.
+- **High session serial numbers**: a server `AUTH_SERIAL_NUM` greater than 65535 no longer
+  aborts connect; it is read with `ub2` (16-bit) semantics like python-oracledb. Found by
+  W3-E8.
+- **Pool disposal of returned-dead connections**: a connection returned to the pool while
+  already dead is now routed through the backend's close path (`PoolBackend::close_connection`
+  runs), instead of being dropped without the backend's lifecycle hook. Found by W3-E8.
 
 ### Added
 

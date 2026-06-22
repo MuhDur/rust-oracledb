@@ -2392,7 +2392,8 @@ fn return_connection_helper<B: PoolBackend>(
     mut is_open: bool,
 ) {
     if !is_open {
-        ensure_min_connections(state, inner);
+        drop_conn(state, inner, conn);
+        return;
     }
     if conn.is_pool_extra {
         conn.is_pool_extra = false;
@@ -3880,6 +3881,21 @@ mod tests {
         );
     }
 
+    fn wait_for_closed_count(backend: &FakeBackend, expected: u64) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if backend.closed.load(Ordering::SeqCst) == expected {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            backend.closed.load(Ordering::SeqCst),
+            expected,
+            "closed count never reached {expected}"
+        );
+    }
+
     fn wait_for_worker_exit<B: PoolBackend>(weak: &std::sync::Weak<EngineInner<B>>) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
@@ -3959,6 +3975,38 @@ mod tests {
         engine.return_connection(second).unwrap();
         engine.close(false).unwrap();
         assert_eq!(backend.closed.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn returning_dead_connection_invokes_backend_close() {
+        let backend = Arc::new(FakeBackend::new());
+        let engine = PoolEngine::start(
+            Arc::clone(&backend),
+            test_config(1, 1, 1, POOL_GETMODE_WAIT),
+        )
+        .expect("pool starts");
+        wait_for_open_count(&engine, 1);
+        let held = engine
+            .acquire(AcquireOptions::default())
+            .expect("acquire pooled connection");
+        {
+            let state = engine.inner.state.lock().expect("lock pool state");
+            let conn = state
+                .busy
+                .iter()
+                .find(|conn| conn.id == held)
+                .expect("held connection remains busy");
+            conn.conn.alive.store(false, Ordering::SeqCst);
+        }
+
+        engine
+            .return_connection(held)
+            .expect("return dead connection");
+
+        wait_for_closed_count(&backend, 1);
+        assert_eq!(engine.busy_count().expect("busy count"), 0);
+        wait_for_open_count(&engine, 1);
+        engine.close(false).expect("close pool");
     }
 
     #[test]

@@ -635,25 +635,25 @@ oracledb	crates/oracledb/src/soda/operation.rs	37	pub fn fetch_array_size(&self)
 oracledb	crates/oracledb/src/soda/qbe.rs	29	pub fn qbe_to_where_clause(filter: &Value, content_col: &str) -> Result<String> {
 oracledb	crates/oracledb/src/soda/qbe.rs	426	pub fn escape_json_path_string(s: &str) -> String {
 oracledb	crates/oracledb/src/soda/qbe.rs	52	pub fn extract_orderby(filter: &Value, content_col: &str) -> Result<Option<String>> {
-oracledb	crates/oracledb/src/sql_convert.rs	1140	pub enum Params<'a> {
-oracledb	crates/oracledb/src/sql_convert.rs	1193	pub trait IntoBinds {
-oracledb	crates/oracledb/src/sql_convert.rs	1287	pub(crate) fn order_named_binds(
-oracledb	crates/oracledb/src/sql_convert.rs	1319	pub(crate) fn resolve_params(sql: &str, params: Params<'_>) -> Result<Vec<BindValue>, BindError> {
-oracledb	crates/oracledb/src/sql_convert.rs	1334	pub(crate) fn validate_bind_rows_shape(
-oracledb	crates/oracledb/src/sql_convert.rs	1365	pub(crate) fn validate_positional_bind_count(sql: &str, actual: usize) -> Result<(), BindError> {
+oracledb	crates/oracledb/src/sql_convert.rs	1158	pub enum Params<'a> {
+oracledb	crates/oracledb/src/sql_convert.rs	1211	pub trait IntoBinds {
+oracledb	crates/oracledb/src/sql_convert.rs	1305	pub(crate) fn order_named_binds(
+oracledb	crates/oracledb/src/sql_convert.rs	1337	pub(crate) fn resolve_params(sql: &str, params: Params<'_>) -> Result<Vec<BindValue>, BindError> {
+oracledb	crates/oracledb/src/sql_convert.rs	1352	pub(crate) fn validate_bind_rows_shape(
+oracledb	crates/oracledb/src/sql_convert.rs	1383	pub(crate) fn validate_positional_bind_count(sql: &str, actual: usize) -> Result<(), BindError> {
 oracledb	crates/oracledb/src/sql_convert.rs	200	pub trait FromSql: Sized {
 oracledb	crates/oracledb/src/sql_convert.rs	48	pub enum ConversionError {
-oracledb	crates/oracledb/src/sql_convert.rs	674	pub trait QueryResultExt {
-oracledb	crates/oracledb/src/sql_convert.rs	787	pub struct TypedRow<'a> {
-oracledb	crates/oracledb/src/sql_convert.rs	794	pub(crate) fn new<'a>(
-oracledb	crates/oracledb/src/sql_convert.rs	807	pub fn get<T: FromSql>(&self, col: usize) -> crate::Result<T> {
-oracledb	crates/oracledb/src/sql_convert.rs	816	pub fn get_by_name<T: FromSql>(&self, name: &str) -> crate::Result<T> {
-oracledb	crates/oracledb/src/sql_convert.rs	842	pub fn try_get<T: FromSql>(&self, col: usize) -> Result<T, ConversionError> {
-oracledb	crates/oracledb/src/sql_convert.rs	852	pub fn try_get_opt<T: FromSql>(&self, col: usize) -> Result<Option<T>, ConversionError> {
-oracledb	crates/oracledb/src/sql_convert.rs	868	pub fn try_get_by_name<T: FromSql>(&self, name: &str) -> Result<T, ConversionError> {
-oracledb	crates/oracledb/src/sql_convert.rs	881	pub fn try_get_by_name_opt<T: FromSql>(
-oracledb	crates/oracledb/src/sql_convert.rs	939	pub trait FromRow: Sized {
-oracledb	crates/oracledb/src/sql_convert.rs	956	pub trait ToSql {
+oracledb	crates/oracledb/src/sql_convert.rs	692	pub trait QueryResultExt {
+oracledb	crates/oracledb/src/sql_convert.rs	805	pub struct TypedRow<'a> {
+oracledb	crates/oracledb/src/sql_convert.rs	812	pub(crate) fn new<'a>(
+oracledb	crates/oracledb/src/sql_convert.rs	825	pub fn get<T: FromSql>(&self, col: usize) -> crate::Result<T> {
+oracledb	crates/oracledb/src/sql_convert.rs	834	pub fn get_by_name<T: FromSql>(&self, name: &str) -> crate::Result<T> {
+oracledb	crates/oracledb/src/sql_convert.rs	860	pub fn try_get<T: FromSql>(&self, col: usize) -> Result<T, ConversionError> {
+oracledb	crates/oracledb/src/sql_convert.rs	870	pub fn try_get_opt<T: FromSql>(&self, col: usize) -> Result<Option<T>, ConversionError> {
+oracledb	crates/oracledb/src/sql_convert.rs	886	pub fn try_get_by_name<T: FromSql>(&self, name: &str) -> Result<T, ConversionError> {
+oracledb	crates/oracledb/src/sql_convert.rs	899	pub fn try_get_by_name_opt<T: FromSql>(
+oracledb	crates/oracledb/src/sql_convert.rs	957	pub trait FromRow: Sized {
+oracledb	crates/oracledb/src/sql_convert.rs	974	pub trait ToSql {
 oracledb	crates/oracledb/src/sql_convert.rs	99	pub enum BindError {
 oracledb	crates/oracledb/src/tls.rs	220	pub(crate) fn build_client_config(params: &TlsParams) -> Result<ClientConfig, Error> {
 oracledb	crates/oracledb/src/tls.rs	332	pub(crate) fn resolve_tls_params(

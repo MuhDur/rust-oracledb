@@ -614,6 +614,43 @@ mod tests {
     }
 
     #[test]
+    fn owned_and_borrowed_number_decode_agree_for_large_integers() {
+        for text in [
+            "1",
+            "100",
+            "1000000000000000000",                       // 19 digits
+            "99999999999999999999999999999999999999",    // 38 nines (inline max)
+            "100000000000000000000000000000000000000",   // 1e38 (39 digits)
+            "1000000000000000000000000000000000000000",  // 1e39 (40 digits)
+            "10000000000000000000000000000000000000000", // 1e40
+        ] {
+            let wire = match encode_number_text(text) {
+                Ok(wire) => wire,
+                Err(err) => panic!("encode {text}: {err:?}"),
+            };
+            // Owned path:
+            let owned = OracleNumber::from_wire(&wire).expect("from_wire");
+            // Borrowed path: decode wire to canonical text, then to_owned_value's
+            // from_canonical_text_with_flag.
+            let mut digits = Vec::new();
+            let mut canon = String::new();
+            let is_int =
+                crate::thin::codecs::decode_number_text_into(&wire, &mut digits, &mut canon)
+                    .expect("decode_number_text_into");
+            let borrowed = OracleNumber::from_canonical_text_with_flag(&canon, is_int);
+            // Observable values must always match even when the enum variant diverges.
+            assert_eq!(
+                owned.to_canonical_string(),
+                borrowed.to_canonical_string(),
+                "canon {text}"
+            );
+            assert_eq!(owned.to_i128(), borrowed.to_i128(), "i128 {text}");
+            assert_eq!(owned.to_i64(), borrowed.to_i64(), "i64 {text}");
+            assert_eq!(owned.is_integer(), borrowed.is_integer(), "is_int {text}");
+        }
+    }
+
+    #[test]
     fn overflow_value_falls_back_to_text_losslessly() {
         // A 40-digit integer exceeds i128 (39 digits max); the canonical text
         // round-trips through the boxed fallback exactly. Built via from_wire of

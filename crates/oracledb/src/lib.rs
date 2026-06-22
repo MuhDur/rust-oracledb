@@ -10025,7 +10025,8 @@ fn parse_session_u16(
 ) -> Result<u16> {
     data.get(key)
         .ok_or(Error::MissingSessionField(key))?
-        .parse::<u16>()
+        .parse::<u64>()
+        .map(|value| value as u16)
         .map_err(|_| Error::MissingSessionField(key))
 }
 
@@ -10373,6 +10374,18 @@ mod tests {
         // A no-cursor (0) insert is never cached and closes nothing.
         assert!(statement_cache_insert(&mut cache, 5, "a", 0).is_empty());
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn auth_serial_num_truncates_to_low_u16_instead_of_rejecting() {
+        let mut data = BTreeMap::new();
+        data.insert("AUTH_SERIAL_NUM".to_string(), "70000".to_string());
+
+        assert_eq!(
+            parse_session_u16(&data, "AUTH_SERIAL_NUM")
+                .expect("large AUTH_SERIAL_NUM should parse"),
+            70000_u64 as u16
+        );
     }
 
     #[test]

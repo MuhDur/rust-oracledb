@@ -298,11 +298,11 @@ fn async_execute_family_surfaces_outcome() {
             .execute_with(
                 &cx,
                 Execute::new(
-                    "update rust_execute_outcome_t set name = :2 where id = :1 returning name into :3",
+                    "update rust_execute_outcome_t set name = :1 where id = :2 returning name into :3",
                 )
                 .bind(vec![
-                    BindValue::Number("1".to_string()),
                     BindValue::Text("bob".to_string()),
+                    BindValue::Number("1".to_string()),
                     BindValue::ReturnOutput {
                         ora_type_num: ORA_TYPE_NUM_VARCHAR,
                         csfrm: CS_FORM_IMPLICIT,
@@ -444,8 +444,8 @@ fn async_execute_many_family_surfaces_batch_outcome() {
 
         let returning_rows = vec![
             vec![
-                BindValue::Number("3".to_string()),
                 BindValue::Text("cora".to_string()),
+                BindValue::Number("3".to_string()),
                 BindValue::ReturnOutput {
                     ora_type_num: ORA_TYPE_NUM_VARCHAR,
                     csfrm: CS_FORM_IMPLICIT,
@@ -453,8 +453,8 @@ fn async_execute_many_family_surfaces_batch_outcome() {
                 },
             ],
             vec![
-                BindValue::Number("4".to_string()),
                 BindValue::Text("dana2".to_string()),
+                BindValue::Number("4".to_string()),
                 BindValue::ReturnOutput {
                     ora_type_num: ORA_TYPE_NUM_VARCHAR,
                     csfrm: CS_FORM_IMPLICIT,
@@ -466,7 +466,7 @@ fn async_execute_many_family_surfaces_batch_outcome() {
             .execute_many_with(
                 &cx,
                 Batch::new(
-                    "update rust_batch_outcome_t set name = :2 where id = :1 returning name into :3",
+                    "update rust_batch_outcome_t set name = :1 where id = :2 returning name into :3",
                     &returning_rows,
                 )
                 .row_counts(),
@@ -709,6 +709,8 @@ fn blocking_connection_mirrors_four_operation_families() {
             .expect("execute_many_with row counts");
             assert_eq!(deleted.rows_affected(), 2);
             assert_eq!(deleted.per_row_counts(), Some([1, 1, 0].as_slice()));
+
+            BlockingConnection::execute(conn, "commit", ()).expect("commit before CQN register");
 
             match BlockingConnection::subscribe_register(
                 conn,
