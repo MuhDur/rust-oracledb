@@ -2440,7 +2440,11 @@ impl Rows<'_> {
         let previous_row = self.batch.last().map(|row| row.values.clone());
         let cursor_id = self.cursor_id;
         let arraysize = self.arraysize.get();
-        let columns = self.columns.to_vec();
+        // Cheap refcount bump, not a deep clone: `self.columns` is an
+        // `Arc<[ColumnMetadata]>` and `fetch_rows_with_columns` only needs a
+        // `&[ColumnMetadata]`, so `&columns` deref-coerces. Cloning the Arc keeps
+        // the per-page continuation off the metadata's owned Strings.
+        let columns = Arc::clone(&self.columns);
         let result = match self
             .deadline
             .run(self.connection.fetch_rows_with_columns(

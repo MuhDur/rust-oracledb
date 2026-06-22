@@ -949,8 +949,16 @@ pub(crate) fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm:
         }
         BindValue::ObjectInput { oid, image, .. } => write_dbobject_bind(writer, oid, image),
         BindValue::Text(value) => {
-            let bytes = encode_text_value(value, csfrm);
-            writer.write_bytes_with_length(&bytes)
+            // The common implicit/single-byte-charset case writes the &str bytes
+            // straight through (no throwaway Vec); only NCHAR re-encodes to UTF-16
+            // and needs the owned buffer. Byte-identical to encode_text_value,
+            // which for the non-NCHAR path is exactly `value.as_bytes().to_vec()`.
+            if csfrm == CS_FORM_NCHAR {
+                let bytes = encode_text_value(value, csfrm);
+                writer.write_bytes_with_length(&bytes)
+            } else {
+                writer.write_bytes_with_length(value.as_bytes())
+            }
         }
         BindValue::Raw(value) => writer.write_bytes_with_length(value),
         BindValue::Lob { locator, .. } => writer.write_bytes_with_two_lengths(Some(locator)),
