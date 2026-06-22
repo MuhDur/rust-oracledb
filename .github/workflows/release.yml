@@ -70,6 +70,10 @@ jobs:
     needs: checks
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write       # required for actions/attest-build-provenance
+      attestations: write   # required to record the build-provenance attestation
     # ring (rustls' crypto backend) compiles C for musl; cc + the linker must be
     # musl-gcc to produce a fully static-pie binary (verified; mirrors
     # scripts/smoke-static.sh).
@@ -97,12 +101,29 @@ jobs:
           cp README.md LICENSE-APACHE LICENSE-MIT "$dist/"
           tar czf "$dist.tar.gz" "$dist"
           shasum -a 256 "$dist.tar.gz" > "$dist.tar.gz.sha256"
+      - name: Generate SBOM + dependency/action inventory
+        run: |
+          bash scripts/gen_sbom.sh
+          ref="${{ github.ref_name }}"
+          cp docs/provenance/cyclonedx.json     "oracledb-sbom-cyclonedx-$ref.json"
+          cp docs/provenance/dependencies.tsv   "oracledb-dependencies-$ref.tsv"
+          cp docs/provenance/github-actions.tsv "oracledb-github-actions-$ref.tsv"
+      # Records a signed, verifiable GitHub build-provenance attestation for the
+      # static binary (verify later with `gh attestation verify`). TODO: pin @v2
+      # to a commit SHA via dependabot before the 1.0.0 final cut.
+      - name: Attest build provenance (static binary)
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: oracledb-smoke-x86_64-unknown-linux-musl.tar.gz
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: oracledb-smoke-musl
           path: |
             oracledb-smoke-*.tar.gz
             oracledb-smoke-*.tar.gz.sha256
+            oracledb-sbom-cyclonedx-*.json
+            oracledb-dependencies-*.tsv
+            oracledb-github-actions-*.tsv
           if-no-files-found: error
 
   # Publish the workspace to crates.io on a non-pre-release version tag, before
@@ -153,5 +174,8 @@ jobs:
           files: |
             artifacts/*.tar.gz
             artifacts/*.tar.gz.sha256
+            artifacts/oracledb-sbom-cyclonedx-*.json
+            artifacts/oracledb-dependencies-*.tsv
+            artifacts/oracledb-github-actions-*.tsv
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}

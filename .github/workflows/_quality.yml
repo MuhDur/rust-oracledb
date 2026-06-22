@@ -185,6 +185,14 @@ jobs:
         if: ${{ inputs.profile != 'canary' }}
         run: bash scripts/check_async_blocking_coverage.sh
 
+      - name: Provenance artifacts drift check (SBOM + dep/action inventory)
+        if: ${{ inputs.profile != 'canary' }}
+        run: bash scripts/gen_sbom.sh --check
+
+      - name: Standalone packaged-crate build
+        if: ${{ inputs.profile == 'release-qualification' }}
+        run: bash scripts/check_standalone_package.sh
+
       - name: Musl binary size gate
         if: ${{ inputs.profile == 'release-qualification' }}
         shell: bash
