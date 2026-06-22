@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+#[path = "connectstring/mod.rs"]
 pub mod connectstring;
 
 /// `.tns-cassette` record/replay wire format (sans-I/O framing). Gated behind

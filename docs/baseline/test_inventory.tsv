@@ -3,7 +3,8 @@ crates/oracledb-protocol/src/capabilities.rs	2
 crates/oracledb-protocol/src/dpl.rs	22
 crates/oracledb-protocol/src/lib.rs	3
 crates/oracledb-protocol/src/net/cassette.rs	8
-crates/oracledb-protocol/src/net/connectstring.rs	44
+crates/oracledb-protocol/src/net/connectstring/mod.rs	29
+crates/oracledb-protocol/src/net/connectstring/tnsnames.rs	15
 crates/oracledb-protocol/src/net/mod.rs	7
 crates/oracledb-protocol/src/oson.rs	12
 crates/oracledb-protocol/src/packet/mod.rs	5

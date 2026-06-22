@@ -811,48 +811,52 @@ oracledb-protocol	crates/oracledb-protocol/src/net/cassette.rs	44	pub enum Direc
 oracledb-protocol	crates/oracledb-protocol/src/net/cassette.rs	54	pub fn tag(self) -> u8 {
 oracledb-protocol	crates/oracledb-protocol/src/net/cassette.rs	74	pub struct Frame {
 oracledb-protocol	crates/oracledb-protocol/src/net/cassette.rs	86	pub enum CassetteError {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	109	pub fn as_str(self) -> &'static str {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	131	pub enum Purity {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	1349	pub mod tnsnames {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	1356	pub struct TnsnamesReader {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	1366	pub fn read(config_dir: &Path) -> Result<Self> {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	1380	pub fn get(&self, alias: &str) -> Option<&str> {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	1390	pub fn service_names(&self) -> Vec<String> {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	1396	pub fn file_name(&self) -> &Path {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	1504	pub fn fuzz_parse_file(contents: &str) -> Vec<(String, String)> {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	152	pub struct Address {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	179	pub struct AddressList {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	192	pub struct ConnectData {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	220	pub struct Security {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	244	pub struct Description {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	295	pub fn addresses(&self) -> impl Iterator<Item = &Address> {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	304	pub struct Descriptor {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	319	pub fn first_description(&self) -> &Description {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	324	pub fn addresses(&self) -> impl Iterator<Item = &Address> {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	330	pub fn first_address(&self) -> Option<&Address> {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	337	pub fn describe(&self) -> String {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	34	pub const DEFAULT_PORT: u16 = 1521;
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	36	pub const DEFAULT_TCPS_PORT: u16 = 2484;
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	38	pub const DEFAULT_SDU: u32 = 8192;
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	396	pub fn parse(connect_string: &str) -> Result<Option<Descriptor>> {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	40	pub const MIN_SDU: u32 = 512;
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	42	pub const MAX_SDU: u32 = 2_097_152;
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	44	pub const DEFAULT_RETRY_DELAY: u32 = 1;
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	46	pub const DEFAULT_TCP_CONNECT_TIMEOUT: f64 = 20.0;
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	51	pub enum Protocol {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	593	pub(super) fn parse(chars: &[char], connect_string: &str) -> Result<Option<Descriptor>> {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	62	pub fn default_port(self) -> u16 {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	71	pub fn is_tls(self) -> bool {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	77	pub fn as_str(self) -> &'static str {
-oracledb-protocol	crates/oracledb-protocol/src/net/connectstring.rs	97	pub enum ServerType {
-oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	103	pub fn parse_descriptor(input: &str) -> Result<connectstring::Descriptor> {
-oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	14	pub enum Protocol {
-oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	25	pub fn default_port(self) -> u16 {
-oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	34	pub fn is_tls(self) -> bool {
-oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	3	pub mod connectstring;
-oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	40	pub struct EasyConnect {
-oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	67	pub fn parse(input: &str) -> Result<Self> {
-oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	8	pub mod cassette;
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/builders.rs	17	pub(super) fn parse_bool(value: &str) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/builders.rs	27	pub(super) fn parse_uint(connect_string: &str, key: &str, value: &str) -> Result<u32> {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/builders.rs	38	pub(super) fn parse_duration(connect_string: &str, key: &str, value: &str) -> Result<f64> {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/builders.rs	96	pub(super) fn build_descriptor(connect_string: &str, args: &ArgMap) -> Result<Descriptor> {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/easy_connect.rs	165	pub(super) fn parse(chars: &[char], connect_string: &str) -> Result<Option<Descriptor>> {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	109	pub fn as_str(self) -> &'static str {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	131	pub enum Purity {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	152	pub struct Address {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	179	pub struct AddressList {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	192	pub struct ConnectData {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	220	pub struct Security {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	244	pub struct Description {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	295	pub fn addresses(&self) -> impl Iterator<Item = &Address> {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	304	pub struct Descriptor {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	319	pub fn first_description(&self) -> &Description {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	324	pub fn addresses(&self) -> impl Iterator<Item = &Address> {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	330	pub fn first_address(&self) -> Option<&Address> {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	337	pub fn describe(&self) -> String {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	34	pub const DEFAULT_PORT: u16 = 1521;
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	36	pub const DEFAULT_TCPS_PORT: u16 = 2484;
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	38	pub const DEFAULT_SDU: u32 = 8192;
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	396	pub fn parse(connect_string: &str) -> Result<Option<Descriptor>> {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	40	pub const MIN_SDU: u32 = 512;
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	42	pub const MAX_SDU: u32 = 2_097_152;
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	44	pub const DEFAULT_RETRY_DELAY: u32 = 1;
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	46	pub const DEFAULT_TCP_CONNECT_TIMEOUT: f64 = 20.0;
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	51	pub enum Protocol {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	62	pub fn default_port(self) -> u16 {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	71	pub fn is_tls(self) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	77	pub fn as_str(self) -> &'static str {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	800	pub mod tnsnames;
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/mod.rs	97	pub enum ServerType {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/tnsnames.rs	155	pub fn fuzz_parse_file(contents: &str) -> Vec<(String, String)> {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/tnsnames.rs	17	pub fn read(config_dir: &Path) -> Result<Self> {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/tnsnames.rs	31	pub fn get(&self, alias: &str) -> Option<&str> {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/tnsnames.rs	41	pub fn service_names(&self) -> Vec<String> {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/tnsnames.rs	47	pub fn file_name(&self) -> &Path {
+oracledb-protocol	crates/oracledb-protocol/src/net/connectstring/tnsnames.rs	7	pub struct TnsnamesReader {
+oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	104	pub fn parse_descriptor(input: &str) -> Result<connectstring::Descriptor> {
+oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	15	pub enum Protocol {
+oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	26	pub fn default_port(self) -> u16 {
+oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	35	pub fn is_tls(self) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	41	pub struct EasyConnect {
+oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	4	pub mod connectstring;
+oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	68	pub fn parse(input: &str) -> Result<Self> {
+oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	9	pub mod cassette;
 oracledb-protocol	crates/oracledb-protocol/src/oson.rs	114	pub enum OsonValue {
 oracledb-protocol	crates/oracledb-protocol/src/oson.rs	1291	pub fn encode_oson(value: &OsonValue, supports_long_fnames: bool) -> Result<Vec<u8>> {
 oracledb-protocol	crates/oracledb-protocol/src/oson.rs	622	pub fn decode_oson(data: &[u8]) -> Result<OsonValue> {
