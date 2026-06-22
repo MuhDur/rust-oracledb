@@ -1,0 +1,22 @@
+# Fuzz smoke (30s/target, x86_64-unknown-linux-gnu) — all targets clean; CI soak runs 120s/target
+# crash = real libFuzzer signature (==NN== ERROR: libFuzzer / SUMMARY: / crash- artifact / deadly signal / panicked)
+accept_payload             Done 15366168 runs in 31 second(s)  [real_crashes=0]
+aq_response                Done 2578379 runs in 31 second(s)  [real_crashes=0]
+auth_response              Done 2672218 runs in 31 second(s)  [real_crashes=0]
+borrowed_query_response    Done 2069974 runs in 31 second(s)  [real_crashes=0]
+connect_string             Done 576202 runs in 31 second(s)  [real_crashes=0]
+dbobject_image             Done 5099398 runs in 31 second(s)  [real_crashes=0]
+dbobject_scalars           Done 5183948 runs in 31 second(s)  [real_crashes=0]
+dpl_response               Done 2224815 runs in 31 second(s)  [real_crashes=0]
+lob_responses              Done 1948819 runs in 31 second(s)  [real_crashes=0]
+oac_record                 Done 1632615 runs in 31 second(s)  [real_crashes=0]
+oson_decoder               Done 836841 runs in 31 second(s)  [real_crashes=0]
+packet_framing             Done 18285112 runs in 31 second(s)  [real_crashes=0]
+query_response             Done 2226054 runs in 31 second(s)  [real_crashes=0]
+scalar_codecs              Done 7636885 runs in 31 second(s)  [real_crashes=0]
+server_error_info          Done 2269193 runs in 31 second(s)  [real_crashes=0]
+sessionless_tpc            Done 2655482 runs in 31 second(s)  [real_crashes=0]
+subscr_response            Done 2292317 runs in 31 second(s)  [real_crashes=0]
+vector_decoder             Done 9164322 runs in 31 second(s)  [real_crashes=0]
+wallet_parsers             Done 629185 runs in 31 second(s)  [real_crashes=0]
+# All 19 targets: Done with real_crashes=0.
