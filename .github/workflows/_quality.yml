@@ -158,6 +158,9 @@ jobs:
       - name: Validate release metadata
         run: bash scripts/release_preflight.sh
 
+      - name: Inter-crate version-pin guard test
+        run: bash scripts/test_release_preflight_pins.sh
+
       - name: Install baseline tools
         if: ${{ inputs.profile != 'canary' }}
         run: sudo apt-get update && sudo apt-get install -y ripgrep

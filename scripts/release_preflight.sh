@@ -54,6 +54,30 @@ for package in "${expected_packages[@]}"; do
   fi
 done
 
+# Inter-crate version-pin guard (W4-T3.1). The package-version check above proves
+# every workspace crate shares one version, but NOT that the published `oracledb`
+# crate's path-dependency *requirements* on its siblings equal that version. A
+# stale `version = "X"` requirement publishes a crate that resolves a wrong/old
+# sibling from crates.io even though the workspace built against the local path —
+# the gap that bit 0.2.1/0.2.2. Assert each inter-crate requirement pins the
+# current workspace version.
+for dep in oracledb-protocol oracledb-derive; do
+  req="$(
+    jq -r --arg d "$dep" '
+      .packages[] | select(.name == "oracledb")
+      | .dependencies[] | select(.name == $d) | .req
+    ' <<<"$metadata"
+  )"
+  if [ -z "$req" ] || [ "$req" = "null" ]; then
+    fail "the oracledb crate is missing its inter-crate dependency on $dep"
+  fi
+  # cargo normalizes `version = "X"` to the requirement `^X`; strip a leading
+  # comparator (^ ~ = >= <=) and surrounding space to recover the pinned version.
+  req_version="$(printf '%s' "$req" | sed -E 's/^[[:space:]]*[\^~=<>]*[[:space:]]*//')"
+  [ "$req_version" = "$version" ] || fail \
+    "oracledb's '$dep' requirement '$req' (pinned version '$req_version') does not match the workspace version '$version' — bump the inter-crate pin in crates/oracledb/Cargo.toml in lockstep"
+done
+
 tag="${RELEASE_TAG:-}"
 if [ -z "$tag" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
   tag="${GITHUB_REF_NAME:-}"
