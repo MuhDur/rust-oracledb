@@ -1,5 +1,6 @@
 target	path
 accept_payload	crates/oracledb-protocol/fuzz/fuzz_targets/accept_payload.rs
+alter_session	crates/oracledb-protocol/fuzz/fuzz_targets/alter_session.rs
 aq_response	crates/oracledb-protocol/fuzz/fuzz_targets/aq_response.rs
 auth_response	crates/oracledb-protocol/fuzz/fuzz_targets/auth_response.rs
 borrowed_query_response	crates/oracledb-protocol/fuzz/fuzz_targets/borrowed_query_response.rs

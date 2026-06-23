@@ -93,6 +93,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "alter_session"
+path = "fuzz_targets/alter_session.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "auth_response"
 path = "fuzz_targets/auth_response.rs"
 test = false

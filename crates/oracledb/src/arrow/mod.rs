@@ -315,8 +315,11 @@ impl crate::Connection {
         }
 
         let capacity = result.rows.len().max(size as usize);
-        let mut builder = ColumnarBatchBuilder::new(schema, columns.clone(), capacity)
-            .expect("columnar_supported guarantees every column builds");
+        // `columnar_supported` upstream guarantees every column builds; surface a
+        // future guard/builder mismatch as an error instead of panicking.
+        let mut builder = ColumnarBatchBuilder::new(schema, columns.clone(), capacity).ok_or(
+            ArrowConversionError::NotImplemented("columnar path does not support this column type"),
+        )?;
 
         // First page arrived owned from the execute round trip.
         builder.append_owned(&result.rows)?;

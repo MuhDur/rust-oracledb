@@ -26,11 +26,11 @@ oracledb	crates/oracledb/src/arrow/mod.rs	24	pub use builders::{
 oracledb	crates/oracledb/src/arrow/mod.rs	276	pub async fn fetch_all_record_batch_columnar(
 oracledb	crates/oracledb/src/arrow/mod.rs	28	pub use direct_path::record_batch_to_direct_path_rows;
 oracledb	crates/oracledb/src/arrow/mod.rs	29	pub use schema::{
-oracledb	crates/oracledb/src/arrow/mod.rs	350	pub async fn fetch_record_batches(
-oracledb	crates/oracledb/src/arrow/mod.rs	382	pub fn fetch_all_record_batch(
-oracledb	crates/oracledb/src/arrow/mod.rs	399	pub fn fetch_all_record_batch_columnar(
-oracledb	crates/oracledb/src/arrow/mod.rs	412	pub fn fetch_record_batches(
-oracledb	crates/oracledb/src/arrow/mod.rs	425	pub fn next_record_batch(
+oracledb	crates/oracledb/src/arrow/mod.rs	353	pub async fn fetch_record_batches(
+oracledb	crates/oracledb/src/arrow/mod.rs	385	pub fn fetch_all_record_batch(
+oracledb	crates/oracledb/src/arrow/mod.rs	402	pub fn fetch_all_record_batch_columnar(
+oracledb	crates/oracledb/src/arrow/mod.rs	415	pub fn fetch_record_batches(
+oracledb	crates/oracledb/src/arrow/mod.rs	428	pub fn next_record_batch(
 oracledb	crates/oracledb/src/arrow/mod.rs	42	pub enum ArrowConversionError {
 oracledb	crates/oracledb/src/arrow/schema.rs	114	pub fn arrow_type_name(data_type: &DataType) -> String {
 oracledb	crates/oracledb/src/arrow/schema.rs	18	pub(super) const ORA_TYPE_NUM_VECTOR: u8 = 127;
@@ -842,6 +842,7 @@ oracledb-protocol	crates/oracledb-protocol/src/lib.rs	319	pub fn fuzz_aq_respons
 oracledb-protocol	crates/oracledb-protocol/src/lib.rs	346	pub fn fuzz_subscr_responses(data: &[u8]) {
 oracledb-protocol	crates/oracledb-protocol/src/lib.rs	36	pub enum ProtocolError {
 oracledb-protocol	crates/oracledb-protocol/src/lib.rs	374	pub fn fuzz_connect_string(input: &str) {
+oracledb-protocol	crates/oracledb-protocol/src/lib.rs	385	pub fn fuzz_alter_session_value(input: &str) {
 oracledb-protocol	crates/oracledb-protocol/src/lib.rs	3	pub mod capabilities;
 oracledb-protocol	crates/oracledb-protocol/src/lib.rs	4	pub mod crypto;
 oracledb-protocol	crates/oracledb-protocol/src/lib.rs	5	pub mod dpl;
@@ -1622,14 +1623,14 @@ oracledb-protocol	crates/oracledb-protocol/src/tls/wallet.rs	77	pub fn has_clien
 oracledb-protocol	crates/oracledb-protocol/src/tls/wallet.rs	94	pub fn resolve_wallet_dir(
 oracledb-protocol	crates/oracledb-protocol/src/vector.rs	107	pub fn decode_vector(data: &[u8]) -> Result<Vector> {
 oracledb-protocol	crates/oracledb-protocol/src/vector.rs	112	pub fn decode_vector_with_limits(data: &[u8], limits: ProtocolLimits) -> Result<Vector> {
-oracledb-protocol	crates/oracledb-protocol/src/vector.rs	216	pub fn encode_vector(vector: &Vector) -> Vec<u8> {
-oracledb-protocol	crates/oracledb-protocol/src/vector.rs	223	pub(crate) fn encode_vector_checked(vector: &Vector) -> Result<Vec<u8>> {
+oracledb-protocol	crates/oracledb-protocol/src/vector.rs	224	pub fn encode_vector(vector: &Vector) -> Vec<u8> {
+oracledb-protocol	crates/oracledb-protocol/src/vector.rs	231	pub(crate) fn encode_vector_checked(vector: &Vector) -> Result<Vec<u8>> {
 oracledb-protocol	crates/oracledb-protocol/src/vector.rs	33	pub const TNS_VECTOR_MAGIC_BYTE: u8 = 0xDB;
 oracledb-protocol	crates/oracledb-protocol/src/vector.rs	36	pub const TNS_VECTOR_VERSION_BASE: u8 = 0;
 oracledb-protocol	crates/oracledb-protocol/src/vector.rs	37	pub const TNS_VECTOR_VERSION_WITH_BINARY: u8 = 1;
-oracledb-protocol	crates/oracledb-protocol/src/vector.rs	385	pub fn write_vector_image(writer: &mut TtcWriter, image: &[u8]) -> Result<()> {
 oracledb-protocol	crates/oracledb-protocol/src/vector.rs	38	pub const TNS_VECTOR_VERSION_WITH_SPARSE: u8 = 2;
-oracledb-protocol	crates/oracledb-protocol/src/vector.rs	394	pub fn write_oson_aq_payload(writer: &mut TtcWriter, image: &[u8]) -> Result<()> {
+oracledb-protocol	crates/oracledb-protocol/src/vector.rs	393	pub fn write_vector_image(writer: &mut TtcWriter, image: &[u8]) -> Result<()> {
+oracledb-protocol	crates/oracledb-protocol/src/vector.rs	402	pub fn write_oson_aq_payload(writer: &mut TtcWriter, image: &[u8]) -> Result<()> {
 oracledb-protocol	crates/oracledb-protocol/src/vector.rs	41	pub const TNS_VECTOR_FLAG_NORM: u16 = 0x0002;
 oracledb-protocol	crates/oracledb-protocol/src/vector.rs	42	pub const TNS_VECTOR_FLAG_NORM_RESERVED: u16 = 0x0010;
 oracledb-protocol	crates/oracledb-protocol/src/vector.rs	43	pub const TNS_VECTOR_FLAG_SPARSE: u16 = 0x0020;

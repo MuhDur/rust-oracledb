@@ -375,6 +375,18 @@ pub mod fuzz_api {
         let _ = crate::net::connectstring::parse(input);
         let _ = crate::net::connectstring::tnsnames::fuzz_parse_file(input);
     }
+
+    /// Drive `sql::parse_alter_session_value` — the `ALTER SESSION SET <key> =
+    /// <value>` value extractor used to track session state (current_schema /
+    /// edition) the server reflects back. It must never panic on arbitrary
+    /// statement text, including non-UTF-8-boundary keys/values. The first byte
+    /// selects the lookup key so the fuzzer exercises the matched + unmatched
+    /// branches.
+    pub fn fuzz_alter_session_value(input: &str) {
+        let keys = ["current_schema", "edition", "time_zone", ""];
+        let key = keys[input.as_bytes().first().copied().unwrap_or(0) as usize % keys.len()];
+        let _ = crate::sql::parse_alter_session_value(input, key);
+    }
 }
 
 #[cfg(test)]
