@@ -565,7 +565,7 @@ oracledb-pyshim     PyO3 module slotted under python-oracledb's public layer so
 
 ## Scope
 
-- **Native ergonomic surfaces (0.2).** First-class typed APIs over capabilities
+- **Native ergonomic surfaces.** First-class typed APIs over capabilities
   the engine already speaks: REF CURSOR / implicit result sets
   (`Connection::fetch_cursor`), structured ADT object **and collection** decode
   (`describe_object_type` / `decode_object`), `DBMS_OUTPUT` capture
@@ -605,6 +605,21 @@ when no listener is present.
 
 ---
 
+## Troubleshooting
+
+| symptom | likely cause | fix |
+|---|---|---|
+| `ORA-12541: TNS:no listener`, or connect refused/timeout | nothing is listening at that `host:port` | start the listener and check the `host:port/service` of your EasyConnect string; for the test container, `scripts/container.sh up` |
+| `ORA-12514: ... does not currently know of service` | wrong service name (e.g. a SID, or the CDB instead of the PDB) | use the PDB service name (e.g. `FREEPDB1`); confirm available services with `lsnrctl status` |
+| `ORA-01017: invalid username/password` | bad credentials, or proxy/token/external-auth misconfigured | verify the user/password; for IAM/OAuth2 token or wallet auth see [docs/TLS_SETUP.md](docs/TLS_SETUP.md) |
+| Build fails with `error[E0658]` / `feature(try_trait_v2)` | building on **stable** Rust | this crate requires nightly — `rustup override set nightly` (the exact pinned toolchain is in [docs/TOOLCHAIN.md](docs/TOOLCHAIN.md)) |
+| `ConversionError` "unexpected NULL" while mapping a row | a `NULL` column mapped to a non-`Option` field | make the field `Option<T>` (NULL → `None`); a non-`Option` NULL is a deliberate hard error, not a silent default |
+| async `.into_typed()` won't compile / "expected `&Cx`" | async `into_typed` takes `&cx` and is awaited | call `rows.into_typed::<T>(&cx).await?`; the blocking facade's `into_typed()` takes no `cx` |
+| TLS/TCPS handshake fails (cert / server-DN) | wallet path, DN match, or SNI | see [docs/TLS_SETUP.md](docs/TLS_SETUP.md); a `cwallet.sso` auto-login wallet needs `--features experimental` |
+| a connect string is rejected as malformed | a typo in a TNS descriptor / EZConnect-Plus token | the error carries a **byte-offset caret** pointing at the offending token — read it; full grammar in [docs/CONNECT_STRINGS.md](docs/CONNECT_STRINGS.md) |
+
+---
+
 ## FAQ
 
 **Does it need Oracle Instant Client or OCI?** No. It is pure Rust and speaks the
@@ -632,24 +647,6 @@ wallet (`ewallet.pem`, or `cwallet.sso` with `--features experimental`). See
 
 ---
 
-## About contributions
-
-Please don't take this the wrong way, but I do not accept outside contributions
-for any of my projects. I simply don't have the mental bandwidth to review
-anything, and it's my name on the thing, so I'm responsible for any problems it
-causes; thus, the risk-reward is highly asymmetric from my perspective. I'd also
-have to worry about other "stakeholders," which seems unwise for tools I mostly
-make for myself for free. Feel free to submit issues, and even PRs if you want to
-illustrate a proposed fix, but know I won't merge them directly. Instead, I'll
-have Claude or Codex review submissions via `gh` and independently decide whether
-and how to address them. Bug reports in particular are welcome. Sorry if this
-offends, but I want to avoid wasted time and hurt feelings. I understand this
-isn't in sync with the prevailing open-source ethos that seeks community
-contributions, but it's the only way I can move at this velocity and keep my
-sanity.
-
----
-
 ## License
 
 Dual-licensed under either of:
@@ -659,7 +656,7 @@ Dual-licensed under either of:
 
 at your option.
 
-[`BlockingConnection`]: https://github.com/MuhDur/rust-oracledb
+[`BlockingConnection`]: https://docs.rs/oracledb/latest/oracledb/struct.BlockingConnection.html
 
 
 ---
