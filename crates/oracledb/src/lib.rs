@@ -4115,15 +4115,25 @@ impl Connection {
                 self.fetch_rows_request(cx, cursor_id, arraysize).await?;
             }
 
-            // Snapshot the last row for the next page's duplicate-column seed
-            // before consuming the batch in the callback.
+            // Snapshot ONLY the last row of the page as the next page's
+            // duplicate-column seed; materializing every row to owned (the old
+            // behaviour) would defeat the zero-copy fast path. `row_count()` is
+            // the `for_each_row_ref` iteration count (both are `row_starts.len()`),
+            // so this captures exactly the row the old "overwrite every iteration"
+            // logic left in `last_owned`. Seed correctness is covered by the
+            // duplicate-CLOB compression regression in `live_borrowed_fetch`.
+            let row_count = result.batch.row_count();
             let mut last_owned: Option<Vec<Option<oracledb_protocol::thin::QueryValue>>> = None;
+            let mut row_idx = 0usize;
             result.batch.for_each_row_ref(|row| {
-                last_owned = Some(
-                    row.iter()
-                        .map(|cell| cell.map(|v| v.to_owned_value()))
-                        .collect(),
-                );
+                if row_idx + 1 == row_count {
+                    last_owned = Some(
+                        row.iter()
+                            .map(|cell| cell.map(|v| v.to_owned_value()))
+                            .collect(),
+                    );
+                }
+                row_idx += 1;
                 callback(row)
             })?;
             if let Some(last) = last_owned {
