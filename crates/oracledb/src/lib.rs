@@ -3684,7 +3684,20 @@ impl Connection {
     /// request — so the leftover bytes / still-running call cannot poison this
     /// response. A failed drain marks the connection dead and surfaces
     /// [`Error::ConnectionClosed`].
+    ///
+    /// A bare [`fetch_rows_request`](Self::fetch_rows_request) whose paired
+    /// `fetch_rows_ref_response` is never consumed (the caller abandons the
+    /// speculative page without dropping a response future to fire the guard)
+    /// leaves the phase `InFlight` with a stranded response on the wire. Treat
+    /// that the same as a dropped fetch: move it to `BreakSent` so the drain
+    /// below reclaims the wire instead of wedging the connection on every
+    /// subsequent operation. This is only ever reached from the *start* of the
+    /// next operation — `fetch_rows_ref_response`, the one path that legitimately
+    /// reads its own `InFlight` response, never calls this.
     async fn ensure_clean_before_request(&mut self) -> Result<()> {
+        if self.core.recovery.phase() == SessionRecoveryPhase::InFlight {
+            self.core.recovery.mark_break_required();
+        }
         if !self.core.recovery.begin_pending_drain()? {
             return Ok(());
         }
@@ -11715,6 +11728,102 @@ mod tests {
             next, FRESH_BODY,
             "after cancel the reused connection must read the FRESH response, not the \
              stale in-flight response ({INFLIGHT_BODY:?}) or error body ({ERROR_BODY:?})"
+        );
+        server.join().expect("server thread joins");
+    }
+
+    // A bare `fetch_rows_request` whose paired `fetch_rows_ref_response` is never
+    // consumed leaves the recovery phase `InFlight` with a stranded page on the
+    // wire (no response future was dropped to fire a `CancelDrainGuard`).
+    // `ensure_clean_before_request` must treat that exactly like a dropped fetch:
+    // break + drain the stranded page and reconcile to `Ready`, so the next
+    // operation reads its OWN response instead of the connection wedging forever
+    // on "operation attempted while a response is still in flight". Offline
+    // regression for the live `stranded_prefetch_request_is_drained_before_reuse`
+    // proof (bead rust-oracledb-004o).
+    #[test]
+    fn ensure_clean_drains_inflight_bare_request_before_reuse() {
+        // The stranded speculative page (its own end-of-response): stale bytes
+        // that must be discarded, never mistaken for the next result.
+        const INFLIGHT_BODY: &[u8] = &[0xCA, 0xFE];
+        // The trailing ORA-01013-shaped error packet ending the drain response.
+        const ERROR_BODY: &[u8] = &[0x04, 0x01, 0x0d];
+        // The genuine response to the reuse operation.
+        const FRESH_BODY: &[u8] = &[0x07, 0x05, 0x0c];
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            use std::io::Write as _;
+
+            // The reuse op must break + drain the stranded page first. Without the
+            // InFlight handling this BREAK never arrives (the op errors out) and
+            // this read times out — the regression's failure mode.
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_BREAK,
+                "reuse after a bare request must send a BREAK to drain the stranded page"
+            );
+            socket
+                .write_all(&data_packet(INFLIGHT_BODY, true))
+                .expect("write stranded page");
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))
+                .expect("write break-ack marker");
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_RESET,
+                "drain must answer the break-ack marker with a RESET"
+            );
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_RESET))
+                .expect("write reset-confirm marker");
+            socket
+                .write_all(&data_packet(ERROR_BODY, true))
+                .expect("write trailing error packet");
+            socket
+                .write_all(&data_packet(FRESH_BODY, true))
+                .expect("write fresh response");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let next = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("ambient Cx");
+                let stream = TcpStream::connect(addr).await.expect("connect to listener");
+                let (read, write) = transport::plain_split(stream);
+                let mut conn = loopback_connection(read, write);
+
+                // Simulate a bare `fetch_rows_request`: a speculative response is
+                // outstanding, so the phase is `InFlight` with no guard armed.
+                conn.core
+                    .recovery
+                    .begin_operation()
+                    .expect("enter InFlight");
+                assert_eq!(conn.core.recovery.phase(), SessionRecoveryPhase::InFlight);
+
+                // The next operation's pre-flight cleanup must reclaim the wire.
+                conn.ensure_clean_before_request()
+                    .await
+                    .expect("a stranded bare request must be drained, not wedge the connection");
+                assert_eq!(
+                    conn.core.recovery.phase(),
+                    SessionRecoveryPhase::Ready,
+                    "after draining the stranded page the session is Ready for reuse"
+                );
+
+                conn.core.read_data_response(&cx).await
+            })
+            .expect("the reused connection must read its fresh response");
+
+        assert_eq!(
+            next, FRESH_BODY,
+            "after draining the stranded bare request the reused connection must read \
+             the FRESH response, not the stranded page ({INFLIGHT_BODY:?})"
         );
         server.join().expect("server thread joins");
     }

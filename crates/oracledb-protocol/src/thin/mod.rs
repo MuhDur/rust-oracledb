@@ -109,6 +109,46 @@ mod tests {
         assert!(!parsed.more_rows);
     }
 
+    // Regression for bead rust-oracledb-f0ad. A cached query cursor
+    // (`select :1 as v from dual`) is re-executed after the column's type
+    // changed CHAR -> CLOB. The server re-describes the column as CLOB but, per
+    // `adjust_refetch_metadata`, streams the (null) value in LONG form WITH the
+    // LONG status trailer (null indicator + ORA-01405 return code). The execute
+    // path runs with `fetch_long_status = false`, so before the fix the 5-byte
+    // trailer was left unconsumed and the following message byte (0x81) was
+    // mis-read as "unknown TTC message type 129 at position 95". The fix
+    // promotes `fetch_long_status` when an adjustment folds a column to
+    // LONG/LONG RAW. Bytes are a real Oracle Free 23ai wire capture.
+    #[test]
+    fn query_response_consumes_long_trailer_for_clob_refetched_as_long() {
+        let payload = Vec::from_hex(concat!(
+            "1017d2695e29222bd76b27853dff436b866a787e06170608290001018270800000",
+            "020fa0000000000203690100023ffe010101010156000000000000000000000107",
+            "07787e061706082a00021fe8010201020006220101000164000000070081010205",
+            "7d0801060371a8380001010000000000000401010211fe010102057b0000010101",
+            "1403000000000000000000000000210001010000000002057b0101010300194f52",
+            "412d30313430333a206e6f206461746120666f756e640a1d",
+        ))
+        .expect("fixture response should be valid hex");
+
+        // The cached cursor's previous fetch saw column V as CHAR; the
+        // re-execute describes it as CLOB, which adjust_refetch_metadata folds
+        // to LONG, so the wire value carries the LONG status trailer.
+        let previous = vec![char_column("V")];
+        let parsed = parse_query_response_with_context(
+            &payload,
+            ClientCapabilities::default(),
+            &previous,
+            None,
+        )
+        .expect("CLOB-refetched-as-LONG must decode, not desync on the LONG status trailer");
+
+        assert_eq!(parsed.columns.len(), 1);
+        assert_eq!(parsed.columns[0].ora_type_num, ORA_TYPE_NUM_LONG);
+        assert_eq!(parsed.rows, vec![vec![None]]);
+        assert!(!parsed.more_rows);
+    }
+
     #[test]
     fn fetch_response_decodes_rows_with_previous_cursor_metadata() {
         let payload = Vec::from_hex("06020101000205dc0001010101000702c1041d")
@@ -802,6 +842,28 @@ mod tests {
             scale: 0,
             buffer_size: ORA_TYPE_SIZE_NUMBER,
             max_size: ORA_TYPE_SIZE_NUMBER,
+            nulls_allowed: true,
+            is_json: false,
+            is_oson: false,
+            object_schema: None,
+            object_type_name: None,
+            is_array: false,
+            vector_dimensions: None,
+            vector_format: 0,
+            vector_flags: 0,
+            ..Default::default()
+        }
+    }
+
+    fn char_column(name: &str) -> ColumnMetadata {
+        ColumnMetadata {
+            name: name.into(),
+            ora_type_num: ORA_TYPE_NUM_CHAR,
+            csfrm: CS_FORM_IMPLICIT,
+            precision: 0,
+            scale: 0,
+            buffer_size: 2000,
+            max_size: 2000,
             nulls_allowed: true,
             is_json: false,
             is_oson: false,

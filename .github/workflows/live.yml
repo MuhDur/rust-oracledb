@@ -3,8 +3,11 @@ name: Live (database) tests
 # The driver's live tests are #[ignore] (they require an Oracle listener), so the
 # standard `required`/`canary` lanes never run them — which let a real regression
 # sit undetected (bead bur7). This lane runs them against a real Oracle Free 23ai
-# container, SERIALLY (the small single-instance DB is sensitive to parallel load
-# + test ordering, so serial avoids the environment-flake class tracked in f0ad/004o).
+# container, SERIALLY (the small single-instance DB is sensitive to parallel load,
+# so serial keeps the run deterministic). Earlier "flakes" f0ad (a CLOB-refetched-
+# as-LONG status-trailer desync) and 004o (a stranded speculative-fetch wedge) were
+# root-caused to real driver bugs, fixed, and now run unconditionally with offline
+# regressions guarding them — no tests are skipped here.
 #
 # Nightly + on-demand, not per-PR: the Oracle container takes a minute+ to start.
 #
@@ -68,19 +71,19 @@ jobs:
           set -uo pipefail
           eval "$(scripts/container.sh env)"
           # --test-threads=1: the single small DB is sensitive to parallel load.
-          # Two live tests are environment/ordering-flaky against a single small
-          # container (NOT driver bugs — tracked as f0ad/004o for a robustness fix
-          # and re-inclusion): live_typed_roundtrip_matrix_e12 flakes in-suite, and
-          # stranded_prefetch_request_is_drained_before_reuse depends on in-suite
-          # warmup. They flake non-deterministically (a different one per run), so
-          # whole-suite retry never converges; they are SKIPPED here. Everything
-          # else (200+ live tests incl. the bur7 regression) runs and must pass —
-          # a real regression still fails the lane. A 2nd attempt covers any other
-          # transient blip.
-          SKIP="--skip live_typed_roundtrip_matrix_e12 --skip stranded_prefetch_request_is_drained_before_reuse"
+          # ALL live tests run — including live_typed_roundtrip_matrix_e12 (f0ad)
+          # and stranded_prefetch_request_is_drained_before_reuse (004o), whose
+          # former flakiness was real driver bugs now fixed (a CLOB-refetched-as-
+          # LONG status-trailer desync and a stranded speculative-fetch wedge,
+          # each with an offline regression). A real regression must fail the lane.
+          # The 2nd attempt only covers a genuine infra transient (container blip).
+          # `--tests` scopes the run to test targets (lib unit + integration), so
+          # `--include-ignored` un-ignores the live integration tests WITHOUT also
+          # forcing the `#[doc] ```ignore` examples (e.g. oracledb-derive) to run;
+          # doctests are covered by the offline gate.
           for attempt in 1 2; do
             echo "::group::live test attempt $attempt"
-            if cargo test --workspace --exclude oracledb-pyshim -- --include-ignored --test-threads=1 $SKIP; then
+            if cargo test --workspace --exclude oracledb-pyshim --tests -- --include-ignored --test-threads=1; then
               echo "::endgroup::"; echo "live tests passed on attempt $attempt"; exit 0
             fi
             echo "::endgroup::"; echo "attempt $attempt failed; retrying once"

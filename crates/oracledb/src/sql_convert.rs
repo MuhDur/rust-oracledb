@@ -532,9 +532,9 @@ mod serde_json_impls {
 
     fn significant_digit_count(text: &str) -> usize {
         let mantissa = text
-            .split_once(|ch| ch == 'e' || ch == 'E')
+            .split_once(['e', 'E'])
             .map_or(text, |(mantissa, _)| mantissa)
-            .trim_start_matches(|ch| ch == '+' || ch == '-');
+            .trim_start_matches(['+', '-']);
         let mut seen_non_zero = false;
         let mut count = 0usize;
         for ch in mantissa.chars().filter(|ch| ch.is_ascii_digit()) {

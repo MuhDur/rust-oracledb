@@ -441,6 +441,14 @@ fn parse_query_response_with_context_binds_options_lob_mode_and_limits(
         more_rows: true,
         ..QueryResult::default()
     };
+    // A re-executed cursor whose column type changed to CLOB/BLOB but was
+    // previously fetched as CHAR/VARCHAR/RAW streams the value in LONG/LONG RAW
+    // form (see `adjust_refetch_metadata`), which carries the LONG status
+    // trailer (null indicator + return code) after each value — even on the
+    // execute path that otherwise passes `fetch_long_status = false`. Promote
+    // the flag when such an adjustment fires so `parse_row_data` consumes that
+    // trailer instead of mis-framing the next message (bead rust-oracledb-f0ad).
+    let mut fetch_long_status = fetch_long_status;
     let mut bit_vector: Option<Vec<u8>> = None;
     let mut out_bind_indexes: Vec<usize> = Vec::new();
     while reader.remaining() > 0 {
@@ -459,7 +467,11 @@ fn parse_query_response_with_context_binds_options_lob_mode_and_limits(
                 // `_process_describe_info`).
                 for (index, column) in result.columns.iter_mut().enumerate() {
                     if let Some(prev) = previous.get(index) {
-                        adjust_refetch_metadata(prev, column);
+                        if adjust_refetch_metadata(prev, column) {
+                            // the adjusted column (now LONG / LONG RAW) is
+                            // streamed with the LONG status trailer.
+                            fetch_long_status = true;
+                        }
                     }
                 }
             }
