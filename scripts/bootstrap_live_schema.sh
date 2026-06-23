@@ -53,6 +53,38 @@ to ${MAIN_USER}
 /
 grant aq_administrator_role to ${MAIN_USER}
 /
+-- Edition for the edition-selection live test (it connects with_edition("E_TEST")
+-- and asserts the session runs under it). Idempotent: tolerate "already exists".
+begin
+  execute immediate 'create edition E_TEST';
+exception when others then if sqlcode != -955 then raise; end if;
+end;
+/
+grant use on edition E_TEST to ${MAIN_USER}
+/
+-- Object types + tables the object-decode live test expects to pre-exist in the
+-- main user's schema (see crates/oracledb/tests/live_object_decode.rs headers).
+-- The main user was just (re)created above, so its schema is empty.
+create type ${MAIN_USER}.vx6_addr as object (street varchar2(40), zip number, ok number(1))
+/
+create table ${MAIN_USER}.vx6_people (id number, home ${MAIN_USER}.vx6_addr)
+/
+create type ${MAIN_USER}.vx6_nums as varray(10) of number
+/
+create table ${MAIN_USER}.vx6_coll (id number, vals ${MAIN_USER}.vx6_nums)
+/
+insert into ${MAIN_USER}.vx6_people values (1, ${MAIN_USER}.vx6_addr('12 Oak St', 90210, 1))
+/
+insert into ${MAIN_USER}.vx6_people values (2, ${MAIN_USER}.vx6_addr('  ', null, 0))
+/
+insert into ${MAIN_USER}.vx6_coll values (1, ${MAIN_USER}.vx6_nums(10, 20, 30))
+/
+insert into ${MAIN_USER}.vx6_coll values (2, ${MAIN_USER}.vx6_nums(7, null, 9))
+/
+insert into ${MAIN_USER}.vx6_coll values (3, ${MAIN_USER}.vx6_nums())
+/
+commit
+/
 -- Optional roles the slim image may not ship (Oracle Text CTXAPP; SODA_APP for
 -- the feature-gated SODA tests). Grant if present, tolerate if absent — the
 -- driver live tests do not require full-text search and self-skip SODA.
