@@ -1,0 +1,85 @@
+name: Live (database) tests
+
+# The driver's live tests are #[ignore] (they require an Oracle listener), so the
+# standard `required`/`canary` lanes never run them — which let a real regression
+# sit undetected (bead bur7). This lane runs them against a real Oracle Free 23ai
+# container, SERIALLY (the small single-instance DB is sensitive to parallel load
+# + test ordering, so serial avoids the environment-flake class tracked in f0ad/004o).
+#
+# Nightly + on-demand, not per-PR: the Oracle container takes a minute+ to start.
+#
+# Scope note: this runs the DRIVER's own live tests (which self-provision their
+# tables and need only the pythontest user). The full python-oracledb conformance
+# suite (harness/run.sh) additionally needs a Python venv + the maturin-built
+# PyO3 pyshim + the pinned reference checkout; wiring that richer lane is a
+# follow-up.
+
+on:
+  schedule:
+    - cron: '0 4 * * *'   # 04:00 UTC nightly
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  live:
+    name: driver live tests (Oracle Free 23ai)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ORACLE_PASSWORD: OracledbTest#2026
+      ORACLEDB_CONTAINER_NAME: rust-oracledb-free
+      ORACLEDB_HOST_PORT: '1522'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: nightly-2026-05-11
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+
+      - name: Start Oracle Free 23ai
+        run: bash scripts/container.sh up
+
+      - name: Wait for database ready
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 90); do
+            if docker logs "$ORACLEDB_CONTAINER_NAME" 2>&1 | grep -qF 'DATABASE IS READY TO USE'; then
+              echo "database ready after ~$((i * 5))s"; exit 0
+            fi
+            sleep 5
+          done
+          echo "database never became ready" >&2
+          docker logs "$ORACLEDB_CONTAINER_NAME" 2>&1 | tail -60 >&2
+          exit 1
+
+      - name: Bootstrap test schema (pythontest user + grants)
+        run: bash scripts/bootstrap_live_schema.sh
+
+      - name: Driver live tests (serial, ignored, suite-retry)
+        run: |
+          set -uo pipefail
+          eval "$(scripts/container.sh env)"
+          # --test-threads=1: the single small DB is sensitive to parallel load,
+          # so run serially (some tests also rely on in-suite ordering/warmup —
+          # f0ad/004o). Whole-suite retry up to 3x: a transient flake clears on a
+          # later attempt, while a real regression (consistent across all attempts,
+          # e.g. bead bur7) still fails the lane. The known-flaky tests are tracked
+          # for a robustness fix (f0ad/004o); per-test isolation (nextest) is not
+          # used because one of them needs in-suite state.
+          for attempt in 1 2 3; do
+            echo "::group::live test attempt $attempt"
+            if cargo test --workspace --exclude oracledb-pyshim -- --include-ignored --test-threads=1; then
+              echo "::endgroup::"; echo "live tests passed on attempt $attempt"; exit 0
+            fi
+            echo "::endgroup::"; echo "attempt $attempt failed; retrying the suite"
+          done
+          echo "live tests failed after 3 attempts" >&2
+          exit 1
