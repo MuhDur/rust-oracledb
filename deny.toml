@@ -106,7 +106,7 @@ allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"]
 multiple-versions = "warn"
 # The publishable crates now carry lockstep version requirements on their
 # intra-workspace path dependencies (`oracledb -> oracledb-protocol = { path,
-# version = "1.0.0-rc.1" }`), enforced by the inter-crate pin guard in
+# version = "0.5.0" }`), enforced by the inter-crate pin guard in
 # scripts/release_preflight.sh. `allow-wildcard-paths` still covers the remaining
 # pure path deps of `publish = false` crates (the pyshim harness); we keep
 # wildcards as a warning to surface any future un-versioned publishable path dep.

@@ -8,7 +8,7 @@ families — `query`, `execute`, `execute_many`, `register_query` — plus their
 `#[deprecated(since = "0.3.0")]`.
 
 > **One release to migrate.** The deprecated shims ship in **0.3.0** and are
-> **removed before `1.0.0-rc.1`** (road-to-1.0 task W4-T1). They delegate to the
+> **removed in `0.5.0`** (road-to-1.0 task W4-T1). They delegate to the
 > exact same private operation core as the new families, so 0.3.0 is purely
 > additive for behavior — your 0.2.x calls keep working (with a deprecation
 > warning) until you migrate. Code that must compile clean on 0.3.0 should move

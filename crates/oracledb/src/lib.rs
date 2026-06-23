@@ -8137,7 +8137,7 @@ mod tests {
     fn migration_guide_covers_every_deprecated_method() {
         // No orphan removal: every old execute/query name that carried a
         // `#[deprecated(since = "0.3.0")]` shim and is now removed in
-        // 1.0.0-rc.1 must still appear in the user-facing 0.3.0 migration
+        // 0.5.0 must still appear in the user-facing 0.3.0 migration
         // guide, so an external consumer can always find the replacement.
         // These are exactly the names listed in API_DESIGN.md §8.
         let guide = include_str!("../../../docs/MIGRATING-0.3.md");
@@ -8182,10 +8182,10 @@ mod tests {
             );
         }
         // The one-release removal window must be stated so external users know
-        // the shims disappear before 1.0.0-rc.1.
+        // the shims disappear in 0.5.0.
         assert!(
-            guide.contains("1.0.0-rc.1"),
-            "MIGRATING-0.3.md must state the shims are removed before 1.0.0-rc.1"
+            guide.contains("0.5.0"),
+            "MIGRATING-0.3.md must state the shims are removed in 0.5.0"
         );
     }
 

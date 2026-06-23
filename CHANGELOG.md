@@ -5,11 +5,17 @@ is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows the SemVer contract described in
 [`docs/adr/0002-semver-contract.md`](docs/adr/0002-semver-contract.md).
 
-## [1.0.0-rc.1] - 2026-06-22
+## [0.5.0] - 2026-06-23
 
-First release candidate for 1.0. This cut freezes the intended 1.x public API:
-the pre-1.0 deprecation shims are removed and the remaining accidental internals
-are made crate-private, so the surface is exactly the intended contract. See
+Brings the workspace to the intended 1.x public-API contract and ships it as a
+published `0.x` release for real-world validation ahead of `1.0`. The pre-1.0
+deprecation shims are removed and the remaining accidental internals are made
+crate-private, so the surface is exactly the intended 1.0 contract. This is the
+code that was internally frozen and exhaustively qualified as `1.0.0-rc.1`
+(release-qualification suite green; python-oracledb thin differential 2578 = 2578,
+0 regressions) plus three further driver-correctness fixes found afterward
+(below); it is released as `0.5.0` rather than `1.0.0` so the 1.0 stability
+promise is made only after downstream production validation. See
 [`docs/MIGRATING-0.3.md`](docs/MIGRATING-0.3.md) for the upgrade path.
 
 ### Removed (BREAKING)
@@ -45,6 +51,27 @@ are made crate-private, so the surface is exactly the intended contract. See
 
 ### Fixed
 
+- **Borrowed LOB-prefetch request/response pairing** (`for_each_row_ref` over
+  CLOB/NCLOB/BLOB): the borrowed paging loop registered the cursor for LOB
+  prefetch but then sent a plain FETCH while parsing the response as a
+  define-fetch (or vice versa), so a multi-batch borrowed fetch over a LOB column
+  could drop the `size` / `chunk_size` fields and desynchronize. The request and
+  the response decode are now paired on the same per-cursor LOB-prefetch state
+  (bead rust-oracledb-bur7).
+- **CLOB/BLOB refetched as LONG/LONG RAW** (`unknown TTC message type 129`): a
+  cached query cursor re-executed after a column's type changed from
+  CHAR/VARCHAR/RAW to CLOB/BLOB is streamed by the server in LONG/LONG RAW form
+  (`adjust_refetch_metadata`), which carries the LONG status trailer
+  (null-indicator + return code) after each value. The execute parse path did not
+  consume that trailer, so the next message byte was mis-framed and the connection
+  desynchronized. The parser now consumes the trailer whenever a column is folded
+  to LONG/LONG RAW (bead rust-oracledb-f0ad).
+- **Stranded speculative fetch no longer wedges the connection**: issuing a
+  low-level `fetch_rows_request` and then abandoning it (without consuming the
+  paired response) left the connection in an unrecoverable in-flight state where
+  every subsequent operation errored. The next operation now breaks + drains the
+  stranded page and reclaims the wire, exactly as it already did for a dropped
+  fetch future (bead rust-oracledb-004o).
 - **Pool close race**: a `force`-close racing an in-flight connection open
   failure or an unhealthy ping no longer requeues the associated waiter after
   the pool has begun closing. Previously this could leave a closed pool with a
@@ -160,6 +187,24 @@ are made crate-private, so the surface is exactly the intended contract. See
   `Ready` boundary) and the async pool lifecycle (W3-E4: no missed wakeup, FIFO
   fairness, no double-hand-out, force-close drains all waiters). Test-only; no
   public API change.
+
+### Performance
+
+- Borrowed `for_each_row_ref` paging snapshots only the last row of each page as
+  the next page's duplicate-column seed, instead of materializing every row to
+  owned values — preserving the zero-copy fast path across page boundaries.
+- Removed a per-cell allocation on the text-bind encode path and a per-page deep
+  clone of column metadata.
+
+### Internal
+
+- The driver crate was de-monolithized (`lib.rs` and the arrow/pool modules split
+  into focused submodules: recovery state machine, connect-string parser, pool
+  acquire/engine, arrow builders/schema/direct-path, request builders, row
+  facades). API-preserving: the public surface is byte-identical to the API
+  ledger's frozen `keep` set (verified by the cargo-public-api baseline).
+- `asupersync` is pinned to `=0.3.4`; GitHub Actions are SHA-pinned and emit build
+  provenance attestations.
 
 ## [0.3.0] — 2026-06-21
 

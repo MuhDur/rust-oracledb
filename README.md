@@ -406,7 +406,7 @@ cargo add oracledb
 
 ```toml
 [dependencies]
-oracledb = "0.2"
+oracledb = "0.5"
 # optional features: arrow, chrono, uuid, serde_json, rust_decimal, tracing, soda, experimental
 ```
 
