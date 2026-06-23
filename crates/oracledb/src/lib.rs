@@ -3767,8 +3767,18 @@ impl Connection {
         // If a prior fetch future was cancelled mid-read, break + drain the
         // stranded call before issuing this fetch (Scope-based cancel-on-drop).
         self.ensure_clean_before_request().await?;
+        let columns = self
+            .cursor_columns
+            .get(&cursor_id)
+            .cloned()
+            .unwrap_or_else(|| known_columns.to_vec());
+        let lob_prefetch = self.lob_prefetch_cursors.contains(&cursor_id);
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
+        let payload = if lob_prefetch {
+            build_define_fetch_payload_with_seq(cursor_id, arraysize, seq_num, &columns)?
+        } else {
+            build_fetch_payload_with_seq(cursor_id, arraysize, seq_num)
+        };
         trace_query_bytes("FETCH payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         // Read under a cancel-on-drop guard: if THIS fetch future is dropped
@@ -3780,13 +3790,7 @@ impl Connection {
             fetch_profile::add_read(time::wall_now().duration_since(start));
         }
         trace_query_bytes("FETCH response", &response);
-        let columns = self
-            .cursor_columns
-            .get(&cursor_id)
-            .cloned()
-            .unwrap_or_else(|| known_columns.to_vec());
         let decode_start = profile.then(time::wall_now);
-        let lob_prefetch = self.lob_prefetch_cursors.contains(&cursor_id);
         let parsed = if lob_prefetch {
             parse_define_fetch_response_with_context_and_limits(
                 &response,
@@ -3833,8 +3837,18 @@ impl Connection {
     ) -> Result<BorrowedFetchResult> {
         observe_cancellation_between_round_trips(cx)?;
         self.ensure_clean_before_request().await?;
+        let columns = self
+            .cursor_columns
+            .get(&cursor_id)
+            .cloned()
+            .unwrap_or_default();
+        let lob_prefetch = self.lob_prefetch_cursors.contains(&cursor_id);
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
+        let payload = if lob_prefetch {
+            build_define_fetch_payload_with_seq(cursor_id, arraysize, seq_num, &columns)?
+        } else {
+            build_fetch_payload_with_seq(cursor_id, arraysize, seq_num)
+        };
         trace_query_bytes("FETCH payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let profile = fetch_profile::enabled();
@@ -3844,13 +3858,8 @@ impl Connection {
             fetch_profile::add_read(time::wall_now().duration_since(start));
         }
         trace_query_bytes("FETCH response", &response);
-        let columns = self
-            .cursor_columns
-            .get(&cursor_id)
-            .cloned()
-            .unwrap_or_default();
         let decode_start = profile.then(time::wall_now);
-        let parsed = if self.lob_prefetch_cursors.contains(&cursor_id) {
+        let parsed = if lob_prefetch {
             parse_define_fetch_response_borrowed_with_limits(
                 &response,
                 self.capabilities,
@@ -3911,8 +3920,18 @@ impl Connection {
         // A request must start from a clean boundary: if a prior cancelled op
         // left a drain pending, break + drain it first.
         self.ensure_clean_before_request().await?;
+        let columns = self
+            .cursor_columns
+            .get(&cursor_id)
+            .cloned()
+            .unwrap_or_default();
+        let lob_prefetch = self.lob_prefetch_cursors.contains(&cursor_id);
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let payload = build_fetch_payload_with_seq(cursor_id, arraysize, seq_num);
+        let payload = if lob_prefetch {
+            build_define_fetch_payload_with_seq(cursor_id, arraysize, seq_num, &columns)?
+        } else {
+            build_fetch_payload_with_seq(cursor_id, arraysize, seq_num)
+        };
         trace_query_bytes("FETCH payload (prefetch)", &payload);
         self.core.recovery.begin_operation()?;
         match self.core.send_data_packet(cx, &payload, self.sdu).await {
@@ -4036,6 +4055,9 @@ impl Connection {
             )
             .await?;
         let cursor_id = first.cursor_id;
+        if cursor_id != 0 && columns_have_lob_prefetch_fields(&first.columns) {
+            self.lob_prefetch_cursors.insert(cursor_id);
+        }
 
         // Emit the first (owned) batch's rows as borrowed refs over owned values.
         // The first execute round trip already materialized them; surfacing them
