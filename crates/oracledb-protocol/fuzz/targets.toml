@@ -304,3 +304,18 @@ malloc_limit_mb = 2048
 lane = "ci-smoke"
 iterations = 500
 max_total_time_seconds = 5
+
+[[targets]]
+name = "alter_session"
+owner = "protocol/sql"
+parser_entry = "crates/oracledb-protocol/src/sql.rs:706 parse_alter_session_value"
+risk_tier = "required"
+corpus_dir = "corpus/alter_session"
+dictionary = ""
+max_input_bytes = 1_000_000
+timeout_seconds = 10
+rss_limit_mb = 2048
+malloc_limit_mb = 2048
+lane = "ci-smoke"
+iterations = 500
+max_total_time_seconds = 5
