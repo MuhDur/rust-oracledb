@@ -157,8 +157,9 @@ left alone. See [Optimization history](#optimization-history).
 
 The two operations where the Rust path was materially slower than python-oracledb
 thin — `select_one_row` and `read_clob` — were both profiled and optimized. Each
-change is behaviour-preserving (the full reference suite stays green: 2236/2236)
-and was proved with a before/after criterion delta on the same container.
+change was behaviour-preserving in the historical benchmark run (the then-current
+reference suite stayed green: 2236/2236) and was proved with a before/after
+criterion delta on the same container.
 All deltas below are from `cargo bench -p oracledb --bench thin_driver` against
 the local Oracle container; the host was shared and busy, so sub-200 us numbers
 carry the usual jitter and are reported with their criterion confidence interval.

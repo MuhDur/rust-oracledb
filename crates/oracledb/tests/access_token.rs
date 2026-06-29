@@ -11,26 +11,37 @@
 //!   PYO_TEST_MAIN_USER=pythontest PYO_TEST_MAIN_PASSWORD=pythontest \
 //!   cargo test -p oracledb --test access_token -- --ignored --nocapture
 use oracledb::protocol::ClientIdentity;
-use oracledb::{AccessToken, BlockingConnection, ConnectOptions, Error};
+use oracledb::{
+    AccessToken, AuthModeKind, AuthModeSupport, BlockingConnection, ConnectOptions, Error,
+};
 
-const SECRET: &str = "eyJ-this-is-a-fake-jwt-SECRET-value.signature";
-const PASSWORD_SECRET: &str = "plain-password-SECRET-value";
-const WALLET_SECRET: &str = "wallet-password-SECRET-value";
+const OPAQUE_AUTH_VALUE: &str = "opaque-redaction-value";
+const LOGIN_REDACTION_VALUE: &str = "login-redaction-value";
+const WALLET_REDACTION_VALUE: &str = "wallet-redaction-value";
+const SAMPLE_WALLET_PATH: &str = "/secure/wallet/redaction-location";
+const SAMPLE_CERT_DN: &str = "CN=redaction-db";
+const SAMPLE_KERBEROS_PRINCIPAL: &str = "service/redaction-host@EXAMPLE.COM";
+const SAMPLE_KERBEROS_KEYTAB: &str = "/secure/keytabs/redaction.keytab";
+const SAMPLE_RADIUS_CHALLENGE: &str = "redaction-radius-challenge";
 
 #[test]
 fn access_token_is_redacted_in_debug() {
-    let tok = AccessToken::new(SECRET);
+    let tok = AccessToken::new(OPAQUE_AUTH_VALUE);
     let shown = format!("{tok:?}");
-    assert!(!shown.contains(SECRET), "token must never appear in Debug");
+    assert!(
+        !shown.contains(OPAQUE_AUTH_VALUE),
+        "token must never appear in Debug"
+    );
     assert!(shown.contains("redacted"));
 
     // ...and it stays redacted when nested inside ConnectOptions, so logging
     // the options can't leak the credential.
     let id = ClientIdentity::new("a", "h", "u", "t", "r").expect("test identity should be valid");
-    let opts = ConnectOptions::new("localhost/FREEPDB1", "scott", "", id).with_access_token(SECRET);
+    let opts = ConnectOptions::new("localhost/FREEPDB1", "scott", "", id)
+        .with_access_token(OPAQUE_AUTH_VALUE);
     let shown = format!("{opts:?}");
     assert!(
-        !shown.contains(SECRET),
+        !shown.contains(OPAQUE_AUTH_VALUE),
         "ConnectOptions Debug must not leak the access token"
     );
     assert!(opts.access_token().is_some());
@@ -39,23 +50,32 @@ fn access_token_is_redacted_in_debug() {
 #[test]
 fn connect_options_debug_redacts_passwords() {
     let id = ClientIdentity::new("a", "h", "u", "t", "r").expect("test identity should be valid");
-    let opts = ConnectOptions::new("localhost/FREEPDB1", "scott", PASSWORD_SECRET, id)
-        .with_wallet_location("/secure/wallet")
-        .with_wallet_password(WALLET_SECRET)
-        .with_access_token(SECRET);
+    let opts = ConnectOptions::new("localhost/FREEPDB1", "scott", LOGIN_REDACTION_VALUE, id)
+        .with_wallet_location(SAMPLE_WALLET_PATH)
+        .with_wallet_password(WALLET_REDACTION_VALUE)
+        .with_ssl_server_cert_dn(SAMPLE_CERT_DN)
+        .with_access_token(OPAQUE_AUTH_VALUE);
 
     let shown = format!("{opts:?}");
     assert!(
-        !shown.contains(PASSWORD_SECRET),
+        !shown.contains(LOGIN_REDACTION_VALUE),
         "ConnectOptions Debug must not leak the login password"
     );
     assert!(
-        !shown.contains(WALLET_SECRET),
+        !shown.contains(WALLET_REDACTION_VALUE),
         "ConnectOptions Debug must not leak the wallet password"
     );
     assert!(
-        !shown.contains(SECRET),
+        !shown.contains(OPAQUE_AUTH_VALUE),
         "ConnectOptions Debug must not leak the access token"
+    );
+    assert!(
+        !shown.contains(SAMPLE_WALLET_PATH),
+        "ConnectOptions Debug must not leak the wallet path"
+    );
+    assert!(
+        !shown.contains(SAMPLE_CERT_DN),
+        "ConnectOptions Debug must not leak certificate identity material"
     );
     assert!(
         shown.contains("***redacted***"),
@@ -65,6 +85,44 @@ fn connect_options_debug_redacts_passwords() {
         shown.contains("password") && shown.contains("wallet_password"),
         "Debug should keep field names for diagnostics"
     );
+}
+
+#[test]
+fn unsupported_auth_modes_are_typed_and_redacted() {
+    let id = ClientIdentity::new("a", "h", "u", "t", "r").expect("test identity should be valid");
+    let external = ConnectOptions::external_auth("localhost/FREEPDB1", id.clone());
+    assert_eq!(external.auth_mode().kind(), AuthModeKind::External);
+    assert_eq!(
+        external.auth_capabilities().support(AuthModeKind::External),
+        AuthModeSupport::UnsupportedInThin
+    );
+
+    let err = BlockingConnection::connect(external)
+        .expect_err("external auth is a typed unsupported mode in this thin build");
+    assert!(
+        matches!(err, Error::UnsupportedAuthMode(_)),
+        "expected UnsupportedAuthMode(External), got: {err:?}"
+    );
+    let Error::UnsupportedAuthMode(reason) = err else {
+        return;
+    };
+    assert!(matches!(reason.mode(), AuthModeKind::External));
+
+    let kerberos = ConnectOptions::kerberos_auth(
+        "localhost/FREEPDB1",
+        SAMPLE_KERBEROS_PRINCIPAL,
+        SAMPLE_KERBEROS_KEYTAB,
+        id.clone(),
+    );
+    let shown = format!("{kerberos:?}");
+    assert!(!shown.contains(SAMPLE_KERBEROS_PRINCIPAL));
+    assert!(!shown.contains(SAMPLE_KERBEROS_KEYTAB));
+    assert_eq!(kerberos.auth_mode().kind(), AuthModeKind::Kerberos);
+
+    let radius = ConnectOptions::radius_auth("localhost/FREEPDB1", SAMPLE_RADIUS_CHALLENGE, id);
+    let shown = format!("{radius:?}");
+    assert!(!shown.contains(SAMPLE_RADIUS_CHALLENGE));
+    assert_eq!(radius.auth_mode().kind(), AuthModeKind::Radius);
 }
 
 #[test]
@@ -81,7 +139,7 @@ fn access_token_over_plain_tcp_is_typed_error() {
     // bytes leave the client — with the precise, machine-classifiable variant,
     // not a generic connection failure (and never echoing the token).
     let err = BlockingConnection::connect(
-        ConnectOptions::new(&cs, &user, "", id).with_access_token(SECRET),
+        ConnectOptions::new(&cs, &user, "", id).with_access_token(OPAQUE_AUTH_VALUE),
     )
     .expect_err("token auth over plain TCP must fail");
 
@@ -90,7 +148,8 @@ fn access_token_over_plain_tcp_is_typed_error() {
         "expected AccessTokenRequiresTcps, got: {err:?}"
     );
     assert!(
-        !format!("{err}").contains(SECRET) && !format!("{err:?}").contains(SECRET),
+        !format!("{err}").contains(OPAQUE_AUTH_VALUE)
+            && !format!("{err:?}").contains(OPAQUE_AUTH_VALUE),
         "the token must not appear in the error"
     );
 }

@@ -1560,6 +1560,8 @@ pub oracledb_protocol::tls::wallet::WalletError::NoCertificates
 pub oracledb_protocol::tls::wallet::WalletError::Pem(alloc::string::String)
 pub oracledb_protocol::tls::wallet::WalletError::Sso(alloc::string::String)
 pub oracledb_protocol::tls::wallet::WalletError::SsoNotEnabled
+pub oracledb_protocol::tls::wallet::WalletError::UnsupportedFormat
+pub oracledb_protocol::tls::wallet::WalletError::UnsupportedFormat::format: &'static str
 impl core::error::Error for oracledb_protocol::tls::wallet::WalletError
 pub fn oracledb_protocol::tls::wallet::WalletError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
 impl core::fmt::Debug for oracledb_protocol::tls::wallet::WalletError

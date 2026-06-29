@@ -15,7 +15,7 @@
 //!
 //! # Caller-set identity (the differentiator)
 //!
-//! Every connection carries a [`ClientIdentity`](protocol::ClientIdentity) the
+//! Every connection carries a [`ClientIdentity`] the
 //! caller supplies: `program`, `machine`, `osuser`, and `terminal`. The
 //! database stores those exact values in `v$session`. An OCI client reports the
 //! host process and OS user it happens to run as; here the application decides.
@@ -335,8 +335,8 @@ pub use oracledb_derive::FromRow;
 /// The everyday types and traits, for a single glob import.
 ///
 /// A typical program needs a connection type, [`ConnectOptions`], the
-/// [`ClientIdentity`](protocol::ClientIdentity) the database records, the value
-/// types it binds and reads back ([`BindValue`](protocol::thin::BindValue) /
+/// [`ClientIdentity`] the database records, the value
+/// types it binds and reads back ([`BindValue`] /
 /// [`QueryValue`](protocol::thin::QueryValue)), and the typed-row helpers
 /// ([`FromRow`], [`QueryResultExt`], [`params!`]). Those live across two
 /// namespaces (the driver root and the [`protocol`] re-export), so the prelude
@@ -907,6 +907,7 @@ pub enum ErrorKind {
     Conversion,
     Pool,
     ResourceLimit,
+    Authentication,
 }
 
 /// Whether the connection that produced an error can be reused.
@@ -973,6 +974,11 @@ pub enum Error {
     /// DN-match failure).
     #[error("TLS/TCPS error: {0}")]
     Tls(String),
+    /// A wallet-location or wallet-format error. Kept distinct from generic
+    /// TLS failures so callers can classify unsupported wallet formats and
+    /// operator setup issues without parsing strings.
+    #[error("wallet error: {0}")]
+    Wallet(#[from] oracledb_protocol::tls::wallet::WalletError),
     /// Access-token authentication was requested over a non-TLS transport.
     /// A database access token must only travel over TCPS so it is not exposed
     /// in clear text (reference protocol.pyx `ERR_ACCESS_TOKEN_REQUIRES_TCPS` /
@@ -980,6 +986,12 @@ pub enum Error {
     /// never included in this error.
     #[error("DPY-3001: access token authentication requires a TLS (TCPS) connection")]
     AccessTokenRequiresTcps,
+    /// The caller selected a known authentication mode that this thin build
+    /// does not implement. The mode is structured so diagnostic tools can
+    /// distinguish capability gaps from bad credentials, listener failures, or
+    /// TLS setup errors without parsing the display string.
+    #[error("{0}")]
+    UnsupportedAuthMode(UnsupportedAuthMode),
     /// A sessionless transaction client-API misuse (reference
     /// ERR_SESSIONLESS_* / DPY-3034/3035/3036). The payload is the DPY full
     /// code so the shim can raise the matching DatabaseError.
@@ -1087,17 +1099,20 @@ impl Error {
             Error::Io(_)
             | Error::ListenerRefused(_)
             | Error::ConnectionClosed(_)
-            | Error::Tls(_) => ErrorKind::Network,
+            | Error::Tls(_)
+            | Error::Wallet(_) => ErrorKind::Network,
             Error::CallTimeout(_) => ErrorKind::Timeout,
             Error::Cancelled => ErrorKind::Cancel,
             Error::Conversion(_) | Error::Bind(_) => ErrorKind::Conversion,
             #[cfg(feature = "arrow")]
             Error::ArrowConversion(_) => ErrorKind::Conversion,
+            Error::AccessTokenRequiresTcps | Error::UnsupportedAuthMode(_) => {
+                ErrorKind::Authentication
+            }
             Error::RedirectUnsupported
             | Error::Runtime(_)
             | Error::FastAuthRequired
             | Error::MissingSessionField(_)
-            | Error::AccessTokenRequiresTcps
             | Error::SessionlessTransaction(_)
             | Error::UnknownTransactionState(_) => ErrorKind::Protocol,
             Error::NoRows | Error::TooManyRows => ErrorKind::Database,
@@ -1346,6 +1361,151 @@ impl std::fmt::Debug for AccessToken {
     }
 }
 
+/// Stable classifier for the thin driver's authentication modes.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum AuthModeKind {
+    Password,
+    Proxy,
+    External,
+    IamToken,
+    Kerberos,
+    Radius,
+}
+
+impl std::fmt::Display for AuthModeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::Password => "password",
+            Self::Proxy => "proxy",
+            Self::External => "external",
+            Self::IamToken => "iam-token",
+            Self::Kerberos => "kerberos",
+            Self::Radius => "radius",
+        };
+        f.write_str(name)
+    }
+}
+
+/// Whether a known authentication mode is implemented by this thin driver.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum AuthModeSupport {
+    Supported,
+    UnsupportedInThin,
+}
+
+/// Queryable authentication capability metadata for this build.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct AuthCapabilities {
+    pub password: AuthModeSupport,
+    pub proxy: AuthModeSupport,
+    pub external: AuthModeSupport,
+    pub iam_token: AuthModeSupport,
+    pub kerberos: AuthModeSupport,
+    pub radius: AuthModeSupport,
+}
+
+impl AuthCapabilities {
+    /// Capabilities of the current pure-thin implementation.
+    pub const THIN: Self = Self {
+        password: AuthModeSupport::Supported,
+        proxy: AuthModeSupport::Supported,
+        external: AuthModeSupport::UnsupportedInThin,
+        iam_token: AuthModeSupport::Supported,
+        kerberos: AuthModeSupport::UnsupportedInThin,
+        radius: AuthModeSupport::UnsupportedInThin,
+    };
+
+    #[must_use]
+    pub fn support(self, mode: AuthModeKind) -> AuthModeSupport {
+        match mode {
+            AuthModeKind::Password => self.password,
+            AuthModeKind::Proxy => self.proxy,
+            AuthModeKind::External => self.external,
+            AuthModeKind::IamToken => self.iam_token,
+            AuthModeKind::Kerberos => self.kerberos,
+            AuthModeKind::Radius => self.radius,
+        }
+    }
+}
+
+/// A known authentication mode selected by the caller.
+#[derive(Clone, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum AuthMode {
+    Password,
+    Proxy,
+    External,
+    IamToken,
+    Kerberos {
+        principal: Option<String>,
+        keytab: Option<String>,
+    },
+    Radius {
+        challenge: Option<String>,
+    },
+}
+
+impl AuthMode {
+    #[must_use]
+    pub fn kind(&self) -> AuthModeKind {
+        match self {
+            Self::Password => AuthModeKind::Password,
+            Self::Proxy => AuthModeKind::Proxy,
+            Self::External => AuthModeKind::External,
+            Self::IamToken => AuthModeKind::IamToken,
+            Self::Kerberos { .. } => AuthModeKind::Kerberos,
+            Self::Radius { .. } => AuthModeKind::Radius,
+        }
+    }
+
+    fn unsupported_in_thin(&self) -> Option<UnsupportedAuthMode> {
+        let mode = self.kind();
+        (AuthCapabilities::THIN.support(mode) == AuthModeSupport::UnsupportedInThin)
+            .then_some(UnsupportedAuthMode { mode })
+    }
+}
+
+impl std::fmt::Debug for AuthMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn redacted(value: &Option<String>) -> Option<&'static str> {
+            value.as_ref().map(|_| REDACTED_SECRET)
+        }
+
+        match self {
+            Self::Password => f.write_str("Password"),
+            Self::Proxy => f.write_str("Proxy"),
+            Self::External => f.write_str("External"),
+            Self::IamToken => f.write_str("IamToken"),
+            Self::Kerberos { principal, keytab } => f
+                .debug_struct("Kerberos")
+                .field("principal", &redacted(principal))
+                .field("keytab", &redacted(keytab))
+                .finish(),
+            Self::Radius { challenge } => f
+                .debug_struct("Radius")
+                .field("challenge", &redacted(challenge))
+                .finish(),
+        }
+    }
+}
+
+/// Structured unsupported-authentication diagnostic.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("authentication mode {mode} is not supported by this thin build")]
+pub struct UnsupportedAuthMode {
+    mode: AuthModeKind,
+}
+
+impl UnsupportedAuthMode {
+    #[must_use]
+    pub fn mode(&self) -> AuthModeKind {
+        self.mode
+    }
+}
+
 /// Everything needed to open a connection: where to connect, who to
 /// authenticate as, and the [`ClientIdentity`] the database will record.
 ///
@@ -1369,6 +1529,9 @@ pub struct ConnectOptions {
     sdu: u16,
     /// Proxy user for `[proxy_user]` style connections, if any.
     proxy_user: Option<String>,
+    /// Authentication mode selected by the caller. Unsupported thin modes fail
+    /// before network I/O with [`Error::UnsupportedAuthMode`].
+    auth_mode: AuthMode,
     /// When set, `(SERVER=emon)` is injected into the connect descriptor's
     /// `CONNECT_DATA`. This routes the connection to the database EMON process
     /// used to push CQN notifications (reference `subscr.pyx` rewrites
@@ -1416,7 +1579,9 @@ pub struct ConnectOptions {
 
 impl std::fmt::Debug for ConnectOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let wallet_location = self.wallet_location.as_ref().map(|_| REDACTED_SECRET);
         let wallet_password = self.wallet_password.as_ref().map(|_| REDACTED_SECRET);
+        let server_cert_dn = self.ssl_server_cert_dn.as_ref().map(|_| REDACTED_SECRET);
         f.debug_struct("ConnectOptions")
             .field("connect_string", &self.connect_string)
             .field("user", &self.user)
@@ -1425,12 +1590,13 @@ impl std::fmt::Debug for ConnectOptions {
             .field("app_context", &self.app_context)
             .field("sdu", &self.sdu)
             .field("proxy_user", &self.proxy_user)
+            .field("auth_mode", &self.auth_mode)
             .field("server_type_emon", &self.server_type_emon)
-            .field("wallet_location", &self.wallet_location)
+            .field("wallet_location", &wallet_location)
             .field("wallet_password", &wallet_password)
             .field("edition", &self.edition)
             .field("ssl_server_dn_match", &self.ssl_server_dn_match)
-            .field("ssl_server_cert_dn", &self.ssl_server_cert_dn)
+            .field("ssl_server_cert_dn", &server_cert_dn)
             .field("use_sni", &self.use_sni)
             .field("access_token", &self.access_token)
             .field("statement_cache_size", &self.statement_cache_size)
@@ -1458,6 +1624,7 @@ impl ConnectOptions {
             app_context: Vec::new(),
             sdu: 8192,
             proxy_user: None,
+            auth_mode: AuthMode::Password,
             server_type_emon: false,
             wallet_location: None,
             wallet_password: None,
@@ -1469,6 +1636,48 @@ impl ConnectOptions {
             statement_cache_size: STATEMENT_CACHE_SIZE,
             protocol_limits: ProtocolLimits::DEFAULT,
         }
+    }
+
+    /// Create connect options that express passwordless external authentication
+    /// intent without caller-supplied dummy credentials. This thin build
+    /// currently reports the mode as [`Error::UnsupportedAuthMode`] before any
+    /// network I/O; use [`Self::auth_capabilities`] to inspect support.
+    pub fn external_auth(connect_string: impl Into<String>, identity: ClientIdentity) -> Self {
+        let mut options = Self::new(connect_string, "", "", identity);
+        options.auth_mode = AuthMode::External;
+        options
+    }
+
+    /// Create connect options for Kerberos intent. Real Kerberos/GSSAPI
+    /// exchange is not implemented in this thin build; principal and keytab are
+    /// carried only for structured diagnostics and are redacted from `Debug`.
+    pub fn kerberos_auth(
+        connect_string: impl Into<String>,
+        principal: impl Into<String>,
+        keytab: impl Into<String>,
+        identity: ClientIdentity,
+    ) -> Self {
+        let mut options = Self::new(connect_string, "", "", identity);
+        options.auth_mode = AuthMode::Kerberos {
+            principal: Some(principal.into()),
+            keytab: Some(keytab.into()),
+        };
+        options
+    }
+
+    /// Create connect options for RADIUS/native-MFA intent. Real challenge
+    /// exchange is not implemented in this thin build; the challenge hint is
+    /// carried only for structured diagnostics and is redacted from `Debug`.
+    pub fn radius_auth(
+        connect_string: impl Into<String>,
+        challenge: impl Into<String>,
+        identity: ClientIdentity,
+    ) -> Self {
+        let mut options = Self::new(connect_string, "", "", identity);
+        options.auth_mode = AuthMode::Radius {
+            challenge: Some(challenge.into()),
+        };
+        options
     }
 
     /// Set the thin-protocol resource limits. Invalid policies are rejected at
@@ -1503,6 +1712,52 @@ impl ConnectOptions {
     #[must_use]
     pub fn with_access_token(mut self, token: impl Into<String>) -> Self {
         self.access_token = Some(AccessToken::new(token));
+        self.auth_mode = AuthMode::IamToken;
+        self
+    }
+
+    /// Select passwordless external authentication intent on an existing
+    /// options value. This is useful for code that starts from a shared
+    /// `ConnectOptions::new` builder path; [`Self::external_auth`] avoids
+    /// requiring credentials in the first place.
+    #[must_use]
+    pub fn with_external_auth(mut self) -> Self {
+        self.auth_mode = AuthMode::External;
+        self.user.clear();
+        self.password.clear();
+        self
+    }
+
+    /// Select Kerberos authentication intent. Principal and keytab values are
+    /// redacted from every `Debug` representation and are not sent on the wire
+    /// because this thin build returns [`Error::UnsupportedAuthMode`] for the
+    /// mode before network I/O.
+    #[must_use]
+    pub fn with_kerberos_auth(
+        mut self,
+        principal: impl Into<String>,
+        keytab: impl Into<String>,
+    ) -> Self {
+        self.auth_mode = AuthMode::Kerberos {
+            principal: Some(principal.into()),
+            keytab: Some(keytab.into()),
+        };
+        self.user.clear();
+        self.password.clear();
+        self
+    }
+
+    /// Select RADIUS/native-MFA authentication intent. The challenge hint is
+    /// redacted from `Debug` and is not sent on the wire because this thin
+    /// build returns [`Error::UnsupportedAuthMode`] for the mode before network
+    /// I/O.
+    #[must_use]
+    pub fn with_radius_auth(mut self, challenge: impl Into<String>) -> Self {
+        self.auth_mode = AuthMode::Radius {
+            challenge: Some(challenge.into()),
+        };
+        self.user.clear();
+        self.password.clear();
         self
     }
 
@@ -1571,6 +1826,11 @@ impl ConnectOptions {
 
     /// Set the proxy user for `[proxy_user]` style authentication.
     pub fn with_proxy_user(mut self, proxy_user: Option<String>) -> Self {
+        if proxy_user.is_some() {
+            self.auth_mode = AuthMode::Proxy;
+        } else if matches!(self.auth_mode, AuthMode::Proxy) {
+            self.auth_mode = AuthMode::Password;
+        }
         self.proxy_user = proxy_user;
         self
     }
@@ -1610,6 +1870,14 @@ impl ConnectOptions {
 
     pub fn proxy_user(&self) -> Option<&str> {
         self.proxy_user.as_deref()
+    }
+
+    pub fn auth_mode(&self) -> &AuthMode {
+        &self.auth_mode
+    }
+
+    pub fn auth_capabilities(&self) -> AuthCapabilities {
+        AuthCapabilities::THIN
     }
 
     pub fn server_type_emon(&self) -> bool {
@@ -1868,6 +2136,9 @@ impl Connection {
     pub async fn connect(cx: &Cx, options: ConnectOptions) -> Result<Self> {
         observe_cancellation_between_round_trips(cx)?;
         let protocol_limits = options.protocol_limits.validate()?;
+        if let Some(unsupported) = options.auth_mode.unsupported_in_thin() {
+            return Err(Error::UnsupportedAuthMode(unsupported));
+        }
         let descriptor = EasyConnect::parse(&options.connect_string)?;
         // Connect span (feature-gated, zero-cost when off). Carries only the
         // server address / port / service — never the password.
@@ -3832,7 +4103,7 @@ impl Connection {
 
     /// Zero-copy companion to [`fetch_rows`](Self::fetch_rows): fetch one batch
     /// of rows from an open server cursor and return a
-    /// [`BorrowedFetchResult`](oracledb_protocol::thin::BorrowedFetchResult)
+    /// [`BorrowedFetchResult`]
     /// whose rows borrow the response buffer (no per-cell allocation for the
     /// common scalar case). Iterate the rows with
     /// [`BorrowedRowBatch::for_each_row_ref`](oracledb_protocol::thin::BorrowedRowBatch::for_each_row_ref).
@@ -4026,7 +4297,7 @@ impl Connection {
     }
 
     /// Execute `sql` and drive every fetched row through `callback` as a slice
-    /// of borrowed [`QueryValueRef`](oracledb_protocol::thin::QueryValueRef) —
+    /// of borrowed [`QueryValueRef`] —
     /// the zero-copy fetch fast path. Scalar cells (Text / Number / Raw /
     /// Boolean / Interval / DateTime) borrow the fetch buffer directly, so a
     /// Rust consumer iterating a wide many-row result pays ~0 allocations per

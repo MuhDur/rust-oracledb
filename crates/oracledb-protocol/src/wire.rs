@@ -414,7 +414,7 @@ pub trait BoundedReader {
 
     /// Validate a server-declared element `count` against the buffer: a run of
     /// `count` elements must carry at least `count * min_bytes_per_elem` bytes,
-    /// so a count whose minimum byte footprint exceeds [`remaining`] is a lie.
+    /// so a count whose minimum byte footprint exceeds [`Self::remaining`] is a lie.
     /// Returns the (unchanged) `count` when it fits, or a fail-closed
     /// [`ProtocolError::TtcDecode`] otherwise — never a panic, never an OOM.
     ///

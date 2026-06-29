@@ -137,7 +137,7 @@ fn parse_number_u64(text: &str) -> Option<u64> {
 /// scale. Rejects values with more than 38 digits and the special
 /// max-negative value (-1e126).
 /// Formats a Decimal128 (unscaled `i128` + `scale`) as a decimal string, the
-/// inverse of [`decimal128_from_number_text`]. Used when converting an Arrow
+/// inverse of `decimal128_from_number_text`. Used when converting an Arrow
 /// decimal cell back to a `decimal.Decimal` for the bind path.
 pub fn decimal128_to_string(unscaled: i128, scale: i8) -> String {
     if scale <= 0 {

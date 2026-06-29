@@ -254,8 +254,9 @@ fn check_convert_to_arrow(column: &ColumnMetadata, requested: &DataType) -> Resu
     }
 }
 
-/// Computes the Arrow schema produced by [`build_record_batch`] for the
-/// given fetch metadata and options.
+/// Computes the Arrow schema produced by
+/// [`build_record_batch`](crate::arrow::build_record_batch) for the given fetch
+/// metadata and options.
 pub fn arrow_schema_for_columns(
     columns: &[ColumnMetadata],
     options: &ArrowFetchOptions,

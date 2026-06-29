@@ -10,7 +10,7 @@
 //!
 //! The message-property / payload codecs are shared between all three so the
 //! wire encoding is byte-identical to python-oracledb (golden traces under
-//! `tests/golden/aq_*.txt`). Object payloads reuse [`super::dbobject`] and JSON
+//! `tests/golden/aq_*.txt`). Object payloads reuse the `dbobject` codec and JSON
 //! payloads reuse [`crate::oson`].
 
 use super::*;

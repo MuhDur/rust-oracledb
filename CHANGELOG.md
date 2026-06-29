@@ -5,6 +5,37 @@ is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows the SemVer contract described in
 [`docs/adr/0002-semver-contract.md`](docs/adr/0002-semver-contract.md).
 
+## [0.5.1] - 2026-06-29
+
+Patch release focused on downstream capability honesty for `oraclemcp` doctor
+checks and release-documentation truth. No breaking changes.
+
+### Added
+
+- Added a typed authentication capability surface: `AuthMode`,
+  `AuthModeKind`, `AuthModeSupport`, `AuthCapabilities`, and
+  `Error::UnsupportedAuthMode`. Password, proxy, and IAM/OAuth token auth remain
+  the supported thin modes; external/passwordless, Kerberos, and RADIUS/native
+  MFA are now expressible and fail before network I/O with a machine-classifiable
+  unsupported-mode error instead of requiring dummy credentials.
+- Added passwordless/unsupported auth constructors and builders on
+  `ConnectOptions`: `external_auth`, `kerberos_auth`, `radius_auth`,
+  `with_external_auth`, `with_kerberos_auth`, and `with_radius_auth`.
+- Added a typed wallet-format diagnostic for unsupported standalone
+  `ewallet.p12` wallets (`WalletError::UnsupportedFormat`), leaving encrypted
+  PEM and p12 backend implementation deferred.
+
+### Fixed
+
+- Redacted wallet paths, wallet passwords, server certificate DN material,
+  Kerberos principals/keytabs, RADIUS challenge hints, and access tokens from
+  formatted debug/error surfaces covered by the new release scope.
+- Updated public documentation to match current release evidence: 20 fuzz
+  targets and the current python-oracledb thin differential count
+  (2578 collected, 2462 passed, 116 skipped, 0 regressions).
+- Cleaned rustdoc/public-api warning sites so release public-API snapshots do
+  not emit avoidable broken/private/redundant link warnings.
+
 ## [0.5.0] - 2026-06-23
 
 Brings the workspace to the intended 1.x public-API contract and ships it as a

@@ -25,7 +25,7 @@ crates/oracledb-protocol/src/tls/dn.rs	15
 crates/oracledb-protocol/src/tls/pfx.rs	1
 crates/oracledb-protocol/src/tls/sni.rs	6
 crates/oracledb-protocol/src/tls/sso.rs	4
-crates/oracledb-protocol/src/tls/wallet.rs	5
+crates/oracledb-protocol/src/tls/wallet.rs	6
 crates/oracledb-protocol/src/vector.rs	14
 crates/oracledb-protocol/src/wire.rs	16
 crates/oracledb-protocol/tests/_numi128_decode_allocs.rs	0
@@ -60,7 +60,7 @@ crates/oracledb/src/soda/qbe.rs	23
 crates/oracledb/src/sql_convert.rs	28
 crates/oracledb/src/tls.rs	2
 crates/oracledb/src/transport.rs	11
-crates/oracledb/tests/access_token.rs	3
+crates/oracledb/tests/access_token.rs	4
 crates/oracledb/tests/arrow_columnar_alloc.rs	1
 crates/oracledb/tests/arrow_columnar_diff.rs	7
 crates/oracledb/tests/arrow_golden.rs	2

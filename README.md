@@ -363,7 +363,7 @@ Each row is a concrete differentiator, with the specific edge.
 | **Record/replay** | deterministic `.tns-cassette` capture + offline replay with no socket | no transport seam | reproduce a production wire bug from one file, no DB ([docs/RECORD_REPLAY.md](docs/RECORD_REPLAY.md)) |
 | **Observability** | feature-gated `tracing`/OpenTelemetry per-round-trip spans, GIL-free, digest-only (no secrets), zero-cost off | GIL-bound, app-wired | N connections trace in parallel; the dependency isn't compiled in when off ([docs/OBSERVABILITY.md](docs/OBSERVABILITY.md)) |
 | **Thin-mode SODA** (experimental) | SODA over the thin TTC protocol — 42 of Oracle's own SODA tests pass | raises `DPI-1050`; SODA is thick-only | the first pure-thin SODA in an Oracle driver ([docs/SODA.md](docs/SODA.md)) |
-| **Fail-closed decoder** | OOM-closed by construction (`BoundedReader`); 10 cargo-fuzz targets, billions of execs, 0 crashes | — | a hostile/buggy server cannot OOM or panic the client ([docs/FUZZING.md](docs/FUZZING.md)) |
+| **Fail-closed decoder** | OOM-closed by construction (`BoundedReader`); 20 cargo-fuzz targets, billions of execs, 0 crashes | — | a hostile/buggy server cannot OOM or panic the client ([docs/FUZZING.md](docs/FUZZING.md)) |
 | **Cancellation-correct fetch** | `cancel()` / scope cancel-on-drop sends a break and drains, leaving a clean connection | — | a cancelled or timed-out fetch never poisons a reused connection |
 
 ---
@@ -380,9 +380,10 @@ Every untrusted input path is **fail-closed**: the wire decoder, the TLS wallet
 readers, and the connect-string parser return a structured error on malformed or
 hostile input — never a panic, OOM, or stack overflow.
 
-The wire decoder is **coverage-guided fuzzed** with 10 cargo-fuzz targets — one
-per untrusted decode boundary (packet framing, query response, OSON, VECTOR,
-scalar codecs, server-error trailer, direct-path, AQ, CQN/subscription) plus the
+The wire decoder is **coverage-guided fuzzed** with 20 cargo-fuzz targets across
+the untrusted decode boundaries (packet framing, auth/accept/query/borrowed-query
+responses, OSON, VECTOR, scalar codecs, server-error trailer, direct-path, AQ,
+CQN/subscription, LOB, DbObject, OAC, sessionless TPC, wallet parsers) plus the
 connect-string parser. Bounded sessions log billions of executions under
 ASan/UBSan with overflow-checks and **zero crashes**. The entire
 OOM-from-wire-length class is **closed by construction** via the `BoundedReader`

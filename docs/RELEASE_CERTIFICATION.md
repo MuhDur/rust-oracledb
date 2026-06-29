@@ -1,5 +1,11 @@
 # rust-oracledb — Release Certification Scorecard
 
+> **Current release evidence:** this 2026-06-13 scorecard is a historical
+> conformance snapshot. The current release-qualification bundle supersedes it:
+> 2578 collected reference tests, 2462 passed, 116 skipped, 0 regressions /
+> missing tests (see `docs/qualification/1.0.0-rc.1/SUMMARY.md` and
+> `docs/PARITY_SKIPS.md`).
+
 **Date:** 2026-06-13 · **Reference pinned:** python-oracledb v4.0.1 (thin mode) ·
 **Subject:** rust-oracledb @ master `1fe571a` · **Database under test:** Oracle 23ai Free (gvenzl/oracle-free), local container.
 
@@ -20,11 +26,11 @@ conformance certification, not a "drop-in / production-ready / Oracle-certified"
 
 | Dimension | Result | Evidence |
 |---|---|---|
-| Differential vs reference | **2236 / 2236 baseline tests, 0 regressions** | `harness/run.sh diff` (regressions=0, missing=0); 72/72 in-scope modules |
+| Differential vs reference | **2578 collected: 2462 passed / 116 skipped, 0 regressions** | `docs/qualification/1.0.0-rc.1/SUMMARY.md`; `docs/PARITY_SKIPS.md` |
 | Oracle = the reference's OWN suite | python-oracledb v4.0.1 `tests/test_*.py` driven through a PyO3 shim that slots the Rust engine under the reference's public layer | `harness/shim_inject/` |
 | Green is REAL (not fabricated) | Adversarial 5-auditor audit: strace raw-socket evidence (server-computed values on the wire), dead-port offline-falsification (no fabrication path) | `docs/FAKE_PARITY_AUDIT.md` |
 | Wire-format fidelity | Byte-exact golden captures vs real client for DPL, pipelining, sessionless (TPC switch), dbobject pickle, OSON, vector | `crates/oracledb-protocol/tests/golden/` |
-| Fault tolerance (decoder) | cargo-fuzz, 7 targets, billions of execs under ASan/UBSan, **0 crashes**; 4 real DoS bugs (OOM × 3, panic × 1) found and fixed fail-closed | `docs/FUZZING.md`, `crates/oracledb-protocol/fuzz/` |
+| Fault tolerance (decoder) | cargo-fuzz, 20 targets under ASan/UBSan, **0 crashes** in the qualification logs; 4 real DoS bugs (OOM × 3, panic × 1) found and fixed fail-closed | `docs/FUZZING.md`, `crates/oracledb-protocol/fuzz/`, `docs/qualification/1.0.0-rc.1/logs/fuzz_*.log` |
 | Safety | `#![forbid(unsafe_code)]` in protocol + driver; one quarantined FFI module (Arrow C Data Interface) in the harness-only shim | `git grep forbid(unsafe_code)` |
 
 **Not run (honest):** the gauntlet's e-process invariants, Bayesian conformal LOWER-bound release

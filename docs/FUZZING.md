@@ -14,7 +14,7 @@ lockfile and the normal `cargo build --workspace` is unaffected.
 
 ## Targets
 
-Ten libFuzzer targets, one per untrusted decode/parse boundary. Most take
+Twenty libFuzzer targets cover the untrusted decode/parse boundaries. Most take
 `data: &[u8]`, guard the input size, and call the decoder asserting only that
 it returns a `Result` (an `Err` is a perfectly good outcome — a panic / OOM /
 hang is the bug). The connect-string target (#10) is **structure-aware**: it
@@ -33,8 +33,18 @@ deep is unreachable by byte-level mutation alone (see its row below).
 | 8 | `aq_response` | `fuzz_api::fuzz_aq_responses` | Advanced Queuing enqueue / dequeue / array response decoders (RAW / JSON / Object payloads) |
 | 9 | `subscr_response` | `fuzz_api::fuzz_subscr_responses` | Subscription (CQN / AQ-notification) subscribe-response + notification-stream decoders (OAC records, grouping notifications) |
 | 10 | `connect_string` | `fuzz_api::fuzz_connect_string` | TNS connect-descriptor / EZConnect-Plus parser (`net::connectstring::parse`) + in-memory tnsnames.ora lexer; **structure-aware** (nested-paren `Arbitrary` generator) |
+| 11 | `alter_session` | `thin::parse_alter_session_response` | ALTER SESSION response status and trailer handling |
+| 12 | `auth_response` | `thin::parse_auth_response` | FAST_AUTH response dictionaries, verifier fields, capabilities, and session data |
+| 13 | `accept_payload` | `thin::parse_accept_payload` | Listener ACCEPT payload framing and negotiated flags |
+| 14 | `dbobject_image` | `thin::decode_object_value` / DbObject image reader | DbObject/collection image lengths, prefixes, and value payloads |
+| 15 | `dbobject_scalars` | DbObject scalar decoders | Object attribute scalar conversion boundaries |
+| 16 | `lob_responses` | LOB response parsers | LOB read/write/trim/free/create response shapes |
+| 17 | `sessionless_tpc` | sessionless transaction/TPC parsers | Sessionless transaction piggybacks and TPC state responses |
+| 18 | `oac_record` | OAC record parser | Oracle access/control records used in notifications and auth-adjacent payloads |
+| 19 | `wallet_parsers` | wallet PEM/SSO parser entry points | Wallet container parsing and typed fail-closed diagnostics |
+| 20 | `borrowed_query_response` | borrowed query/define response parsers | Zero-copy row/LOB decode paths and borrowed lifetime-safe parsing |
 
-Targets 5, 6, 8, 9, and 10 reach `pub(crate)` (or `#[cfg(fuzzing)] pub`)
+Several targets reach `pub(crate)` (or `#[cfg(fuzzing)] pub`)
 functions through a tiny, **`#[cfg(fuzzing)]`-only** shim module
 `oracledb_protocol::fuzz_api` (see `crates/oracledb-protocol/src/lib.rs`).
 The shim is compiled only under `--cfg fuzzing` (which `cargo-fuzz` sets
@@ -262,9 +272,10 @@ the out-bind bound to a raw `Vec::with_capacity(count)` makes the test attempt a
 
 ## Clean-run evidence
 
-After all four fixes, each target was re-run for a bounded 120 s libFuzzer
-session (`-max_total_time=120 -rss_limit_mb=2048 -timeout=10`, ASan + UBSan +
-overflow-checks). **Zero surviving crashes** across all seven targets:
+After the original four DoS fixes, each then-existing target was re-run for a
+bounded 120 s libFuzzer session (`-max_total_time=120 -rss_limit_mb=2048
+-timeout=10`, ASan + UBSan + overflow-checks). This historical run covered the
+first seven targets and had **zero surviving crashes**:
 
 | Target | Executions (120 s) | exec/s | Coverage (edges / features) | Crashes |
 |--------|-------------------:|-------:|----------------------------|:-------:|

@@ -141,11 +141,16 @@ the `oracledb` crate builds the rustls `ClientConfig` and the custom verifier.
 | `ewallet.pem` (PEM trust anchors; optional client chain + unencrypted PKCS#8/PKCS#1/SEC1 key for mTLS) | **Fully supported.** | `crates/oracledb-protocol/src/tls/wallet.rs:139-204` |
 | Raw PEM CA bundles (system roots) | Supported for the no-wallet path. | `crates/oracledb-protocol/src/tls/wallet.rs:210-215` |
 | `cwallet.sso` (SSO auto-login wallet, PKCS#12 container) | **Experimental** — only behind `--features experimental`. With the feature off, `parse_cwallet_sso` returns `WalletError::SsoNotEnabled` (a clear typed error telling the operator to rebuild or convert to `ewallet.pem`) — **fail closed**, never a silent skip. | reader gated `crates/oracledb-protocol/src/tls/sso.rs:200-213`; fail-closed wiring `crates/oracledb/src/tls.rs:354-372`; not a stable 1.0 contract (see the "Documented But Not Matrix Profiles" table above) |
-| Encrypted `ewallet.pem` private key | **Not supported** — detected and rejected with a clear message (`orapki … -auto_login` to produce an auto-login PEM, or use `cwallet.sso`), rather than silently degrading to verify-only. | `crates/oracledb-protocol/src/tls/wallet.rs:174-201` |
+| Encrypted `ewallet.pem` private key | **Not supported in 0.5.1** — detected and rejected with `WalletError::Pem` and a clear operator message (`orapki ... -auto_login` to produce an unencrypted PEM, or use `cwallet.sso`) rather than silently degrading to verify-only. The wallet password option is accepted for API symmetry but does not decrypt encrypted PKCS#8 yet. | `crates/oracledb-protocol/src/tls/wallet.rs` |
+| `ewallet.p12` standalone PKCS#12 wallet | **Not supported in 0.5.1** — recognized as an unsupported wallet format and returned as a typed `WalletError::UnsupportedFormat { format: "ewallet.p12" }`. Convert to `ewallet.pem` or use experimental `cwallet.sso`; decrypt/standalone p12 support is deferred. | `crates/oracledb/src/tls.rs`; `crates/oracledb-protocol/src/tls/wallet.rs` |
 
 **Wallet resolution precedence:** explicit `wallet_location` (the literal `SYSTEM`
 means "no wallet, use system roots"), then `TNS_ADMIN`
 (`crates/oracledb-protocol/src/tls/wallet.rs:94-108`).
+Formatted wallet diagnostics redact wallet paths and wallet passwords. `ConnectOptions`
+`Debug` redacts `wallet_location`, `wallet_password`, access tokens, and server
+certificate DN material; `WalletError` display/debug messages do not print the
+filesystem path stored in the error.
 
 > Native Network Encryption / Data Integrity (the non-TLS Oracle NNE transport
 > encryption) is **not** supported and is handled in the auth section below
@@ -197,17 +202,17 @@ silently falls back to a weaker or no-auth mode.
 | Unknown / unsupported password verifier type | `ProtocolError::UnsupportedVerifier { verifier_type }` — the verifier `match` has no default/fallback arm. | `crates/oracledb-protocol/src/crypto.rs:54-58`; variant `lib.rs:74-75` |
 | Native Network Encryption / Data Integrity (NNE) | If the server requires NNE, connect returns `ProtocolError::UnsupportedFeature("Native Network Encryption and Data Integrity")`. The client also advertises `TNS_NSI_DISABLE_NA`. | `crates/oracledb-protocol/src/thin/connect.rs:24-25,44-48` |
 | OCI IAM request-signing (instance/resource principal; `AUTH_HEADER`/`AUTH_SIGNATURE`) | **Not implemented.** Only a pre-supplied bearer token string is accepted; the driver does not mint or sign IAM tokens. Tracked as bead `rust-oracledb-cco` (open). | confirmed absent (no `sign`/instance-principal path); bead `rust-oracledb-cco` |
-| Kerberos | **Not implemented.** No keytab/principal/GSSAPI handling exists in the codebase. Tracked as bead `rust-oracledb-qm4` (open). | absent in `crates/oracledb-protocol/src/thin/auth.rs` and the driver auth surface; bead `rust-oracledb-qm4` |
-| RADIUS / native MFA (challenge-response) | **Not implemented.** Tracked as bead `rust-oracledb-qm4` (open). | absent; bead `rust-oracledb-qm4` |
-| External / OS / passwordless auth | **Not implemented.** Only the `LOGON`/`WITH_PASSWORD`/`CHANGE_PASSWORD` auth modes exist; no external/SYSDBA/SYSOPER mode constants. Tracked as bead `rust-oracledb-o0b`. | auth-mode constants `crates/oracledb-protocol/src/thin/constants.rs:190-192`; bead `rust-oracledb-o0b` |
+| Kerberos | **Selectable but not implemented.** `ConnectOptions::kerberos_auth` / `with_kerberos_auth` express intent without sending dummy credentials, redact principal/keytab in `Debug`, and return `Error::UnsupportedAuthMode` before network I/O. Real GSSAPI/keytab exchange is deferred. | `AuthMode::Kerberos`, `AuthCapabilities::THIN`, `Error::UnsupportedAuthMode` in `crates/oracledb/src/lib.rs`; bead `rust-oracledb-qm4` |
+| RADIUS / native MFA (challenge-response) | **Selectable but not implemented.** `ConnectOptions::radius_auth` / `with_radius_auth` express intent, redact the challenge hint in `Debug`, and return `Error::UnsupportedAuthMode` before network I/O. Real RADIUS/MFA exchange is deferred. | `AuthMode::Radius`, `AuthCapabilities::THIN`, `Error::UnsupportedAuthMode` in `crates/oracledb/src/lib.rs`; bead `rust-oracledb-qm4` |
+| External / OS / passwordless auth | **Selectable but not implemented.** `ConnectOptions::external_auth` / `with_external_auth` express passwordless intent without caller-supplied dummy username/password and return `Error::UnsupportedAuthMode` before network I/O. | `AuthMode::External`, `AuthCapabilities::THIN`, `Error::UnsupportedAuthMode` in `crates/oracledb/src/lib.rs`; bead `rust-oracledb-o0b` |
 
 **Fail-closed guarantee (verified):** mode selection is driven solely by the
-inputs (a token is used iff `access_token` is set — `crates/oracledb/src/lib.rs:3528`);
-there is no path that downgrades an unsupported request to a weaker one. Supporting
-typed errors: missing verifier type → `Error::MissingSessionField` (`lib.rs:3574-3576`);
-fast-auth not negotiated → `Error::FastAuthRequired` (`lib.rs:3512-3513`);
-server-response MAC mismatch → `ProtocolError::InvalidServerResponse`
-(`crypto.rs:142-157`).
+inputs (`AuthMode` + access-token presence); there is no path that downgrades an
+unsupported request to a weaker one. Supporting typed errors:
+`Error::UnsupportedAuthMode` for known unsupported modes, missing verifier type
+-> `Error::MissingSessionField`, fast-auth not negotiated ->
+`Error::FastAuthRequired`, server-response MAC mismatch ->
+`ProtocolError::InvalidServerResponse` (`crypto.rs:142-157`).
 
 > The "Not implemented" auth/wallet rows are also called out as out-of-scope for
 > 1.0 in the Road-to-1.0 program epic (`rust-oracledb-road-to-1-0-llv`, "Out of
@@ -228,7 +233,7 @@ data corruption; a single-endpoint connect is unaffected.
 |---|---|---|
 | Multi-address `ADDRESS_LIST` failover / load-balance | The first usable address is used; there is **no** automatic failover/retry to subsequent addresses. Provide a single reachable endpoint, or retry at the application level. | `crates/oracledb-protocol/src/net/mod.rs:58` |
 | Listener `REDIRECT` (RAC / SCAN / shared-server handoff) | **Fail closed:** the driver returns `Error::RedirectUnsupported` rather than following the redirect. | `crates/oracledb/src/lib.rs:3553` |
-| DSN `DESCRIPTION` / EZConnect-Plus advanced parameters (`transport_connect_timeout`, `sdu`, security/wallet, `use_sni`, ...) | Parsed from the connect string but **not applied** to the live connect (which uses a fixed TCP connect timeout and the `ConnectOptions` values). Set these via `ConnectOptions`. | `crates/oracledb/src/lib.rs:3494` |
+| DSN `DESCRIPTION` / EZConnect-Plus advanced parameters (`transport_connect_timeout`, `sdu`, security/wallet, `use_sni`, ...) | Parsed from the connect string but **not applied** to the live connect. In particular, `transport_connect_timeout` is currently ignored and the driver uses its fixed TCP connect timeout; set supported values via `ConnectOptions` instead. | `crates/oracledb/src/lib.rs` |
 | Oracle Server Name Indication (SNI) over TCPS | `use_sni=true` is honoured only when the Oracle SNI name is a valid rustls DNS name; otherwise SNI is omitted. Full Oracle-format SNI is a transport-hardening follow-up. | `crates/oracledb/src/tls.rs:406` |
 
 These are feature-completeness gaps, not defects in implemented behaviour, and

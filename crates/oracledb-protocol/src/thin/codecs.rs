@@ -482,7 +482,7 @@ pub fn decode_number_value(bytes: &[u8]) -> Result<QueryValue> {
 /// the borrowed fetch path drives, writing straight into its per-row arena.
 /// [`decode_number_value`] is the owning convenience wrapper.
 ///
-/// Implemented in terms of [`decode_number_parts`] + the shared formatter
+/// Implemented in terms of `decode_number_parts` plus the shared formatter
 /// fragment below, so the borrowed-arena text and the owned inline
 /// [`super::number::OracleNumber`] are byte-identical by construction (they walk
 /// the same digits and format with the same code).

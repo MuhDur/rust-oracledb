@@ -1,10 +1,18 @@
 # Fake-Parity Audit — Suite-Green Integrity Verification
 
+> **Current release evidence:** the full thin-mode release-qualification bundle
+> supersedes the original 2026-06-13 filtered-suite count: 2578 collected
+> reference tests, 2462 passed, 116 skipped, 0 regressions / missing tests
+> (`docs/qualification/1.0.0-rc.1/SUMMARY.md`, `docs/PARITY_SKIPS.md`). The
+> audit method below is the historical adversarial proof that suite-green was
+> real end-to-end Rust-engine behavior, not shim fabrication.
+
 **Date:** 2026-06-13 · **Commit audited:** `73524b2` (suite green) · **Verdict: REAL (all slices)**
 
-The filtered python-oracledb thin suite (72 in-scope modules, 2236 tests) passes with
-**0 regressions vs the baseline manifest**. Because the whole premise of this port is
-"no fake parity," the green was adversarially audited before being claimed.
+The original filtered python-oracledb thin suite-green was adversarially audited
+before being claimed because the whole premise of this port is "no fake parity."
+The current release evidence is broader: 2462 passing reference tests, 116
+legitimate thin-mode skips, and 0 regressions/missing tests.
 
 ## Method
 
@@ -59,5 +67,7 @@ that the same plant in the protocol crate is *not* flagged). The earlier dbms_ou
 v$sql_monitor shim simulations were removed during Wave 1; the scanner now runs **clean (exit 0)**
 on the current tree and would catch their re-introduction.
 
-**Conclusion:** the 2236-test suite-green is genuine end-to-end behavior through the Rust engine
-against a real Oracle database. The port passes python-oracledb's own test suite for real.
+**Conclusion:** the suite-green result is genuine end-to-end behavior through the
+Rust engine against a real Oracle database. The port passes python-oracledb's own
+thin-mode test suite for real; the current release count is 2462 passed / 116
+skipped / 2578 collected with 0 regressions.

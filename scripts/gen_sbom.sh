@@ -20,14 +20,11 @@ command -v cargo >/dev/null 2>&1 || { echo "gen-sbom: missing cargo" >&2; exit 2
 command -v jq >/dev/null 2>&1 || { echo "gen-sbom: missing jq" >&2; exit 2; }
 command -v python3 >/dev/null 2>&1 || { echo "gen-sbom: missing python3" >&2; exit 2; }
 
-metafile="$(mktemp "${TMPDIR:-/tmp}/oracledb-metadata.XXXXXX")"
-trap 'rm -f "$metafile"' EXIT
-cargo metadata --format-version 1 --all-features > "$metafile"
-
 # --- SBOM + dependency inventory (non-dev closure of the published crates) ---
-# NOTE: the heredoc feeds the Python SOURCE on stdin, so the cargo-metadata JSON
-# is passed as a file path (argv[2]), not piped.
-python3 - "$OUT" "$metafile" <<'PY'
+# NOTE: the heredoc feeds the Python source on stdin, while process substitution
+# passes the cargo-metadata JSON as argv[2]. This avoids temp-file cleanup in
+# no-delete automation sessions.
+python3 - "$OUT" <(cargo metadata --format-version 1 --all-features) <<'PY'
 import json, sys
 from pathlib import Path
 

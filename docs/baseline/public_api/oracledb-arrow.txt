@@ -333,13 +333,18 @@ pub struct oracledb::prelude::ConnectOptions
 impl oracledb::ConnectOptions
 pub fn oracledb::ConnectOptions::access_token(&self) -> core::option::Option<&oracledb::AccessToken>
 pub fn oracledb::ConnectOptions::app_context(&self) -> &[(alloc::string::String, alloc::string::String, alloc::string::String)]
+pub fn oracledb::ConnectOptions::auth_capabilities(&self) -> oracledb::AuthCapabilities
+pub fn oracledb::ConnectOptions::auth_mode(&self) -> &oracledb::AuthMode
 pub fn oracledb::ConnectOptions::connect_string(&self) -> &str
 pub fn oracledb::ConnectOptions::edition(&self) -> core::option::Option<&str>
+pub fn oracledb::ConnectOptions::external_auth(impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
 pub fn oracledb::ConnectOptions::identity(&self) -> &oracledb_protocol::ClientIdentity
+pub fn oracledb::ConnectOptions::kerberos_auth(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
 pub fn oracledb::ConnectOptions::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
 pub fn oracledb::ConnectOptions::password(&self) -> &str
 pub fn oracledb::ConnectOptions::protocol_limits(&self) -> oracledb_protocol::wire::ProtocolLimits
 pub fn oracledb::ConnectOptions::proxy_user(&self) -> core::option::Option<&str>
+pub fn oracledb::ConnectOptions::radius_auth(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
 pub fn oracledb::ConnectOptions::sdu(&self) -> u16
 pub fn oracledb::ConnectOptions::server_type_emon(&self) -> bool
 pub fn oracledb::ConnectOptions::ssl_server_cert_dn(&self) -> core::option::Option<&str>
@@ -352,8 +357,11 @@ pub fn oracledb::ConnectOptions::wallet_password(&self) -> core::option::Option<
 pub fn oracledb::ConnectOptions::with_access_token(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_app_context(self, alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String)>) -> Self
 pub fn oracledb::ConnectOptions::with_edition(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oracledb::ConnectOptions::with_external_auth(self) -> Self
+pub fn oracledb::ConnectOptions::with_kerberos_auth(self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_protocol_limits(self, oracledb_protocol::wire::ProtocolLimits) -> Self
 pub fn oracledb::ConnectOptions::with_proxy_user(self, core::option::Option<alloc::string::String>) -> Self
+pub fn oracledb::ConnectOptions::with_radius_auth(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_sdu(self, u32) -> Self
 pub fn oracledb::ConnectOptions::with_server_type_emon(self, bool) -> Self
 pub fn oracledb::ConnectOptions::with_ssl_server_cert_dn(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -469,6 +477,60 @@ pub mod oracledb::transport
 pub macro oracledb::obs_record!
 pub macro oracledb::obs_span!
 pub macro oracledb::params!
+#[non_exhaustive] pub enum oracledb::AuthMode
+pub oracledb::AuthMode::External
+pub oracledb::AuthMode::IamToken
+pub oracledb::AuthMode::Kerberos
+pub oracledb::AuthMode::Kerberos::keytab: core::option::Option<alloc::string::String>
+pub oracledb::AuthMode::Kerberos::principal: core::option::Option<alloc::string::String>
+pub oracledb::AuthMode::Password
+pub oracledb::AuthMode::Proxy
+pub oracledb::AuthMode::Radius
+pub oracledb::AuthMode::Radius::challenge: core::option::Option<alloc::string::String>
+impl oracledb::AuthMode
+pub fn oracledb::AuthMode::kind(&self) -> oracledb::AuthModeKind
+impl core::clone::Clone for oracledb::AuthMode
+pub fn oracledb::AuthMode::clone(&self) -> oracledb::AuthMode
+impl core::cmp::Eq for oracledb::AuthMode
+impl core::cmp::PartialEq for oracledb::AuthMode
+pub fn oracledb::AuthMode::eq(&self, &oracledb::AuthMode) -> bool
+impl core::fmt::Debug for oracledb::AuthMode
+pub fn oracledb::AuthMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oracledb::AuthMode
+#[non_exhaustive] pub enum oracledb::AuthModeKind
+pub oracledb::AuthModeKind::External
+pub oracledb::AuthModeKind::IamToken
+pub oracledb::AuthModeKind::Kerberos
+pub oracledb::AuthModeKind::Password
+pub oracledb::AuthModeKind::Proxy
+pub oracledb::AuthModeKind::Radius
+impl core::clone::Clone for oracledb::AuthModeKind
+pub fn oracledb::AuthModeKind::clone(&self) -> oracledb::AuthModeKind
+impl core::cmp::Eq for oracledb::AuthModeKind
+impl core::cmp::PartialEq for oracledb::AuthModeKind
+pub fn oracledb::AuthModeKind::eq(&self, &oracledb::AuthModeKind) -> bool
+impl core::fmt::Debug for oracledb::AuthModeKind
+pub fn oracledb::AuthModeKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oracledb::AuthModeKind
+pub fn oracledb::AuthModeKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oracledb::AuthModeKind
+pub fn oracledb::AuthModeKind::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for oracledb::AuthModeKind
+impl core::marker::StructuralPartialEq for oracledb::AuthModeKind
+#[non_exhaustive] pub enum oracledb::AuthModeSupport
+pub oracledb::AuthModeSupport::Supported
+pub oracledb::AuthModeSupport::UnsupportedInThin
+impl core::clone::Clone for oracledb::AuthModeSupport
+pub fn oracledb::AuthModeSupport::clone(&self) -> oracledb::AuthModeSupport
+impl core::cmp::Eq for oracledb::AuthModeSupport
+impl core::cmp::PartialEq for oracledb::AuthModeSupport
+pub fn oracledb::AuthModeSupport::eq(&self, &oracledb::AuthModeSupport) -> bool
+impl core::fmt::Debug for oracledb::AuthModeSupport
+pub fn oracledb::AuthModeSupport::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oracledb::AuthModeSupport
+pub fn oracledb::AuthModeSupport::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for oracledb::AuthModeSupport
+impl core::marker::StructuralPartialEq for oracledb::AuthModeSupport
 pub enum oracledb::BatchRows<'a>
 pub oracledb::BatchRows::Borrowed(&'a [alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>])
 pub oracledb::BatchRows::Owned(alloc::vec::Vec<alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>>)
@@ -571,6 +633,8 @@ pub oracledb::Error::SessionlessTransaction(oracledb::SessionlessError)
 pub oracledb::Error::Tls(alloc::string::String)
 pub oracledb::Error::TooManyRows
 pub oracledb::Error::UnknownTransactionState(u32)
+pub oracledb::Error::UnsupportedAuthMode(oracledb::UnsupportedAuthMode)
+pub oracledb::Error::Wallet(oracledb_protocol::tls::wallet::WalletError)
 impl oracledb::Error
 pub fn oracledb::Error::caret(&self, &str) -> core::option::Option<alloc::string::String>
 pub fn oracledb::Error::connection_disposition(&self) -> oracledb::ConnectionDisposition
@@ -591,6 +655,8 @@ impl core::convert::From<oracledb::arrow::ArrowConversionError> for oracledb::Er
 pub fn oracledb::Error::from(oracledb::arrow::ArrowConversionError) -> Self
 impl core::convert::From<oracledb_protocol::ProtocolError> for oracledb::Error
 pub fn oracledb::Error::from(oracledb_protocol::ProtocolError) -> Self
+impl core::convert::From<oracledb_protocol::tls::wallet::WalletError> for oracledb::Error
+pub fn oracledb::Error::from(oracledb_protocol::tls::wallet::WalletError) -> Self
 impl core::convert::From<std::io::error::Error> for oracledb::Error
 pub fn oracledb::Error::from(std::io::error::Error) -> Self
 impl core::error::Error for oracledb::Error
@@ -600,6 +666,7 @@ pub fn oracledb::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::
 impl core::fmt::Display for oracledb::Error
 pub fn oracledb::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 #[non_exhaustive] pub enum oracledb::ErrorKind
+pub oracledb::ErrorKind::Authentication
 pub oracledb::ErrorKind::Cancel
 pub oracledb::ErrorKind::Conversion
 pub oracledb::ErrorKind::Database
@@ -740,6 +807,25 @@ impl core::clone::Clone for oracledb::AccessToken
 pub fn oracledb::AccessToken::clone(&self) -> oracledb::AccessToken
 impl core::fmt::Debug for oracledb::AccessToken
 pub fn oracledb::AccessToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+#[non_exhaustive] pub struct oracledb::AuthCapabilities
+pub oracledb::AuthCapabilities::external: oracledb::AuthModeSupport
+pub oracledb::AuthCapabilities::iam_token: oracledb::AuthModeSupport
+pub oracledb::AuthCapabilities::kerberos: oracledb::AuthModeSupport
+pub oracledb::AuthCapabilities::password: oracledb::AuthModeSupport
+pub oracledb::AuthCapabilities::proxy: oracledb::AuthModeSupport
+pub oracledb::AuthCapabilities::radius: oracledb::AuthModeSupport
+impl oracledb::AuthCapabilities
+pub const oracledb::AuthCapabilities::THIN: Self
+pub fn oracledb::AuthCapabilities::support(self, oracledb::AuthModeKind) -> oracledb::AuthModeSupport
+impl core::clone::Clone for oracledb::AuthCapabilities
+pub fn oracledb::AuthCapabilities::clone(&self) -> oracledb::AuthCapabilities
+impl core::cmp::Eq for oracledb::AuthCapabilities
+impl core::cmp::PartialEq for oracledb::AuthCapabilities
+pub fn oracledb::AuthCapabilities::eq(&self, &oracledb::AuthCapabilities) -> bool
+impl core::fmt::Debug for oracledb::AuthCapabilities
+pub fn oracledb::AuthCapabilities::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb::AuthCapabilities
+impl core::marker::StructuralPartialEq for oracledb::AuthCapabilities
 #[non_exhaustive] pub struct oracledb::Batch<'a>
 impl<'a> oracledb::Batch<'a>
 pub fn oracledb::Batch<'a>::collect_errors(self) -> Self
@@ -887,13 +973,18 @@ pub struct oracledb::ConnectOptions
 impl oracledb::ConnectOptions
 pub fn oracledb::ConnectOptions::access_token(&self) -> core::option::Option<&oracledb::AccessToken>
 pub fn oracledb::ConnectOptions::app_context(&self) -> &[(alloc::string::String, alloc::string::String, alloc::string::String)]
+pub fn oracledb::ConnectOptions::auth_capabilities(&self) -> oracledb::AuthCapabilities
+pub fn oracledb::ConnectOptions::auth_mode(&self) -> &oracledb::AuthMode
 pub fn oracledb::ConnectOptions::connect_string(&self) -> &str
 pub fn oracledb::ConnectOptions::edition(&self) -> core::option::Option<&str>
+pub fn oracledb::ConnectOptions::external_auth(impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
 pub fn oracledb::ConnectOptions::identity(&self) -> &oracledb_protocol::ClientIdentity
+pub fn oracledb::ConnectOptions::kerberos_auth(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
 pub fn oracledb::ConnectOptions::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
 pub fn oracledb::ConnectOptions::password(&self) -> &str
 pub fn oracledb::ConnectOptions::protocol_limits(&self) -> oracledb_protocol::wire::ProtocolLimits
 pub fn oracledb::ConnectOptions::proxy_user(&self) -> core::option::Option<&str>
+pub fn oracledb::ConnectOptions::radius_auth(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
 pub fn oracledb::ConnectOptions::sdu(&self) -> u16
 pub fn oracledb::ConnectOptions::server_type_emon(&self) -> bool
 pub fn oracledb::ConnectOptions::ssl_server_cert_dn(&self) -> core::option::Option<&str>
@@ -906,8 +997,11 @@ pub fn oracledb::ConnectOptions::wallet_password(&self) -> core::option::Option<
 pub fn oracledb::ConnectOptions::with_access_token(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_app_context(self, alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String)>) -> Self
 pub fn oracledb::ConnectOptions::with_edition(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oracledb::ConnectOptions::with_external_auth(self) -> Self
+pub fn oracledb::ConnectOptions::with_kerberos_auth(self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_protocol_limits(self, oracledb_protocol::wire::ProtocolLimits) -> Self
 pub fn oracledb::ConnectOptions::with_proxy_user(self, core::option::Option<alloc::string::String>) -> Self
+pub fn oracledb::ConnectOptions::with_radius_auth(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_sdu(self, u32) -> Self
 pub fn oracledb::ConnectOptions::with_server_type_emon(self, bool) -> Self
 pub fn oracledb::ConnectOptions::with_ssl_server_cert_dn(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -1241,6 +1335,21 @@ pub fn oracledb::TypedRow<'_>::try_get_opt<T: oracledb::FromSql>(&self, usize) -
 impl<'a> core::clone::Clone for oracledb::TypedRow<'a>
 pub fn oracledb::TypedRow<'a>::clone(&self) -> oracledb::TypedRow<'a>
 impl<'a> core::marker::Copy for oracledb::TypedRow<'a>
+pub struct oracledb::UnsupportedAuthMode
+impl oracledb::UnsupportedAuthMode
+pub fn oracledb::UnsupportedAuthMode::mode(&self) -> oracledb::AuthModeKind
+impl core::clone::Clone for oracledb::UnsupportedAuthMode
+pub fn oracledb::UnsupportedAuthMode::clone(&self) -> oracledb::UnsupportedAuthMode
+impl core::cmp::Eq for oracledb::UnsupportedAuthMode
+impl core::cmp::PartialEq for oracledb::UnsupportedAuthMode
+pub fn oracledb::UnsupportedAuthMode::eq(&self, &oracledb::UnsupportedAuthMode) -> bool
+impl core::error::Error for oracledb::UnsupportedAuthMode
+impl core::fmt::Debug for oracledb::UnsupportedAuthMode
+pub fn oracledb::UnsupportedAuthMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oracledb::UnsupportedAuthMode
+pub fn oracledb::UnsupportedAuthMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb::UnsupportedAuthMode
+impl core::marker::StructuralPartialEq for oracledb::UnsupportedAuthMode
 pub trait oracledb::ColumnIndex: oracledb::column_index_private::Sealed
 impl oracledb::ColumnIndex for &str
 impl oracledb::ColumnIndex for usize

@@ -27,14 +27,14 @@ pub const PEM_WALLET_FILE_NAME: &str = "ewallet.pem";
 pub const SSO_WALLET_FILE_NAME: &str = "cwallet.sso";
 
 /// Errors raised while resolving or reading a wallet.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 #[non_exhaustive]
 pub enum WalletError {
     /// The wallet directory did not contain the expected file.
-    #[error("wallet file is missing: {0}")]
+    #[error("wallet file is missing")]
     FileMissing(String),
     /// An I/O error occurred reading the wallet.
-    #[error("failed to read wallet {path}: {source}")]
+    #[error("failed to read wallet file: {source}")]
     Io {
         path: String,
         #[source]
@@ -55,6 +55,33 @@ pub enum WalletError {
          --features experimental, or convert the wallet to ewallet.pem"
     )]
     SsoNotEnabled,
+    /// A recognized wallet file is present but this thin build does not support
+    /// the format.
+    #[error("wallet format {format} is not supported by this thin build")]
+    UnsupportedFormat { format: &'static str },
+}
+
+impl std::fmt::Debug for WalletError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const REDACTED_PATH: &str = "***redacted***";
+        let redacted = |_: &String| REDACTED_PATH;
+        match self {
+            Self::FileMissing(path) => f.debug_tuple("FileMissing").field(&redacted(path)).finish(),
+            Self::Io { path, source } => f
+                .debug_struct("Io")
+                .field("path", &redacted(path))
+                .field("source", source)
+                .finish(),
+            Self::Pem(message) => f.debug_tuple("Pem").field(message).finish(),
+            Self::NoCertificates => f.write_str("NoCertificates"),
+            Self::Sso(message) => f.debug_tuple("Sso").field(message).finish(),
+            Self::SsoNotEnabled => f.write_str("SsoNotEnabled"),
+            Self::UnsupportedFormat { format } => f
+                .debug_struct("UnsupportedFormat")
+                .field("format", format)
+                .finish(),
+        }
+    }
 }
 
 /// Parsed contents of an Oracle wallet, as DER bytes ready for rustls.
@@ -285,5 +312,20 @@ mod tests {
     fn parse_rejects_empty_pem() {
         let err = parse_ewallet_pem(b"", None).unwrap_err();
         assert!(matches!(err, WalletError::NoCertificates));
+    }
+
+    #[test]
+    fn wallet_errors_redact_paths_in_display_and_debug() {
+        let sensitive_path = "/private/wallet/ewallet.pem";
+        let err = WalletError::FileMissing(sensitive_path.to_string());
+        assert!(!format!("{err}").contains(sensitive_path));
+        assert!(!format!("{err:?}").contains(sensitive_path));
+
+        let err = WalletError::Io {
+            path: sensitive_path.to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+        };
+        assert!(!format!("{err}").contains(sensitive_path));
+        assert!(!format!("{err:?}").contains(sensitive_path));
     }
 }

@@ -326,8 +326,8 @@ fn rustls_pemfile_certs(reader: &mut dyn std::io::BufRead) -> Vec<Vec<u8>> {
 /// `cwallet.sso`), and capture the DN-match configuration.
 ///
 /// # Errors
-/// Returns [`Error::Tls`] when a configured wallet directory is missing or its
-/// wallet file cannot be parsed.
+/// Returns [`Error::Wallet`] when a configured wallet directory is missing or
+/// its wallet file cannot be parsed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_tls_params(
     descriptor: &EasyConnect,
@@ -354,21 +354,28 @@ pub(crate) fn resolve_tls_params(
 /// Read a wallet from a directory: prefer `ewallet.pem`; fall back to
 /// `cwallet.sso` when the `experimental` feature is enabled and no PEM exists.
 fn load_wallet(dir: &std::path::Path, password: Option<&str>) -> Result<WalletContents, Error> {
-    use oracledb_protocol::tls::wallet::{pem_wallet_path, read_ewallet_pem, sso_wallet_path};
+    use oracledb_protocol::tls::wallet::{
+        pem_wallet_path, read_ewallet_pem, sso_wallet_path, WalletError,
+    };
 
     if pem_wallet_path(dir).exists() {
-        return read_ewallet_pem(dir, password).map_err(|e| Error::Tls(e.to_string()));
+        return read_ewallet_pem(dir, password).map_err(Error::from);
     }
     let sso = sso_wallet_path(dir);
     if sso.exists() {
-        let bytes = std::fs::read(&sso).map_err(|e| Error::Tls(e.to_string()))?;
-        return oracledb_protocol::tls::sso::parse_cwallet_sso(&bytes)
-            .map_err(|e| Error::Tls(e.to_string()));
+        let bytes = std::fs::read(&sso).map_err(|source| WalletError::Io {
+            path: sso.display().to_string(),
+            source,
+        })?;
+        return oracledb_protocol::tls::sso::parse_cwallet_sso(&bytes).map_err(Error::from);
     }
-    Err(Error::Tls(format!(
-        "wallet directory {} contains neither ewallet.pem nor cwallet.sso",
-        dir.display()
-    )))
+    if dir.join("ewallet.p12").exists() {
+        return Err(WalletError::UnsupportedFormat {
+            format: "ewallet.p12",
+        }
+        .into());
+    }
+    Err(WalletError::FileMissing("ewallet.pem or cwallet.sso".to_string()).into())
 }
 
 /// A `ServerName` that is always a valid rustls DNS name, used when no SNI is

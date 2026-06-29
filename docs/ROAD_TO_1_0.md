@@ -511,9 +511,10 @@ commit every minimized shrink. **Acceptance:** pure bridge proptests for every p
 an `#[ignore]` live matrix in `live_typed.rs`; green at the soak budget; shrinks pinned.
 
 ### W3-E2 — Manifest-driven fuzzing
-Harness exists (10 cargo-fuzz targets; 4 DoS bugs already fixed; `BoundedReader`;
-4 committed regressions; a differential oracle `harness/differential/diff_oracle.py`,
-5,944 cases 0 divergences). Fix the stale "8 targets" CI comment (`ci.yml:112`).
+Harness exists (historically expanded from the first ten cargo-fuzz targets to
+the current twenty; 4 DoS bugs already fixed; `BoundedReader`; 4 committed
+regressions; a differential oracle `harness/differential/diff_oracle.py`, 5,944
+cases 0 divergences). Fix the stale "8 targets" CI comment (`ci.yml:112`).
 - **`fuzz/targets.toml` manifest:** target, owner, parser entry, risk tier, corpus,
   dictionary, max-input/timeout/RSS/malloc limits, lane budgets.
 - **9 new targets (verified missing, all `pub`-reachable offline; 1 needs a loop

@@ -219,8 +219,8 @@ fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<V
 /// Panics if `vector` is not a valid VECTOR value (e.g. a sparse vector whose
 /// index/value counts disagree or whose dimension exceeds the protocol limit).
 /// This is the infallible convenience wrapper; callers that accept
-/// caller-constructed (potentially invalid) vectors should use
-/// [`encode_vector_checked`], which returns the error instead of panicking.
+/// caller-constructed (potentially invalid) vectors should use the crate-local
+/// `encode_vector_checked`, which returns the error instead of panicking.
 pub fn encode_vector(vector: &Vector) -> Vec<u8> {
     match encode_vector_checked(vector) {
         Ok(image) => image,
