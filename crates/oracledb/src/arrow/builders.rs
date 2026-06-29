@@ -225,6 +225,7 @@ struct EpochParts {
     nanos: u32,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn epoch_parts_from_components(
     year: i32,
     month: u8,
