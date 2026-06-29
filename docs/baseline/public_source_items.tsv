@@ -925,10 +925,10 @@ oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	41	pub struct EasyConn
 oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	4	pub mod connectstring;
 oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	68	pub fn parse(input: &str) -> Result<Self> {
 oracledb-protocol	crates/oracledb-protocol/src/net/mod.rs	9	pub mod cassette;
-oracledb-protocol	crates/oracledb-protocol/src/oson.rs	114	pub enum OsonValue {
-oracledb-protocol	crates/oracledb-protocol/src/oson.rs	1291	pub fn encode_oson(value: &OsonValue, supports_long_fnames: bool) -> Result<Vec<u8>> {
-oracledb-protocol	crates/oracledb-protocol/src/oson.rs	622	pub fn decode_oson(data: &[u8]) -> Result<OsonValue> {
-oracledb-protocol	crates/oracledb-protocol/src/oson.rs	627	pub fn decode_oson_with_limits(data: &[u8], limits: ProtocolLimits) -> Result<OsonValue> {
+oracledb-protocol	crates/oracledb-protocol/src/oson.rs	115	pub enum OsonValue {
+oracledb-protocol	crates/oracledb-protocol/src/oson.rs	1321	pub fn encode_oson(value: &OsonValue, supports_long_fnames: bool) -> Result<Vec<u8>> {
+oracledb-protocol	crates/oracledb-protocol/src/oson.rs	652	pub fn decode_oson(data: &[u8]) -> Result<OsonValue> {
+oracledb-protocol	crates/oracledb-protocol/src/oson.rs	657	pub fn decode_oson_with_limits(data: &[u8], limits: ProtocolLimits) -> Result<OsonValue> {
 oracledb-protocol	crates/oracledb-protocol/src/packet/mod.rs	16	pub fn encode(&self) -> Result<Vec<u8>> {
 oracledb-protocol	crates/oracledb-protocol/src/packet/mod.rs	30	pub fn parse(input: &[u8]) -> Result<Self> {
 oracledb-protocol	crates/oracledb-protocol/src/packet/mod.rs	34	pub fn parse_with_limits(input: &[u8], limits: ProtocolLimits) -> Result<Self> {
@@ -1019,28 +1019,28 @@ oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	87	pub fn bind_value
 oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	905	pub(crate) fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
 oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	911	pub(crate) fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm: u8) -> Result<()> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	102	pub fn decode_datetime_value(bytes: &[u8]) -> Result<QueryValue> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	153	pub(crate) fn adjust_datetime_by_minutes(
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	184	pub(crate) fn days_from_civil(year: i32, month: u8, day: u8) -> Result<i64> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	200	pub(crate) fn civil_from_days(days: i64) -> Result<(i32, u8, u8)> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	222	pub(crate) fn encode_binary_double(value: f64) -> [u8; 8] {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	234	pub(crate) fn encode_binary_float(value: f32) -> [u8; 4] {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	246	pub(crate) fn decode_binary_float(bytes: &[u8]) -> Result<f32> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	261	pub(crate) fn encode_interval_ds(days: i32, seconds: i32, nanoseconds: i32) -> Result<[u8; 11]> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	280	pub(crate) fn decode_interval_ds(bytes: &[u8]) -> Result<QueryValue> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	301	pub(crate) fn encode_interval_ym(years: i32, months: i32) -> Result<[u8; 5]> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	314	pub(crate) fn decode_interval_ym(bytes: &[u8]) -> Result<QueryValue> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	327	pub(crate) fn decode_binary_double(bytes: &[u8]) -> Result<f64> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	346	pub fn encode_number_text(value: &str) -> Result<Vec<u8>> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	152	pub(crate) fn adjust_datetime_by_minutes(
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	182	pub(crate) fn days_from_civil(year: i32, month: u8, day: u8) -> Result<i64> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	197	pub(crate) fn civil_from_days(days: i64) -> Result<(i32, u8, u8)> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	219	pub(crate) fn encode_binary_double(value: f64) -> [u8; 8] {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	231	pub(crate) fn encode_binary_float(value: f32) -> [u8; 4] {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	243	pub(crate) fn decode_binary_float(bytes: &[u8]) -> Result<f32> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	258	pub(crate) fn encode_interval_ds(days: i32, seconds: i32, nanoseconds: i32) -> Result<[u8; 11]> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	277	pub(crate) fn decode_interval_ds(bytes: &[u8]) -> Result<QueryValue> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	298	pub(crate) fn encode_interval_ym(years: i32, months: i32) -> Result<[u8; 5]> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	311	pub(crate) fn decode_interval_ym(bytes: &[u8]) -> Result<QueryValue> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	324	pub(crate) fn decode_binary_double(bytes: &[u8]) -> Result<f64> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	343	pub fn encode_number_text(value: &str) -> Result<Vec<u8>> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	35	pub(crate) fn encode_oracle_timestamp(
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	505	pub fn decode_number_value(bytes: &[u8]) -> Result<QueryValue> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	522	pub fn decode_number_text_into(
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	549	pub(crate) fn decode_number_parts(
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	502	pub fn decode_number_value(bytes: &[u8]) -> Result<QueryValue> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	519	pub fn decode_number_text_into(
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	546	pub(crate) fn decode_number_parts(
 oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	57	pub(crate) fn encode_oracle_timestamp_tz(
 oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	5	pub(crate) fn encode_oracle_date(
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	626	pub(crate) fn decode_number_parts_stack(
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	623	pub(crate) fn decode_number_parts_stack(
 oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	70	pub(crate) fn encode_oracle_timestamp_tz_with_offset(
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	722	pub(crate) fn format_number_digits(
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	757	pub(crate) fn decode_text_value(bytes: &[u8], csfrm: u8) -> Result<String> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	719	pub(crate) fn format_number_digits(
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	754	pub(crate) fn decode_text_value(bytes: &[u8], csfrm: u8) -> Result<String> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/connect.rs	111	pub fn build_function_payload(function_code: u8) -> Vec<u8> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/connect.rs	115	pub fn build_function_payload_with_seq(function_code: u8, seq_num: u8) -> Vec<u8> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/connect.rs	122	pub fn build_function_payload_with_seq_and_token(
