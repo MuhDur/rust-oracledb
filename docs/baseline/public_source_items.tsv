@@ -1,11 +1,11 @@
 crate	path	line	item
-oracledb	crates/oracledb/src/arrow/builders.rs	1241	pub(super) fn columnar_supported(schema: &Schema) -> bool {
-oracledb	crates/oracledb/src/arrow/builders.rs	1254	pub(super) struct ColumnarBatchBuilder {
-oracledb	crates/oracledb/src/arrow/builders.rs	1264	pub(super) fn new(
-oracledb	crates/oracledb/src/arrow/builders.rs	1285	pub(super) fn append_borrowed(
-oracledb	crates/oracledb/src/arrow/builders.rs	1323	pub(super) fn append_owned(&mut self, rows: &[Vec<Option<QueryValue>>]) -> Result<()> {
-oracledb	crates/oracledb/src/arrow/builders.rs	1344	pub(super) fn finish(self) -> Result<RecordBatch> {
-oracledb	crates/oracledb/src/arrow/builders.rs	1360	pub fn build_record_batch_columnar(
+oracledb	crates/oracledb/src/arrow/builders.rs	1242	pub(super) fn columnar_supported(schema: &Schema) -> bool {
+oracledb	crates/oracledb/src/arrow/builders.rs	1255	pub(super) struct ColumnarBatchBuilder {
+oracledb	crates/oracledb/src/arrow/builders.rs	1265	pub(super) fn new(
+oracledb	crates/oracledb/src/arrow/builders.rs	1286	pub(super) fn append_borrowed(
+oracledb	crates/oracledb/src/arrow/builders.rs	1324	pub(super) fn append_owned(&mut self, rows: &[Vec<Option<QueryValue>>]) -> Result<()> {
+oracledb	crates/oracledb/src/arrow/builders.rs	1345	pub(super) fn finish(self) -> Result<RecordBatch> {
+oracledb	crates/oracledb/src/arrow/builders.rs	1361	pub fn build_record_batch_columnar(
 oracledb	crates/oracledb/src/arrow/builders.rs	142	pub fn decimal128_to_string(unscaled: i128, scale: i8) -> String {
 oracledb	crates/oracledb/src/arrow/builders.rs	168	pub(super) fn decimal128_from_number_text(text: &str, scale: i8) -> Option<i128> {
 oracledb	crates/oracledb/src/arrow/builders.rs	29	pub fn build_record_batch(
