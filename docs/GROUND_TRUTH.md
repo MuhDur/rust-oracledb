@@ -364,8 +364,9 @@ Orchestration session 2026-06-11 (Claude, ultracode), driving while codex is rat
   1522 reserved for global verification; builds never share a checkout.
 - **D4** M5 dataframe/Arrow + DPL (~557 fails) staged as a dedicated workflow after wave 1.
 - **D5** Perf/optimization deferred until the suite is green (correctness first, M6 ordering).
-- **D6** NEVER push local `master` to github MuhDur/rust-oracledb — the public repo is a filtered
-  mirror (3 markdown files scrubbed); publishing is a separate filter-repo export.
+- **D6** Release publishing uses the configured GitHub `origin/main` remote plus the tag-driven
+  release workflow. A release tag must match the workspace version and be contained in
+  `origin/main` before `scripts/release_preflight.sh` allows publish jobs to proceed.
 - **D7** Intake briefs live in `.intake/` (untracked); lane agents read them from disk.
 
 Coordination addendum from the same comment: codex may resume on master; lanes rebase before
@@ -381,10 +382,9 @@ merge; the tree stays clean between waves.
   localhost:<port>/FREEPDB1`, `ORACLEDB_RESULTS_DIR`). Run schema prep on a lane before first
   use. Current worktrees at `978491a`: `rust-oracledb-w0` (branch `wave0-split`),
   `rust-oracledb-m5` (branch `m5-arrow-foundation`).
-- **Never push `master` to the public GitHub mirror** (decision D6). The mirror is a filtered
-  export that excludes `plan.md`, `PLAN_TO_PORT_PYTHON_ORACLEDB_THIN_TO_RUST.md` and `AGENTS.md`.
-  No `origin` remote is configured in this checkout (verified) — keep it that way; publishing is
-  an operator-run filter-repo export (bead `u4w`).
+- **Release publishing uses `origin/main` directly** (decision D6). Keep release commits on the
+  configured GitHub remote and cut `vX.Y.Z` tags only from commits that are contained in
+  `origin/main`, matching `scripts/release_preflight.sh`.
 - **Codex agent may resume on `master` at any time.** Do not rewrite master history; rebase lane
   branches onto master before merging.
 - **Until Wave 0 lands**, `pyshim/src/lib.rs` and `protocol/src/thin.rs` are exclusive locks —
