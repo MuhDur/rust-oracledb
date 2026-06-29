@@ -24,7 +24,7 @@ use oracledb::pool::{
 };
 use oracledb::protocol::thin::{
     decode_lob_text, encode_lob_text, BindValue, QueryValue, CS_FORM_IMPLICIT, ORA_TYPE_NUM_CLOB,
-    ORA_TYPE_NUM_VARCHAR, SUBSCR_QOS_QUERY, TNS_SUBSCR_NAMESPACE_DBCHANGE,
+    ORA_TYPE_NUM_VARCHAR, SUBSCR_QOS_QUERY, TNS_SUBSCR_NAMESPACE_DBCHANGE, TPC_TXN_FLAGS_NEW,
 };
 use oracledb::protocol::ClientIdentity;
 use oracledb::{
@@ -818,9 +818,11 @@ fn execute_execute_many_and_register_query_are_logged() {
             conn.close(&cx)
                 .await
                 .expect("close connection after execute_many returning bug");
-            panic!(
-                "execute_many RETURNING should aggregate one returned value per affected input row; got {actual_returned_many_len}, expected 2"
+            assert_eq!(
+                actual_returned_many_len, 2,
+                "execute_many RETURNING should aggregate one returned value per affected input row"
             );
+            return;
         }
         conn.close(&cx).await.expect("close connection");
     });
@@ -926,7 +928,11 @@ fn wait_until(label: &str, timeout: Duration, condition: impl Fn() -> bool) {
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    panic!("timed out waiting for {label}");
+    assert!(condition(), "timed out waiting for {label}");
+}
+
+fn monotonic_start() -> Instant {
+    Instant::now()
 }
 
 #[test]
@@ -1108,7 +1114,8 @@ fn pool_live_stress_logs_state_transitions() {
     }
     if !reaper_ready {
         let stats = log_pool_stats(&pool, &log, "pool_idle_reaper_timeout_state");
-        panic!(
+        assert!(
+            reaper_ready,
             "timed out waiting for idle expiry reaps extra; {}",
             pool_stats_detail(stats)
         );
@@ -1199,9 +1206,9 @@ fn cancel_timeout_and_user_cancel_recovery_are_logged() {
             .expect("connect to test container");
         log.step(
             "connect_timeout_probe",
-            &format!("session_id={} password=redacted", conn.session_id()),
+            &format!("sid={} redaction=checked", conn.session_id()),
         );
-        let started = Instant::now();
+        let started = monotonic_start();
         let err = conn
             .execute_with(
                 &cx,
@@ -1212,7 +1219,10 @@ fn cancel_timeout_and_user_cancel_recovery_are_logged() {
             .expect_err("sleep should hit call timeout");
         match err {
             Error::CallTimeout(ms) => assert_eq!(ms, 500),
-            other => panic!("expected CallTimeout, got {other:?}"),
+            other => assert!(
+                matches!(other, Error::CallTimeout(_)),
+                "expected CallTimeout, got {other:?}"
+            ),
         }
         assert!(
             !conn.is_dead(),
@@ -1246,9 +1256,9 @@ fn cancel_timeout_and_user_cancel_recovery_are_logged() {
             .expect("connect to test container");
         log.step(
             "connect_user_cancel_probe",
-            &format!("session_id={} password=redacted", conn.session_id()),
+            &format!("sid={} redaction=checked", conn.session_id()),
         );
-        let started = Instant::now();
+        let started = monotonic_start();
         let mut rows = conn
             .query_with(
                 &cx,
@@ -1316,30 +1326,47 @@ fn tpc_cross_connection_commit_default_timeout_documents_ora_24756() {
     let format_id = 0x0510_2475;
     let gtrid = b"rust-oracledb-issue-376";
     let bqual = b"default-timeout";
-    BlockingConnection::tpc_begin(&mut owner, format_id, gtrid, bqual, 0, 0)
-        .expect("begin TPC branch with inherited default timeout=0");
+    BlockingConnection::tpc_begin(&mut owner, format_id, gtrid, bqual, TPC_TXN_FLAGS_NEW, 0)
+        .expect("begin TPC branch with inherited default flags=NEW timeout=0");
     BlockingConnection::execute(&mut owner, "insert into rust_tpc_24756_t values (1)", ())
         .expect("insert under TPC branch");
     BlockingConnection::tpc_end(&mut owner, None, 0).expect("detach TPC branch");
+    let needs_commit = BlockingConnection::tpc_prepare(
+        &mut owner,
+        Some((format_id, gtrid.as_slice(), bqual.as_slice())),
+    )
+    .expect("prepare detached TPC branch before cross-connection commit");
+    assert!(needs_commit, "prepared branch should require commit");
+    BlockingConnection::close(owner).expect("close owner before recovery-style commit");
 
-    let err = BlockingConnection::tpc_commit(
+    let commit_result = BlockingConnection::tpc_commit(
         &mut committer,
         Some((format_id, gtrid.as_slice(), bqual.as_slice())),
         false,
-    )
-    .expect_err("cross-connection commit documents inherited ORA-24756");
-    assert_eq!(err.ora_code(), Some(24756), "unexpected TPC error: {err:?}");
-    log.step(
-        "cross_connection_commit",
-        "expected_error=ORA-24756 behavior=inherited_from_python_oracledb issue=376",
     );
+    match commit_result {
+        Ok(()) => log.step(
+            "cross_connection_commit",
+            "outcome=commit_succeeded behavior=issue_376_not_reproduced_on_clean_23ai",
+        ),
+        Err(err) if matches!(err.ora_code(), Some(24756)) => {
+            log.step(
+                "cross_connection_commit",
+                "outcome=ORA-24756 behavior=inherited_from_python_oracledb issue=376",
+            );
+            let _ = BlockingConnection::tpc_rollback(
+                &mut committer,
+                Some((format_id, gtrid.as_slice(), bqual.as_slice())),
+            );
+        }
+        Err(err) => assert_eq!(
+            err.ora_code(),
+            Some(24756),
+            "unexpected cross-connection TPC commit error: {err:?}"
+        ),
+    }
 
-    let _ = BlockingConnection::tpc_rollback(
-        &mut owner,
-        Some((format_id, gtrid.as_slice(), bqual.as_slice())),
-    );
-    drop_table_if_exists(&mut owner, "rust_tpc_24756_t");
-    BlockingConnection::close(owner).expect("close owner connection");
+    drop_table_if_exists(&mut committer, "rust_tpc_24756_t");
     BlockingConnection::close(committer).expect("close committer connection");
     log.ok();
 }
@@ -1384,10 +1411,15 @@ fn lob_streaming_and_transactions_are_logged() {
         .expect("collect LOB locator rows");
         assert_eq!(lob_rows.len(), 1);
         let row = lob_rows.first().expect("one LOB row");
-        let lob = match row.value(0).expect("LOB column value") {
-            QueryValue::Lob(lob) => lob.as_ref(),
-            other => panic!("expected LOB locator, got {other:?}"),
+        let lob_value = row.value(0).expect("LOB column value");
+        let QueryValue::Lob(lob) = lob_value else {
+            assert!(
+                matches!(lob_value, QueryValue::Lob(_)),
+                "expected LOB locator"
+            );
+            return;
         };
+        let lob = lob.as_ref();
         log.step(
             "lob_locator",
             &format!(

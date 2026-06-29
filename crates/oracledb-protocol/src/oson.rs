@@ -38,9 +38,10 @@
 use std::collections::BTreeMap;
 
 use crate::thin::{
-    decode_binary_double, decode_binary_float, decode_datetime_value, decode_interval_ds,
-    decode_number_value, encode_binary_double, encode_binary_float, encode_interval_ds,
-    encode_number_text, encode_oracle_date, encode_oracle_timestamp, QueryValue,
+    adjust_datetime_by_minutes, decode_binary_double, decode_binary_float, decode_datetime_value,
+    decode_interval_ds, decode_number_value, encode_binary_double, encode_binary_float,
+    encode_interval_ds, encode_number_text, encode_oracle_date, encode_oracle_timestamp,
+    QueryValue,
 };
 use crate::wire::{BoundedReader, ProtocolLimits};
 use crate::{ProtocolError, Result};
@@ -575,6 +576,35 @@ impl<'a> OsonDecoder<'a> {
                 second,
                 nanosecond,
             }),
+            QueryValue::TimestampTz {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+                offset_minutes,
+            } => {
+                let (year, month, day, hour, minute, second) = adjust_datetime_by_minutes(
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    offset_minutes,
+                )?;
+                Ok(OsonValue::DateTime {
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    nanosecond,
+                })
+            }
             _ => Err(ProtocolError::OsonInvalid("datetime decode mismatch")),
         }
     }
@@ -1426,8 +1456,13 @@ mod tests {
             };
             // long_fname_256 needs version 3 (long field names support).
             let supports_long = name == "long_fname_256";
-            let encoded = encode_oson(&value, supports_long)
-                .unwrap_or_else(|e| panic!("encode {name} failed: {e}"));
+            let encoded = encode_oson(&value, supports_long);
+            assert!(
+                encoded.is_ok(),
+                "encode {name} failed: {:?}",
+                encoded.as_ref().err()
+            );
+            let encoded = encoded.expect("OSON encode result checked");
             assert_eq!(
                 encoded,
                 expected,
@@ -1454,8 +1489,13 @@ mod tests {
             let Some(expected) = golden_value(name) else {
                 continue;
             };
-            let decoded =
-                decode_oson(&bytes).unwrap_or_else(|e| panic!("decode {name} failed: {e}"));
+            let decoded = decode_oson(&bytes);
+            assert!(
+                decoded.is_ok(),
+                "decode {name} failed: {:?}",
+                decoded.as_ref().err()
+            );
+            let decoded = decoded.expect("OSON decode result checked");
             assert_eq!(decoded, expected, "OSON decode mismatch for {name}");
         }
     }
@@ -1465,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_via_encode_decode() {
+    fn round_trip_via_oson_codec() {
         let value = obj(&[
             ("id", num("6903")),
             ("value", s("string 6903")),
@@ -1481,6 +1521,48 @@ mod tests {
         let encoded = encode_oson(&value, false).unwrap();
         let decoded = decode_oson(&encoded).unwrap();
         assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn decode_timestamp_tz_scalar_applies_offset() {
+        let mut bytes = vec![
+            TNS_JSON_MAGIC_BYTE_1,
+            TNS_JSON_MAGIC_BYTE_2,
+            TNS_JSON_MAGIC_BYTE_3,
+            TNS_JSON_VERSION_MAX_FNAME_255,
+            0,
+            TNS_JSON_FLAG_INLINE_LEAF as u8 | TNS_JSON_FLAG_IS_SCALAR as u8,
+            0,
+            14,
+            TNS_JSON_TYPE_TIMESTAMP_TZ,
+        ];
+        bytes.extend_from_slice(
+            &crate::thin::encode_oracle_timestamp_tz_with_offset(
+                2022,
+                12,
+                7,
+                22,
+                59,
+                15,
+                123_400_000,
+                330,
+            )
+            .expect("encode timestamp with time zone"),
+        );
+
+        let decoded = decode_oson(&bytes).expect("decode timestamp with time zone OSON scalar");
+        assert_eq!(
+            decoded,
+            OsonValue::DateTime {
+                year: 2022,
+                month: 12,
+                day: 8,
+                hour: 4,
+                minute: 29,
+                second: 15,
+                nanosecond: 123_400_000,
+            }
+        );
     }
 
     #[test]

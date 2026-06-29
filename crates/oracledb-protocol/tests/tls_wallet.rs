@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use oracledb_protocol::tls::dn::{check_cert_dn, check_server_name, name_matches};
 use oracledb_protocol::tls::sni::build_sni;
-use oracledb_protocol::tls::wallet::{parse_ewallet_pem, resolve_wallet_dir};
+use oracledb_protocol::tls::wallet::{parse_ewallet_pem, resolve_wallet_dir, WalletError};
 
 fn fixture_dir() -> PathBuf {
     // crates/oracledb-protocol/tests -> crates/oracledb/tests/fixtures/tls
@@ -24,7 +24,7 @@ fn fixture_dir() -> PathBuf {
 
 fn read_fixture(name: &str) -> Vec<u8> {
     let path = fixture_dir().join(name);
-    std::fs::read(&path).unwrap_or_else(|e| panic!("read fixture {}: {e}", path.display()))
+    std::fs::read(&path).expect("read TLS wallet fixture")
 }
 
 #[test]
@@ -61,6 +61,43 @@ fn ca_only_wallet_is_verify_only() {
         !wallet.has_client_identity(),
         "a CA-only wallet must NOT present a client identity"
     );
+}
+
+#[test]
+fn encrypted_ewallet_pem_reports_typed_remediation() {
+    const ENCRYPTED_PKCS8_KEY: &str = "\
+-----BEGIN ENCRYPTED PRIVATE KEY-----\n\
+MIIBxTBfBgkqhkiG9w0BBQ0wUjAxBgkqhkiG9w0BBQwwJAQQ0szDnlfhzs/48BM7\n\
+gZYo1wICCAAwDAYIKoZIhvcNAgkFADAdBglghkgBZQMEASoEEMZ1nFqs2Oh9dqKz\n\
+XiSxWMsEggFgrIf9Xh+VmNfcOcqXkNZkFHNWX0MZI0oGHB23R+7M1yLqfV0Qj\n\
+NQZe/x3yO24kBy2hzhzs2tzqVOX5OcUlrdI37D7bvbqmjxrTyH5XH1JskAWPDCM5\n\
+DuKHdjoN8dfGxvyJ5JsNDiaGH54h1zNUABOVNVom8evOwbRMG1BvlA5gQJvdLcLr\n\
++VfxFLt8FJMJJF9rLqW/p9IU3L4JVsp9nStbam7h7L446roQAWT8AvFka+ajzMiW\n\
+PGodnmXKA1d2oSXistuoJU358Ls3kw+J+QmCXb9tt6qpp+FbHUiJp+ng7b9T8QrN\n\
+0SBbytDphifDt9RRw/o6DADLjLoZmXk4Tf57dwK/adsJTyHL4W8t1wSXDyjBNSLu\n\
+RQbD0Mj087+zY3GUJVz9nyrNr3KCjuU6K4A9nQouFZCNqLnK5ujJmOKkSz/sIOaL\n\
+FyQwV5H9Lft1CUguUqQX32wuwTu2ZGwWzQ==\n\
+-----END ENCRYPTED PRIVATE KEY-----\n";
+    let mut pem = read_fixture("ca_wallet.pem");
+    pem.extend_from_slice(ENCRYPTED_PKCS8_KEY.as_bytes());
+    let err = parse_ewallet_pem(&pem, Some("redaction-password"))
+        .expect_err("encrypted private key should report a typed PEM error");
+    let message = if let WalletError::Pem(message) = &err {
+        message
+    } else {
+        assert!(
+            matches!(&err, WalletError::Pem(_)),
+            "expected WalletError::Pem, got {err:?}"
+        );
+        return;
+    };
+    assert!(message.contains("orapki"));
+    assert!(message.contains("-auto_login"));
+    assert!(!format!("{err}").contains("redaction-password"));
+    assert!(!format!("{err:?}").contains("redaction-password"));
+    let sensitive_path = fixture_dir().display().to_string();
+    assert!(!format!("{err}").contains(&sensitive_path));
+    assert!(!format!("{err:?}").contains(&sensitive_path));
 }
 
 #[test]

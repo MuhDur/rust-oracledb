@@ -22,7 +22,7 @@ reference vendored at v4.0.1). Tracking beads carry the `upstream-parity` label.
 
 | Upstream | Behavior we inherit | Status | Our code |
 |---|---|---|---|
-| #376 | thin TPC `tpc_begin` sends `timeout=0`/`flags=NEW`; cross-connection `tpc_commit` can hit ORA-24756 | HOLD for parity (gate on upstream); ignored live regression documents the inherited failure | `lib.rs:tpc_begin`; `tests/e2e_live.rs:tpc_cross_connection_commit_default_timeout_documents_ora_24756` |
+| #376 | thin TPC `tpc_begin` sends `timeout=0`/`flags=NEW`; cross-connection `tpc_commit` can hit ORA-24756, but clean Oracle Free 23ai can also commit the prepared branch successfully | HOLD for parity (gate on upstream); ignored live probe records whether the inherited ORA-24756 reproduces in the current clean DB | `lib.rs:tpc_begin`; `tests/e2e_live.rs:tpc_cross_connection_commit_default_timeout_documents_ora_24756` |
 
 ## 2. Robustness gaps (present in our code)
 

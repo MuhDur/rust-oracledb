@@ -149,7 +149,6 @@ pub fn decode_datetime_value(bytes: &[u8]) -> Result<QueryValue> {
     })
 }
 
-#[cfg(test)]
 pub(crate) fn adjust_datetime_by_minutes(
     year: i32,
     month: u8,
@@ -180,7 +179,6 @@ pub(crate) fn adjust_datetime_by_minutes(
     Ok((year, month, day, hour, minute, second))
 }
 
-#[cfg(test)]
 pub(crate) fn days_from_civil(year: i32, month: u8, day: u8) -> Result<i64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return Err(ProtocolError::TtcDecode("invalid TIMESTAMP date"));
@@ -196,7 +194,6 @@ pub(crate) fn days_from_civil(year: i32, month: u8, day: u8) -> Result<i64> {
     Ok(i64::from(era) * 146_097 + i64::from(day_of_era) - 719_468)
 }
 
-#[cfg(test)]
 pub(crate) fn civil_from_days(days: i64) -> Result<(i32, u8, u8)> {
     let days = days + 719_468;
     let era = if days >= 0 { days } else { days - 146_096 } / 146_097;

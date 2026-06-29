@@ -463,4 +463,39 @@ mod tests {
         assert!(!sni_is_rustls_valid("S8.FREEPDB1.V3.319"));
         assert!(sni_is_rustls_valid("db.example.com"));
     }
+
+    #[test]
+    fn ewallet_p12_only_wallet_is_typed_unsupported_format() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("tls")
+            .join("p12_only");
+        let err = load_wallet(&dir, None).expect_err("p12-only wallet must be unsupported");
+        let wallet_err = if let Error::Wallet(wallet_err) = err {
+            wallet_err
+        } else {
+            assert!(matches!(err, Error::Wallet(_)), "expected wallet error");
+            return;
+        };
+        let format =
+            if let oracledb_protocol::tls::wallet::WalletError::UnsupportedFormat { format } =
+                &wallet_err
+            {
+                format
+            } else {
+                assert!(
+                    matches!(
+                        &wallet_err,
+                        oracledb_protocol::tls::wallet::WalletError::UnsupportedFormat { .. }
+                    ),
+                    "expected UnsupportedFormat, got {wallet_err:?}"
+                );
+                return;
+            };
+        assert_eq!(*format, "ewallet.p12");
+        let sensitive_path = dir.display().to_string();
+        assert!(!format!("{wallet_err}").contains(&sensitive_path));
+        assert!(!format!("{wallet_err:?}").contains(&sensitive_path));
+    }
 }

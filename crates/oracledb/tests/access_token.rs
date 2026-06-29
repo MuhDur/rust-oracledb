@@ -126,6 +126,50 @@ fn unsupported_auth_modes_are_typed_and_redacted() {
 }
 
 #[test]
+fn kerberos_and_radius_reject_before_network_io() {
+    let id = ClientIdentity::new("a", "h", "u", "t", "r").expect("test identity should be valid");
+    let kerberos = ConnectOptions::kerberos_auth(
+        "127.0.0.1:1/FREEPDB1",
+        SAMPLE_KERBEROS_PRINCIPAL,
+        SAMPLE_KERBEROS_KEYTAB,
+        id.clone(),
+    );
+    assert_unsupported_mode_before_io(
+        kerberos,
+        AuthModeKind::Kerberos,
+        &[SAMPLE_KERBEROS_PRINCIPAL, SAMPLE_KERBEROS_KEYTAB],
+    );
+
+    let radius = ConnectOptions::radius_auth("127.0.0.1:1/FREEPDB1", SAMPLE_RADIUS_CHALLENGE, id);
+    assert_unsupported_mode_before_io(radius, AuthModeKind::Radius, &[SAMPLE_RADIUS_CHALLENGE]);
+}
+
+fn assert_unsupported_mode_before_io(
+    options: ConnectOptions,
+    expected: AuthModeKind,
+    secret_values: &[&str],
+) {
+    let err = BlockingConnection::connect(options)
+        .expect_err("unsupported auth mode should fail before connecting to 127.0.0.1:1");
+    let reason = if let Error::UnsupportedAuthMode(reason) = &err {
+        reason
+    } else {
+        assert!(
+            matches!(&err, Error::UnsupportedAuthMode(_)),
+            "expected UnsupportedAuthMode({expected:?}) before network I/O, got {err:?}"
+        );
+        return;
+    };
+    assert_eq!(reason.mode(), expected);
+    let display = format!("{err}");
+    let debug = format!("{err:?}");
+    for secret in secret_values {
+        assert!(!display.contains(secret));
+        assert!(!debug.contains(secret));
+    }
+}
+
+#[test]
 #[ignore]
 fn access_token_over_plain_tcp_is_typed_error() {
     let cs = std::env::var("PYO_TEST_CONNECT_STRING")

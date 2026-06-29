@@ -1281,6 +1281,26 @@ pub(crate) fn query_value_to_py(
                 .call1((*year, *month, *day, *hour, *minute, *second, microsecond))?
                 .unbind())
         }
+        Some(QueryValue::TimestampTz {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+            offset_minutes,
+        }) => {
+            let datetime_module = PyModule::import(py, "datetime")?;
+            let datetime = datetime_module.getattr("datetime")?;
+            let microsecond = nanosecond / 1000;
+            let value =
+                datetime.call1((*year, *month, *day, *hour, *minute, *second, microsecond))?;
+            let timedelta = datetime_module
+                .getattr("timedelta")?
+                .call1((0, i64::from(*offset_minutes) * 60))?;
+            Ok(value.call_method1("__add__", (timedelta,))?.unbind())
+        }
         Some(QueryValue::Array(values)) => {
             let values = values
                 .iter()

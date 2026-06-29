@@ -906,7 +906,10 @@ impl ThinVar {
             }
             // str(datetime) for DATE/TIMESTAMP wire data requested as a
             // character type (converters.pyx:556-562)
-            (ThinVarReturnKind::Plain, Some(QueryValue::DateTime { .. })) if target_is_char => {
+            (
+                ThinVarReturnKind::Plain,
+                Some(QueryValue::DateTime { .. } | QueryValue::TimestampTz { .. }),
+            ) if target_is_char => {
                 let datetime = query_value_to_py(py, value, None, lob_context, true, false)?;
                 let builtins = PyModule::import(py, "builtins")?;
                 Ok(builtins.getattr("str")?.call1((datetime,))?.unbind())
