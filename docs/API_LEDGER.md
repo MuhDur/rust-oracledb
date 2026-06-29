@@ -29,6 +29,11 @@ pub use oracledb::FromRow	keep	Derive output is part of the typed row API.
 pub use oracledb::protocol	keep	W1-T9 decision: KEEP. The driver's public API returns protocol-crate types directly (QueryValue, BindValue, ColumnMetadata, ClientIdentity, ...) in 187 signature positions, so users must be able to name them; `oracledb::protocol` is the single canonical path for that without a separate version-coupled oracledb-protocol dependency. Removing it would break the public contract.
 pub use oracledb::transport::CassetteError	keep	Cassette diagnostics are part of the record/replay testing surface.
 *oracledb::AccessToken*	keep	Public credential wrapper used by token authentication.
+*oracledb::AuthCapabilities*	keep	0.5.1 downstream capability-honesty surface: callers can inspect which known auth modes this thin build supports.
+*oracledb::AuthModeKind*	keep	Stable classifier for typed authentication modes, used in capability metadata and unsupported-mode diagnostics.
+*oracledb::AuthModeSupport*	keep	Machine-classifiable support status for each known authentication mode.
+*oracledb::AuthMode*	keep	Typed authentication intent surface, including supported password/proxy/IAM-token modes and fail-closed unsupported external/Kerberos/RADIUS intents.
+*oracledb::UnsupportedAuthMode*	keep	Structured diagnostic returned before network I/O when the caller selects a known auth mode unsupported by this thin build.
 *oracledb::BlockingConnection::query<'*	keep	Blocking mirror of the query family.
 *oracledb::BlockingConnection::query_one*	keep	Blocking mirror of the query-one helper.
 *oracledb::BlockingConnection::query_opt*	keep	Blocking mirror of the optional-row query helper.

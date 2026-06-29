@@ -1,4 +1,4 @@
-//! Procedural macros for the [`oracledb`] driver.
+//! Procedural macros for the `oracledb` driver.
 //!
 //! This crate hosts the `#[derive(FromRow)]` macro. It is an implementation
 //! detail of the `oracledb` crate: end users never depend on it directly. The
