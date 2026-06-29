@@ -1,11 +1,11 @@
 crate	path	line	item
-oracledb	crates/oracledb/src/arrow/builders.rs	1189	pub(super) fn columnar_supported(schema: &Schema) -> bool {
-oracledb	crates/oracledb/src/arrow/builders.rs	1202	pub(super) struct ColumnarBatchBuilder {
-oracledb	crates/oracledb/src/arrow/builders.rs	1212	pub(super) fn new(
-oracledb	crates/oracledb/src/arrow/builders.rs	1233	pub(super) fn append_borrowed(
-oracledb	crates/oracledb/src/arrow/builders.rs	1271	pub(super) fn append_owned(&mut self, rows: &[Vec<Option<QueryValue>>]) -> Result<()> {
-oracledb	crates/oracledb/src/arrow/builders.rs	1292	pub(super) fn finish(self) -> Result<RecordBatch> {
-oracledb	crates/oracledb/src/arrow/builders.rs	1308	pub fn build_record_batch_columnar(
+oracledb	crates/oracledb/src/arrow/builders.rs	1241	pub(super) fn columnar_supported(schema: &Schema) -> bool {
+oracledb	crates/oracledb/src/arrow/builders.rs	1254	pub(super) struct ColumnarBatchBuilder {
+oracledb	crates/oracledb/src/arrow/builders.rs	1264	pub(super) fn new(
+oracledb	crates/oracledb/src/arrow/builders.rs	1285	pub(super) fn append_borrowed(
+oracledb	crates/oracledb/src/arrow/builders.rs	1323	pub(super) fn append_owned(&mut self, rows: &[Vec<Option<QueryValue>>]) -> Result<()> {
+oracledb	crates/oracledb/src/arrow/builders.rs	1344	pub(super) fn finish(self) -> Result<RecordBatch> {
+oracledb	crates/oracledb/src/arrow/builders.rs	1360	pub fn build_record_batch_columnar(
 oracledb	crates/oracledb/src/arrow/builders.rs	142	pub fn decimal128_to_string(unscaled: i128, scale: i8) -> String {
 oracledb	crates/oracledb/src/arrow/builders.rs	168	pub(super) fn decimal128_from_number_text(text: &str, scale: i8) -> Option<i128> {
 oracledb	crates/oracledb/src/arrow/builders.rs	29	pub fn build_record_batch(
@@ -48,287 +48,287 @@ oracledb	crates/oracledb/src/cursor_logic.rs	15	pub enum ExecutemanyManagerError
 oracledb	crates/oracledb/src/cursor_logic.rs	45	pub struct ExecutemanyManager {
 oracledb	crates/oracledb/src/cursor_logic.rs	58	pub fn new(total_rows: usize, batch_size: u32) -> Result<Self, ExecutemanyManagerError> {
 oracledb	crates/oracledb/src/cursor_logic.rs	66	pub fn with_chunks(
-oracledb	crates/oracledb/src/lib.rs	1018	pub type Result<T> = std::result::Result<T, Error>;
-oracledb	crates/oracledb/src/lib.rs	1020	pub(crate) fn duration_to_millis_saturating(duration: Duration) -> u32 {
-oracledb	crates/oracledb/src/lib.rs	1025	pub type Cursor = CursorValue;
-oracledb	crates/oracledb/src/lib.rs	1030	pub trait ColumnIndex: column_index_private::Sealed {
-oracledb	crates/oracledb/src/lib.rs	1036	pub trait Sealed {}
-oracledb	crates/oracledb/src/lib.rs	1096	pub fn kind(&self) -> ErrorKind {
-oracledb	crates/oracledb/src/lib.rs	1124	pub fn resource_limit(&self) -> Option<oracledb_protocol::ResourceLimit> {
-oracledb	crates/oracledb/src/lib.rs	1141	pub fn ora_code(&self) -> Option<i32> {
-oracledb	crates/oracledb/src/lib.rs	1152	pub fn oracle_code(&self) -> Option<i32> {
-oracledb	crates/oracledb/src/lib.rs	1160	pub fn offset(&self) -> Option<i32> {
-oracledb	crates/oracledb/src/lib.rs	1181	pub fn caret(&self, sql: &str) -> Option<String> {
-oracledb	crates/oracledb/src/lib.rs	1206	pub fn connection_disposition(&self) -> ConnectionDisposition {
-oracledb	crates/oracledb/src/lib.rs	1219	pub fn is_connection_lost(&self) -> bool {
-oracledb	crates/oracledb/src/lib.rs	1240	pub fn is_transient(&self) -> bool {
-oracledb	crates/oracledb/src/lib.rs	1250	pub fn retry_hint(&self) -> RetryHint {
-oracledb	crates/oracledb/src/lib.rs	1260	pub fn is_retryable(&self) -> bool {
-oracledb	crates/oracledb/src/lib.rs	1269	pub enum SessionlessError {
-oracledb	crates/oracledb/src/lib.rs	1281	pub fn full_code(self) -> &'static str {
-oracledb	crates/oracledb/src/lib.rs	1290	pub fn message(self) -> &'static str {
-oracledb	crates/oracledb/src/lib.rs	1338	pub struct AccessToken(String);
-oracledb	crates/oracledb/src/lib.rs	1344	pub fn new(token: impl Into<String>) -> Self {
-oracledb	crates/oracledb/src/lib.rs	1350	pub(crate) fn expose(&self) -> &str {
-oracledb	crates/oracledb/src/lib.rs	1367	pub enum AuthModeKind {
-oracledb	crates/oracledb/src/lib.rs	1393	pub enum AuthModeSupport {
-oracledb	crates/oracledb/src/lib.rs	1401	pub struct AuthCapabilities {
-oracledb	crates/oracledb/src/lib.rs	1412	pub const THIN: Self = Self {
-oracledb	crates/oracledb/src/lib.rs	1422	pub fn support(self, mode: AuthModeKind) -> AuthModeSupport {
-oracledb	crates/oracledb/src/lib.rs	1437	pub enum AuthMode {
-oracledb	crates/oracledb/src/lib.rs	1453	pub fn kind(&self) -> AuthModeKind {
-oracledb	crates/oracledb/src/lib.rs	1498	pub struct UnsupportedAuthMode {
-oracledb	crates/oracledb/src/lib.rs	1504	pub fn mode(&self) -> AuthModeKind {
-oracledb	crates/oracledb/src/lib.rs	1515	pub struct ConnectOptions {
-oracledb	crates/oracledb/src/lib.rs	1613	pub fn new(
-oracledb	crates/oracledb/src/lib.rs	1645	pub fn external_auth(connect_string: impl Into<String>, identity: ClientIdentity) -> Self {
-oracledb	crates/oracledb/src/lib.rs	1654	pub fn kerberos_auth(
-oracledb	crates/oracledb/src/lib.rs	1671	pub fn radius_auth(
-oracledb	crates/oracledb/src/lib.rs	1686	pub fn with_protocol_limits(mut self, limits: ProtocolLimits) -> Self {
-oracledb	crates/oracledb/src/lib.rs	1698	pub fn with_statement_cache_size(mut self, size: usize) -> Self {
-oracledb	crates/oracledb/src/lib.rs	1713	pub fn with_access_token(mut self, token: impl Into<String>) -> Self {
-oracledb	crates/oracledb/src/lib.rs	1724	pub fn with_external_auth(mut self) -> Self {
-oracledb	crates/oracledb/src/lib.rs	1736	pub fn with_kerberos_auth(
-oracledb	crates/oracledb/src/lib.rs	1755	pub fn with_radius_auth(mut self, challenge: impl Into<String>) -> Self {
-oracledb	crates/oracledb/src/lib.rs	1770	pub fn with_edition(mut self, edition: impl Into<String>) -> Self {
-oracledb	crates/oracledb/src/lib.rs	1777	pub fn with_use_sni(mut self, use_sni: bool) -> Self {
-oracledb	crates/oracledb/src/lib.rs	1785	pub fn with_wallet_location(mut self, location: impl Into<String>) -> Self {
-oracledb	crates/oracledb/src/lib.rs	1792	pub fn with_wallet_password(mut self, password: impl Into<String>) -> Self {
-oracledb	crates/oracledb/src/lib.rs	1800	pub fn with_ssl_server_dn_match(mut self, enabled: bool) -> Self {
-oracledb	crates/oracledb/src/lib.rs	1808	pub fn with_ssl_server_cert_dn(mut self, dn: impl Into<String>) -> Self {
-oracledb	crates/oracledb/src/lib.rs	1816	pub fn with_server_type_emon(mut self, emon: bool) -> Self {
-oracledb	crates/oracledb/src/lib.rs	181	pub use oracledb_protocol as protocol;
-oracledb	crates/oracledb/src/lib.rs	1822	pub fn with_app_context(mut self, app_context: Vec<(String, String, String)>) -> Self {
-oracledb	crates/oracledb/src/lib.rs	1828	pub fn with_proxy_user(mut self, proxy_user: Option<String>) -> Self {
-oracledb	crates/oracledb/src/lib.rs	1841	pub fn with_sdu(mut self, sdu: u32) -> Self {
-oracledb	crates/oracledb/src/lib.rs	1847	pub fn connect_string(&self) -> &str {
-oracledb	crates/oracledb/src/lib.rs	1851	pub fn user(&self) -> &str {
-oracledb	crates/oracledb/src/lib.rs	1855	pub fn password(&self) -> &str {
-oracledb	crates/oracledb/src/lib.rs	1859	pub fn identity(&self) -> &ClientIdentity {
-oracledb	crates/oracledb/src/lib.rs	1863	pub fn app_context(&self) -> &[(String, String, String)] {
-oracledb	crates/oracledb/src/lib.rs	1867	pub fn sdu(&self) -> u16 {
-oracledb	crates/oracledb/src/lib.rs	1871	pub fn proxy_user(&self) -> Option<&str> {
-oracledb	crates/oracledb/src/lib.rs	1875	pub fn auth_mode(&self) -> &AuthMode {
-oracledb	crates/oracledb/src/lib.rs	1879	pub fn auth_capabilities(&self) -> AuthCapabilities {
-oracledb	crates/oracledb/src/lib.rs	1883	pub fn server_type_emon(&self) -> bool {
-oracledb	crates/oracledb/src/lib.rs	1887	pub fn wallet_location(&self) -> Option<&str> {
-oracledb	crates/oracledb/src/lib.rs	1891	pub fn wallet_password(&self) -> Option<&str> {
-oracledb	crates/oracledb/src/lib.rs	1895	pub fn edition(&self) -> Option<&str> {
-oracledb	crates/oracledb/src/lib.rs	1899	pub fn ssl_server_dn_match(&self) -> bool {
-oracledb	crates/oracledb/src/lib.rs	1903	pub fn ssl_server_cert_dn(&self) -> Option<&str> {
-oracledb	crates/oracledb/src/lib.rs	1907	pub fn use_sni(&self) -> bool {
-oracledb	crates/oracledb/src/lib.rs	1911	pub fn access_token(&self) -> Option<&AccessToken> {
-oracledb	crates/oracledb/src/lib.rs	1915	pub fn statement_cache_size(&self) -> usize {
-oracledb	crates/oracledb/src/lib.rs	1919	pub fn protocol_limits(&self) -> ProtocolLimits {
-oracledb	crates/oracledb/src/lib.rs	1934	pub struct Connection {
-oracledb	crates/oracledb/src/lib.rs	2057	pub enum NotificationOutcome {
-oracledb	crates/oracledb/src/lib.rs	206	pub(crate) fn enabled() -> bool {
-oracledb	crates/oracledb/src/lib.rs	2071	pub enum PipelineRequest {
-oracledb	crates/oracledb/src/lib.rs	2082	pub fn execute(
-oracledb	crates/oracledb/src/lib.rs	2094	pub fn commit() -> Self {
-oracledb	crates/oracledb/src/lib.rs	2098	pub fn sql(&self) -> Option<&str> {
-oracledb	crates/oracledb/src/lib.rs	2105	pub fn bind_rows(&self) -> Option<&[Vec<BindValue>]> {
-oracledb	crates/oracledb/src/lib.rs	2112	pub fn prefetch_rows(&self) -> Option<u32> {
-oracledb	crates/oracledb/src/lib.rs	2119	pub fn is_commit(&self) -> bool {
-oracledb	crates/oracledb/src/lib.rs	2125	pub struct CancelHandle {
-oracledb	crates/oracledb/src/lib.rs	212	pub(crate) fn add_read(ns: u64) {
-oracledb	crates/oracledb/src/lib.rs	2136	pub async fn connect(cx: &Cx, options: ConnectOptions) -> Result<Self> {
-oracledb	crates/oracledb/src/lib.rs	217	pub(crate) fn add_decode(ns: u64) {
-oracledb	crates/oracledb/src/lib.rs	221	pub(crate) fn snapshot() -> (u64, u64) {
-oracledb	crates/oracledb/src/lib.rs	228	pub(crate) fn reset() {
-oracledb	crates/oracledb/src/lib.rs	233	pub(crate) fn set_force(on: bool) {
-oracledb	crates/oracledb/src/lib.rs	2371	pub fn descriptor(&self) -> &EasyConnect {
-oracledb	crates/oracledb/src/lib.rs	2377	pub fn identity(&self) -> &ClientIdentity {
-oracledb	crates/oracledb/src/lib.rs	2382	pub fn session_id(&self) -> u32 {
-oracledb	crates/oracledb/src/lib.rs	2387	pub fn serial_num(&self) -> u16 {
-oracledb	crates/oracledb/src/lib.rs	2392	pub fn server_version(&self) -> Option<&str> {
-oracledb	crates/oracledb/src/lib.rs	2398	pub fn server_version_tuple(&self) -> Option<(u8, u8, u8, u8, u8)> {
-oracledb	crates/oracledb/src/lib.rs	2410	pub fn sdu(&self) -> usize {
-oracledb	crates/oracledb/src/lib.rs	2417	pub fn supports_pipelining(&self) -> bool {
-oracledb	crates/oracledb/src/lib.rs	2421	pub fn cancel_handle(&self) -> Result<CancelHandle> {
-oracledb	crates/oracledb/src/lib.rs	2430	pub fn is_dead(&self) -> bool {
-oracledb	crates/oracledb/src/lib.rs	2452	pub async fn ping(&mut self, cx: &Cx) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	245	pub fn fetch_profile_read_decode_ns() -> (u64, u64) {
-oracledb	crates/oracledb/src/lib.rs	2460	pub async fn change_password(
-oracledb	crates/oracledb/src/lib.rs	2495	pub async fn subscribe_register(
-oracledb	crates/oracledb/src/lib.rs	250	pub fn fetch_profile_reset() {
-oracledb	crates/oracledb/src/lib.rs	2540	pub async fn subscribe_unregister(
-oracledb	crates/oracledb/src/lib.rs	256	pub fn fetch_profile_arm(on: bool) {
-oracledb	crates/oracledb/src/lib.rs	2591	pub async fn notify_register(&mut self, cx: &Cx, client_id: &[u8]) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	2614	pub async fn recv_notification(
-oracledb	crates/oracledb/src/lib.rs	262	pub mod arrow;
-oracledb	crates/oracledb/src/lib.rs	2691	pub async fn ping_with_timeout(&mut self, cx: &Cx, timeout_ms: u32) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	2712	pub async fn commit(&mut self, cx: &Cx) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	2722	pub async fn rollback(&mut self, cx: &Cx) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	2733	pub async fn enable_dbms_output(&mut self, cx: &Cx, buffer_bytes: Option<u32>) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	273	pub mod pool;
-oracledb	crates/oracledb/src/lib.rs	2754	pub async fn read_dbms_output(
-oracledb	crates/oracledb/src/lib.rs	278	pub mod soda;
-oracledb	crates/oracledb/src/lib.rs	280	pub(crate) mod tls;
-oracledb	crates/oracledb/src/lib.rs	281	pub mod transport;
-oracledb	crates/oracledb/src/lib.rs	2877	pub async fn begin_sessionless_transaction(
-oracledb	crates/oracledb/src/lib.rs	288	pub use tracing as __tracing;
-oracledb	crates/oracledb/src/lib.rs	2896	pub async fn resume_sessionless_transaction(
-oracledb	crates/oracledb/src/lib.rs	2915	pub async fn suspend_sessionless_transaction(&mut self, cx: &Cx) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	294	pub use obs::ObsSpanGuard;
-oracledb	crates/oracledb/src/lib.rs	296	pub use cursor_logic::{
-oracledb	crates/oracledb/src/lib.rs	3010	pub async fn tpc_begin(
-oracledb	crates/oracledb/src/lib.rs	301	pub use request::{Batch, BatchRows, Execute, Query, Registration, Scroll};
-oracledb	crates/oracledb/src/lib.rs	302	pub use rows::{
-oracledb	crates/oracledb/src/lib.rs	3035	pub async fn tpc_end(
-oracledb	crates/oracledb/src/lib.rs	3065	pub async fn tpc_prepare(&mut self, cx: &Cx, xid: Option<(u32, &[u8], &[u8])>) -> Result<bool> {
-oracledb	crates/oracledb/src/lib.rs	307	pub use sql_convert::{
-oracledb	crates/oracledb/src/lib.rs	3093	pub async fn tpc_commit(
-oracledb	crates/oracledb/src/lib.rs	3138	pub async fn tpc_rollback(&mut self, cx: &Cx, xid: Option<(u32, &[u8], &[u8])>) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	3163	pub fn transaction_in_progress(&self) -> bool {
-oracledb	crates/oracledb/src/lib.rs	3171	pub fn prepare_sessionless_suspend_on_success(&mut self) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	3321	pub async fn query<'p>(
-oracledb	crates/oracledb/src/lib.rs	3332	pub async fn query_one<'p>(
-oracledb	crates/oracledb/src/lib.rs	333	pub use oracledb_derive::FromRow;
-oracledb	crates/oracledb/src/lib.rs	3352	pub async fn query_opt<'p>(
-oracledb	crates/oracledb/src/lib.rs	3372	pub async fn query_all<'p>(
-oracledb	crates/oracledb/src/lib.rs	3383	pub async fn query_with<'conn, 'q>(
-oracledb	crates/oracledb/src/lib.rs	3463	pub async fn execute<'p>(
-oracledb	crates/oracledb/src/lib.rs	3474	pub async fn execute_with<'e>(
-oracledb	crates/oracledb/src/lib.rs	3510	pub async fn execute_many<'b>(
-oracledb	crates/oracledb/src/lib.rs	3521	pub async fn execute_many_with<'b>(
-oracledb	crates/oracledb/src/lib.rs	3559	pub async fn register_query<'r>(
-oracledb	crates/oracledb/src/lib.rs	3599	pub(crate) async fn execute_query_with_binds_core(
-oracledb	crates/oracledb/src/lib.rs	3621	pub(crate) async fn execute_query_with_bind_rows_and_options_core(
-oracledb	crates/oracledb/src/lib.rs	368	pub mod prelude {
-oracledb	crates/oracledb/src/lib.rs	369	pub use crate::protocol::thin::{BindValue, QueryValue};
-oracledb	crates/oracledb/src/lib.rs	370	pub use crate::protocol::ClientIdentity;
-oracledb	crates/oracledb/src/lib.rs	371	pub use crate::{
-oracledb	crates/oracledb/src/lib.rs	3894	pub async fn execute_raw(
-oracledb	crates/oracledb/src/lib.rs	3914	pub(crate) async fn execute_query_with_bind_rows_options_call_timeout(
-oracledb	crates/oracledb/src/lib.rs	4022	pub async fn fetch_rows(
-oracledb	crates/oracledb/src/lib.rs	4033	pub async fn fetch_rows_with_columns(
-oracledb	crates/oracledb/src/lib.rs	4115	pub async fn fetch_rows_ref(
-oracledb	crates/oracledb/src/lib.rs	4197	pub async fn fetch_rows_request(
-oracledb	crates/oracledb/src/lib.rs	4247	pub async fn fetch_rows_ref_response(
-oracledb	crates/oracledb/src/lib.rs	4317	pub async fn for_each_row_ref<F>(
-oracledb	crates/oracledb/src/lib.rs	4433	pub async fn define_and_fetch_rows_with_columns(
-oracledb	crates/oracledb/src/lib.rs	4486	pub async fn fetch_cursor(
-oracledb	crates/oracledb/src/lib.rs	4553	pub async fn describe_object_type(
-oracledb	crates/oracledb/src/lib.rs	4639	pub async fn scroll_cursor(
-oracledb	crates/oracledb/src/lib.rs	4703	pub async fn read_lob(
-oracledb	crates/oracledb/src/lib.rs	4740	pub async fn read_lob_with_timeout(
-oracledb	crates/oracledb/src/lib.rs	4754	pub async fn aq_enq_one(
-oracledb	crates/oracledb/src/lib.rs	4788	pub async fn aq_deq_one(
-oracledb	crates/oracledb/src/lib.rs	4820	pub async fn aq_enq_many(
-oracledb	crates/oracledb/src/lib.rs	4859	pub async fn aq_deq_many(
-oracledb	crates/oracledb/src/lib.rs	4896	pub async fn create_temp_lob(
-oracledb	crates/oracledb/src/lib.rs	4922	pub async fn write_lob(
-oracledb	crates/oracledb/src/lib.rs	4961	pub async fn write_lob_with_timeout(
-oracledb	crates/oracledb/src/lib.rs	4973	pub async fn trim_lob(
-oracledb	crates/oracledb/src/lib.rs	5001	pub async fn trim_lob_with_timeout(
-oracledb	crates/oracledb/src/lib.rs	5012	pub async fn free_temp_lobs(&mut self, cx: &Cx, locators: &[Vec<u8>]) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	5049	pub async fn free_temp_lobs_with_timeout(
-oracledb	crates/oracledb/src/lib.rs	5250	pub async fn direct_path_prepare(
-oracledb	crates/oracledb/src/lib.rs	5280	pub async fn direct_path_load_stream(
-oracledb	crates/oracledb/src/lib.rs	5307	pub async fn direct_path_op(&mut self, cx: &Cx, cursor_id: u16, op_code: u32) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	5331	pub async fn direct_path_load(
-oracledb	crates/oracledb/src/lib.rs	5360	pub async fn direct_path_load_prepared(
-oracledb	crates/oracledb/src/lib.rs	5481	pub(crate) async fn recover_from_call_timeout<T>(
-oracledb	crates/oracledb/src/lib.rs	5562	pub async fn cancel(&mut self, _cx: &Cx) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	5587	pub fn supports_oob(&self) -> bool {
-oracledb	crates/oracledb/src/lib.rs	5762	pub fn release_cursor(&mut self, cursor_id: u32) {
-oracledb	crates/oracledb/src/lib.rs	5786	pub fn close_cursor(&mut self, cursor_id: u32) {
-oracledb	crates/oracledb/src/lib.rs	5846	pub async fn close(mut self, cx: &Cx) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	589	pub fn render_caret(sql: &str, offset: usize, headline: &str) -> String {
-oracledb	crates/oracledb/src/lib.rs	5910	pub async fn run_pipeline(
-oracledb	crates/oracledb/src/lib.rs	6033	pub async fn run_pipeline_decoded(
-oracledb	crates/oracledb/src/lib.rs	6131	pub async fn supplement_json_column_metadata(
-oracledb	crates/oracledb/src/lib.rs	6171	pub async fn cancel(&mut self, cx: &Cx) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	6200	pub fn cancel_blocking(&mut self) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	6235	pub struct BlockingConnection;
-oracledb	crates/oracledb/src/lib.rs	6239	pub fn connect(options: ConnectOptions) -> Result<Connection> {
-oracledb	crates/oracledb/src/lib.rs	6248	pub fn ping(connection: &mut Connection) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	6257	pub fn ping_with_timeout(connection: &mut Connection, timeout_ms: u32) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	625	pub struct DbmsOutput {
-oracledb	crates/oracledb/src/lib.rs	6266	pub fn change_password(
-oracledb	crates/oracledb/src/lib.rs	6282	pub fn cancel(connection: &mut Connection) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	6286	pub fn commit(connection: &mut Connection) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	6298	pub fn subscribe_register(
-oracledb	crates/oracledb/src/lib.rs	6332	pub fn subscribe_unregister(
-oracledb	crates/oracledb/src/lib.rs	6369	pub fn notify_register(connection: &mut Connection, client_id: &[u8]) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	6374	pub fn recv_notification(
-oracledb	crates/oracledb/src/lib.rs	6388	pub fn register_query<'r>(
-oracledb	crates/oracledb/src/lib.rs	638	pub fn new(lines: Vec<String>, truncated: bool) -> Self {
-oracledb	crates/oracledb/src/lib.rs	6395	pub fn rollback(connection: &mut Connection) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	6405	pub fn enable_dbms_output(
-oracledb	crates/oracledb/src/lib.rs	6418	pub fn read_dbms_output(
-oracledb	crates/oracledb/src/lib.rs	6432	pub fn fetch_cursor(
-oracledb	crates/oracledb/src/lib.rs	6446	pub fn describe_object_type(
-oracledb	crates/oracledb/src/lib.rs	6461	pub fn begin_sessionless_transaction(
-oracledb	crates/oracledb/src/lib.rs	6477	pub fn resume_sessionless_transaction(
-oracledb	crates/oracledb/src/lib.rs	6493	pub fn suspend_sessionless_transaction(connection: &mut Connection) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	649	pub fn lines(&self) -> &[String] {
-oracledb	crates/oracledb/src/lib.rs	6503	pub fn tpc_begin(
-oracledb	crates/oracledb/src/lib.rs	6528	pub fn tpc_end(
-oracledb	crates/oracledb/src/lib.rs	653	pub fn line_count(&self) -> usize {
-oracledb	crates/oracledb/src/lib.rs	6541	pub fn tpc_prepare(
-oracledb	crates/oracledb/src/lib.rs	6553	pub fn tpc_commit(
-oracledb	crates/oracledb/src/lib.rs	6566	pub fn tpc_rollback(
-oracledb	crates/oracledb/src/lib.rs	657	pub fn char_count(&self) -> usize {
-oracledb	crates/oracledb/src/lib.rs	6580	pub fn query<'conn, 'p>(
-oracledb	crates/oracledb/src/lib.rs	6594	pub fn query_one<'p>(
-oracledb	crates/oracledb/src/lib.rs	6603	pub fn query_opt<'p>(
-oracledb	crates/oracledb/src/lib.rs	6612	pub fn query_all<'p>(
-oracledb	crates/oracledb/src/lib.rs	661	pub fn truncated(&self) -> bool {
-oracledb	crates/oracledb/src/lib.rs	6621	pub fn query_with<'conn, 'q>(
-oracledb	crates/oracledb/src/lib.rs	6634	pub fn execute<'p>(
-oracledb	crates/oracledb/src/lib.rs	6643	pub fn execute_with<'e>(
-oracledb	crates/oracledb/src/lib.rs	6651	pub fn execute_many<'b>(
-oracledb	crates/oracledb/src/lib.rs	665	pub fn into_lines(self) -> Vec<String> {
-oracledb	crates/oracledb/src/lib.rs	6660	pub fn execute_many_with<'b>(
-oracledb	crates/oracledb/src/lib.rs	6676	pub fn execute_raw(
-oracledb	crates/oracledb/src/lib.rs	6694	pub fn fetch_rows(
-oracledb	crates/oracledb/src/lib.rs	6710	pub fn fetch_rows_with_columns(
-oracledb	crates/oracledb/src/lib.rs	6727	pub fn define_and_fetch_rows_with_columns(
-oracledb	crates/oracledb/src/lib.rs	672	pub struct ObjectAttribute {
-oracledb	crates/oracledb/src/lib.rs	6750	pub fn scroll_cursor(
-oracledb	crates/oracledb/src/lib.rs	6768	pub fn read_lob(
-oracledb	crates/oracledb/src/lib.rs	6782	pub fn read_lob_with_timeout(
-oracledb	crates/oracledb/src/lib.rs	6799	pub fn aq_enq_one(
-oracledb	crates/oracledb/src/lib.rs	6813	pub fn aq_deq_one(
-oracledb	crates/oracledb/src/lib.rs	6826	pub fn aq_enq_many(
-oracledb	crates/oracledb/src/lib.rs	6842	pub fn aq_deq_many(
-oracledb	crates/oracledb/src/lib.rs	6858	pub fn create_temp_lob(
-oracledb	crates/oracledb/src/lib.rs	686	pub struct CollectionElement {
-oracledb	crates/oracledb/src/lib.rs	6871	pub fn write_lob(
-oracledb	crates/oracledb/src/lib.rs	6885	pub fn trim_lob(
-oracledb	crates/oracledb/src/lib.rs	6898	pub fn write_lob_with_timeout(
-oracledb	crates/oracledb/src/lib.rs	6915	pub fn trim_lob_with_timeout(
-oracledb	crates/oracledb/src/lib.rs	6931	pub fn free_temp_lobs(connection: &mut Connection, locators: &[Vec<u8>]) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	6940	pub fn free_temp_lobs_with_timeout(
-oracledb	crates/oracledb/src/lib.rs	6955	pub fn direct_path_load(
-oracledb	crates/oracledb/src/lib.rs	6973	pub fn run_pipeline(
-oracledb	crates/oracledb/src/lib.rs	6988	pub fn run_pipeline_decoded(
-oracledb	crates/oracledb/src/lib.rs	699	pub struct ObjectType {
-oracledb	crates/oracledb/src/lib.rs	7003	pub fn direct_path_prepare(
-oracledb	crates/oracledb/src/lib.rs	7019	pub fn direct_path_load_prepared(
-oracledb	crates/oracledb/src/lib.rs	7036	pub fn __pyshim_drain_cancel_response(connection: &mut Connection) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	7042	pub fn supplement_json_column_metadata(
-oracledb	crates/oracledb/src/lib.rs	7057	pub fn close(connection: Connection) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	7092	pub(crate) fn new_pool_runtime() -> Result<Runtime> {
-oracledb	crates/oracledb/src/lib.rs	7142	pub(crate) fn block_on_io<F, Fut, T>(operation: F) -> Result<T>
-oracledb	crates/oracledb/src/lib.rs	7158	pub(crate) fn block_on_connection<F, Fut, T>(operation: F) -> Result<T>
-oracledb	crates/oracledb/src/lib.rs	716	pub struct DecodedObject {
-oracledb	crates/oracledb/src/lib.rs	730	pub fn object(
-oracledb	crates/oracledb/src/lib.rs	743	pub fn collection(
-oracledb	crates/oracledb/src/lib.rs	756	pub fn type_schema(&self) -> &str {
-oracledb	crates/oracledb/src/lib.rs	760	pub fn type_name(&self) -> &str {
-oracledb	crates/oracledb/src/lib.rs	764	pub fn attributes(&self) -> &[(String, Option<oracledb_protocol::thin::QueryValue>)] {
-oracledb	crates/oracledb/src/lib.rs	768	pub fn elements(&self) -> Option<&[Option<oracledb_protocol::thin::QueryValue>]> {
-oracledb	crates/oracledb/src/lib.rs	772	pub fn is_collection(&self) -> bool {
-oracledb	crates/oracledb/src/lib.rs	776	pub fn into_attributes(self) -> Vec<(String, Option<oracledb_protocol::thin::QueryValue>)> {
-oracledb	crates/oracledb/src/lib.rs	780	pub fn into_elements(self) -> Option<Vec<Option<oracledb_protocol::thin::QueryValue>>> {
-oracledb	crates/oracledb/src/lib.rs	795	pub fn decode_object(
-oracledb	crates/oracledb/src/lib.rs	901	pub enum ErrorKind {
-oracledb	crates/oracledb/src/lib.rs	915	pub enum ConnectionDisposition {
-oracledb	crates/oracledb/src/lib.rs	923	pub enum RetryHint {
-oracledb	crates/oracledb/src/lib.rs	931	pub enum Error {
+oracledb	crates/oracledb/src/lib.rs	1021	pub type Result<T> = std::result::Result<T, Error>;
+oracledb	crates/oracledb/src/lib.rs	1023	pub(crate) fn duration_to_millis_saturating(duration: Duration) -> u32 {
+oracledb	crates/oracledb/src/lib.rs	1028	pub type Cursor = CursorValue;
+oracledb	crates/oracledb/src/lib.rs	1033	pub trait ColumnIndex: column_index_private::Sealed {
+oracledb	crates/oracledb/src/lib.rs	1039	pub trait Sealed {}
+oracledb	crates/oracledb/src/lib.rs	1099	pub fn kind(&self) -> ErrorKind {
+oracledb	crates/oracledb/src/lib.rs	1127	pub fn resource_limit(&self) -> Option<oracledb_protocol::ResourceLimit> {
+oracledb	crates/oracledb/src/lib.rs	1144	pub fn ora_code(&self) -> Option<i32> {
+oracledb	crates/oracledb/src/lib.rs	1155	pub fn oracle_code(&self) -> Option<i32> {
+oracledb	crates/oracledb/src/lib.rs	1163	pub fn offset(&self) -> Option<i32> {
+oracledb	crates/oracledb/src/lib.rs	1184	pub fn caret(&self, sql: &str) -> Option<String> {
+oracledb	crates/oracledb/src/lib.rs	1209	pub fn connection_disposition(&self) -> ConnectionDisposition {
+oracledb	crates/oracledb/src/lib.rs	1222	pub fn is_connection_lost(&self) -> bool {
+oracledb	crates/oracledb/src/lib.rs	1243	pub fn is_transient(&self) -> bool {
+oracledb	crates/oracledb/src/lib.rs	1253	pub fn retry_hint(&self) -> RetryHint {
+oracledb	crates/oracledb/src/lib.rs	1263	pub fn is_retryable(&self) -> bool {
+oracledb	crates/oracledb/src/lib.rs	1272	pub enum SessionlessError {
+oracledb	crates/oracledb/src/lib.rs	1284	pub fn full_code(self) -> &'static str {
+oracledb	crates/oracledb/src/lib.rs	1293	pub fn message(self) -> &'static str {
+oracledb	crates/oracledb/src/lib.rs	1341	pub struct AccessToken(String);
+oracledb	crates/oracledb/src/lib.rs	1347	pub fn new(token: impl Into<String>) -> Self {
+oracledb	crates/oracledb/src/lib.rs	1353	pub(crate) fn expose(&self) -> &str {
+oracledb	crates/oracledb/src/lib.rs	1370	pub enum AuthModeKind {
+oracledb	crates/oracledb/src/lib.rs	1396	pub enum AuthModeSupport {
+oracledb	crates/oracledb/src/lib.rs	1404	pub struct AuthCapabilities {
+oracledb	crates/oracledb/src/lib.rs	1415	pub const THIN: Self = Self {
+oracledb	crates/oracledb/src/lib.rs	1425	pub fn support(self, mode: AuthModeKind) -> AuthModeSupport {
+oracledb	crates/oracledb/src/lib.rs	1440	pub enum AuthMode {
+oracledb	crates/oracledb/src/lib.rs	1456	pub fn kind(&self) -> AuthModeKind {
+oracledb	crates/oracledb/src/lib.rs	1501	pub struct UnsupportedAuthMode {
+oracledb	crates/oracledb/src/lib.rs	1507	pub fn mode(&self) -> AuthModeKind {
+oracledb	crates/oracledb/src/lib.rs	1518	pub struct ConnectOptions {
+oracledb	crates/oracledb/src/lib.rs	1616	pub fn new(
+oracledb	crates/oracledb/src/lib.rs	1648	pub fn external_auth(connect_string: impl Into<String>, identity: ClientIdentity) -> Self {
+oracledb	crates/oracledb/src/lib.rs	1657	pub fn kerberos_auth(
+oracledb	crates/oracledb/src/lib.rs	1674	pub fn radius_auth(
+oracledb	crates/oracledb/src/lib.rs	1689	pub fn with_protocol_limits(mut self, limits: ProtocolLimits) -> Self {
+oracledb	crates/oracledb/src/lib.rs	1701	pub fn with_statement_cache_size(mut self, size: usize) -> Self {
+oracledb	crates/oracledb/src/lib.rs	1716	pub fn with_access_token(mut self, token: impl Into<String>) -> Self {
+oracledb	crates/oracledb/src/lib.rs	1727	pub fn with_external_auth(mut self) -> Self {
+oracledb	crates/oracledb/src/lib.rs	1739	pub fn with_kerberos_auth(
+oracledb	crates/oracledb/src/lib.rs	1758	pub fn with_radius_auth(mut self, challenge: impl Into<String>) -> Self {
+oracledb	crates/oracledb/src/lib.rs	1773	pub fn with_edition(mut self, edition: impl Into<String>) -> Self {
+oracledb	crates/oracledb/src/lib.rs	1780	pub fn with_use_sni(mut self, use_sni: bool) -> Self {
+oracledb	crates/oracledb/src/lib.rs	1788	pub fn with_wallet_location(mut self, location: impl Into<String>) -> Self {
+oracledb	crates/oracledb/src/lib.rs	1795	pub fn with_wallet_password(mut self, password: impl Into<String>) -> Self {
+oracledb	crates/oracledb/src/lib.rs	1803	pub fn with_ssl_server_dn_match(mut self, enabled: bool) -> Self {
+oracledb	crates/oracledb/src/lib.rs	1811	pub fn with_ssl_server_cert_dn(mut self, dn: impl Into<String>) -> Self {
+oracledb	crates/oracledb/src/lib.rs	1819	pub fn with_server_type_emon(mut self, emon: bool) -> Self {
+oracledb	crates/oracledb/src/lib.rs	1825	pub fn with_app_context(mut self, app_context: Vec<(String, String, String)>) -> Self {
+oracledb	crates/oracledb/src/lib.rs	1831	pub fn with_proxy_user(mut self, proxy_user: Option<String>) -> Self {
+oracledb	crates/oracledb/src/lib.rs	1844	pub fn with_sdu(mut self, sdu: u32) -> Self {
+oracledb	crates/oracledb/src/lib.rs	184	pub use oracledb_protocol as protocol;
+oracledb	crates/oracledb/src/lib.rs	1850	pub fn connect_string(&self) -> &str {
+oracledb	crates/oracledb/src/lib.rs	1854	pub fn user(&self) -> &str {
+oracledb	crates/oracledb/src/lib.rs	1858	pub fn password(&self) -> &str {
+oracledb	crates/oracledb/src/lib.rs	1862	pub fn identity(&self) -> &ClientIdentity {
+oracledb	crates/oracledb/src/lib.rs	1866	pub fn app_context(&self) -> &[(String, String, String)] {
+oracledb	crates/oracledb/src/lib.rs	1870	pub fn sdu(&self) -> u16 {
+oracledb	crates/oracledb/src/lib.rs	1874	pub fn proxy_user(&self) -> Option<&str> {
+oracledb	crates/oracledb/src/lib.rs	1878	pub fn auth_mode(&self) -> &AuthMode {
+oracledb	crates/oracledb/src/lib.rs	1882	pub fn auth_capabilities(&self) -> AuthCapabilities {
+oracledb	crates/oracledb/src/lib.rs	1886	pub fn server_type_emon(&self) -> bool {
+oracledb	crates/oracledb/src/lib.rs	1890	pub fn wallet_location(&self) -> Option<&str> {
+oracledb	crates/oracledb/src/lib.rs	1894	pub fn wallet_password(&self) -> Option<&str> {
+oracledb	crates/oracledb/src/lib.rs	1898	pub fn edition(&self) -> Option<&str> {
+oracledb	crates/oracledb/src/lib.rs	1902	pub fn ssl_server_dn_match(&self) -> bool {
+oracledb	crates/oracledb/src/lib.rs	1906	pub fn ssl_server_cert_dn(&self) -> Option<&str> {
+oracledb	crates/oracledb/src/lib.rs	1910	pub fn use_sni(&self) -> bool {
+oracledb	crates/oracledb/src/lib.rs	1914	pub fn access_token(&self) -> Option<&AccessToken> {
+oracledb	crates/oracledb/src/lib.rs	1918	pub fn statement_cache_size(&self) -> usize {
+oracledb	crates/oracledb/src/lib.rs	1922	pub fn protocol_limits(&self) -> ProtocolLimits {
+oracledb	crates/oracledb/src/lib.rs	1937	pub struct Connection {
+oracledb	crates/oracledb/src/lib.rs	2060	pub enum NotificationOutcome {
+oracledb	crates/oracledb/src/lib.rs	2074	pub enum PipelineRequest {
+oracledb	crates/oracledb/src/lib.rs	2085	pub fn execute(
+oracledb	crates/oracledb/src/lib.rs	2097	pub fn commit() -> Self {
+oracledb	crates/oracledb/src/lib.rs	209	pub(crate) fn enabled() -> bool {
+oracledb	crates/oracledb/src/lib.rs	2101	pub fn sql(&self) -> Option<&str> {
+oracledb	crates/oracledb/src/lib.rs	2108	pub fn bind_rows(&self) -> Option<&[Vec<BindValue>]> {
+oracledb	crates/oracledb/src/lib.rs	2115	pub fn prefetch_rows(&self) -> Option<u32> {
+oracledb	crates/oracledb/src/lib.rs	2122	pub fn is_commit(&self) -> bool {
+oracledb	crates/oracledb/src/lib.rs	2128	pub struct CancelHandle {
+oracledb	crates/oracledb/src/lib.rs	2139	pub async fn connect(cx: &Cx, options: ConnectOptions) -> Result<Self> {
+oracledb	crates/oracledb/src/lib.rs	215	pub(crate) fn add_read(ns: u64) {
+oracledb	crates/oracledb/src/lib.rs	220	pub(crate) fn add_decode(ns: u64) {
+oracledb	crates/oracledb/src/lib.rs	224	pub(crate) fn snapshot() -> (u64, u64) {
+oracledb	crates/oracledb/src/lib.rs	231	pub(crate) fn reset() {
+oracledb	crates/oracledb/src/lib.rs	236	pub(crate) fn set_force(on: bool) {
+oracledb	crates/oracledb/src/lib.rs	2405	pub fn descriptor(&self) -> &EasyConnect {
+oracledb	crates/oracledb/src/lib.rs	2411	pub fn identity(&self) -> &ClientIdentity {
+oracledb	crates/oracledb/src/lib.rs	2416	pub fn session_id(&self) -> u32 {
+oracledb	crates/oracledb/src/lib.rs	2421	pub fn serial_num(&self) -> u16 {
+oracledb	crates/oracledb/src/lib.rs	2426	pub fn server_version(&self) -> Option<&str> {
+oracledb	crates/oracledb/src/lib.rs	2432	pub fn server_version_tuple(&self) -> Option<(u8, u8, u8, u8, u8)> {
+oracledb	crates/oracledb/src/lib.rs	2444	pub fn sdu(&self) -> usize {
+oracledb	crates/oracledb/src/lib.rs	2451	pub fn supports_pipelining(&self) -> bool {
+oracledb	crates/oracledb/src/lib.rs	2455	pub fn cancel_handle(&self) -> Result<CancelHandle> {
+oracledb	crates/oracledb/src/lib.rs	2464	pub fn is_dead(&self) -> bool {
+oracledb	crates/oracledb/src/lib.rs	2486	pub async fn ping(&mut self, cx: &Cx) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	248	pub fn fetch_profile_read_decode_ns() -> (u64, u64) {
+oracledb	crates/oracledb/src/lib.rs	2494	pub async fn change_password(
+oracledb	crates/oracledb/src/lib.rs	2529	pub async fn subscribe_register(
+oracledb	crates/oracledb/src/lib.rs	253	pub fn fetch_profile_reset() {
+oracledb	crates/oracledb/src/lib.rs	2574	pub async fn subscribe_unregister(
+oracledb	crates/oracledb/src/lib.rs	259	pub fn fetch_profile_arm(on: bool) {
+oracledb	crates/oracledb/src/lib.rs	2625	pub async fn notify_register(&mut self, cx: &Cx, client_id: &[u8]) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	2648	pub async fn recv_notification(
+oracledb	crates/oracledb/src/lib.rs	265	pub mod arrow;
+oracledb	crates/oracledb/src/lib.rs	2725	pub async fn ping_with_timeout(&mut self, cx: &Cx, timeout_ms: u32) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	2746	pub async fn commit(&mut self, cx: &Cx) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	2756	pub async fn rollback(&mut self, cx: &Cx) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	2767	pub async fn enable_dbms_output(&mut self, cx: &Cx, buffer_bytes: Option<u32>) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	276	pub mod pool;
+oracledb	crates/oracledb/src/lib.rs	2788	pub async fn read_dbms_output(
+oracledb	crates/oracledb/src/lib.rs	281	pub mod soda;
+oracledb	crates/oracledb/src/lib.rs	283	pub(crate) mod tls;
+oracledb	crates/oracledb/src/lib.rs	284	pub mod transport;
+oracledb	crates/oracledb/src/lib.rs	2911	pub async fn begin_sessionless_transaction(
+oracledb	crates/oracledb/src/lib.rs	291	pub use tracing as __tracing;
+oracledb	crates/oracledb/src/lib.rs	2930	pub async fn resume_sessionless_transaction(
+oracledb	crates/oracledb/src/lib.rs	2949	pub async fn suspend_sessionless_transaction(&mut self, cx: &Cx) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	297	pub use obs::ObsSpanGuard;
+oracledb	crates/oracledb/src/lib.rs	299	pub use cursor_logic::{
+oracledb	crates/oracledb/src/lib.rs	3044	pub async fn tpc_begin(
+oracledb	crates/oracledb/src/lib.rs	304	pub use request::{Batch, BatchRows, Execute, Query, Registration, Scroll};
+oracledb	crates/oracledb/src/lib.rs	305	pub use rows::{
+oracledb	crates/oracledb/src/lib.rs	3069	pub async fn tpc_end(
+oracledb	crates/oracledb/src/lib.rs	3099	pub async fn tpc_prepare(&mut self, cx: &Cx, xid: Option<(u32, &[u8], &[u8])>) -> Result<bool> {
+oracledb	crates/oracledb/src/lib.rs	310	pub use sql_convert::{
+oracledb	crates/oracledb/src/lib.rs	3127	pub async fn tpc_commit(
+oracledb	crates/oracledb/src/lib.rs	3172	pub async fn tpc_rollback(&mut self, cx: &Cx, xid: Option<(u32, &[u8], &[u8])>) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	3197	pub fn transaction_in_progress(&self) -> bool {
+oracledb	crates/oracledb/src/lib.rs	3205	pub fn prepare_sessionless_suspend_on_success(&mut self) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	3355	pub async fn query<'p>(
+oracledb	crates/oracledb/src/lib.rs	3366	pub async fn query_one<'p>(
+oracledb	crates/oracledb/src/lib.rs	336	pub use oracledb_derive::FromRow;
+oracledb	crates/oracledb/src/lib.rs	3386	pub async fn query_opt<'p>(
+oracledb	crates/oracledb/src/lib.rs	3406	pub async fn query_all<'p>(
+oracledb	crates/oracledb/src/lib.rs	3417	pub async fn query_with<'conn, 'q>(
+oracledb	crates/oracledb/src/lib.rs	3497	pub async fn execute<'p>(
+oracledb	crates/oracledb/src/lib.rs	3508	pub async fn execute_with<'e>(
+oracledb	crates/oracledb/src/lib.rs	3544	pub async fn execute_many<'b>(
+oracledb	crates/oracledb/src/lib.rs	3555	pub async fn execute_many_with<'b>(
+oracledb	crates/oracledb/src/lib.rs	3593	pub async fn register_query<'r>(
+oracledb	crates/oracledb/src/lib.rs	3633	pub(crate) async fn execute_query_with_binds_core(
+oracledb	crates/oracledb/src/lib.rs	3655	pub(crate) async fn execute_query_with_bind_rows_and_options_core(
+oracledb	crates/oracledb/src/lib.rs	371	pub mod prelude {
+oracledb	crates/oracledb/src/lib.rs	372	pub use crate::protocol::thin::{BindValue, QueryValue};
+oracledb	crates/oracledb/src/lib.rs	373	pub use crate::protocol::ClientIdentity;
+oracledb	crates/oracledb/src/lib.rs	374	pub use crate::{
+oracledb	crates/oracledb/src/lib.rs	3928	pub async fn execute_raw(
+oracledb	crates/oracledb/src/lib.rs	3948	pub(crate) async fn execute_query_with_bind_rows_options_call_timeout(
+oracledb	crates/oracledb/src/lib.rs	4056	pub async fn fetch_rows(
+oracledb	crates/oracledb/src/lib.rs	4067	pub async fn fetch_rows_with_columns(
+oracledb	crates/oracledb/src/lib.rs	4149	pub async fn fetch_rows_ref(
+oracledb	crates/oracledb/src/lib.rs	4231	pub async fn fetch_rows_request(
+oracledb	crates/oracledb/src/lib.rs	4281	pub async fn fetch_rows_ref_response(
+oracledb	crates/oracledb/src/lib.rs	4351	pub async fn for_each_row_ref<F>(
+oracledb	crates/oracledb/src/lib.rs	4467	pub async fn define_and_fetch_rows_with_columns(
+oracledb	crates/oracledb/src/lib.rs	4520	pub async fn fetch_cursor(
+oracledb	crates/oracledb/src/lib.rs	4587	pub async fn describe_object_type(
+oracledb	crates/oracledb/src/lib.rs	4673	pub async fn scroll_cursor(
+oracledb	crates/oracledb/src/lib.rs	4737	pub async fn read_lob(
+oracledb	crates/oracledb/src/lib.rs	4774	pub async fn read_lob_with_timeout(
+oracledb	crates/oracledb/src/lib.rs	4788	pub async fn aq_enq_one(
+oracledb	crates/oracledb/src/lib.rs	4822	pub async fn aq_deq_one(
+oracledb	crates/oracledb/src/lib.rs	4854	pub async fn aq_enq_many(
+oracledb	crates/oracledb/src/lib.rs	4893	pub async fn aq_deq_many(
+oracledb	crates/oracledb/src/lib.rs	4930	pub async fn create_temp_lob(
+oracledb	crates/oracledb/src/lib.rs	4956	pub async fn write_lob(
+oracledb	crates/oracledb/src/lib.rs	4995	pub async fn write_lob_with_timeout(
+oracledb	crates/oracledb/src/lib.rs	5007	pub async fn trim_lob(
+oracledb	crates/oracledb/src/lib.rs	5035	pub async fn trim_lob_with_timeout(
+oracledb	crates/oracledb/src/lib.rs	5046	pub async fn free_temp_lobs(&mut self, cx: &Cx, locators: &[Vec<u8>]) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	5083	pub async fn free_temp_lobs_with_timeout(
+oracledb	crates/oracledb/src/lib.rs	5284	pub async fn direct_path_prepare(
+oracledb	crates/oracledb/src/lib.rs	5314	pub async fn direct_path_load_stream(
+oracledb	crates/oracledb/src/lib.rs	5341	pub async fn direct_path_op(&mut self, cx: &Cx, cursor_id: u16, op_code: u32) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	5365	pub async fn direct_path_load(
+oracledb	crates/oracledb/src/lib.rs	5394	pub async fn direct_path_load_prepared(
+oracledb	crates/oracledb/src/lib.rs	5515	pub(crate) async fn recover_from_call_timeout<T>(
+oracledb	crates/oracledb/src/lib.rs	5596	pub async fn cancel(&mut self, _cx: &Cx) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	5621	pub fn supports_oob(&self) -> bool {
+oracledb	crates/oracledb/src/lib.rs	5796	pub fn release_cursor(&mut self, cursor_id: u32) {
+oracledb	crates/oracledb/src/lib.rs	5820	pub fn close_cursor(&mut self, cursor_id: u32) {
+oracledb	crates/oracledb/src/lib.rs	5880	pub async fn close(mut self, cx: &Cx) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	592	pub fn render_caret(sql: &str, offset: usize, headline: &str) -> String {
+oracledb	crates/oracledb/src/lib.rs	5944	pub async fn run_pipeline(
+oracledb	crates/oracledb/src/lib.rs	6067	pub async fn run_pipeline_decoded(
+oracledb	crates/oracledb/src/lib.rs	6165	pub async fn supplement_json_column_metadata(
+oracledb	crates/oracledb/src/lib.rs	6205	pub async fn cancel(&mut self, cx: &Cx) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	6234	pub fn cancel_blocking(&mut self) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	6269	pub struct BlockingConnection;
+oracledb	crates/oracledb/src/lib.rs	6273	pub fn connect(options: ConnectOptions) -> Result<Connection> {
+oracledb	crates/oracledb/src/lib.rs	6282	pub fn ping(connection: &mut Connection) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	628	pub struct DbmsOutput {
+oracledb	crates/oracledb/src/lib.rs	6291	pub fn ping_with_timeout(connection: &mut Connection, timeout_ms: u32) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	6300	pub fn change_password(
+oracledb	crates/oracledb/src/lib.rs	6316	pub fn cancel(connection: &mut Connection) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	6320	pub fn commit(connection: &mut Connection) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	6332	pub fn subscribe_register(
+oracledb	crates/oracledb/src/lib.rs	6366	pub fn subscribe_unregister(
+oracledb	crates/oracledb/src/lib.rs	6403	pub fn notify_register(connection: &mut Connection, client_id: &[u8]) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	6408	pub fn recv_notification(
+oracledb	crates/oracledb/src/lib.rs	641	pub fn new(lines: Vec<String>, truncated: bool) -> Self {
+oracledb	crates/oracledb/src/lib.rs	6422	pub fn register_query<'r>(
+oracledb	crates/oracledb/src/lib.rs	6429	pub fn rollback(connection: &mut Connection) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	6439	pub fn enable_dbms_output(
+oracledb	crates/oracledb/src/lib.rs	6452	pub fn read_dbms_output(
+oracledb	crates/oracledb/src/lib.rs	6466	pub fn fetch_cursor(
+oracledb	crates/oracledb/src/lib.rs	6480	pub fn describe_object_type(
+oracledb	crates/oracledb/src/lib.rs	6495	pub fn begin_sessionless_transaction(
+oracledb	crates/oracledb/src/lib.rs	6511	pub fn resume_sessionless_transaction(
+oracledb	crates/oracledb/src/lib.rs	6527	pub fn suspend_sessionless_transaction(connection: &mut Connection) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	652	pub fn lines(&self) -> &[String] {
+oracledb	crates/oracledb/src/lib.rs	6537	pub fn tpc_begin(
+oracledb	crates/oracledb/src/lib.rs	6562	pub fn tpc_end(
+oracledb	crates/oracledb/src/lib.rs	656	pub fn line_count(&self) -> usize {
+oracledb	crates/oracledb/src/lib.rs	6575	pub fn tpc_prepare(
+oracledb	crates/oracledb/src/lib.rs	6587	pub fn tpc_commit(
+oracledb	crates/oracledb/src/lib.rs	6600	pub fn tpc_rollback(
+oracledb	crates/oracledb/src/lib.rs	660	pub fn char_count(&self) -> usize {
+oracledb	crates/oracledb/src/lib.rs	6614	pub fn query<'conn, 'p>(
+oracledb	crates/oracledb/src/lib.rs	6628	pub fn query_one<'p>(
+oracledb	crates/oracledb/src/lib.rs	6637	pub fn query_opt<'p>(
+oracledb	crates/oracledb/src/lib.rs	6646	pub fn query_all<'p>(
+oracledb	crates/oracledb/src/lib.rs	664	pub fn truncated(&self) -> bool {
+oracledb	crates/oracledb/src/lib.rs	6655	pub fn query_with<'conn, 'q>(
+oracledb	crates/oracledb/src/lib.rs	6668	pub fn execute<'p>(
+oracledb	crates/oracledb/src/lib.rs	6677	pub fn execute_with<'e>(
+oracledb	crates/oracledb/src/lib.rs	6685	pub fn execute_many<'b>(
+oracledb	crates/oracledb/src/lib.rs	668	pub fn into_lines(self) -> Vec<String> {
+oracledb	crates/oracledb/src/lib.rs	6694	pub fn execute_many_with<'b>(
+oracledb	crates/oracledb/src/lib.rs	6710	pub fn execute_raw(
+oracledb	crates/oracledb/src/lib.rs	6728	pub fn fetch_rows(
+oracledb	crates/oracledb/src/lib.rs	6744	pub fn fetch_rows_with_columns(
+oracledb	crates/oracledb/src/lib.rs	675	pub struct ObjectAttribute {
+oracledb	crates/oracledb/src/lib.rs	6761	pub fn define_and_fetch_rows_with_columns(
+oracledb	crates/oracledb/src/lib.rs	6784	pub fn scroll_cursor(
+oracledb	crates/oracledb/src/lib.rs	6802	pub fn read_lob(
+oracledb	crates/oracledb/src/lib.rs	6816	pub fn read_lob_with_timeout(
+oracledb	crates/oracledb/src/lib.rs	6833	pub fn aq_enq_one(
+oracledb	crates/oracledb/src/lib.rs	6847	pub fn aq_deq_one(
+oracledb	crates/oracledb/src/lib.rs	6860	pub fn aq_enq_many(
+oracledb	crates/oracledb/src/lib.rs	6876	pub fn aq_deq_many(
+oracledb	crates/oracledb/src/lib.rs	6892	pub fn create_temp_lob(
+oracledb	crates/oracledb/src/lib.rs	689	pub struct CollectionElement {
+oracledb	crates/oracledb/src/lib.rs	6905	pub fn write_lob(
+oracledb	crates/oracledb/src/lib.rs	6919	pub fn trim_lob(
+oracledb	crates/oracledb/src/lib.rs	6932	pub fn write_lob_with_timeout(
+oracledb	crates/oracledb/src/lib.rs	6949	pub fn trim_lob_with_timeout(
+oracledb	crates/oracledb/src/lib.rs	6965	pub fn free_temp_lobs(connection: &mut Connection, locators: &[Vec<u8>]) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	6974	pub fn free_temp_lobs_with_timeout(
+oracledb	crates/oracledb/src/lib.rs	6989	pub fn direct_path_load(
+oracledb	crates/oracledb/src/lib.rs	7007	pub fn run_pipeline(
+oracledb	crates/oracledb/src/lib.rs	7022	pub fn run_pipeline_decoded(
+oracledb	crates/oracledb/src/lib.rs	702	pub struct ObjectType {
+oracledb	crates/oracledb/src/lib.rs	7037	pub fn direct_path_prepare(
+oracledb	crates/oracledb/src/lib.rs	7053	pub fn direct_path_load_prepared(
+oracledb	crates/oracledb/src/lib.rs	7070	pub fn __pyshim_drain_cancel_response(connection: &mut Connection) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	7076	pub fn supplement_json_column_metadata(
+oracledb	crates/oracledb/src/lib.rs	7091	pub fn close(connection: Connection) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	7126	pub(crate) fn new_pool_runtime() -> Result<Runtime> {
+oracledb	crates/oracledb/src/lib.rs	7176	pub(crate) fn block_on_io<F, Fut, T>(operation: F) -> Result<T>
+oracledb	crates/oracledb/src/lib.rs	7192	pub(crate) fn block_on_connection<F, Fut, T>(operation: F) -> Result<T>
+oracledb	crates/oracledb/src/lib.rs	719	pub struct DecodedObject {
+oracledb	crates/oracledb/src/lib.rs	733	pub fn object(
+oracledb	crates/oracledb/src/lib.rs	746	pub fn collection(
+oracledb	crates/oracledb/src/lib.rs	759	pub fn type_schema(&self) -> &str {
+oracledb	crates/oracledb/src/lib.rs	763	pub fn type_name(&self) -> &str {
+oracledb	crates/oracledb/src/lib.rs	767	pub fn attributes(&self) -> &[(String, Option<oracledb_protocol::thin::QueryValue>)] {
+oracledb	crates/oracledb/src/lib.rs	771	pub fn elements(&self) -> Option<&[Option<oracledb_protocol::thin::QueryValue>]> {
+oracledb	crates/oracledb/src/lib.rs	775	pub fn is_collection(&self) -> bool {
+oracledb	crates/oracledb/src/lib.rs	779	pub fn into_attributes(self) -> Vec<(String, Option<oracledb_protocol::thin::QueryValue>)> {
+oracledb	crates/oracledb/src/lib.rs	783	pub fn into_elements(self) -> Option<Vec<Option<oracledb_protocol::thin::QueryValue>>> {
+oracledb	crates/oracledb/src/lib.rs	798	pub fn decode_object(
+oracledb	crates/oracledb/src/lib.rs	904	pub enum ErrorKind {
+oracledb	crates/oracledb/src/lib.rs	918	pub enum ConnectionDisposition {
+oracledb	crates/oracledb/src/lib.rs	926	pub enum RetryHint {
+oracledb	crates/oracledb/src/lib.rs	934	pub enum Error {
 oracledb	crates/oracledb/src/obs.rs	187	pub struct ObsSpanGuard;
 oracledb	crates/oracledb/src/obs.rs	53	pub(crate) fn sql_digest(sql: &str) -> String {
 oracledb	crates/oracledb/src/pool.rs	1004	pub struct PooledConnection<B: PoolBackend> {
@@ -712,25 +712,25 @@ oracledb	crates/oracledb/src/soda/operation.rs	37	pub fn fetch_array_size(&self)
 oracledb	crates/oracledb/src/soda/qbe.rs	29	pub fn qbe_to_where_clause(filter: &Value, content_col: &str) -> Result<String> {
 oracledb	crates/oracledb/src/soda/qbe.rs	426	pub fn escape_json_path_string(s: &str) -> String {
 oracledb	crates/oracledb/src/soda/qbe.rs	52	pub fn extract_orderby(filter: &Value, content_col: &str) -> Result<Option<String>> {
-oracledb	crates/oracledb/src/sql_convert.rs	1158	pub enum Params<'a> {
-oracledb	crates/oracledb/src/sql_convert.rs	1211	pub trait IntoBinds {
-oracledb	crates/oracledb/src/sql_convert.rs	1305	pub(crate) fn order_named_binds(
-oracledb	crates/oracledb/src/sql_convert.rs	1337	pub(crate) fn resolve_params(sql: &str, params: Params<'_>) -> Result<Vec<BindValue>, BindError> {
-oracledb	crates/oracledb/src/sql_convert.rs	1352	pub(crate) fn validate_bind_rows_shape(
-oracledb	crates/oracledb/src/sql_convert.rs	1383	pub(crate) fn validate_positional_bind_count(sql: &str, actual: usize) -> Result<(), BindError> {
+oracledb	crates/oracledb/src/sql_convert.rs	1001	pub fn try_get_by_name<T: FromSql>(&self, name: &str) -> Result<T, ConversionError> {
+oracledb	crates/oracledb/src/sql_convert.rs	1014	pub fn try_get_by_name_opt<T: FromSql>(
+oracledb	crates/oracledb/src/sql_convert.rs	1072	pub trait FromRow: Sized {
+oracledb	crates/oracledb/src/sql_convert.rs	1089	pub trait ToSql {
+oracledb	crates/oracledb/src/sql_convert.rs	1303	pub enum Params<'a> {
+oracledb	crates/oracledb/src/sql_convert.rs	1356	pub trait IntoBinds {
+oracledb	crates/oracledb/src/sql_convert.rs	1450	pub(crate) fn order_named_binds(
+oracledb	crates/oracledb/src/sql_convert.rs	1482	pub(crate) fn resolve_params(sql: &str, params: Params<'_>) -> Result<Vec<BindValue>, BindError> {
+oracledb	crates/oracledb/src/sql_convert.rs	1497	pub(crate) fn validate_bind_rows_shape(
+oracledb	crates/oracledb/src/sql_convert.rs	1528	pub(crate) fn validate_positional_bind_count(sql: &str, actual: usize) -> Result<(), BindError> {
 oracledb	crates/oracledb/src/sql_convert.rs	200	pub trait FromSql: Sized {
 oracledb	crates/oracledb/src/sql_convert.rs	48	pub enum ConversionError {
-oracledb	crates/oracledb/src/sql_convert.rs	692	pub trait QueryResultExt {
-oracledb	crates/oracledb/src/sql_convert.rs	805	pub struct TypedRow<'a> {
-oracledb	crates/oracledb/src/sql_convert.rs	812	pub(crate) fn new<'a>(
-oracledb	crates/oracledb/src/sql_convert.rs	825	pub fn get<T: FromSql>(&self, col: usize) -> crate::Result<T> {
-oracledb	crates/oracledb/src/sql_convert.rs	834	pub fn get_by_name<T: FromSql>(&self, name: &str) -> crate::Result<T> {
-oracledb	crates/oracledb/src/sql_convert.rs	860	pub fn try_get<T: FromSql>(&self, col: usize) -> Result<T, ConversionError> {
-oracledb	crates/oracledb/src/sql_convert.rs	870	pub fn try_get_opt<T: FromSql>(&self, col: usize) -> Result<Option<T>, ConversionError> {
-oracledb	crates/oracledb/src/sql_convert.rs	886	pub fn try_get_by_name<T: FromSql>(&self, name: &str) -> Result<T, ConversionError> {
-oracledb	crates/oracledb/src/sql_convert.rs	899	pub fn try_get_by_name_opt<T: FromSql>(
-oracledb	crates/oracledb/src/sql_convert.rs	957	pub trait FromRow: Sized {
-oracledb	crates/oracledb/src/sql_convert.rs	974	pub trait ToSql {
+oracledb	crates/oracledb/src/sql_convert.rs	807	pub trait QueryResultExt {
+oracledb	crates/oracledb/src/sql_convert.rs	920	pub struct TypedRow<'a> {
+oracledb	crates/oracledb/src/sql_convert.rs	927	pub(crate) fn new<'a>(
+oracledb	crates/oracledb/src/sql_convert.rs	940	pub fn get<T: FromSql>(&self, col: usize) -> crate::Result<T> {
+oracledb	crates/oracledb/src/sql_convert.rs	949	pub fn get_by_name<T: FromSql>(&self, name: &str) -> crate::Result<T> {
+oracledb	crates/oracledb/src/sql_convert.rs	975	pub fn try_get<T: FromSql>(&self, col: usize) -> Result<T, ConversionError> {
+oracledb	crates/oracledb/src/sql_convert.rs	985	pub fn try_get_opt<T: FromSql>(&self, col: usize) -> Result<Option<T>, ConversionError> {
 oracledb	crates/oracledb/src/sql_convert.rs	99	pub enum BindError {
 oracledb	crates/oracledb/src/tls.rs	220	pub(crate) fn build_client_config(params: &TlsParams) -> Result<ClientConfig, Error> {
 oracledb	crates/oracledb/src/tls.rs	332	pub(crate) fn resolve_tls_params(
@@ -992,54 +992,55 @@ oracledb-protocol	crates/oracledb-protocol/src/thin/auth.rs	343	pub(crate) fn pa
 oracledb-protocol	crates/oracledb-protocol/src/thin/auth.rs	35	pub fn append_auth_phase_two_token(
 oracledb-protocol	crates/oracledb-protocol/src/thin/auth.rs	6	pub fn append_auth_phase_one(
 oracledb-protocol	crates/oracledb-protocol/src/thin/auth.rs	85	pub fn build_auth_phase_two_payload(
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	1077	pub(crate) fn encode_text_value(value: &str, csfrm: u8) -> Vec<u8> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	1101	pub(crate) fn encode_text_value(value: &str, csfrm: u8) -> Vec<u8> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	13	pub(crate) fn is_return_output(&self) -> bool {
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	171	pub fn define_metadata_from_bind(source: &ColumnMetadata, value: &BindValue) -> ColumnMetadata {
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	205	pub fn adjust_refetch_metadata(previous: &ColumnMetadata, current: &mut ColumnMetadata) -> bool {
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	233	pub fn output_bind(value: BindValue) -> BindValue {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	172	pub fn define_metadata_from_bind(source: &ColumnMetadata, value: &BindValue) -> ColumnMetadata {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	206	pub fn adjust_refetch_metadata(previous: &ColumnMetadata, current: &mut ColumnMetadata) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	234	pub fn output_bind(value: BindValue) -> BindValue {
 oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	25	pub(crate) fn write_bind_metadata_with_type(
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	265	pub fn returning_output_bind(value: BindValue) -> BindValue {
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	297	pub fn cursor_bind_template() -> BindValue {
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	305	pub fn is_cursor_bind_template(value: &BindValue) -> bool {
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	315	pub fn public_dbtype_name_from_type_name(type_name: &str) -> &'static str {
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	349	pub fn column_metadata_is_xmltype(metadata: &ColumnMetadata) -> bool {
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	360	pub fn public_dbtype_name_from_column_metadata(metadata: &ColumnMetadata) -> &'static str {
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	401	pub fn public_dbtype_size_info(dbtype_name: &str) -> (u32, u32) {
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	433	pub fn check_fetch_conversion(
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	576	pub fn public_dbtype_name_from_oracle_type_name(type_name: &str) -> &'static str {
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	629	pub fn dbobject_attr_precision_scale(
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	646	pub fn dbobject_attr_max_size(type_name: &str, length: Option<u32>) -> u32 {
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	654	pub fn dbobject_rowtype_attr_max_size(
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	669	pub fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	266	pub fn returning_output_bind(value: BindValue) -> BindValue {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	298	pub fn cursor_bind_template() -> BindValue {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	306	pub fn is_cursor_bind_template(value: &BindValue) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	316	pub fn public_dbtype_name_from_type_name(type_name: &str) -> &'static str {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	350	pub fn column_metadata_is_xmltype(metadata: &ColumnMetadata) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	361	pub fn public_dbtype_name_from_column_metadata(metadata: &ColumnMetadata) -> &'static str {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	402	pub fn public_dbtype_size_info(dbtype_name: &str) -> (u32, u32) {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	434	pub fn check_fetch_conversion(
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	577	pub fn public_dbtype_name_from_oracle_type_name(type_name: &str) -> &'static str {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	630	pub fn dbobject_attr_precision_scale(
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	647	pub fn dbobject_attr_max_size(type_name: &str, length: Option<u32>) -> u32 {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	655	pub fn dbobject_rowtype_attr_max_size(
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	670	pub fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
 oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	6	pub(crate) fn is_output_only(&self) -> bool {
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	724	pub fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	848	pub fn dbobject_element_bind_type_info(dbtype_name: &str, max_size: u32) -> BindTypeInfo {
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	873	pub(crate) fn public_dbtype_name_from_type_info(ora_type_num: u8, csfrm: u8) -> &'static str {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	726	pub fn bind_template_from_type_name(type_name: &str, size: u32) -> BindValue {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	850	pub fn dbobject_element_bind_type_info(dbtype_name: &str, max_size: u32) -> BindTypeInfo {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	875	pub(crate) fn public_dbtype_name_from_type_info(ora_type_num: u8, csfrm: u8) -> &'static str {
 oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	87	pub fn bind_value_type_info(value: &BindValue) -> Option<BindTypeInfo> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	903	pub(crate) fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
-oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	909	pub(crate) fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm: u8) -> Result<()> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	122	pub(crate) fn adjust_datetime_by_minutes(
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	152	pub(crate) fn days_from_civil(year: i32, month: u8, day: u8) -> Result<i64> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	167	pub(crate) fn civil_from_days(days: i64) -> Result<(i32, u8, u8)> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	189	pub(crate) fn encode_binary_double(value: f64) -> [u8; 8] {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	201	pub(crate) fn encode_binary_float(value: f32) -> [u8; 4] {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	213	pub(crate) fn decode_binary_float(bytes: &[u8]) -> Result<f32> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	228	pub(crate) fn encode_interval_ds(days: i32, seconds: i32, nanoseconds: i32) -> Result<[u8; 11]> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	247	pub(crate) fn decode_interval_ds(bytes: &[u8]) -> Result<QueryValue> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	268	pub(crate) fn encode_interval_ym(years: i32, months: i32) -> Result<[u8; 5]> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	281	pub(crate) fn decode_interval_ym(bytes: &[u8]) -> Result<QueryValue> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	294	pub(crate) fn decode_binary_double(bytes: &[u8]) -> Result<f64> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	313	pub fn encode_number_text(value: &str) -> Result<Vec<u8>> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	905	pub(crate) fn bind_metadata(value: &BindValue) -> (u8, u8, u32) {
+oracledb-protocol	crates/oracledb-protocol/src/thin/bind.rs	911	pub(crate) fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm: u8) -> Result<()> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	102	pub fn decode_datetime_value(bytes: &[u8]) -> Result<QueryValue> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	153	pub(crate) fn adjust_datetime_by_minutes(
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	184	pub(crate) fn days_from_civil(year: i32, month: u8, day: u8) -> Result<i64> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	200	pub(crate) fn civil_from_days(days: i64) -> Result<(i32, u8, u8)> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	222	pub(crate) fn encode_binary_double(value: f64) -> [u8; 8] {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	234	pub(crate) fn encode_binary_float(value: f32) -> [u8; 4] {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	246	pub(crate) fn decode_binary_float(bytes: &[u8]) -> Result<f32> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	261	pub(crate) fn encode_interval_ds(days: i32, seconds: i32, nanoseconds: i32) -> Result<[u8; 11]> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	280	pub(crate) fn decode_interval_ds(bytes: &[u8]) -> Result<QueryValue> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	301	pub(crate) fn encode_interval_ym(years: i32, months: i32) -> Result<[u8; 5]> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	314	pub(crate) fn decode_interval_ym(bytes: &[u8]) -> Result<QueryValue> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	327	pub(crate) fn decode_binary_double(bytes: &[u8]) -> Result<f64> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	346	pub fn encode_number_text(value: &str) -> Result<Vec<u8>> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	35	pub(crate) fn encode_oracle_timestamp(
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	472	pub fn decode_number_value(bytes: &[u8]) -> Result<QueryValue> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	489	pub fn decode_number_text_into(
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	516	pub(crate) fn decode_number_parts(
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	505	pub fn decode_number_value(bytes: &[u8]) -> Result<QueryValue> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	522	pub fn decode_number_text_into(
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	549	pub(crate) fn decode_number_parts(
 oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	57	pub(crate) fn encode_oracle_timestamp_tz(
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	593	pub(crate) fn decode_number_parts_stack(
 oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	5	pub(crate) fn encode_oracle_date(
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	689	pub(crate) fn format_number_digits(
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	724	pub(crate) fn decode_text_value(bytes: &[u8], csfrm: u8) -> Result<String> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	80	pub fn decode_datetime_value(bytes: &[u8]) -> Result<QueryValue> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	626	pub(crate) fn decode_number_parts_stack(
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	70	pub(crate) fn encode_oracle_timestamp_tz_with_offset(
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	722	pub(crate) fn format_number_digits(
+oracledb-protocol	crates/oracledb-protocol/src/thin/codecs.rs	757	pub(crate) fn decode_text_value(bytes: &[u8], csfrm: u8) -> Result<String> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/connect.rs	111	pub fn build_function_payload(function_code: u8) -> Vec<u8> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/connect.rs	115	pub fn build_function_payload_with_seq(function_code: u8, seq_num: u8) -> Vec<u8> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/connect.rs	122	pub fn build_function_payload_with_seq_and_token(
@@ -1317,16 +1318,16 @@ oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	235	pub fn image
 oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	248	pub fn pack_bindvalue_into_image(buf: &mut Vec<u8>, value: &BindValue, csfrm: u8) -> Result<()> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	28	pub fn limits(&self) -> crate::wire::ProtocolLimits {
 oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	32	pub fn read_u8(&mut self) -> Result<u8> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	345	pub(crate) fn parse_binary_integer_u32(text: &str) -> Result<u32> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	357	pub fn write_dbobject_bind(writer: &mut TtcWriter, oid: &[u8], image: &[u8]) -> Result<()> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	376	pub fn decode_dbobject_text(bytes: &[u8], dbtype_name: &str) -> Result<String> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	393	pub fn decode_dbobject_xmltype_text(bytes: &[u8]) -> Result<Option<String>> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	411	pub fn decode_lob_text(bytes: &[u8], csfrm: u8, locator: Option<&[u8]>) -> Result<String> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	472	pub fn encode_lob_text(value: &str, csfrm: u8, locator: Option<&[u8]>) -> Vec<u8> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	489	pub fn decode_bfile_locator_name(locator: &[u8]) -> Option<(String, String)> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	517	pub(crate) fn lob_text_uses_utf16(csfrm: u8, locator: Option<&[u8]>) -> (bool, bool) {
-oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	528	pub fn decode_dbobject_binary_float(bytes: &[u8]) -> Result<f32> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	542	pub fn decode_dbobject_binary_double(bytes: &[u8]) -> Result<f64> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	367	pub(crate) fn parse_binary_integer_u32(text: &str) -> Result<u32> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	379	pub fn write_dbobject_bind(writer: &mut TtcWriter, oid: &[u8], image: &[u8]) -> Result<()> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	398	pub fn decode_dbobject_text(bytes: &[u8], dbtype_name: &str) -> Result<String> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	415	pub fn decode_dbobject_xmltype_text(bytes: &[u8]) -> Result<Option<String>> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	433	pub fn decode_lob_text(bytes: &[u8], csfrm: u8, locator: Option<&[u8]>) -> Result<String> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	494	pub fn encode_lob_text(value: &str, csfrm: u8, locator: Option<&[u8]>) -> Vec<u8> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	511	pub fn decode_bfile_locator_name(locator: &[u8]) -> Option<(String, String)> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	539	pub(crate) fn lob_text_uses_utf16(csfrm: u8, locator: Option<&[u8]>) -> (bool, bool) {
+oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	550	pub fn decode_dbobject_binary_float(bytes: &[u8]) -> Result<f32> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	564	pub fn decode_dbobject_binary_double(bytes: &[u8]) -> Result<f64> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	5	pub struct DbObjectPackedReader<'a> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	66	pub fn read_i32be(&mut self) -> Result<i32> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/dbobject.rs	73	pub fn read_length(&mut self) -> Result<usize> {
@@ -1357,33 +1358,33 @@ oracledb-protocol	crates/oracledb-protocol/src/thin/execute.rs	9	pub fn build_ex
 oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1000	pub(crate) fn is_duplicate_column(bit_vector: Option<&[u8]>, column_num: usize) -> bool {
 oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1011	pub(crate) fn parse_column_value(
 oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	121	pub(crate) fn write_define_column_metadata(writer: &mut TtcWriter, metadata: &ColumnMetadata) {
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1348	pub struct BorrowedRowBatch {
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1374	pub fn new(buffer: Vec<u8>, columns: Vec<ColumnMetadata>, row_starts: Vec<usize>) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1387	pub fn row_count(&self) -> usize {
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1392	pub fn columns(&self) -> &[ColumnMetadata] {
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1399	pub fn buffer_ptr_range(&self) -> core::ops::Range<usize> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1413	pub fn for_each_row_ref<F, E>(&self, mut callback: F) -> std::result::Result<(), E>
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1533	pub struct BorrowedFetchResult {
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1555	pub fn parse_query_response_borrowed(
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1570	pub fn parse_query_response_borrowed_with_limits(
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1587	pub fn parse_define_fetch_response_borrowed_with_limits(
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1367	pub struct BorrowedRowBatch {
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1393	pub fn new(buffer: Vec<u8>, columns: Vec<ColumnMetadata>, row_starts: Vec<usize>) -> Self {
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1406	pub fn row_count(&self) -> usize {
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1411	pub fn columns(&self) -> &[ColumnMetadata] {
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1418	pub fn buffer_ptr_range(&self) -> core::ops::Range<usize> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1432	pub fn for_each_row_ref<F, E>(&self, mut callback: F) -> std::result::Result<(), E>
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1552	pub struct BorrowedFetchResult {
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1574	pub fn parse_query_response_borrowed(
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1589	pub fn parse_query_response_borrowed_with_limits(
 oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	159	pub fn parse_query_response(
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1606	pub fn parse_define_fetch_response_borrowed_with_limits(
 oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	166	pub fn parse_query_response_with_limits(
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1815	pub(crate) fn encode_rowid_component(mut value: u32, size: usize, output: &mut String) {
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1825	pub(crate) fn encode_physical_rowid(
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1839	pub(crate) fn parse_rowid_value(reader: &mut TtcReader<'_>) -> Result<Option<String>> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1834	pub(crate) fn encode_rowid_component(mut value: u32, size: usize, output: &mut String) {
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1844	pub(crate) fn encode_physical_rowid(
 oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	184	pub fn parse_query_response_with_binds(
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1857	pub(crate) fn encode_logical_urowid(bytes: &[u8]) -> String {
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1892	pub(crate) fn parse_urowid_value(reader: &mut TtcReader<'_>) -> Result<Option<String>> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1918	pub(crate) fn parse_lob_value(
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1858	pub(crate) fn parse_rowid_value(reader: &mut TtcReader<'_>) -> Result<Option<String>> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1876	pub(crate) fn encode_logical_urowid(bytes: &[u8]) -> String {
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1911	pub(crate) fn parse_urowid_value(reader: &mut TtcReader<'_>) -> Result<Option<String>> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	1937	pub(crate) fn parse_lob_value(
 oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	197	pub fn parse_query_response_with_binds_and_options(
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	2136	pub(crate) fn parse_vector_value(reader: &mut TtcReader<'_>) -> Result<Option<QueryValue>> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	2158	pub(crate) fn parse_json_value(reader: &mut TtcReader<'_>) -> Result<Option<QueryValue>> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	215	pub fn parse_query_response_with_binds_options_and_columns(
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	2177	pub(crate) fn parse_object_value(
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	2201	pub(crate) fn parse_cursor_value(reader: &mut TtcReader<'_>) -> Result<QueryValue> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	2212	pub(crate) struct QueryReturnParameters {
-oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	2219	pub(crate) fn parse_query_return_parameters(
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	2202	pub(crate) fn parse_vector_value(reader: &mut TtcReader<'_>) -> Result<Option<QueryValue>> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	2224	pub(crate) fn parse_json_value(reader: &mut TtcReader<'_>) -> Result<Option<QueryValue>> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	2243	pub(crate) fn parse_object_value(
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	2267	pub(crate) fn parse_cursor_value(reader: &mut TtcReader<'_>) -> Result<QueryValue> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	2278	pub(crate) struct QueryReturnParameters {
+oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	2285	pub(crate) fn parse_query_return_parameters(
 oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	240	pub fn parse_query_response_with_binds_options_columns_and_limits(
 oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	268	pub fn parse_query_response_with_previous(
 oracledb-protocol	crates/oracledb-protocol/src/thin/fetch.rs	276	pub fn parse_query_response_with_context(
@@ -1498,46 +1499,49 @@ oracledb-protocol	crates/oracledb-protocol/src/thin/subscr.rs	46	pub struct MsgQ
 oracledb-protocol	crates/oracledb-protocol/src/thin/subscr.rs	54	pub struct NotificationMessage {
 oracledb-protocol	crates/oracledb-protocol/src/thin/subscr.rs	70	pub enum NotificationRecord {
 oracledb-protocol	crates/oracledb-protocol/src/thin/subscr.rs	98	pub fn build_subscribe_payload_with_seq(
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1002	pub struct TpcSwitchResponse {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	100	pub fn ora_type_num(&self) -> u8 {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1049	pub fn batcherrors(&self) -> bool {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1054	pub fn with_batcherrors(mut self, enabled: bool) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1059	pub fn arraydmlrowcounts(&self) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1018	pub struct TpcChangeStateResponse {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1027	pub struct ExecuteOptions {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	105	pub fn with_ora_type_num(mut self, ora_type_num: u8) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1064	pub fn with_arraydmlrowcounts(mut self, enabled: bool) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1069	pub fn parse_only(&self) -> bool {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1074	pub fn with_parse_only(mut self, enabled: bool) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1079	pub fn token_num(&self) -> u64 {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1084	pub fn with_token_num(mut self, token_num: u64) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1089	pub fn cursor_id(&self) -> u32 {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1094	pub fn with_cursor_id(mut self, cursor_id: u32) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1099	pub fn cache_statement(&self) -> bool {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1104	pub fn with_cache_statement(mut self, enabled: bool) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1109	pub fn scrollable(&self) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1100	pub fn batcherrors(&self) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1105	pub fn with_batcherrors(mut self, enabled: bool) -> Self {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	110	pub fn csfrm(&self) -> u8 {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1114	pub fn with_scrollable(mut self, enabled: bool) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1119	pub fn fetch_orientation(&self) -> u32 {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1124	pub fn with_fetch_orientation(mut self, fetch_orientation: u32) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1129	pub fn fetch_pos(&self) -> u32 {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1134	pub fn with_fetch_pos(mut self, fetch_pos: u32) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1139	pub fn scroll_operation(&self) -> bool {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1144	pub fn with_scroll_operation(mut self, enabled: bool) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1149	pub fn suspend_on_success(&self) -> bool {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1154	pub fn with_suspend_on_success(mut self, enabled: bool) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1159	pub fn no_prefetch(&self) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1110	pub fn arraydmlrowcounts(&self) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1115	pub fn with_arraydmlrowcounts(mut self, enabled: bool) -> Self {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1120	pub fn parse_only(&self) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1125	pub fn with_parse_only(mut self, enabled: bool) -> Self {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1130	pub fn token_num(&self) -> u64 {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1135	pub fn with_token_num(mut self, token_num: u64) -> Self {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1140	pub fn cursor_id(&self) -> u32 {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1145	pub fn with_cursor_id(mut self, cursor_id: u32) -> Self {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1150	pub fn cache_statement(&self) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1155	pub fn with_cache_statement(mut self, enabled: bool) -> Self {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	115	pub fn with_csfrm(mut self, csfrm: u8) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1164	pub fn with_no_prefetch(mut self, enabled: bool) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1169	pub fn registration_id(&self) -> u64 {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1174	pub fn with_registration_id(mut self, registration_id: u64) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1179	pub fn max_string_size(&self) -> u32 {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1184	pub fn with_max_string_size(mut self, max_string_size: u32) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1193	pub struct BatchServerError {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1200	pub fn new(code: u32, offset: u32, message: impl Into<String>) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1208	pub fn code(&self) -> u32 {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1160	pub fn scrollable(&self) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1165	pub fn with_scrollable(mut self, enabled: bool) -> Self {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1170	pub fn fetch_orientation(&self) -> u32 {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1175	pub fn with_fetch_orientation(mut self, fetch_orientation: u32) -> Self {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1180	pub fn fetch_pos(&self) -> u32 {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1185	pub fn with_fetch_pos(mut self, fetch_pos: u32) -> Self {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1190	pub fn scroll_operation(&self) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1195	pub fn with_scroll_operation(mut self, enabled: bool) -> Self {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1200	pub fn suspend_on_success(&self) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1205	pub fn with_suspend_on_success(mut self, enabled: bool) -> Self {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	120	pub fn precision(&self) -> i8 {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1212	pub fn offset(&self) -> u32 {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1216	pub fn message(&self) -> &str {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1220	pub fn into_parts(self) -> (u32, u32, String) {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1210	pub fn no_prefetch(&self) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1215	pub fn with_no_prefetch(mut self, enabled: bool) -> Self {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1220	pub fn registration_id(&self) -> u64 {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1225	pub fn with_registration_id(mut self, registration_id: u64) -> Self {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1230	pub fn max_string_size(&self) -> u32 {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1235	pub fn with_max_string_size(mut self, max_string_size: u32) -> Self {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1244	pub struct BatchServerError {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1251	pub fn new(code: u32, offset: u32, message: impl Into<String>) -> Self {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1259	pub fn code(&self) -> u32 {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	125	pub fn with_precision(mut self, precision: i8) -> Self {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1263	pub fn offset(&self) -> u32 {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1267	pub fn message(&self) -> &str {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	1271	pub fn into_parts(self) -> (u32, u32, String) {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	130	pub fn scale(&self) -> i8 {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	135	pub fn with_scale(mut self, scale: i8) -> Self {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	140	pub fn buffer_size(&self) -> u32 {
@@ -1575,43 +1579,40 @@ oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	291	pub struct Curs
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	299	pub struct ObjectValue {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	308	pub struct LobValue {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	330	pub enum QueryValue {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	405	pub fn number_from_text(text: &str, is_integer: bool) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	414	pub fn as_text(&self) -> Option<&str> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	425	pub fn as_i64(&self) -> Option<i64> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	437	pub fn as_f64(&self) -> Option<f64> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	448	pub fn as_number_text(&self) -> Option<std::borrow::Cow<'_, str>> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	456	pub fn as_number(&self) -> Option<&OracleNumber> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	465	pub fn as_bool(&self) -> Option<bool> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	473	pub fn as_raw(&self) -> Option<&[u8]> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	415	pub fn number_from_text(text: &str, is_integer: bool) -> Self {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	424	pub fn as_text(&self) -> Option<&str> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	435	pub fn as_i64(&self) -> Option<i64> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	447	pub fn as_f64(&self) -> Option<f64> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	458	pub fn as_number_text(&self) -> Option<std::borrow::Cow<'_, str>> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	466	pub fn as_number(&self) -> Option<&OracleNumber> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	475	pub fn as_bool(&self) -> Option<bool> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	47	pub struct ColumnMetadata {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	482	pub fn as_rowid(&self) -> Option<&str> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	494	pub fn variant_name(&self) -> &'static str {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	548	pub enum QueryValueRef<'buf> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	593	pub fn to_owned_value(&self) -> QueryValue {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	638	pub fn as_text(&self) -> Option<&str> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	652	pub fn as_number_text(&self) -> Option<&str> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	662	pub fn as_raw(&self) -> Option<&[u8]> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	673	pub enum BindValue {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	483	pub fn as_raw(&self) -> Option<&[u8]> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	492	pub fn as_rowid(&self) -> Option<&str> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	504	pub fn variant_name(&self) -> &'static str {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	559	pub enum QueryValueRef<'buf> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	614	pub fn to_owned_value(&self) -> QueryValue {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	678	pub fn as_text(&self) -> Option<&str> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	692	pub fn as_number_text(&self) -> Option<&str> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	6	pub struct AcceptInfo {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	771	pub fn variant_name(&self) -> &'static str {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	801	pub fn is_null(&self) -> bool {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	808	pub fn as_str(&self) -> Option<&str> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	816	pub fn as_bytes(&self) -> Option<&[u8]> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	824	pub fn as_bool(&self) -> Option<bool> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	702	pub fn as_raw(&self) -> Option<&[u8]> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	713	pub enum BindValue {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	821	pub fn variant_name(&self) -> &'static str {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	82	pub fn new(name: impl Into<String>, ora_type_num: u8) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	834	pub fn as_number_text(&self) -> Option<&str> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	846	pub fn as_f64(&self) -> Option<f64> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	858	pub fn as_i64(&self) -> Option<i64> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	868	pub struct QueryResult {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	852	pub fn is_null(&self) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	859	pub fn as_str(&self) -> Option<&str> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	867	pub fn as_bytes(&self) -> Option<&[u8]> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	875	pub fn as_bool(&self) -> Option<bool> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	885	pub fn as_number_text(&self) -> Option<&str> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	897	pub fn as_f64(&self) -> Option<f64> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	909	pub fn as_i64(&self) -> Option<i64> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	90	pub fn name(&self) -> &str {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	911	pub fn cell(&self, row: usize, col: usize) -> Option<&QueryValue> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	918	pub fn column_index(&self, name: &str) -> Option<usize> {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	926	pub struct LobReadResult {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	937	pub enum SessionlessTxnState {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	951	pub struct TpcSwitchResponse {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	919	pub struct QueryResult {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	95	pub fn with_name(mut self, name: impl Into<String>) -> Self {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	967	pub struct TpcChangeStateResponse {
-oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	976	pub struct ExecuteOptions {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	962	pub fn cell(&self, row: usize, col: usize) -> Option<&QueryValue> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	969	pub fn column_index(&self, name: &str) -> Option<usize> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	977	pub struct LobReadResult {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	988	pub enum SessionlessTxnState {
 oracledb-protocol	crates/oracledb-protocol/src/tls/dn.rs	149	pub fn check_cert_dn(expected_dn: &str, server_subject_dn: &str) -> Result<(), DnMatchError> {
 oracledb-protocol	crates/oracledb-protocol/src/tls/dn.rs	165	pub fn name_matches(name_to_check: &str, cert_name: &str) -> bool {
 oracledb-protocol	crates/oracledb-protocol/src/tls/dn.rs	228	pub fn check_server_name(

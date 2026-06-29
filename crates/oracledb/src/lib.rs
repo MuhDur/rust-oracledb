@@ -172,7 +172,10 @@ use oracledb_protocol::thin::{
 };
 use oracledb_protocol::thin::{TNS_AQ_ARRAY_DEQ, TNS_AQ_ARRAY_ENQ};
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth, ProtocolLimits};
-use oracledb_protocol::{net::EasyConnect, ClientIdentity};
+use oracledb_protocol::{
+    net::{connectstring::Description, EasyConnect, Protocol as NetProtocol},
+    ClientIdentity,
+};
 
 const PYTHON_ORACLEDB_COMPAT_VERSION_NUM: u32 = 0x0400_1000;
 const DEFAULT_SDU: usize = 8192;
@@ -2140,232 +2143,263 @@ impl Connection {
             return Err(Error::UnsupportedAuthMode(unsupported));
         }
         let descriptor = EasyConnect::parse(&options.connect_string)?;
-        // Connect span (feature-gated, zero-cost when off). Carries only the
-        // server address / port / service — never the password.
-        let _span = obs_span!(
-            "oracledb.connect",
-            db.system = "oracle",
-            server.address = %descriptor.host,
-            server.port = descriptor.port as u64,
-            db.name = %descriptor.service_name,
-        );
-        let identity = options.identity;
-        trace_connect_step("tcp connect");
-        let stream = TcpStream::connect_timeout(
-            (descriptor.host.clone(), descriptor.port),
-            Duration::from_secs(20),
-        )
-        .await?;
-        stream.set_nodelay(true)?;
-        trace_connect_step("tcp connected");
+        let full_descriptor = EasyConnect::parse_descriptor(&options.connect_string)?;
+        let primary_description = full_descriptor.first_description().clone();
+        let connect_timeout =
+            transport_connect_timeout_duration(primary_description.tcp_connect_timeout);
+        let connect_timeout_ms = duration_to_millis_saturating(connect_timeout);
+        let connect_result = time::timeout(time::wall_now(), connect_timeout, async {
+            // Connect span (feature-gated, zero-cost when off). Carries only the
+            // server address / port / service — never the password.
+            let _span = obs_span!(
+                "oracledb.connect",
+                db.system = "oracle",
+                server.address = %descriptor.host,
+                server.port = descriptor.port as u64,
+                db.name = %descriptor.service_name,
+            );
+            let token_auth = options.access_token.is_some();
+            let descriptor_ssl_server_dn_match =
+                primary_description.security.ssl_server_dn_match && options.ssl_server_dn_match;
+            let descriptor_ssl_server_cert_dn = options
+                .ssl_server_cert_dn
+                .as_deref()
+                .or(primary_description.security.ssl_server_cert_dn.as_deref());
+            let identity = options.identity;
+            trace_connect_step("tcp connect");
+            let stream = TcpStream::connect_timeout(
+                (descriptor.host.clone(), descriptor.port),
+                connect_timeout,
+            )
+            .await?;
+            stream.set_nodelay(true)?;
+            trace_connect_step("tcp connected");
 
-        // TCPS: complete the TLS handshake on the whole socket before splitting
-        // and before any TNS bytes are sent (implicit TLS, matching
-        // python-oracledb thin's _connect_tcp ordering).
-        let connector = DriverConnector::default();
-        let (read, write) = if descriptor.protocol.is_tls() {
-            trace_connect_step("tls handshake");
-            let server_type = if options.server_type_emon {
-                Some("emon")
+            // TCPS: complete the TLS handshake on the whole socket before splitting
+            // and before any TNS bytes are sent (implicit TLS, matching
+            // python-oracledb thin's _connect_tcp ordering).
+            let connector = DriverConnector::default();
+            let (read, write) = if descriptor.protocol.is_tls() {
+                trace_connect_step("tls handshake");
+                let server_type = if options.server_type_emon {
+                    Some("emon")
+                } else {
+                    None
+                };
+                let tls_params = tls::resolve_tls_params(
+                    &descriptor,
+                    options.wallet_location.as_deref(),
+                    options.wallet_password.as_deref(),
+                    options.ssl_server_dn_match,
+                    options.ssl_server_cert_dn.as_deref(),
+                    options.use_sni,
+                )?;
+                let tls_stream =
+                    tls::tls_handshake(&descriptor, server_type, &tls_params, stream).await?;
+                trace_connect_step("tls established");
+                connector.tls_split(tls_stream)
             } else {
-                None
+                connector.plain_split(stream)
             };
-            let tls_params = tls::resolve_tls_params(
+            let mut core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
+            core.set_protocol_limits(protocol_limits)?;
+
+            let connect_descriptor = listener_connect_descriptor_with_server(
                 &descriptor,
-                options.wallet_location.as_deref(),
-                options.wallet_password.as_deref(),
-                options.ssl_server_dn_match,
-                options.ssl_server_cert_dn.as_deref(),
-                options.use_sni,
+                &primary_description,
+                &identity,
+                options.server_type_emon,
+                token_auth,
+                descriptor_ssl_server_dn_match,
+                descriptor_ssl_server_cert_dn,
+            );
+            trace_connect_value("CONNECT descriptor", &connect_descriptor);
+            let connect_payload = build_connect_packet_payload(&connect_descriptor, options.sdu)?;
+            let packet = encode_packet(
+                TNS_PACKET_TYPE_CONNECT,
+                0,
+                None,
+                &connect_payload,
+                PacketLengthWidth::Legacy16,
             )?;
-            let tls_stream =
-                tls::tls_handshake(&descriptor, server_type, &tls_params, stream).await?;
-            trace_connect_step("tls established");
-            connector.tls_split(tls_stream)
-        } else {
-            connector.plain_split(stream)
-        };
-        let mut core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
-        core.set_protocol_limits(protocol_limits)?;
+            trace_connect_bytes("CONNECT packet", &packet);
+            trace_connect_step("send CONNECT");
+            core.write_all(cx, &packet).await?;
 
-        let connect_descriptor = listener_connect_descriptor_with_server(
-            &descriptor,
-            &identity,
-            options.server_type_emon,
-        );
-        trace_connect_value("CONNECT descriptor", &connect_descriptor);
-        let connect_payload = build_connect_packet_payload(&connect_descriptor, options.sdu)?;
-        let packet = encode_packet(
-            TNS_PACKET_TYPE_CONNECT,
-            0,
-            None,
-            &connect_payload,
-            PacketLengthWidth::Legacy16,
-        )?;
-        trace_connect_bytes("CONNECT packet", &packet);
-        trace_connect_step("send CONNECT");
-        core.write_all(cx, &packet).await?;
-
-        trace_connect_step("read ACCEPT");
-        let accept = core.read_packet(PacketLengthWidth::Legacy16).await?;
-        match accept.packet_type {
-            TNS_PACKET_TYPE_ACCEPT => {}
-            TNS_PACKET_TYPE_REDIRECT => return Err(Error::RedirectUnsupported),
-            TNS_PACKET_TYPE_REFUSE => {
-                return Err(Error::ListenerRefused(
-                    String::from_utf8_lossy(&accept.payload).to_string(),
-                ))
-            }
-            other => {
-                return Err(oracledb_protocol::ProtocolError::UnknownMessageType {
-                    message_type: other,
-                    position: 4,
+            trace_connect_step("read ACCEPT");
+            let accept = core.read_packet(PacketLengthWidth::Legacy16).await?;
+            match accept.packet_type {
+                TNS_PACKET_TYPE_ACCEPT => {}
+                TNS_PACKET_TYPE_REDIRECT => return Err(Error::RedirectUnsupported),
+                TNS_PACKET_TYPE_REFUSE => {
+                    return Err(Error::ListenerRefused(
+                        String::from_utf8_lossy(&accept.payload).to_string(),
+                    ))
                 }
-                .into())
+                other => {
+                    return Err(oracledb_protocol::ProtocolError::UnknownMessageType {
+                        message_type: other,
+                        position: 4,
+                    }
+                    .into())
+                }
             }
-        }
-        let accept_info = parse_accept_payload(&accept.payload)?;
-        if !accept_info.supports_fast_auth {
-            return Err(Error::FastAuthRequired);
-        }
-        let sdu = usize::try_from(accept_info.sdu)
-            .unwrap_or(DEFAULT_SDU)
-            .max(TNS_DATA_PACKET_OVERHEAD + 1);
-
-        let mut ttc_seq_num = 1;
-        let auth_connect_string = auth_connect_descriptor(&descriptor);
-
-        // Authentication has two shapes. Token auth (OCI IAM / OAuth2) carries
-        // the credential in `AUTH_TOKEN` and skips the password-verifier round
-        // trip entirely; password auth does the classic phase-one challenge /
-        // phase-two verifier exchange. Both converge on a parsed auth response
-        // plus the negotiated capabilities; only password auth yields a combo key
-        // (used later to verify the server's response and for change-password).
-        let (auth_two, capabilities, combo_key) = if let Some(token) = &options.access_token {
-            // A database access token must never travel in clear text: require
-            // TLS/TCPS, exactly as the reference does
-            // (protocol.pyx `ERR_ACCESS_TOKEN_REQUIRES_TCPS`).
-            if !descriptor.protocol.is_tls() {
-                return Err(Error::AccessTokenRequiresTcps);
+            let accept_info = parse_accept_payload(&accept.payload)?;
+            if !accept_info.supports_fast_auth {
+                return Err(Error::FastAuthRequired);
             }
-            // One combined fast-auth bundle carrying a phase-two `AUTH_TOKEN`
-            // message; no resend. The payload (which embeds the token) is never
-            // passed to `trace_connect_bytes`, so the secret stays out of logs.
-            let auth_payload = build_fast_auth_token_payload(
-                &options.user,
-                token.expose(),
-                &identity.driver_name,
-                PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
-                &auth_connect_string,
-                options.edition.as_deref(),
-            )?;
-            trace_connect_step("send AUTH token (fast-auth phase two)");
-            core.send_data_packet(cx, &auth_payload, sdu).await?;
-            trace_connect_step("read AUTH token response");
-            let response = core.read_data_response(cx).await?;
-            trace_connect_bytes("AUTH token response", &response);
-            let auth = parse_auth_response_with_limits(&response, protocol_limits)?;
-            let capabilities = auth.capabilities.unwrap_or_default();
-            // Token auth derives no shared password key: there is no combo key,
-            // hence no server-response MAC to verify and no change-password.
-            (auth, capabilities, Vec::new())
-        } else {
-            let client_pid = process::id();
-            let auth_one = build_fast_auth_phase_one_payload(
-                &options.user,
-                &identity.program,
-                &identity.machine,
-                &identity.osuser,
-                &identity.terminal,
-                client_pid,
-            )?;
-            trace_connect_bytes("AUTH phase one payload", &auth_one);
-            trace_connect_step("send AUTH phase one");
-            core.send_data_packet(cx, &auth_one, sdu).await?;
-            trace_connect_step("read AUTH phase one");
-            let auth_one_response = core.read_data_response(cx).await?;
-            trace_connect_bytes("AUTH phase one response", &auth_one_response);
-            let auth_one = parse_auth_response_with_limits(&auth_one_response, protocol_limits)?;
-            let capabilities = auth_one.capabilities.unwrap_or_default();
-            let verifier_type = auth_one
-                .verifier_type
-                .ok_or(Error::MissingSessionField("AUTH_VFR_DATA verifier type"))?;
-            let encrypted = oracledb_protocol::crypto::generate_verifier(
-                options.password.as_bytes(),
-                &auth_one.session_data,
-                verifier_type,
-            )?;
-            let auth_two_payload = build_auth_phase_two_payload_with_proxy_with_seq(
-                &options.user,
-                &encrypted,
-                &identity.driver_name,
-                PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
-                &auth_connect_string,
-                next_ttc_sequence(&mut ttc_seq_num),
-                &options.app_context,
-                options.proxy_user.as_deref(),
-                options.edition.as_deref(),
-            )?;
-            trace_connect_bytes("AUTH phase two payload", &auth_two_payload);
-            trace_connect_step("send AUTH phase two");
-            core.send_data_packet(cx, &auth_two_payload, sdu).await?;
-            trace_connect_step("read AUTH phase two");
-            let auth_two_response = core.read_data_response(cx).await?;
-            trace_connect_bytes("AUTH phase two response", &auth_two_response);
-            let auth_two = parse_auth_response_with_limits(&auth_two_response, protocol_limits)?;
-            oracledb_protocol::crypto::verify_server_response(
-                &encrypted.combo_key,
-                &auth_two.session_data,
-            )?;
-            (auth_two, capabilities, encrypted.combo_key)
-        };
+            let sdu = usize::try_from(accept_info.sdu)
+                .unwrap_or(DEFAULT_SDU)
+                .max(TNS_DATA_PACKET_OVERHEAD + 1);
 
-        let session_id = parse_session_u32(&auth_two.session_data, "AUTH_SESSION_ID")?;
-        let serial_num = parse_session_u16(&auth_two.session_data, "AUTH_SERIAL_NUM")?;
-        let server_version = auth_two.session_data.get("AUTH_VERSION_STRING").cloned();
-        let server_version_tuple = auth_two
-            .session_data
-            .get("AUTH_VERSION_NO")
-            .and_then(|value| value.trim().parse::<u32>().ok())
-            .map(|num| {
-                decode_server_version_number(
-                    num,
-                    capabilities.ttc_field_version >= TNS_CCAP_FIELD_VERSION_18_1_EXT_1,
-                )
-            });
+            let mut ttc_seq_num = 1;
+            let auth_connect_string = auth_connect_descriptor(
+                &descriptor,
+                &primary_description,
+                token_auth,
+                descriptor_ssl_server_dn_match,
+                descriptor_ssl_server_cert_dn,
+            );
 
-        Ok(Self {
-            descriptor,
-            identity,
-            core,
-            protocol_limits,
-            session_id,
-            serial_num,
-            server_version,
-            server_version_tuple,
-            capabilities,
-            ttc_seq_num,
-            sdu,
-            supports_end_of_response: accept_info.supports_end_of_response,
-            supports_oob: accept_info.supports_oob,
-            cursor_columns: BTreeMap::new(),
-            fetch_metadata_by_sql: HashMap::new(),
-            fetch_metadata_order: VecDeque::new(),
-            dead: false,
-            user: options.user,
-            combo_key,
-            statement_cache: Vec::new(),
-            statement_cache_size: options.statement_cache_size,
-            in_use_cursors: HashSet::new(),
-            lob_prefetch_cursors: BTreeSet::new(),
-            copied_cursors: HashSet::new(),
-            cursors_to_close: Vec::new(),
-            sessionless_data: None,
-            notification_buffer: Vec::new(),
-            notification_header_consumed: false,
-            transaction_context: None,
-            txn_in_progress: false,
+            // Authentication has two shapes. Token auth (OCI IAM / OAuth2) carries
+            // the credential in `AUTH_TOKEN` and skips the password-verifier round
+            // trip entirely; password auth does the classic phase-one challenge /
+            // phase-two verifier exchange. Both converge on a parsed auth response
+            // plus the negotiated capabilities; only password auth yields a combo key
+            // (used later to verify the server's response and for change-password).
+            let (auth_two, capabilities, combo_key) = if let Some(token) = &options.access_token {
+                // A database access token must never travel in clear text: require
+                // TLS/TCPS, exactly as the reference does
+                // (protocol.pyx `ERR_ACCESS_TOKEN_REQUIRES_TCPS`).
+                if !descriptor.protocol.is_tls() {
+                    return Err(Error::AccessTokenRequiresTcps);
+                }
+                // One combined fast-auth bundle carrying a phase-two `AUTH_TOKEN`
+                // message; no resend. The payload (which embeds the token) is never
+                // passed to `trace_connect_bytes`, so the secret stays out of logs.
+                let auth_payload = build_fast_auth_token_payload(
+                    &options.user,
+                    token.expose(),
+                    &identity.driver_name,
+                    PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
+                    &auth_connect_string,
+                    options.edition.as_deref(),
+                )?;
+                trace_connect_step("send AUTH token (fast-auth phase two)");
+                core.send_data_packet(cx, &auth_payload, sdu).await?;
+                trace_connect_step("read AUTH token response");
+                let response = core.read_data_response(cx).await?;
+                trace_connect_bytes("AUTH token response", &response);
+                let auth = parse_auth_response_with_limits(&response, protocol_limits)?;
+                let capabilities = auth.capabilities.unwrap_or_default();
+                // Token auth derives no shared password key: there is no combo key,
+                // hence no server-response MAC to verify and no change-password.
+                (auth, capabilities, Vec::new())
+            } else {
+                let client_pid = process::id();
+                let auth_one = build_fast_auth_phase_one_payload(
+                    &options.user,
+                    &identity.program,
+                    &identity.machine,
+                    &identity.osuser,
+                    &identity.terminal,
+                    client_pid,
+                )?;
+                trace_connect_bytes("AUTH phase one payload", &auth_one);
+                trace_connect_step("send AUTH phase one");
+                core.send_data_packet(cx, &auth_one, sdu).await?;
+                trace_connect_step("read AUTH phase one");
+                let auth_one_response = core.read_data_response(cx).await?;
+                trace_connect_bytes("AUTH phase one response", &auth_one_response);
+                let auth_one =
+                    parse_auth_response_with_limits(&auth_one_response, protocol_limits)?;
+                let capabilities = auth_one.capabilities.unwrap_or_default();
+                let verifier_type = auth_one
+                    .verifier_type
+                    .ok_or(Error::MissingSessionField("AUTH_VFR_DATA verifier type"))?;
+                let encrypted = oracledb_protocol::crypto::generate_verifier(
+                    options.password.as_bytes(),
+                    &auth_one.session_data,
+                    verifier_type,
+                )?;
+                let auth_two_payload = build_auth_phase_two_payload_with_proxy_with_seq(
+                    &options.user,
+                    &encrypted,
+                    &identity.driver_name,
+                    PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
+                    &auth_connect_string,
+                    next_ttc_sequence(&mut ttc_seq_num),
+                    &options.app_context,
+                    options.proxy_user.as_deref(),
+                    options.edition.as_deref(),
+                )?;
+                trace_connect_bytes("AUTH phase two payload", &auth_two_payload);
+                trace_connect_step("send AUTH phase two");
+                core.send_data_packet(cx, &auth_two_payload, sdu).await?;
+                trace_connect_step("read AUTH phase two");
+                let auth_two_response = core.read_data_response(cx).await?;
+                trace_connect_bytes("AUTH phase two response", &auth_two_response);
+                let auth_two =
+                    parse_auth_response_with_limits(&auth_two_response, protocol_limits)?;
+                oracledb_protocol::crypto::verify_server_response(
+                    &encrypted.combo_key,
+                    &auth_two.session_data,
+                )?;
+                (auth_two, capabilities, encrypted.combo_key)
+            };
+
+            let session_id = parse_session_u32(&auth_two.session_data, "AUTH_SESSION_ID")?;
+            let serial_num = parse_session_u16(&auth_two.session_data, "AUTH_SERIAL_NUM")?;
+            let server_version = auth_two.session_data.get("AUTH_VERSION_STRING").cloned();
+            let server_version_tuple = auth_two
+                .session_data
+                .get("AUTH_VERSION_NO")
+                .and_then(|value| value.trim().parse::<u32>().ok())
+                .map(|num| {
+                    decode_server_version_number(
+                        num,
+                        capabilities.ttc_field_version >= TNS_CCAP_FIELD_VERSION_18_1_EXT_1,
+                    )
+                });
+
+            Ok(Self {
+                descriptor,
+                identity,
+                core,
+                protocol_limits,
+                session_id,
+                serial_num,
+                server_version,
+                server_version_tuple,
+                capabilities,
+                ttc_seq_num,
+                sdu,
+                supports_end_of_response: accept_info.supports_end_of_response,
+                supports_oob: accept_info.supports_oob,
+                cursor_columns: BTreeMap::new(),
+                fetch_metadata_by_sql: HashMap::new(),
+                fetch_metadata_order: VecDeque::new(),
+                dead: false,
+                user: options.user,
+                combo_key,
+                statement_cache: Vec::new(),
+                statement_cache_size: options.statement_cache_size,
+                in_use_cursors: HashSet::new(),
+                lob_prefetch_cursors: BTreeSet::new(),
+                copied_cursors: HashSet::new(),
+                cursors_to_close: Vec::new(),
+                sessionless_data: None,
+                notification_buffer: Vec::new(),
+                notification_header_consumed: false,
+                transaction_context: None,
+                txn_in_progress: false,
+            })
         })
+        .await;
+        match connect_result {
+            Ok(result) => result,
+            Err(_) => Err(Error::CallTimeout(connect_timeout_ms)),
+        }
     }
 
     pub fn descriptor(&self) -> &EasyConnect {
@@ -8088,37 +8122,175 @@ where
     })
 }
 
+fn transport_connect_timeout_duration(seconds: f64) -> Duration {
+    let seconds = if seconds.is_finite() && seconds > 0.0 {
+        seconds
+    } else {
+        20.0
+    };
+    Duration::from_secs_f64(seconds.max(0.001))
+}
+
 /// Builds the listener connect descriptor, optionally injecting `(SERVER=emon)`
 /// into `CONNECT_DATA` (between `SERVICE_NAME` and `CID`, matching the golden
 /// emon connect packet). The reference sets `description.server_type = "emon"`
 /// for the background CQN connection (subscr.pyx:70-73).
 fn listener_connect_descriptor_with_server(
     descriptor: &EasyConnect,
+    description: &Description,
     identity: &ClientIdentity,
     server_type_emon: bool,
+    token_auth: bool,
+    ssl_server_dn_match: bool,
+    ssl_server_cert_dn: Option<&str>,
 ) -> String {
-    let server = if server_type_emon {
-        "(SERVER=emon)"
-    } else {
-        ""
+    let address = descriptor_address_clause(descriptor);
+    let connect_data = listener_connect_data_clause(description, identity, server_type_emon);
+    let security = descriptor_security_clause(
+        descriptor.protocol,
+        description,
+        token_auth,
+        ssl_server_dn_match,
+        ssl_server_cert_dn,
+    );
+    format!("(DESCRIPTION={}{}{})", address, connect_data, security)
+}
+
+fn auth_connect_descriptor(
+    descriptor: &EasyConnect,
+    description: &Description,
+    token_auth: bool,
+    ssl_server_dn_match: bool,
+    ssl_server_cert_dn: Option<&str>,
+) -> String {
+    let address = descriptor_address_clause(descriptor);
+    let connect_data = auth_connect_data_clause(description, descriptor);
+    let security = descriptor_security_clause(
+        descriptor.protocol,
+        description,
+        token_auth,
+        ssl_server_dn_match,
+        ssl_server_cert_dn,
+    );
+    format!("(DESCRIPTION={}{}{})", address, connect_data, security)
+}
+
+fn descriptor_address_clause(descriptor: &EasyConnect) -> String {
+    let protocol = match descriptor.protocol {
+        NetProtocol::Tcp => "tcp",
+        NetProtocol::Tcps => "tcps",
     };
     format!(
-        "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST={})(PORT={}))(CONNECT_DATA=(SERVICE_NAME={}){}(CID=(PROGRAM={})(HOST={})(USER={}))))",
-        descriptor.host,
-        descriptor.port,
-        descriptor.service_name,
-        server,
-        identity.program,
-        identity.machine,
-        identity.osuser,
+        "(ADDRESS=(PROTOCOL={})(HOST={})(PORT={}))",
+        protocol, descriptor.host, descriptor.port
     )
 }
 
-fn auth_connect_descriptor(descriptor: &EasyConnect) -> String {
-    format!(
-        "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST={})(PORT={}))(CONNECT_DATA=(SERVICE_NAME={})))",
-        descriptor.host, descriptor.port, descriptor.service_name
-    )
+fn listener_connect_data_clause(
+    description: &Description,
+    identity: &ClientIdentity,
+    server_type_emon: bool,
+) -> String {
+    let mut out = auth_connect_data_clause_from_service(description, None);
+    if server_type_emon {
+        out.push_str("(SERVER=emon)");
+    } else if let Some(server_type) = description.connect_data.server_type {
+        out.push_str("(SERVER=");
+        out.push_str(server_type.as_str());
+        out.push(')');
+    }
+    for (key, value) in &description.connect_data.extra {
+        out.push('(');
+        out.push_str(key);
+        out.push('=');
+        out.push_str(value);
+        out.push(')');
+    }
+    out.push_str("(CID=(PROGRAM=");
+    out.push_str(&identity.program);
+    out.push_str(")(HOST=");
+    out.push_str(&identity.machine);
+    out.push_str(")(USER=");
+    out.push_str(&identity.osuser);
+    out.push_str(")))");
+    out
+}
+
+fn auth_connect_data_clause(description: &Description, descriptor: &EasyConnect) -> String {
+    let mut out =
+        auth_connect_data_clause_from_service(description, Some(&descriptor.service_name));
+    if let Some(server_type) = description.connect_data.server_type {
+        out.push_str("(SERVER=");
+        out.push_str(server_type.as_str());
+        out.push(')');
+    }
+    for (key, value) in &description.connect_data.extra {
+        out.push('(');
+        out.push_str(key);
+        out.push('=');
+        out.push_str(value);
+        out.push(')');
+    }
+    out.push(')');
+    out
+}
+
+fn auth_connect_data_clause_from_service(
+    description: &Description,
+    fallback_service_name: Option<&str>,
+) -> String {
+    let service_name = description
+        .connect_data
+        .service_name
+        .as_deref()
+        .or(fallback_service_name)
+        .unwrap_or("");
+    format!("(CONNECT_DATA=(SERVICE_NAME={service_name})")
+}
+
+fn descriptor_security_clause(
+    protocol: NetProtocol,
+    description: &Description,
+    token_auth: bool,
+    ssl_server_dn_match: bool,
+    ssl_server_cert_dn: Option<&str>,
+) -> String {
+    let security = &description.security;
+    if !protocol.is_tls()
+        && !token_auth
+        && ssl_server_dn_match
+        && ssl_server_cert_dn.is_none()
+        && security.extra.is_empty()
+    {
+        return String::new();
+    }
+
+    let mut out = String::from("(SECURITY=");
+    if protocol.is_tls() || !ssl_server_dn_match {
+        out.push_str("(SSL_SERVER_DN_MATCH=");
+        out.push_str(if ssl_server_dn_match { "ON" } else { "OFF" });
+        out.push(')');
+    }
+    if let Some(cert_dn) = ssl_server_cert_dn {
+        out.push_str("(SSL_SERVER_CERT_DN=");
+        out.push_str(cert_dn);
+        out.push(')');
+    }
+    for (key, value) in &security.extra {
+        if key.eq_ignore_ascii_case("TOKEN_AUTH") {
+            continue;
+        }
+        out.push('(');
+        out.push_str(key);
+        out.push('=');
+        out.push_str(value);
+        out.push(')');
+    }
+    if token_auth {
+        out.push_str("(TOKEN_AUTH=OCI_TOKEN)");
+    }
+    out.push(')');
+    out
 }
 
 fn parse_session_u32(
@@ -8283,7 +8455,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Poll, Waker};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn api_design_nothing_lost_map_covers_current_surface() {
@@ -8364,12 +8536,13 @@ mod tests {
             "IntervalYM",
             "DateTime",
             "Timestamp",
+            "TimestampTz",
             "Array",
             "Vector",
             "Json",
             "Cursor",
         ];
-        assert_eq!(bind_variants.len(), 22);
+        assert_eq!(bind_variants.len(), 23);
         for variant in bind_variants {
             assert!(
                 design.contains(&format!("`{variant}`")),
@@ -8389,13 +8562,14 @@ mod tests {
             "Boolean",
             "Cursor",
             "DateTime",
+            "TimestampTz",
             "Object",
             "Lob",
             "Vector",
             "Json",
             "Array",
         ];
-        assert_eq!(query_variants.len(), 16);
+        assert_eq!(query_variants.len(), 17);
         for variant in query_variants {
             assert!(
                 design.contains(&format!("`{variant}`")),
@@ -9561,14 +9735,108 @@ mod tests {
         let options = ConnectOptions::new("localhost/FREEPDB1", "user", "password", identity());
         let descriptor =
             EasyConnect::parse(&options.connect_string).expect("test connect string should parse");
-        let built = listener_connect_descriptor_with_server(&descriptor, &options.identity, false);
+        let full_descriptor = EasyConnect::parse_descriptor(&options.connect_string)
+            .expect("test connect string should parse as full descriptor");
+        let description = full_descriptor.first_description();
+        let built = listener_connect_descriptor_with_server(
+            &descriptor,
+            description,
+            &options.identity,
+            false,
+            false,
+            true,
+            None,
+        );
         assert!(built.contains("(PROGRAM=program)"));
         assert!(built.contains("(HOST=machine)"));
         assert!(built.contains("(USER=osuser)"));
         assert!(!built.contains("(SERVER=emon)"));
         // emon variant injects the SERVER directive ahead of the CID block
-        let emon = listener_connect_descriptor_with_server(&descriptor, &options.identity, true);
+        let emon = listener_connect_descriptor_with_server(
+            &descriptor,
+            description,
+            &options.identity,
+            true,
+            false,
+            true,
+            None,
+        );
         assert!(emon.contains("(SERVICE_NAME=FREEPDB1)(SERVER=emon)(CID="));
+    }
+
+    #[test]
+    fn token_auth_descriptor_uses_tcps_security_and_passthrough() {
+        let connect_string = concat!(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=adb.example.test)(PORT=2484))",
+            "(CONNECT_DATA=(SERVICE_NAME=adbsvc))",
+            "(SECURITY=(SSL_SERVER_DN_MATCH=off)",
+            "(SSL_SERVER_CERT_DN=CN=adb.example.test)",
+            "(OCI_IAM_HOST=private-endpoint)))"
+        );
+        let descriptor = EasyConnect::parse(connect_string).expect("parse tcps descriptor");
+        let full_descriptor =
+            EasyConnect::parse_descriptor(connect_string).expect("parse full descriptor");
+        let description = full_descriptor.first_description();
+        let built = auth_connect_descriptor(
+            &descriptor,
+            description,
+            true,
+            false,
+            description.security.ssl_server_cert_dn.as_deref(),
+        );
+
+        assert!(built.contains("(PROTOCOL=tcps)"));
+        assert!(built.contains("(SECURITY="));
+        assert!(built.contains("(SSL_SERVER_DN_MATCH=OFF)"));
+        assert!(built.contains("(SSL_SERVER_CERT_DN=CN=adb.example.test)"));
+        assert!(built.contains("(OCI_IAM_HOST=private-endpoint)"));
+        assert!(built.contains("(TOKEN_AUTH=OCI_TOKEN)"));
+        assert!(!built.contains("WALLET"));
+    }
+
+    #[test]
+    fn transport_connect_timeout_bounds_post_dial_accept_read() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let mut header = [0u8; 8];
+            socket.read_exact(&mut header)?;
+            let declared = usize::from(u16::from_be_bytes([header[0], header[1]]));
+            let mut payload = vec![0u8; declared.saturating_sub(header.len())];
+            socket.read_exact(&mut payload)?;
+            thread::sleep(Duration::from_millis(300));
+            Ok(())
+        });
+
+        let options = ConnectOptions::new(
+            format!(
+                "127.0.0.1:{}/FREEPDB1?transport_connect_timeout=100ms",
+                addr.port()
+            ),
+            "user",
+            "password",
+            identity(),
+        );
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let started = Instant::now();
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("ambient Cx");
+                Connection::connect(&cx, options).await
+            })
+            .expect_err("stalling listener should hit transport connect timeout");
+        assert!(
+            matches!(err, Error::CallTimeout(ms) if ms == 100),
+            "expected 100ms CallTimeout, got {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "post-dial ACCEPT read should be bounded"
+        );
+        server.join().expect("server thread joins")?;
+        Ok(())
     }
 
     #[test]

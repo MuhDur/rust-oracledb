@@ -1255,6 +1255,10 @@ impl oracledb::FromSql for alloc::vec::Vec<u8>
 pub fn alloc::vec::Vec<u8>::from_sql(&oracledb_protocol::thin::types::QueryValue) -> core::result::Result<Self, oracledb::ConversionError>
 impl oracledb::FromSql for bool
 pub fn bool::from_sql(&oracledb_protocol::thin::types::QueryValue) -> core::result::Result<Self, oracledb::ConversionError>
+impl oracledb::FromSql for chrono::datetime::DateTime<chrono::offset::fixed::FixedOffset>
+pub fn chrono::datetime::DateTime<chrono::offset::fixed::FixedOffset>::from_sql(&oracledb_protocol::thin::types::QueryValue) -> core::result::Result<Self, oracledb::ConversionError>
+impl oracledb::FromSql for chrono::datetime::DateTime<chrono::offset::utc::Utc>
+pub fn chrono::datetime::DateTime<chrono::offset::utc::Utc>::from_sql(&oracledb_protocol::thin::types::QueryValue) -> core::result::Result<Self, oracledb::ConversionError>
 impl oracledb::FromSql for chrono::naive::date::NaiveDate
 pub fn chrono::naive::date::NaiveDate::from_sql(&oracledb_protocol::thin::types::QueryValue) -> core::result::Result<Self, oracledb::ConversionError>
 impl oracledb::FromSql for chrono::naive::datetime::NaiveDateTime
@@ -1331,6 +1335,10 @@ impl oracledb::ToSql for alloc::vec::Vec<u8>
 pub fn alloc::vec::Vec<u8>::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
 impl oracledb::ToSql for bool
 pub fn bool::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
+impl oracledb::ToSql for chrono::datetime::DateTime<chrono::offset::fixed::FixedOffset>
+pub fn chrono::datetime::DateTime<chrono::offset::fixed::FixedOffset>::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
+impl oracledb::ToSql for chrono::datetime::DateTime<chrono::offset::utc::Utc>
+pub fn chrono::datetime::DateTime<chrono::offset::utc::Utc>::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
 impl oracledb::ToSql for chrono::naive::date::NaiveDate
 pub fn chrono::naive::date::NaiveDate::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
 impl oracledb::ToSql for chrono::naive::datetime::NaiveDateTime

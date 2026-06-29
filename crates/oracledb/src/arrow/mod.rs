@@ -450,7 +450,7 @@ mod tests {
         ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_FLOAT, ORA_TYPE_NUM_BLOB,
         ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_DATE, ORA_TYPE_NUM_LONG,
         ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_RAW, ORA_TYPE_NUM_TIMESTAMP,
-        ORA_TYPE_NUM_VARCHAR,
+        ORA_TYPE_NUM_TIMESTAMP_TZ, ORA_TYPE_NUM_VARCHAR,
     };
     use oracledb_protocol::vector::{
         Vector, VectorValues, VECTOR_FORMAT_BINARY, VECTOR_FORMAT_FLOAT32, VECTOR_FORMAT_FLOAT64,
@@ -484,6 +484,28 @@ mod tests {
             minute,
             second,
             nanosecond,
+        })
+    }
+
+    fn timestamp_tz(
+        year: i32,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        nanosecond: u32,
+        offset_minutes: i32,
+    ) -> Option<QueryValue> {
+        Some(QueryValue::TimestampTz {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+            offset_minutes,
         })
     }
 
@@ -701,6 +723,25 @@ mod tests {
                 .as_primitive::<TimestampNanosecondType>()
                 .value(0),
             1_704_164_645_123_456_789
+        );
+    }
+
+    #[test]
+    fn timestamp_tz_maps_to_arrow_epoch_once() {
+        let columns = vec![column("TSTZ", ORA_TYPE_NUM_TIMESTAMP_TZ, 0, 9)];
+        let rows = vec![vec![timestamp_tz(2024, 1, 2, 3, 4, 5, 123_456_789, -330)]];
+        let batch =
+            build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
+        assert_eq!(
+            batch.schema().field(0).data_type(),
+            &DataType::Timestamp(TimeUnit::Nanosecond, None)
+        );
+        assert_eq!(
+            batch
+                .column(0)
+                .as_primitive::<TimestampNanosecondType>()
+                .value(0),
+            1_704_184_445_123_456_789
         );
     }
 

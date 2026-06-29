@@ -642,6 +642,15 @@ pub oracledb_protocol::thin::BindValue::Timestamp::nanosecond: u32
 pub oracledb_protocol::thin::BindValue::Timestamp::ora_type_num: u8
 pub oracledb_protocol::thin::BindValue::Timestamp::second: u8
 pub oracledb_protocol::thin::BindValue::Timestamp::year: i32
+pub oracledb_protocol::thin::BindValue::TimestampTz
+pub oracledb_protocol::thin::BindValue::TimestampTz::day: u8
+pub oracledb_protocol::thin::BindValue::TimestampTz::hour: u8
+pub oracledb_protocol::thin::BindValue::TimestampTz::minute: u8
+pub oracledb_protocol::thin::BindValue::TimestampTz::month: u8
+pub oracledb_protocol::thin::BindValue::TimestampTz::nanosecond: u32
+pub oracledb_protocol::thin::BindValue::TimestampTz::offset_minutes: i32
+pub oracledb_protocol::thin::BindValue::TimestampTz::second: u8
+pub oracledb_protocol::thin::BindValue::TimestampTz::year: i32
 pub oracledb_protocol::thin::BindValue::TypedNull
 pub oracledb_protocol::thin::BindValue::TypedNull::buffer_size: u32
 pub oracledb_protocol::thin::BindValue::TypedNull::csfrm: u8
@@ -739,6 +748,15 @@ pub oracledb_protocol::thin::QueryValue::Text(alloc::string::String)
 pub oracledb_protocol::thin::QueryValue::TextRaw
 pub oracledb_protocol::thin::QueryValue::TextRaw::bytes: alloc::vec::Vec<u8>
 pub oracledb_protocol::thin::QueryValue::TextRaw::csfrm: u8
+pub oracledb_protocol::thin::QueryValue::TimestampTz
+pub oracledb_protocol::thin::QueryValue::TimestampTz::day: u8
+pub oracledb_protocol::thin::QueryValue::TimestampTz::hour: u8
+pub oracledb_protocol::thin::QueryValue::TimestampTz::minute: u8
+pub oracledb_protocol::thin::QueryValue::TimestampTz::month: u8
+pub oracledb_protocol::thin::QueryValue::TimestampTz::nanosecond: u32
+pub oracledb_protocol::thin::QueryValue::TimestampTz::offset_minutes: i32
+pub oracledb_protocol::thin::QueryValue::TimestampTz::second: u8
+pub oracledb_protocol::thin::QueryValue::TimestampTz::year: i32
 pub oracledb_protocol::thin::QueryValue::Vector(alloc::boxed::Box<oracledb_protocol::vector::Vector>)
 impl oracledb_protocol::thin::QueryValue
 pub fn oracledb_protocol::thin::QueryValue::as_bool(&self) -> core::option::Option<bool>
@@ -783,6 +801,15 @@ pub oracledb_protocol::thin::QueryValueRef::Number::text: &'buf str
 pub oracledb_protocol::thin::QueryValueRef::Owned(&'buf oracledb_protocol::thin::QueryValue)
 pub oracledb_protocol::thin::QueryValueRef::Raw(&'buf [u8])
 pub oracledb_protocol::thin::QueryValueRef::Text(&'buf str)
+pub oracledb_protocol::thin::QueryValueRef::TimestampTz
+pub oracledb_protocol::thin::QueryValueRef::TimestampTz::day: u8
+pub oracledb_protocol::thin::QueryValueRef::TimestampTz::hour: u8
+pub oracledb_protocol::thin::QueryValueRef::TimestampTz::minute: u8
+pub oracledb_protocol::thin::QueryValueRef::TimestampTz::month: u8
+pub oracledb_protocol::thin::QueryValueRef::TimestampTz::nanosecond: u32
+pub oracledb_protocol::thin::QueryValueRef::TimestampTz::offset_minutes: i32
+pub oracledb_protocol::thin::QueryValueRef::TimestampTz::second: u8
+pub oracledb_protocol::thin::QueryValueRef::TimestampTz::year: i32
 impl oracledb_protocol::thin::QueryValueRef<'_>
 pub fn oracledb_protocol::thin::QueryValueRef<'_>::as_number_text(&self) -> core::option::Option<&str>
 pub fn oracledb_protocol::thin::QueryValueRef<'_>::as_raw(&self) -> core::option::Option<&[u8]>

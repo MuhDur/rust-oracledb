@@ -314,6 +314,28 @@ pub fn pack_bindvalue_into_image(buf: &mut Vec<u8>, value: &BindValue, csfrm: u8
             };
             image_write_value_bytes(buf, &bytes)
         }
+        BindValue::TimestampTz {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+            offset_minutes,
+        } => {
+            let bytes = encode_oracle_timestamp_tz_with_offset(
+                *year,
+                *month,
+                *day,
+                *hour,
+                *minute,
+                *second,
+                *nanosecond,
+                *offset_minutes,
+            )?;
+            image_write_value_bytes(buf, &bytes)
+        }
         BindValue::Lob { locator, .. } => image_write_value_bytes(buf, locator),
         BindValue::IntervalDS {
             days,

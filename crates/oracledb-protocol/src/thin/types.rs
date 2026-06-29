@@ -368,6 +368,16 @@ pub enum QueryValue {
         second: u8,
         nanosecond: u32,
     },
+    TimestampTz {
+        year: i32,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        nanosecond: u32,
+        offset_minutes: i32,
+    },
     /// ADT / collection image (cold): payload boxed, see [`ObjectValue`].
     Object(Box<ObjectValue>),
     /// LOB / BFILE locator (cold): payload boxed, see [`LobValue`].
@@ -504,6 +514,7 @@ impl QueryValue {
             QueryValue::Boolean(_) => "Boolean",
             QueryValue::Cursor(_) => "Cursor",
             QueryValue::DateTime { .. } => "DateTime",
+            QueryValue::TimestampTz { .. } => "TimestampTz",
             QueryValue::Object(_) => "Object",
             QueryValue::Lob(_) => "Lob",
             QueryValue::Vector(_) => "Vector",
@@ -579,6 +590,16 @@ pub enum QueryValueRef<'buf> {
         second: u8,
         nanosecond: u32,
     },
+    TimestampTz {
+        year: i32,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        nanosecond: u32,
+        offset_minutes: i32,
+    },
     /// Fallback for the cold / non-borrowable variants (Cursor / Object / Lob /
     /// Vector / Json, UTF-16 `NCHAR` text, synthesized `ROWID`, `BinaryDouble`).
     /// Boxed so the borrowed enum stays small. This is the rare path.
@@ -628,6 +649,25 @@ impl QueryValueRef<'_> {
                 minute,
                 second,
                 nanosecond,
+            },
+            QueryValueRef::TimestampTz {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+                offset_minutes,
+            } => QueryValue::TimestampTz {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+                offset_minutes,
             },
             QueryValueRef::Owned(value) => value.clone(),
         }
@@ -745,6 +785,16 @@ pub enum BindValue {
         second: u8,
         nanosecond: u32,
     },
+    TimestampTz {
+        year: i32,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        nanosecond: u32,
+        offset_minutes: i32,
+    },
     Array {
         ora_type_num: u8,
         csfrm: u8,
@@ -788,6 +838,7 @@ impl BindValue {
             BindValue::IntervalYM { .. } => "IntervalYM",
             BindValue::DateTime { .. } => "DateTime",
             BindValue::Timestamp { .. } => "Timestamp",
+            BindValue::TimestampTz { .. } => "TimestampTz",
             BindValue::Array { .. } => "Array",
             BindValue::Vector(_) => "Vector",
             BindValue::Json(_) => "Json",

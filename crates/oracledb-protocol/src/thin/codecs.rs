@@ -63,17 +63,39 @@ pub(crate) fn encode_oracle_timestamp_tz(
     second: u8,
     nanosecond: u32,
 ) -> Result<Vec<u8>> {
+    encode_oracle_timestamp_tz_with_offset(year, month, day, hour, minute, second, nanosecond, 0)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_oracle_timestamp_tz_with_offset(
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+    nanosecond: u32,
+    offset_minutes: i32,
+) -> Result<Vec<u8>> {
     if nanosecond > 999_999_999 {
         return Err(ProtocolError::TtcDecode(
             "invalid TIMESTAMP WITH TIME ZONE fraction",
         ));
     }
+    let offset_hours = offset_minutes / 60;
+    let offset_minute_part = offset_minutes % 60;
+    let encoded_hour = offset_hours + i32::from(TZ_HOUR_OFFSET);
+    let encoded_minute = offset_minute_part + i32::from(TZ_MINUTE_OFFSET);
+    let encoded_hour = u8::try_from(encoded_hour)
+        .map_err(|_| ProtocolError::TtcDecode("invalid TIMESTAMP WITH TIME ZONE offset hour"))?;
+    let encoded_minute = u8::try_from(encoded_minute)
+        .map_err(|_| ProtocolError::TtcDecode("invalid TIMESTAMP WITH TIME ZONE offset minute"))?;
     let mut bytes = Vec::with_capacity(ORA_TYPE_SIZE_TIMESTAMP_TZ as usize);
     let date = encode_oracle_date(year, month, day, hour, minute, second)?;
     bytes.extend_from_slice(&date);
     bytes.extend_from_slice(&nanosecond.to_be_bytes());
-    bytes.push(TZ_HOUR_OFFSET);
-    bytes.push(TZ_MINUTE_OFFSET);
+    bytes.push(encoded_hour);
+    bytes.push(encoded_minute);
     Ok(bytes)
 }
 
@@ -81,12 +103,12 @@ pub fn decode_datetime_value(bytes: &[u8]) -> Result<QueryValue> {
     if bytes.len() < ORA_TYPE_SIZE_DATE as usize {
         return Err(ProtocolError::TtcDecode("DATE value too short"));
     }
-    let mut year = (i32::from(bytes[0]) - 100) * 100 + i32::from(bytes[1]) - 100;
-    let mut month = bytes[2];
-    let mut day = bytes[3];
-    let mut hour = bytes[4].saturating_sub(1);
-    let mut minute = bytes[5].saturating_sub(1);
-    let mut second = bytes[6].saturating_sub(1);
+    let year = (i32::from(bytes[0]) - 100) * 100 + i32::from(bytes[1]) - 100;
+    let month = bytes[2];
+    let day = bytes[3];
+    let hour = bytes[4].saturating_sub(1);
+    let minute = bytes[5].saturating_sub(1);
+    let second = bytes[6].saturating_sub(1);
     let nanosecond = if bytes.len() >= ORA_TYPE_SIZE_TIMESTAMP as usize {
         u32::from_be_bytes(
             bytes[7..11]
@@ -105,8 +127,16 @@ pub fn decode_datetime_value(bytes: &[u8]) -> Result<QueryValue> {
         let offset_minutes = (i32::from(bytes[11]) - i32::from(TZ_HOUR_OFFSET)) * 60
             + i32::from(bytes[12])
             - i32::from(TZ_MINUTE_OFFSET);
-        (year, month, day, hour, minute, second) =
-            adjust_datetime_by_minutes(year, month, day, hour, minute, second, offset_minutes)?;
+        return Ok(QueryValue::TimestampTz {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+            offset_minutes,
+        });
     }
     Ok(QueryValue::DateTime {
         year,
@@ -119,6 +149,7 @@ pub fn decode_datetime_value(bytes: &[u8]) -> Result<QueryValue> {
     })
 }
 
+#[cfg(test)]
 pub(crate) fn adjust_datetime_by_minutes(
     year: i32,
     month: u8,
@@ -149,6 +180,7 @@ pub(crate) fn adjust_datetime_by_minutes(
     Ok((year, month, day, hour, minute, second))
 }
 
+#[cfg(test)]
 pub(crate) fn days_from_civil(year: i32, month: u8, day: u8) -> Result<i64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return Err(ProtocolError::TtcDecode("invalid TIMESTAMP date"));
@@ -164,6 +196,7 @@ pub(crate) fn days_from_civil(year: i32, month: u8, day: u8) -> Result<i64> {
     Ok(i64::from(era) * 146_097 + i64::from(day_of_era) - 719_468)
 }
 
+#[cfg(test)]
 pub(crate) fn civil_from_days(days: i64) -> Result<(i32, u8, u8)> {
     let days = days + 719_468;
     let era = if days >= 0 { days } else { days - 146_096 } / 146_097;

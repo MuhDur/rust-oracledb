@@ -77,12 +77,11 @@ impl<'a>             From<Vec<(String,BindValue)>> for Params<'a> {} // params!{
   two `params!` arms are **kept verbatim**. `params![40,"x"]` → `Positional`;
   `params!{":id"=>40}` → `Named`. Borrowed (`Cow`) so callers can pass `&[BindValue]`
   without moving; owned values live in `BindValue` (no `&dyn ToSql` lifetime friction).
-- The full **22 current `BindValue` variants** remain the bind currency
+- The full **23 current `BindValue` variants** remain the bind currency
   (`Null`/`TypedNull`/`Output`/`ReturnOutput`/`ObjectOutput`/`ObjectInput`/`Text`/
   `Raw`/`Lob`/`Number`/`BinaryInteger`/`BinaryDouble`/`BinaryFloat`/`Boolean`/
-  `IntervalDS`/`IntervalYM`/`DateTime`/`Timestamp`/`Array`/`Vector`/`Json`/
-  `Cursor`) — OUT/IN-OUT/RETURNING/object/cursor binds all expressible. Earlier
-  planning text said 23; source truth is 22 at this point in W1.
+  `IntervalDS`/`IntervalYM`/`DateTime`/`Timestamp`/`TimestampTz`/`Array`/`Vector`/
+  `Json`/`Cursor`) — OUT/IN-OUT/RETURNING/object/cursor binds all expressible.
 
 ---
 
@@ -246,7 +245,7 @@ pub trait ColumnIndex { /* impl for usize and &str */ }
 - **Typed-mapping stack kept verbatim:** `FromRow` (+ `#[derive(FromRow)]`), `FromSql`,
   `ToSql`, all feature-gated impls (chrono/uuid/serde_json/rust_decimal, always
   Vec<f32>/Vec<f64> for VECTOR), `QueryResultExt`. `TypedRow` becomes the internal basis
-  of `Row`. The 16 `QueryValue` variants and their accessors (`as_i64`/`as_text`/…) stay.
+  of `Row`. The 17 `QueryValue` variants and their accessors (`as_i64`/`as_text`/…) stay.
 - **`Error`** (W1-T6): typed; `kind() -> ErrorKind`, `ora_code()`/`oracle_code()`,
   `offset()`, `caret(sql)`, `connection_disposition() -> {Reusable, Dead}`,
   `retry_hint()`, and the existing `is_connection_lost`/`is_transient`/`is_retryable`
@@ -320,7 +319,7 @@ execute/fetch/define/cursor machinery the SODA/Arrow/direct-path facades sit on.
 | C07 | Timeouts | `Query::timeout`, `Execute::timeout`, `Batch::timeout`, `Registration::timeout`; one logical operation deadline. |
 | C08 | Named/positional bind ergonomics | `Params`, `IntoBinds`, and `params!` cover positional and named binds. |
 | C09 | Typed read/write stack | `FromSql`, `ToSql`, `FromRow`, derive, `Row::get`, and `Rows::into_typed` retained. |
-| C10 | Value enum surface | 22 `BindValue` variants and 16 `QueryValue` variants remain covered below. |
+| C10 | Value enum surface | 23 `BindValue` variants and 17 `QueryValue` variants remain covered below. |
 | C11 | Continuous Query Notification | `Registration`/`register_query` plus retained subscribe/notify primitives. |
 | C12 | LOB and BFILE operations | Retained read/write/trim/create/free APIs and timeout variants. |
 | C13 | AQ | Retained enqueue/dequeue APIs and option/property/payload types. |
@@ -359,8 +358,8 @@ execute/fetch/define/cursor machinery the SODA/Arrow/direct-path facades sit on.
 
 | Domain | Variants |
 |---|---|
-| `BindValue` (22 current variants) | `Null`, `TypedNull`, `Output`, `ReturnOutput`, `ObjectOutput`, `ObjectInput`, `Text`, `Raw`, `Lob`, `Number`, `BinaryInteger`, `BinaryDouble`, `BinaryFloat`, `Boolean`, `IntervalDS`, `IntervalYM`, `DateTime`, `Timestamp`, `Array`, `Vector`, `Json`, `Cursor`. |
-| `QueryValue` (16 variants) | `Text`, `TextRaw`, `Raw`, `Rowid`, `BinaryDouble`, `IntervalDS`, `IntervalYM`, `Number`, `Boolean`, `Cursor`, `DateTime`, `Object`, `Lob`, `Vector`, `Json`, `Array`. |
+| `BindValue` (23 current variants) | `Null`, `TypedNull`, `Output`, `ReturnOutput`, `ObjectOutput`, `ObjectInput`, `Text`, `Raw`, `Lob`, `Number`, `BinaryInteger`, `BinaryDouble`, `BinaryFloat`, `Boolean`, `IntervalDS`, `IntervalYM`, `DateTime`, `Timestamp`, `TimestampTz`, `Array`, `Vector`, `Json`, `Cursor`. |
+| `QueryValue` (17 variants) | `Text`, `TextRaw`, `Raw`, `Rowid`, `BinaryDouble`, `IntervalDS`, `IntervalYM`, `Number`, `Boolean`, `Cursor`, `DateTime`, `TimestampTz`, `Object`, `Lob`, `Vector`, `Json`, `Array`. |
 
 ---
 

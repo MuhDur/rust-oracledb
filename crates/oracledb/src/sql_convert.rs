@@ -352,7 +352,10 @@ impl<T: FromSql> FromSql for Option<T> {
 #[cfg(feature = "chrono")]
 mod chrono_impls {
     use super::{mismatch, ConversionError, FromSql};
-    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+    use chrono::{
+        DateTime, Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime,
+        TimeZone, Utc,
+    };
     use oracledb_protocol::thin::QueryValue;
 
     fn naive_from_components(
@@ -398,6 +401,33 @@ mod chrono_impls {
                 } => {
                     naive_from_components(*year, *month, *day, *hour, *minute, *second, *nanosecond)
                 }
+                QueryValue::TimestampTz {
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    nanosecond,
+                    offset_minutes,
+                } => {
+                    let naive = naive_from_components(
+                        *year,
+                        *month,
+                        *day,
+                        *hour,
+                        *minute,
+                        *second,
+                        *nanosecond,
+                    )?;
+                    naive
+                        .checked_add_signed(ChronoDuration::minutes(i64::from(*offset_minutes)))
+                        .ok_or_else(|| ConversionError::OutOfRange {
+                            expected: "chrono::NaiveDateTime",
+                            detail: "TIMESTAMP WITH TIME ZONE offset adjustment overflow"
+                                .to_string(),
+                        })
+                }
                 other => mismatch("chrono::NaiveDateTime", other),
             }
         }
@@ -414,8 +444,93 @@ mod chrono_impls {
                         detail: format!("invalid date {year:04}-{month:02}-{day:02}"),
                     },
                 ),
+                QueryValue::TimestampTz { .. } => {
+                    let datetime = NaiveDateTime::from_sql(value)?;
+                    Ok(datetime.date())
+                }
                 other => mismatch("chrono::NaiveDate", other),
             }
+        }
+    }
+
+    fn fixed_offset_from_minutes(offset_minutes: i32) -> Result<FixedOffset, ConversionError> {
+        let seconds =
+            offset_minutes
+                .checked_mul(60)
+                .ok_or_else(|| ConversionError::OutOfRange {
+                    expected: "chrono::FixedOffset",
+                    detail: format!("offset minutes {offset_minutes} overflow seconds"),
+                })?;
+        FixedOffset::east_opt(seconds).ok_or_else(|| ConversionError::OutOfRange {
+            expected: "chrono::FixedOffset",
+            detail: format!("offset minutes {offset_minutes} out of chrono range"),
+        })
+    }
+
+    impl FromSql for DateTime<FixedOffset> {
+        fn from_sql(value: &QueryValue) -> Result<Self, ConversionError> {
+            match value {
+                QueryValue::TimestampTz {
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    nanosecond,
+                    offset_minutes,
+                } => {
+                    let naive = naive_from_components(
+                        *year,
+                        *month,
+                        *day,
+                        *hour,
+                        *minute,
+                        *second,
+                        *nanosecond,
+                    )?;
+                    fixed_offset_from_minutes(*offset_minutes)?
+                        .from_local_datetime(&naive)
+                        .single()
+                        .ok_or_else(|| ConversionError::OutOfRange {
+                            expected: "chrono::DateTime<FixedOffset>",
+                            detail: "invalid fixed-offset local datetime".to_string(),
+                        })
+                }
+                QueryValue::DateTime {
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    nanosecond,
+                } => {
+                    let naive = naive_from_components(
+                        *year,
+                        *month,
+                        *day,
+                        *hour,
+                        *minute,
+                        *second,
+                        *nanosecond,
+                    )?;
+                    fixed_offset_from_minutes(0)?
+                        .from_local_datetime(&naive)
+                        .single()
+                        .ok_or_else(|| ConversionError::OutOfRange {
+                            expected: "chrono::DateTime<FixedOffset>",
+                            detail: "invalid UTC local datetime".to_string(),
+                        })
+                }
+                other => mismatch("chrono::DateTime<FixedOffset>", other),
+            }
+        }
+    }
+
+    impl FromSql for DateTime<Utc> {
+        fn from_sql(value: &QueryValue) -> Result<Self, ConversionError> {
+            DateTime::<FixedOffset>::from_sql(value).map(|datetime| datetime.with_timezone(&Utc))
         }
     }
 }
@@ -1054,7 +1169,7 @@ impl<T: ToSql> ToSql for Option<T> {
 #[cfg(feature = "chrono")]
 mod chrono_to_sql {
     use super::ToSql;
-    use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
+    use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, Timelike, Utc};
     use oracledb_protocol::thin::BindValue;
 
     impl ToSql for NaiveDateTime {
@@ -1082,6 +1197,36 @@ mod chrono_to_sql {
                 hour: 0,
                 minute: 0,
                 second: 0,
+            }
+        }
+    }
+
+    impl ToSql for DateTime<FixedOffset> {
+        fn to_sql(&self) -> BindValue {
+            BindValue::TimestampTz {
+                year: self.year(),
+                month: self.month() as u8,
+                day: self.day() as u8,
+                hour: self.hour() as u8,
+                minute: self.minute() as u8,
+                second: self.second() as u8,
+                nanosecond: self.nanosecond(),
+                offset_minutes: self.offset().local_minus_utc() / 60,
+            }
+        }
+    }
+
+    impl ToSql for DateTime<Utc> {
+        fn to_sql(&self) -> BindValue {
+            BindValue::TimestampTz {
+                year: self.year(),
+                month: self.month() as u8,
+                day: self.day() as u8,
+                hour: self.hour() as u8,
+                minute: self.minute() as u8,
+                second: self.second() as u8,
+                nanosecond: self.nanosecond(),
+                offset_minutes: 0,
             }
         }
     }
@@ -1714,6 +1859,17 @@ mod tests {
     }
 
     #[test]
+    fn resolve_params_dedups_group_by_case_repeated_named_bind() {
+        let sql = "\
+            select case when deptno = :dept then 'target' else 'other' end bucket, count(*) \
+            from emp \
+            group by case when deptno = :dept then 'target' else 'other' end";
+        let ordered = resolve_params(sql, Params::from(params! { ":dept" => 10_i64 }))
+            .expect("repeated named GROUP BY CASE bind should resolve once");
+        assert_eq!(ordered, vec![BindValue::Number("10".to_string())]);
+    }
+
+    #[test]
     fn validate_bind_rows_shape_accepts_empty_rows_for_parse() {
         // A parse-only describe (and any no-bind execute) supplies zero bind
         // rows; the wire bind count is zero. This must be accepted.
@@ -1770,7 +1926,9 @@ mod tests {
     #[cfg(feature = "chrono")]
     #[test]
     fn chrono_from_and_to_sql() {
-        use chrono::{NaiveDate, NaiveDateTime};
+        use chrono::{
+            DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Timelike, Utc,
+        };
         let dt = QueryValue::DateTime {
             year: 2026,
             month: 6,
@@ -1784,6 +1942,17 @@ mod tests {
         assert_eq!(parsed.to_string(), "2026-06-14 12:30:45.123456789");
         let date = NaiveDate::from_sql(&dt).unwrap();
         assert_eq!(date, NaiveDate::from_ymd_opt(2026, 6, 14).unwrap());
+        let bce = QueryValue::DateTime {
+            year: -4712,
+            month: 1,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            nanosecond: 0,
+        };
+        let bce_date = NaiveDate::from_sql(&bce).unwrap();
+        assert_eq!(bce_date.year(), -4712);
         // ToSql produces a Timestamp bind carrying the same components.
         match parsed.to_sql() {
             BindValue::Timestamp {
@@ -1794,6 +1963,43 @@ mod tests {
             }
             other => panic!("expected Timestamp bind, got {other:?}"),
         }
+
+        let offset_value = QueryValue::TimestampTz {
+            year: 2026,
+            month: 6,
+            day: 29,
+            hour: 12,
+            minute: 34,
+            second: 56,
+            nanosecond: 987_654_321,
+            offset_minutes: -330,
+        };
+        let fixed = DateTime::<FixedOffset>::from_sql(&offset_value).unwrap();
+        assert_eq!(fixed.to_rfc3339(), "2026-06-29T12:34:56.987654321-05:30");
+        let utc = DateTime::<Utc>::from_sql(&offset_value).unwrap();
+        assert_eq!(utc.to_rfc3339(), "2026-06-29T18:04:56.987654321+00:00");
+        let legacy_naive = NaiveDateTime::from_sql(&offset_value).unwrap();
+        assert_eq!(legacy_naive.to_string(), "2026-06-29 07:04:56.987654321");
+
+        let outbound = FixedOffset::east_opt(5 * 3600 + 45 * 60)
+            .unwrap()
+            .with_ymd_and_hms(2026, 6, 29, 7, 8, 9)
+            .unwrap()
+            .with_nanosecond(123_000_000)
+            .unwrap();
+        assert_eq!(
+            outbound.to_sql(),
+            BindValue::TimestampTz {
+                year: 2026,
+                month: 6,
+                day: 29,
+                hour: 7,
+                minute: 8,
+                second: 9,
+                nanosecond: 123_000_000,
+                offset_minutes: 345,
+            }
+        );
     }
 
     #[cfg(feature = "uuid")]

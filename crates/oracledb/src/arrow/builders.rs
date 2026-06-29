@@ -225,26 +225,67 @@ struct EpochParts {
     nanos: u32,
 }
 
-fn epoch_parts(column: &ColumnMetadata, value: &QueryValue) -> Result<EpochParts> {
-    let QueryValue::DateTime {
-        year,
-        month,
-        day,
-        hour,
-        minute,
-        second,
-        nanosecond,
-    } = value
-    else {
-        return Err(invalid_value(column, "expected a datetime value"));
-    };
-    let days = days_from_civil(*year, *month, *day);
-    let seconds =
-        days * 86_400 + i64::from(*hour) * 3_600 + i64::from(*minute) * 60 + i64::from(*second);
-    Ok(EpochParts {
+fn epoch_parts_from_components(
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+    nanosecond: u32,
+    offset_minutes: i32,
+) -> EpochParts {
+    let days = days_from_civil(year, month, day);
+    let seconds = days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60
+        - i64::from(offset_minutes) * 60
+        + i64::from(second);
+    EpochParts {
         seconds,
-        nanos: *nanosecond,
-    })
+        nanos: nanosecond,
+    }
+}
+
+fn epoch_parts(column: &ColumnMetadata, value: &QueryValue) -> Result<EpochParts> {
+    match value {
+        QueryValue::DateTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+        } => Ok(epoch_parts_from_components(
+            *year,
+            *month,
+            *day,
+            *hour,
+            *minute,
+            *second,
+            *nanosecond,
+            0,
+        )),
+        QueryValue::TimestampTz {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+            offset_minutes,
+        } => Ok(epoch_parts_from_components(
+            *year,
+            *month,
+            *day,
+            *hour,
+            *minute,
+            *second,
+            *nanosecond,
+            *offset_minutes,
+        )),
+        _ => Err(invalid_value(column, "expected a datetime value")),
+    }
 }
 
 fn timestamp_epoch_value(parts: &EpochParts, unit: TimeUnit) -> Result<i64> {
@@ -819,17 +860,28 @@ fn epoch_parts_ref(column: &ColumnMetadata, value: &QueryValueRef<'_>) -> Result
             minute,
             second,
             nanosecond,
-        } => {
-            let days = days_from_civil(year, month, day);
-            let seconds = days * 86_400
-                + i64::from(hour) * 3_600
-                + i64::from(minute) * 60
-                + i64::from(second);
-            Ok(EpochParts {
-                seconds,
-                nanos: nanosecond,
-            })
-        }
+        } => Ok(epoch_parts_from_components(
+            year, month, day, hour, minute, second, nanosecond, 0,
+        )),
+        QueryValueRef::TimestampTz {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+            offset_minutes,
+        } => Ok(epoch_parts_from_components(
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+            offset_minutes,
+        )),
         QueryValueRef::Owned(owned) => epoch_parts(column, owned),
         _ => Err(invalid_value(column, "expected a datetime value")),
     }

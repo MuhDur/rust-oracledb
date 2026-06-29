@@ -1288,6 +1288,25 @@ fn parse_column_slot<'buf>(
                     second,
                     nanosecond,
                 })),
+                QueryValue::TimestampTz {
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    nanosecond,
+                    offset_minutes,
+                } => Ok(ColumnSlot::Wire(QueryValueRef::TimestampTz {
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    nanosecond,
+                    offset_minutes,
+                })),
                 other => Ok(park(owned_arena, Some(other))),
             },
         }),
@@ -2026,6 +2045,53 @@ mod lob_fetch_shape_tests {
             Some(QueryValue::Lob(lob)) => lob.as_ref(),
             other => panic!("expected LOB value, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn column_metadata_discards_server_charset_id_and_keeps_csfrm_only() {
+        let caps = ClientCapabilities {
+            ttc_field_version: 0,
+            max_string_size: 32_767,
+            charset_id: 873,
+        };
+        let mut writer = TtcWriter::new();
+        writer.write_u8(ORA_TYPE_NUM_VARCHAR);
+        writer.write_u8(0); // flags
+        writer.write_u8(0); // precision
+        writer.write_u8(0); // scale
+        writer.write_ub4(4000);
+        writer.write_ub4(0); // max array elements
+        writer.write_ub8(0); // cont flags
+        writer
+            .write_bytes_with_two_lengths(None)
+            .expect("empty oid");
+        writer.write_ub2(0); // version
+        writer.write_ub2(0); // unusable server charset id: must not drive decoding
+        writer.write_u8(CS_FORM_IMPLICIT);
+        writer.write_ub4(4000);
+        writer.write_u8(1); // nullable
+        writer.write_u8(0); // flags
+        writer
+            .write_bytes_with_two_lengths(Some(b"TXT"))
+            .expect("name");
+        writer
+            .write_bytes_with_two_lengths(None)
+            .expect("object schema");
+        writer
+            .write_bytes_with_two_lengths(None)
+            .expect("object type");
+        writer.write_ub2(1); // column position
+        writer.write_ub4(0); // uds flags
+
+        let bytes = writer.into_bytes();
+        let mut reader = TtcReader::new(&bytes);
+        let metadata = parse_column_metadata(&mut reader, caps).expect("metadata should parse");
+        assert_eq!(metadata.name(), "TXT");
+        assert_eq!(metadata.csfrm(), CS_FORM_IMPLICIT);
+        assert_eq!(
+            decode_text_value("ok".as_bytes(), metadata.csfrm()).expect("decode text"),
+            "ok"
+        );
     }
 
     #[test]

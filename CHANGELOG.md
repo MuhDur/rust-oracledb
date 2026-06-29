@@ -24,9 +24,22 @@ checks and release-documentation truth. No breaking changes.
 - Added a typed wallet-format diagnostic for unsupported standalone
   `ewallet.p12` wallets (`WalletError::UnsupportedFormat`), leaving encrypted
   PEM and p12 backend implementation deferred.
+- Added offset-preserving `TIMESTAMP WITH TIME ZONE` surfaces:
+  `QueryValue::TimestampTz`, `BindValue::TimestampTz`, and chrono
+  `DateTime<FixedOffset>` / `DateTime<Utc>` `FromSql` and `ToSql`
+  conversions.
 
 ### Fixed
 
+- IAM/OAuth token connections now preserve TCPS in the listener/auth connect
+  descriptors, forward non-wallet `SECURITY` pass-through fields, and inject
+  `(TOKEN_AUTH=OCI_TOKEN)` for token-auth listeners.
+- `transport_connect_timeout` / `connect_timeout` in DSN descriptors now bound
+  the full connect handshake, including post-dial listener ACCEPT and AUTH
+  reads, instead of only relying on a fixed TCP dial timeout.
+- Fixed-offset `TIMESTAMP WITH TIME ZONE` fetch and bind no longer drop the
+  numeric offset. Legacy `NaiveDateTime` conversion remains available, while
+  offset-aware chrono types preserve the zone offset.
 - Redacted wallet paths, wallet passwords, server certificate DN material,
   Kerberos principals/keytabs, RADIUS challenge hints, and access tokens from
   formatted debug/error surfaces covered by the new release scope.

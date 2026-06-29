@@ -1197,6 +1197,39 @@ fn assert_datetime(row: &Row, label: &str, expected: (i32, u8, u8, u8, u8, u8, u
     }
 }
 
+fn assert_timestamp_tz(row: &Row, label: &str, expected: (i32, u8, u8, u8, u8, u8, u32, i32)) {
+    let value = cell(row, label);
+    match value {
+        QueryValue::TimestampTz {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+            offset_minutes,
+        } => assert_eq!(
+            (
+                *year,
+                *month,
+                *day,
+                *hour,
+                *minute,
+                *second,
+                *nanosecond,
+                *offset_minutes,
+            ),
+            expected,
+            "{label} timestamp with time zone mismatch"
+        ),
+        _ => assert!(
+            matches!(value, QueryValue::TimestampTz { .. }),
+            "{label} should fetch as TimestampTz, got {value:?}"
+        ),
+    }
+}
+
 fn assert_binary_double_bits(row: &Row, label: &str, expected: f64) {
     let actual = row
         .get::<f64>(0)
@@ -1568,13 +1601,12 @@ fn exercise_datetime_interval_matrix(conn: &mut Connection) {
         "select cast(:1 as timestamp(9) with time zone) as v from dual",
         vec![timestamp_tz_bind],
     );
-    // The thin bind encoder currently supplies a +00:00 offset and the fetch
-    // decoder normalizes TIMESTAMP WITH TIME ZONE into QueryValue::DateTime, so
-    // no zone identity is available to assert here.
-    assert_datetime(
+    // The legacy raw Timestamp bind still supplies a +00:00 offset; fetch now
+    // preserves that explicit fixed offset as QueryValue::TimestampTz.
+    assert_timestamp_tz(
         &row,
         "TIMESTAMP WITH TIME ZONE",
-        (2026, 6, 21, 15, 6, 7, 123_456_789),
+        (2026, 6, 21, 15, 6, 7, 123_456_789, 0),
     );
 
     let timestamp_ltz_bind = BindValue::Timestamp {

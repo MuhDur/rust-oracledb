@@ -144,6 +144,7 @@ pub fn bind_value_type_info(value: &BindValue) -> Option<BindTypeInfo> {
                 ORA_TYPE_SIZE_TIMESTAMP
             },
         ),
+        BindValue::TimestampTz { .. } => (ORA_TYPE_NUM_TIMESTAMP_TZ, 0, ORA_TYPE_SIZE_TIMESTAMP_TZ),
         BindValue::Array {
             ora_type_num,
             csfrm,
@@ -714,6 +715,7 @@ pub fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
             ORA_TYPE_NUM_TIMESTAMP_TZ => "DB_TYPE_TIMESTAMP_TZ",
             _ => "DB_TYPE_TIMESTAMP",
         },
+        BindValue::TimestampTz { .. } => "DB_TYPE_TIMESTAMP_TZ",
         BindValue::Vector(_) => "DB_TYPE_VECTOR",
         BindValue::Json(_) => "DB_TYPE_JSON",
         BindValue::Cursor { .. } => "DB_TYPE_CURSOR",
@@ -1031,6 +1033,28 @@ pub(crate) fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm:
             } else {
                 encode_oracle_timestamp(*year, *month, *day, *hour, *minute, *second, *nanosecond)?
             };
+            writer.write_bytes_with_length(&bytes)
+        }
+        BindValue::TimestampTz {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+            offset_minutes,
+        } => {
+            let bytes = encode_oracle_timestamp_tz_with_offset(
+                *year,
+                *month,
+                *day,
+                *hour,
+                *minute,
+                *second,
+                *nanosecond,
+                *offset_minutes,
+            )?;
             writer.write_bytes_with_length(&bytes)
         }
         BindValue::Array {

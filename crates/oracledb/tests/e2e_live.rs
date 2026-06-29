@@ -198,6 +198,7 @@ fn value_shape(value: &QueryValue) -> &'static str {
         QueryValue::Boolean(_) => "Boolean",
         QueryValue::Cursor(_) => "Cursor",
         QueryValue::DateTime { .. } => "DateTime",
+        QueryValue::TimestampTz { .. } => "TimestampTz",
         QueryValue::Object(_) => "Object",
         QueryValue::Lob(_) => "Lob",
         QueryValue::Vector(_) => "Vector",
@@ -1285,6 +1286,61 @@ fn cancel_timeout_and_user_cancel_recovery_are_logged() {
         "rows=1 value_shape=Number expected=24 session_state=Ready dead=false",
     );
     BlockingConnection::close(cancelled_conn).expect("close user-cancel probe");
+    log.ok();
+}
+
+#[test]
+#[ignore = "requires live Oracle container env from scripts/container.sh"]
+fn tpc_cross_connection_commit_default_timeout_documents_ora_24756() {
+    let log = E2eLog::new("tpc_default_timeout_ora_24756");
+    let Some(options) = connect_options() else {
+        log.skip(
+            "tpc_default_timeout_ora_24756",
+            "PYO_TEST_* environment not configured",
+        );
+        return;
+    };
+
+    let mut owner =
+        BlockingConnection::connect(options.clone()).expect("connect owner for TPC probe");
+    let mut committer =
+        BlockingConnection::connect(options).expect("connect committer for TPC probe");
+    drop_table_if_exists(&mut owner, "rust_tpc_24756_t");
+    BlockingConnection::execute(
+        &mut owner,
+        "create table rust_tpc_24756_t (id number primary key)",
+        (),
+    )
+    .expect("create TPC probe table");
+
+    let format_id = 0x0510_2475;
+    let gtrid = b"rust-oracledb-issue-376";
+    let bqual = b"default-timeout";
+    BlockingConnection::tpc_begin(&mut owner, format_id, gtrid, bqual, 0, 0)
+        .expect("begin TPC branch with inherited default timeout=0");
+    BlockingConnection::execute(&mut owner, "insert into rust_tpc_24756_t values (1)", ())
+        .expect("insert under TPC branch");
+    BlockingConnection::tpc_end(&mut owner, None, 0).expect("detach TPC branch");
+
+    let err = BlockingConnection::tpc_commit(
+        &mut committer,
+        Some((format_id, gtrid.as_slice(), bqual.as_slice())),
+        false,
+    )
+    .expect_err("cross-connection commit documents inherited ORA-24756");
+    assert_eq!(err.ora_code(), Some(24756), "unexpected TPC error: {err:?}");
+    log.step(
+        "cross_connection_commit",
+        "expected_error=ORA-24756 behavior=inherited_from_python_oracledb issue=376",
+    );
+
+    let _ = BlockingConnection::tpc_rollback(
+        &mut owner,
+        Some((format_id, gtrid.as_slice(), bqual.as_slice())),
+    );
+    drop_table_if_exists(&mut owner, "rust_tpc_24756_t");
+    BlockingConnection::close(owner).expect("close owner connection");
+    BlockingConnection::close(committer).expect("close committer connection");
     log.ok();
 }
 

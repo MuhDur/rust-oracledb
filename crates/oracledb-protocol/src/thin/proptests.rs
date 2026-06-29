@@ -20,6 +20,7 @@ use super::codecs::{
     decode_interval_ym, decode_number_value, decode_text_value, encode_binary_double,
     encode_binary_float, encode_interval_ds, encode_interval_ym, encode_number_text,
     encode_oracle_date, encode_oracle_timestamp, encode_oracle_timestamp_tz,
+    encode_oracle_timestamp_tz_with_offset,
 };
 use super::constants::CS_FORM_NCHAR;
 use super::types::QueryValue;
@@ -357,11 +358,8 @@ proptest! {
         });
     }
 
-    /// ROUND-TRIP TIMESTAMP WITH TIME ZONE. encode_oracle_timestamp_tz writes a
-    /// fixed UTC offset (TZ_HOUR_OFFSET/TZ_MINUTE_OFFSET == zero offset), so the
-    /// decoder's UTC normalization is the identity and the civil components must
-    /// come back unchanged. This still exercises the 13-byte TSTZ frame and the
-    /// offset-decode path (codecs.rs lines 99-110).
+    /// ROUND-TRIP TIMESTAMP WITH TIME ZONE. The zero-offset convenience encoder
+    /// emits the 13-byte TSTZ frame and decode preserves the explicit offset.
     #[test]
     fn timestamp_tz_zero_offset_round_trip(
         (y, mo, d, h, mi, s) in civil_datetime(),
@@ -370,8 +368,9 @@ proptest! {
         let wire = encode_oracle_timestamp_tz(y, mo, d, h, mi, s, nanosecond).expect("encode tstz");
         prop_assert_eq!(wire.len(), 13, "TSTZ is 13 bytes");
         let decoded = decode_datetime_value(&wire).expect("decode tstz");
-        prop_assert_eq!(decoded, QueryValue::DateTime {
+        prop_assert_eq!(decoded, QueryValue::TimestampTz {
             year: y, month: mo, day: d, hour: h, minute: mi, second: s, nanosecond,
+            offset_minutes: 0,
         });
     }
 
@@ -393,6 +392,28 @@ proptest! {
             .expect("back shift");
         prop_assert_eq!(back, (y, mo, d, h, mi, s));
     }
+}
+
+#[test]
+fn timestamp_tz_preserves_negative_half_hour_offset_bytes() {
+    let wire = encode_oracle_timestamp_tz_with_offset(2026, 6, 29, 12, 34, 56, 123_456_789, -330)
+        .expect("encode negative half-hour offset");
+    assert_eq!(wire[11], 15);
+    assert_eq!(wire[12], 30);
+    let decoded = decode_datetime_value(&wire).expect("decode negative half-hour offset");
+    assert_eq!(
+        decoded,
+        QueryValue::TimestampTz {
+            year: 2026,
+            month: 6,
+            day: 29,
+            hour: 12,
+            minute: 34,
+            second: 56,
+            nanosecond: 123_456_789,
+            offset_minutes: -330,
+        }
+    );
 }
 
 /// Boundary DATE/TIMESTAMP cases: the field extremes, the epoch, and pre-epoch.
