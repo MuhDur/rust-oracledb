@@ -338,6 +338,15 @@ pub struct Rows<'conn> {
     sql: String,
     columns: Arc<[ColumnMetadata]>,
     batch: Vec<Row>,
+    /// Duplicate-column seed for the next fetch page: the last row of the most
+    /// recent non-empty batch. The server compresses a fetch page's first row
+    /// against the previous page's last row (bit-vector duplicate columns), so
+    /// this must survive independently of `batch` — callers like
+    /// [`collect`](Self::collect) drain `batch` before requesting the next
+    /// page, and seeding from `batch.last()` alone would decode a
+    /// duplicate-compressed continuation with no previous row (an error on
+    /// END_OF_RESPONSE servers, a stuck probe on classic pre-23ai framing).
+    previous_row: Option<Vec<Option<QueryValue>>>,
     cursor_id: u32,
     more_rows: bool,
     arraysize: NonZeroU32,
@@ -359,16 +368,18 @@ impl Rows<'_> {
         let more_rows = result.more_rows;
         let cursor = first_cursor_from_result(&result);
         let columns: Arc<[ColumnMetadata]> = Arc::from(result.columns.into_boxed_slice());
-        let batch = result
+        let batch: Vec<Row> = result
             .rows
             .into_iter()
             .map(|values| Row::new(Arc::clone(&columns), values))
             .collect();
+        let previous_row = batch.last().map(|row| row.values.clone());
         Rows {
             connection,
             sql,
             columns,
             batch,
+            previous_row,
             cursor_id,
             more_rows,
             arraysize,
@@ -392,7 +403,7 @@ impl Rows<'_> {
             return Ok(false);
         }
         observe_cancellation_between_round_trips(cx)?;
-        let previous_row = self.batch.last().map(|row| row.values.clone());
+        let previous_row = self.previous_row.clone();
         let cursor_id = self.cursor_id;
         let arraysize = self.arraysize.get();
         // Cheap refcount bump, not a deep clone: `self.columns` is an
@@ -457,10 +468,10 @@ impl Rows<'_> {
     pub(crate) async fn materialize_for_cardinality(&mut self, cx: &Cx) -> Result<()> {
         let mut held: Vec<Row> = Vec::new();
         while held.len() + self.batch.len() < 2 && self.more_rows && self.cursor_id != 0 {
-            // `next_batch` keys the LONG/LOB define-fetch continuation off
-            // `self.batch.last()` and then REPLACES `self.batch`. Clone the row
-            // we already hold into `held` (leaving the original in place as the
-            // continuation key) so it survives the fetch.
+            // `next_batch` REPLACES `self.batch` (the duplicate-column
+            // continuation seed is tracked separately on `self.previous_row`).
+            // Clone the row we already hold into `held` so it survives the
+            // fetch.
             if let Some(last) = self.batch.last() {
                 held.push(last.clone());
             }
@@ -557,6 +568,11 @@ impl Rows<'_> {
             .into_iter()
             .map(|values| Row::new(Arc::clone(&self.columns), values))
             .collect();
+        // Refresh the duplicate-column seed; an empty page (e.g. the final
+        // ORA-1403 confirmation fetch) keeps the previous seed.
+        if let Some(last) = self.batch.last() {
+            self.previous_row = Some(last.values.clone());
+        }
     }
 
     fn release_cursor(&mut self) {

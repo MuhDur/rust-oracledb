@@ -517,6 +517,67 @@ impl<T: WireTransport> ConnectionCore<T> {
         self.note_post_sync_result(result)
     }
 
+    /// Reads one TTC response, deciding completion the way the connected
+    /// server framing requires. With `classic == false` this is exactly
+    /// [`read_data_response`](Self::read_data_response) (END_OF_RESPONSE/EOF
+    /// data-flag framing, 23ai+). With `classic == true` (ACCEPT protocol
+    /// version < 319 — the server never sends those flags) DATA packets are
+    /// accumulated and `probe(&accumulated)` decides completion after each
+    /// packet: the caller probes with the same parser it will run on the
+    /// returned buffer, so the response is complete precisely when that parser
+    /// can consume it without running out of bytes (reference
+    /// messages/base.pyx:249-252, 294-298 — a classic response ends at its
+    /// terminal ERROR/STATUS/FLUSH_OUT_BINDS message).
+    async fn read_data_response_probed(
+        &mut self,
+        cx: &Cx,
+        classic: bool,
+        probe: impl Fn(&[u8]) -> bool,
+    ) -> Result<Vec<u8>> {
+        if !classic {
+            return self.read_data_response(cx).await;
+        }
+        let write = Arc::clone(&self.write);
+        let limits = self.protocol_limits;
+        let result = read_classic_data_response_probed_with_limits(
+            self.read_mut()?,
+            cx,
+            &write,
+            &probe,
+            limits,
+        )
+        .await;
+        self.note_post_sync_result(result)
+    }
+
+    /// [`read_data_response_probed`](Self::read_data_response_probed) for the
+    /// bind/execute path, which must answer FLUSH_OUT_BINDS requests. With
+    /// `classic == false` this is exactly
+    /// [`read_data_response_flushing_out_binds`](Self::read_data_response_flushing_out_binds).
+    async fn read_data_response_flushing_out_binds_probed(
+        &mut self,
+        cx: &Cx,
+        sdu: usize,
+        classic: bool,
+        probe: impl Fn(&[u8]) -> bool,
+    ) -> Result<Vec<u8>> {
+        if !classic {
+            return self.read_data_response_flushing_out_binds(cx, sdu).await;
+        }
+        let write = Arc::clone(&self.write);
+        let limits = self.protocol_limits;
+        let result = read_classic_data_response_flushing_out_binds_probed_with_limits(
+            self.read_mut()?,
+            cx,
+            &write,
+            sdu,
+            &probe,
+            limits,
+        )
+        .await;
+        self.note_post_sync_result(result)
+    }
+
     async fn read_data_response_boundary(
         &mut self,
         cx: &Cx,
@@ -982,11 +1043,11 @@ pub enum Error {
     #[error("listener refused connection: {0}")]
     ListenerRefused(String),
     #[error(
-        "unexpected TNS packet type {ty} ({name}) while waiting for ACCEPT",
+        "unexpected TNS packet type {ty} ({name})",
         ty = .0,
         name = tns_packet_type_name(*.0)
     )]
-    UnexpectedConnectPacket(u8),
+    UnexpectedPacket(u8),
     #[error("server kept requesting CONNECT resend ({0} rounds); giving up")]
     ConnectResendLoop(u8),
     #[error("server did not advertise fast authentication")]
@@ -1162,7 +1223,7 @@ impl Error {
             Error::RedirectUnsupported
             | Error::Runtime(_)
             | Error::FastAuthRequired
-            | Error::UnexpectedConnectPacket(_)
+            | Error::UnexpectedPacket(_)
             | Error::ConnectResendLoop(_)
             | Error::MissingSessionField(_)
             | Error::SessionlessTransaction(_)
@@ -2312,7 +2373,7 @@ impl Connection {
                             String::from_utf8_lossy(&reply.payload).to_string(),
                         ))
                     }
-                    other => return Err(Error::UnexpectedConnectPacket(other)),
+                    other => return Err(Error::UnexpectedPacket(other)),
                 }
             };
             let accept_info = parse_accept_payload(&accept.payload)?;
@@ -2638,7 +2699,15 @@ impl Connection {
             self.capabilities.ttc_field_version,
         )?;
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        // change_password is an auth-shaped round trip, so the classic probe is
+        // the same terminal-message rule the connect-phase reads use.
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                classic_connect_response_is_complete(bytes, limits).unwrap_or(true)
+            })
+            .await?;
         self.note_parse(
             parse_auth_response_with_limits(&response, self.protocol_limits).map(|_| ()),
         )?;
@@ -3930,6 +3999,7 @@ impl Connection {
             statement_is_query(sql),
             bind_rows,
             exec_options,
+            self.capabilities.ttc_field_version,
         )?;
         if let Some(piggyback_bytes) = sessionless_piggyback {
             let mut combined = piggyback_bytes;
@@ -3942,10 +4012,6 @@ impl Connection {
         }
         trace_query_bytes("EXECUTE query payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        // Read under a cancel-on-drop guard: a dropped execute future arms the
-        // next operation's break + drain.
-        let response = self.read_flushing_out_binds_cancellable(cx).await?;
-        trace_query_bytes("EXECUTE query response", &response);
         let known_columns = if exec_options.cursor_id() != 0 {
             self.cursor_columns
                 .get(&exec_options.cursor_id())
@@ -3954,6 +4020,26 @@ impl Connection {
         } else {
             Vec::new()
         };
+        // Read under a cancel-on-drop guard: a dropped execute future arms the
+        // next operation's break + drain. The classic probe is the same parse
+        // this site runs below, with its result discarded.
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let first_bind_row = bind_rows.first().map(Vec::as_slice).unwrap_or(&[]);
+        let classic = !self.supports_end_of_response;
+        let response = self
+            .read_flushing_out_binds_cancellable(cx, classic, |bytes| {
+                response_complete(&parse_query_response_with_binds_options_columns_and_limits(
+                    bytes,
+                    capabilities,
+                    first_bind_row,
+                    exec_options,
+                    &known_columns,
+                    limits,
+                ))
+            })
+            .await?;
+        trace_query_bytes("EXECUTE query response", &response);
         let parsed = parse_query_response_with_binds_options_columns_and_limits(
             &response,
             self.capabilities,
@@ -4152,13 +4238,21 @@ impl Connection {
     /// recovery phase to `BreakSent` so the next operation breaks + drains the
     /// stranded call. A normal completion disarms the guard, so the uncancelled
     /// path costs nothing beyond an `Arc::clone`.
-    async fn read_response_cancellable(&mut self, cx: &Cx) -> Result<Vec<u8>> {
+    async fn read_response_cancellable(
+        &mut self,
+        cx: &Cx,
+        classic: bool,
+        probe: impl Fn(&[u8]) -> bool,
+    ) -> Result<Vec<u8>> {
         // Clone the Arc so the guard owns a handle independent of the `&mut self`
         // read borrow (the two touch disjoint state but the borrow checker can't
         // prove it across the guard's lifetime).
         let recovery = Arc::clone(&self.core.recovery);
         let mut guard = CancelDrainGuard::arm(recovery)?;
-        let response = self.core.read_data_response(cx).await?;
+        let response = self
+            .core
+            .read_data_response_probed(cx, classic, probe)
+            .await?;
         guard.disarm();
         Ok(response)
     }
@@ -4167,12 +4261,17 @@ impl Connection {
     /// via [`read_data_response_flushing_out_binds`] (it answers FLUSH_OUT_BINDS
     /// requests). Same cancel-on-drop semantics: a dropped execute future arms
     /// the next operation's break + drain.
-    async fn read_flushing_out_binds_cancellable(&mut self, cx: &Cx) -> Result<Vec<u8>> {
+    async fn read_flushing_out_binds_cancellable(
+        &mut self,
+        cx: &Cx,
+        classic: bool,
+        probe: impl Fn(&[u8]) -> bool,
+    ) -> Result<Vec<u8>> {
         let recovery = Arc::clone(&self.core.recovery);
         let mut guard = CancelDrainGuard::arm(recovery)?;
         let response = self
             .core
-            .read_data_response_flushing_out_binds(cx, self.sdu)
+            .read_data_response_flushing_out_binds_probed(cx, self.sdu, classic, probe)
             .await?;
         guard.disarm();
         Ok(response)
@@ -4218,17 +4317,53 @@ impl Connection {
         let lob_prefetch = self.lob_prefetch_cursors.contains(&cursor_id);
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = if lob_prefetch {
-            build_define_fetch_payload_with_seq(cursor_id, arraysize, seq_num, &columns)?
+            build_define_fetch_payload_with_seq(
+                cursor_id,
+                arraysize,
+                seq_num,
+                &columns,
+                self.capabilities.ttc_field_version,
+            )?
         } else {
-            build_fetch_payload_with_seq(cursor_id, arraysize, seq_num)
+            build_fetch_payload_with_seq(
+                cursor_id,
+                arraysize,
+                seq_num,
+                self.capabilities.ttc_field_version,
+            )
         };
         trace_query_bytes("FETCH payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         // Read under a cancel-on-drop guard: if THIS fetch future is dropped
         // mid-read, the next operation will break + drain the stranded call.
+        // The classic probe is the same parse this site runs below, with its
+        // result discarded.
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let classic = !self.supports_end_of_response;
         let profile = fetch_profile::enabled();
         let read_start = profile.then(time::wall_now);
-        let response = self.read_response_cancellable(cx).await?;
+        let response = self
+            .read_response_cancellable(cx, classic, |bytes| {
+                response_complete(&if lob_prefetch {
+                    parse_define_fetch_response_with_context_and_limits(
+                        bytes,
+                        capabilities,
+                        &columns,
+                        previous_row,
+                        limits,
+                    )
+                } else {
+                    parse_fetch_response_with_context_and_limits(
+                        bytes,
+                        capabilities,
+                        &columns,
+                        previous_row,
+                        limits,
+                    )
+                })
+            })
+            .await?;
         if let Some(start) = read_start {
             fetch_profile::add_read(time::wall_now().duration_since(start));
         }
@@ -4288,15 +4423,52 @@ impl Connection {
         let lob_prefetch = self.lob_prefetch_cursors.contains(&cursor_id);
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = if lob_prefetch {
-            build_define_fetch_payload_with_seq(cursor_id, arraysize, seq_num, &columns)?
+            build_define_fetch_payload_with_seq(
+                cursor_id,
+                arraysize,
+                seq_num,
+                &columns,
+                self.capabilities.ttc_field_version,
+            )?
         } else {
-            build_fetch_payload_with_seq(cursor_id, arraysize, seq_num)
+            build_fetch_payload_with_seq(
+                cursor_id,
+                arraysize,
+                seq_num,
+                self.capabilities.ttc_field_version,
+            )
         };
         trace_query_bytes("FETCH payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
+        // The classic probe runs the same borrowed parsers this site uses
+        // below; the borrowed result is dropped inside the closure, so no
+        // borrow of the probe bytes escapes.
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let classic = !self.supports_end_of_response;
         let profile = fetch_profile::enabled();
         let read_start = profile.then(time::wall_now);
-        let response = self.read_response_cancellable(cx).await?;
+        let response = self
+            .read_response_cancellable(cx, classic, |bytes| {
+                if lob_prefetch {
+                    response_complete(&parse_define_fetch_response_borrowed_with_limits(
+                        bytes,
+                        capabilities,
+                        &columns,
+                        previous_row,
+                        limits,
+                    ))
+                } else {
+                    response_complete(&parse_query_response_borrowed_with_limits(
+                        bytes,
+                        capabilities,
+                        &columns,
+                        previous_row,
+                        limits,
+                    ))
+                }
+            })
+            .await?;
         if let Some(start) = read_start {
             fetch_profile::add_read(time::wall_now().duration_since(start));
         }
@@ -4371,9 +4543,20 @@ impl Connection {
         let lob_prefetch = self.lob_prefetch_cursors.contains(&cursor_id);
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
         let payload = if lob_prefetch {
-            build_define_fetch_payload_with_seq(cursor_id, arraysize, seq_num, &columns)?
+            build_define_fetch_payload_with_seq(
+                cursor_id,
+                arraysize,
+                seq_num,
+                &columns,
+                self.capabilities.ttc_field_version,
+            )?
         } else {
-            build_fetch_payload_with_seq(cursor_id, arraysize, seq_num)
+            build_fetch_payload_with_seq(
+                cursor_id,
+                arraysize,
+                seq_num,
+                self.capabilities.ttc_field_version,
+            )
         };
         trace_query_bytes("FETCH payload (prefetch)", &payload);
         self.core.recovery.begin_operation()?;
@@ -4414,20 +4597,46 @@ impl Connection {
         // `ensure_clean_before_request` here — the InFlight phase is set by our
         // own `fetch_rows_request` and marks the response we are about to read
         // legitimately, not a stranded call to discard.
-        let profile = fetch_profile::enabled();
-        let read_start = profile.then(time::wall_now);
-        let response = self.read_response_cancellable(cx).await?;
-        if let Some(start) = read_start {
-            fetch_profile::add_read(time::wall_now().duration_since(start));
-        }
-        trace_query_bytes("FETCH response (prefetch)", &response);
         let columns = self
             .cursor_columns
             .get(&cursor_id)
             .cloned()
             .unwrap_or_default();
+        let lob_prefetch = self.lob_prefetch_cursors.contains(&cursor_id);
+        // The classic probe runs the same borrowed parsers this site uses
+        // below; the borrowed result is dropped inside the closure.
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let classic = !self.supports_end_of_response;
+        let profile = fetch_profile::enabled();
+        let read_start = profile.then(time::wall_now);
+        let response = self
+            .read_response_cancellable(cx, classic, |bytes| {
+                if lob_prefetch {
+                    response_complete(&parse_define_fetch_response_borrowed_with_limits(
+                        bytes,
+                        capabilities,
+                        &columns,
+                        previous_row,
+                        limits,
+                    ))
+                } else {
+                    response_complete(&parse_query_response_borrowed_with_limits(
+                        bytes,
+                        capabilities,
+                        &columns,
+                        previous_row,
+                        limits,
+                    ))
+                }
+            })
+            .await?;
+        if let Some(start) = read_start {
+            fetch_profile::add_read(time::wall_now().duration_since(start));
+        }
+        trace_query_bytes("FETCH response (prefetch)", &response);
         let decode_start = profile.then(time::wall_now);
-        let parsed = if self.lob_prefetch_cursors.contains(&cursor_id) {
+        let parsed = if lob_prefetch {
             parse_define_fetch_response_borrowed_with_limits(
                 &response,
                 self.capabilities,
@@ -4600,11 +4809,29 @@ impl Connection {
         observe_cancellation_between_round_trips(cx)?;
         self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let payload =
-            build_define_fetch_payload_with_seq(cursor_id, arraysize, seq_num, define_columns)?;
+        let payload = build_define_fetch_payload_with_seq(
+            cursor_id,
+            arraysize,
+            seq_num,
+            define_columns,
+            self.capabilities.ttc_field_version,
+        )?;
         trace_query_bytes("DEFINE FETCH payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_define_fetch_response_with_context_and_limits(
+                    bytes,
+                    capabilities,
+                    define_columns,
+                    previous_row,
+                    limits,
+                ))
+            })
+            .await?;
         trace_query_bytes("DEFINE FETCH response", &response);
         let result = parse_define_fetch_response_with_context_and_limits(
             &response,
@@ -4823,6 +5050,7 @@ impl Connection {
             true,
             &[],
             exec_options,
+            self.capabilities.ttc_field_version,
         )?;
         if let Some(mut piggyback_bytes) = piggyback {
             piggyback_bytes.extend_from_slice(&payload);
@@ -4830,16 +5058,34 @@ impl Connection {
         }
         trace_query_bytes("SCROLL payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self
-            .core
-            .read_data_response_flushing_out_binds(cx, self.sdu)
-            .await?;
-        trace_query_bytes("SCROLL response", &response);
         let known_columns = self
             .cursor_columns
             .get(&cursor_id)
             .cloned()
             .unwrap_or_default();
+        // The classic probe is the same parse this site runs below, with its
+        // result discarded (a scroll is an execute-shaped round trip).
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_flushing_out_binds_probed(
+                cx,
+                self.sdu,
+                !self.supports_end_of_response,
+                |bytes| {
+                    response_complete(&parse_query_response_with_binds_options_columns_and_limits(
+                        bytes,
+                        capabilities,
+                        &[],
+                        exec_options,
+                        &known_columns,
+                        limits,
+                    ))
+                },
+            )
+            .await?;
+        trace_query_bytes("SCROLL response", &response);
         let parsed = parse_query_response_with_binds_options_columns_and_limits(
             &response,
             self.capabilities,
@@ -4886,7 +5132,19 @@ impl Connection {
         )?;
         trace_query_bytes("LOB READ payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_lob_read_response_with_limits(
+                    bytes,
+                    capabilities,
+                    locator,
+                    limits,
+                ))
+            })
+            .await?;
         trace_query_bytes("LOB READ response", &response);
         self.note_parse(parse_lob_read_response_with_limits(
             &response,
@@ -5069,7 +5327,18 @@ impl Connection {
         )?;
         trace_query_bytes("LOB CREATE TEMP payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_lob_create_temp_response_with_limits(
+                    bytes,
+                    capabilities,
+                    limits,
+                ))
+            })
+            .await?;
         trace_query_bytes("LOB CREATE TEMP response", &response);
         self.note_parse(parse_lob_create_temp_response_with_limits(
             &response,
@@ -5107,7 +5376,19 @@ impl Connection {
         )?;
         trace_query_bytes("LOB WRITE payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_lob_write_response_with_limits(
+                    bytes,
+                    capabilities,
+                    locator,
+                    limits,
+                ))
+            })
+            .await?;
         trace_query_bytes("LOB WRITE response", &response);
         self.note_parse(parse_lob_write_response_with_limits(
             &response,
@@ -5147,7 +5428,19 @@ impl Connection {
         )?;
         trace_query_bytes("LOB TRIM payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_lob_trim_response_with_limits(
+                    bytes,
+                    capabilities,
+                    locator,
+                    limits,
+                ))
+            })
+            .await?;
         trace_query_bytes("LOB TRIM response", &response);
         self.note_parse(parse_lob_trim_response_with_limits(
             &response,
@@ -5195,7 +5488,19 @@ impl Connection {
         )?;
         trace_query_bytes("LOB FREE TEMP payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_lob_free_temp_response_with_limits(
+                    bytes,
+                    capabilities,
+                    returned_parameter_len,
+                    limits,
+                ))
+            })
+            .await?;
         trace_query_bytes("LOB FREE TEMP response", &response);
         self.note_parse(parse_lob_free_temp_response_with_limits(
             &response,
@@ -5997,6 +6302,7 @@ impl Connection {
         Some(oracledb_protocol::thin::build_close_cursors_piggyback(
             &cursor_ids,
             seq_num,
+            self.capabilities.ttc_field_version,
         ))
     }
 
@@ -6024,14 +6330,27 @@ impl Connection {
         self.core
             .send_data_packet(
                 cx,
-                &build_function_payload_with_seq(TNS_FUNC_LOGOFF, seq_num),
+                &build_function_payload_with_seq(
+                    TNS_FUNC_LOGOFF,
+                    seq_num,
+                    self.capabilities.ttc_field_version,
+                ),
                 self.sdu,
             )
             .await?;
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
         if let Ok(response) = time::timeout(
             time::wall_now(),
             Duration::from_secs(5),
-            self.core.read_data_response(cx),
+            self.core
+                .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                    response_complete(&parse_plain_function_response_with_limits(
+                        bytes,
+                        capabilities,
+                        limits,
+                    ))
+                }),
         )
         .await
         {
@@ -6072,6 +6391,18 @@ impl Connection {
         requests: &[PipelineRequest],
         continue_on_error: bool,
     ) -> Result<Vec<Vec<u8>>> {
+        // Pipelining is defined in terms of END_OF_RESPONSE boundary framing
+        // (impl/thin/capabilities.pyx:126-130); a pre-23ai server that did not
+        // negotiate it cannot delimit the N+1 pipelined responses, so fail
+        // closed instead of hanging on the first boundary read.
+        if !self.supports_end_of_response {
+            return Err(Error::Protocol(
+                oracledb_protocol::ProtocolError::UnsupportedFeature(
+                    "pipelining requires END_OF_RESPONSE framing, which this server \
+                     did not negotiate (requires Oracle Database 23ai or later)",
+                ),
+            ));
+        }
         observe_cancellation_between_round_trips(cx)?;
         if requests.is_empty() {
             return Ok(Vec::new());
@@ -6130,6 +6461,7 @@ impl Connection {
                             ExecuteOptions::default()
                                 .with_token_num(token_num)
                                 .with_max_string_size(self.capabilities.max_string_size),
+                            self.capabilities.ttc_field_version,
                         )?,
                     );
                 }
@@ -6138,6 +6470,7 @@ impl Connection {
                         TNS_FUNC_COMMIT,
                         seq_num,
                         token_num,
+                        self.capabilities.ttc_field_version,
                     ));
                 }
             }
@@ -6257,11 +6590,26 @@ impl Connection {
         self.core
             .send_data_packet(
                 cx,
-                &build_function_payload_with_seq(function_code, seq_num),
+                &build_function_payload_with_seq(
+                    function_code,
+                    seq_num,
+                    self.capabilities.ttc_field_version,
+                ),
                 self.sdu,
             )
             .await?;
-        let response = self.core.read_data_response(cx).await?;
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_plain_function_response_with_limits(
+                    bytes,
+                    capabilities,
+                    limits,
+                ))
+            })
+            .await?;
         // Surface server errors (e.g. ORA-01012 after a killed session) that
         // arrive on plain function round trips; pool ping health checks and
         // commit/rollback depend on these not being silently swallowed. The
@@ -7524,7 +7872,7 @@ where
     loop {
         let packet = read_packet_with_limits(read, PacketLengthWidth::Large32, limits).await?;
         if packet.packet_type != TNS_PACKET_TYPE_DATA {
-            return Err(Error::UnexpectedConnectPacket(packet.packet_type));
+            return Err(Error::UnexpectedPacket(packet.packet_type));
         }
         let payload =
             packet
@@ -7546,6 +7894,129 @@ where
             return Ok(response);
         }
     }
+}
+
+/// Probe predicate for classic (pre-END_OF_RESPONSE) response reassembly:
+/// whether a parse attempt over the accumulated payload says the response is
+/// complete. `TtcDecode` is the decoder's "ran out of bytes / short read"
+/// error — the response needs more packets. ANY other outcome means the
+/// parser consumed a full response: `Ok` is the happy path, a
+/// `ServerError`/`ServerErrorInfo` means the terminal ERROR message was
+/// reached (the caller's real parse will surface it), and structural errors
+/// (`UnknownMessageType`, `ResourceLimit`, ...) are returned to the caller by
+/// its real parse instead of hanging the read loop forever.
+fn response_complete<T>(result: &oracledb_protocol::Result<T>) -> bool {
+    !matches!(result, Err(oracledb_protocol::ProtocolError::TtcDecode(_)))
+}
+
+/// Accumulates DATA packets for one classic (pre-END_OF_RESPONSE) post-connect
+/// response, deciding completion with the caller's `probe` over the
+/// accumulated payload (see
+/// [`ConnectionCore::read_data_response_probed`]). MARKER packets run the
+/// same reset dance as [`read_data_response_boundary_seeded`]; after a reset
+/// the terminal-message-byte relaxation ([`post_reset_packet_ends_response`])
+/// also ends the response, exactly like the flag-framed reader.
+async fn read_classic_data_response_probed_with_limits<R, W, P>(
+    read: &mut R,
+    cx: &Cx,
+    write: &Arc<AsyncMutex<W>>,
+    probe: &P,
+    limits: ProtocolLimits,
+) -> Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+    P: Fn(&[u8]) -> bool,
+{
+    let mut response = Vec::new();
+    read_classic_data_response_probed_into(read, cx, write, probe, limits, &mut response).await?;
+    Ok(response)
+}
+
+/// The reassembly loop of [`read_classic_data_response_probed_with_limits`],
+/// appending onto an existing buffer so the flush-out-binds continuation can
+/// probe the COMBINED payload (the parser always parses from the response
+/// start).
+async fn read_classic_data_response_probed_into<R, W, P>(
+    read: &mut R,
+    cx: &Cx,
+    write: &Arc<AsyncMutex<W>>,
+    probe: &P,
+    limits: ProtocolLimits,
+    response: &mut Vec<u8>,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+    P: Fn(&[u8]) -> bool,
+{
+    let mut pending_packet: Option<IncomingPacket> = None;
+    let mut after_reset = false;
+    loop {
+        let packet = match pending_packet.take() {
+            Some(packet) => packet,
+            None => read_packet_with_limits(read, PacketLengthWidth::Large32, limits).await?,
+        };
+        if packet.packet_type == TNS_PACKET_TYPE_MARKER {
+            pending_packet =
+                reset_after_marker_with_limits(read, cx, write, &packet, limits).await?;
+            after_reset = true;
+            continue;
+        }
+        if packet.packet_type != TNS_PACKET_TYPE_DATA {
+            return Err(Error::UnexpectedPacket(packet.packet_type));
+        }
+        let payload =
+            packet
+                .payload
+                .get(2..)
+                .ok_or(oracledb_protocol::ProtocolError::TtcDecode(
+                    "missing data packet flags",
+                ))?;
+        let combined = response.len().checked_add(payload.len()).ok_or(
+            oracledb_protocol::ProtocolError::ResourceLimit {
+                limit: "response_bytes",
+                observed: usize::MAX,
+                maximum: limits.max_response_bytes,
+            },
+        )?;
+        limits.check_response_bytes(combined)?;
+        response.extend_from_slice(payload);
+        if (after_reset && post_reset_packet_ends_response(payload)) || probe(response) {
+            return Ok(());
+        }
+    }
+}
+
+/// Classic (pre-END_OF_RESPONSE) counterpart of
+/// [`read_data_response_flushing_out_binds_with_limits`]: reads one probed
+/// response and, while it ends at a FLUSH_OUT_BINDS request (terminal message
+/// byte, same detection as the flag-framed path), answers it and keeps
+/// accumulating — probing the combined payload — until the real response is
+/// complete.
+async fn read_classic_data_response_flushing_out_binds_probed_with_limits<R, W, P>(
+    read: &mut R,
+    cx: &Cx,
+    write: &Arc<AsyncMutex<W>>,
+    sdu: usize,
+    probe: &P,
+    limits: ProtocolLimits,
+) -> Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+    P: Fn(&[u8]) -> bool,
+{
+    let mut payload = Vec::new();
+    read_classic_data_response_probed_into(read, cx, write, probe, limits, &mut payload).await?;
+    while matches!(payload.last(), Some(&TNS_MSG_TYPE_FLUSH_OUT_BINDS)) {
+        observe_cancellation_between_round_trips(cx)?;
+        payload.pop();
+        send_data_packet_shared(cx, write, &[TNS_MSG_TYPE_FLUSH_OUT_BINDS], sdu).await?;
+        read_classic_data_response_probed_into(read, cx, write, probe, limits, &mut payload)
+            .await?;
+    }
+    Ok(payload)
 }
 
 /// Upper bound on how long the post-break recovery drain may take before the
@@ -8998,6 +9469,7 @@ mod tests {
             true,
             &[],
             ExecuteOptions::default(),
+            ClientCapabilities::default().ttc_field_version,
         )?;
         Ok(encode_packet(
             TNS_PACKET_TYPE_DATA,
@@ -9010,7 +9482,8 @@ mod tests {
 
     #[cfg(feature = "cassette")]
     fn synthetic_fetch_packet() -> Result<Vec<u8>> {
-        let payload = build_fetch_payload_with_seq(42, 2, 2);
+        let payload =
+            build_fetch_payload_with_seq(42, 2, 2, ClientCapabilities::default().ttc_field_version);
         Ok(encode_packet(
             TNS_PACKET_TYPE_DATA,
             0,
@@ -9022,7 +9495,11 @@ mod tests {
 
     #[cfg(feature = "cassette")]
     fn synthetic_function_packet(function_code: u8, seq_num: u8) -> Result<Vec<u8>> {
-        let payload = build_function_payload_with_seq(function_code, seq_num);
+        let payload = build_function_payload_with_seq(
+            function_code,
+            seq_num,
+            ClientCapabilities::default().ttc_field_version,
+        );
         Ok(encode_packet(
             TNS_PACKET_TYPE_DATA,
             0,
@@ -9706,6 +10183,179 @@ mod tests {
         assert_eq!(conn.core.recovery.phase(), SessionRecoveryPhase::Dead);
 
         drop(conn);
+        server.join().expect("server thread joins");
+        Ok(())
+    }
+
+    // ---- classic (pre-END_OF_RESPONSE) probed response reads ----------------
+    //
+    // Pre-23ai servers (ACCEPT protocol version < 319) never send the
+    // END_OF_RESPONSE/EOF data flags, so `read_data_response_probed` in classic
+    // mode must decide completion with the caller's probe over the accumulated
+    // payload — the flag-driven reader would wait until the call timeout.
+
+    /// A classic two-packet response: the probe sees the accumulated payload
+    /// after each DATA packet, reports "incomplete" after packet 1 and
+    /// "complete" after packet 2, and the returned buffer is the flag-stripped
+    /// concatenation of both packets.
+    #[test]
+    fn classic_probed_read_reassembles_until_probe_reports_complete() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            use std::io::Write as _;
+            // Both packets are flagless: a classic server never sets
+            // END_OF_RESPONSE/EOF, so only the probe can end the read.
+            socket
+                .write_all(&data_packet(&[0x01, 0x02], false))
+                .expect("write first classic packet");
+            socket
+                .write_all(&data_packet(&[0x03, 0x04], false))
+                .expect("write second classic packet");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let probed = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
+        let probed_in = Arc::clone(&probed);
+        let response = runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (read, write) = transport::plain_split(stream);
+            let mut conn = loopback_connection(read, write);
+            conn.core
+                .read_data_response_probed(&cx, true, move |bytes| {
+                    probed_in
+                        .lock()
+                        .expect("probe snapshot lock")
+                        .push(bytes.to_vec());
+                    // "Parser consumed the whole response": needs all 4 bytes.
+                    bytes.len() >= 4
+                })
+                .await
+        })?;
+
+        assert_eq!(
+            response,
+            [0x01, 0x02, 0x03, 0x04],
+            "classic read must reassemble both flag-stripped payloads"
+        );
+        let probed = probed.lock().expect("probe snapshot lock");
+        assert_eq!(
+            probed.as_slice(),
+            &[vec![0x01, 0x02], vec![0x01, 0x02, 0x03, 0x04]],
+            "the probe must run over the accumulated payload after every packet"
+        );
+        server.join().expect("server thread joins");
+        Ok(())
+    }
+
+    /// MARKER-free happy path: a single flagless classic packet whose probe
+    /// reports complete immediately returns that packet's payload.
+    #[test]
+    fn classic_probed_read_single_packet_happy_path() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            use std::io::Write as _;
+            socket
+                .write_all(&data_packet(
+                    &[0x09, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06],
+                    false,
+                ))
+                .expect("write classic packet");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let response = runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (read, write) = transport::plain_split(stream);
+            let mut conn = loopback_connection(read, write);
+            conn.core
+                .read_data_response_probed(&cx, true, |bytes| !bytes.is_empty())
+                .await
+        })?;
+
+        assert_eq!(response, [0x09, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+        server.join().expect("server thread joins");
+        Ok(())
+    }
+
+    /// With `classic == false` the probed read delegates to the flag-framed
+    /// reader: an END_OF_RESPONSE-flagged packet completes the response even
+    /// though the probe never says so — the 23ai path is byte-identical and
+    /// the probe is never consulted.
+    #[test]
+    fn probed_read_ignores_probe_when_not_classic() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            use std::io::Write as _;
+            socket
+                .write_all(&data_packet(&[0x01, 0x02, 0x03], true))
+                .expect("write flag-framed packet");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let response = runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("asupersync did not install an ambient Cx".into()))?;
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (read, write) = transport::plain_split(stream);
+            let mut conn = loopback_connection(read, write);
+            conn.core
+                .read_data_response_probed(&cx, false, |_| false)
+                .await
+        })?;
+
+        assert_eq!(response, [0x01, 0x02, 0x03]);
+        server.join().expect("server thread joins");
+        Ok(())
+    }
+
+    /// A non-DATA/non-MARKER packet mid-response is a protocol violation: the
+    /// classic probed read fails closed with `UnexpectedPacket` instead of
+    /// accumulating garbage.
+    #[test]
+    fn classic_probed_read_rejects_non_data_packet() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            use std::io::Write as _;
+            let packet = encode_packet(
+                TNS_PACKET_TYPE_ACCEPT,
+                0,
+                None,
+                &[0x00],
+                PacketLengthWidth::Large32,
+            )
+            .expect("encode unexpected packet");
+            socket.write_all(&packet).expect("write unexpected packet");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let err = runtime.block_on(async {
+            let cx = Cx::current().expect("ambient Cx");
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (read, write) = transport::plain_split(stream);
+            let mut conn = loopback_connection(read, write);
+            conn.core
+                .read_data_response_probed(&cx, true, |_| true)
+                .await
+                .expect_err("non-DATA packet must fail closed")
+        });
+
+        assert!(matches!(
+            err,
+            Error::UnexpectedPacket(TNS_PACKET_TYPE_ACCEPT)
+        ));
+        assert_eq!(err.kind(), ErrorKind::Protocol);
         server.join().expect("server thread joins");
         Ok(())
     }
@@ -11367,7 +12017,11 @@ mod tests {
             TNS_PACKET_TYPE_DATA,
             0,
             Some(0),
-            &build_function_payload_with_seq(TNS_FUNC_COMMIT, 1),
+            &build_function_payload_with_seq(
+                TNS_FUNC_COMMIT,
+                1,
+                ClientCapabilities::default().ttc_field_version,
+            ),
             PacketLengthWidth::Large32,
         )?;
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");

@@ -8,17 +8,18 @@
 //! This is a measurement-only test (it asserts a sane upper bound so a future
 //! regression is caught), counted with the `allocation-counter` crate.
 
-use oracledb_protocol::thin::build_execute_payload_with_seq;
+use oracledb_protocol::thin::{build_execute_payload_with_seq, ClientCapabilities};
 
 #[test]
 fn execute_payload_build_allocations() {
     let sql = "select 1 from dual";
+    let ttc_field_version = ClientCapabilities::default().ttc_field_version;
     // Warm (touch the path once so any lazy statics are initialized).
-    let _ = build_execute_payload_with_seq(sql, 1, 1, true).unwrap();
+    let _ = build_execute_payload_with_seq(sql, 1, 1, true, ttc_field_version).unwrap();
 
     let mut len = 0usize;
     let measured = allocation_counter::measure(|| {
-        let payload = build_execute_payload_with_seq(sql, 1, 1, true).unwrap();
+        let payload = build_execute_payload_with_seq(sql, 1, 1, true, ttc_field_version).unwrap();
         len = std::hint::black_box(payload.len());
     });
 

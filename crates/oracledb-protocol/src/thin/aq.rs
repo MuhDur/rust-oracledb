@@ -209,10 +209,7 @@ fn write_aq_function_code(
     seq_num: u8,
     ttc_field_version: u8,
 ) {
-    writer.write_function_code_with_seq(function_code, seq_num);
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
-        writer.write_ub8(0); // token_num
-    }
+    writer.write_function_header(function_code, seq_num, ttc_field_version);
 }
 
 fn write_value_with_length(writer: &mut TtcWriter, value: Option<&[u8]>) -> Result<()> {

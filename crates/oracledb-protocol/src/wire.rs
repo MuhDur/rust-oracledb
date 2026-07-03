@@ -373,6 +373,34 @@ impl TtcWriter {
         self.write_u8(function_code);
         self.write_u8(seq_num);
     }
+
+    /// Function-message header with the version-gated ub8 pipeline-token field
+    /// (reference messages/base.pyx `_write_function_code`): the token exists
+    /// only when the negotiated ttc field version is >= 23.1 ext 1. A pre-23ai
+    /// server parses a stray token byte as message content and fails the call
+    /// (observed live: ORA-03120 on Oracle XE 21c).
+    pub fn write_function_header(&mut self, function_code: u8, seq_num: u8, ttc_field_version: u8) {
+        self.write_function_code_with_seq(function_code, seq_num);
+        if ttc_field_version >= crate::thin::TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
+            self.write_ub8(0);
+        }
+    }
+
+    /// Piggyback-message header with the same version-gated token field
+    /// (reference messages/base.pyx piggyback write path).
+    pub fn write_piggyback_header(
+        &mut self,
+        function_code: u8,
+        seq_num: u8,
+        ttc_field_version: u8,
+    ) {
+        self.write_u8(crate::thin::TNS_MSG_TYPE_PIGGYBACK);
+        self.write_u8(function_code);
+        self.write_u8(seq_num);
+        if ttc_field_version >= crate::thin::TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
+            self.write_ub8(0);
+        }
+    }
 }
 
 /// The structural OOM-from-length invariant for every wire decoder.

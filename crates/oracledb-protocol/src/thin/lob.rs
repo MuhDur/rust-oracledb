@@ -16,10 +16,7 @@ pub fn build_lob_read_payload_with_seq(
             minimum: 0,
         })?;
     let mut writer = TtcWriter::new();
-    writer.write_function_code_with_seq(TNS_FUNC_LOB_OP, seq_num);
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
-        writer.write_ub8(0);
-    }
+    writer.write_function_header(TNS_FUNC_LOB_OP, seq_num, ttc_field_version);
     writer.write_u8(1);
     writer.write_ub4(locator_len);
     writer.write_u8(0);
@@ -62,10 +59,7 @@ pub(crate) fn write_lob_op_header(
             length: locator.len(),
             minimum: 0,
         })?;
-    writer.write_function_code_with_seq(TNS_FUNC_LOB_OP, seq_num);
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
-        writer.write_ub8(0);
-    }
+    writer.write_function_header(TNS_FUNC_LOB_OP, seq_num, ttc_field_version);
     writer.write_u8(1);
     writer.write_ub4(locator_len);
     writer.write_u8(0);
@@ -187,10 +181,7 @@ pub fn build_lob_free_temp_payload_with_seq(
             .ok_or(ProtocolError::PacketTooLarge { length: usize::MAX })
     })?;
     let mut writer = TtcWriter::new();
-    writer.write_function_code_with_seq(TNS_FUNC_LOB_OP, seq_num);
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
-        writer.write_ub8(0);
-    }
+    writer.write_function_header(TNS_FUNC_LOB_OP, seq_num, ttc_field_version);
     writer.write_u8(1);
     writer.write_ub4(total_size);
     writer.write_u8(0);

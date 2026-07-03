@@ -23,8 +23,8 @@ use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion
 use oracledb::protocol::net::cassette::{self, Direction};
 use oracledb::protocol::thin::{
     bind_value_type_info, build_execute_payload_with_bind_rows_with_seq, decode_lob_text,
-    decode_number_text_into, decode_number_value, encode_number_text, BindValue, QueryValue,
-    CS_FORM_NCHAR,
+    decode_number_text_into, decode_number_value, encode_number_text, BindValue,
+    ClientCapabilities, QueryValue, CS_FORM_NCHAR,
 };
 use oracledb::protocol::vector::{decode_vector, encode_vector, Vector, VectorValues};
 use oracledb::{ExecutemanyManager, FromSql, IntoBinds, ToSql};
@@ -322,6 +322,7 @@ fn bench_conversion_and_binds(c: &mut Criterion) {
                 1,
                 false,
                 black_box(&rows),
+                ClientCapabilities::default().ttc_field_version,
             )
             .expect("execute payload builds");
             black_box(payload.len())

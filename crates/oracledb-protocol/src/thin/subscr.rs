@@ -83,10 +83,7 @@ pub enum NotificationRecord {
 /// `messages/base.pyx::_write_function_code` (writes `ub8 token_num` for
 /// `ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1`).
 fn write_function_code_token(w: &mut TtcWriter, function_code: u8, seq_num: u8, field_version: u8) {
-    w.write_function_code_with_seq(function_code, seq_num);
-    if field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
-        w.write_ub8(0);
-    }
+    w.write_function_header(function_code, seq_num, field_version);
 }
 
 /// Build the SUBSCRIBE (FUNC 125) payload for register (`opcode = 1`) or

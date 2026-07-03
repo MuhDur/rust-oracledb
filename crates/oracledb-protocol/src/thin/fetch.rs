@@ -31,17 +31,21 @@ pub(crate) enum LobDecodeMode {
     DefineMetadata,
 }
 
-pub fn build_fetch_payload(cursor_id: u32, arraysize: u32) -> Vec<u8> {
-    build_fetch_payload_with_seq(cursor_id, arraysize, 1)
+pub fn build_fetch_payload(cursor_id: u32, arraysize: u32, ttc_field_version: u8) -> Vec<u8> {
+    build_fetch_payload_with_seq(cursor_id, arraysize, 1, ttc_field_version)
 }
 
-pub fn build_fetch_payload_with_seq(cursor_id: u32, arraysize: u32, seq_num: u8) -> Vec<u8> {
+pub fn build_fetch_payload_with_seq(
+    cursor_id: u32,
+    arraysize: u32,
+    seq_num: u8,
+    ttc_field_version: u8,
+) -> Vec<u8> {
     // Fixed tiny payload (function code + ub8 + two ub4 ≈ <=20 bytes). Prealloc
     // so the small pushes do not grow the Vec through doublings; built every
     // fetch page, so this matters on multi-page fetches. Bytes unchanged.
     let mut writer = TtcWriter::with_capacity(32);
-    writer.write_function_code_with_seq(TNS_FUNC_FETCH, seq_num);
-    writer.write_ub8(0);
+    writer.write_function_header(TNS_FUNC_FETCH, seq_num, ttc_field_version);
     writer.write_ub4(cursor_id);
     writer.write_ub4(arraysize);
     writer.into_bytes()
@@ -52,6 +56,7 @@ pub fn build_define_fetch_payload_with_seq(
     arraysize: u32,
     seq_num: u8,
     define_columns: &[ColumnMetadata],
+    ttc_field_version: u8,
 ) -> Result<Vec<u8>> {
     let define_count =
         u32::try_from(define_columns.len()).map_err(|_| ProtocolError::InvalidPacketLength {
@@ -59,8 +64,7 @@ pub fn build_define_fetch_payload_with_seq(
             minimum: 0,
         })?;
     let mut writer = TtcWriter::new();
-    writer.write_function_code_with_seq(TNS_FUNC_EXECUTE, seq_num);
-    writer.write_ub8(0);
+    writer.write_function_header(TNS_FUNC_EXECUTE, seq_num, ttc_field_version);
     writer.write_ub4(TNS_EXEC_OPTION_DEFINE | TNS_EXEC_OPTION_NOT_PLSQL);
     writer.write_ub4(cursor_id);
     writer.write_u8(0);

@@ -185,6 +185,7 @@ fn execute_packet() -> TestResult<Vec<u8>> {
         true,
         &[],
         ExecuteOptions::default(),
+        ClientCapabilities::default().ttc_field_version,
     )?;
     Ok(encode_packet(
         TNS_PACKET_TYPE_DATA,
@@ -196,7 +197,12 @@ fn execute_packet() -> TestResult<Vec<u8>> {
 }
 
 fn fetch_packet() -> TestResult<Vec<u8>> {
-    let payload = build_fetch_payload_with_seq(SYNTHETIC_CURSOR_ID, 2, 2);
+    let payload = build_fetch_payload_with_seq(
+        SYNTHETIC_CURSOR_ID,
+        2,
+        2,
+        ClientCapabilities::default().ttc_field_version,
+    );
     Ok(encode_packet(
         TNS_PACKET_TYPE_DATA,
         0,
@@ -207,7 +213,11 @@ fn fetch_packet() -> TestResult<Vec<u8>> {
 }
 
 fn function_packet(function_code: u8, seq_num: u8) -> TestResult<Vec<u8>> {
-    let payload = build_function_payload_with_seq(function_code, seq_num);
+    let payload = build_function_payload_with_seq(
+        function_code,
+        seq_num,
+        ClientCapabilities::default().ttc_field_version,
+    );
     Ok(encode_packet(
         TNS_PACKET_TYPE_DATA,
         0,

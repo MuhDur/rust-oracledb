@@ -210,6 +210,7 @@ fn abort_mode_request_payloads_byte_match_reference_client() {
         false,
         &[],
         1,
+        ClientCapabilities::default().ttc_field_version,
     )
     .expect("insert payload should build");
     assert_eq!(captured_insert, built);
@@ -223,13 +224,19 @@ fn abort_mode_request_payloads_byte_match_reference_client() {
         false,
         &[],
         2,
+        ClientCapabilities::default().ttc_field_version,
     )
     .expect("insert payload should build");
     assert_eq!(captured, &built);
 
     // op 3: commit, token 3
     let captured = &frames.op_payloads[2];
-    let built = build_function_payload_with_seq_and_token(TNS_FUNC_COMMIT, captured[2], 3);
+    let built = build_function_payload_with_seq_and_token(
+        TNS_FUNC_COMMIT,
+        captured[2],
+        3,
+        ClientCapabilities::default().ttc_field_version,
+    );
     assert_eq!(captured, &built);
 
     // op 4: fetchall (prefetchrows = arraysize = 100), token 4
@@ -241,6 +248,7 @@ fn abort_mode_request_payloads_byte_match_reference_client() {
         true,
         &[],
         4,
+        ClientCapabilities::default().ttc_field_version,
     )
     .expect("select payload should build");
     assert_eq!(captured, &built);
@@ -372,6 +380,7 @@ fn bound_execute_in_pipeline_byte_matches_reference_client() {
             BindValue::Text("four".to_string()),
         ]],
         1,
+        ClientCapabilities::default().ttc_field_version,
     )
     .expect("bound insert payload should build");
     assert_eq!(captured, built.as_slice());

@@ -2,16 +2,21 @@
 
 use super::*;
 
-pub fn build_execute_query_payload(sql: &str, prefetch_rows: u32) -> Result<Vec<u8>> {
-    build_execute_query_payload_with_seq(sql, prefetch_rows, 1)
+pub fn build_execute_query_payload(
+    sql: &str,
+    prefetch_rows: u32,
+    ttc_field_version: u8,
+) -> Result<Vec<u8>> {
+    build_execute_query_payload_with_seq(sql, prefetch_rows, 1, ttc_field_version)
 }
 
 pub fn build_execute_query_payload_with_seq(
     sql: &str,
     prefetch_rows: u32,
     seq_num: u8,
+    ttc_field_version: u8,
 ) -> Result<Vec<u8>> {
-    build_execute_payload_with_seq(sql, prefetch_rows, seq_num, true)
+    build_execute_payload_with_seq(sql, prefetch_rows, seq_num, true, ttc_field_version)
 }
 
 pub fn build_execute_payload_with_seq(
@@ -19,8 +24,16 @@ pub fn build_execute_payload_with_seq(
     prefetch_rows: u32,
     seq_num: u8,
     is_query: bool,
+    ttc_field_version: u8,
 ) -> Result<Vec<u8>> {
-    build_execute_payload_with_binds_with_seq(sql, prefetch_rows, seq_num, is_query, &[])
+    build_execute_payload_with_binds_with_seq(
+        sql,
+        prefetch_rows,
+        seq_num,
+        is_query,
+        &[],
+        ttc_field_version,
+    )
 }
 
 pub fn build_execute_payload_with_binds_with_seq(
@@ -29,13 +42,21 @@ pub fn build_execute_payload_with_binds_with_seq(
     seq_num: u8,
     is_query: bool,
     binds: &[BindValue],
+    ttc_field_version: u8,
 ) -> Result<Vec<u8>> {
     let bind_rows = if binds.is_empty() {
         Vec::new()
     } else {
         vec![binds.to_vec()]
     };
-    build_execute_payload_with_bind_rows_with_seq(sql, prefetch_rows, seq_num, is_query, &bind_rows)
+    build_execute_payload_with_bind_rows_with_seq(
+        sql,
+        prefetch_rows,
+        seq_num,
+        is_query,
+        &bind_rows,
+        ttc_field_version,
+    )
 }
 
 pub fn build_execute_payload_with_bind_rows_with_seq(
@@ -44,6 +65,7 @@ pub fn build_execute_payload_with_bind_rows_with_seq(
     seq_num: u8,
     is_query: bool,
     bind_rows: &[Vec<BindValue>],
+    ttc_field_version: u8,
 ) -> Result<Vec<u8>> {
     build_execute_payload_with_bind_rows_and_options_with_seq(
         sql,
@@ -52,6 +74,7 @@ pub fn build_execute_payload_with_bind_rows_with_seq(
         is_query,
         bind_rows,
         ExecuteOptions::default(),
+        ttc_field_version,
     )
 }
 
@@ -65,6 +88,7 @@ pub fn build_execute_payload_with_bind_rows_with_seq_and_token(
     is_query: bool,
     bind_rows: &[Vec<BindValue>],
     token_num: u64,
+    ttc_field_version: u8,
 ) -> Result<Vec<u8>> {
     build_execute_payload_with_bind_rows_and_options_with_seq(
         sql,
@@ -76,6 +100,7 @@ pub fn build_execute_payload_with_bind_rows_with_seq_and_token(
             token_num,
             ..ExecuteOptions::default()
         },
+        ttc_field_version,
     )
 }
 
@@ -83,12 +108,13 @@ pub fn build_execute_payload_with_bind_rows_with_seq_and_token(
 /// `_write_close_cursors_piggyback` + `write_cursors_to_close`); it is
 /// prepended to the next regular message in the same data packet and
 /// consumes a TTC sequence number of its own.
-pub fn build_close_cursors_piggyback(cursor_ids: &[u32], seq_num: u8) -> Vec<u8> {
+pub fn build_close_cursors_piggyback(
+    cursor_ids: &[u32],
+    seq_num: u8,
+    ttc_field_version: u8,
+) -> Vec<u8> {
     let mut writer = TtcWriter::new();
-    writer.write_u8(TNS_MSG_TYPE_PIGGYBACK);
-    writer.write_u8(TNS_FUNC_CLOSE_CURSORS);
-    writer.write_u8(seq_num);
-    writer.write_ub8(0); // token number (23.1 ext 1+)
+    writer.write_piggyback_header(TNS_FUNC_CLOSE_CURSORS, seq_num, ttc_field_version);
     writer.write_u8(1); // pointer
     writer.write_ub4(u32::try_from(cursor_ids.len()).unwrap_or(u32::MAX));
     for cursor_id in cursor_ids {
@@ -104,6 +130,7 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     is_query: bool,
     bind_rows: &[Vec<BindValue>],
     exec_options: ExecuteOptions,
+    ttc_field_version: u8,
 ) -> Result<Vec<u8>> {
     let sql_bytes = sql.as_bytes();
     let sql_len =
@@ -136,7 +163,19 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     let writer_capacity = 96 + sql_bytes.len();
     let mut writer = TtcWriter::with_capacity(writer_capacity);
     writer.write_function_code_with_seq(TNS_FUNC_EXECUTE, seq_num);
-    writer.write_ub8(exec_options.token_num);
+    // The ub8 pipeline token exists only when the negotiated field version is
+    // >= 23.1 ext 1 (reference messages/base.pyx `_write_function_code`); a
+    // pre-23ai server parses a stray token as message content (ORA-03120).
+    // Pipelining only happens on 23ai-negotiated connections, so a nonzero
+    // token is never dropped here.
+    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
+        writer.write_ub8(exec_options.token_num);
+    } else {
+        debug_assert_eq!(
+            exec_options.token_num, 0,
+            "pipeline tokens require a 23ai-negotiated connection"
+        );
+    }
 
     let is_plsql = statement_is_plsql(sql);
     let parse_only = exec_options.parse_only;
@@ -450,6 +489,7 @@ mod tests {
                 registration_id,
                 ..ExecuteOptions::default()
             },
+            ClientCapabilities::default().ttc_field_version,
         )
         .expect("execute payload");
 
@@ -503,6 +543,7 @@ mod tests {
             false,
             &[row.clone()],
             ExecuteOptions::default().with_max_string_size(4_000),
+            ClientCapabilities::default().ttc_field_version,
         )
         .expect("STANDARD execute payload");
         let standard_a = find_subslice(&standard, &[b'A'; 32], "STANDARD A value");
@@ -521,6 +562,7 @@ mod tests {
             false,
             &[row],
             ExecuteOptions::default().with_max_string_size(32_767),
+            ClientCapabilities::default().ttc_field_version,
         )
         .expect("32K execute payload");
         let extended_a = find_subslice(&extended, &[b'A'; 32], "32K A value");

@@ -185,25 +185,39 @@ pub fn build_fast_auth_token_payload(
     Ok(out)
 }
 
-pub fn build_function_payload(function_code: u8) -> Vec<u8> {
-    build_function_payload_with_seq(function_code, 1)
+pub fn build_function_payload(function_code: u8, ttc_field_version: u8) -> Vec<u8> {
+    build_function_payload_with_seq(function_code, 1, ttc_field_version)
 }
 
-pub fn build_function_payload_with_seq(function_code: u8, seq_num: u8) -> Vec<u8> {
-    build_function_payload_with_seq_and_token(function_code, seq_num, 0)
+pub fn build_function_payload_with_seq(
+    function_code: u8,
+    seq_num: u8,
+    ttc_field_version: u8,
+) -> Vec<u8> {
+    build_function_payload_with_seq_and_token(function_code, seq_num, 0, ttc_field_version)
 }
 
 /// Bare function message with an explicit pipeline token (messages/base.pyx
 /// `_write_function_code` writes `ub8 token_num` for field version >= 23.1
-/// ext 1; non-pipelined messages carry 0).
+/// ext 1; non-pipelined messages carry 0). On a pre-23.1-ext-1 connection the
+/// token field does not exist on the wire at all; pipelining (nonzero tokens)
+/// only happens on 23ai-negotiated connections, so no token is ever dropped.
 pub fn build_function_payload_with_seq_and_token(
     function_code: u8,
     seq_num: u8,
     token_num: u64,
+    ttc_field_version: u8,
 ) -> Vec<u8> {
     let mut writer = TtcWriter::new();
     writer.write_function_code_with_seq(function_code, seq_num);
-    writer.write_ub8(token_num);
+    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
+        writer.write_ub8(token_num);
+    } else {
+        debug_assert_eq!(
+            token_num, 0,
+            "pipeline tokens require a 23ai-negotiated connection"
+        );
+    }
     writer.into_bytes()
 }
 
