@@ -130,15 +130,17 @@ use oracledb_protocol::thin::aq::{
     AqMsgProps, AqQueueDesc,
 };
 use oracledb_protocol::thin::{
-    adjust_refetch_metadata, build_auth_phase_two_payload_with_proxy_with_seq,
-    build_begin_pipeline_piggyback, build_change_password_payload_with_seq,
-    build_connect_packet_payload, build_define_fetch_payload_with_seq,
-    build_end_pipeline_payload_with_seq, build_execute_payload_with_bind_rows_and_options_with_seq,
-    build_fast_auth_phase_one_payload, build_fast_auth_token_payload, build_fetch_payload_with_seq,
-    build_function_payload_with_seq, build_function_payload_with_seq_and_token,
-    build_lob_create_temp_payload_with_seq, build_lob_free_temp_payload_with_seq,
-    build_lob_read_payload_with_seq, build_lob_trim_payload_with_seq,
-    build_lob_write_payload_with_seq, parse_accept_payload, parse_auth_response_with_limits,
+    adjust_refetch_metadata, build_auth_phase_one_payload,
+    build_auth_phase_two_payload_with_proxy_with_seq, build_begin_pipeline_piggyback,
+    build_change_password_payload_with_seq, build_connect_packet_payload, build_data_types_payload,
+    build_define_fetch_payload_with_seq, build_end_pipeline_payload_with_seq,
+    build_execute_payload_with_bind_rows_and_options_with_seq, build_fast_auth_phase_one_payload,
+    build_fast_auth_token_payload, build_fetch_payload_with_seq, build_function_payload_with_seq,
+    build_function_payload_with_seq_and_token, build_lob_create_temp_payload_with_seq,
+    build_lob_free_temp_payload_with_seq, build_lob_read_payload_with_seq,
+    build_lob_trim_payload_with_seq, build_lob_write_payload_with_seq,
+    build_protocol_negotiation_payload, classic_connect_response_is_complete,
+    connect_data_fits_inline, parse_accept_payload, parse_auth_response_with_limits,
     parse_define_fetch_response_borrowed_with_limits,
     parse_define_fetch_response_with_context_and_limits,
     parse_fetch_response_with_context_and_limits, parse_lob_create_temp_response_with_limits,
@@ -152,12 +154,13 @@ use oracledb_protocol::thin::{
     TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF,
     TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS,
     TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA,
-    TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE, TNS_PIPELINE_MODE_ABORT_ON_ERROR,
-    TNS_PIPELINE_MODE_CONTINUE_ON_ERROR, TNS_TPC_TXN_ABORT, TNS_TPC_TXN_COMMIT, TNS_TPC_TXN_DETACH,
-    TNS_TPC_TXN_POST_DETACH, TNS_TPC_TXN_PREPARE, TNS_TPC_TXN_START, TNS_TPC_TXN_STATE_ABORTED,
-    TNS_TPC_TXN_STATE_COMMITTED, TNS_TPC_TXN_STATE_FORGOTTEN, TNS_TPC_TXN_STATE_PREPARE,
-    TNS_TPC_TXN_STATE_READ_ONLY, TNS_TPC_TXN_STATE_REQUIRES_COMMIT, TPC_TXN_FLAGS_NEW,
-    TPC_TXN_FLAGS_RESUME, TPC_TXN_FLAGS_SESSIONLESS,
+    TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE, TNS_PACKET_TYPE_RESEND,
+    TNS_PIPELINE_MODE_ABORT_ON_ERROR, TNS_PIPELINE_MODE_CONTINUE_ON_ERROR, TNS_TPC_TXN_ABORT,
+    TNS_TPC_TXN_COMMIT, TNS_TPC_TXN_DETACH, TNS_TPC_TXN_POST_DETACH, TNS_TPC_TXN_PREPARE,
+    TNS_TPC_TXN_START, TNS_TPC_TXN_STATE_ABORTED, TNS_TPC_TXN_STATE_COMMITTED,
+    TNS_TPC_TXN_STATE_FORGOTTEN, TNS_TPC_TXN_STATE_PREPARE, TNS_TPC_TXN_STATE_READ_ONLY,
+    TNS_TPC_TXN_STATE_REQUIRES_COMMIT, TPC_TXN_FLAGS_NEW, TPC_TXN_FLAGS_RESUME,
+    TPC_TXN_FLAGS_SESSIONLESS,
 };
 use oracledb_protocol::thin::{
     build_notify_payload_with_seq, build_subscribe_payload_with_seq,
@@ -179,6 +182,31 @@ use oracledb_protocol::{
 
 const PYTHON_ORACLEDB_COMPAT_VERSION_NUM: u32 = 0x0400_1000;
 const DEFAULT_SDU: usize = 8192;
+
+/// Upper bound on server-requested CONNECT resends before giving up. A real
+/// server asks once (pre-23ai, long connect data); the bound only guards
+/// against a peer that never stops answering RESEND.
+const MAX_CONNECT_RESEND_ROUNDS: u8 = 8;
+
+/// Human name for a TNS network packet type, for connect-phase diagnostics.
+/// These are packet-layer types (header offset 4), not TTC message types.
+fn tns_packet_type_name(packet_type: u8) -> &'static str {
+    match packet_type {
+        1 => "CONNECT",
+        2 => "ACCEPT",
+        3 => "ACK",
+        4 => "REFUSE",
+        5 => "REDIRECT",
+        6 => "DATA",
+        7 => "NULL",
+        9 => "ABORT",
+        11 => "RESEND",
+        12 => "MARKER",
+        13 => "ATTENTION",
+        14 => "CONTROL",
+        _ => "unknown",
+    }
+}
 const TNS_DATA_PACKET_OVERHEAD: usize = 10;
 
 pub use oracledb_protocol as protocol;
@@ -475,6 +503,17 @@ impl<T: WireTransport> ConnectionCore<T> {
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
         let result = read_data_response_with_limits(self.read_mut()?, cx, &write, limits).await;
+        self.note_post_sync_result(result)
+    }
+
+    /// Reads one classic (pre-END_OF_RESPONSE) connect-phase response. Servers
+    /// that did not negotiate END_OF_RESPONSE framing never set the
+    /// end-of-response DATA flag, so the flag-driven boundary reader would wait
+    /// forever; completion is decided by the payload's terminal message instead
+    /// (`classic_connect_response_is_complete`).
+    async fn read_classic_data_response(&mut self) -> Result<Vec<u8>> {
+        let limits = self.protocol_limits;
+        let result = read_classic_data_response_with_limits(self.read_mut()?, limits).await;
         self.note_post_sync_result(result)
     }
 
@@ -942,6 +981,14 @@ pub enum Error {
     RedirectUnsupported,
     #[error("listener refused connection: {0}")]
     ListenerRefused(String),
+    #[error(
+        "unexpected TNS packet type {ty} ({name}) while waiting for ACCEPT",
+        ty = .0,
+        name = tns_packet_type_name(*.0)
+    )]
+    UnexpectedConnectPacket(u8),
+    #[error("server kept requesting CONNECT resend ({0} rounds); giving up")]
+    ConnectResendLoop(u8),
     #[error("server did not advertise fast authentication")]
     FastAuthRequired,
     #[error("server response did not contain {0}")]
@@ -1115,6 +1162,8 @@ impl Error {
             Error::RedirectUnsupported
             | Error::Runtime(_)
             | Error::FastAuthRequired
+            | Error::UnexpectedConnectPacket(_)
+            | Error::ConnectResendLoop(_)
             | Error::MissingSessionField(_)
             | Error::SessionlessTransaction(_)
             | Error::UnknownTransactionState(_) => ErrorKind::Protocol,
@@ -2223,31 +2272,50 @@ impl Connection {
                 PacketLengthWidth::Legacy16,
             )?;
             trace_connect_bytes("CONNECT packet", &packet);
-            trace_connect_step("send CONNECT");
-            core.write_all(cx, &packet).await?;
+            // A descriptor longer than TNS_MAX_CONNECT_DATA travels in a DATA
+            // packet right behind the CONNECT packet, and the server may answer
+            // with a RESEND packet asking for the whole exchange again before it
+            // ACCEPTs (reference protocol.pyx `_connect_phase_one`: "this may
+            // request the message to be resent multiple times"). Pre-23ai
+            // servers RESEND routinely; a bounded loop guards against a
+            // misbehaving peer that never stops asking.
+            let split_connect_data = !connect_data_fits_inline(&connect_descriptor);
+            let mut resend_rounds = 0u8;
+            let accept = loop {
+                trace_connect_step("send CONNECT");
+                core.write_all(cx, &packet).await?;
+                if split_connect_data {
+                    trace_connect_step("send CONNECT descriptor (data packet)");
+                    core.send_data_packet(
+                        cx,
+                        connect_descriptor.as_bytes(),
+                        usize::from(options.sdu),
+                    )
+                    .await?;
+                }
 
-            trace_connect_step("read ACCEPT");
-            let accept = core.read_packet(PacketLengthWidth::Legacy16).await?;
-            match accept.packet_type {
-                TNS_PACKET_TYPE_ACCEPT => {}
-                TNS_PACKET_TYPE_REDIRECT => return Err(Error::RedirectUnsupported),
-                TNS_PACKET_TYPE_REFUSE => {
-                    return Err(Error::ListenerRefused(
-                        String::from_utf8_lossy(&accept.payload).to_string(),
-                    ))
-                }
-                other => {
-                    return Err(oracledb_protocol::ProtocolError::UnknownMessageType {
-                        message_type: other,
-                        position: 4,
+                trace_connect_step("read ACCEPT");
+                let reply = core.read_packet(PacketLengthWidth::Legacy16).await?;
+                match reply.packet_type {
+                    TNS_PACKET_TYPE_ACCEPT => break reply,
+                    TNS_PACKET_TYPE_RESEND => {
+                        resend_rounds += 1;
+                        if resend_rounds > MAX_CONNECT_RESEND_ROUNDS {
+                            return Err(Error::ConnectResendLoop(resend_rounds));
+                        }
+                        trace_connect_step("RESEND requested; resending CONNECT");
+                        continue;
                     }
-                    .into())
+                    TNS_PACKET_TYPE_REDIRECT => return Err(Error::RedirectUnsupported),
+                    TNS_PACKET_TYPE_REFUSE => {
+                        return Err(Error::ListenerRefused(
+                            String::from_utf8_lossy(&reply.payload).to_string(),
+                        ))
+                    }
+                    other => return Err(Error::UnexpectedConnectPacket(other)),
                 }
-            }
+            };
             let accept_info = parse_accept_payload(&accept.payload)?;
-            if !accept_info.supports_fast_auth {
-                return Err(Error::FastAuthRequired);
-            }
             let sdu = usize::try_from(accept_info.sdu)
                 .unwrap_or(DEFAULT_SDU)
                 .max(TNS_DATA_PACKET_OVERHEAD + 1);
@@ -2274,6 +2342,12 @@ impl Connection {
                 if !descriptor.protocol.is_tls() {
                     return Err(Error::AccessTokenRequiresTcps);
                 }
+                // Token auth is only wired through the combined fast-auth
+                // bundle; the servers that accept database tokens (23ai-era)
+                // all advertise fast auth.
+                if !accept_info.supports_fast_auth {
+                    return Err(Error::FastAuthRequired);
+                }
                 // One combined fast-auth bundle carrying a phase-two `AUTH_TOKEN`
                 // message; no resend. The payload (which embeds the token) is never
                 // passed to `trace_connect_bytes`, so the secret stays out of logs.
@@ -2297,23 +2371,68 @@ impl Connection {
                 (auth, capabilities, Vec::new())
             } else {
                 let client_pid = process::id();
-                let auth_one = build_fast_auth_phase_one_payload(
-                    &options.user,
-                    &identity.program,
-                    &identity.machine,
-                    &identity.osuser,
-                    &identity.terminal,
-                    client_pid,
-                )?;
+                // Pre-23ai servers do not understand the combined fast-auth
+                // bundle: run the classic handshake instead — protocol
+                // negotiation and data types as their own round trips
+                // (reference protocol.pyx `_connect_phase_two`), then the same
+                // two-phase password auth. The standalone payloads are exact
+                // slices of the fast-auth bundle, so both paths negotiate
+                // byte-identically.
+                let negotiated_capabilities = if accept_info.supports_fast_auth {
+                    None
+                } else {
+                    let protocol_payload = build_protocol_negotiation_payload()?;
+                    trace_connect_step("send protocol negotiation (classic)");
+                    core.send_data_packet(cx, &protocol_payload, sdu).await?;
+                    trace_connect_step("read protocol negotiation");
+                    let response = core.read_classic_data_response().await?;
+                    trace_connect_bytes("protocol negotiation response", &response);
+                    let negotiated = parse_auth_response_with_limits(&response, protocol_limits)?;
+
+                    let data_types_payload = build_data_types_payload()?;
+                    trace_connect_step("send data types (classic)");
+                    core.send_data_packet(cx, &data_types_payload, sdu).await?;
+                    trace_connect_step("read data types");
+                    let response = core.read_classic_data_response().await?;
+                    trace_connect_bytes("data types response", &response);
+                    parse_auth_response_with_limits(&response, protocol_limits)?;
+
+                    Some(negotiated.capabilities.unwrap_or_default())
+                };
+                let auth_one = if accept_info.supports_fast_auth {
+                    build_fast_auth_phase_one_payload(
+                        &options.user,
+                        &identity.program,
+                        &identity.machine,
+                        &identity.osuser,
+                        &identity.terminal,
+                        client_pid,
+                    )?
+                } else {
+                    build_auth_phase_one_payload(
+                        &options.user,
+                        &identity.program,
+                        &identity.machine,
+                        &identity.osuser,
+                        &identity.terminal,
+                        client_pid,
+                    )?
+                };
                 trace_connect_bytes("AUTH phase one payload", &auth_one);
                 trace_connect_step("send AUTH phase one");
                 core.send_data_packet(cx, &auth_one, sdu).await?;
                 trace_connect_step("read AUTH phase one");
-                let auth_one_response = core.read_data_response(cx).await?;
+                let auth_one_response = if accept_info.supports_fast_auth {
+                    core.read_data_response(cx).await?
+                } else {
+                    core.read_classic_data_response().await?
+                };
                 trace_connect_bytes("AUTH phase one response", &auth_one_response);
                 let auth_one =
                     parse_auth_response_with_limits(&auth_one_response, protocol_limits)?;
-                let capabilities = auth_one.capabilities.unwrap_or_default();
+                let capabilities = negotiated_capabilities
+                    .or(auth_one.capabilities)
+                    .unwrap_or_default();
                 let verifier_type = auth_one
                     .verifier_type
                     .ok_or(Error::MissingSessionField("AUTH_VFR_DATA verifier type"))?;
@@ -2332,12 +2451,17 @@ impl Connection {
                     &options.app_context,
                     options.proxy_user.as_deref(),
                     options.edition.as_deref(),
+                    capabilities.ttc_field_version,
                 )?;
                 trace_connect_bytes("AUTH phase two payload", &auth_two_payload);
                 trace_connect_step("send AUTH phase two");
                 core.send_data_packet(cx, &auth_two_payload, sdu).await?;
                 trace_connect_step("read AUTH phase two");
-                let auth_two_response = core.read_data_response(cx).await?;
+                let auth_two_response = if accept_info.supports_fast_auth {
+                    core.read_data_response(cx).await?
+                } else {
+                    core.read_classic_data_response().await?
+                };
                 trace_connect_bytes("AUTH phase two response", &auth_two_response);
                 let auth_two =
                     parse_auth_response_with_limits(&auth_two_response, protocol_limits)?;
@@ -2511,6 +2635,7 @@ impl Connection {
             &encoded_password,
             &encoded_newpassword,
             seq_num,
+            self.capabilities.ttc_field_version,
         )?;
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         let response = self.core.read_data_response(cx).await?;
@@ -7381,6 +7506,46 @@ where
             .await?
             .payload,
     )
+}
+
+/// Accumulates DATA packets for one classic (pre-END_OF_RESPONSE)
+/// connect-phase response until the payload's terminal message is complete.
+/// Used only for the pre-23ai protocol-negotiation / data-types / auth round
+/// trips, where END_OF_RESPONSE framing is not negotiated and completion is
+/// message-driven (reference messages/base.pyx `Message.process`).
+async fn read_classic_data_response_with_limits<R>(
+    read: &mut R,
+    limits: ProtocolLimits,
+) -> Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut response = Vec::new();
+    loop {
+        let packet = read_packet_with_limits(read, PacketLengthWidth::Large32, limits).await?;
+        if packet.packet_type != TNS_PACKET_TYPE_DATA {
+            return Err(Error::UnexpectedConnectPacket(packet.packet_type));
+        }
+        let payload =
+            packet
+                .payload
+                .get(2..)
+                .ok_or(oracledb_protocol::ProtocolError::TtcDecode(
+                    "missing data packet flags",
+                ))?;
+        let combined = response.len().checked_add(payload.len()).ok_or(
+            oracledb_protocol::ProtocolError::ResourceLimit {
+                limit: "response_bytes",
+                observed: usize::MAX,
+                maximum: limits.max_response_bytes,
+            },
+        )?;
+        limits.check_response_bytes(combined)?;
+        response.extend_from_slice(payload);
+        if classic_connect_response_is_complete(&response, limits)? {
+            return Ok(response);
+        }
+    }
 }
 
 /// Upper bound on how long the post-break recovery drain may take before the

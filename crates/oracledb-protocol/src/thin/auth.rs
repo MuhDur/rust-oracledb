@@ -137,12 +137,19 @@ pub fn build_auth_phase_two_payload_with_context_with_seq(
         app_context,
         None,
         None,
+        ClientCapabilities::default().ttc_field_version,
     )
 }
 
 /// Phase-two auth payload with optional proxy authentication: the reference
 /// writes `PROXY_CLIENT_NAME` as the first key/value pair when the connect
 /// user is of the form `user[proxy_user]` (messages/auth.pyx).
+///
+/// `ttc_field_version` is the field version negotiated with THIS server: the
+/// ub8 pipeline-token in the function header is a 23.1+ field (reference
+/// messages/base.pyx `_write_function_code`); a pre-23ai server parses the
+/// stray byte as part of the auth header and breaks the connection with a
+/// MARKER (observed live against Oracle XE 18c).
 #[allow(clippy::too_many_arguments)]
 pub fn build_auth_phase_two_payload_with_proxy_with_seq(
     user: &str,
@@ -154,10 +161,13 @@ pub fn build_auth_phase_two_payload_with_proxy_with_seq(
     app_context: &[(String, String, String)],
     proxy_user: Option<&str>,
     edition: Option<&str>,
+    ttc_field_version: u8,
 ) -> Result<Vec<u8>> {
     let mut writer = TtcWriter::new();
     writer.write_function_code_with_seq(TNS_FUNC_AUTH_PHASE_TWO, seq_num);
-    writer.write_ub8(0);
+    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
+        writer.write_ub8(0);
+    }
     let mut num_pairs = 6u32;
     if encrypted.speedy_key.is_some() {
         num_pairs += 1;
@@ -238,10 +248,13 @@ pub fn build_change_password_payload_with_seq(
     encoded_password: &str,
     encoded_newpassword: &str,
     seq_num: u8,
+    ttc_field_version: u8,
 ) -> Result<Vec<u8>> {
     let mut writer = TtcWriter::new();
     writer.write_function_code_with_seq(TNS_FUNC_AUTH_PHASE_TWO, seq_num);
-    writer.write_ub8(0);
+    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
+        writer.write_ub8(0);
+    }
     write_auth_header(
         &mut writer,
         user,
@@ -255,6 +268,85 @@ pub fn build_change_password_payload_with_seq(
 
 pub fn parse_auth_response(payload: &[u8]) -> Result<AuthResponse> {
     parse_auth_response_with_limits(payload, ProtocolLimits::DEFAULT)
+}
+
+/// Whether an accumulated classic (pre-END_OF_RESPONSE) connect-phase response
+/// is complete.
+///
+/// Servers that did not negotiate END_OF_RESPONSE framing (protocol version
+/// below 319, i.e. everything before 23ai) never set the end-of-response DATA
+/// flag; the response instead ends when its *terminal message* has been read
+/// (reference messages/base.pyx `Message.process`: loop until
+/// `end_of_response`). The terminal messages for the connect-phase round trips
+/// are:
+///
+/// - protocol negotiation (msg 1): ends the response once processed
+///   (messages/protocol.pyx),
+/// - data types (msg 2): same (messages/data_types.pyx),
+/// - STATUS (msg 9): ends any response when END_OF_RESPONSE framing is off
+///   (messages/base.pyx),
+/// - ERROR (msg 4): carries the failure that the real parse will surface.
+///
+/// Returns `Ok(false)` when the payload runs out mid-message — the caller must
+/// read the next DATA packet and try again, exactly like the reference's
+/// `ReadBuffer` blocking for more packets mid-parse. Unknown message types
+/// propagate as errors.
+pub fn classic_connect_response_is_complete(
+    payload: &[u8],
+    limits: ProtocolLimits,
+) -> Result<bool> {
+    let Ok(mut reader) = TtcReader::with_limits(payload, limits) else {
+        return Ok(false);
+    };
+    while reader.remaining() > 0 {
+        let message_type = reader.read_u8()?;
+        let terminal = match message_type {
+            TNS_MSG_TYPE_PROTOCOL => match skip_protocol_message(&mut reader) {
+                Ok(_) => true,
+                Err(ProtocolError::TtcDecode(_)) => return Ok(false),
+                Err(err) => return Err(err),
+            },
+            TNS_MSG_TYPE_DATA_TYPES => match skip_data_types_response(&mut reader) {
+                Ok(()) => true,
+                Err(ProtocolError::TtcDecode(_)) => return Ok(false),
+                Err(err) => return Err(err),
+            },
+            TNS_MSG_TYPE_PARAMETER => match parse_return_parameters(&mut reader) {
+                Ok(_) => false,
+                Err(ProtocolError::TtcDecode(_)) => return Ok(false),
+                Err(err) => return Err(err),
+            },
+            TNS_MSG_TYPE_STATUS => {
+                let complete = reader.read_ub4().and_then(|_| reader.read_ub2());
+                match complete {
+                    Ok(_) => true,
+                    Err(ProtocolError::TtcDecode(_)) => return Ok(false),
+                    Err(err) => return Err(err),
+                }
+            }
+            TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => match skip_server_side_piggyback(&mut reader) {
+                Ok(_) => false,
+                Err(ProtocolError::TtcDecode(_)) => return Ok(false),
+                Err(err) => return Err(err),
+            },
+            TNS_MSG_TYPE_END_OF_RESPONSE => true,
+            TNS_MSG_TYPE_ERROR => match parse_server_error(&mut reader, 13) {
+                Ok(_) | Err(ProtocolError::ServerError(_)) => true,
+                Err(ProtocolError::TtcDecode(_)) => return Ok(false),
+                Err(err) => return Err(err),
+            },
+            _ => {
+                return Err(ProtocolError::UnknownMessageType {
+                    message_type,
+                    position: reader.position().saturating_sub(1),
+                })
+            }
+        };
+        if terminal {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn parse_auth_response_with_limits(

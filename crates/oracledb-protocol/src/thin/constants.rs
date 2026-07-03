@@ -5,6 +5,13 @@ pub const TNS_PACKET_TYPE_ACCEPT: u8 = 2;
 pub const TNS_PACKET_TYPE_REFUSE: u8 = 4;
 pub const TNS_PACKET_TYPE_REDIRECT: u8 = 5;
 pub const TNS_PACKET_TYPE_DATA: u8 = 6;
+pub const TNS_PACKET_TYPE_RESEND: u8 = 11;
+
+/// Longest connect data that may travel inline in the CONNECT packet
+/// (reference constants.pxi `TNS_MAX_CONNECT_DATA`). Longer descriptors are
+/// sent in a separate DATA packet immediately after the CONNECT packet, and
+/// pre-23ai servers then ask for a full RESEND of both.
+pub const TNS_MAX_CONNECT_DATA: usize = 230;
 
 pub const TNS_DATA_FLAGS_EOF: u16 = 0x0040;
 pub const TNS_DATA_FLAGS_END_OF_REQUEST: u16 = 0x0800;
@@ -28,6 +35,7 @@ pub const TNS_MSG_TYPE_PIGGYBACK: u8 = 17;
 pub const TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK: u8 = 23;
 pub const TNS_MSG_TYPE_IMPLICIT_RESULTSET: u8 = 27;
 pub const TNS_MSG_TYPE_END_OF_RESPONSE: u8 = 29;
+pub const TNS_MSG_TYPE_FAST_AUTH: u8 = 34;
 pub const TNS_MSG_TYPE_TOKEN: u8 = 33;
 
 pub const TNS_FUNC_AUTH_PHASE_ONE: u8 = 118;

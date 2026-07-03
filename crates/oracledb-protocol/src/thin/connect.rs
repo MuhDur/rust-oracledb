@@ -2,6 +2,14 @@
 
 use super::*;
 
+/// Whether the connect data travels inline in the CONNECT packet. Longer
+/// descriptors must be sent in a separate DATA packet right after the CONNECT
+/// packet (reference messages/connect.pyx `ConnectMessage.send`); the caller
+/// owns that follow-up send.
+pub fn connect_data_fits_inline(connect_data: &str) -> bool {
+    connect_data.len() <= TNS_MAX_CONNECT_DATA
+}
+
 pub fn build_connect_packet_payload(connect_data: &str, sdu: u16) -> Result<Vec<u8>> {
     let connect_bytes = connect_data.as_bytes();
     let connect_len =
@@ -31,7 +39,11 @@ pub fn build_connect_packet_payload(connect_data: &str, sdu: u16) -> Result<Vec<
     writer.write_u32be(u32::from(sdu));
     writer.write_u32be(0);
     writer.write_u32be(0);
-    writer.write_raw(connect_bytes);
+    // Connect data above TNS_MAX_CONNECT_DATA is carried in a separate DATA
+    // packet; the header still advertises the full length either way.
+    if connect_data_fits_inline(connect_data) {
+        writer.write_raw(connect_bytes);
+    }
     Ok(writer.into_bytes())
 }
 
@@ -78,6 +90,71 @@ pub fn build_fast_auth_phase_one_payload(
 ) -> Result<Vec<u8>> {
     let mut out = Vec::from_hex(FAST_AUTH_PREFIX_HEX)
         .map_err(|_| ProtocolError::TtcDecode("invalid static fast-auth prefix"))?;
+    append_auth_phase_one(&mut out, user, program, machine, osuser, terminal, pid)?;
+    Ok(out)
+}
+
+// Byte layout of FAST_AUTH_PREFIX_HEX (mirrors reference
+// messages/fast_auth.pyx `FastAuthMessage._write_message`):
+//   [0..4)    fast-auth envelope: msg type 34, version 1, char-conv flags
+//   [4..23)   embedded protocol-negotiation message (msg type 1, version 6,
+//             terminator, driver name string + NUL)
+//   [23..29)  envelope glue: unused server charset/ncharset placeholders +
+//             the pinned ttc field version byte
+//   [29..)    embedded data-types message (msg type 2, UTF8 charsets,
+//             encoding flags, compile/runtime caps, static type table)
+// The classic (non-fast-auth) handshake sends the same two embedded messages
+// as standalone round trips, so pre-23ai servers negotiate byte-identically
+// to the reference implementation.
+const FAST_AUTH_PROTOCOL_MSG_START: usize = 4;
+const FAST_AUTH_PROTOCOL_MSG_END: usize = 23;
+const FAST_AUTH_DATA_TYPES_MSG_START: usize = 29;
+
+fn fast_auth_prefix_slice(start: usize, end: Option<usize>) -> Result<Vec<u8>> {
+    let prefix = Vec::from_hex(FAST_AUTH_PREFIX_HEX)
+        .map_err(|_| ProtocolError::TtcDecode("invalid static fast-auth prefix"))?;
+    let slice = match end {
+        Some(end) => prefix.get(start..end),
+        None => prefix.get(start..),
+    };
+    slice
+        .map(<[u8]>::to_vec)
+        .ok_or(ProtocolError::TtcDecode("fast-auth prefix too short"))
+}
+
+/// Standalone TTC protocol-negotiation message (msg type 1) for the classic
+/// pre-23ai handshake. Byte-identical to the copy embedded in the fast-auth
+/// bundle (reference messages/protocol.pyx `ProtocolMessage._write_message`).
+pub fn build_protocol_negotiation_payload() -> Result<Vec<u8>> {
+    let payload = fast_auth_prefix_slice(
+        FAST_AUTH_PROTOCOL_MSG_START,
+        Some(FAST_AUTH_PROTOCOL_MSG_END),
+    )?;
+    debug_assert_eq!(payload.first(), Some(&TNS_MSG_TYPE_PROTOCOL));
+    Ok(payload)
+}
+
+/// Standalone TTC data-types message (msg type 2) for the classic pre-23ai
+/// handshake. Byte-identical to the copy embedded in the fast-auth bundle
+/// (reference messages/data_types.pyx `DataTypesMessage._write_message`).
+pub fn build_data_types_payload() -> Result<Vec<u8>> {
+    let payload = fast_auth_prefix_slice(FAST_AUTH_DATA_TYPES_MSG_START, None)?;
+    debug_assert_eq!(payload.first(), Some(&TNS_MSG_TYPE_DATA_TYPES));
+    Ok(payload)
+}
+
+/// Standalone auth phase-one function message for the classic pre-23ai
+/// handshake — the same message [`build_fast_auth_phase_one_payload`] appends
+/// after the fast-auth bundle, sent on its own round trip instead.
+pub fn build_auth_phase_one_payload(
+    user: &str,
+    program: &str,
+    machine: &str,
+    osuser: &str,
+    terminal: &str,
+    pid: u32,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
     append_auth_phase_one(&mut out, user, program, machine, osuser, terminal, pid)?;
     Ok(out)
 }
@@ -155,8 +232,13 @@ pub(crate) fn skip_protocol_message(
         .get(TNS_CCAP_FIELD_VERSION)
         .copied()
         .unwrap_or_else(|| ClientCapabilities::default().ttc_field_version);
+    // The effective field version is the LOWER of what the server reports and
+    // what this client supports (reference capabilities.pyx
+    // `_adjust_for_server_compile_caps`: "if server < client: client =
+    // server"). Taking the max would over-claim 23ai-era field formats against
+    // pre-23ai servers.
     let ttc_field_version =
-        server_ttc_field_version.max(ClientCapabilities::default().ttc_field_version);
+        server_ttc_field_version.min(ClientCapabilities::default().ttc_field_version);
     let max_string_size = if runtime_caps
         .as_deref()
         .and_then(|caps| caps.get(TNS_RCAP_TTC))
@@ -185,4 +267,36 @@ pub(crate) fn skip_data_types_response(reader: &mut TtcReader<'_>) -> Result<()>
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classic_handshake_messages_slice_the_fast_auth_prefix() {
+        let protocol = build_protocol_negotiation_payload().expect("protocol payload");
+        assert_eq!(protocol[0], TNS_MSG_TYPE_PROTOCOL);
+        assert_eq!(protocol[1], 6, "protocol version byte (8.1 and higher)");
+        assert_eq!(protocol[2], 0, "array terminator");
+        assert!(
+            protocol.ends_with(b"python-oracledb\0"),
+            "driver name string with NUL terminator"
+        );
+
+        let data_types = build_data_types_payload().expect("data types payload");
+        assert_eq!(data_types[0], TNS_MSG_TYPE_DATA_TYPES);
+        // UTF8 charset (873) little-endian for charset and ncharset.
+        assert_eq!(&data_types[1..5], &[0x69, 0x03, 0x69, 0x03]);
+
+        // The two standalone messages are exact slices of the fast-auth bundle,
+        // so classic and fast-auth handshakes can never drift apart.
+        let full = Vec::from_hex(FAST_AUTH_PREFIX_HEX).expect("prefix decodes");
+        assert_eq!(full[0], TNS_MSG_TYPE_FAST_AUTH);
+        assert_eq!(
+            &full[FAST_AUTH_PROTOCOL_MSG_START..FAST_AUTH_PROTOCOL_MSG_END],
+            &protocol[..]
+        );
+        assert_eq!(&full[FAST_AUTH_DATA_TYPES_MSG_START..], &data_types[..]);
+    }
 }
