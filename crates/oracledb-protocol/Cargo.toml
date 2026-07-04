@@ -21,10 +21,11 @@ exclude = [
 
 [features]
 default = []
-# Enables the cwallet.sso (SSO auto-login wallet) reader. Off by default: the
-# format is a proprietary Oracle container and only the AES/PBES2 branch is
-# implemented; ewallet.pem is fully supported without this feature.
-experimental = ["dep:cbc", "dep:der", "dep:hmac"]
+# Historical gate for the cwallet.sso (SSO auto-login wallet) reader. As of
+# 0.7.x the wallet readers (ewallet.pem incl. encrypted keys, ewallet.p12,
+# cwallet.sso) are first-class and always compiled; this feature is kept as an
+# empty no-op so `--features experimental` builds keep working.
+experimental = []
 # Enables the `.tns-cassette` record/replay wire format (net::cassette). Pure,
 # sans-I/O framing; off by default so the standard build is byte-identical.
 cassette = []
@@ -48,10 +49,13 @@ serde.workspace = true
 sha1.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-# Experimental cwallet.sso reader deps (gated by the `experimental` feature).
-cbc = { workspace = true, optional = true }
-der = { workspace = true, optional = true }
-hmac = { workspace = true, optional = true }
+# Wallet readers (PKCS#12 `ewallet.p12`, encrypted-PKCS#8 `ewallet.pem`,
+# `cwallet.sso`): sans-I/O ASN.1 + symmetric crypto, all RustCrypto
+# (`#![forbid(unsafe_code)]`-clean). The `pem` feature of `der` supplies the
+# RFC 7468 decoder for the ENCRYPTED PRIVATE KEY PEM block.
+cbc.workspace = true
+der = { workspace = true, features = ["pem"] }
+hmac.workspace = true
 # SIMD-accelerated UTF-8 validation for the borrowed fetch text path (gated by
 # the `simd-decode` feature). Its `unsafe` SIMD intrinsics are encapsulated
 # inside the crate; we only call its safe `basic::from_utf8` API, so this crate

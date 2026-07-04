@@ -1653,13 +1653,14 @@ pub struct ConnectOptions {
     /// `description.server_type = "emon"` for the background connection).
     server_type_emon: bool,
     /// TCPS wallet directory (`MY_WALLET_DIRECTORY` / `wallet_location`). The
-    /// directory should contain `ewallet.pem` (or, with the `experimental`
-    /// feature, `cwallet.sso`). When `None`, `TNS_ADMIN` is consulted; the
-    /// special value `SYSTEM` (case-insensitive) forces the system trust store.
-    /// Only consulted for TCPS connections.
+    /// directory should contain `ewallet.pem`, `ewallet.p12` (requires
+    /// `wallet_password`), or `cwallet.sso`. When `None`, `TNS_ADMIN` is
+    /// consulted; the special value `SYSTEM` (case-insensitive) forces the
+    /// system trust store. Only consulted for TCPS connections.
     wallet_location: Option<String>,
-    /// Password for an encrypted wallet (mTLS key). `None` for auto-login or
-    /// verify-only wallets.
+    /// Password for an encrypted wallet (`ewallet.p12`, or an `ewallet.pem`
+    /// with an encrypted private key). `None` for auto-login or verify-only
+    /// wallets.
     wallet_password: Option<String>,
     /// Oracle edition for Edition-Based Redefinition (`AUTH_ORA_EDITION`),
     /// applied during authentication before any user SQL. `None` uses the
@@ -1902,7 +1903,9 @@ impl ConnectOptions {
         self
     }
 
-    /// Set the wallet password (for an encrypted mTLS key).
+    /// Set the wallet password — required for `ewallet.p12` wallets and for an
+    /// `ewallet.pem` whose private key is encrypted (PKCS#8 `ENCRYPTED PRIVATE
+    /// KEY`). Not needed for auto-login (`cwallet.sso`) or verify-only wallets.
     #[must_use]
     pub fn with_wallet_password(mut self, password: impl Into<String>) -> Self {
         self.wallet_password = Some(password.into());

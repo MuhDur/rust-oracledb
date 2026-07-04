@@ -71,13 +71,34 @@ python-oracledb thin loads (`transport.pyx::create_ssl_context`). The reader
 - loads **every** `CERTIFICATE` block as a trust anchor (server verification),
 - if an (unencrypted PKCS#8 / PKCS#1 / SEC1) `PRIVATE KEY` block is also
   present, uses the certs + key as the **client identity for mTLS**,
-- reports an encrypted private key with a clear error rather than silently
-  producing a verify-only wallet.
+- decrypts a PKCS#8 `ENCRYPTED PRIVATE KEY` block with the supplied
+  `wallet_password` (PBES2 / PBKDF2-HMAC-SHA1/SHA256 / AES-CBC — the scheme
+  ADB wallet downloads and `openssl pkcs8 -topk8` emit). A missing password
+  yields a typed `PasswordRequired` error; a wrong password or unsupported
+  scheme (scrypt, legacy `Proc-Type: 4,ENCRYPTED`) yields a typed `KeyDecrypt`
+  error — never a silent verify-only downgrade.
 
 A wallet with no private key is **verify-only** (the common server-verification
 case) — e.g. a PEM containing just the CA certificate.
 
-### `cwallet.sso` — experimental (`--features experimental`)
+### `ewallet.p12` — supported (requires `wallet_password`)
+
+The standard Oracle PKCS#12 wallet — the file `orapki wallet create` produces
+and Autonomous Database wallet zips ship. `parse_ewallet_p12` /
+`read_ewallet_p12` reuse the internal PFX reader (`tls/pfx.rs`):
+
+- modern **PBES2 / PBKDF2 / AES-CBC** wallets (orapki 19c+/23ai and
+  `openssl pkcs12 -export` defaults) are fully parsed: trust-anchor certs,
+  client chain, and the (shrouded or plain) private key;
+- the wallet password is **required** — without it the loader fails closed
+  with a typed `PasswordRequired` remediation (Oracle p12 wallets are always
+  password-protected);
+- legacy PBE-SHA1-3DES / RC2 wallets return a typed `Pkcs12` error naming the
+  unsupported OID (re-export the wallet with a modern cipher).
+
+Proven against a **real `orapki` 23.26-generated wallet** (see §5).
+
+### `cwallet.sso` — supported
 
 The SSO auto-login wallet: a proprietary Oracle binary container wrapping a
 standard PKCS#12. Ported from the open-source
@@ -102,9 +123,26 @@ standard PKCS#12. Ported from the open-source
 If a wallet hits an unsupported branch, **convert it to `ewallet.pem`** (which is
 fully supported): `orapki wallet pkcs12_to_pem` or export from the wallet tool.
 
-The `experimental` feature is off by default. Without it, `cwallet.sso` files are
-rejected with a clear "rebuild with --features experimental, or convert to
-ewallet.pem" message.
+Promoted from the `experimental` feature to always-on in 0.7.x after the reader
+was verified against a real `orapki` 23.26-generated `cwallet.sso` whose
+extracted certs/keys are byte-identical to its paired `ewallet.p12` (see §5).
+The `experimental` cargo feature remains as an empty no-op.
+
+### Which file wins? (loader precedence)
+
+`load_wallet` (`crates/oracledb/src/tls.rs`) picks, in order:
+
+1. `ewallet.pem` — parity with python-oracledb thin, which reads **only** this
+   file;
+2. `ewallet.p12` **when a `wallet_password` is supplied**;
+3. `cwallet.sso` (auto-login, no password);
+4. a passwordless `ewallet.p12` → typed `PasswordRequired` error.
+
+So an untouched ADB wallet zip (`cwallet.sso` + `ewallet.p12`, no
+`ewallet.pem`) connects with a password (p12 path) *or* without one (sso path).
+Note that reading `ewallet.p12`/`cwallet.sso` **exceeds** the pinned
+python-oracledb 4.0.1 thin reference; full live acceptance against a real ADB
+endpoint is still pending (offline parsing is proven, see `docs/SUPPORT.md`).
 
 ---
 
@@ -263,6 +301,34 @@ cp ca.crt ca_wallet.pem   # verify-only client wallet (trusts the CA)
 openssl pkcs12 -export -out wallet_oracle.p12 -inkey leaf.key -in leaf.crt \
   -certfile ca.crt -name oracle-test -passout pass:OracleWallet1234 \
   -keypbe NONE -certpbe AES-256-CBC -macalg sha256
+
+# Encrypted-key ewallet.pem variants (password WalletPassword16), the ADB
+# ewallet.pem shape: leaf.crt + ca.crt + an ENCRYPTED PRIVATE KEY block.
+openssl pkcs8 -topk8 -in leaf.key -passout pass:WalletPassword16 \
+  -v2 aes-256-cbc -v2prf hmacWithSHA256   # -> ewallet_encrypted.pem
+openssl pkcs8 -topk8 -in leaf.key -passout pass:WalletPassword16 \
+  -v2 aes-128-cbc -v2prf hmacWithSHA1     # -> ewallet_encrypted_sha1.pem
+openssl pkcs8 -topk8 -in leaf.key -passout pass:WalletPassword16 \
+  -scrypt                                 # -> ewallet_encrypted_scrypt.pem (typed-unsupported test)
+openssl rsa -in leaf.key -aes256 -traditional \
+  -passout pass:WalletPassword16          # -> ewallet_encrypted_legacy.pem (typed-unsupported test)
+
+# Standalone PKCS#12 wallet, OpenSSL 3 defaults (PBES2/AES-256-CBC shrouded key):
+openssl pkcs12 -export -out ewallet_openssl.p12 -inkey leaf.key -in leaf.crt \
+  -certfile ca.crt -name oracle-test -passout pass:WalletPassword16
+```
+
+Additionally, `ewallet_orapki.p12` + `cwallet_orapki.sso` are a **genuine
+Oracle-tooling wallet** (password `WalletPass123`, self-signed lab-only
+`CN=db.example.com` content) generated with the `oraclepki` 23.26.2.0.0 jar
+from Maven Central (`orapki` is a thin wrapper around it):
+
+```bash
+java -cp oraclepki-23.26.2.0.0.jar oracle.security.pki.textui.OraclePKITextUI \
+  wallet create -wallet . -pwd "WalletPass123" -auto_login
+java -cp oraclepki-23.26.2.0.0.jar oracle.security.pki.textui.OraclePKITextUI \
+  wallet add -wallet . -pwd "WalletPass123" \
+  -dn "CN=db.example.com,O=ExampleDB,C=US" -keysize 2048 -self_signed -validity 3650
 ```
 
 The tests that consume them:

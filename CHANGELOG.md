@@ -5,6 +5,47 @@ is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows the SemVer contract described in
 [`docs/adr/0002-semver-contract.md`](docs/adr/0002-semver-contract.md).
 
+## [Unreleased]
+
+### Added
+
+- **Encrypted `ewallet.pem` private keys decrypt with `wallet_password`**
+  (bead `rust-oracledb-encrypted-pem-p12-wallets-1u8f`, GH #6 follow-up): a
+  PKCS#8 `ENCRYPTED PRIVATE KEY` block (PBES2 / PBKDF2-HMAC-SHA1/SHA256 /
+  AES-128/192/256-CBC — the scheme ADB wallet downloads and
+  `openssl pkcs8 -topk8` emit) is now decrypted when a wallet password is
+  supplied. RustCrypto only; `#![forbid(unsafe_code)]` holds. Fail-closed
+  typed errors: `WalletError::PasswordRequired` (no password),
+  `WalletError::KeyDecrypt` (wrong password / unsupported scheme, incl.
+  scrypt and legacy `Proc-Type: 4,ENCRYPTED` PEM encryption) — never a
+  silent verify-only downgrade.
+- **Standalone `ewallet.p12` wallets** are a first-class format:
+  `tls::wallet::parse_ewallet_p12` / `read_ewallet_p12` /
+  `p12_wallet_path` / `P12_WALLET_FILE_NAME` reuse the internal PKCS#12
+  (PFX) reader. Requires `wallet_password` (typed `PasswordRequired`
+  otherwise); legacy 3DES/RC2 wallets fail closed with a typed
+  `WalletError::Pkcs12` naming the unsupported OID. An untouched ADB wallet
+  zip (`cwallet.sso` + `ewallet.p12`) now connects directly.
+- **`cwallet.sso` promoted from `--features experimental` to always-on**
+  after the reader was verified against a REAL `orapki` 23.26-generated
+  wallet fixture (`crates/oracledb/tests/fixtures/tls/cwallet_orapki.sso`)
+  whose extracted certs/keys are byte-identical to its paired
+  `ewallet.p12`. The `experimental` cargo feature remains as an empty no-op.
+  Unsupported outer sub-types (`5`, `0x35`) still fail closed with typed
+  errors.
+- New `WalletError` variants (additive, `#[non_exhaustive]`): `Pkcs12`,
+  `KeyDecrypt`, `PasswordRequired`. All wallet diagnostics keep redacting
+  wallet paths and never echo passwords.
+- Wallet loader precedence (`load_wallet`): `ewallet.pem` (reference
+  parity) → `ewallet.p12` with password → `cwallet.sso` → passwordless
+  `ewallet.p12` fails closed with `PasswordRequired`.
+- Lab-only synthetic wallet fixtures: a genuine `oraclepki` 23.26 wallet
+  (`ewallet_orapki.p12` + `cwallet_orapki.sso`) and openssl-generated
+  encrypted-PEM variants (SHA-256/SHA-1 PRFs, scrypt and legacy negatives);
+  generation commands documented in `docs/TLS_SETUP.md` §5. Honesty note:
+  offline parsing/decryption is proven; live ADB acceptance still pending
+  (see `docs/SUPPORT.md`).
+
 ## [0.7.0] - 2026-07-04
 
 ### Added

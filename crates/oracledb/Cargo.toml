@@ -46,7 +46,10 @@ rust_decimal = ["dep:rust_decimal"]
 # PL/SQL on the existing execute/fetch/OSON primitives. Requires serde_json for
 # QBE filter parsing.
 soda = ["dep:serde_json"]
-# Enables the experimental cwallet.sso (SSO auto-login wallet) reader.
+# Historical gate for the cwallet.sso (SSO auto-login wallet) reader. As of
+# 0.7.x all wallet readers (ewallet.pem incl. encrypted keys, ewallet.p12,
+# cwallet.sso) are first-class and always compiled; kept as a no-op so
+# `--features experimental` builds keep working.
 experimental = ["oracledb-protocol/experimental"]
 # First-class OpenTelemetry-style observability (bead rust-oracledb-lv6).
 # Emits per-round-trip `tracing` spans (connect / execute / fetch / round-trip /

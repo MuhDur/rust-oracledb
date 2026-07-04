@@ -1591,8 +1591,12 @@ pub oracledb_protocol::tls::wallet::WalletError::FileMissing(alloc::string::Stri
 pub oracledb_protocol::tls::wallet::WalletError::Io
 pub oracledb_protocol::tls::wallet::WalletError::Io::path: alloc::string::String
 pub oracledb_protocol::tls::wallet::WalletError::Io::source: std::io::error::Error
+pub oracledb_protocol::tls::wallet::WalletError::KeyDecrypt(alloc::string::String)
 pub oracledb_protocol::tls::wallet::WalletError::NoCertificates
+pub oracledb_protocol::tls::wallet::WalletError::PasswordRequired
+pub oracledb_protocol::tls::wallet::WalletError::PasswordRequired::format: &'static str
 pub oracledb_protocol::tls::wallet::WalletError::Pem(alloc::string::String)
+pub oracledb_protocol::tls::wallet::WalletError::Pkcs12(alloc::string::String)
 pub oracledb_protocol::tls::wallet::WalletError::Sso(alloc::string::String)
 pub oracledb_protocol::tls::wallet::WalletError::SsoNotEnabled
 pub oracledb_protocol::tls::wallet::WalletError::UnsupportedFormat
@@ -1615,11 +1619,15 @@ impl core::default::Default for oracledb_protocol::tls::wallet::WalletContents
 pub fn oracledb_protocol::tls::wallet::WalletContents::default() -> oracledb_protocol::tls::wallet::WalletContents
 impl core::fmt::Debug for oracledb_protocol::tls::wallet::WalletContents
 pub fn oracledb_protocol::tls::wallet::WalletContents::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub const oracledb_protocol::tls::wallet::P12_WALLET_FILE_NAME: &str
 pub const oracledb_protocol::tls::wallet::PEM_WALLET_FILE_NAME: &str
 pub const oracledb_protocol::tls::wallet::SSO_WALLET_FILE_NAME: &str
+pub fn oracledb_protocol::tls::wallet::p12_wallet_path(&std::path::Path) -> std::path::PathBuf
+pub fn oracledb_protocol::tls::wallet::parse_ewallet_p12(&[u8], core::option::Option<&str>) -> core::result::Result<oracledb_protocol::tls::wallet::WalletContents, oracledb_protocol::tls::wallet::WalletError>
 pub fn oracledb_protocol::tls::wallet::parse_ewallet_pem(&[u8], core::option::Option<&str>) -> core::result::Result<oracledb_protocol::tls::wallet::WalletContents, oracledb_protocol::tls::wallet::WalletError>
 pub fn oracledb_protocol::tls::wallet::parse_pem_certificates(&mut dyn std::io::BufRead) -> alloc::vec::Vec<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::tls::wallet::pem_wallet_path(&std::path::Path) -> std::path::PathBuf
+pub fn oracledb_protocol::tls::wallet::read_ewallet_p12(&std::path::Path, core::option::Option<&str>) -> core::result::Result<oracledb_protocol::tls::wallet::WalletContents, oracledb_protocol::tls::wallet::WalletError>
 pub fn oracledb_protocol::tls::wallet::read_ewallet_pem(&std::path::Path, core::option::Option<&str>) -> core::result::Result<oracledb_protocol::tls::wallet::WalletContents, oracledb_protocol::tls::wallet::WalletError>
 pub fn oracledb_protocol::tls::wallet::resolve_wallet_dir(core::option::Option<&str>, core::option::Option<&str>) -> core::option::Option<std::path::PathBuf>
 pub fn oracledb_protocol::tls::wallet::sso_wallet_path(&std::path::Path) -> std::path::PathBuf

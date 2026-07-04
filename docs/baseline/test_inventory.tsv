@@ -25,7 +25,7 @@ crates/oracledb-protocol/src/thin/types.rs	4
 crates/oracledb-protocol/src/tls/dn.rs	15
 crates/oracledb-protocol/src/tls/pfx.rs	1
 crates/oracledb-protocol/src/tls/sni.rs	6
-crates/oracledb-protocol/src/tls/sso.rs	4
+crates/oracledb-protocol/src/tls/sso.rs	3
 crates/oracledb-protocol/src/tls/wallet.rs	6
 crates/oracledb-protocol/src/vector.rs	14
 crates/oracledb-protocol/src/wire.rs	16
@@ -45,7 +45,7 @@ crates/oracledb-protocol/tests/pre23ai_handshake_golden.rs	10
 crates/oracledb-protocol/tests/protocol_limits_properties.rs	8
 crates/oracledb-protocol/tests/reference_contract.rs	1
 crates/oracledb-protocol/tests/sessionless_golden.rs	2
-crates/oracledb-protocol/tests/tls_wallet.rs	10
+crates/oracledb-protocol/tests/tls_wallet.rs	20
 crates/oracledb-protocol/tests/tpc_golden.rs	3
 crates/oracledb-pyshim/src/dbobject.rs	3
 crates/oracledb/src/arrow/mod.rs	35
@@ -60,7 +60,7 @@ crates/oracledb/src/soda/metadata.rs	4
 crates/oracledb/src/soda/operation.rs	11
 crates/oracledb/src/soda/qbe.rs	23
 crates/oracledb/src/sql_convert.rs	29
-crates/oracledb/src/tls.rs	3
+crates/oracledb/src/tls.rs	6
 crates/oracledb/src/transport.rs	11
 crates/oracledb/tests/access_token.rs	5
 crates/oracledb/tests/arrow_columnar_alloc.rs	1
@@ -93,6 +93,7 @@ crates/oracledb/tests/pool_reaper_async.rs	4
 crates/oracledb/tests/prefetch_overlap.rs	4
 crates/oracledb/tests/repro_repeated_named_bind.rs	1
 crates/oracledb/tests/reuse_after_call_timeout.rs	1
+crates/oracledb/tests/statement_ground_truth.rs	3
 crates/oracledb/tests/tls_handshake.rs	3
 crates/oracledb/tests/trybuild/fail/enum.rs	0
 crates/oracledb/tests/trybuild/fail/invalid_field_attr.rs	0

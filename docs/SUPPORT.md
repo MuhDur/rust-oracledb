@@ -58,7 +58,7 @@ matrix:
 | `derive` | Default feature; covered by the default profile and derive-specific tests. |
 | `tracing` | Observability feature; covered by all-features compile smoke and observability tests. |
 | `cassette` | Transport record/replay seam; covered by record/replay tests and all-features compile smoke. |
-| `experimental` | Enables the cwallet.sso reader; covered by all-features compile smoke, not a stable 1.0 user contract yet. |
+| `experimental` | Historical no-op since 0.7.x: the wallet readers (`ewallet.pem` incl. encrypted keys, `ewallet.p12`, `cwallet.sso`) are always compiled. Kept so `--features experimental` builds keep working. |
 
 Unsupported feature combinations should be documented explicitly before they are
 relied on. Do not infer support from `--all-features` alone.
@@ -138,11 +138,29 @@ the `oracledb` crate builds the rustls `ClientConfig` and the custom verifier.
 
 | format | status | citation |
 |---|---|---|
-| `ewallet.pem` (PEM trust anchors; optional client chain + unencrypted PKCS#8/PKCS#1/SEC1 key for mTLS) | **Fully supported.** | `crates/oracledb-protocol/src/tls/wallet.rs:139-204` |
-| Raw PEM CA bundles (system roots) | Supported for the no-wallet path. | `crates/oracledb-protocol/src/tls/wallet.rs:210-215` |
-| `cwallet.sso` (SSO auto-login wallet, PKCS#12 container) | **Experimental** — only behind `--features experimental`. With the feature off, `parse_cwallet_sso` returns `WalletError::SsoNotEnabled` (a clear typed error telling the operator to rebuild or convert to `ewallet.pem`) — **fail closed**, never a silent skip. | reader gated `crates/oracledb-protocol/src/tls/sso.rs:200-213`; fail-closed wiring `crates/oracledb/src/tls.rs:354-372`; not a stable 1.0 contract (see the "Documented But Not Matrix Profiles" table above) |
-| Encrypted `ewallet.pem` private key | **Not supported in 0.5.1** — detected and rejected with `WalletError::Pem` and a clear operator message (`orapki ... -auto_login` to produce an unencrypted PEM, or use `cwallet.sso`) rather than silently degrading to verify-only. The wallet password option is accepted for API symmetry but does not decrypt encrypted PKCS#8 yet. | `crates/oracledb-protocol/src/tls/wallet.rs` |
-| `ewallet.p12` standalone PKCS#12 wallet | **Not supported in 0.5.1** — recognized as an unsupported wallet format and returned as a typed `WalletError::UnsupportedFormat { format: "ewallet.p12" }`. Convert to `ewallet.pem` or use experimental `cwallet.sso`; decrypt/standalone p12 support is deferred. | `crates/oracledb/src/tls.rs`; `crates/oracledb-protocol/src/tls/wallet.rs` |
+| `ewallet.pem` (PEM trust anchors; optional client chain + unencrypted PKCS#8/PKCS#1/SEC1 key for mTLS) | **Fully supported.** | `crates/oracledb-protocol/src/tls/wallet.rs` (`parse_ewallet_pem`) |
+| Raw PEM CA bundles (system roots) | Supported for the no-wallet path. | `crates/oracledb-protocol/src/tls/wallet.rs` (`parse_pem_certificates`) |
+| `cwallet.sso` (SSO auto-login wallet, PKCS#12 container) | **Supported** (promoted from experimental in 0.7.x): outer container magic `A1F84E` versions 6/7/8 with the `num3 == 6` AES-128-CBC auto-login sub-type (incl. auto-login-local key re-derivation), inner PKCS#12 PBES2/PBKDF2/AES-CBC. Unsupported sub-types (`5` no-key, `0x35` single-DES) and legacy 3DES/RC2 PKCS#12 schemes fail closed with typed `WalletError::Sso`/`WalletError::Pkcs12` errors. Verified offline against a **real `orapki` 23.26-generated wallet** (`tests/fixtures/tls/cwallet_orapki.sso`) whose extracted certs/keys are byte-identical to its paired `ewallet.p12`. | reader `crates/oracledb-protocol/src/tls/sso.rs`; PFX core `crates/oracledb-protocol/src/tls/pfx.rs`; wiring `crates/oracledb/src/tls.rs` (`load_wallet`); tests `crates/oracledb-protocol/tests/tls_wallet.rs` |
+| Encrypted `ewallet.pem` private key | **Supported since 0.7.x** — a PKCS#8 `ENCRYPTED PRIVATE KEY` block is decrypted with `wallet_password` (PBES2 / PBKDF2-HMAC-SHA1/SHA256 / AES-128/192/256-CBC — the scheme ADB wallet downloads and `openssl pkcs8 -topk8` emit; RustCrypto only). Missing password → typed `WalletError::PasswordRequired`; wrong password or unsupported scheme (scrypt, PBES1, legacy `Proc-Type: 4,ENCRYPTED`) → typed `WalletError::KeyDecrypt` naming the remediation. Never silently degrades to verify-only. | `crates/oracledb-protocol/src/tls/wallet.rs` (`parse_ewallet_pem`), `crates/oracledb-protocol/src/tls/pfx.rs` (`decrypt_encrypted_private_key_info`); tests `crates/oracledb-protocol/tests/tls_wallet.rs` |
+| `ewallet.p12` standalone PKCS#12 wallet | **Supported since 0.7.x** — `parse_ewallet_p12`/`read_ewallet_p12` reuse the PFX reader; requires `wallet_password` (typed `WalletError::PasswordRequired` when absent). Modern PBES2/PBKDF2/AES-CBC wallets (orapki 19c+/23ai, `openssl pkcs12 -export` defaults) verified offline against a **real `orapki` 23.26-generated `ewallet.p12`**; legacy 3DES/RC2 wallets fail closed with a typed `WalletError::Pkcs12` naming the unsupported OID. | `crates/oracledb-protocol/src/tls/wallet.rs` (`parse_ewallet_p12`); loader precedence `crates/oracledb/src/tls.rs` (`load_wallet`); tests `crates/oracledb-protocol/tests/tls_wallet.rs` |
+
+**Honesty note (offline vs live):** the encrypted-PEM / p12 / sso rows above are
+proven **offline** — real `orapki`-generated and openssl-generated wallets are
+parsed, decrypted, and cross-checked (sso ≡ p12 contents) in unit/integration
+tests, and the identical rustls wiring is exercised by the live TCPS handshake
+tests. A full end-to-end acceptance against a real **Autonomous Database**
+TCPS endpoint (real ADB wallet zip) still requires ADB infrastructure and has
+**not** been run; until then treat ADB-specific behaviour as
+**intended/unverified**.
+
+**Wallet loading precedence** (`crates/oracledb/src/tls.rs::load_wallet`):
+`ewallet.pem` first (python-oracledb thin parity — the reference reads *only*
+this file); else `ewallet.p12` when `wallet_password` is supplied; else
+`cwallet.sso`; else a passwordless `ewallet.p12` fails closed with
+`PasswordRequired`. Note that `ewallet.p12`/`cwallet.sso` reading **exceeds**
+the pinned python-oracledb 4.0.1 thin reference (which requires `ewallet.pem`);
+the encrypted-PEM decryption matches the reference's
+`load_cert_chain(..., password=...)` behaviour.
 
 **Wallet resolution precedence:** explicit `wallet_location` (the literal `SYSTEM`
 means "no wallet, use system roots"), then `TNS_ADMIN`

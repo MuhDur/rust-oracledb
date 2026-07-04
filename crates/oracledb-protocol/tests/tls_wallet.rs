@@ -1,15 +1,25 @@
 //! Integration tests for the sans-I/O TLS wallet readers, SNI builder and DN
-//! matcher, exercised against REAL fixtures generated with openssl (see
-//! `crates/oracledb/tests/fixtures/tls/` and `docs/TLS_SETUP.md`).
+//! matcher, exercised against REAL fixtures (see
+//! `crates/oracledb/tests/fixtures/tls/` and `docs/TLS_SETUP.md`): openssl-3
+//! generated PEM/PKCS#12 material plus a genuine `orapki` 23c wallet
+//! (`ewallet_orapki.p12` + `cwallet_orapki.sso`, synthetic self-signed
+//! lab-only content).
 //!
-//! These prove the actual parsing/crypto paths — not mocks. The `cwallet.sso`
-//! test is gated on the `experimental` feature.
+//! These prove the actual parsing/crypto paths — not mocks.
 
 use std::path::PathBuf;
 
 use oracledb_protocol::tls::dn::{check_cert_dn, check_server_name, name_matches};
 use oracledb_protocol::tls::sni::build_sni;
-use oracledb_protocol::tls::wallet::{parse_ewallet_pem, resolve_wallet_dir, WalletError};
+use oracledb_protocol::tls::wallet::{
+    parse_ewallet_p12, parse_ewallet_pem, resolve_wallet_dir, WalletError,
+};
+
+/// Wallet password used when generating the encrypted fixtures (see
+/// `docs/TLS_SETUP.md` §5). Lab-only synthetic material.
+const FIXTURE_WALLET_PASSWORD: &str = "WalletPassword16";
+/// Wallet password of the orapki-generated wallet fixtures.
+const ORAPKI_WALLET_PASSWORD: &str = "WalletPass123";
 
 fn fixture_dir() -> PathBuf {
     // crates/oracledb-protocol/tests -> crates/oracledb/tests/fixtures/tls
@@ -63,41 +73,160 @@ fn ca_only_wallet_is_verify_only() {
     );
 }
 
-#[test]
-fn encrypted_ewallet_pem_reports_typed_remediation() {
-    const ENCRYPTED_PKCS8_KEY: &str = "\
------BEGIN ENCRYPTED PRIVATE KEY-----\n\
-MIIBxTBfBgkqhkiG9w0BBQ0wUjAxBgkqhkiG9w0BBQwwJAQQ0szDnlfhzs/48BM7\n\
-gZYo1wICCAAwDAYIKoZIhvcNAgkFADAdBglghkgBZQMEASoEEMZ1nFqs2Oh9dqKz\n\
-XiSxWMsEggFgrIf9Xh+VmNfcOcqXkNZkFHNWX0MZI0oGHB23R+7M1yLqfV0Qj\n\
-NQZe/x3yO24kBy2hzhzs2tzqVOX5OcUlrdI37D7bvbqmjxrTyH5XH1JskAWPDCM5\n\
-DuKHdjoN8dfGxvyJ5JsNDiaGH54h1zNUABOVNVom8evOwbRMG1BvlA5gQJvdLcLr\n\
-+VfxFLt8FJMJJF9rLqW/p9IU3L4JVsp9nStbam7h7L446roQAWT8AvFka+ajzMiW\n\
-PGodnmXKA1d2oSXistuoJU358Ls3kw+J+QmCXb9tt6qpp+FbHUiJp+ng7b9T8QrN\n\
-0SBbytDphifDt9RRw/o6DADLjLoZmXk4Tf57dwK/adsJTyHL4W8t1wSXDyjBNSLu\n\
-RQbD0Mj087+zY3GUJVz9nyrNr3KCjuU6K4A9nQouFZCNqLnK5ujJmOKkSz/sIOaL\n\
-FyQwV5H9Lft1CUguUqQX32wuwTu2ZGwWzQ==\n\
------END ENCRYPTED PRIVATE KEY-----\n";
-    let mut pem = read_fixture("ca_wallet.pem");
-    pem.extend_from_slice(ENCRYPTED_PKCS8_KEY.as_bytes());
-    let err = parse_ewallet_pem(&pem, Some("redaction-password"))
-        .expect_err("encrypted private key should report a typed PEM error");
-    let message = if let WalletError::Pem(message) = &err {
-        message
-    } else {
-        assert!(
-            matches!(&err, WalletError::Pem(_)),
-            "expected WalletError::Pem, got {err:?}"
-        );
-        return;
-    };
-    assert!(message.contains("orapki"));
-    assert!(message.contains("-auto_login"));
-    assert!(!format!("{err}").contains("redaction-password"));
-    assert!(!format!("{err:?}").contains("redaction-password"));
+/// Assert an error's Display and Debug never leak the wallet password or the
+/// fixture path.
+fn assert_redacted(err: &WalletError, password: &str) {
+    let display = format!("{err}");
+    let debug = format!("{err:?}");
+    assert!(!display.contains(password), "password leaked: {display}");
+    assert!(!debug.contains(password), "password leaked: {debug}");
     let sensitive_path = fixture_dir().display().to_string();
-    assert!(!format!("{err}").contains(&sensitive_path));
-    assert!(!format!("{err:?}").contains(&sensitive_path));
+    assert!(!display.contains(&sensitive_path), "path leaked: {display}");
+    assert!(!debug.contains(&sensitive_path), "path leaked: {debug}");
+}
+
+/// Assert decrypted wallet contents carry a usable mTLS identity whose key is
+/// valid PKCS#8 (or PKCS#1) DER.
+fn assert_client_identity(wallet: &oracledb_protocol::tls::wallet::WalletContents) {
+    assert!(!wallet.ca_certificates.is_empty(), "trust anchors expected");
+    assert!(wallet.has_client_identity(), "client identity expected");
+    use x509_cert::der::Decode;
+    let key_der = wallet.client_private_key.as_ref().expect("key present");
+    let pkcs8_ok = pkcs8::PrivateKeyInfo::from_der(key_der).is_ok();
+    // PKCS#1 keys (BEGIN RSA PRIVATE KEY) are also accepted by rustls.
+    assert!(
+        pkcs8_ok || key_der.first() == Some(&0x30),
+        "decrypted key must be DER"
+    );
+    let _cert = x509_cert::Certificate::from_der(&wallet.client_cert_chain[0])
+        .expect("client chain leaf must be X.509");
+}
+
+#[test]
+fn encrypted_ewallet_pem_decrypts_with_password_sha256_prf() {
+    // ADB-style ewallet.pem: certs + PKCS#8 ENCRYPTED PRIVATE KEY
+    // (PBES2 / PBKDF2-HMAC-SHA256 / AES-256-CBC).
+    let pem = read_fixture("ewallet_encrypted.pem");
+    let wallet = parse_ewallet_pem(&pem, Some(FIXTURE_WALLET_PASSWORD))
+        .expect("encrypted ewallet.pem must decrypt with the wallet password");
+    assert_client_identity(&wallet);
+    assert_eq!(wallet.ca_certificates.len(), 2, "leaf + CA certs");
+}
+
+#[test]
+fn encrypted_ewallet_pem_decrypts_with_password_sha1_prf() {
+    // PBES2 / PBKDF2-HMAC-SHA1 / AES-128-CBC variant.
+    let pem = read_fixture("ewallet_encrypted_sha1.pem");
+    let wallet = parse_ewallet_pem(&pem, Some(FIXTURE_WALLET_PASSWORD))
+        .expect("SHA1-PRF encrypted ewallet.pem must decrypt");
+    assert_client_identity(&wallet);
+}
+
+#[test]
+fn encrypted_ewallet_pem_without_password_is_password_required() {
+    let pem = read_fixture("ewallet_encrypted.pem");
+    let err = parse_ewallet_pem(&pem, None)
+        .expect_err("encrypted key without a password must fail closed");
+    assert!(
+        matches!(err, WalletError::PasswordRequired { format } if format == "ewallet.pem"),
+        "expected PasswordRequired, got {err:?}"
+    );
+    assert_redacted(&err, FIXTURE_WALLET_PASSWORD);
+}
+
+#[test]
+fn encrypted_ewallet_pem_wrong_password_is_typed_key_decrypt() {
+    let pem = read_fixture("ewallet_encrypted.pem");
+    let err = parse_ewallet_pem(&pem, Some("not-the-password!"))
+        .expect_err("wrong password must fail, never degrade to verify-only");
+    assert!(
+        matches!(&err, WalletError::KeyDecrypt(_)),
+        "expected KeyDecrypt, got {err:?}"
+    );
+    assert!(format!("{err}").contains("wallet_password"));
+    assert_redacted(&err, "not-the-password!");
+}
+
+#[test]
+fn encrypted_ewallet_pem_scrypt_kdf_is_typed_unsupported() {
+    // openssl pkcs8 -scrypt: an unsupported KDF must produce a typed error
+    // naming the unsupported OID — not a panic, not a silent verify-only wallet.
+    let pem = read_fixture("ewallet_encrypted_scrypt.pem");
+    let err = parse_ewallet_pem(&pem, Some(FIXTURE_WALLET_PASSWORD))
+        .expect_err("scrypt KDF is not supported and must fail closed");
+    assert!(
+        matches!(&err, WalletError::KeyDecrypt(_)),
+        "expected KeyDecrypt, got {err:?}"
+    );
+    assert_redacted(&err, FIXTURE_WALLET_PASSWORD);
+}
+
+#[test]
+fn legacy_openssl_encrypted_pem_is_typed_unsupported() {
+    // Proc-Type: 4,ENCRYPTED (PEM-level encryption) — typed remediation
+    // pointing at `openssl pkcs8 -topk8`, even when a password is supplied.
+    let pem = read_fixture("ewallet_encrypted_legacy.pem");
+    let err = parse_ewallet_pem(&pem, Some(FIXTURE_WALLET_PASSWORD))
+        .expect_err("legacy PEM encryption must fail closed");
+    let message = if let WalletError::KeyDecrypt(message) = &err {
+        message.clone()
+    } else {
+        panic!("expected KeyDecrypt, got {err:?}");
+    };
+    assert!(message.contains("pkcs8"), "remediation must name pkcs8");
+    assert_redacted(&err, FIXTURE_WALLET_PASSWORD);
+}
+
+#[test]
+fn orapki_ewallet_p12_parses_with_password() {
+    // A REAL `orapki wallet create` + `wallet add -self_signed` ewallet.p12
+    // (oraclepki 23.26): whole-safe encryptedData, PBES2 / PBKDF2-HMAC-SHA256 /
+    // AES-256-CBC.
+    let p12 = read_fixture("ewallet_orapki.p12");
+    let wallet = parse_ewallet_p12(&p12, Some(ORAPKI_WALLET_PASSWORD))
+        .expect("real orapki ewallet.p12 must parse");
+    assert_client_identity(&wallet);
+    use x509_cert::der::Decode;
+    let cert = x509_cert::Certificate::from_der(&wallet.ca_certificates[0])
+        .expect("orapki cert must be X.509");
+    let subject = cert.tbs_certificate.subject.to_string();
+    assert!(
+        subject.contains("db.example.com"),
+        "subject was {subject:?}"
+    );
+}
+
+#[test]
+fn openssl_default_ewallet_p12_parses_with_password() {
+    // `openssl pkcs12 -export` (OpenSSL 3 defaults): PKCS8ShroudedKeyBag +
+    // encryptedData cert safe, PBES2/AES-256-CBC.
+    let p12 = read_fixture("ewallet_openssl.p12");
+    let wallet = parse_ewallet_p12(&p12, Some(FIXTURE_WALLET_PASSWORD))
+        .expect("openssl-default ewallet.p12 must parse");
+    assert_client_identity(&wallet);
+}
+
+#[test]
+fn ewallet_p12_without_password_is_password_required() {
+    let p12 = read_fixture("ewallet_orapki.p12");
+    let err = parse_ewallet_p12(&p12, None).expect_err("p12 without password must fail closed");
+    assert!(
+        matches!(err, WalletError::PasswordRequired { format } if format == "ewallet.p12"),
+        "expected PasswordRequired, got {err:?}"
+    );
+    assert_redacted(&err, ORAPKI_WALLET_PASSWORD);
+}
+
+#[test]
+fn ewallet_p12_wrong_password_is_typed_pkcs12_error() {
+    let p12 = read_fixture("ewallet_orapki.p12");
+    let err = parse_ewallet_p12(&p12, Some("not-the-password!"))
+        .expect_err("wrong p12 password must fail");
+    assert!(
+        matches!(&err, WalletError::Pkcs12(_)),
+        "expected Pkcs12, got {err:?}"
+    );
+    assert_redacted(&err, "not-the-password!");
 }
 
 #[test]
@@ -143,7 +272,29 @@ fn resolve_wallet_dir_precedence() {
     assert_eq!(resolve_wallet_dir(None, Some("/t")), Some("/t".into()));
 }
 
-#[cfg(feature = "experimental")]
+#[test]
+fn cwallet_sso_orapki_real_wallet_parses() {
+    // The genuine `orapki wallet create -auto_login` cwallet.sso (oraclepki
+    // 23.26) that pairs with ewallet_orapki.p12: outer container magic
+    // A1F84E / version '6' / sub-type 6 (AES-128-CBC auto-login password),
+    // inner PKCS#12 PBES2/AES-256. Its contents must match the p12's.
+    let sso = read_fixture("cwallet_orapki.sso");
+    let wallet = oracledb_protocol::tls::sso::parse_cwallet_sso(&sso)
+        .expect("real orapki cwallet.sso must parse end to end");
+    assert_client_identity(&wallet);
+    let p12 = read_fixture("ewallet_orapki.p12");
+    let from_p12 = parse_ewallet_p12(&p12, Some(ORAPKI_WALLET_PASSWORD))
+        .expect("paired ewallet.p12 must parse");
+    assert_eq!(
+        wallet.ca_certificates, from_p12.ca_certificates,
+        "sso and p12 must yield identical certificates"
+    );
+    assert_eq!(
+        wallet.client_private_key, from_p12.client_private_key,
+        "sso and p12 must yield the identical private key"
+    );
+}
+
 #[test]
 fn cwallet_sso_parses_real_oracle_format_wallet() {
     // A genuine cwallet.sso (Oracle SSO outer container wrapping a real
@@ -170,7 +321,6 @@ fn cwallet_sso_parses_real_oracle_format_wallet() {
     );
 }
 
-#[cfg(feature = "experimental")]
 #[test]
 fn cwallet_sso_parses_shrouded_key_wallet() {
     // A cwallet.sso whose inner PKCS#12 stores the private key in a PBES2/AES

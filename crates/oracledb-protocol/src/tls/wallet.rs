@@ -1,18 +1,23 @@
 //! Oracle wallet readers and wallet-location resolution.
 //!
-//! Two wallet shapes are supported:
+//! Three wallet shapes are supported:
 //!
 //! * **`ewallet.pem`** — a single PEM file holding the trust-anchor
 //!   certificate(s) and, for mTLS, the client certificate chain plus the
 //!   client private key (optionally encrypted with a wallet password). This is
 //!   the format python-oracledb thin loads
 //!   (`transport.pyx::create_ssl_context`: `load_verify_locations(ewallet.pem)`
-//!   then a best-effort `load_cert_chain(ewallet.pem, password=...)`). Fully
-//!   supported here.
+//!   then a best-effort `load_cert_chain(ewallet.pem, password=...)`).
+//!   Encrypted `ENCRYPTED PRIVATE KEY` (PKCS#8 PBES2) blocks are decrypted
+//!   when a wallet password is supplied.
+//!
+//! * **`ewallet.p12`** — the standard PKCS#12 wallet (the file `orapki wallet
+//!   create` produces and Autonomous Database wallet zips ship). Requires the
+//!   wallet password. Modern PBES2/PBKDF2/AES-CBC wallets are supported;
+//!   legacy 3DES/RC2 wallets return a typed error.
 //!
 //! * **`cwallet.sso`** — the SSO auto-login wallet (proprietary Oracle
-//!   container wrapping a PKCS#12). Parsing is gated behind the `experimental`
-//!   feature; see [`super::sso`].
+//!   container wrapping a PKCS#12); see [`super::sso`].
 //!
 //! All parsed certificates and keys are returned as DER bytes so the I/O crate
 //! can hand them to rustls without this (sans-I/O) crate depending on the async
@@ -23,6 +28,8 @@ use std::path::{Path, PathBuf};
 
 /// File name of the PEM wallet (python-oracledb `PEM_WALLET_FILE_NAME`).
 pub const PEM_WALLET_FILE_NAME: &str = "ewallet.pem";
+/// File name of the standalone PKCS#12 wallet.
+pub const P12_WALLET_FILE_NAME: &str = "ewallet.p12";
 /// File name of the SSO auto-login wallet.
 pub const SSO_WALLET_FILE_NAME: &str = "cwallet.sso";
 
@@ -46,15 +53,37 @@ pub enum WalletError {
     /// The wallet contained no usable trust-anchor certificates.
     #[error("wallet contained no certificates")]
     NoCertificates,
-    /// SSO (cwallet.sso) parsing failure (experimental).
+    /// SSO (cwallet.sso) outer-container parsing failure.
     #[error("cwallet.sso parse error: {0}")]
     Sso(String),
-    /// SSO support is not compiled in.
+    /// Historical: SSO support compiled out. No longer returned as of 0.7.x
+    /// (the `cwallet.sso` reader is always available); the variant is kept so
+    /// existing `match` arms keep compiling.
     #[error(
-        "cwallet.sso support is experimental and not enabled; rebuild with \
-         --features experimental, or convert the wallet to ewallet.pem"
+        "cwallet.sso support is not enabled in this build; convert the wallet \
+         to ewallet.pem"
     )]
     SsoNotEnabled,
+    /// PKCS#12 (`ewallet.p12`, or the PKCS#12 embedded in `cwallet.sso`)
+    /// parsing or decryption failure. The message names OIDs/structures only —
+    /// never paths or passwords.
+    #[error("PKCS#12 wallet parse error: {0}")]
+    Pkcs12(String),
+    /// An encrypted private key could not be decrypted (wrong wallet password,
+    /// or an unsupported encryption scheme — only PKCS#8 PBES2 with
+    /// PBKDF2-HMAC-SHA1/SHA256 + AES-CBC is supported).
+    #[error("wallet private key decryption failed: {0}")]
+    KeyDecrypt(String),
+    /// The wallet (or its private key) is encrypted and requires a wallet
+    /// password, but none was supplied. Machine-classifiable remediation:
+    /// supply `wallet_password`, or use an auto-login `cwallet.sso` /
+    /// unencrypted `ewallet.pem` wallet.
+    #[error(
+        "wallet {format} is encrypted and requires a wallet password; supply \
+         wallet_password (or use an auto-login cwallet.sso or unencrypted \
+         ewallet.pem wallet)"
+    )]
+    PasswordRequired { format: &'static str },
     /// A recognized wallet file is present but this thin build does not support
     /// the format.
     #[error("wallet format {format} is not supported by this thin build")]
@@ -76,6 +105,12 @@ impl std::fmt::Debug for WalletError {
             Self::NoCertificates => f.write_str("NoCertificates"),
             Self::Sso(message) => f.debug_tuple("Sso").field(message).finish(),
             Self::SsoNotEnabled => f.write_str("SsoNotEnabled"),
+            Self::Pkcs12(message) => f.debug_tuple("Pkcs12").field(message).finish(),
+            Self::KeyDecrypt(message) => f.debug_tuple("KeyDecrypt").field(message).finish(),
+            Self::PasswordRequired { format } => f
+                .debug_struct("PasswordRequired")
+                .field("format", format)
+                .finish(),
             Self::UnsupportedFormat { format } => f
                 .debug_struct("UnsupportedFormat")
                 .field("format", format)
@@ -140,6 +175,12 @@ pub fn pem_wallet_path(dir: &Path) -> PathBuf {
     dir.join(PEM_WALLET_FILE_NAME)
 }
 
+/// Returns the path to `ewallet.p12` inside a wallet directory.
+#[must_use]
+pub fn p12_wallet_path(dir: &Path) -> PathBuf {
+    dir.join(P12_WALLET_FILE_NAME)
+}
+
 /// Returns the path to `cwallet.sso` inside a wallet directory.
 #[must_use]
 pub fn sso_wallet_path(dir: &Path) -> PathBuf {
@@ -154,24 +195,40 @@ pub fn sso_wallet_path(dir: &Path) -> PathBuf {
 /// (`load_cert_chain`). A wallet without a private key is verify-only, which is
 /// the common server-verification case.
 ///
-/// The `wallet_password` is accepted for API symmetry with python-oracledb but
-/// is only meaningful for encrypted private keys; rustls-pemfile handles
-/// unencrypted PKCS#8/PKCS#1/SEC1 keys. Encrypted keys are reported via
-/// [`WalletError::Pem`] so the caller can surface a clear message rather than
-/// silently producing a verify-only wallet.
+/// When the private key is an `ENCRYPTED PRIVATE KEY` (PKCS#8
+/// `EncryptedPrivateKeyInfo`) block — the shape Autonomous Database wallet
+/// downloads produce — it is decrypted with `wallet_password` (PBES2 /
+/// PBKDF2-HMAC-SHA1/SHA256 / AES-CBC, the scheme `openssl pkcs8 -topk8` and
+/// Oracle wallet exports emit). A missing password yields
+/// [`WalletError::PasswordRequired`]; a wrong password or unsupported scheme
+/// yields [`WalletError::KeyDecrypt`]. Legacy OpenSSL PEM-level encryption
+/// (`Proc-Type: 4,ENCRYPTED`) is rejected with a typed remediation.
 ///
 /// # Errors
-/// Returns [`WalletError::Pem`] on malformed PEM and
-/// [`WalletError::NoCertificates`] if no certificate blocks are found.
+/// Returns [`WalletError::Pem`] on malformed PEM,
+/// [`WalletError::NoCertificates`] if no certificate blocks are found, and the
+/// encrypted-key errors described above.
 pub fn parse_ewallet_pem(
     pem: &[u8],
-    _wallet_password: Option<&str>,
+    wallet_password: Option<&str>,
 ) -> Result<WalletContents, WalletError> {
+    // Legacy OpenSSL PEM-level encryption scrambles the base64 payload of a
+    // PKCS#1 block; rustls-pemfile would surface it as a garbage key. Reject it
+    // up front with a typed remediation (fail closed).
+    if pem_contains_legacy_encryption(pem) {
+        return Err(WalletError::KeyDecrypt(
+            "legacy OpenSSL PEM encryption (Proc-Type: 4,ENCRYPTED) is not \
+             supported; re-export the key as PKCS#8 with \
+             `openssl pkcs8 -topk8` (optionally encrypted, then supply \
+             wallet_password)"
+                .to_string(),
+        ));
+    }
+
     let mut reader = std::io::BufReader::new(pem);
     let mut contents = WalletContents::default();
     let mut all_certs: Vec<Vec<u8>> = Vec::new();
     let mut keys: Vec<Vec<u8>> = Vec::new();
-    let mut saw_encrypted_key = false;
 
     loop {
         match rustls_pemfile::read_one(&mut reader) {
@@ -188,9 +245,8 @@ pub fn parse_ewallet_pem(
                 rustls_pemfile::Item::Sec1Key(der) => {
                     keys.push(der.secret_sec1_der().to_vec());
                 }
-                // Encrypted private keys are not handled by rustls-pemfile;
-                // they appear as Crl/Csr-less "other" items the iterator skips.
-                // We detect the PEM marker separately below.
+                // ENCRYPTED PRIVATE KEY blocks are not handled by
+                // rustls-pemfile; they are extracted and decrypted below.
                 _ => {}
             },
             Ok(None) => break,
@@ -198,15 +254,25 @@ pub fn parse_ewallet_pem(
         }
     }
 
-    // rustls-pemfile silently skips ENCRYPTED PRIVATE KEY blocks; detect them so
-    // we can tell the operator their key needs decrypting rather than pretend
-    // the wallet is verify-only.
-    if keys.is_empty() && pem_contains_encrypted_key(pem) {
-        saw_encrypted_key = true;
-    }
-
     if all_certs.is_empty() {
         return Err(WalletError::NoCertificates);
+    }
+
+    // Decrypt an ENCRYPTED PRIVATE KEY block when no plaintext key was found.
+    if keys.is_empty() {
+        let encrypted_blocks = extract_encrypted_key_pem_blocks(pem);
+        if !encrypted_blocks.is_empty() {
+            let Some(password) = wallet_password else {
+                return Err(WalletError::PasswordRequired {
+                    format: PEM_WALLET_FILE_NAME,
+                });
+            };
+            // Oracle wallets carry a single client key; decrypt the first block
+            // and surface its error directly (never silently degrade to a
+            // verify-only wallet).
+            let block = &encrypted_blocks[0];
+            keys.push(decrypt_encrypted_pem_key(block, password)?);
+        }
     }
 
     // Every certificate is a candidate trust anchor (python-oracledb loads the
@@ -219,15 +285,81 @@ pub fn parse_ewallet_pem(
     if let Some(key) = keys.into_iter().next() {
         contents.client_cert_chain = all_certs;
         contents.client_private_key = Some(key);
-    } else if saw_encrypted_key {
-        return Err(WalletError::Pem(
-            "wallet private key is encrypted; supply a wallet with an \
-             unencrypted ewallet.pem (orapki ... -auto_login) or use cwallet.sso"
-                .to_string(),
-        ));
     }
 
     Ok(contents)
+}
+
+/// Parse a standalone `ewallet.p12` (PKCS#12) wallet into [`WalletContents`].
+///
+/// This is the wallet file `orapki wallet create` produces and Autonomous
+/// Database wallet zips ship. Only the modern PBES2 / PBKDF2 / AES-CBC scheme
+/// is supported (orapki 19c+, `openssl pkcs12 -export` defaults); legacy
+/// 3DES/RC2 wallets return a typed [`WalletError::Pkcs12`] naming the
+/// unsupported OID.
+///
+/// # Errors
+/// Returns [`WalletError::PasswordRequired`] when `wallet_password` is `None`
+/// (Oracle PKCS#12 wallets are always password-protected), and
+/// [`WalletError::Pkcs12`] on parse/decrypt failure (including a wrong
+/// password).
+pub fn parse_ewallet_p12(
+    data: &[u8],
+    wallet_password: Option<&str>,
+) -> Result<WalletContents, WalletError> {
+    let Some(password) = wallet_password else {
+        return Err(WalletError::PasswordRequired {
+            format: P12_WALLET_FILE_NAME,
+        });
+    };
+    super::pfx::parse_pfx(data, password.as_bytes())
+}
+
+/// Extract the raw text of every `ENCRYPTED PRIVATE KEY` PEM block.
+fn extract_encrypted_key_pem_blocks(pem: &[u8]) -> Vec<String> {
+    const BEGIN: &str = "-----BEGIN ENCRYPTED PRIVATE KEY-----";
+    const END: &str = "-----END ENCRYPTED PRIVATE KEY-----";
+    let text = String::from_utf8_lossy(pem);
+    let mut blocks = Vec::new();
+    let mut rest: &str = &text;
+    while let Some(start) = rest.find(BEGIN) {
+        let Some(end_rel) = rest[start..].find(END) else {
+            break;
+        };
+        let stop = start + end_rel + END.len();
+        blocks.push(rest[start..stop].to_string());
+        rest = &rest[stop..];
+    }
+    blocks
+}
+
+/// Decode one `ENCRYPTED PRIVATE KEY` PEM block and decrypt it to plaintext
+/// PKCS#8 `PrivateKeyInfo` DER.
+fn decrypt_encrypted_pem_key(block: &str, password: &str) -> Result<Vec<u8>, WalletError> {
+    let (label, doc) = der::Document::from_pem(block)
+        .map_err(|e| WalletError::Pem(format!("ENCRYPTED PRIVATE KEY block: {e}")))?;
+    if label != "ENCRYPTED PRIVATE KEY" {
+        return Err(WalletError::Pem(format!(
+            "expected ENCRYPTED PRIVATE KEY PEM label, got {label}"
+        )));
+    }
+    super::pfx::decrypt_encrypted_private_key_info(doc.as_bytes(), password.as_bytes())
+}
+
+/// Heuristic: does this PEM buffer use legacy OpenSSL PEM-level encryption?
+fn pem_contains_legacy_encryption(pem: &[u8]) -> bool {
+    let mut reader = std::io::BufReader::new(pem);
+    let mut line = String::new();
+    while let Ok(n) = reader.read_line(&mut line) {
+        if n == 0 {
+            break;
+        }
+        if line.contains("Proc-Type: 4,ENCRYPTED") {
+            return true;
+        }
+        line.clear();
+    }
+    false
 }
 
 /// Parse all `CERTIFICATE` blocks from a PEM reader into DER byte vectors.
@@ -239,22 +371,6 @@ pub fn parse_pem_certificates(reader: &mut dyn BufRead) -> Vec<Vec<u8>> {
         .filter_map(Result::ok)
         .map(|der| der.as_ref().to_vec())
         .collect()
-}
-
-/// Heuristic: does this PEM buffer contain an encrypted private-key block?
-fn pem_contains_encrypted_key(pem: &[u8]) -> bool {
-    let mut reader = std::io::BufReader::new(pem);
-    let mut line = String::new();
-    while let Ok(n) = reader.read_line(&mut line) {
-        if n == 0 {
-            break;
-        }
-        if line.contains("ENCRYPTED PRIVATE KEY") || line.contains("Proc-Type: 4,ENCRYPTED") {
-            return true;
-        }
-        line.clear();
-    }
-    false
 }
 
 /// Read and parse `ewallet.pem` from a wallet directory.
@@ -276,6 +392,27 @@ pub fn read_ewallet_pem(
         source,
     })?;
     parse_ewallet_pem(&bytes, wallet_password)
+}
+
+/// Read and parse `ewallet.p12` from a wallet directory.
+///
+/// # Errors
+/// Returns [`WalletError::FileMissing`] if the file does not exist,
+/// [`WalletError::Io`] on a read error, and parse errors from
+/// [`parse_ewallet_p12`].
+pub fn read_ewallet_p12(
+    dir: &Path,
+    wallet_password: Option<&str>,
+) -> Result<WalletContents, WalletError> {
+    let path = p12_wallet_path(dir);
+    if !path.exists() {
+        return Err(WalletError::FileMissing(path.display().to_string()));
+    }
+    let bytes = std::fs::read(&path).map_err(|source| WalletError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    parse_ewallet_p12(&bytes, wallet_password)
 }
 
 #[cfg(test)]

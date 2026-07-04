@@ -1,15 +1,18 @@
-//! Minimal PKCS#12 (PFX) reader for the SSO wallet's inner container —
-//! EXPERIMENTAL, only the PBES2/PBKDF2/AES-CBC scheme.
+//! Minimal PKCS#12 (PFX) reader — only the PBES2/PBKDF2/AES-CBC scheme.
 //!
-//! This is intentionally narrow: it understands exactly the structure Oracle's
-//! modern (AES) `cwallet.sso` produces — a PFX whose AuthenticatedSafe holds an
-//! `encryptedData` content encrypted with PBES2 (PBKDF2 + AES-CBC), wrapping a
-//! `SafeContents` of key/cert SafeBags. Anything outside that path returns an
-//! explicit error (see [`super::sso`] for the supported/unsupported matrix).
+//! This is intentionally narrow: it understands exactly the structure modern
+//! Oracle wallets (`ewallet.p12`, and the PKCS#12 embedded in `cwallet.sso`)
+//! and `openssl pkcs12 -export` produce — a PFX whose AuthenticatedSafe holds
+//! `encryptedData` / `data` contents encrypted with PBES2 (PBKDF2 + AES-CBC),
+//! wrapping a `SafeContents` of key/cert SafeBags. Anything outside that path
+//! returns an explicit typed error (legacy PBE-SHA1-3DES/RC2 wallets must be
+//! re-exported; see [`super::wallet`] for the supported/unsupported matrix).
+//!
+//! The same PBES2 machinery also decrypts standalone PKCS#8
+//! `EncryptedPrivateKeyInfo` blocks (the `ENCRYPTED PRIVATE KEY` PEM block in
+//! an ADB-style `ewallet.pem`) via [`decrypt_encrypted_private_key_info`].
 //!
 //! Ported from go-ora `v3/configurations/wallet.go` + `wallet_algo.go`.
-
-#![cfg(feature = "experimental")]
 
 use crate::tls::wallet::{WalletContents, WalletError};
 use der::asn1::ObjectIdentifier;
@@ -29,27 +32,80 @@ const OID_KEY_BAG: &str = "1.2.840.113549.1.12.10.1.1";
 const OID_PKCS8_SHROUDED_KEY_BAG: &str = "1.2.840.113549.1.12.10.1.2";
 const OID_CERT_BAG: &str = "1.2.840.113549.1.12.10.1.3";
 
-fn sso(msg: impl Into<String>) -> WalletError {
-    WalletError::Sso(msg.into())
+fn p12(msg: impl Into<String>) -> WalletError {
+    WalletError::Pkcs12(msg.into())
+}
+
+/// Decrypt a PKCS#8 `EncryptedPrivateKeyInfo` (RFC 5958) — the DER inside an
+/// `ENCRYPTED PRIVATE KEY` PEM block — returning the plaintext PKCS#8
+/// `PrivateKeyInfo` DER.
+///
+/// ```text
+/// EncryptedPrivateKeyInfo ::= SEQUENCE {
+///   encryptionAlgorithm AlgorithmIdentifier,   -- PBES2 only
+///   encryptedData      OCTET STRING }
+/// ```
+///
+/// Only the PBES2 / PBKDF2 (HMAC-SHA1 or HMAC-SHA256) / AES-CBC scheme is
+/// supported — the scheme `openssl pkcs8 -topk8` and Oracle wallet exports
+/// emit. Anything else (scrypt, legacy PBES1, 3DES/RC2) returns a typed
+/// [`WalletError::KeyDecrypt`] naming the unsupported OID.
+pub(super) fn decrypt_encrypted_private_key_info(
+    der_bytes: &[u8],
+    password: &[u8],
+) -> Result<Vec<u8>, WalletError> {
+    let map_err = |e: WalletError| match e {
+        WalletError::Pkcs12(msg) => WalletError::KeyDecrypt(msg),
+        other => other,
+    };
+    let mut root = into_seq(der_bytes).map_err(map_err)?;
+    let (tag, epki_body) = read_tlv(&mut root).map_err(map_err)?;
+    if tag != Tag::Sequence {
+        return Err(WalletError::KeyDecrypt(
+            "EncryptedPrivateKeyInfo: expected SEQUENCE".to_string(),
+        ));
+    }
+    let mut epki = into_seq(epki_body).map_err(map_err)?;
+    let (alg_tag, alg_body) = read_tlv(&mut epki).map_err(map_err)?;
+    if alg_tag != Tag::Sequence {
+        return Err(WalletError::KeyDecrypt(
+            "EncryptedPrivateKeyInfo: expected AlgorithmIdentifier".to_string(),
+        ));
+    }
+    let (key, iv) = derive_pbes2(alg_body, password).map_err(map_err)?;
+    let (ct_tag, ct) = read_tlv(&mut epki).map_err(map_err)?;
+    if ct_tag != Tag::OctetString {
+        return Err(WalletError::KeyDecrypt(
+            "EncryptedPrivateKeyInfo: expected encrypted OCTET STRING".to_string(),
+        ));
+    }
+    aes_cbc_decrypt(&key, &iv, ct).map_err(|e| match e {
+        // A padding failure after a successful parse almost always means the
+        // password is wrong; say so instead of leaking a bare crypto error.
+        WalletError::Pkcs12(msg) => WalletError::KeyDecrypt(format!(
+            "{msg} (wrong wallet_password, or corrupted key material)"
+        )),
+        other => other,
+    })
 }
 
 fn read_oid(reader: &mut SliceReader<'_>) -> Result<ObjectIdentifier, WalletError> {
-    ObjectIdentifier::decode(reader).map_err(|e| sso(format!("OID decode: {e}")))
+    ObjectIdentifier::decode(reader).map_err(|e| p12(format!("OID decode: {e}")))
 }
 
 /// Read a single TLV, returning (tag, value-bytes), advancing the reader.
 fn read_tlv<'a>(reader: &mut SliceReader<'a>) -> Result<(Tag, &'a [u8]), WalletError> {
-    let header = der::Header::decode(reader).map_err(|e| sso(format!("TLV header: {e}")))?;
-    let len = usize::try_from(header.length).map_err(|_| sso("length overflow"))?;
+    let header = der::Header::decode(reader).map_err(|e| p12(format!("TLV header: {e}")))?;
+    let len = usize::try_from(header.length).map_err(|_| p12("length overflow"))?;
     let bytes = reader
         .read_slice(header.length)
-        .map_err(|e| sso(format!("TLV body ({len} bytes): {e}")))?;
+        .map_err(|e| p12(format!("TLV body ({len} bytes): {e}")))?;
     Ok((header.tag, bytes))
 }
 
 /// Open a constructed value and return a reader over its contents.
 fn into_seq<'a>(bytes: &'a [u8]) -> Result<SliceReader<'a>, WalletError> {
-    SliceReader::new(bytes).map_err(|e| sso(format!("subreader: {e}")))
+    SliceReader::new(bytes).map_err(|e| p12(format!("subreader: {e}")))
 }
 
 /// Top-level entry: parse a PFX and extract certs + key.
@@ -58,7 +114,7 @@ pub(super) fn parse_pfx(data: &[u8], password: &[u8]) -> Result<WalletContents, 
     // PFX ::= SEQUENCE { version INTEGER, authSafe ContentInfo, macData OPTIONAL }
     let (tag, pfx_body) = read_tlv(&mut root)?;
     if tag != Tag::Sequence {
-        return Err(sso("PFX: expected outer SEQUENCE"));
+        return Err(p12("PFX: expected outer SEQUENCE"));
     }
     let mut pfx = into_seq(pfx_body)?;
     // version INTEGER
@@ -66,7 +122,7 @@ pub(super) fn parse_pfx(data: &[u8], password: &[u8]) -> Result<WalletContents, 
     // authSafe ContentInfo ::= SEQUENCE { contentType OID, content [0] EXPLICIT }
     let (tag, ci_body) = read_tlv(&mut pfx)?;
     if tag != Tag::Sequence {
-        return Err(sso("PFX authSafe: expected ContentInfo SEQUENCE"));
+        return Err(p12("PFX authSafe: expected ContentInfo SEQUENCE"));
     }
     let auth_safe_data = read_content_info_data(ci_body, OID_DATA)?;
 
@@ -75,7 +131,7 @@ pub(super) fn parse_pfx(data: &[u8], password: &[u8]) -> Result<WalletContents, 
     let mut as_reader = into_seq(auth_safe_data)?;
     let (tag, authsafe_seq) = read_tlv(&mut as_reader)?;
     if tag != Tag::Sequence {
-        return Err(sso("AuthenticatedSafe: expected SEQUENCE OF ContentInfo"));
+        return Err(p12("AuthenticatedSafe: expected SEQUENCE OF ContentInfo"));
     }
 
     let mut decrypted_safe_contents: Vec<u8> = Vec::new();
@@ -84,7 +140,7 @@ pub(super) fn parse_pfx(data: &[u8], password: &[u8]) -> Result<WalletContents, 
     while !inner.is_finished() {
         let (tag, ci) = read_tlv(&mut inner)?;
         if tag != Tag::Sequence {
-            return Err(sso("AuthenticatedSafe element: expected ContentInfo"));
+            return Err(p12("AuthenticatedSafe element: expected ContentInfo"));
         }
         let mut ci_reader = into_seq(ci)?;
         let content_type = read_oid(&mut ci_reader)?;
@@ -116,7 +172,7 @@ pub(super) fn parse_pfx(data: &[u8], password: &[u8]) -> Result<WalletContents, 
     }
 
     if contents.ca_certificates.is_empty() && contents.client_cert_chain.is_empty() {
-        return Err(sso("PFX produced no certificates"));
+        return Err(p12("PFX produced no certificates"));
     }
     // Mirror ewallet behaviour: all certs are trust anchors; if a key exists,
     // the certs form the client chain too.
@@ -135,18 +191,18 @@ fn read_content_info_data<'a>(
     let mut reader = into_seq(ci_body)?;
     let oid = read_oid(&mut reader)?;
     if oid.to_string() != expected_oid {
-        return Err(sso(format!(
+        return Err(p12(format!(
             "ContentInfo: expected {expected_oid}, got {oid}"
         )));
     }
     let (ctx_tag, content) = read_tlv(&mut reader)?;
     if !ctx_tag.is_context_specific() {
-        return Err(sso("ContentInfo: expected [0] EXPLICIT content"));
+        return Err(p12("ContentInfo: expected [0] EXPLICIT content"));
     }
     let mut ctx = into_seq(content)?;
     let (t, os) = read_tlv(&mut ctx)?;
     if t != Tag::OctetString {
-        return Err(sso("ContentInfo content: expected OCTET STRING"));
+        return Err(p12("ContentInfo content: expected OCTET STRING"));
     }
     Ok(os)
 }
@@ -163,30 +219,30 @@ fn decrypt_encrypted_data(
 ) -> Result<Vec<u8>, WalletError> {
     let (tag, ed_body) = read_tlv(ctx)?;
     if tag != Tag::Sequence {
-        return Err(sso("EncryptedData: expected SEQUENCE"));
+        return Err(p12("EncryptedData: expected SEQUENCE"));
     }
     let mut ed = into_seq(ed_body)?;
     let _ = read_tlv(&mut ed)?; // version
     let (tag, eci_body) = read_tlv(&mut ed)?;
     if tag != Tag::Sequence {
-        return Err(sso("EncryptedContentInfo: expected SEQUENCE"));
+        return Err(p12("EncryptedContentInfo: expected SEQUENCE"));
     }
     let mut eci = into_seq(eci_body)?;
     let content_type = read_oid(&mut eci)?;
     if content_type.to_string() != OID_DATA {
-        return Err(sso("EncryptedContentInfo: content type must be data"));
+        return Err(p12("EncryptedContentInfo: content type must be data"));
     }
     // contentEncryptionAlgorithm AlgorithmIdentifier ::= SEQUENCE { algo, params }
     let (tag, alg_body) = read_tlv(&mut eci)?;
     if tag != Tag::Sequence {
-        return Err(sso("EncryptionAlgorithm: expected SEQUENCE"));
+        return Err(p12("EncryptionAlgorithm: expected SEQUENCE"));
     }
     let (key, iv) = derive_pbes2(alg_body, password)?;
 
     // encryptedContent [0] IMPLICIT OCTET STRING
     let (ctag, enc_content) = read_tlv(&mut eci)?;
     if !ctag.is_context_specific() {
-        return Err(sso("encryptedContent: expected [0] IMPLICIT"));
+        return Err(p12("encryptedContent: expected [0] IMPLICIT"));
     }
     aes_cbc_decrypt(&key, &iv, enc_content)
 }
@@ -198,47 +254,49 @@ fn derive_pbes2(alg_body: &[u8], password: &[u8]) -> Result<(Vec<u8>, Vec<u8>), 
     let mut alg = into_seq(alg_body)?;
     let algo = read_oid(&mut alg)?;
     if algo.to_string() != OID_PBES2 {
-        return Err(sso(format!(
-            "unsupported PFX encryption algorithm {algo}; only PBES2 (AES) is \
-             supported in experimental mode — convert wallet to ewallet.pem"
+        return Err(p12(format!(
+            "unsupported PFX encryption algorithm {algo}; only PBES2 \
+             (PBKDF2 + AES-CBC) is supported — re-export the wallet with a \
+             modern (AES) cipher, e.g. `orapki wallet create` 19c+ or \
+             `openssl pkcs12 -export`"
         )));
     }
     let (tag, params) = read_tlv(&mut alg)?;
     if tag != Tag::Sequence {
-        return Err(sso("PBES2 params: expected SEQUENCE"));
+        return Err(p12("PBES2 params: expected SEQUENCE"));
     }
     let mut p = into_seq(params)?;
     // keyDerivationFunc AlgorithmIdentifier
     let (tag, kdf_body) = read_tlv(&mut p)?;
     if tag != Tag::Sequence {
-        return Err(sso("PBES2 KDF: expected SEQUENCE"));
+        return Err(p12("PBES2 KDF: expected SEQUENCE"));
     }
     // encryptionScheme AlgorithmIdentifier
     let (tag, enc_body) = read_tlv(&mut p)?;
     if tag != Tag::Sequence {
-        return Err(sso("PBES2 encScheme: expected SEQUENCE"));
+        return Err(p12("PBES2 encScheme: expected SEQUENCE"));
     }
 
     // --- KDF (PBKDF2) ---
     let mut kdf = into_seq(kdf_body)?;
     let kdf_oid = read_oid(&mut kdf)?;
     if kdf_oid.to_string() != OID_PBKDF2 {
-        return Err(sso(format!("unsupported KDF {kdf_oid}; only PBKDF2")));
+        return Err(p12(format!("unsupported KDF {kdf_oid}; only PBKDF2")));
     }
     let (tag, pbkdf2_params) = read_tlv(&mut kdf)?;
     if tag != Tag::Sequence {
-        return Err(sso("PBKDF2 params: expected SEQUENCE"));
+        return Err(p12("PBKDF2 params: expected SEQUENCE"));
     }
     let mut pk = into_seq(pbkdf2_params)?;
     // salt OCTET STRING
     let (tag, salt) = read_tlv(&mut pk)?;
     if tag != Tag::OctetString {
-        return Err(sso("PBKDF2 salt: expected OCTET STRING"));
+        return Err(p12("PBKDF2 salt: expected OCTET STRING"));
     }
     // iterationCount INTEGER
     let (tag, iter_bytes) = read_tlv(&mut pk)?;
     if tag != Tag::Integer {
-        return Err(sso("PBKDF2 iterations: expected INTEGER"));
+        return Err(p12("PBKDF2 iterations: expected INTEGER"));
     }
     let iterations = be_uint(iter_bytes)?;
     // optional keyLength INTEGER and prf AlgorithmIdentifier
@@ -247,14 +305,14 @@ fn derive_pbes2(alg_body: &[u8], password: &[u8]) -> Result<(Vec<u8>, Vec<u8>), 
     while !pk.is_finished() {
         let (tag, body) = read_tlv(&mut pk)?;
         if tag == Tag::Integer {
-            key_len = Some(usize::try_from(be_uint(body)?).map_err(|_| sso("keylen overflow"))?);
+            key_len = Some(usize::try_from(be_uint(body)?).map_err(|_| p12("keylen overflow"))?);
         } else if tag == Tag::Sequence {
             let mut prf_reader = into_seq(body)?;
             let prf_oid = read_oid(&mut prf_reader)?;
             prf = match prf_oid.to_string().as_str() {
                 OID_HMAC_SHA256 => PrfHash::Sha256,
                 OID_HMAC_SHA1 => PrfHash::Sha1,
-                other => return Err(sso(format!("unsupported PBKDF2 PRF {other}"))),
+                other => return Err(p12(format!("unsupported PBKDF2 PRF {other}"))),
             };
         }
     }
@@ -267,17 +325,17 @@ fn derive_pbes2(alg_body: &[u8], password: &[u8]) -> Result<(Vec<u8>, Vec<u8>), 
         OID_AES192_CBC => 24,
         OID_AES256_CBC => 32,
         other => {
-            return Err(sso(format!(
+            return Err(p12(format!(
                 "unsupported PBES2 cipher {other}; only AES-CBC"
             )))
         }
     };
     let (tag, iv) = read_tlv(&mut enc)?;
     if tag != Tag::OctetString {
-        return Err(sso("AES-CBC IV: expected OCTET STRING"));
+        return Err(p12("AES-CBC IV: expected OCTET STRING"));
     }
     if iv.len() != 16 {
-        return Err(sso("AES-CBC IV must be 16 bytes"));
+        return Err(p12("AES-CBC IV must be 16 bytes"));
     }
     // The optional PBKDF2 keyLength, when present, MUST equal the AES cipher's
     // key size (RFC 8018 §6.2). Reject a mismatch rather than trusting the
@@ -287,7 +345,7 @@ fn derive_pbes2(alg_body: &[u8], password: &[u8]) -> Result<(Vec<u8>, Vec<u8>), 
     // {16,24,32} by construction (bead rust-oracledb-exz).
     let key_len = match key_len {
         Some(specified) if specified != derived_key_len => {
-            return Err(sso(format!(
+            return Err(p12(format!(
                 "PBES2 keyLength {specified} does not match AES key size {derived_key_len}"
             )));
         }
@@ -319,7 +377,7 @@ fn pbkdf2_derive(
 ) -> Result<Vec<u8>, WalletError> {
     use hmac::Hmac;
     if key_len > MAX_PBKDF2_KEY_LEN {
-        return Err(sso(format!(
+        return Err(p12(format!(
             "PBKDF2 keyLength {key_len} exceeds maximum {MAX_PBKDF2_KEY_LEN}"
         )));
     }
@@ -343,10 +401,10 @@ fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ct: &[u8]) -> Result<Vec<u8>, WalletEr
     macro_rules! run {
         ($aes:ty) => {{
             type Dec = cbc::Decryptor<$aes>;
-            let dec = Dec::new_from_slices(key, iv).map_err(|e| sso(format!("AES init: {e}")))?;
+            let dec = Dec::new_from_slices(key, iv).map_err(|e| p12(format!("AES init: {e}")))?;
             let pt = dec
                 .decrypt_padded_mut::<Pkcs7>(&mut buf)
-                .map_err(|e| sso(format!("AES decrypt/unpad: {e}")))?;
+                .map_err(|e| p12(format!("AES decrypt/unpad: {e}")))?;
             Ok(pt.to_vec())
         }};
     }
@@ -354,7 +412,7 @@ fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ct: &[u8]) -> Result<Vec<u8>, WalletEr
         16 => run!(aes::Aes128),
         24 => run!(aes::Aes192),
         32 => run!(aes::Aes256),
-        n => Err(sso(format!("bad AES key length {n}"))),
+        n => Err(p12(format!("bad AES key length {n}"))),
     }
 }
 
@@ -369,7 +427,7 @@ fn read_safe_contents(
     let mut reader = into_seq(data)?;
     let (tag, seq) = read_tlv(&mut reader)?;
     if tag != Tag::Sequence {
-        return Err(sso("SafeContents: expected SEQUENCE OF SafeBag"));
+        return Err(p12("SafeContents: expected SEQUENCE OF SafeBag"));
     }
     let mut bags = into_seq(seq)?;
     while !bags.is_finished() {
@@ -402,12 +460,12 @@ fn read_safe_contents(
                 let mut epki = into_seq(epki_body)?;
                 let (alg_tag, alg_body) = read_tlv(&mut epki)?;
                 if alg_tag != Tag::Sequence {
-                    return Err(sso("shrouded key: expected AlgorithmIdentifier"));
+                    return Err(p12("shrouded key: expected AlgorithmIdentifier"));
                 }
                 let (key, iv) = derive_pbes2(alg_body, password)?;
                 let (ct_tag, ct) = read_tlv(&mut epki)?;
                 if ct_tag != Tag::OctetString {
-                    return Err(sso("shrouded key: expected encrypted OCTET STRING"));
+                    return Err(p12("shrouded key: expected encrypted OCTET STRING"));
                 }
                 let pkcs8 = aes_cbc_decrypt(&key, &iv, ct)?;
                 out.client_private_key = Some(pkcs8);
@@ -440,7 +498,7 @@ fn read_safe_contents(
 /// Decode a big-endian unsigned integer from DER INTEGER content bytes.
 fn be_uint(bytes: &[u8]) -> Result<u64, WalletError> {
     if bytes.len() > 8 {
-        return Err(sso("integer too large"));
+        return Err(p12("integer too large"));
     }
     let mut v: u64 = 0;
     for &b in bytes {

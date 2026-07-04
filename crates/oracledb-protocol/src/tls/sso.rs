@@ -1,4 +1,4 @@
-//! `cwallet.sso` (SSO auto-login wallet) reader — EXPERIMENTAL.
+//! `cwallet.sso` (SSO auto-login wallet) reader.
 //!
 //! `cwallet.sso` is Oracle's auto-login wallet: a proprietary binary container
 //! that wraps a standard PKCS#12 (PFX). The outer container holds a 3-byte
@@ -11,7 +11,8 @@
 //!
 //! ## Scope and honesty
 //!
-//! This is gated behind the `experimental` feature. What is implemented:
+//! What is implemented (verified against a real `orapki` 23c-generated
+//! `cwallet.sso` fixture and synthetic go-ora-format containers):
 //!
 //! * Outer container: magic `A1 F8 4E`, magic version `6`/`7`/`8`, header
 //!   version `6`, and the **`num3 == 6` AES-128-CBC auto-login** sub-type
@@ -40,7 +41,6 @@ const SSO_AES_IV: [u8; 16] = [
     0xC0, 0x34, 0xD8, 0x31, 0x1C, 0x02, 0xCE, 0xF8, 0x51, 0xF0, 0x14, 0x4B, 0x81, 0xED, 0x4B, 0xF2,
 ];
 
-#[cfg(feature = "experimental")]
 mod imp {
     use super::{SSO_AES_IV, SSO_MAGIC};
     use crate::tls::wallet::{WalletContents, WalletError};
@@ -195,25 +195,14 @@ mod imp {
 /// Parse a `cwallet.sso` byte buffer into [`WalletContents`].
 ///
 /// # Errors
-/// Returns [`WalletError::SsoNotEnabled`] unless the `experimental` feature is
-/// enabled, and [`WalletError::Sso`] for parse / unsupported-branch failures.
-#[cfg(feature = "experimental")]
+/// Returns [`WalletError::Sso`] for outer-container parse / unsupported-branch
+/// failures and [`WalletError::Pkcs12`] for inner PKCS#12 failures.
 pub fn parse_cwallet_sso(data: &[u8]) -> Result<WalletContents, WalletError> {
     let (password, pkcs12_offset) = imp::decode_outer(data)?;
     imp::parse_pkcs12(&data[pkcs12_offset..], &password)
 }
 
-/// Parse a `cwallet.sso` byte buffer (disabled build).
-///
-/// # Errors
-/// Always returns [`WalletError::SsoNotEnabled`].
-#[cfg(not(feature = "experimental"))]
-pub fn parse_cwallet_sso(_data: &[u8]) -> Result<WalletContents, WalletError> {
-    let _ = (&SSO_MAGIC, &SSO_AES_IV);
-    Err(WalletError::SsoNotEnabled)
-}
-
-#[cfg(all(test, feature = "experimental"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -237,17 +226,5 @@ mod tests {
         data.extend_from_slice(&[0u8; 16]);
         let err = parse_cwallet_sso(&data).unwrap_err();
         assert!(matches!(err, WalletError::Sso(_)));
-    }
-}
-
-#[cfg(not(feature = "experimental"))]
-#[cfg(test)]
-mod disabled_tests {
-    use super::*;
-
-    #[test]
-    fn sso_disabled_returns_not_enabled() {
-        let err = parse_cwallet_sso(&[0xA1, 0xF8, 0x4E]).unwrap_err();
-        assert!(matches!(err, WalletError::SsoNotEnabled));
     }
 }

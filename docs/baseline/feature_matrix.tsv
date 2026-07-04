@@ -12,5 +12,5 @@ oracledb	tracing	dep:tracing
 oracledb	uuid	dep:uuid
 oracledb-protocol	cassette	
 oracledb-protocol	default	
-oracledb-protocol	experimental	dep:cbc,dep:der,dep:hmac
+oracledb-protocol	experimental	
 oracledb-protocol	simd-decode	dep:simdutf8

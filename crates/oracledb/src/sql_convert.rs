@@ -480,7 +480,14 @@ mod chrono_impls {
                     nanosecond,
                     offset_minutes,
                 } => {
-                    let naive = naive_from_components(
+                    // The wire (and `QueryValue::TimestampTz`) fields are UTC;
+                    // the offset is the display timezone (reference
+                    // decoders.pyx stores the raw fields, converters.pyx adds
+                    // the offset to render the wall clock). Attach the offset
+                    // to the UTC instant — do NOT reinterpret the UTC fields
+                    // as local wall time (bead rust-oracledb-97cj: doing so
+                    // shifted the instant by exactly the offset).
+                    let naive_utc = naive_from_components(
                         *year,
                         *month,
                         *day,
@@ -489,13 +496,7 @@ mod chrono_impls {
                         *second,
                         *nanosecond,
                     )?;
-                    fixed_offset_from_minutes(*offset_minutes)?
-                        .from_local_datetime(&naive)
-                        .single()
-                        .ok_or_else(|| ConversionError::OutOfRange {
-                            expected: "chrono::DateTime<FixedOffset>",
-                            detail: "invalid fixed-offset local datetime".to_string(),
-                        })
+                    Ok(fixed_offset_from_minutes(*offset_minutes)?.from_utc_datetime(&naive_utc))
                 }
                 QueryValue::DateTime {
                     year,
@@ -1203,14 +1204,18 @@ mod chrono_to_sql {
 
     impl ToSql for DateTime<FixedOffset> {
         fn to_sql(&self) -> BindValue {
+            // BindValue::TimestampTz fields must be UTC (the wire stores UTC +
+            // display offset; see bead rust-oracledb-97cj). Emit the UTC
+            // components, not the local wall clock.
+            let utc = self.naive_utc();
             BindValue::TimestampTz {
-                year: self.year(),
-                month: self.month() as u8,
-                day: self.day() as u8,
-                hour: self.hour() as u8,
-                minute: self.minute() as u8,
-                second: self.second() as u8,
-                nanosecond: self.nanosecond(),
+                year: utc.year(),
+                month: utc.month() as u8,
+                day: utc.day() as u8,
+                hour: utc.hour() as u8,
+                minute: utc.minute() as u8,
+                second: utc.second() as u8,
+                nanosecond: utc.nanosecond(),
                 offset_minutes: self.offset().local_minus_utc() / 60,
             }
         }
@@ -1964,6 +1969,10 @@ mod tests {
             other => panic!("expected Timestamp bind, got {other:?}"),
         }
 
+        // TSTZ wire/QueryValue fields are UTC + display offset (bead
+        // rust-oracledb-97cj; reference decoders.pyx + converters.pyx). For
+        // UTC 12:34:56 at -05:30 the wall clock is 07:04:56-05:30 and the
+        // instant is 12:34:56Z.
         let offset_value = QueryValue::TimestampTz {
             year: 2026,
             month: 6,
@@ -1975,12 +1984,31 @@ mod tests {
             offset_minutes: -330,
         };
         let fixed = DateTime::<FixedOffset>::from_sql(&offset_value).unwrap();
-        assert_eq!(fixed.to_rfc3339(), "2026-06-29T12:34:56.987654321-05:30");
+        assert_eq!(fixed.to_rfc3339(), "2026-06-29T07:04:56.987654321-05:30");
         let utc = DateTime::<Utc>::from_sql(&offset_value).unwrap();
-        assert_eq!(utc.to_rfc3339(), "2026-06-29T18:04:56.987654321+00:00");
+        assert_eq!(utc.to_rfc3339(), "2026-06-29T12:34:56.987654321+00:00");
+        // NaiveDateTime mirrors python-oracledb: the wall clock (UTC + offset),
+        // timezone dropped.
         let legacy_naive = NaiveDateTime::from_sql(&offset_value).unwrap();
         assert_eq!(legacy_naive.to_string(), "2026-06-29 07:04:56.987654321");
+        // Round-trip consistency: converting the fixed-offset value back to a
+        // bind must reproduce the original UTC fields + offset.
+        assert_eq!(
+            fixed.to_sql(),
+            BindValue::TimestampTz {
+                year: 2026,
+                month: 6,
+                day: 29,
+                hour: 12,
+                minute: 34,
+                second: 56,
+                nanosecond: 987_654_321,
+                offset_minutes: -330,
+            }
+        );
 
+        // Outbound binds carry UTC fields: wall 07:08:09.123 at +05:45 is UTC
+        // 01:23:09.123, offset +345 minutes.
         let outbound = FixedOffset::east_opt(5 * 3600 + 45 * 60)
             .unwrap()
             .with_ymd_and_hms(2026, 6, 29, 7, 8, 9)
@@ -1993,8 +2021,8 @@ mod tests {
                 year: 2026,
                 month: 6,
                 day: 29,
-                hour: 7,
-                minute: 8,
+                hour: 1,
+                minute: 23,
                 second: 9,
                 nanosecond: 123_000_000,
                 offset_minutes: 345,

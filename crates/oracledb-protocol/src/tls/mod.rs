@@ -9,13 +9,13 @@
 //!
 //! * [`sni`] — the Oracle TCPS SNI string (`S{len}.{service}.V3.{version}`).
 //! * [`dn`] — server-certificate DN / SAN / CN matching (`check_server_dn`).
-//! * [`wallet`] — `ewallet.pem` reader and wallet-location resolution.
-//! * [`sso`] — `cwallet.sso` reader (experimental).
+//! * [`wallet`] — `ewallet.pem` / `ewallet.p12` readers and wallet-location
+//!   resolution (including encrypted-PKCS#8 private-key decryption).
+//! * [`sso`] — `cwallet.sso` (auto-login wallet) reader.
 
 #![forbid(unsafe_code)]
 
 pub mod dn;
-#[cfg(feature = "experimental")]
 mod pfx;
 pub mod sni;
 pub mod sso;

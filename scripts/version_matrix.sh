@@ -34,10 +34,18 @@
 #           scalar round-trips, error paths; xe11: structured-refusal
 #           assertion. This is the standing release gate (see
 #           scripts/release_matrix_gate.sh).
+#   truth   statement-suite ground-truth differential (bead
+#           rust-oracledb-rwoh): runs the IDENTICAL statement corpus through
+#           the Rust driver (examples/statement_ground_truth.rs) AND
+#           python-oracledb (scripts/statement_ground_truth.py, needs a
+#           python with the oracledb module — auto-detected from
+#           .venv-py313, override with ORACLEDB_GT_PYTHON), then diffs the
+#           two JSON documents field-by-field. Any mismatch fails the lane.
+#           Skipped for xe11 (below the protocol floor; nothing to compare).
 #   env     print PYO_TEST_* exports for the lane
 #   stop    stop the lane container(s)
 #
-# usage: scripts/version_matrix.sh up|health|smoke|full|env|stop [lane]
+# usage: scripts/version_matrix.sh up|health|smoke|full|truth|env|stop [lane]
 #   lane: xe11 | xe18 | xe21 | free23 | all (default all)
 
 # The lane_* functions are dispatched dynamically via "lane_$cmd".
@@ -167,11 +175,48 @@ lane_full() {
   fi
 }
 
+# Ground-truth differential (rust vs python-oracledb) for one lane (bead
+# rust-oracledb-rwoh). Any field-by-field mismatch fails the lane.
+lane_truth() {
+  local lane="$1" name image port service user password
+  { read -r name; read -r image; read -r port; read -r service; \
+    read -r user; read -r password; } < <(lane_fields "$lane")
+  if lane_expects_refusal "$lane"; then
+    printf '%-7s TRUTH SKIPPED (below-floor refusal lane)\n' "$lane"
+    return 0
+  fi
+  local python="${ORACLEDB_GT_PYTHON:-.venv-py313/bin/python}"
+  if ! "$python" -c 'import oracledb' >/dev/null 2>&1; then
+    printf '%-7s TRUTH FAILED (no python with the oracledb module; set ORACLEDB_GT_PYTHON)\n' "$lane"
+    return 1
+  fi
+  printf '=== %s TRUTH (%s) localhost:%s/%s ===\n' "$lane" "$image" "$port" "$service"
+  local out_dir="${TMPDIR:-/tmp}/oracledb-gt-$lane-$$"
+  mkdir -p "$out_dir"
+  if ! cargo run -q -p oracledb --example statement_ground_truth -- \
+      "localhost:$port/$service" "$user" "$password" > "$out_dir/rust.json"; then
+    printf '%-7s TRUTH FAILED (rust emitter)\n' "$lane"
+    return 1
+  fi
+  if ! "$python" scripts/statement_ground_truth.py \
+      "localhost:$port/$service" "$user" "$password" > "$out_dir/python.json"; then
+    printf '%-7s TRUTH FAILED (python twin)\n' "$lane"
+    return 1
+  fi
+  if "$python" scripts/statement_ground_truth.py --diff \
+      "$out_dir/rust.json" "$out_dir/python.json"; then
+    printf '%-7s TRUTH GREEN (field-by-field identical)\n' "$lane"
+  else
+    printf '%-7s TRUTH FAILED (ground-truth mismatch; artifacts in %s)\n' "$lane" "$out_dir"
+    return 1
+  fi
+}
+
 cmd="${1:-}"
 lane_arg="${2:-all}"
 rc=0
 case "$cmd" in
-  up|health|env|smoke|full)
+  up|health|env|smoke|full|truth)
     while read -r lane; do
       "lane_$cmd" "$lane" || rc=1
     done < <(lanes_for "$lane_arg")
@@ -183,7 +228,7 @@ case "$cmd" in
     done < <(lanes_for "$lane_arg")
     ;;
   *)
-    printf 'usage: %s up|health|smoke|full|env|stop [xe11|xe18|xe21|free23|all]\n' "$0" >&2
+    printf 'usage: %s up|health|smoke|full|truth|env|stop [xe11|xe18|xe21|free23|all]\n' "$0" >&2
     exit 2
     ;;
 esac

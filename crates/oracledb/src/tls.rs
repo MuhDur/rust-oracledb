@@ -322,8 +322,9 @@ fn rustls_pemfile_certs(reader: &mut dyn std::io::BufRead) -> Vec<Vec<u8>> {
 
 /// Resolve the [`TlsParams`] for a TCPS connection from the descriptor and
 /// connect options: locate the wallet directory (explicit `wallet_location`
-/// then `TNS_ADMIN`), read `ewallet.pem` (or, with the `experimental` feature,
-/// `cwallet.sso`), and capture the DN-match configuration.
+/// then `TNS_ADMIN`), read the wallet (`ewallet.pem`, `ewallet.p12`, or
+/// `cwallet.sso` — see [`load_wallet`]), and capture the DN-match
+/// configuration.
 ///
 /// # Errors
 /// Returns [`Error::Wallet`] when a configured wallet directory is missing or
@@ -351,15 +352,29 @@ pub(crate) fn resolve_tls_params(
     })
 }
 
-/// Read a wallet from a directory: prefer `ewallet.pem`; fall back to
-/// `cwallet.sso` when the `experimental` feature is enabled and no PEM exists.
+/// Read a wallet from a directory. Precedence:
+///
+/// 1. `ewallet.pem` — parity with python-oracledb thin, which reads only this
+///    file (encrypted private keys are decrypted when `wallet_password` is
+///    supplied).
+/// 2. `ewallet.p12` when a `wallet_password` is supplied — the standard Oracle
+///    PKCS#12 wallet (the ADB wallet-zip case).
+/// 3. `cwallet.sso` — the auto-login wallet (no password needed).
+/// 4. `ewallet.p12` without a password — fails closed with a typed
+///    `PasswordRequired` remediation (Oracle p12 wallets are always
+///    password-protected).
 fn load_wallet(dir: &std::path::Path, password: Option<&str>) -> Result<WalletContents, Error> {
     use oracledb_protocol::tls::wallet::{
-        pem_wallet_path, read_ewallet_pem, sso_wallet_path, WalletError,
+        p12_wallet_path, pem_wallet_path, read_ewallet_p12, read_ewallet_pem, sso_wallet_path,
+        WalletError,
     };
 
     if pem_wallet_path(dir).exists() {
         return read_ewallet_pem(dir, password).map_err(Error::from);
+    }
+    let have_p12 = p12_wallet_path(dir).exists();
+    if have_p12 && password.is_some() {
+        return read_ewallet_p12(dir, password).map_err(Error::from);
     }
     let sso = sso_wallet_path(dir);
     if sso.exists() {
@@ -369,13 +384,12 @@ fn load_wallet(dir: &std::path::Path, password: Option<&str>) -> Result<WalletCo
         })?;
         return oracledb_protocol::tls::sso::parse_cwallet_sso(&bytes).map_err(Error::from);
     }
-    if dir.join("ewallet.p12").exists() {
-        return Err(WalletError::UnsupportedFormat {
-            format: "ewallet.p12",
-        }
-        .into());
+    if have_p12 {
+        // No password and no auto-login wallet: surface the typed
+        // supply-wallet_password remediation from the p12 reader.
+        return read_ewallet_p12(dir, password).map_err(Error::from);
     }
-    Err(WalletError::FileMissing("ewallet.pem or cwallet.sso".to_string()).into())
+    Err(WalletError::FileMissing("ewallet.pem, ewallet.p12, or cwallet.sso".to_string()).into())
 }
 
 /// A `ServerName` that is always a valid rustls DNS name, used when no SNI is
@@ -464,38 +478,117 @@ mod tests {
         assert!(sni_is_rustls_valid("db.example.com"));
     }
 
-    #[test]
-    fn ewallet_p12_only_wallet_is_typed_unsupported_format() {
-        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    fn fixture_tls_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
             .join("fixtures")
             .join("tls")
-            .join("p12_only");
-        let err = load_wallet(&dir, None).expect_err("p12-only wallet must be unsupported");
+    }
+
+    #[test]
+    fn ewallet_p12_only_wallet_without_password_is_password_required() {
+        // The p12_only fixture dir holds a dummy ewallet.p12 and nothing else:
+        // with no wallet_password the loader must fail closed with the typed
+        // supply-wallet_password remediation (never a silent skip).
+        let dir = fixture_tls_dir().join("p12_only");
+        let err = load_wallet(&dir, None).expect_err("p12-only wallet without password");
         let wallet_err = if let Error::Wallet(wallet_err) = err {
             wallet_err
         } else {
-            assert!(matches!(err, Error::Wallet(_)), "expected wallet error");
-            return;
+            panic!("expected wallet error, got {err:?}");
         };
-        let format =
-            if let oracledb_protocol::tls::wallet::WalletError::UnsupportedFormat { format } =
-                &wallet_err
-            {
-                format
-            } else {
-                assert!(
-                    matches!(
-                        &wallet_err,
-                        oracledb_protocol::tls::wallet::WalletError::UnsupportedFormat { .. }
-                    ),
-                    "expected UnsupportedFormat, got {wallet_err:?}"
-                );
-                return;
-            };
-        assert_eq!(*format, "ewallet.p12");
+        assert!(
+            matches!(
+                &wallet_err,
+                oracledb_protocol::tls::wallet::WalletError::PasswordRequired { format }
+                    if *format == "ewallet.p12"
+            ),
+            "expected PasswordRequired, got {wallet_err:?}"
+        );
         let sensitive_path = dir.display().to_string();
         assert!(!format!("{wallet_err}").contains(&sensitive_path));
         assert!(!format!("{wallet_err:?}").contains(&sensitive_path));
+    }
+
+    #[test]
+    fn ewallet_p12_only_wallet_with_password_garbage_is_typed_pkcs12_error() {
+        // Same dummy p12, but WITH a password: the parse itself must fail with
+        // a typed PKCS#12 error (the file is not a real PFX).
+        let dir = fixture_tls_dir().join("p12_only");
+        let err = load_wallet(&dir, Some("any-password")).expect_err("dummy p12 must not parse");
+        let wallet_err = if let Error::Wallet(wallet_err) = err {
+            wallet_err
+        } else {
+            panic!("expected wallet error, got {err:?}");
+        };
+        assert!(
+            matches!(
+                &wallet_err,
+                oracledb_protocol::tls::wallet::WalletError::Pkcs12(_)
+            ),
+            "expected Pkcs12, got {wallet_err:?}"
+        );
+        assert!(!format!("{wallet_err}").contains("any-password"));
+        assert!(!format!("{wallet_err:?}").contains("any-password"));
+    }
+
+    /// Build a temp wallet dir holding copies of the named fixtures.
+    fn temp_wallet_dir(label: &str, files: &[&str]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "oracledb-wallet-test-{label}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp wallet dir");
+        for name in files {
+            std::fs::copy(
+                fixture_tls_dir().join(name),
+                dir.join(wallet_file_name(name)),
+            )
+            .expect("copy fixture");
+        }
+        dir
+    }
+
+    /// Map a fixture file name to its in-wallet name.
+    fn wallet_file_name(fixture: &str) -> &'static str {
+        match fixture {
+            "ewallet_orapki.p12" => "ewallet.p12",
+            "cwallet_orapki.sso" => "cwallet.sso",
+            "ewallet.pem" => "ewallet.pem",
+            other => panic!("unmapped fixture {other}"),
+        }
+    }
+
+    #[test]
+    fn adb_style_wallet_dir_prefers_p12_with_password_and_sso_without() {
+        // An ADB wallet zip ships cwallet.sso + ewallet.p12 (no ewallet.pem).
+        // With wallet_password -> ewallet.p12; without -> cwallet.sso. Both
+        // must yield the same mTLS identity (proven identical in the protocol
+        // crate tests; here we prove the loader wiring).
+        let dir = temp_wallet_dir("adb", &["ewallet_orapki.p12", "cwallet_orapki.sso"]);
+        let with_pw =
+            load_wallet(&dir, Some("WalletPass123")).expect("p12 path must load with password");
+        assert!(with_pw.has_client_identity());
+        let without_pw = load_wallet(&dir, None).expect("sso path must load without password");
+        assert!(without_pw.has_client_identity());
+        assert_eq!(with_pw.ca_certificates, without_pw.ca_certificates);
+    }
+
+    #[test]
+    fn wallet_dir_prefers_pem_over_p12_and_sso() {
+        // python-oracledb parity: ewallet.pem wins when present.
+        let dir = temp_wallet_dir(
+            "pem-first",
+            &["ewallet.pem", "ewallet_orapki.p12", "cwallet_orapki.sso"],
+        );
+        let wallet = load_wallet(&dir, None).expect("pem path must load");
+        // The pem fixture's subject is db.example.com and differs from the
+        // orapki wallet's key: proving the pem was chosen is enough.
+        assert!(wallet.has_client_identity());
+        use oracledb_protocol::tls::wallet::parse_ewallet_pem;
+        let pem_bytes =
+            std::fs::read(fixture_tls_dir().join("ewallet.pem")).expect("read pem fixture");
+        let direct = parse_ewallet_pem(&pem_bytes, None).expect("parse pem fixture");
+        assert_eq!(wallet.ca_certificates, direct.ca_certificates);
     }
 }

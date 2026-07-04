@@ -3,13 +3,13 @@
 //!
 //! Entry points:
 //! `oracledb_protocol::tls::wallet::parse_ewallet_pem`,
+//! `oracledb_protocol::tls::wallet::parse_ewallet_p12`,
 //! `oracledb_protocol::tls::sso::parse_cwallet_sso`, and
-//! `oracledb_protocol::tls::dn::parse_dn`. The fuzz crate enables the protocol
-//! crate's `experimental` feature so the SSO parser is compiled here only.
+//! `oracledb_protocol::tls::dn::parse_dn`.
 use libfuzzer_sys::fuzz_target;
 use oracledb_protocol::tls::dn::parse_dn;
 use oracledb_protocol::tls::sso::parse_cwallet_sso;
-use oracledb_protocol::tls::wallet::parse_ewallet_pem;
+use oracledb_protocol::tls::wallet::{parse_ewallet_p12, parse_ewallet_pem};
 
 fuzz_target!(|data: &[u8]| {
     if data.len() > 65_536 {
@@ -22,6 +22,7 @@ fuzz_target!(|data: &[u8]| {
         .flatten();
 
     let _ = parse_ewallet_pem(payload, password);
+    let _ = parse_ewallet_p12(payload, password);
     let _ = parse_cwallet_sso(payload);
     let dn = String::from_utf8_lossy(payload);
     let _ = parse_dn(&dn);
