@@ -9,6 +9,10 @@
 # Pass --check to fail if regenerating changes any committed artifact (drift).
 set -uo pipefail
 
+# Deterministic collation: inventory ordering must not depend on the
+# generating machine's locale (see the same guard in gen_baseline.sh).
+export LC_ALL=C
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 2
 OUT="${SBOM_OUT_DIR:-$ROOT/docs/provenance}"
