@@ -5,6 +5,11 @@
 # Use --refresh-pin only when intentionally moving the reviewed baseline.
 set -euo pipefail
 
+# Deterministic collation: `sort` and rg output ordering must not depend on
+# the machine's locale, or baselines generated locally drift against the
+# LC-neutral CI runner (observed: public_source_items.tsv reordering).
+export LC_ALL=C
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${ORACLEDB_BASELINE_DIR:-$ROOT/docs/baseline}"
 CHECK=false

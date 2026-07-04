@@ -331,19 +331,6 @@ oracledb	crates/oracledb/src/lib.rs	883	pub fn into_elements(self) -> Option<Vec
 oracledb	crates/oracledb/src/lib.rs	898	pub fn decode_object(
 oracledb	crates/oracledb/src/obs.rs	187	pub struct ObsSpanGuard;
 oracledb	crates/oracledb/src/obs.rs	53	pub(crate) fn sql_digest(sql: &str) -> String {
-oracledb	crates/oracledb/src/pool/acquire.rs	123	pub(super) fn enqueue_request<C>(
-oracledb	crates/oracledb/src/pool/acquire.rs	14	pub(super) struct AsyncAcquireRequest<'a, B: PoolBackend> {
-oracledb	crates/oracledb/src/pool/acquire.rs	170	pub(super) fn poll_request_completion<B: PoolBackend>(
-oracledb	crates/oracledb/src/pool/acquire.rs	185	pub(super) fn acquire_wait_future<'a, B: PoolBackend>(
-oracledb	crates/oracledb/src/pool/acquire.rs	21	pub(super) fn new(inner: &'a EngineInner<B>, request_id: u64) -> Self {
-oracledb	crates/oracledb/src/pool/acquire.rs	29	pub(super) fn complete(&mut self) {
-oracledb	crates/oracledb/src/pool/acquire.rs	33	pub(super) fn abandon(&mut self) {
-oracledb	crates/oracledb/src/pool/acquire.rs	56	pub(super) struct TimedAcquireDeadline {
-oracledb	crates/oracledb/src/pool/acquire.rs	63	pub(super) fn new(wait_timeout: Duration) -> Self {
-oracledb	crates/oracledb/src/pool/engine.rs	109	pub(super) fn fulfill<B: PoolBackend>(
-oracledb	crates/oracledb/src/pool/engine.rs	15	pub(super) fn drop_conn<B: PoolBackend>(
-oracledb	crates/oracledb/src/pool/engine.rs	358	pub(super) fn return_connection_helper<B: PoolBackend>(
-oracledb	crates/oracledb/src/pool/engine.rs	465	pub(super) async fn reaper_main<B: PoolBackend>(weak: Weak<EngineInner<B>>, bg: Arc<Notify>) {
 oracledb	crates/oracledb/src/pool.rs	1004	pub struct PooledConnection<B: PoolBackend> {
 oracledb	crates/oracledb/src/pool.rs	1020	pub fn id(&self) -> u64 {
 oracledb	crates/oracledb/src/pool.rs	1025	pub async fn release(mut self, cx: &Cx) -> Result<(), PoolError> {
@@ -481,6 +468,19 @@ oracledb	crates/oracledb/src/pool.rs	977	pub struct BlockingPooledConnection<B: 
 oracledb	crates/oracledb/src/pool.rs	989	pub fn id(&self) -> u64 {
 oracledb	crates/oracledb/src/pool.rs	994	pub fn release(self) -> Result<(), PoolError> {
 oracledb	crates/oracledb/src/pool.rs	999	pub fn drop_from_pool(self) -> Result<(), PoolError> {
+oracledb	crates/oracledb/src/pool/acquire.rs	123	pub(super) fn enqueue_request<C>(
+oracledb	crates/oracledb/src/pool/acquire.rs	14	pub(super) struct AsyncAcquireRequest<'a, B: PoolBackend> {
+oracledb	crates/oracledb/src/pool/acquire.rs	170	pub(super) fn poll_request_completion<B: PoolBackend>(
+oracledb	crates/oracledb/src/pool/acquire.rs	185	pub(super) fn acquire_wait_future<'a, B: PoolBackend>(
+oracledb	crates/oracledb/src/pool/acquire.rs	21	pub(super) fn new(inner: &'a EngineInner<B>, request_id: u64) -> Self {
+oracledb	crates/oracledb/src/pool/acquire.rs	29	pub(super) fn complete(&mut self) {
+oracledb	crates/oracledb/src/pool/acquire.rs	33	pub(super) fn abandon(&mut self) {
+oracledb	crates/oracledb/src/pool/acquire.rs	56	pub(super) struct TimedAcquireDeadline {
+oracledb	crates/oracledb/src/pool/acquire.rs	63	pub(super) fn new(wait_timeout: Duration) -> Self {
+oracledb	crates/oracledb/src/pool/engine.rs	109	pub(super) fn fulfill<B: PoolBackend>(
+oracledb	crates/oracledb/src/pool/engine.rs	15	pub(super) fn drop_conn<B: PoolBackend>(
+oracledb	crates/oracledb/src/pool/engine.rs	358	pub(super) fn return_connection_helper<B: PoolBackend>(
+oracledb	crates/oracledb/src/pool/engine.rs	465	pub(super) async fn reaper_main<B: PoolBackend>(weak: Weak<EngineInner<B>>, bg: Arc<Notify>) {
 oracledb	crates/oracledb/src/recovery.rs	146	pub(crate) enum CancelDisposition {
 oracledb	crates/oracledb/src/recovery.rs	165	pub(crate) fn from_kind(kind: CancelKind) -> Self {
 oracledb	crates/oracledb/src/recovery.rs	194	pub(crate) fn into_error(self, timeout_ms: u32) -> Error {
