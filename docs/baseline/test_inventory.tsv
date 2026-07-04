@@ -12,6 +12,7 @@ crates/oracledb-protocol/src/sql.rs	20
 crates/oracledb-protocol/src/thin/aq.rs	8
 crates/oracledb-protocol/src/thin/auth.rs	3
 crates/oracledb-protocol/src/thin/codecs.rs	3
+crates/oracledb-protocol/src/thin/connect.rs	1
 crates/oracledb-protocol/src/thin/dbobject.rs	7
 crates/oracledb-protocol/src/thin/execute.rs	2
 crates/oracledb-protocol/src/thin/fetch.rs	17
@@ -28,7 +29,6 @@ crates/oracledb-protocol/src/tls/sso.rs	4
 crates/oracledb-protocol/src/tls/wallet.rs	6
 crates/oracledb-protocol/src/vector.rs	14
 crates/oracledb-protocol/src/wire.rs	16
-crates/oracledb-protocol/tests/_numi128_decode_allocs.rs	0
 crates/oracledb-protocol/tests/borrowed_alloc_count.rs	1
 crates/oracledb-protocol/tests/codec_properties.rs	13
 crates/oracledb-protocol/tests/dbobject_golden.rs	1
@@ -39,6 +39,7 @@ crates/oracledb-protocol/tests/fragmentation_invariance.rs	7
 crates/oracledb-protocol/tests/framing_harness.rs	5
 crates/oracledb-protocol/tests/number_decode_alloc_count.rs	1
 crates/oracledb-protocol/tests/number_inline_byte_identical.rs	7
+crates/oracledb-protocol/tests/_numi128_decode_allocs.rs	0
 crates/oracledb-protocol/tests/pipeline_golden.rs	4
 crates/oracledb-protocol/tests/protocol_limits_properties.rs	8
 crates/oracledb-protocol/tests/reference_contract.rs	1
@@ -48,7 +49,7 @@ crates/oracledb-protocol/tests/tpc_golden.rs	3
 crates/oracledb-pyshim/src/dbobject.rs	3
 crates/oracledb/src/arrow/mod.rs	35
 crates/oracledb/src/cursor_logic.rs	14
-crates/oracledb/src/lib.rs	58
+crates/oracledb/src/lib.rs	62
 crates/oracledb/src/obs.rs	6
 crates/oracledb/src/pool.rs	32
 crates/oracledb/src/request.rs	7

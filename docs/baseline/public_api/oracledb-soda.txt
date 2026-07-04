@@ -694,6 +694,7 @@ pub oracledb::Error::AccessTokenRequiresTcps
 pub oracledb::Error::Bind(oracledb::BindError)
 pub oracledb::Error::CallTimeout(u32)
 pub oracledb::Error::Cancelled
+pub oracledb::Error::ConnectResendLoop(u8)
 pub oracledb::Error::ConnectionClosed(alloc::string::String)
 pub oracledb::Error::Conversion(oracledb::ConversionError)
 pub oracledb::Error::FastAuthRequired
@@ -707,6 +708,7 @@ pub oracledb::Error::Runtime(alloc::string::String)
 pub oracledb::Error::SessionlessTransaction(oracledb::SessionlessError)
 pub oracledb::Error::Tls(alloc::string::String)
 pub oracledb::Error::TooManyRows
+pub oracledb::Error::UnexpectedPacket(u8)
 pub oracledb::Error::UnknownTransactionState(u32)
 pub oracledb::Error::UnsupportedAuthMode(oracledb::UnsupportedAuthMode)
 pub oracledb::Error::Wallet(oracledb_protocol::tls::wallet::WalletError)

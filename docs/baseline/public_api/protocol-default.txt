@@ -1308,12 +1308,14 @@ pub const oracledb_protocol::thin::TNS_INIT_KPNDRREQ: u8
 pub const oracledb_protocol::thin::TNS_KEYWORD_NUM_TRANSACTION_ID: u16
 pub const oracledb_protocol::thin::TNS_KPD_AQ_BUFMSG: u32
 pub const oracledb_protocol::thin::TNS_KPD_AQ_EITHER: u32
+pub const oracledb_protocol::thin::TNS_MAX_CONNECT_DATA: usize
 pub const oracledb_protocol::thin::TNS_MAX_LONG_LENGTH: u32
 pub const oracledb_protocol::thin::TNS_MSG_TYPE_BIT_VECTOR: u8
 pub const oracledb_protocol::thin::TNS_MSG_TYPE_DATA_TYPES: u8
 pub const oracledb_protocol::thin::TNS_MSG_TYPE_DESCRIBE_INFO: u8
 pub const oracledb_protocol::thin::TNS_MSG_TYPE_END_OF_RESPONSE: u8
 pub const oracledb_protocol::thin::TNS_MSG_TYPE_ERROR: u8
+pub const oracledb_protocol::thin::TNS_MSG_TYPE_FAST_AUTH: u8
 pub const oracledb_protocol::thin::TNS_MSG_TYPE_FLUSH_OUT_BINDS: u8
 pub const oracledb_protocol::thin::TNS_MSG_TYPE_FUNCTION: u8
 pub const oracledb_protocol::thin::TNS_MSG_TYPE_IMPLICIT_RESULTSET: u8
@@ -1334,6 +1336,7 @@ pub const oracledb_protocol::thin::TNS_PACKET_TYPE_CONNECT: u8
 pub const oracledb_protocol::thin::TNS_PACKET_TYPE_DATA: u8
 pub const oracledb_protocol::thin::TNS_PACKET_TYPE_REDIRECT: u8
 pub const oracledb_protocol::thin::TNS_PACKET_TYPE_REFUSE: u8
+pub const oracledb_protocol::thin::TNS_PACKET_TYPE_RESEND: u8
 pub const oracledb_protocol::thin::TNS_PIPELINE_MODE_ABORT_ON_ERROR: u8
 pub const oracledb_protocol::thin::TNS_PIPELINE_MODE_CONTINUE_ON_ERROR: u8
 pub const oracledb_protocol::thin::TNS_SUBSCR_CLIENT_ID_LEN: u32
@@ -1377,36 +1380,39 @@ pub fn oracledb_protocol::thin::append_auth_phase_one(&mut alloc::vec::Vec<u8>, 
 pub fn oracledb_protocol::thin::append_auth_phase_two_token(&mut alloc::vec::Vec<u8>, &str, &str, &str, u32, &str, core::option::Option<&str>) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::thin::bind_template_from_type_name(&str, u32) -> oracledb_protocol::thin::BindValue
 pub fn oracledb_protocol::thin::bind_value_type_info(&oracledb_protocol::thin::BindValue) -> core::option::Option<oracledb_protocol::thin::BindTypeInfo>
+pub fn oracledb_protocol::thin::build_auth_phase_one_payload(&str, &str, &str, &str, &str, u32) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_auth_phase_two_payload(&str, &oracledb_protocol::crypto::EncryptedPassword, &str, u32, &str) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_auth_phase_two_payload_with_context_with_seq(&str, &oracledb_protocol::crypto::EncryptedPassword, &str, u32, &str, u8, &[(alloc::string::String, alloc::string::String, alloc::string::String)]) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
-pub fn oracledb_protocol::thin::build_auth_phase_two_payload_with_proxy_with_seq(&str, &oracledb_protocol::crypto::EncryptedPassword, &str, u32, &str, u8, &[(alloc::string::String, alloc::string::String, alloc::string::String)], core::option::Option<&str>, core::option::Option<&str>) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_auth_phase_two_payload_with_proxy_with_seq(&str, &oracledb_protocol::crypto::EncryptedPassword, &str, u32, &str, u8, &[(alloc::string::String, alloc::string::String, alloc::string::String)], core::option::Option<&str>, core::option::Option<&str>, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_auth_phase_two_payload_with_seq(&str, &oracledb_protocol::crypto::EncryptedPassword, &str, u32, &str, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_begin_pipeline_piggyback(u8, u64, u8) -> alloc::vec::Vec<u8>
-pub fn oracledb_protocol::thin::build_change_password_payload_with_seq(&str, &str, &str, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
-pub fn oracledb_protocol::thin::build_close_cursors_piggyback(&[u32], u8) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_change_password_payload_with_seq(&str, &str, &str, u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_close_cursors_piggyback(&[u32], u8, u8) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::build_connect_packet_payload(&str, u16) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
-pub fn oracledb_protocol::thin::build_define_fetch_payload_with_seq(u32, u32, u8, &[oracledb_protocol::thin::ColumnMetadata]) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_data_types_payload() -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_define_fetch_payload_with_seq(u32, u32, u8, &[oracledb_protocol::thin::ColumnMetadata], u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_end_pipeline_payload_with_seq(u8) -> alloc::vec::Vec<u8>
-pub fn oracledb_protocol::thin::build_execute_payload_with_bind_rows_and_options_with_seq(&str, u32, u8, bool, &[alloc::vec::Vec<oracledb_protocol::thin::BindValue>], oracledb_protocol::thin::ExecuteOptions) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
-pub fn oracledb_protocol::thin::build_execute_payload_with_bind_rows_with_seq(&str, u32, u8, bool, &[alloc::vec::Vec<oracledb_protocol::thin::BindValue>]) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
-pub fn oracledb_protocol::thin::build_execute_payload_with_bind_rows_with_seq_and_token(&str, u32, u8, bool, &[alloc::vec::Vec<oracledb_protocol::thin::BindValue>], u64) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
-pub fn oracledb_protocol::thin::build_execute_payload_with_binds_with_seq(&str, u32, u8, bool, &[oracledb_protocol::thin::BindValue]) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
-pub fn oracledb_protocol::thin::build_execute_payload_with_seq(&str, u32, u8, bool) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
-pub fn oracledb_protocol::thin::build_execute_query_payload(&str, u32) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
-pub fn oracledb_protocol::thin::build_execute_query_payload_with_seq(&str, u32, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_execute_payload_with_bind_rows_and_options_with_seq(&str, u32, u8, bool, &[alloc::vec::Vec<oracledb_protocol::thin::BindValue>], oracledb_protocol::thin::ExecuteOptions, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_execute_payload_with_bind_rows_with_seq(&str, u32, u8, bool, &[alloc::vec::Vec<oracledb_protocol::thin::BindValue>], u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_execute_payload_with_bind_rows_with_seq_and_token(&str, u32, u8, bool, &[alloc::vec::Vec<oracledb_protocol::thin::BindValue>], u64, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_execute_payload_with_binds_with_seq(&str, u32, u8, bool, &[oracledb_protocol::thin::BindValue], u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_execute_payload_with_seq(&str, u32, u8, bool, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_execute_query_payload(&str, u32, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_execute_query_payload_with_seq(&str, u32, u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_fast_auth_phase_one_payload(&str, &str, &str, &str, &str, u32) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_fast_auth_token_payload(&str, &str, &str, u32, &str, core::option::Option<&str>) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
-pub fn oracledb_protocol::thin::build_fetch_payload(u32, u32) -> alloc::vec::Vec<u8>
-pub fn oracledb_protocol::thin::build_fetch_payload_with_seq(u32, u32, u8) -> alloc::vec::Vec<u8>
-pub fn oracledb_protocol::thin::build_function_payload(u8) -> alloc::vec::Vec<u8>
-pub fn oracledb_protocol::thin::build_function_payload_with_seq(u8, u8) -> alloc::vec::Vec<u8>
-pub fn oracledb_protocol::thin::build_function_payload_with_seq_and_token(u8, u8, u64) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_fetch_payload(u32, u32, u8) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_fetch_payload_with_seq(u32, u32, u8, u8) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_function_payload(u8, u8) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_function_payload_with_seq(u8, u8, u8) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_function_payload_with_seq_and_token(u8, u8, u64, u8) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::build_lob_create_temp_payload_with_seq(u8, u8, u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_lob_free_temp_payload_with_seq(&[alloc::vec::Vec<u8>], u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_lob_read_payload_with_seq(&[u8], u64, u64, u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_lob_trim_payload_with_seq(&[u8], u64, u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_lob_write_payload_with_seq(&[u8], u64, &[u8], u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_notify_payload_with_seq(u8, &[u8], u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_protocol_negotiation_payload() -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_sessionless_piggyback(u8, u64, u32, u32, u32, core::option::Option<&[u8]>) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::build_subscribe_payload_with_seq(u8, u8, core::option::Option<&str>, core::option::Option<&[u8]>, u32, core::option::Option<&str>, u32, u32, u32, u8, u32, u8, u64, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_tpc_change_state_payload_with_seq(u8, u32, u32, u32, core::option::Option<&oracledb_protocol::thin::TpcXid<'_>>, core::option::Option<&[u8]>) -> alloc::vec::Vec<u8>
@@ -1415,8 +1421,10 @@ pub fn oracledb_protocol::thin::build_tpc_txn_switch_payload_with_seq(u8, u64, u
 pub fn oracledb_protocol::thin::check_fetch_conversion(&oracledb_protocol::thin::ColumnMetadata, u8, u8) -> core::option::Option<oracledb_protocol::thin::ColumnMetadata>
 pub fn oracledb_protocol::thin::check_notification_header(&[u8]) -> oracledb_protocol::Result<usize>
 pub fn oracledb_protocol::thin::check_notification_header_with_limits(&[u8], oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<usize>
+pub fn oracledb_protocol::thin::classic_connect_response_is_complete(&[u8], oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<bool>
 pub fn oracledb_protocol::thin::collection_flags_for(bool) -> u8
 pub fn oracledb_protocol::thin::column_metadata_is_xmltype(&oracledb_protocol::thin::ColumnMetadata) -> bool
+pub fn oracledb_protocol::thin::connect_data_fits_inline(&str) -> bool
 pub fn oracledb_protocol::thin::cursor_bind_template() -> oracledb_protocol::thin::BindValue
 pub fn oracledb_protocol::thin::dbobject_attr_max_size(&str, core::option::Option<u32>) -> u32
 pub fn oracledb_protocol::thin::dbobject_attr_precision_scale(&str, core::option::Option<i8>, core::option::Option<i8>) -> (i8, i8)
@@ -1712,7 +1720,9 @@ pub fn oracledb_protocol::wire::TtcWriter::write_bytes_with_length(&mut self, &[
 pub fn oracledb_protocol::wire::TtcWriter::write_bytes_with_two_lengths(&mut self, core::option::Option<&[u8]>) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::wire::TtcWriter::write_function_code(&mut self, u8)
 pub fn oracledb_protocol::wire::TtcWriter::write_function_code_with_seq(&mut self, u8, u8)
+pub fn oracledb_protocol::wire::TtcWriter::write_function_header(&mut self, u8, u8, u8)
 pub fn oracledb_protocol::wire::TtcWriter::write_keyword_value_pair(&mut self, core::option::Option<&[u8]>, core::option::Option<&[u8]>, u16) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::wire::TtcWriter::write_piggyback_header(&mut self, u8, u8, u8)
 pub fn oracledb_protocol::wire::TtcWriter::write_raw(&mut self, &[u8])
 pub fn oracledb_protocol::wire::TtcWriter::write_sb4(&mut self, i32)
 pub fn oracledb_protocol::wire::TtcWriter::write_seq_num(&mut self)
