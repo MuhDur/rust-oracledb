@@ -12,6 +12,7 @@ fn is_common_param(name: &str) -> bool {
     matches!(
         name,
         "expire_time"
+            | "connect_timeout"
             | "failover"
             | "https_proxy"
             | "https_proxy_port"

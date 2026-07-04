@@ -835,6 +835,7 @@ pub fn oracledb::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> c
 impl core::marker::StructuralPartialEq for oracledb::ConversionError
 #[non_exhaustive] pub enum oracledb::Error
 pub oracledb::Error::AccessTokenRequiresTcps
+pub oracledb::Error::AllAddressesFailed(alloc::string::String)
 pub oracledb::Error::ArrowConversion(oracledb::arrow::ArrowConversionError)
 pub oracledb::Error::Bind(oracledb::BindError)
 pub oracledb::Error::CallTimeout(u32)
@@ -858,6 +859,7 @@ pub oracledb::Error::TooManyRows
 pub oracledb::Error::UnexpectedPacket(u8)
 pub oracledb::Error::UnknownTransactionState(u32)
 pub oracledb::Error::UnsupportedAuthMode(oracledb::UnsupportedAuthMode)
+pub oracledb::Error::UnsupportedSni(alloc::string::String)
 pub oracledb::Error::Wallet(oracledb_protocol::tls::wallet::WalletError)
 impl oracledb::Error
 pub fn oracledb::Error::caret(&self, &str) -> core::option::Option<alloc::string::String>

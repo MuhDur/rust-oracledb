@@ -239,23 +239,25 @@ unsupported request to a weaker one. Supporting typed errors:
 
 ## 6. Connection string and transport topology
 
-The driver connects to a **single resolved endpoint** (host, port, protocol,
-service name) per attempt. The structured `ConnectOptions` builder is the
-1.0-supported surface for connect tuning (TLS, DN match, wallet, SNI toggle,
-access token, proxy user, SDU). The following higher-availability / advanced
-connect-string behaviours are **not yet applied in 1.0** and are tracked as a
-transport-hardening follow-up (bead `rust-oracledb-clvm`). None cause silent
-data corruption; a single-endpoint connect is unaffected.
+The structured `ConnectOptions` builder is the primary surface for connect
+tuning (TLS, DN match, wallet, SNI toggle, access token, proxy user, SDU), but
+the DSN `DESCRIPTION` / EZConnect-Plus transport parameters are now **applied to
+the live connection**, not merely parsed for diagnostics. Where a requested
+parameter genuinely cannot be honored the driver **fails closed** with a typed
+error naming it — never a silent ignore. The multi-address / redirect / SDU /
+timeout behaviours below were the transport-hardening gaps tracked under bead
+`rust-oracledb-clvm` (F1–F4); they are now closed as noted.
 
 | feature | 1.0 behaviour | citation |
 |---|---|---|
-| Multi-address `ADDRESS_LIST` failover / load-balance | The first usable address is used; there is **no** automatic failover/retry to subsequent addresses. Provide a single reachable endpoint, or retry at the application level. | `crates/oracledb-protocol/src/net/mod.rs:58` |
-| Listener `REDIRECT` (RAC / SCAN / shared-server handoff) | **Fail closed:** the driver returns `Error::RedirectUnsupported` rather than following the redirect. | `crates/oracledb/src/lib.rs:3553` |
-| DSN `transport_connect_timeout` / `connect_timeout` | Applied as the overall connect deadline: TCP dial, TLS, listener ACCEPT, and AUTH reads all share the parsed duration. A server that accepts then stalls returns `Error::CallTimeout` instead of hanging indefinitely. | `crates/oracledb/src/lib.rs` |
-| TCPS listener descriptor `SECURITY` passthrough | TCPS descriptors preserve non-wallet `SECURITY` pass-through keys and SSL DN-match/cert-DN fields in the listener/auth descriptors; token auth additionally injects `(TOKEN_AUTH=OCI_TOKEN)`. Wallet filesystem paths remain client-side TLS configuration and are not re-emitted into trace-visible descriptors. | `crates/oracledb/src/lib.rs` |
-| Other DSN `DESCRIPTION` / EZConnect-Plus advanced parameters (`sdu`, wallet, `use_sni`, full HA topology, ...) | Parsed for diagnostics/metadata but not all are applied to the live connection yet. Use structured `ConnectOptions` where supported; remaining topology hardening is tracked under bead `rust-oracledb-clvm`. | `crates/oracledb-protocol/src/net/connectstring`; `crates/oracledb/src/lib.rs` |
-| Oracle Server Name Indication (SNI) over TCPS | `use_sni=true` is honoured only when the Oracle SNI name is a valid rustls DNS name; otherwise SNI is omitted. Full Oracle-format SNI is a transport-hardening follow-up. | `crates/oracledb/src/tls.rs:406` |
+| Multi-address `ADDRESS_LIST` failover / load-balance (**F2**) | **Supported.** A `DESCRIPTION` with an `ADDRESS_LIST` (or several `ADDRESS` entries) is tried in order until one address establishes a transport; `LOAD_BALANCE=ON` shuffles the order, `RETRY_COUNT`/`RETRY_DELAY` re-scan the set, and `FAILOVER=OFF` restricts a list to its first address. Only transport-establishment errors (TCP dial / TLS handshake) fail over; a config/auth error aborts. If every address fails the per-address reasons are aggregated into `Error::AllAddressesFailed`. The overall (transport connect timeout) deadline is shared across attempts. **Live-proven** (xe18: dead-first→live-second connects; live-first uses the first). | `resolve_connect_addresses` / failover loop in `crates/oracledb/src/lib.rs`; `crates/oracledb/tests/live_transport_failover.rs` |
+| Listener `REDIRECT` (RAC / SCAN / shared-server handoff) (**F4**) | **Followed** for a same-transport redirect: the driver reconnects to the redirect target and resends the CONNECT (bounded against redirect loops). A redirect that demands a **transport-protocol change** (e.g. `tcps → tcp`, a silent TLS downgrade) still **fails closed** with `Error::RedirectUnsupported`. | REDIRECT loop in `Connection::connect`, `crates/oracledb/src/lib.rs` |
+| DSN `transport_connect_timeout` / `connect_timeout` (**F1**) | **Applied** as the overall connect deadline: TCP dial, TLS, listener ACCEPT, and AUTH reads all share the parsed duration (across failover attempts). A short DSN timeout against a black-hole address times out at that bound instead of hanging on the old hard-coded 20s. Because the thin driver uses a single connect deadline, `CONNECT_TIMEOUT` is honored as an alias of `transport_connect_timeout` — a deliberate footgun-removal *beyond* python-oracledb thin, which drops DESCRIPTION `CONNECT_TIMEOUT`. **Live-proven** (a 2s DSN bound stops a black-hole dial at ~2s, surfacing a bounded transport failure that names the timeout). | `canonical_param_name`, `crates/oracledb-protocol/src/net/connectstring/mod.rs`; `transport_connect_timeout_duration` / `Connection::connect`, `crates/oracledb/src/lib.rs`; `crates/oracledb/tests/live_transport_failover.rs` |
+| DSN `SDU` (**F1**) | **Applied.** The SDU advertised in the CONNECT packet honours a DSN `(SDU=...)` (`resolve_effective_sdu`); an explicit `ConnectOptions::with_sdu` wins, else the DSN value, else the 8192 default. Advertised through the classic 16-bit CONNECT-packet field (ceiling 65535; a larger DSN SDU is advertised at 65535), and the server negotiates the effective SDU down in its ACCEPT. Offline-proven (unit test decodes the SDU back out of the built CONNECT packet). | `resolve_effective_sdu`, `crates/oracledb/src/lib.rs` |
+| DSN `SECURITY` wallet directory + DN-match/cert-DN (**F1**) | **Applied.** `SSL_SERVER_DN_MATCH` / `SSL_SERVER_CERT_DN` and the DSN wallet directory (`MY_WALLET_DIRECTORY` / `WALLET_LOCATION`) feed the TLS setup; an explicit `ConnectOptions` value wins, else the DSN `SECURITY` value. TCPS descriptors also preserve non-wallet `SECURITY` pass-through keys; token auth injects `(TOKEN_AUTH=OCI_TOKEN)`. Wallet paths remain client-side and are not re-emitted into trace-visible descriptors. Offline-proven (wallet-loader tests); a full live-ADB TCPS acceptance still needs ADB infra (**intended/unverified**, see §2). | `resolve_tls_params` / `Connection::connect`, `crates/oracledb/src/lib.rs` |
+| Oracle Server Name Indication (SNI) over TCPS (**F3**) | **Fail closed** when requested-but-un-encodable. `use_sni=true` no longer silently degrades to no-SNI: because the Oracle SNI (`S{len}.{service}.V3.{version}`) ends in an all-numeric label that RFC-strict rustls rejects, `use_sni=true` returns the typed `Error::UnsupportedSni` naming the SNI; reconnect with `use_sni=false` (the default) to rely on the post-handshake Oracle DN match. A real Oracle-format SNI handshake remains a follow-up (limited TCPS test infra). Offline-proven (`decide_sni` unit tests). | `decide_sni` / `tls_handshake`, `crates/oracledb/src/tls.rs` |
 
-These are feature-completeness gaps, not defects in implemented behaviour, and
-are deliberately out of the W3-E8 correctness-bug scope (protocol/codec/
-multi-packet/async). They are revisited in the transport-hardening follow-up.
+These transport-completeness gaps are now implemented (F1/F2 supported, F3
+fail-closed, F4 redirect-follow). None ever caused silent data corruption; they
+were out of the original W3-E8 correctness-bug scope (protocol/codec/
+multi-packet/async) and are closed under bead `rust-oracledb-clvm`.

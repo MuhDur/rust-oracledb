@@ -9,6 +9,18 @@ and the project follows the SemVer contract described in
 
 ### Added
 
+- **HA / multi-address connect-string support (bead `clvm`).** A
+  `DESCRIPTION` with an `ADDRESS_LIST` / multiple `ADDRESS` entries now fails
+  over: each address is tried in order (honoring `LOAD_BALANCE` shuffle,
+  `FAILOVER=OFF`, `RETRY_COUNT` / `RETRY_DELAY`) until one dials; only transport
+  errors fail over (config/auth aborts immediately), and an all-fail is
+  aggregated into the new `Error::AllAddressesFailed`. DSN transport parameters
+  that were previously parsed and silently dropped are now applied: the
+  `CONNECT_TIMEOUT` connect deadline (added as an alias of
+  `transport_connect_timeout`), the DSN `(SDU=)` value (resolved: explicit
+  builder wins, else DSN, else 8192), and DSN wallet / `USE_SNI` settings.
+  `use_sni=true` that cannot be honored now fails closed with
+  `Error::UnsupportedSni` instead of silently degrading to no-SNI.
 - **Listener REDIRECT handling.** A CONNECT answered with a REDIRECT packet
   (shared-server / RAC configurations, routine on many listeners) now follows
   the redirect: the driver reconnects the transport to the redirected address

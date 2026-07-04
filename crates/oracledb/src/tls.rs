@@ -399,9 +399,37 @@ const SNI_PLACEHOLDER: &str = "oracle.invalid";
 
 /// Whether the Oracle SNI string is a valid rustls `ServerName`. The Oracle
 /// format ends in an all-numeric label (`.V3.319`), which RFC-strict rustls
-/// rejects; this helper lets the handshake fall back to no-SNI cleanly.
+/// rejects; this helper lets the handshake decide whether the SNI can be sent.
 fn sni_is_rustls_valid(sni: &str) -> bool {
     rustls::pki_types::ServerName::try_from(sni.to_string()).is_ok()
+}
+
+/// Decide the SNI server name for a TCPS handshake (F3, bead `rust-oracledb-clvm`).
+///
+/// - `Ok(None)` — no SNI is sent (`use_sni=false`, the default and the common
+///   case): the caller uses a placeholder name with `enable_sni=false`, and the
+///   server is identified purely by the post-handshake Oracle DN match.
+/// - `Ok(Some(name))` — `use_sni=true` and the Oracle SNI is a valid rustls DNS
+///   name; it is transmitted with `enable_sni=true`.
+/// - `Err(Error::UnsupportedSni)` — `use_sni=true` was explicitly requested but
+///   the Oracle SNI (`S{len}.{service}.V3.{version}`) is not a valid rustls DNS
+///   name and therefore cannot be sent. The driver **fails closed** rather than
+///   silently downgrading to no-SNI, so an operator who asked for SNI learns it
+///   was not honored instead of discovering it only from a packet capture.
+pub(crate) fn decide_sni(
+    use_sni: bool,
+    service_name: &str,
+    server_type: Option<&str>,
+) -> Result<Option<String>, Error> {
+    if !use_sni {
+        return Ok(None);
+    }
+    let sni = build_sni(service_name, server_type);
+    if sni_is_rustls_valid(&sni) {
+        Ok(Some(sni))
+    } else {
+        Err(Error::UnsupportedSni(sni))
+    }
 }
 
 /// Perform the TCPS TLS handshake over a connected TCP stream, returning the
@@ -409,12 +437,15 @@ fn sni_is_rustls_valid(sni: &str) -> bool {
 ///
 /// SNI handling mirrors python-oracledb: the Oracle `S{len}.{service}.V3.{ver}`
 /// SNI is only emitted when [`TlsParams::use_sni`] is set; by default no SNI is
-/// sent and the server is identified by the post-handshake DN match. Because
-/// rustls rejects the Oracle SNI's trailing numeric label, the SNI is sent only
-/// if it is a valid rustls name; otherwise the handshake proceeds without SNI.
+/// sent and the server is identified by the post-handshake DN match. When
+/// `use_sni=true` is explicitly requested but rustls cannot encode the Oracle
+/// SNI (its trailing numeric label is rejected), the handshake **fails closed**
+/// with [`Error::UnsupportedSni`] rather than silently proceeding without SNI —
+/// see [`decide_sni`].
 ///
 /// # Errors
-/// Returns [`Error::Tls`] on configuration or handshake failure.
+/// Returns [`Error::UnsupportedSni`] when `use_sni=true` cannot be honored, or
+/// [`Error::Tls`] on configuration or handshake failure.
 pub async fn tls_handshake(
     descriptor: &EasyConnect,
     server_type: Option<&str>,
@@ -423,21 +454,17 @@ pub async fn tls_handshake(
 ) -> Result<TlsStream<TcpStream>, Error> {
     let mut config = build_client_config(params)?;
 
-    // Decide the SNI name. Default (and the common case) is no SNI.
-    let server_name = if params.use_sni {
-        let sni = build_sni(&descriptor.service_name, server_type);
-        if sni_is_rustls_valid(&sni) {
+    // Decide the SNI name. Default (and the common case) is no SNI; an
+    // explicitly requested but un-encodable Oracle SNI fails closed here.
+    let server_name = match decide_sni(params.use_sni, &descriptor.service_name, server_type)? {
+        Some(sni) => {
             config.enable_sni = true;
             sni
-        } else {
-            // rustls cannot encode the Oracle SNI (numeric final label); fall
-            // back to no SNI — the DN match still secures the connection.
+        }
+        None => {
             config.enable_sni = false;
             SNI_PLACEHOLDER.to_string()
         }
-    } else {
-        config.enable_sni = false;
-        SNI_PLACEHOLDER.to_string()
     };
 
     let connector =
@@ -472,10 +499,36 @@ mod tests {
     #[test]
     fn oracle_sni_is_rejected_by_rustls_servername() {
         // The Oracle SNI ends in an all-numeric label which RFC-strict rustls
-        // rejects; this is why use_sni falls back to no-SNI. Document it as a
+        // rejects; this is why use_sni cannot be honored. Document it as a
         // test so a future rustls relaxation is noticed.
         assert!(!sni_is_rustls_valid("S8.FREEPDB1.V3.319"));
         assert!(sni_is_rustls_valid("db.example.com"));
+    }
+
+    #[test]
+    fn decide_sni_without_use_sni_sends_no_sni() {
+        // The default (use_sni=false) yields no SNI, cleanly (no error).
+        let decided = decide_sni(false, "FREEPDB1", None).expect("no-SNI must be Ok");
+        assert!(decided.is_none(), "use_sni=false must not send an SNI");
+    }
+
+    #[test]
+    fn decide_sni_with_use_sni_fails_closed_not_silent() {
+        // F3 (bead rust-oracledb-clvm): use_sni=true must NO LONGER silently
+        // degrade to enable_sni=false. Because the Oracle SNI ends in a numeric
+        // label rustls rejects, use_sni=true fails closed with the typed
+        // UnsupportedSni error naming the SNI string.
+        let err = decide_sni(true, "FREEPDB1", None)
+            .expect_err("use_sni=true with an un-encodable Oracle SNI must fail closed");
+        match err {
+            Error::UnsupportedSni(sni) => {
+                assert!(
+                    sni.starts_with('S') && sni.contains("FREEPDB1"),
+                    "error must name the Oracle SNI string, got {sni:?}"
+                );
+            }
+            other => panic!("expected Error::UnsupportedSni, got {other:?}"),
+        }
     }
 
     fn fixture_tls_dir() -> std::path::PathBuf {

@@ -176,7 +176,12 @@ use oracledb_protocol::thin::{
 use oracledb_protocol::thin::{TNS_AQ_ARRAY_DEQ, TNS_AQ_ARRAY_ENQ};
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth, ProtocolLimits};
 use oracledb_protocol::{
-    net::{connectstring::Description, EasyConnect, Protocol as NetProtocol},
+    net::{
+        connectstring::{
+            Address, AddressList, Description, Descriptor, DEFAULT_SDU as DSN_DEFAULT_SDU,
+        },
+        EasyConnect, Protocol as NetProtocol,
+    },
     ClientIdentity,
 };
 
@@ -1071,6 +1076,25 @@ pub enum Error {
     ConnectRedirectLoop(u8),
     #[error("listener refused connection: {0}")]
     ListenerRefused(String),
+    /// Every address in a multi-address connect descriptor (`ADDRESS_LIST` or
+    /// several `ADDRESS` entries) failed to establish a transport. The payload
+    /// aggregates the per-address failure reasons in the order they were tried.
+    /// The connection never reached a listener, so there is nothing to reuse.
+    #[error("all connect addresses failed: {0}")]
+    AllAddressesFailed(String),
+    /// `use_sni=true` was explicitly requested but the Oracle TCPS SNI string
+    /// (`S{len}.{service}.V3.{version}`) is not a valid rustls DNS name (its
+    /// trailing all-numeric label is rejected by RFC-strict rustls), so it
+    /// cannot be transmitted. The driver fails closed here instead of silently
+    /// connecting without SNI. Reconnect with `use_sni=false` (the default) to
+    /// rely on the post-handshake Oracle DN match, which secures the connection
+    /// without SNI.
+    #[error(
+        "use_sni=true cannot be honored: the Oracle SNI \"{0}\" is not a valid \
+         rustls DNS name; reconnect with use_sni=false to secure the connection \
+         with the post-handshake DN match instead"
+    )]
+    UnsupportedSni(String),
     #[error(
         "unexpected TNS packet type {ty} ({name})",
         ty = .0,
@@ -1238,8 +1262,10 @@ impl Error {
             Error::Protocol(err) => protocol_error_kind(err),
             Error::Io(_)
             | Error::ListenerRefused(_)
+            | Error::AllAddressesFailed(_)
             | Error::ConnectionClosed(_)
             | Error::Tls(_)
+            | Error::UnsupportedSni(_)
             | Error::Wallet(_) => ErrorKind::Network,
             Error::CallTimeout(_) => ErrorKind::Timeout,
             Error::Cancelled => ErrorKind::Cancel,
@@ -2314,6 +2340,20 @@ impl Connection {
                 .as_deref()
                 .or(primary_description.security.ssl_server_cert_dn.as_deref());
             let identity = options.identity;
+            // F1 (bead rust-oracledb-clvm): apply the DSN-parsed transport
+            // parameters that were previously parsed and dropped. The SDU
+            // advertised in the CONNECT packet honours a DSN `(SDU=...)` (see
+            // `resolve_effective_sdu`); the wallet directory and the SNI toggle
+            // fall back to the DSN `SECURITY`/`USE_SNI` when the structured
+            // builder did not set them.
+            let advertised_sdu =
+                u16::try_from(resolve_effective_sdu(options.sdu, &primary_description))
+                    .unwrap_or(u16::MAX);
+            let effective_use_sni = options.use_sni || primary_description.use_sni;
+            let effective_wallet_location = options
+                .wallet_location
+                .as_deref()
+                .or(primary_description.security.wallet_location.as_deref());
             // TCPS: TLS parameters (wallet, DN-match, SNI policy) are resolved
             // once and reused when a listener REDIRECT re-establishes the
             // transport to a new address (the redirected connection keeps the
@@ -2326,15 +2366,21 @@ impl Connection {
             let tls_params = if descriptor.protocol.is_tls() {
                 Some(tls::resolve_tls_params(
                     &descriptor,
-                    options.wallet_location.as_deref(),
+                    effective_wallet_location,
                     options.wallet_password.as_deref(),
                     options.ssl_server_dn_match,
                     options.ssl_server_cert_dn.as_deref(),
-                    options.use_sni,
+                    effective_use_sni,
                 )?)
             } else {
                 None
             };
+            // F3 (bead rust-oracledb-clvm): fail closed *before* any transport
+            // is dialled if `use_sni=true` was requested but the Oracle SNI
+            // cannot be encoded as a rustls DNS name — never a silent no-SNI.
+            if let Some(tls_params) = tls_params.as_ref() {
+                tls::decide_sni(tls_params.use_sni, &descriptor.service_name, server_type)?;
+            }
             let connector = DriverConnector::default();
             // Dials one listener endpoint: TCP connect, then — for a TCPS
             // original — the TLS handshake on the whole socket before
@@ -2362,7 +2408,64 @@ impl Connection {
                     Ok::<_, Error>(halves)
                 }
             };
-            let (read, write) = dial(descriptor.host.clone(), descriptor.port).await?;
+            // F2 (bead rust-oracledb-clvm): sequential multi-address failover.
+            // A DESCRIPTION with an ADDRESS_LIST (or several ADDRESS entries)
+            // is tried in order — honouring LOAD_BALANCE (shuffle) and
+            // RETRY_COUNT/RETRY_DELAY — until one address establishes a
+            // transport; if every address fails, the per-address reasons are
+            // aggregated into `Error::AllAddressesFailed`. Only
+            // transport-establishment errors (TCP dial / TLS handshake) fail
+            // over to the next address; a configuration error aborts the whole
+            // connect. The overall connect deadline (the DSN transport connect
+            // timeout) still bounds the total, shared across attempts.
+            let candidates = resolve_connect_addresses(&full_descriptor, descriptor.protocol);
+            let retry_count = primary_description.retry_count;
+            let retry_delay = Duration::from_secs(u64::from(primary_description.retry_delay));
+            let mut attempt_errors: Vec<String> = Vec::new();
+            let mut connected = None;
+            'failover: for round in 0..=retry_count {
+                if round > 0 && !retry_delay.is_zero() {
+                    trace_connect_step("failover retry delay");
+                    // Sleep `retry_delay` by timing out a never-ready future
+                    // (asupersync exposes the deadline primitive, not a bare
+                    // sleep); the elapsed Err is expected and ignored.
+                    let _ =
+                        time::timeout(time::wall_now(), retry_delay, std::future::pending::<()>())
+                            .await;
+                }
+                for candidate in &candidates {
+                    match dial(candidate.host.clone(), candidate.port).await {
+                        Ok(halves) => {
+                            connected = Some((halves, candidate.clone()));
+                            break 'failover;
+                        }
+                        Err(err) if is_failover_eligible(&err) => {
+                            attempt_errors
+                                .push(format!("{}:{} ({err})", candidate.host, candidate.port));
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+            }
+            let ((read, write), active_address) = match connected {
+                Some(pair) => pair,
+                None => {
+                    return Err(Error::AllAddressesFailed(format!(
+                        "tried {} address(es): {}",
+                        attempt_errors.len(),
+                        attempt_errors.join("; ")
+                    )));
+                }
+            };
+            // Rebind the working descriptor to the address that actually
+            // connected so the CONNECT descriptor's ADDRESS clause reflects the
+            // live endpoint (the TLS params/DN match keep the configured host).
+            let descriptor = EasyConnect {
+                host: active_address.host,
+                port: active_address.port,
+                service_name: descriptor.service_name.clone(),
+                protocol: descriptor.protocol,
+            };
             let mut core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
             core.set_protocol_limits(protocol_limits)?;
 
@@ -2393,7 +2496,7 @@ impl Connection {
             let mut resend_rounds = 0u8;
             let mut redirect_rounds = 0u8;
             let accept = loop {
-                let connect_payload = build_connect_packet_payload(&connect_data, options.sdu)?;
+                let connect_payload = build_connect_packet_payload(&connect_data, advertised_sdu)?;
                 let packet = encode_packet(
                     TNS_PACKET_TYPE_CONNECT,
                     packet_flags,
@@ -2407,7 +2510,7 @@ impl Connection {
                 core.write_all(cx, &packet).await?;
                 if split_connect_data {
                     trace_connect_step("send CONNECT descriptor (data packet)");
-                    core.send_data_packet(cx, connect_data.as_bytes(), usize::from(options.sdu))
+                    core.send_data_packet(cx, connect_data.as_bytes(), usize::from(advertised_sdu))
                         .await?;
                 }
 
@@ -9010,6 +9113,120 @@ fn transport_connect_timeout_duration(seconds: f64) -> Duration {
     Duration::from_secs_f64(seconds.max(0.001))
 }
 
+/// The SDU (session data unit, in bytes) advertised in the CONNECT packet
+/// (F1, bead `rust-oracledb-clvm`). Precedence: an explicit
+/// [`ConnectOptions::with_sdu`] value wins; otherwise a DSN-parsed `(SDU=...)`
+/// (`Description::sdu`, already clamped by the connect-string parser to
+/// 512..=2_097_152) is honoured; otherwise the shared 8192 default. The caller
+/// clamps the result to the 16-bit wire field (the classic CONNECT-packet SDU
+/// ceiling of 65535); the server negotiates the effective SDU down from the
+/// advertised value in its ACCEPT.
+fn resolve_effective_sdu(options_sdu: u16, description: &Description) -> u32 {
+    const BUILDER_DEFAULT_SDU: u16 = 8192;
+    if options_sdu != BUILDER_DEFAULT_SDU {
+        u32::from(options_sdu)
+    } else if description.sdu != DSN_DEFAULT_SDU {
+        description.sdu
+    } else {
+        u32::from(BUILDER_DEFAULT_SDU)
+    }
+}
+
+/// One transport endpoint to try during multi-address failover (F2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ConnectAddress {
+    host: String,
+    port: u16,
+}
+
+/// Build the ordered list of transport endpoints to try for a (possibly
+/// multi-address) connect descriptor (F2, bead `rust-oracledb-clvm`),
+/// restricted to the primary transport `protocol`. Honours `LOAD_BALANCE`
+/// (shuffle within the balanced scope) and `FAILOVER=OFF` (only the first
+/// address of that list). Addresses without a host, or whose protocol differs
+/// from the primary, are skipped. The first entry equals the endpoint
+/// [`EasyConnect::parse`] selected as primary, so a single-address descriptor
+/// behaves exactly as before.
+fn resolve_connect_addresses(
+    descriptor: &Descriptor,
+    protocol: NetProtocol,
+) -> Vec<ConnectAddress> {
+    let mut out: Vec<ConnectAddress> = Vec::new();
+    let mut descriptions: Vec<&Description> = descriptor.descriptions.iter().collect();
+    if descriptor.load_balance {
+        shuffle_in_place(&mut descriptions);
+    }
+    for description in descriptions {
+        let mut lists: Vec<&AddressList> = description.address_lists.iter().collect();
+        if description.load_balance {
+            shuffle_in_place(&mut lists);
+        }
+        for list in lists {
+            let mut addresses: Vec<&Address> = list
+                .addresses
+                .iter()
+                .filter(|address| {
+                    address.host.is_some() && NetProtocol::from(address.protocol) == protocol
+                })
+                .collect();
+            if list.load_balance || description.load_balance {
+                shuffle_in_place(&mut addresses);
+            }
+            let limit = if list.failover {
+                addresses.len()
+            } else {
+                addresses.len().min(1)
+            };
+            for address in addresses.into_iter().take(limit) {
+                if let Some(host) = &address.host {
+                    out.push(ConnectAddress {
+                        host: host.clone(),
+                        port: address.port,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether an error justifies trying the next address in a multi-address
+/// descriptor (F2). Only transport-establishment failures (the TCP dial or the
+/// TLS handshake) fail over; configuration errors (wallet, unsupported SNI,
+/// auth) are fatal and abort the whole connect so the operator sees the real
+/// cause instead of an aggregated all-addresses-failed message.
+fn is_failover_eligible(err: &Error) -> bool {
+    matches!(err, Error::Io(_) | Error::Tls(_))
+}
+
+/// In-place Fisher–Yates shuffle seeded from the wall clock. `LOAD_BALANCE`
+/// only needs unpredictability across connects, not cryptographic randomness,
+/// so this stays dependency-free (no `rand` in the driver crate).
+fn shuffle_in_place<T>(items: &mut [T]) {
+    if items.len() < 2 {
+        return;
+    }
+    let mut state = shuffle_seed();
+    for i in (1..items.len()).rev() {
+        // xorshift64*
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let j = (state % (i as u64 + 1)) as usize;
+        items.swap(i, j);
+    }
+}
+
+fn shuffle_seed() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9_7F4A_7C15);
+    // Mix and force a non-zero (odd) seed so xorshift never degenerates.
+    (nanos ^ nanos.rotate_left(32).wrapping_mul(0x2545_F491_4F6C_DD1D)) | 1
+}
+
 /// Builds the listener connect descriptor, optionally injecting `(SERVER=emon)`
 /// into `CONNECT_DATA` (between `SERVICE_NAME` and `CID`, matching the golden
 /// emon connect packet). The reference sets `description.server_type = "emon"`
@@ -9438,6 +9655,196 @@ mod tests {
     use std::task::{Poll, Waker};
     use std::thread;
     use std::time::{Duration, Instant};
+
+    // ---- bead rust-oracledb-clvm: DSN transport params (F1) + failover (F2) ----
+
+    /// Read the SDU advertised in a CONNECT-packet payload (the 4th `u16be`
+    /// field; see `build_connect_packet_payload`).
+    fn connect_packet_sdu(payload: &[u8]) -> u16 {
+        u16::from_be_bytes([payload[6], payload[7]])
+    }
+
+    #[test]
+    fn f1_dsn_sdu_reaches_the_connect_config() {
+        // A DSN-set SDU must reach the connect config when the structured
+        // builder left SDU at its default (the common DSN-only case).
+        let desc = EasyConnect::parse_descriptor(
+            "(DESCRIPTION=(SDU=32768)(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1521))\
+             (CONNECT_DATA=(SERVICE_NAME=svc)))",
+        )
+        .expect("descriptor parses");
+        let primary = desc.first_description();
+        assert_eq!(primary.sdu, 32768, "parser must capture DSN SDU");
+        // builder default (8192) => DSN SDU wins.
+        let advertised =
+            u16::try_from(resolve_effective_sdu(8192, primary)).expect("32768 fits u16");
+        assert_eq!(advertised, 32768);
+        // and it reaches the actual CONNECT packet bytes.
+        let payload = build_connect_packet_payload(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1521))\
+             (CONNECT_DATA=(SERVICE_NAME=svc)))",
+            advertised,
+        )
+        .expect("payload builds");
+        assert_eq!(connect_packet_sdu(&payload), 32768);
+    }
+
+    #[test]
+    fn f1_effective_sdu_precedence() {
+        let dsn = EasyConnect::parse_descriptor(
+            "(DESCRIPTION=(SDU=16384)(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1))\
+             (CONNECT_DATA=(SERVICE_NAME=s)))",
+        )
+        .expect("parse");
+        let desc = dsn.first_description();
+        // explicit builder SDU wins over the DSN.
+        assert_eq!(resolve_effective_sdu(4096, desc), 4096);
+        // builder at default => DSN SDU used.
+        assert_eq!(resolve_effective_sdu(8192, desc), 16384);
+        // neither set => shared default.
+        let plain = EasyConnect::parse_descriptor(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1))(CONNECT_DATA=(SERVICE_NAME=s)))",
+        )
+        .expect("parse");
+        assert_eq!(resolve_effective_sdu(8192, plain.first_description()), 8192);
+    }
+
+    #[test]
+    fn f1_dsn_transport_connect_timeout_reaches_the_deadline() {
+        // A DSN-set transport_connect_timeout must drive the connect deadline,
+        // not the hard-coded 20s.
+        let desc = EasyConnect::parse_descriptor("h:1521/svc?transport_connect_timeout=3.5")
+            .expect("EZConnect-Plus parses");
+        let secs = desc.first_description().tcp_connect_timeout;
+        assert!((secs - 3.5).abs() < 1e-9, "parser captured {secs}");
+        let deadline = transport_connect_timeout_duration(secs);
+        assert_eq!(deadline, Duration::from_secs_f64(3.5));
+        // sanity: a descriptor without the param keeps the 20s default.
+        let default_desc = EasyConnect::parse_descriptor("h:1521/svc").expect("parse");
+        assert_eq!(
+            transport_connect_timeout_duration(
+                default_desc.first_description().tcp_connect_timeout
+            ),
+            Duration::from_secs(20)
+        );
+    }
+
+    #[test]
+    fn f2_address_list_yields_all_addresses_in_order() {
+        let desc = EasyConnect::parse_descriptor(
+            "(DESCRIPTION=(ADDRESS_LIST=\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=primary)(PORT=1521))\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=standby)(PORT=1522)))\
+             (CONNECT_DATA=(SERVICE_NAME=svc)))",
+        )
+        .expect("parse");
+        let addrs = resolve_connect_addresses(&desc, NetProtocol::Tcp);
+        assert_eq!(
+            addrs,
+            vec![
+                ConnectAddress {
+                    host: "primary".into(),
+                    port: 1521
+                },
+                ConnectAddress {
+                    host: "standby".into(),
+                    port: 1522
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn f2_failover_off_keeps_only_first_address() {
+        let desc = EasyConnect::parse_descriptor(
+            "(DESCRIPTION=(ADDRESS_LIST=(FAILOVER=OFF)\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=only)(PORT=1521))\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=nope)(PORT=1522)))\
+             (CONNECT_DATA=(SERVICE_NAME=svc)))",
+        )
+        .expect("parse");
+        let addrs = resolve_connect_addresses(&desc, NetProtocol::Tcp);
+        assert_eq!(
+            addrs,
+            vec![ConnectAddress {
+                host: "only".into(),
+                port: 1521
+            }]
+        );
+    }
+
+    #[test]
+    fn f2_load_balance_preserves_address_set() {
+        // LOAD_BALANCE may reorder, but every address must still be present.
+        let desc = EasyConnect::parse_descriptor(
+            "(DESCRIPTION=(ADDRESS_LIST=(LOAD_BALANCE=ON)\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=a)(PORT=1))\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=b)(PORT=2))\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=c)(PORT=3)))\
+             (CONNECT_DATA=(SERVICE_NAME=svc)))",
+        )
+        .expect("parse");
+        let mut addrs = resolve_connect_addresses(&desc, NetProtocol::Tcp);
+        addrs.sort_by(|l, r| l.port.cmp(&r.port));
+        assert_eq!(
+            addrs,
+            vec![
+                ConnectAddress {
+                    host: "a".into(),
+                    port: 1
+                },
+                ConnectAddress {
+                    host: "b".into(),
+                    port: 2
+                },
+                ConnectAddress {
+                    host: "c".into(),
+                    port: 3
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn f2_only_primary_protocol_addresses_are_candidates() {
+        // A mixed-protocol descriptor only yields the primary-protocol
+        // endpoints (the transport/TLS setup is resolved for one protocol).
+        let desc = EasyConnect::parse_descriptor(
+            "(DESCRIPTION=(ADDRESS_LIST=\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=plain)(PORT=1521))\
+             (ADDRESS=(PROTOCOL=tcps)(HOST=secure)(PORT=2484)))\
+             (CONNECT_DATA=(SERVICE_NAME=svc)))",
+        )
+        .expect("parse");
+        assert_eq!(
+            resolve_connect_addresses(&desc, NetProtocol::Tcp),
+            vec![ConnectAddress {
+                host: "plain".into(),
+                port: 1521
+            }]
+        );
+        assert_eq!(
+            resolve_connect_addresses(&desc, NetProtocol::Tcps),
+            vec![ConnectAddress {
+                host: "secure".into(),
+                port: 2484
+            }]
+        );
+    }
+
+    #[test]
+    fn f2_failover_only_covers_transport_errors() {
+        // TCP dial / TLS handshake failures fail over; config/auth errors abort.
+        assert!(is_failover_eligible(&Error::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "refused"
+        ))));
+        assert!(is_failover_eligible(&Error::Tls("handshake".into())));
+        assert!(!is_failover_eligible(&Error::UnsupportedSni(
+            "S1.X.V3.319".into()
+        )));
+        assert!(!is_failover_eligible(&Error::AccessTokenRequiresTcps));
+    }
 
     #[test]
     fn api_design_nothing_lost_map_covers_current_surface() {

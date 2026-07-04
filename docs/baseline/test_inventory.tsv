@@ -3,7 +3,7 @@ crates/oracledb-protocol/src/capabilities.rs	2
 crates/oracledb-protocol/src/dpl.rs	22
 crates/oracledb-protocol/src/lib.rs	3
 crates/oracledb-protocol/src/net/cassette.rs	8
-crates/oracledb-protocol/src/net/connectstring/mod.rs	29
+crates/oracledb-protocol/src/net/connectstring/mod.rs	30
 crates/oracledb-protocol/src/net/connectstring/tnsnames.rs	15
 crates/oracledb-protocol/src/net/mod.rs	7
 crates/oracledb-protocol/src/oson.rs	13
@@ -50,7 +50,7 @@ crates/oracledb-protocol/tests/tpc_golden.rs	3
 crates/oracledb-pyshim/src/dbobject.rs	3
 crates/oracledb/src/arrow/mod.rs	35
 crates/oracledb/src/cursor_logic.rs	14
-crates/oracledb/src/lib.rs	75
+crates/oracledb/src/lib.rs	83
 crates/oracledb/src/obs.rs	6
 crates/oracledb/src/pool.rs	32
 crates/oracledb/src/request.rs	7
@@ -60,7 +60,7 @@ crates/oracledb/src/soda/metadata.rs	4
 crates/oracledb/src/soda/operation.rs	11
 crates/oracledb/src/soda/qbe.rs	23
 crates/oracledb/src/sql_convert.rs	29
-crates/oracledb/src/tls.rs	6
+crates/oracledb/src/tls.rs	8
 crates/oracledb/src/transport.rs	11
 crates/oracledb/tests/access_token.rs	5
 crates/oracledb/tests/arrow_columnar_alloc.rs	1
@@ -86,6 +86,7 @@ crates/oracledb/tests/live_object_decode.rs	2
 crates/oracledb/tests/live_ref_cursor.rs	3
 crates/oracledb/tests/live_soda.rs	5
 crates/oracledb/tests/live_statement_cache.rs	4
+crates/oracledb/tests/live_transport_failover.rs	3
 crates/oracledb/tests/live_typed.rs	16
 crates/oracledb/tests/observability.rs	1
 crates/oracledb/tests/pipeline_live.rs	2

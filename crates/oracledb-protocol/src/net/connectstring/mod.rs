@@ -508,12 +508,19 @@ impl ArgMap {
 
 /// Alternative parameter names accepted inside descriptors (reference
 /// `ALTERNATIVE_PARAM_NAMES`): the listener keyword maps to the canonical key.
+///
+/// `connect_timeout` is aliased to `tcp_connect_timeout` beyond the reference's
+/// table (bead `rust-oracledb-clvm`, F1): the thin driver applies a single
+/// connect deadline across dial + ACCEPT + AUTH, so an operator-set
+/// `CONNECT_TIMEOUT` is honored as that deadline rather than silently ignored
+/// (the footgun the bead calls out). python-oracledb thin drops DESCRIPTION
+/// `CONNECT_TIMEOUT`; this is a deliberate, documented footgun-removal.
 fn canonical_param_name(name: &str) -> &str {
     match name {
         "pool_connection_class" => "cclass",
         "pool_purity" => "purity",
         "server" => "server_type",
-        "transport_connect_timeout" => "tcp_connect_timeout",
+        "transport_connect_timeout" | "connect_timeout" => "tcp_connect_timeout",
         "my_wallet_directory" => "wallet_location",
         other => other,
     }
@@ -980,6 +987,21 @@ mod tests {
         assert_eq!(desc.retry_delay, 10);
         assert_eq!(desc.retry_count, 12);
         assert!((desc.tcp_connect_timeout - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn connect_timeout_aliases_transport_connect_timeout() {
+        // bead rust-oracledb-clvm (F1): CONNECT_TIMEOUT is honored as the
+        // transport/connect deadline (aliased to tcp_connect_timeout) in both a
+        // full DESCRIPTION and an EZConnect string, so it is never silently
+        // dropped.
+        let d = parse_ok(
+            "(DESCRIPTION=(CONNECT_TIMEOUT=3)(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1521))\
+             (CONNECT_DATA=(SERVICE_NAME=svc)))",
+        );
+        assert!((d.first_description().tcp_connect_timeout - 3.0).abs() < 1e-9);
+        let ez = parse_ok("h:1521/svc?connect_timeout=4");
+        assert!((ez.first_description().tcp_connect_timeout - 4.0).abs() < 1e-9);
     }
 
     #[test]
