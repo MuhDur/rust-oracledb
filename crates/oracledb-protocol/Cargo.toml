@@ -56,11 +56,6 @@ thiserror.workspace = true
 cbc.workspace = true
 der = { workspace = true, features = ["pem"] }
 hmac.workspace = true
-# OCI IAM instance/resource-principal request signing (crypto::iam_signature):
-# RSA PKCS#1 v1.5 over SHA-256, parsing PKCS#8 and PKCS#1 PEM private keys.
-# Pure-Rust RustCrypto, `#![forbid(unsafe_code)]`-clean.
-rsa = { workspace = true }
-base64 = { workspace = true }
 # SIMD-accelerated UTF-8 validation for the borrowed fetch text path (gated by
 # the `simd-decode` feature). Its `unsafe` SIMD intrinsics are encapsulated
 # inside the crate; we only call its safe `basic::from_utf8` API, so this crate

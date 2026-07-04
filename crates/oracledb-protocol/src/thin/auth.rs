@@ -41,95 +41,18 @@ pub fn append_auth_phase_two_token(
     connect_string: &str,
     edition: Option<&str>,
 ) -> Result<()> {
-    append_auth_phase_two_token_inner(
-        out,
-        user,
-        token,
-        driver_name,
-        version_num,
-        connect_string,
-        edition,
-        None,
-    )
-}
-
-/// The signing string covered by the IAM request signature, in the exact layout
-/// the reference builds inside `AuthMessage._write_message` (messages/auth.pyx):
-/// three pseudo-headers — `date`, `(request-target)` and `host` — joined by
-/// single `\n` separators (no trailing newline). `date` must be an RFC 1123 GMT
-/// timestamp (`%a, %d %b %Y %H:%M:%S GMT`), `request_target` is the connection's
-/// service name, and `host` is `host:port` of the live transport.
-///
-/// This is a pure function so the caller signs exactly the bytes it sends and so
-/// the layout can be pinned by a deterministic test without a clock.
-pub fn iam_signing_string(date: &str, request_target: &str, host: &str, port: u16) -> String {
-    format!("date: {date}\n(request-target): {request_target}\nhost: {host}:{port}")
-}
-
-/// The IAM (instance/resource-principal) variant of [`append_auth_phase_two_token`]:
-/// in addition to the token, it writes the `AUTH_HEADER` (the signing string) and
-/// `AUTH_SIGNATURE` (base64 RSA signature) key/value pairs and OR's
-/// `TNS_AUTH_MODE_IAM_TOKEN` into the auth mode (reference messages/auth.pyx: the
-/// `self.private_key is not None` branch and `auth_mode |= TNS_AUTH_MODE_IAM_TOKEN`).
-/// `auth_header` and `auth_signature` are produced by [`iam_signing_string`] and
-/// [`crate::crypto::iam_signature`].
-#[allow(clippy::too_many_arguments)]
-pub fn append_auth_phase_two_token_iam(
-    out: &mut Vec<u8>,
-    user: &str,
-    token: &str,
-    driver_name: &str,
-    version_num: u32,
-    connect_string: &str,
-    edition: Option<&str>,
-    auth_header: &str,
-    auth_signature: &str,
-) -> Result<()> {
-    append_auth_phase_two_token_inner(
-        out,
-        user,
-        token,
-        driver_name,
-        version_num,
-        connect_string,
-        edition,
-        Some((auth_header, auth_signature)),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn append_auth_phase_two_token_inner(
-    out: &mut Vec<u8>,
-    user: &str,
-    token: &str,
-    driver_name: &str,
-    version_num: u32,
-    connect_string: &str,
-    edition: Option<&str>,
-    iam_signature: Option<(&str, &str)>,
-) -> Result<()> {
     let mut writer = TtcWriter::new();
     writer.write_function_code(TNS_FUNC_AUTH_PHASE_TWO);
     // AUTH_TOKEN + the four mandatory session pairs, plus the optional
-    // AUTH_HEADER/AUTH_SIGNATURE pair, AUTH_ORA_EDITION and AUTH_CONNECT_STRING.
+    // AUTH_ORA_EDITION and AUTH_CONNECT_STRING.
     let mut num_pairs = 5u32;
-    if iam_signature.is_some() {
-        num_pairs += 2;
-    }
     if edition.is_some() {
         num_pairs += 1;
     }
     if !connect_string.is_empty() {
         num_pairs += 1;
     }
-    // A present private key adds the IAM_TOKEN bit to the LOGON mode
-    // (reference `auth_mode |= TNS_AUTH_MODE_IAM_TOKEN`).
-    let auth_mode = if iam_signature.is_some() {
-        TNS_AUTH_MODE_LOGON | TNS_AUTH_MODE_IAM_TOKEN
-    } else {
-        TNS_AUTH_MODE_LOGON
-    };
-    write_auth_header(&mut writer, user, auth_mode, num_pairs)?;
+    write_auth_header(&mut writer, user, TNS_AUTH_MODE_LOGON, num_pairs)?;
     write_key_value(&mut writer, "AUTH_TOKEN", token, 0)?;
     write_key_value(&mut writer, "SESSION_CLIENT_CHARSET", "873", 0)?;
     write_key_value(&mut writer, "SESSION_CLIENT_DRIVER_NAME", driver_name, 0)?;
@@ -145,12 +68,6 @@ fn append_auth_phase_two_token_inner(
         "ALTER SESSION SET TIME_ZONE='+00:00'\0",
         1,
     )?;
-    // The IAM signature pair sits between AUTH_ALTER_SESSION and AUTH_ORA_EDITION,
-    // exactly as the reference writes it (messages/auth.pyx `_write_message`).
-    if let Some((auth_header, auth_signature)) = iam_signature {
-        write_key_value(&mut writer, "AUTH_HEADER", auth_header, 0)?;
-        write_key_value(&mut writer, "AUTH_SIGNATURE", auth_signature, 0)?;
-    }
     // Edition-Based Redefinition applies to token auth too — the reference writes
     // AUTH_ORA_EDITION after AUTH_ALTER_SESSION on both auth paths (messages/auth.pyx
     // `_write_message`); omitting it here silently ran token sessions under the
@@ -647,124 +564,5 @@ mod token_auth_tests {
         let _ = read_ub4(&out2, &mut p);
         p += 1;
         assert_eq!(read_ub4(&out2, &mut p), 7, "+ AUTH_CONNECT_STRING");
-    }
-
-    /// The signing string is the reference header layout: three pseudo-headers
-    /// joined by single `\n`, no trailing newline (messages/auth.pyx).
-    #[test]
-    fn iam_signing_string_layout() {
-        let s = iam_signing_string(
-            "Wed, 04 Jul 2026 12:34:56 GMT",
-            "salesdb_high",
-            "adb.us-ashburn-1.oraclecloud.com",
-            1522,
-        );
-        assert_eq!(
-            s,
-            "date: Wed, 04 Jul 2026 12:34:56 GMT\n\
-             (request-target): salesdb_high\n\
-             host: adb.us-ashburn-1.oraclecloud.com:1522"
-        );
-        // Exactly two newline separators, none trailing.
-        assert_eq!(s.matches('\n').count(), 2);
-        assert!(!s.ends_with('\n'));
-    }
-
-    /// The IAM message must carry AUTH_HEADER + AUTH_SIGNATURE, set the
-    /// LOGON|IAM_TOKEN auth mode, and keep the reference key order (the signature
-    /// pair sits between AUTH_ALTER_SESSION and AUTH_ORA_EDITION / AUTH_CONNECT_STRING).
-    /// This is the deterministic cassette pinning the signed-token wire format.
-    #[test]
-    fn iam_message_carries_header_and_signature() {
-        let mut out = Vec::new();
-        append_auth_phase_two_token_iam(
-            &mut out,
-            "scott",
-            "HEADER.PAYLOAD.SIG",
-            "drv",
-            300_000_000,
-            "cs",
-            None,
-            "date: X\n(request-target): svc\nhost: h:1522",
-            "QkFTRTY0U0lHTg==",
-        )
-        .unwrap();
-
-        assert_eq!(out[0], TNS_MSG_TYPE_FUNCTION);
-        assert_eq!(out[1], TNS_FUNC_AUTH_PHASE_TWO);
-        assert_eq!(out[3], 1, "user is present");
-        let mut pos = 4;
-        assert_eq!(read_ub4(&out, &mut pos), 5, "user length = len(\"scott\")");
-        assert_eq!(
-            read_ub4(&out, &mut pos),
-            TNS_AUTH_MODE_LOGON | TNS_AUTH_MODE_IAM_TOKEN,
-            "a private key OR's the IAM_TOKEN bit into the LOGON mode"
-        );
-        assert_eq!(out[pos], 1); // authivl pointer
-        pos += 1;
-        assert_eq!(
-            read_ub4(&out, &mut pos),
-            8,
-            "AUTH_TOKEN + 4 session pairs + AUTH_HEADER + AUTH_SIGNATURE + AUTH_CONNECT_STRING"
-        );
-
-        assert!(contains(&out, b"AUTH_TOKEN"));
-        assert!(contains(&out, b"AUTH_HEADER"));
-        assert!(contains(&out, b"AUTH_SIGNATURE"));
-        assert!(
-            contains(&out, b"QkFTRTY0U0lHTg=="),
-            "the signature value is sent"
-        );
-        assert!(contains(&out, b"AUTH_CONNECT_STRING"));
-        assert!(
-            !contains(&out, b"AUTH_PASSWORD") && !contains(&out, b"AUTH_SESSKEY"),
-            "signed-token auth must not send any password material"
-        );
-
-        // Ordering: AUTH_HEADER/AUTH_SIGNATURE come after AUTH_ALTER_SESSION and
-        // before AUTH_CONNECT_STRING (reference _write_message order).
-        let idx = |needle: &[u8]| out.windows(needle.len()).position(|w| w == needle).unwrap();
-        assert!(idx(b"AUTH_ALTER_SESSION") < idx(b"AUTH_HEADER"));
-        assert!(idx(b"AUTH_HEADER") < idx(b"AUTH_SIGNATURE"));
-        assert!(idx(b"AUTH_SIGNATURE") < idx(b"AUTH_CONNECT_STRING"));
-    }
-
-    /// Without a connect string or edition the signed-token pair count is exactly
-    /// the token + four session pairs + the two signature pairs.
-    #[test]
-    fn iam_message_pair_count_minimal() {
-        let mut out = Vec::new();
-        append_auth_phase_two_token_iam(&mut out, "u", "tok", "drv", 1, "", None, "hdr", "sig")
-            .unwrap();
-        let mut pos = 4;
-        let _user_len = read_ub4(&out, &mut pos);
-        assert_eq!(
-            read_ub4(&out, &mut pos),
-            TNS_AUTH_MODE_LOGON | TNS_AUTH_MODE_IAM_TOKEN
-        );
-        pos += 1; // authivl pointer
-        assert_eq!(
-            read_ub4(&out, &mut pos),
-            7,
-            "AUTH_TOKEN + 4 session pairs + AUTH_HEADER + AUTH_SIGNATURE"
-        );
-        assert!(!contains(&out, b"AUTH_CONNECT_STRING"));
-    }
-
-    /// The non-IAM token path is unchanged: it never emits the signature pairs
-    /// and never sets the IAM_TOKEN bit (regression guard for the shared inner fn).
-    #[test]
-    fn plain_token_path_has_no_signature() {
-        let mut out = Vec::new();
-        append_auth_phase_two_token(&mut out, "u", "tok", "drv", 1, "cs", None).unwrap();
-        let mut pos = 4;
-        let _user_len = read_ub4(&out, &mut pos);
-        assert_eq!(
-            read_ub4(&out, &mut pos),
-            TNS_AUTH_MODE_LOGON,
-            "the bare token path must not set the IAM_TOKEN bit"
-        );
-        assert!(!contains(&out, b"AUTH_HEADER"));
-        assert!(!contains(&out, b"AUTH_SIGNATURE"));
     }
 }

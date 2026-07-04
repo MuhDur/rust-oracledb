@@ -88,10 +88,6 @@ pub enum ProtocolError {
     UnsupportedVerifier { verifier_type: u32 },
     #[error("invalid AES key length")]
     InvalidAesKey,
-    #[error("invalid IAM private key: expected a PKCS#8 or PKCS#1 RSA PEM key")]
-    InvalidIamPrivateKey,
-    #[error("IAM request signing failed")]
-    IamSignatureFailed,
     #[error("invalid server authentication response")]
     InvalidServerResponse,
     // The next three mirror python-oracledb error numbers DPY-8000, DPY-8001

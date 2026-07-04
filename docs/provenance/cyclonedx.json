@@ -1708,19 +1708,6 @@
       "licenses": [
         {
           "license": {
-            "name": "MIT/Apache-2.0"
-          }
-        }
-      ],
-      "name": "num-bigint-dig",
-      "purl": "pkg:cargo/num-bigint-dig@0.8.6",
-      "type": "library",
-      "version": "0.8.6"
-    },
-    {
-      "licenses": [
-        {
-          "license": {
             "name": "MIT OR Apache-2.0"
           }
         }
@@ -1755,19 +1742,6 @@
       "purl": "pkg:cargo/num-integer@0.1.46",
       "type": "library",
       "version": "0.1.46"
-    },
-    {
-      "licenses": [
-        {
-          "license": {
-            "name": "MIT OR Apache-2.0"
-          }
-        }
-      ],
-      "name": "num-iter",
-      "purl": "pkg:cargo/num-iter@0.1.45",
-      "type": "library",
-      "version": "0.1.45"
     },
     {
       "licenses": [
@@ -1950,19 +1924,6 @@
       "purl": "pkg:cargo/pin-project-lite@0.2.17",
       "type": "library",
       "version": "0.2.17"
-    },
-    {
-      "licenses": [
-        {
-          "license": {
-            "name": "Apache-2.0 OR MIT"
-          }
-        }
-      ],
-      "name": "pkcs1",
-      "purl": "pkg:cargo/pkcs1@0.7.5",
-      "type": "library",
-      "version": "0.7.5"
     },
     {
       "licenses": [
@@ -2345,19 +2306,6 @@
       "licenses": [
         {
           "license": {
-            "name": "MIT OR Apache-2.0"
-          }
-        }
-      ],
-      "name": "rsa",
-      "purl": "pkg:cargo/rsa@0.9.10",
-      "type": "library",
-      "version": "0.9.10"
-    },
-    {
-      "licenses": [
-        {
-          "license": {
             "name": "MIT"
           }
         }
@@ -2730,19 +2678,6 @@
       "purl": "pkg:cargo/socket2@0.6.4",
       "type": "library",
       "version": "0.6.4"
-    },
-    {
-      "licenses": [
-        {
-          "license": {
-            "name": "MIT"
-          }
-        }
-      ],
-      "name": "spin",
-      "purl": "pkg:cargo/spin@0.9.8",
-      "type": "library",
-      "version": "0.9.8"
     },
     {
       "licenses": [

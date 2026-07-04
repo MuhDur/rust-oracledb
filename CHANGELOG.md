@@ -9,26 +9,6 @@ and the project follows the SemVer contract described in
 
 ### Added
 
-- **OCI IAM instance/resource-principal request signing (bead `cco`).**
-  `ConnectOptions::with_iam_token(token, private_key_pem)` adds the
-  `AUTH_HEADER` / `AUTH_SIGNATURE` pair (RSA PKCS#1 v1.5 over SHA-256 of the
-  `date` / `(request-target)` / `host` signing string, matching the reference)
-  and the `TNS_AUTH_MODE_IAM_TOKEN` mode, on top of the existing database-token
-  path. The private key parses from PKCS#8 or PKCS#1 PEM, is redacted from all
-  Debug/trace output, and — like the token — is refused before any dial over a
-  non-TCPS transport. Signing is verified offline against an OpenSSL-computed
-  signature vector; full OCI/ADB server acceptance is not yet live-verified.
-  New deps: `rsa` 0.9 (RustCrypto), `base64`. See the note below on
-  RUSTSEC-2023-0071.
-
-  > **Security note.** `rsa` 0.9 carries RUSTSEC-2023-0071 (Marvin timing
-  > side-channel) with no fixed release available upstream. The advisory targets
-  > an RSA *decryption* oracle; this usage is a one-shot client-side *signature*
-  > at connect time with no attacker-queryable decryption oracle, so it is not
-  > practically exploitable here. A documented `deny.toml` ignore records this;
-  > it is tracked for removal once RustCrypto ships a constant-time `rsa`
-  > (bead `rsa-marvin-revisit`), and must be an explicit decision at release.
-
 - **HA / multi-address connect-string support (bead `clvm`).** A
   `DESCRIPTION` with an `ADDRESS_LIST` / multiple `ADDRESS` entries now fails
   over: each address is tried in order (honoring `LOAD_BALANCE` shuffle,

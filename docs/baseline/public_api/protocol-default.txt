@@ -33,7 +33,6 @@ pub fn oracledb_protocol::crypto::EncryptedPassword::fmt(&self, &mut core::fmt::
 impl core::marker::StructuralPartialEq for oracledb_protocol::crypto::EncryptedPassword
 pub fn oracledb_protocol::crypto::encrypt_change_password_pair(&[u8], &[u8], &[u8]) -> oracledb_protocol::Result<(alloc::string::String, alloc::string::String)>
 pub fn oracledb_protocol::crypto::generate_verifier(&[u8], &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>, u32) -> oracledb_protocol::Result<oracledb_protocol::crypto::EncryptedPassword>
-pub fn oracledb_protocol::crypto::iam_signature(&str, &str) -> oracledb_protocol::Result<alloc::string::String>
 pub fn oracledb_protocol::crypto::verify_server_response(&[u8], &alloc::collections::btree::map::BTreeMap<alloc::string::String, alloc::string::String>) -> oracledb_protocol::Result<()>
 pub mod oracledb_protocol::dpl
 pub enum oracledb_protocol::dpl::DirectPathColumnValue
@@ -1270,7 +1269,6 @@ pub const oracledb_protocol::thin::TNS_AQ_MSG_BUFFERED: u16
 pub const oracledb_protocol::thin::TNS_AQ_MSG_PERSISTENT: u16
 pub const oracledb_protocol::thin::TNS_AQ_MSG_PERSISTENT_OR_BUFFERED: u16
 pub const oracledb_protocol::thin::TNS_AUTH_MODE_CHANGE_PASSWORD: u32
-pub const oracledb_protocol::thin::TNS_AUTH_MODE_IAM_TOKEN: u32
 pub const oracledb_protocol::thin::TNS_AUTH_MODE_LOGON: u32
 pub const oracledb_protocol::thin::TNS_AUTH_MODE_WITH_PASSWORD: u32
 pub const oracledb_protocol::thin::TNS_CCAP_FIELD_VERSION_12_1: u8
@@ -1381,7 +1379,6 @@ pub const oracledb_protocol::thin::TPC_TXN_FLAGS_SESSIONLESS: u32
 pub fn oracledb_protocol::thin::adjust_refetch_metadata(&oracledb_protocol::thin::ColumnMetadata, &mut oracledb_protocol::thin::ColumnMetadata) -> bool
 pub fn oracledb_protocol::thin::append_auth_phase_one(&mut alloc::vec::Vec<u8>, &str, &str, &str, &str, &str, u32) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::thin::append_auth_phase_two_token(&mut alloc::vec::Vec<u8>, &str, &str, &str, u32, &str, core::option::Option<&str>) -> oracledb_protocol::Result<()>
-pub fn oracledb_protocol::thin::append_auth_phase_two_token_iam(&mut alloc::vec::Vec<u8>, &str, &str, &str, u32, &str, core::option::Option<&str>, &str, &str) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::thin::bind_template_from_type_name(&str, u32) -> oracledb_protocol::thin::BindValue
 pub fn oracledb_protocol::thin::bind_value_type_info(&oracledb_protocol::thin::BindValue) -> core::option::Option<oracledb_protocol::thin::BindTypeInfo>
 pub fn oracledb_protocol::thin::build_auth_phase_one_payload(&str, &str, &str, &str, &str, u32) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
@@ -1405,7 +1402,6 @@ pub fn oracledb_protocol::thin::build_execute_query_payload(&str, u32, u8) -> or
 pub fn oracledb_protocol::thin::build_execute_query_payload_with_seq(&str, u32, u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_fast_auth_phase_one_payload(&str, &str, &str, &str, &str, u32) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_fast_auth_token_payload(&str, &str, &str, u32, &str, core::option::Option<&str>) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
-pub fn oracledb_protocol::thin::build_fast_auth_token_payload_iam(&str, &str, &str, u32, &str, core::option::Option<&str>, &str, &str) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_fetch_payload(u32, u32, u8) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::build_fetch_payload_with_seq(u32, u32, u8, u8) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::build_function_payload(u8, u8) -> alloc::vec::Vec<u8>
@@ -1448,7 +1444,6 @@ pub fn oracledb_protocol::thin::decode_sessionless_txn_state(&[u8]) -> oracledb_
 pub fn oracledb_protocol::thin::define_metadata_from_bind(&oracledb_protocol::thin::ColumnMetadata, &oracledb_protocol::thin::BindValue) -> oracledb_protocol::thin::ColumnMetadata
 pub fn oracledb_protocol::thin::encode_lob_text(&str, u8, core::option::Option<&[u8]>) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::encode_number_text(&str) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
-pub fn oracledb_protocol::thin::iam_signing_string(&str, &str, &str, u16) -> alloc::string::String
 pub fn oracledb_protocol::thin::image_begin(bool) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::image_finalize(&mut [u8]) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::thin::image_write_length(&mut alloc::vec::Vec<u8>, usize) -> oracledb_protocol::Result<()>
@@ -1783,7 +1778,6 @@ pub fn oracledb_protocol::wire::TtcReader<'_>::with_capacity_limited<T, F>(&self
 pub fn oracledb_protocol::wire::encode_packet(u8, u8, core::option::Option<u16>, &[u8], oracledb_protocol::wire::PacketLengthWidth) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 #[non_exhaustive] pub enum oracledb_protocol::ProtocolError
 pub oracledb_protocol::ProtocolError::DirectPathLoadTooMuchData
-pub oracledb_protocol::ProtocolError::IamSignatureFailed
 pub oracledb_protocol::ProtocolError::IncompletePacket
 pub oracledb_protocol::ProtocolError::IncompletePacket::available: usize
 pub oracledb_protocol::ProtocolError::IncompletePacket::declared: usize
@@ -1792,7 +1786,6 @@ pub oracledb_protocol::ProtocolError::InvalidClientIdentity
 pub oracledb_protocol::ProtocolError::InvalidClientIdentity::field: &'static str
 pub oracledb_protocol::ProtocolError::InvalidClientIdentity::reason: alloc::borrow::Cow<'static, str>
 pub oracledb_protocol::ProtocolError::InvalidConnectDescriptor(alloc::string::String)
-pub oracledb_protocol::ProtocolError::InvalidIamPrivateKey
 pub oracledb_protocol::ProtocolError::InvalidPacketLength
 pub oracledb_protocol::ProtocolError::InvalidPacketLength::length: usize
 pub oracledb_protocol::ProtocolError::InvalidPacketLength::minimum: usize

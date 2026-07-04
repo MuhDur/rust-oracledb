@@ -117,7 +117,6 @@ use std::num::NonZeroU32;
 use std::process;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use asupersync::net::TcpStream;
@@ -136,13 +135,13 @@ use oracledb_protocol::thin::{
     build_change_password_payload_with_seq, build_connect_packet_payload, build_data_types_payload,
     build_define_fetch_payload_with_seq, build_end_pipeline_payload_with_seq,
     build_execute_payload_with_bind_rows_and_options_with_seq, build_fast_auth_phase_one_payload,
-    build_fast_auth_token_payload, build_fast_auth_token_payload_iam, build_fetch_payload_with_seq,
-    build_function_payload_with_seq, build_function_payload_with_seq_and_token,
-    build_lob_create_temp_payload_with_seq, build_lob_free_temp_payload_with_seq,
-    build_lob_read_payload_with_seq, build_lob_trim_payload_with_seq,
-    build_lob_write_payload_with_seq, build_protocol_negotiation_payload,
-    classic_connect_response_is_complete, connect_data_fits_inline, parse_accept_payload,
-    parse_auth_response_with_limits, parse_define_fetch_response_borrowed_with_limits,
+    build_fast_auth_token_payload, build_fetch_payload_with_seq, build_function_payload_with_seq,
+    build_function_payload_with_seq_and_token, build_lob_create_temp_payload_with_seq,
+    build_lob_free_temp_payload_with_seq, build_lob_read_payload_with_seq,
+    build_lob_trim_payload_with_seq, build_lob_write_payload_with_seq,
+    build_protocol_negotiation_payload, classic_connect_response_is_complete,
+    connect_data_fits_inline, parse_accept_payload, parse_auth_response_with_limits,
+    parse_define_fetch_response_borrowed_with_limits,
     parse_define_fetch_response_with_context_and_limits,
     parse_fetch_response_with_context_and_limits, parse_lob_create_temp_response_with_limits,
     parse_lob_free_temp_response_with_limits, parse_lob_read_response_with_limits,
@@ -188,85 +187,6 @@ use oracledb_protocol::{
 
 const PYTHON_ORACLEDB_COMPAT_VERSION_NUM: u32 = 0x0400_1000;
 const DEFAULT_SDU: usize = 8192;
-
-/// Format a system time as an RFC 1123 GMT timestamp
-/// (`%a, %d %b %Y %H:%M:%S GMT`) for the OCI IAM signed-request `date`
-/// pseudo-header (reference messages/auth.pyx
-/// `now.strftime("%a, %d %b %Y %H:%M:%S GMT")`).
-fn format_rfc1123_gmt(now: SystemTime) -> String {
-    let secs = now
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format_rfc1123_gmt_secs(secs)
-}
-
-/// Pure, clock-free core of [`format_rfc1123_gmt`]: convert Unix seconds to the
-/// RFC 1123 GMT string. Uses Howard Hinnant's `civil_from_days` algorithm so the
-/// output is unit-testable against fixed vectors.
-fn format_rfc1123_gmt_secs(unix_secs: u64) -> String {
-    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let days = (unix_secs / 86_400) as i64;
-    let secs_of_day = unix_secs % 86_400;
-    let hour = secs_of_day / 3600;
-    let minute = (secs_of_day % 3600) / 60;
-    let second = secs_of_day % 60;
-    // 1970-01-01 is a Thursday (index 4 in a Sun=0 week).
-    let weekday = (((days % 7) + 4 + 7) % 7) as usize;
-    // civil_from_days: days is the count since 1970-01-01.
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
-        WEEKDAYS[weekday],
-        day,
-        MONTHS[(month - 1) as usize],
-        year,
-        hour,
-        minute,
-        second
-    )
-}
-
-#[cfg(test)]
-mod rfc1123_date_tests {
-    use super::*;
-
-    #[test]
-    fn known_unix_timestamps_format_as_rfc1123_gmt() {
-        // The Unix epoch (verified: `date -u -d @0` = Thu 01 Jan 1970 00:00:00 GMT).
-        assert_eq!(format_rfc1123_gmt_secs(0), "Thu, 01 Jan 1970 00:00:00 GMT");
-        // 1_700_000_000 = Tue, 14 Nov 2023 22:13:20 GMT.
-        assert_eq!(
-            format_rfc1123_gmt_secs(1_700_000_000),
-            "Tue, 14 Nov 2023 22:13:20 GMT"
-        );
-        // A leap-day boundary: 2020-02-29 00:00:00 GMT = 1_582_934_400.
-        assert_eq!(
-            format_rfc1123_gmt_secs(1_582_934_400),
-            "Sat, 29 Feb 2020 00:00:00 GMT"
-        );
-    }
-
-    #[test]
-    fn system_time_wrapper_agrees_with_pure_core() {
-        let t = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        assert_eq!(
-            format_rfc1123_gmt(t),
-            format_rfc1123_gmt_secs(1_700_000_000)
-        );
-    }
-}
 
 /// Upper bound on server-requested CONNECT resends before giving up. A real
 /// server asks once (pre-23ai, long connect data); the bound only guards
@@ -1611,35 +1531,6 @@ impl std::fmt::Debug for AccessToken {
     }
 }
 
-/// An RSA private key (PEM) used to sign the OCI IAM request header for
-/// instance/resource-principal authentication. Like [`AccessToken`], its
-/// [`Debug`] output is redacted so the key material never leaks into logs, error
-/// messages, or panic output. Set it with [`ConnectOptions::with_iam_token`].
-#[derive(Clone)]
-pub struct IamPrivateKey(String);
-
-impl IamPrivateKey {
-    /// Wrap a PEM private key string. The value is never printed; see the type docs.
-    pub fn new(private_key_pem: impl Into<String>) -> Self {
-        Self(private_key_pem.into())
-    }
-
-    /// The raw PEM, for signing on the wire. Crate-internal so callers cannot
-    /// accidentally route the secret through `Display`/formatting.
-    pub(crate) fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for IamPrivateKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never render the key, regardless of formatter flags.
-        f.write_str("IamPrivateKey(")?;
-        f.write_str(REDACTED_SECRET)?;
-        f.write_str(")")
-    }
-}
-
 /// Stable classifier for the thin driver's authentication modes.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[non_exhaustive]
@@ -1846,11 +1737,6 @@ pub struct ConnectOptions {
     /// verifier is exchanged. Token auth requires a TLS/TCPS transport; see
     /// [`ConnectOptions::with_access_token`]. The token is redacted from `Debug`.
     access_token: Option<AccessToken>,
-    /// RSA private key (PEM) for OCI IAM instance/resource-principal request
-    /// signing. When set alongside [`Self::access_token`], the client also sends
-    /// the signed `AUTH_HEADER`/`AUTH_SIGNATURE` pair (see
-    /// [`ConnectOptions::with_iam_token`]). Redacted from `Debug`.
-    iam_private_key: Option<IamPrivateKey>,
     /// Maximum number of open statements kept in this connection's statement
     /// cache. Defaults to 20 (the reference default). `0` disables caching
     /// entirely (every statement's cursor is closed after use, never retained),
@@ -1884,7 +1770,6 @@ impl std::fmt::Debug for ConnectOptions {
             .field("ssl_server_cert_dn", &server_cert_dn)
             .field("use_sni", &self.use_sni)
             .field("access_token", &self.access_token)
-            .field("iam_private_key", &self.iam_private_key)
             .field("statement_cache_size", &self.statement_cache_size)
             .field("protocol_limits", &self.protocol_limits)
             .finish()
@@ -1919,7 +1804,6 @@ impl ConnectOptions {
             use_sni: false,
             edition: None,
             access_token: None,
-            iam_private_key: None,
             statement_cache_size: STATEMENT_CACHE_SIZE,
             protocol_limits: ProtocolLimits::DEFAULT,
         }
@@ -1999,34 +1883,6 @@ impl ConnectOptions {
     #[must_use]
     pub fn with_access_token(mut self, token: impl Into<String>) -> Self {
         self.access_token = Some(AccessToken::new(token));
-        self.auth_mode = AuthMode::IamToken;
-        self
-    }
-
-    /// Authenticate with an OCI IAM **instance / resource-principal** signed
-    /// request: a database token plus the RSA private key that signs the request
-    /// header (python-oracledb's `access_token = (token, private_key)`).
-    ///
-    /// In addition to sending the token as `AUTH_TOKEN` (see
-    /// [`Self::with_access_token`]), the client signs a
-    /// `date` / `(request-target)` / `host` header with `private_key_pem` and
-    /// sends the `AUTH_HEADER` and `AUTH_SIGNATURE` pairs, setting the
-    /// `IAM_TOKEN` auth mode. The signature is RSA PKCS#1 v1.5 over SHA-256; the
-    /// PEM may be PKCS#8 or PKCS#1.
-    ///
-    /// Like a bare token, a signed token **requires** a TLS/TCPS connection (it
-    /// must never travel in clear text); over plain TCP this fails with the typed
-    /// [`Error::AccessTokenRequiresTcps`]. Both the token and the private key are
-    /// wrapped in redacting newtypes, so neither ever appears in `Debug`, logs,
-    /// or error output.
-    #[must_use]
-    pub fn with_iam_token(
-        mut self,
-        token: impl Into<String>,
-        private_key_pem: impl Into<String>,
-    ) -> Self {
-        self.access_token = Some(AccessToken::new(token));
-        self.iam_private_key = Some(IamPrivateKey::new(private_key_pem));
         self.auth_mode = AuthMode::IamToken;
         self
     }
@@ -2227,10 +2083,6 @@ impl ConnectOptions {
 
     pub fn access_token(&self) -> Option<&AccessToken> {
         self.access_token.as_ref()
-    }
-
-    pub fn iam_private_key(&self) -> Option<&IamPrivateKey> {
-        self.iam_private_key.as_ref()
     }
 
     pub fn statement_cache_size(&self) -> usize {
@@ -2481,15 +2333,6 @@ impl Connection {
                 db.name = %descriptor.service_name,
             );
             let token_auth = options.access_token.is_some();
-            // A database access token — bare (5bh) or IAM instance/resource-principal
-            // signed (cco) — must never travel in clear text. Fail closed *before*
-            // dialing any listener if the transport is not TLS/TCPS, so a token never
-            // even triggers a network connection over plaintext (reference protocol.pyx
-            // `ERR_ACCESS_TOKEN_REQUIRES_TCPS`). The post-accept check below is retained
-            // as defense in depth.
-            if token_auth && !descriptor.protocol.is_tls() {
-                return Err(Error::AccessTokenRequiresTcps);
-            }
             let descriptor_ssl_server_dn_match =
                 primary_description.security.ssl_server_dn_match && options.ssl_server_dn_match;
             let descriptor_ssl_server_cert_dn = options
@@ -2754,45 +2597,14 @@ impl Connection {
                 // One combined fast-auth bundle carrying a phase-two `AUTH_TOKEN`
                 // message; no resend. The payload (which embeds the token) is never
                 // passed to `trace_connect_bytes`, so the secret stays out of logs.
-                //
-                // Instance/resource-principal auth additionally signs a
-                // date/(request-target)/host header with the RSA private key and
-                // sends AUTH_HEADER + AUTH_SIGNATURE (reference messages/auth.pyx
-                // `_write_message`). The signing string is built and signed here so
-                // the exact bytes we send are the bytes we sign; neither the private
-                // key nor the resulting payload ever reaches `trace_connect_bytes`.
-                let auth_payload = if let Some(private_key) = &options.iam_private_key {
-                    let date = format_rfc1123_gmt(SystemTime::now());
-                    let signing_string = oracledb_protocol::thin::iam_signing_string(
-                        &date,
-                        &descriptor.service_name,
-                        &descriptor.host,
-                        descriptor.port,
-                    );
-                    let signature = oracledb_protocol::crypto::iam_signature(
-                        private_key.expose(),
-                        &signing_string,
-                    )?;
-                    build_fast_auth_token_payload_iam(
-                        &options.user,
-                        token.expose(),
-                        &identity.driver_name,
-                        PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
-                        &auth_connect_string,
-                        options.edition.as_deref(),
-                        &signing_string,
-                        &signature,
-                    )?
-                } else {
-                    build_fast_auth_token_payload(
-                        &options.user,
-                        token.expose(),
-                        &identity.driver_name,
-                        PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
-                        &auth_connect_string,
-                        options.edition.as_deref(),
-                    )?
-                };
+                let auth_payload = build_fast_auth_token_payload(
+                    &options.user,
+                    token.expose(),
+                    &identity.driver_name,
+                    PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
+                    &auth_connect_string,
+                    options.edition.as_deref(),
+                )?;
                 trace_connect_step("send AUTH token (fast-auth phase two)");
                 core.send_data_packet(cx, &auth_payload, sdu).await?;
                 trace_connect_step("read AUTH token response");
