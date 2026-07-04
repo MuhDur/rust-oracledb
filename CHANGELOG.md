@@ -5,6 +5,68 @@ is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows the SemVer contract described in
 [`docs/adr/0002-semver-contract.md`](docs/adr/0002-semver-contract.md).
 
+## [0.6.0] - 2026-07-04
+
+Minor release: the thin driver now connects to and queries **pre-23ai Oracle
+servers** (18c/19c/21c generation). Previously every pre-23ai connect failed
+during the TNS handshake; a field test against a 19c fleet surfaced the gap,
+and the fixes were live-verified against Oracle XE 18, XE 21, and FREE 23ai
+(`scripts/version_matrix.sh`). Breaking protocol-crate builder signature
+changes force the minor bump per ADR-0002; the 23ai wire behavior is
+byte-identical (goldens and cassettes unchanged).
+
+### Added
+
+- Pre-23ai session establishment: the connect path now handles the TNS
+  `RESEND` packet (resending CONNECT plus the split connect-data packet for
+  descriptors above `TNS_MAX_CONNECT_DATA`), and runs the classic
+  protocol-negotiation / data-types / two-phase-auth handshake when the
+  server does not advertise fast authentication. New protocol builders:
+  `build_protocol_negotiation_payload`, `build_data_types_payload`,
+  `build_auth_phase_one_payload`, `connect_data_fits_inline`, and the
+  classic completion checker `classic_connect_response_is_complete`.
+- Classic response framing: servers that never negotiated `END_OF_RESPONSE`
+  framing (protocol version below 319) complete responses at their terminal
+  TTC message. Execute, fetch (owned and borrowed), commit/rollback/ping/
+  logoff, LOB operations, scroll, and change-password now finish on such
+  servers instead of hanging until the call timeout.
+- `TtcWriter::write_function_header` / `write_piggyback_header`: function
+  and piggyback headers with the ub8 pipeline-token written only when the
+  negotiated ttc field version is at least 23.1 ext 1.
+- Errors: `Error::UnexpectedPacket` (names the TNS packet type, replacing a
+  misleading "unknown TTC message type ... at position 4" report for
+  packet-layer bytes) and `Error::ConnectResendLoop`.
+- `TNS_PACKET_TYPE_RESEND`, `TNS_MSG_TYPE_FAST_AUTH`, and
+  `TNS_MAX_CONNECT_DATA` protocol constants.
+
+### Fixed
+
+- Fetch continuation across pages: `Rows` now tracks the previous page's
+  last row for bit-vector duplicate-column decompression. Previously
+  `Rows::collect()` drained the batch before the next fetch, so a page whose
+  first row was duplicate-compressed against the prior page failed to decode
+  (also affected 23ai).
+- Field-version negotiation takes the minimum of the server-reported and
+  client-supported ttc field versions (was: maximum), matching the reference
+  `capabilities.pyx` and preventing 23ai-era field formats from being used
+  against older servers.
+
+### Changed
+
+- **Breaking (oracledb-protocol, re-exported via `oracledb::protocol`):**
+  execute/fetch/LOB/AQ/subscription payload builders,
+  `build_function_payload*`, `build_auth_phase_two_payload_with_proxy_with_seq`,
+  and `build_change_password_payload_with_seq` take the negotiated
+  `ttc_field_version` so the ub8 token is version-gated. Pass
+  `ClientCapabilities::default().ttc_field_version` to keep the previous
+  23ai-era bytes.
+- Pipelining fails closed with a structured unsupported-feature error on
+  connections without `END_OF_RESPONSE` framing (pre-23ai servers) instead
+  of hanging on the first boundary read.
+- Token (IAM/OAuth) authentication explicitly requires a fast-auth-capable
+  (23ai-generation) server; password auth uses the classic flow on older
+  servers.
+
 ## [0.5.1] - 2026-06-29
 
 Patch release focused on downstream capability honesty for `oraclemcp` doctor
