@@ -9,7 +9,9 @@ pub(crate) use std::collections::BTreeMap;
 
 pub(crate) use crate::sql::statement_is_plsql;
 pub(crate) use crate::wire::{BorrowedBytes, BoundedReader, TtcReader, TtcWriter};
-pub(crate) use crate::{ProtocolError, Result, TNS_VERSION_DESIRED, TNS_VERSION_MIN};
+pub(crate) use crate::{
+    ProtocolError, Result, TNS_VERSION_DESIRED, TNS_VERSION_MIN, TNS_VERSION_MIN_ACCEPTED,
+};
 pub(crate) use hex::FromHex;
 
 pub mod aq;

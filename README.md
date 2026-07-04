@@ -604,6 +604,47 @@ docs ([docs/FUZZING.md](docs/FUZZING.md), [docs/PERFORMANCE.md](docs/PERFORMANCE
 give the exact commands. Container-dependent benches and tests self-skip cleanly
 when no listener is present.
 
+### Multi-version live matrix (release gate)
+
+The 0.5.x line was only ever live-tested against 23ai FREE — which is exactly
+how a connect path that could not reach *any* pre-23ai server shipped. Server-
+version coverage is therefore a **standing gate**, not an optional extra:
+
+```bash
+# One container per server generation (xe11 / xe18 / xe21 / free23):
+scripts/version_matrix.sh up all && scripts/version_matrix.sh health all
+
+# Quick connect smoke per lane:
+scripts/version_matrix.sh smoke all
+
+# FULL value-asserting suite per lane (examples/matrix_full.rs): identity,
+# multi-packet fetch, wide rows, bind DML + rollback/commit, CLOB/BLOB
+# write+readback, describe metadata, NULLs, scalar round-trips, error paths:
+scripts/version_matrix.sh full all
+```
+
+The `xe11` lane (Oracle 11g) is deliberately **below** the supported protocol
+floor (`TNS_VERSION_MIN_ACCEPTED = 315`; 11g negotiates 314): its assertion is
+inverted — the lane passes when the driver *refuses* the server with the
+structured `UnsupportedVersion` error naming the floor (python-oracledb
+DPY-3010 parity), never a hang or a misleading decode error.
+
+**A release cannot ship without a green full-matrix run recorded for the
+release SHA.** Run `scripts/release_matrix_gate.sh` on the commit you intend
+to tag; it runs `version_matrix.sh full` for every lane and writes
+`tests/artifacts/version_matrix/results-<sha>.json`. Commit that file —
+`scripts/release_preflight.sh` (executed by the tag-driven release workflow)
+rejects any tag whose HEAD has no committed, all-green artifact. CI also runs
+the full matrix on every push to `main` touching `crates/**` plus nightly
+(`.github/workflows/version-matrix.yml`, gvenzl service containers).
+
+A genuine 19c EE lane (Oracle Container Registry, requires an OTN account;
+free for dev/test) is a documented **operator-run pre-release extra**, not
+part of the automated gate — XE 18 and XE 21 bracket 19c on the relevant
+protocol behaviors (RESEND on connect, classic non-fast-auth session
+establishment, no END_OF_RESPONSE framing) and reproduce the original field
+failure byte-identically.
+
 ---
 
 ## Troubleshooting

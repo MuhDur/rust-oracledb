@@ -50,6 +50,18 @@ pub fn build_connect_packet_payload(connect_data: &str, sdu: u16) -> Result<Vec<
 pub fn parse_accept_payload(payload: &[u8]) -> Result<AcceptInfo> {
     let mut reader = TtcReader::new(payload);
     let protocol_version = reader.read_u16be()?;
+    // Refuse below-floor servers BEFORE touching the rest of the payload
+    // (reference messages/connect.pyx: `if protocol_version <
+    // TNS_VERSION_MIN_ACCEPTED: ERR_SERVER_VERSION_NOT_SUPPORTED`). Pre-12.1
+    // servers use an older, shorter ACCEPT layout — Oracle 11g (version 314)
+    // sends 24 payload bytes, so parsing on would die with a misleading
+    // "truncated TTC payload" instead of naming the real problem.
+    if protocol_version < TNS_VERSION_MIN_ACCEPTED {
+        return Err(ProtocolError::UnsupportedVersion {
+            version: protocol_version,
+            minimum: TNS_VERSION_MIN_ACCEPTED,
+        });
+    }
     let protocol_options = reader.read_u16be()?;
     reader.skip(10)?;
     let flags1 = reader.read_u8()?;

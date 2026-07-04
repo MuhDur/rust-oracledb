@@ -4,28 +4,57 @@
 #
 # The 0.5.x line was only ever live-tested against 23ai FREE, which is how a
 # connect path that could not reach ANY pre-23ai server shipped. This helper
-# manages one container per server generation and runs the connect smoke
+# manages one container per server generation and runs the live suites
 # against each:
 #
+#   xe11    gvenzl/oracle-xe:11-slim    (BELOW the protocol floor: refusal lane)
 #   xe18    gvenzl/oracle-xe:18-slim    (closest free proxy to a 19c fleet)
 #   xe21    gvenzl/oracle-xe:21-slim
 #   free23  gvenzl/oracle-free:23-slim  (fast-auth / END_OF_RESPONSE era)
 #
 # Protocol behaviors that only pre-23ai lanes exercise: RESEND on connect,
 # classic (non-fast-auth) session establishment, no END_OF_RESPONSE framing,
-# low negotiated ttc field versions (no ub8 function-header tokens).
+# low negotiated ttc field versions (no ub8 function-header tokens), break
+# MARKER before the classic auth ERROR response.
 #
-# usage: scripts/version_matrix.sh up|health|smoke|env|stop [lane]
-#   lane: xe18 | xe21 | free23 | all (default all)
+# The xe11 lane is deliberately BELOW the accepted protocol floor
+# (TNS_VERSION_MIN_ACCEPTED = 315; Oracle 11g negotiates 314). Its assertion
+# is inverted: smoke/full PASS when the driver refuses the server with the
+# structured UnsupportedVersion error naming the floor (reference parity:
+# python-oracledb DPY-3010) — never a hang, never a decode error.
+#
+# Subcommands:
+#   up      create/start the lane container(s)
+#   health  check "DATABASE IS READY TO USE" in the container log
+#   smoke   quick connect + two queries (examples/smoke.rs);
+#           xe11: structured-refusal assertion
+#   full    deep suite with VALUE assertions (examples/matrix_full.rs):
+#           identity, multi-packet fetch, wide rows, bind DML +
+#           rollback/commit, CLOB/BLOB write+readback, describe, NULLs,
+#           scalar round-trips, error paths; xe11: structured-refusal
+#           assertion. This is the standing release gate (see
+#           scripts/release_matrix_gate.sh).
+#   env     print PYO_TEST_* exports for the lane
+#   stop    stop the lane container(s)
+#
+# usage: scripts/version_matrix.sh up|health|smoke|full|env|stop [lane]
+#   lane: xe11 | xe18 | xe21 | free23 | all (default all)
+
+# The lane_* functions are dispatched dynamically via "lane_$cmd".
+# shellcheck disable=SC2329
 set -euo pipefail
 
 ORACLE_PASSWORD="${ORACLE_PASSWORD:-OracledbTest#2026}"
 APP_USER="${ORACLEDB_MATRIX_APP_USER:-testuser}"
 APP_USER_PASSWORD="${ORACLEDB_MATRIX_APP_PASSWORD:-testpw}"
 
-# lane -> name / image / host port / service / smoke user / smoke password
+# lane -> name / image / host port / service / suite user / suite password
 lane_fields() {
   case "$1" in
+    xe11)   printf '%s\n' "${ORACLEDB_XE11_CONTAINER:-oracle-xe11-1511}" \
+                          "gvenzl/oracle-xe:11-slim" \
+                          "${ORACLEDB_XE11_PORT:-1511}" "XE" \
+                          "$APP_USER" "$APP_USER_PASSWORD" ;;
     xe18)   printf '%s\n' "${ORACLEDB_XE18_CONTAINER:-oracle-xe18-1518}" \
                           "gvenzl/oracle-xe:18-slim" \
                           "${ORACLEDB_XE18_PORT:-1518}" "XEPDB1" \
@@ -39,13 +68,19 @@ lane_fields() {
                           "${ORACLEDB_HOST_PORT:-1522}" "FREEPDB1" \
                           "${PYO_TEST_MAIN_USER:-pythontest}" \
                           "${PYO_TEST_MAIN_PASSWORD:-pythontest}" ;;
-    *) printf 'unknown lane: %s (xe18|xe21|free23)\n' "$1" >&2; return 2 ;;
+    *) printf 'unknown lane: %s (xe11|xe18|xe21|free23)\n' "$1" >&2; return 2 ;;
   esac
+}
+
+# Whether a lane asserts the below-floor structured refusal instead of a
+# working connection.
+lane_expects_refusal() {
+  [ "$1" = "xe11" ]
 }
 
 lanes_for() {
   case "${1:-all}" in
-    all) printf 'xe18\nxe21\nfree23\n' ;;
+    all) printf 'xe11\nxe18\nxe21\nfree23\n' ;;
     *)   printf '%s\n' "$1" ;;
   esac
 }
@@ -96,7 +131,16 @@ lane_smoke() {
   { read -r name; read -r image; read -r port; read -r service; \
     read -r user; read -r password; } < <(lane_fields "$lane")
   printf '=== %s (%s) localhost:%s/%s ===\n' "$lane" "$image" "$port" "$service"
-  if cargo run -q --example smoke -- \
+  if lane_expects_refusal "$lane"; then
+    # Below-floor lane: PASS means the driver cleanly refused the server.
+    if cargo run -q --example matrix_full -- --expect-version-refusal \
+        "localhost:$port/$service" "$user" "$password"; then
+      printf '%-7s SMOKE GREEN (structured refusal verified)\n' "$lane"
+    else
+      printf '%-7s SMOKE FAILED (refusal missing or malformed)\n' "$lane"
+      return 1
+    fi
+  elif cargo run -q --example smoke -- \
       "localhost:$port/$service" "$user" "$password"; then
     printf '%-7s SMOKE GREEN\n' "$lane"
   else
@@ -105,11 +149,29 @@ lane_smoke() {
   fi
 }
 
+lane_full() {
+  local lane="$1" name image port service user password
+  { read -r name; read -r image; read -r port; read -r service; \
+    read -r user; read -r password; } < <(lane_fields "$lane")
+  printf '=== %s FULL (%s) localhost:%s/%s ===\n' "$lane" "$image" "$port" "$service"
+  local -a refusal_flag=()
+  if lane_expects_refusal "$lane"; then
+    refusal_flag=(--expect-version-refusal)
+  fi
+  if cargo run -q --example matrix_full -- "${refusal_flag[@]}" \
+      "localhost:$port/$service" "$user" "$password"; then
+    printf '%-7s FULL GREEN\n' "$lane"
+  else
+    printf '%-7s FULL FAILED\n' "$lane"
+    return 1
+  fi
+}
+
 cmd="${1:-}"
 lane_arg="${2:-all}"
 rc=0
 case "$cmd" in
-  up|health|env|smoke)
+  up|health|env|smoke|full)
     while read -r lane; do
       "lane_$cmd" "$lane" || rc=1
     done < <(lanes_for "$lane_arg")
@@ -121,7 +183,7 @@ case "$cmd" in
     done < <(lanes_for "$lane_arg")
     ;;
   *)
-    printf 'usage: %s up|health|smoke|env|stop [xe18|xe21|free23|all]\n' "$0" >&2
+    printf 'usage: %s up|health|smoke|full|env|stop [xe11|xe18|xe21|free23|all]\n' "$0" >&2
     exit 2
     ;;
 esac

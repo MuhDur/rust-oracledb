@@ -5,6 +5,57 @@ is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows the SemVer contract described in
 [`docs/adr/0002-semver-contract.md`](docs/adr/0002-semver-contract.md).
 
+## [Unreleased]
+
+### Added
+
+- **Below-floor server refusal (Oracle 11g and older).** The ACCEPT parser now
+  enforces the reference's protocol floor (`TNS_VERSION_MIN_ACCEPTED` = 315,
+  the 12.1 wire format; python-oracledb `ERR_SERVER_VERSION_NOT_SUPPORTED`,
+  DPY-3010): a server negotiating below it — Oracle 11g answers with 314 — is
+  refused with a structured, self-explanatory error naming both the offered
+  version and the floor. Previously the 11g ACCEPT (an older, shorter payload
+  layout) surfaced a misleading `truncated TTC payload` decode error.
+- **Standing multi-version live matrix as a release gate**
+  (`scripts/version_matrix.sh`): new `full` subcommand runs a deep
+  value-asserting suite (`examples/matrix_full.rs`) per lane — session
+  identity, 600-row multi-packet fetch verified value-by-value, wide rows
+  above one SDU, bind DML with `rows_affected` checks, rollback semantics +
+  cross-connection commit visibility, CLOB/BLOB write+readback above one
+  chunk, describe/metadata (names, types, precision/scale), NULL handling,
+  NUMBER/VARCHAR2/DATE/TIMESTAMP round-trips, and deliberate error paths (bad
+  SQL, unknown table, wrong password → clean ORA-01017). New `xe11` lane
+  (gvenzl/oracle-xe:11-slim, port 1511) asserts the structured below-floor
+  refusal. `scripts/release_matrix_gate.sh` records a per-SHA verdict file,
+  and `scripts/release_preflight.sh` now REFUSES any release tag without a
+  committed all-green matrix artifact for the exact release SHA.
+  `.github/workflows/version-matrix.yml` runs the full matrix (gvenzl service
+  containers, one runner per lane) on pushes to `main` touching `crates/**`
+  and nightly.
+- Sans-I/O golden regression tests for the pre-23ai handshake
+  (`oracledb-protocol/tests/pre23ai_handshake_golden.rs`), from lab captures
+  only: the 8-byte RESEND packet, below-floor 11g ACCEPT (structured refusal,
+  refusal-precedes-decode), XE 18 classic ACCEPT (no fast-auth flags), FREE
+  23ai contrast ACCEPT, and classic protocol-negotiation / data-types / auth
+  phase one + two responses proven complete ONLY at their terminal message —
+  the terminate-without-END_OF_RESPONSE loop contract, including the
+  incomplete-prefix "read more packets" behavior.
+
+### Fixed
+
+- **Classic (pre-23ai) connect-phase reads now handle break MARKERs.** A
+  pre-23ai server answers a failed classic login (wrong password) with a
+  MARKER packet before the ERROR response; the connect-phase reader now runs
+  the same marker/reset dance as the post-connect readers, so the real
+  ORA-01017 is surfaced instead of `unexpected TNS packet type 12 (MARKER)`.
+
+### Changed
+
+- `ProtocolError::UnsupportedVersion` now carries `{ version, minimum }` (was
+  `{ version }`) and its message names the floor and the reference error it
+  mirrors; `TnsVersion::negotiate` refuses below 315 (the reference's accepted
+  floor) instead of 300 (the advertised CONNECT minimum).
+
 ## [0.6.0] - 2026-07-04
 
 Minor release: the thin driver now connects to and queries **pre-23ai Oracle

@@ -91,6 +91,30 @@ if [ -n "$tag" ]; then
     fail "tag '$tag' is not a supported semver tag (expected vX.Y.Z or vX.Y.Z-prerelease)"
   [ "$tag" = "v$version" ] ||
     fail "tag '$tag' does not match workspace version '$version' (expected v$version)"
+
+  # Live version-matrix gate (bead rust-oracledb-pre23ai-connect-z47u.5): a
+  # release cannot ship without a committed, all-green FULL matrix run for the
+  # exact release SHA. The 0.5.x line shipped a connect path that could not
+  # reach any pre-23ai server because only 23ai was ever live-tested; this
+  # check makes pre-23ai coverage (xe11 refusal + xe18 + xe21 + free23)
+  # structurally unskippable. Produce the artifact with
+  # scripts/release_matrix_gate.sh and commit it before tagging.
+  need git
+  head_sha="$(git rev-parse HEAD)"
+  matrix_results="tests/artifacts/version_matrix/results-$head_sha.json"
+  [ -f "$matrix_results" ] ||
+    fail "missing live version-matrix results for release SHA $head_sha — run scripts/release_matrix_gate.sh on this commit and commit $matrix_results"
+  [ "$(jq -r '.sha' "$matrix_results")" = "$head_sha" ] ||
+    fail "$matrix_results does not record SHA $head_sha"
+  [ "$(jq -r '.dirty' "$matrix_results")" = "false" ] ||
+    fail "$matrix_results was recorded on a dirty worktree — rerun scripts/release_matrix_gate.sh on the clean release commit"
+  [ "$(jq -r '.overall' "$matrix_results")" = "pass" ] ||
+    fail "$matrix_results is not all-green — a release cannot ship without every matrix lane passing"
+  for lane in xe11 xe18 xe21 free23; do
+    [ "$(jq -r --arg l "$lane" '.lanes[$l]' "$matrix_results")" = "pass" ] ||
+      fail "$matrix_results: lane '$lane' did not pass"
+  done
+  echo "release-preflight: version-matrix gate OK ($matrix_results)"
 fi
 
 # On a real tag build, require the tagged commit to be contained in origin/main

@@ -85,13 +85,13 @@ axes with the server:
 
 | axis | client value | meaning |
 |---|---|---|
-| TNS transport version | floor `TNS_VERSION_MIN = 300`, desired `TNS_VERSION_DESIRED = 319` | the listener/transport protocol version. `TnsVersion::negotiate` accepts any server version `>= 300` and caps the session at `min(server, 319)`. |
+| TNS transport version | advertised minimum `TNS_VERSION_MIN = 300`, accepted floor `TNS_VERSION_MIN_ACCEPTED = 315`, desired `TNS_VERSION_DESIRED = 319` | the listener/transport protocol version. The CONNECT packet advertises 300 like the reference, but any ACCEPT below `315` (the 12.1 wire format; Oracle 11g answers `314`) is refused with the structured `UnsupportedVersion` error naming the floor — python-oracledb `TNS_VERSION_MIN_ACCEPTED` / DPY-3010 parity. Sessions cap at `min(server, 319)`. |
 | TTC capability (field) version | client advertises `ttc_field_version = 24` (the FAST_AUTH compile-caps blob), negotiated down to the server's value | drives which message/response shapes are used (12.1 → 23ai feature gates). |
 
 Citations:
 
-- TNS version constants: `crates/oracledb-protocol/src/lib.rs:19-20`.
-- TNS negotiation (reject `< 300`, cap at `319`): `crates/oracledb-protocol/src/capabilities.rs:9-17`. A server below the floor yields `ProtocolError::UnsupportedVersion` — i.e. **fail closed**, not a silent downgrade (`crates/oracledb-protocol/src/lib.rs:45-46`).
+- TNS version constants (`TNS_VERSION_MIN`, `TNS_VERSION_MIN_ACCEPTED`, `TNS_VERSION_DESIRED`): `crates/oracledb-protocol/src/lib.rs`.
+- TNS negotiation (reject `< 315` at ACCEPT-parse time, before the rest of the payload is touched; cap at `319`): `parse_accept_payload` in `crates/oracledb-protocol/src/thin/connect.rs` and `crates/oracledb-protocol/src/capabilities.rs`. A server below the floor yields the structured `ProtocolError::UnsupportedVersion { version, minimum }` — i.e. **fail closed** with a self-explanatory refusal, not a silent downgrade or a decode error. Live-verified against Oracle 11g XE (`scripts/version_matrix.sh`, xe11 lane) and pinned by `oracledb-protocol/tests/pre23ai_handshake_golden.rs`.
 - TTC field-version floor/negotiation (`server_ttc_field_version.max(default)`): `crates/oracledb-protocol/src/thin/connect.rs:154-159`.
 - Default client TTC field version (`24`): `crates/oracledb-protocol/src/thin/types.rs:38`.
 - TTC field-version → Oracle release map (the constants the gates compare against): `TNS_CCAP_FIELD_VERSION_12_1 = 7`, `_12_2 = 8`, `_20_1 = 14`, `_21_1 = 16`, `_23_1 = 17`, `_23_1_EXT_1 = 18`, `_23_1_EXT_3 = 20` — `crates/oracledb-protocol/src/thin/constants.rs:78,283-288`.
@@ -100,18 +100,18 @@ Citations:
 
 | Oracle Database release | status |
 |---|---|
-| 12.1 / 12.2 | Supported — TTC field-version gates 7/8 exist and are honoured (`constants.rs:78,283`). The TNS floor (300) admits these servers. |
+| 12.1 / 12.2 | Supported — TTC field-version gates 7/8 exist and are honoured (`constants.rs:78,283`). The accepted TNS floor (315 = the 12.1 wire format) admits these servers. |
 | 18c / 19c | Supported — covered by the 12.2-and-up gates; no release-specific gate is required between 12.2 and 20.1. |
 | 21c | Supported — `_21_1 = 16` gate (`constants.rs:285`). |
 | 23ai (23.x) | Supported — this is the client's own capability level (`ttc_field_version = 24`, above `_23_1_EXT_3 = 20`); 23ai features (native BOOLEAN, SQL domains, VECTOR, annotations) are wired (`types.rs:69-75,357`). |
-| Pre-12.1 (11g and older servers) | Not promised — any server negotiating a TNS transport version below `300` is rejected with `UnsupportedVersion`. |
+| Pre-12.1 (11g and older servers) | Refused — any server whose ACCEPT carries a TNS transport version below `315` (11g negotiates `314`) is rejected with the structured `UnsupportedVersion` error naming the floor; asserted continuously by the `xe11` matrix lane. |
 
 Notes on the version mapping: the TNS transport version (`319`) and the TTC field
 version (`24`) are protocol-internal numbers, **not** Oracle marketing release
 numbers; the release rows above are derived from the TTC field-version constants,
 which are the values that actually gate behaviour. The **minimum** promised server
 is one that negotiates TTC field version `>= 7` (12.1) and TNS transport version
-`>= 300`. The **tested** set is whatever the live conformance matrix (W3-E7.2)
+`>= 315`. The **tested** set is whatever the live conformance matrix (W3-E7.2)
 pins; the driver is developed and conformance-tested against the python-oracledb
 reference at tag `v4.0.1` (`crates/oracledb-protocol/src/lib.rs:17-18`). The exact
 tested server releases are recorded by that live run, not asserted here

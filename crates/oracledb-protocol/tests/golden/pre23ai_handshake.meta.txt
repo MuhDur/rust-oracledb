@@ -1,0 +1,38 @@
+pre-23ai classic-handshake wire fixtures (bead rust-oracledb-pre23ai-connect-z47u.4)
+
+Provenance: LAB CAPTURES ONLY — disposable gvenzl containers on the dev
+machine, throwaway lab users (testuser/testpw via the images' APP_USER):
+  - gvenzl/oracle-xe:11-slim  (oracle-xe11-1511, service XE)      2026-07-04
+  - gvenzl/oracle-xe:18-slim  (oracle-xe18-1518, service XEPDB1)  2026-07-04
+  - gvenzl/oracle-free:23-slim (rust-oracledb-free, FREEPDB1)     2026-07-04
+Captured by replaying the driver's own CONNECT packet over a raw socket
+(RESEND/ACCEPT packets) and via ORACLEDB_TRACE_CONNECT=1 on the classic
+handshake (protocol-negotiation / data-types / auth responses). No customer
+data of any kind; the auth fixtures carry only per-boot lab session values.
+
+files
+  pre23ai_resend_packet.hex
+    the 8-byte RESEND packet (type 11) both XE 11 and XE 18 answer before
+    ACCEPT when the connect data travels split
+  pre23ai_xe11_accept_payload.hex
+    ACCEPT payload from Oracle 11g XE: protocol version 314 — BELOW the
+    accepted floor (TNS_VERSION_MIN_ACCEPTED = 315) and 24 bytes short of the
+    modern layout; pins the structured refusal
+  pre23ai_xe18_accept_payload.hex
+    ACCEPT payload from XE 18: version 317, classic era (no fast-auth flags,
+    no END_OF_RESPONSE)
+  free23_accept_payload.hex
+    ACCEPT payload from FREE 23ai: version 319 with fast-auth /
+    END_OF_RESPONSE flags — the contrast pin
+  pre23ai_xe18_protocol_negotiation_response.hex
+    classic TTC protocol-negotiation response (msg type 1 terminal)
+  pre23ai_xe18_data_types_response.hex
+    classic TTC data-types response (msg type 2 terminal)
+  pre23ai_xe18_auth_phase_one_response.hex
+    classic auth phase one (verifier data; PARAMETER msg then STATUS, no
+    END_OF_RESPONSE message anywhere)
+  pre23ai_xe18_auth_phase_two_response.hex
+    classic auth phase two (session data; PARAMETER msg then STATUS, no
+    END_OF_RESPONSE message anywhere)
+
+consumed by tests/pre23ai_handshake_golden.rs

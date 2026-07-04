@@ -1,0 +1,101 @@
+name: Version matrix (live, multi-generation)
+
+# Standing multi-version live gate (bead rust-oracledb-pre23ai-connect-z47u.5):
+# the FULL value-asserting suite (examples/matrix_full.rs, driven by
+# scripts/version_matrix.sh full) against every supported server generation as
+# gvenzl service containers, one runner per lane:
+#
+#   xe11    gvenzl/oracle-xe:11-slim    BELOW-floor lane: asserts the driver's
+#                                       structured protocol-version refusal
+#                                       (TNS version 314 < floor 315, DPY-3010
+#                                       parity) — never a hang or decode error
+#   xe18    gvenzl/oracle-xe:18-slim    classic handshake (RESEND, no fast-auth,
+#                                       no END_OF_RESPONSE) — closest free proxy
+#                                       to a 19c fleet
+#   xe21    gvenzl/oracle-xe:21-slim    classic handshake, 21c generation
+#   free23  gvenzl/oracle-free:23-slim  fast-auth / END_OF_RESPONSE era
+#
+# TRIGGER CHOICE (justification): push-to-main touching driver code + nightly +
+# on-demand, NOT per-PR. Each lane needs a multi-GB image pull plus minutes of
+# database bootstrap; four lanes on every PR would dwarf the PR feedback loop,
+# and this repo already deliberately keeps live-DB lanes off PRs for exactly
+# that reason (see live.yml, which runs the driver's own live tests against
+# 23ai nightly). A 23ai-only smoke per PR was considered and rejected on the
+# same grounds — the container bootstrap dominates, and every merge to main
+# gets the full matrix here immediately, so a regression cannot age more than
+# one merge. Release tags are additionally gated by release_preflight.sh,
+# which requires a committed all-green release_matrix_gate.sh artifact for the
+# exact release SHA.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/version_matrix.sh"
+      - ".github/workflows/version-matrix.yml"
+  schedule:
+    - cron: "30 4 * * *" # 04:30 UTC nightly, after live.yml's 04:00 start
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  matrix-full:
+    name: ${{ matrix.lane.name }} full suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        lane:
+          - { name: xe11, image: "gvenzl/oracle-xe:11-slim", port: 1511 }
+          - { name: xe18, image: "gvenzl/oracle-xe:18-slim", port: 1518 }
+          - { name: xe21, image: "gvenzl/oracle-xe:21-slim", port: 1520 }
+          - { name: free23, image: "gvenzl/oracle-free:23-slim", port: 1522 }
+    services:
+      oracle:
+        image: ${{ matrix.lane.image }}
+        env:
+          ORACLE_PASSWORD: OracledbTest#2026
+          APP_USER: testuser
+          APP_USER_PASSWORD: testpw
+        ports:
+          # Host port matches the lane's default in scripts/version_matrix.sh,
+          # so the script needs no port overrides here.
+          - ${{ matrix.lane.port }}:1521
+        # gvenzl images ship healthcheck.sh on PATH (the documented GitHub
+        # Actions service pattern); the runner blocks until the database is
+        # healthy. Generous retries: XE 18 first boot can take several minutes.
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 60
+          --health-start-period 30s
+    env:
+      # The free23 lane's default user is the locally-bootstrapped pythontest;
+      # in CI the service container provisions APP_USER=testuser instead.
+      PYO_TEST_MAIN_USER: testuser
+      PYO_TEST_MAIN_PASSWORD: testpw
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: nightly-2026-05-11
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+
+      - name: Full matrix lane (value-asserting live suite)
+        run: bash scripts/version_matrix.sh full ${{ matrix.lane.name }}

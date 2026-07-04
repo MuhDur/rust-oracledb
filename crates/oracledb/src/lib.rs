@@ -511,9 +511,11 @@ impl<T: WireTransport> ConnectionCore<T> {
     /// end-of-response DATA flag, so the flag-driven boundary reader would wait
     /// forever; completion is decided by the payload's terminal message instead
     /// (`classic_connect_response_is_complete`).
-    async fn read_classic_data_response(&mut self) -> Result<Vec<u8>> {
+    async fn read_classic_data_response(&mut self, cx: &Cx) -> Result<Vec<u8>> {
+        let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
-        let result = read_classic_data_response_with_limits(self.read_mut()?, limits).await;
+        let result =
+            read_classic_data_response_with_limits(self.read_mut()?, cx, &write, limits).await;
         self.note_post_sync_result(result)
     }
 
@@ -2446,7 +2448,7 @@ impl Connection {
                     trace_connect_step("send protocol negotiation (classic)");
                     core.send_data_packet(cx, &protocol_payload, sdu).await?;
                     trace_connect_step("read protocol negotiation");
-                    let response = core.read_classic_data_response().await?;
+                    let response = core.read_classic_data_response(cx).await?;
                     trace_connect_bytes("protocol negotiation response", &response);
                     let negotiated = parse_auth_response_with_limits(&response, protocol_limits)?;
 
@@ -2454,7 +2456,7 @@ impl Connection {
                     trace_connect_step("send data types (classic)");
                     core.send_data_packet(cx, &data_types_payload, sdu).await?;
                     trace_connect_step("read data types");
-                    let response = core.read_classic_data_response().await?;
+                    let response = core.read_classic_data_response(cx).await?;
                     trace_connect_bytes("data types response", &response);
                     parse_auth_response_with_limits(&response, protocol_limits)?;
 
@@ -2486,7 +2488,7 @@ impl Connection {
                 let auth_one_response = if accept_info.supports_fast_auth {
                     core.read_data_response(cx).await?
                 } else {
-                    core.read_classic_data_response().await?
+                    core.read_classic_data_response(cx).await?
                 };
                 trace_connect_bytes("AUTH phase one response", &auth_one_response);
                 let auth_one =
@@ -2521,7 +2523,7 @@ impl Connection {
                 let auth_two_response = if accept_info.supports_fast_auth {
                     core.read_data_response(cx).await?
                 } else {
-                    core.read_classic_data_response().await?
+                    core.read_classic_data_response(cx).await?
                 };
                 trace_connect_bytes("AUTH phase two response", &auth_two_response);
                 let auth_two =
@@ -7861,16 +7863,37 @@ where
 /// Used only for the pre-23ai protocol-negotiation / data-types / auth round
 /// trips, where END_OF_RESPONSE framing is not negotiated and completion is
 /// message-driven (reference messages/base.pyx `Message.process`).
-async fn read_classic_data_response_with_limits<R>(
+///
+/// MARKER packets run the same reset dance as the post-connect readers: a
+/// pre-23ai server answers a failed classic login (e.g. wrong password) with
+/// a break MARKER *before* the ERROR response, so without the reset exchange
+/// the caller would surface a misleading `UnexpectedPacket(MARKER)` instead
+/// of the real ORA-01017 (reference packet.pyx: markers are handled uniformly
+/// on every read, including the connect-phase auth round trips).
+async fn read_classic_data_response_with_limits<R, W>(
     read: &mut R,
+    cx: &Cx,
+    write: &Arc<AsyncMutex<W>>,
     limits: ProtocolLimits,
 ) -> Result<Vec<u8>>
 where
     R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
 {
     let mut response = Vec::new();
+    let mut pending_packet: Option<IncomingPacket> = None;
+    let mut after_reset = false;
     loop {
-        let packet = read_packet_with_limits(read, PacketLengthWidth::Large32, limits).await?;
+        let packet = match pending_packet.take() {
+            Some(packet) => packet,
+            None => read_packet_with_limits(read, PacketLengthWidth::Large32, limits).await?,
+        };
+        if packet.packet_type == TNS_PACKET_TYPE_MARKER {
+            pending_packet =
+                reset_after_marker_with_limits(read, cx, write, &packet, limits).await?;
+            after_reset = true;
+            continue;
+        }
         if packet.packet_type != TNS_PACKET_TYPE_DATA {
             return Err(Error::UnexpectedPacket(packet.packet_type));
         }
@@ -7890,7 +7913,9 @@ where
         )?;
         limits.check_response_bytes(combined)?;
         response.extend_from_slice(payload);
-        if classic_connect_response_is_complete(&response, limits)? {
+        if (after_reset && post_reset_packet_ends_response(payload))
+            || classic_connect_response_is_complete(&response, limits)?
+        {
             return Ok(response);
         }
     }

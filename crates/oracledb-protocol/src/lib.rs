@@ -17,6 +17,15 @@ use std::borrow::Cow;
 pub const PYTHON_ORACLEDB_REFERENCE_TAG: &str = "v4.0.1";
 pub const PYTHON_ORACLEDB_REFERENCE_COMMIT: &str = "3daef052904e41668bb862e6fa40f43c22a81beb";
 pub const TNS_VERSION_MIN: u16 = 300;
+/// Lowest server TNS protocol version this driver will talk to (12.1-era wire
+/// format). The CONNECT packet still advertises [`TNS_VERSION_MIN`] like the
+/// reference, but an ACCEPT below this floor is refused outright (reference
+/// constants.pxi `TNS_VERSION_MIN_ACCEPTED` / connect.pyx raising
+/// `ERR_SERVER_VERSION_NOT_SUPPORTED`, DPY-3010). Oracle 11g answers ACCEPT
+/// with protocol version 314 and an older, shorter payload layout; without
+/// this floor the parser would surface a misleading "truncated TTC payload"
+/// decode error instead of a clean, self-explanatory refusal.
+pub const TNS_VERSION_MIN_ACCEPTED: u16 = 315;
 pub const TNS_VERSION_DESIRED: u16 = 319;
 
 /// Structured details for a protocol resource-limit violation.
@@ -42,8 +51,12 @@ pub enum ProtocolError {
     IncompletePacket { declared: usize, available: usize },
     #[error("packet length {length} exceeds TNS two-byte length field")]
     PacketTooLarge { length: usize },
-    #[error("unsupported TNS version {version}")]
-    UnsupportedVersion { version: u16 },
+    #[error(
+        "server TNS protocol version {version} is below the minimum {minimum} supported by \
+         this driver (Oracle Database 12.1 wire format); connections to this database server \
+         version are not supported (mirrors python-oracledb DPY-3010)"
+    )]
+    UnsupportedVersion { version: u16, minimum: u16 },
     #[error("invalid client identity field {field}: {reason}")]
     InvalidClientIdentity {
         field: &'static str,
