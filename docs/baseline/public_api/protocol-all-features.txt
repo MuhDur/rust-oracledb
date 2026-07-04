@@ -1388,6 +1388,7 @@ pub const oracledb_protocol::thin::TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK: u8
 pub const oracledb_protocol::thin::TNS_MSG_TYPE_STATUS: u8
 pub const oracledb_protocol::thin::TNS_MSG_TYPE_TOKEN: u8
 pub const oracledb_protocol::thin::TNS_OBJ_TOP_LEVEL: u32
+pub const oracledb_protocol::thin::TNS_PACKET_FLAG_REDIRECT: u8
 pub const oracledb_protocol::thin::TNS_PACKET_TYPE_ACCEPT: u8
 pub const oracledb_protocol::thin::TNS_PACKET_TYPE_CONNECT: u8
 pub const oracledb_protocol::thin::TNS_PACKET_TYPE_DATA: u8

@@ -50,7 +50,7 @@ crates/oracledb-protocol/tests/tpc_golden.rs	3
 crates/oracledb-pyshim/src/dbobject.rs	3
 crates/oracledb/src/arrow/mod.rs	35
 crates/oracledb/src/cursor_logic.rs	14
-crates/oracledb/src/lib.rs	62
+crates/oracledb/src/lib.rs	75
 crates/oracledb/src/obs.rs	6
 crates/oracledb/src/pool.rs	32
 crates/oracledb/src/request.rs	7
@@ -85,7 +85,7 @@ crates/oracledb/tests/live_named_bind_timeout.rs	2
 crates/oracledb/tests/live_object_decode.rs	2
 crates/oracledb/tests/live_ref_cursor.rs	3
 crates/oracledb/tests/live_soda.rs	5
-crates/oracledb/tests/live_statement_cache.rs	3
+crates/oracledb/tests/live_statement_cache.rs	4
 crates/oracledb/tests/live_typed.rs	16
 crates/oracledb/tests/observability.rs	1
 crates/oracledb/tests/pipeline_live.rs	2

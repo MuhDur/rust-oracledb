@@ -7,6 +7,12 @@ pub const TNS_PACKET_TYPE_REDIRECT: u8 = 5;
 pub const TNS_PACKET_TYPE_DATA: u8 = 6;
 pub const TNS_PACKET_TYPE_RESEND: u8 = 11;
 
+/// CONNECT packet header flag marking a connect that follows a listener
+/// REDIRECT: the CONNECT resent to the redirected address carries this flag
+/// (reference constants.pxi `TNS_PACKET_FLAG_REDIRECT`,
+/// protocol.pyx `_connect_phase_one`).
+pub const TNS_PACKET_FLAG_REDIRECT: u8 = 0x04;
+
 /// Longest connect data that may travel inline in the CONNECT packet
 /// (reference constants.pxi `TNS_MAX_CONNECT_DATA`). Longer descriptors are
 /// sent in a separate DATA packet immediately after the CONNECT packet, and

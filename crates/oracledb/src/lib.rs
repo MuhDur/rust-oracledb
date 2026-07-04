@@ -153,8 +153,8 @@ use oracledb_protocol::thin::{
     SessionlessTxnState, TpcChangeStateResponse, TpcSwitchResponse, TpcXid,
     TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF,
     TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS,
-    TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA,
-    TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE, TNS_PACKET_TYPE_RESEND,
+    TNS_PACKET_FLAG_REDIRECT, TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT,
+    TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE, TNS_PACKET_TYPE_RESEND,
     TNS_PIPELINE_MODE_ABORT_ON_ERROR, TNS_PIPELINE_MODE_CONTINUE_ON_ERROR, TNS_TPC_TXN_ABORT,
     TNS_TPC_TXN_COMMIT, TNS_TPC_TXN_DETACH, TNS_TPC_TXN_POST_DETACH, TNS_TPC_TXN_PREPARE,
     TNS_TPC_TXN_START, TNS_TPC_TXN_STATE_ABORTED, TNS_TPC_TXN_STATE_COMMITTED,
@@ -187,6 +187,12 @@ const DEFAULT_SDU: usize = 8192;
 /// server asks once (pre-23ai, long connect data); the bound only guards
 /// against a peer that never stops answering RESEND.
 const MAX_CONNECT_RESEND_ROUNDS: u8 = 8;
+
+/// Upper bound on listener REDIRECT hops before giving up. A real redirect
+/// chain is one hop (shared server / RAC dispatcher); the reference does not
+/// bound the loop, but a pair of misconfigured listeners redirecting to each
+/// other must terminate here instead of spinning forever.
+const MAX_CONNECT_REDIRECT_ROUNDS: u8 = 8;
 
 /// Human name for a TNS network packet type, for connect-phase diagnostics.
 /// These are packet-layer types (header offset 4), not TTC message types.
@@ -1040,8 +1046,29 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("asupersync runtime error: {0}")]
     Runtime(String),
-    #[error("listener redirected this connection; redirect handling is not implemented yet")]
+    /// The listener redirected the connection to a target whose shape this
+    /// driver refuses to follow: the redirect address demands a transport
+    /// protocol CHANGE. Continuing a `tcps` connect over plain `tcp` would be
+    /// a silent TLS downgrade, and a mid-connect `tcp` -> `tcps` upgrade is
+    /// not supported; a redirect that keeps the original transport protocol
+    /// is followed transparently.
+    #[error(
+        "listener redirect demands a transport protocol change (e.g. a tcps -> tcp \
+         downgrade); refusing to follow it"
+    )]
     RedirectUnsupported,
+    /// The listener answered CONNECT with a REDIRECT packet whose redirect
+    /// data could not be understood (truncated length prefix, missing the
+    /// NUL separator between the target address and its connect data, or an
+    /// unparseable target address). The payload describes the defect; the
+    /// raw redirect bytes are not echoed verbatim.
+    #[error("listener redirect data is malformed: {0}")]
+    InvalidRedirectData(String),
+    /// The listener kept answering every CONNECT with another REDIRECT. A
+    /// real redirect chain is one hop (shared server / RAC); the bound only
+    /// guards against a redirect loop between misconfigured listeners.
+    #[error("listener kept redirecting the connection ({0} redirects); giving up")]
+    ConnectRedirectLoop(u8),
     #[error("listener refused connection: {0}")]
     ListenerRefused(String),
     #[error(
@@ -1223,6 +1250,8 @@ impl Error {
                 ErrorKind::Authentication
             }
             Error::RedirectUnsupported
+            | Error::InvalidRedirectData(_)
+            | Error::ConnectRedirectLoop(_)
             | Error::Runtime(_)
             | Error::FastAuthRequired
             | Error::UnexpectedPacket(_)
@@ -2085,9 +2114,13 @@ pub struct Connection {
     /// Session combo key from verifier generation, retained for the
     /// change-password call (reference keeps `conn_impl._combo_key`).
     combo_key: Vec<u8>,
-    /// LRU statement cache: SQL text -> open server cursor id (reference
-    /// thin/statement_cache.pyx, default size 20).
-    statement_cache: Vec<(String, u32)>,
+    /// LRU statement cache: SQL text -> open server cursor id plus the bind
+    /// TYPE shape the cursor was last bound with (reference
+    /// thin/statement_cache.pyx, default size 20). The shape guards against
+    /// reusing a cursor whose server-side bind metadata no longer matches the
+    /// new binds (bead rust-oracledb-ilel: ORA-01722 when a text bind rides a
+    /// cursor parsed with a NUMBER bind).
+    statement_cache: Vec<CachedStatement>,
     /// Capacity of [`Self::statement_cache`] (from
     /// [`ConnectOptions::statement_cache_size`]); `0` disables caching.
     statement_cache_size: usize,
@@ -2281,41 +2314,55 @@ impl Connection {
                 .as_deref()
                 .or(primary_description.security.ssl_server_cert_dn.as_deref());
             let identity = options.identity;
-            trace_connect_step("tcp connect");
-            let stream = TcpStream::connect_timeout(
-                (descriptor.host.clone(), descriptor.port),
-                connect_timeout,
-            )
-            .await?;
-            stream.set_nodelay(true)?;
-            trace_connect_step("tcp connected");
-
-            // TCPS: complete the TLS handshake on the whole socket before splitting
-            // and before any TNS bytes are sent (implicit TLS, matching
-            // python-oracledb thin's _connect_tcp ordering).
-            let connector = DriverConnector::default();
-            let (read, write) = if descriptor.protocol.is_tls() {
-                trace_connect_step("tls handshake");
-                let server_type = if options.server_type_emon {
-                    Some("emon")
-                } else {
-                    None
-                };
-                let tls_params = tls::resolve_tls_params(
+            // TCPS: TLS parameters (wallet, DN-match, SNI policy) are resolved
+            // once and reused when a listener REDIRECT re-establishes the
+            // transport to a new address (the redirected connection keeps the
+            // original transport protocol, reference `_connect_phase_one`).
+            let server_type = if options.server_type_emon {
+                Some("emon")
+            } else {
+                None
+            };
+            let tls_params = if descriptor.protocol.is_tls() {
+                Some(tls::resolve_tls_params(
                     &descriptor,
                     options.wallet_location.as_deref(),
                     options.wallet_password.as_deref(),
                     options.ssl_server_dn_match,
                     options.ssl_server_cert_dn.as_deref(),
                     options.use_sni,
-                )?;
-                let tls_stream =
-                    tls::tls_handshake(&descriptor, server_type, &tls_params, stream).await?;
-                trace_connect_step("tls established");
-                connector.tls_split(tls_stream)
+                )?)
             } else {
-                connector.plain_split(stream)
+                None
             };
+            let connector = DriverConnector::default();
+            // Dials one listener endpoint: TCP connect, then — for a TCPS
+            // original — the TLS handshake on the whole socket before
+            // splitting and before any TNS bytes are sent (implicit TLS,
+            // matching python-oracledb thin's _connect_tcp ordering). Used
+            // for the initial address and for every REDIRECT target.
+            let dial = |host: String, port: u16| {
+                let descriptor = &descriptor;
+                let connector = &connector;
+                let tls_params = tls_params.as_ref();
+                async move {
+                    trace_connect_step("tcp connect");
+                    let stream = TcpStream::connect_timeout((host, port), connect_timeout).await?;
+                    stream.set_nodelay(true)?;
+                    trace_connect_step("tcp connected");
+                    let halves = if let Some(tls_params) = tls_params {
+                        trace_connect_step("tls handshake");
+                        let tls_stream =
+                            tls::tls_handshake(descriptor, server_type, tls_params, stream).await?;
+                        trace_connect_step("tls established");
+                        connector.tls_split(tls_stream)
+                    } else {
+                        connector.plain_split(stream)
+                    };
+                    Ok::<_, Error>(halves)
+                }
+            };
+            let (read, write) = dial(descriptor.host.clone(), descriptor.port).await?;
             let mut core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
             core.set_protocol_limits(protocol_limits)?;
 
@@ -2329,35 +2376,39 @@ impl Connection {
                 descriptor_ssl_server_cert_dn,
             );
             trace_connect_value("CONNECT descriptor", &connect_descriptor);
-            let connect_payload = build_connect_packet_payload(&connect_descriptor, options.sdu)?;
-            let packet = encode_packet(
-                TNS_PACKET_TYPE_CONNECT,
-                0,
-                None,
-                &connect_payload,
-                PacketLengthWidth::Legacy16,
-            )?;
-            trace_connect_bytes("CONNECT packet", &packet);
             // A descriptor longer than TNS_MAX_CONNECT_DATA travels in a DATA
             // packet right behind the CONNECT packet, and the server may answer
             // with a RESEND packet asking for the whole exchange again before it
             // ACCEPTs (reference protocol.pyx `_connect_phase_one`: "this may
             // request the message to be resent multiple times"). Pre-23ai
             // servers RESEND routinely; a bounded loop guards against a
-            // misbehaving peer that never stops asking.
-            let split_connect_data = !connect_data_fits_inline(&connect_descriptor);
+            // misbehaving peer that never stops asking. A REDIRECT answer
+            // reconnects the transport to the redirected address and resends
+            // the CONNECT there with the REDIRECT packet flag (and the
+            // redirect-supplied connect data); RESEND and REDIRECT may
+            // interleave — a RESEND after a redirect resends the redirected
+            // CONNECT, flag included.
+            let mut connect_data = connect_descriptor;
+            let mut packet_flags = 0u8;
             let mut resend_rounds = 0u8;
+            let mut redirect_rounds = 0u8;
             let accept = loop {
+                let connect_payload = build_connect_packet_payload(&connect_data, options.sdu)?;
+                let packet = encode_packet(
+                    TNS_PACKET_TYPE_CONNECT,
+                    packet_flags,
+                    None,
+                    &connect_payload,
+                    PacketLengthWidth::Legacy16,
+                )?;
+                trace_connect_bytes("CONNECT packet", &packet);
+                let split_connect_data = !connect_data_fits_inline(&connect_data);
                 trace_connect_step("send CONNECT");
                 core.write_all(cx, &packet).await?;
                 if split_connect_data {
                     trace_connect_step("send CONNECT descriptor (data packet)");
-                    core.send_data_packet(
-                        cx,
-                        connect_descriptor.as_bytes(),
-                        usize::from(options.sdu),
-                    )
-                    .await?;
+                    core.send_data_packet(cx, connect_data.as_bytes(), usize::from(options.sdu))
+                        .await?;
                 }
 
                 trace_connect_step("read ACCEPT");
@@ -2372,7 +2423,33 @@ impl Connection {
                         trace_connect_step("RESEND requested; resending CONNECT");
                         continue;
                     }
-                    TNS_PACKET_TYPE_REDIRECT => return Err(Error::RedirectUnsupported),
+                    TNS_PACKET_TYPE_REDIRECT => {
+                        redirect_rounds += 1;
+                        if redirect_rounds > MAX_CONNECT_REDIRECT_ROUNDS {
+                            return Err(Error::ConnectRedirectLoop(redirect_rounds));
+                        }
+                        let redirect_data = read_redirect_data(&mut core, &reply.payload).await?;
+                        let target = parse_redirect_target(&redirect_data, descriptor.protocol)?;
+                        trace_connect_value(
+                            "REDIRECT target",
+                            &format!("{}:{}", target.host, target.port),
+                        );
+                        // Reconnect the transport to the redirected listener
+                        // (dropping the old connection closes it) and resend
+                        // the CONNECT there, flagged as a redirect follow-up
+                        // and carrying the redirect-supplied connect data
+                        // (reference `_connect_phase_one`).
+                        let (read, write) = dial(target.host, target.port).await?;
+                        core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
+                        core.set_protocol_limits(protocol_limits)?;
+                        connect_data = target.connect_data;
+                        packet_flags = TNS_PACKET_FLAG_REDIRECT;
+                        // The redirected listener negotiates from scratch and
+                        // may itself ask for resends.
+                        resend_rounds = 0;
+                        trace_connect_step("REDIRECT: reconnected; resending CONNECT");
+                        continue;
+                    }
                     TNS_PACKET_TYPE_REFUSE => {
                         return Err(Error::ListenerRefused(
                             String::from_utf8_lossy(&reply.payload).to_string(),
@@ -3938,16 +4015,21 @@ impl Connection {
         // returnable: returning it would evict the still-live original from the
         // cache and reset its fetch position (ORA-01002).
         let mut is_copy = false;
+        // Bind TYPE shape of this execute: a cached cursor is only reused when
+        // the shape it was parsed/bound with is still compatible, otherwise it
+        // is dropped and this execute re-parses with the new bind metadata
+        // (bead rust-oracledb-ilel: ORA-01722 on a NUMBER->TEXT rebind).
+        let bind_shape = bind_type_shape(bind_rows);
         if exec_options.cursor_id() == 0 && !exec_options.parse_only() {
             if use_cache {
                 if self.statement_is_in_use(sql) {
                     // cached cursor busy: this execute parses a fresh (copy)
                     // cursor that must not be returned to the cache
                     is_copy = true;
-                } else if let Some(cursor_id) = self.statement_cache_get(sql) {
+                } else if let Some(cursor_id) = self.statement_cache_get(sql, &bind_shape) {
                     exec_options = exec_options.with_cursor_id(cursor_id);
                 }
-            } else if let Some(cursor_id) = self.statement_cache_take(sql) {
+            } else if let Some(cursor_id) = self.statement_cache_take(sql, &bind_shape) {
                 // reference pops the statement from the cache even when
                 // cache_statement=False, reusing its open cursor once
                 exec_options = exec_options.with_cursor_id(cursor_id);
@@ -4079,7 +4161,7 @@ impl Connection {
                         self.copied_cursors.insert(result.cursor_id);
                     }
                 } else if use_cache {
-                    self.statement_cache_put(sql, result.cursor_id);
+                    self.statement_cache_put(sql, result.cursor_id, bind_shape);
                 }
                 // Mark the open query cursor as in use so a concurrent execute
                 // of the same SQL on another cursor of this connection does not
@@ -6158,13 +6240,23 @@ impl Connection {
     /// concurrent cursors over identical SQL each drive their own server
     /// cursor and cannot reset each other's fetch position (ORA-01002). We
     /// model the copy by returning `None`, which forces a fresh PARSE.
-    fn statement_cache_get(&mut self, sql: &str) -> Option<u32> {
+    ///
+    /// A cached cursor whose recorded bind TYPE shape is incompatible with
+    /// `bind_shape` is dropped (queued for the close-cursors piggyback) and
+    /// `None` is returned, forcing a fresh PARSE with the new bind metadata:
+    /// re-executing it would make the server coerce the new values through
+    /// the stale parsed types (bead rust-oracledb-ilel, ORA-01722).
+    fn statement_cache_get(&mut self, sql: &str, bind_shape: &[BindShapeSlot]) -> Option<u32> {
         let index = self
             .statement_cache
             .iter()
-            .position(|(cached_sql, _)| cached_sql == sql)?;
-        let cursor_id = self.statement_cache[index].1;
+            .position(|entry| entry.sql == sql)?;
+        let cursor_id = self.statement_cache[index].cursor_id;
         if cursor_id != 0 && self.in_use_cursors.contains(&cursor_id) {
+            return None;
+        }
+        if !bind_shape_is_compatible(&self.statement_cache[index].bind_shape, bind_shape) {
+            self.statement_cache_invalidate(sql, cursor_id);
             return None;
         }
         let entry = self.statement_cache.remove(index);
@@ -6175,24 +6267,33 @@ impl Connection {
     /// Removes and returns the open cursor for the SQL text; used when the
     /// caller requested `cache_statement=False` but the statement is still
     /// present from an earlier cached execution (reference `_get_statement`
-    /// pops from the cache unconditionally).
-    fn statement_cache_take(&mut self, sql: &str) -> Option<u32> {
+    /// pops from the cache unconditionally). A bind-shape mismatch drops the
+    /// cursor instead of handing it out (same rule as
+    /// [`Self::statement_cache_get`]).
+    fn statement_cache_take(&mut self, sql: &str, bind_shape: &[BindShapeSlot]) -> Option<u32> {
         let index = self
             .statement_cache
             .iter()
-            .position(|(cached_sql, _)| cached_sql == sql)?;
-        Some(self.statement_cache.remove(index).1)
+            .position(|entry| entry.sql == sql)?;
+        if !bind_shape_is_compatible(&self.statement_cache[index].bind_shape, bind_shape) {
+            let cursor_id = self.statement_cache[index].cursor_id;
+            self.statement_cache_invalidate(sql, cursor_id);
+            return None;
+        }
+        Some(self.statement_cache.remove(index).cursor_id)
     }
 
-    /// Stores/updates the open cursor for the SQL text, evicting the least
-    /// recently used entry into the close-cursors piggyback queue (reference
+    /// Stores/updates the open cursor for the SQL text along with the bind
+    /// TYPE shape it was bound with, evicting the least recently used entry
+    /// into the close-cursors piggyback queue (reference
     /// `_statement_cache.return_statement`).
-    fn statement_cache_put(&mut self, sql: &str, cursor_id: u32) {
+    fn statement_cache_put(&mut self, sql: &str, cursor_id: u32, bind_shape: Vec<BindShapeSlot>) {
         let to_close = statement_cache_insert(
             &mut self.statement_cache,
             self.statement_cache_size,
             sql,
             cursor_id,
+            bind_shape,
         );
         for cursor_id in &to_close {
             self.lob_prefetch_cursors.remove(cursor_id);
@@ -6214,7 +6315,7 @@ impl Connection {
                         continue;
                     }
                     self.statement_cache
-                        .retain(|(_, cached_id)| cached_id != cursor_id);
+                        .retain(|entry| entry.cursor_id != *cursor_id);
                     self.cursor_columns.remove(cursor_id);
                     self.lob_prefetch_cursors.remove(cursor_id);
                 }
@@ -6271,9 +6372,9 @@ impl Connection {
     fn statement_is_in_use(&self, sql: &str) -> bool {
         self.statement_cache
             .iter()
-            .find(|(cached_sql, _)| cached_sql == sql)
-            .is_some_and(|(_, cursor_id)| {
-                *cursor_id != 0 && self.in_use_cursors.contains(cursor_id)
+            .find(|entry| entry.sql == sql)
+            .is_some_and(|entry| {
+                entry.cursor_id != 0 && self.in_use_cursors.contains(&entry.cursor_id)
             })
     }
 
@@ -6283,7 +6384,7 @@ impl Connection {
         if let Some(index) = self
             .statement_cache
             .iter()
-            .position(|(cached_sql, _)| cached_sql == sql)
+            .position(|entry| entry.sql == sql)
         {
             self.statement_cache.remove(index);
         }
@@ -8312,11 +8413,11 @@ where
                 continue;
             }
             other => {
-                return Err(oracledb_protocol::ProtocolError::UnknownMessageType {
-                    message_type: other,
-                    position: 4,
-                }
-                .into())
+                // Packet-layer byte (header offset 4), NOT a TTC message
+                // type: name the TNS packet type so triage is not steered
+                // toward the application layer (bead
+                // rust-oracledb-pre23ai-connect-z47u.3).
+                return Err(Error::UnexpectedPacket(other));
             }
         }
     };
@@ -8572,11 +8673,10 @@ where
             continue;
         }
         if packet.packet_type != TNS_PACKET_TYPE_DATA {
-            return Err(oracledb_protocol::ProtocolError::UnknownMessageType {
-                message_type: packet.packet_type,
-                position: 4,
-            }
-            .into());
+            // Packet-layer byte (header offset 4), NOT a TTC message type:
+            // name the TNS packet type so triage is not steered toward the
+            // application layer (bead rust-oracledb-pre23ai-connect-z47u.3).
+            return Err(Error::UnexpectedPacket(packet.packet_type));
         }
         let (data_flags, payload) = packet.payload.split_at_checked(2).ok_or(
             oracledb_protocol::ProtocolError::TtcDecode("missing data packet flags"),
@@ -8784,6 +8884,121 @@ where
         packet_type,
         payload,
     })
+}
+
+/// The endpoint a listener REDIRECT points at, split out of the redirect
+/// data (reference protocol.pyx `_connect_phase_one` redirect branch).
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RedirectTarget {
+    /// Host to reconnect the transport to.
+    host: String,
+    /// Port to reconnect the transport to.
+    port: u16,
+    /// The connect data to send in the CONNECT packet on the redirected
+    /// connection (the part of the redirect data after the NUL separator).
+    connect_data: String,
+}
+
+/// Splits a REDIRECT packet payload into the declared redirect-data length
+/// (u16be prefix) and the data bytes carried inline in this packet. The
+/// inline bytes may be shorter than the declared length (the remainder then
+/// arrives in follow-up packets, reference ConnectMessage.process
+/// `wait_for_packets_sync`) or longer (trailing bytes beyond the declared
+/// length are ignored).
+fn redirect_payload_prefix(payload: &[u8]) -> Result<(usize, &[u8])> {
+    let Some((length_bytes, inline)) = payload.split_first_chunk::<2>() else {
+        return Err(Error::InvalidRedirectData(format!(
+            "REDIRECT packet payload of {} byte(s) is too short for the u16 redirect-data length",
+            payload.len()
+        )));
+    };
+    let declared = usize::from(u16::from_be_bytes(*length_bytes));
+    let take = inline.len().min(declared);
+    Ok((declared, &inline[..take]))
+}
+
+/// Assembles the full redirect data starting from the first REDIRECT packet's
+/// payload, reading follow-up packets from the same connection while the
+/// declared length is not yet satisfied (the listener may send the length in
+/// one packet and the data in the next). Follow-up packets must be REDIRECT
+/// or DATA packets; anything else fails closed as an unexpected packet.
+async fn read_redirect_data(core: &mut DriverCore, first_payload: &[u8]) -> Result<String> {
+    let (declared, inline) = redirect_payload_prefix(first_payload)?;
+    let mut data = inline.to_vec();
+    while data.len() < declared {
+        let packet = core.read_packet(PacketLengthWidth::Legacy16).await?;
+        if packet.packet_type != TNS_PACKET_TYPE_REDIRECT
+            && packet.packet_type != TNS_PACKET_TYPE_DATA
+        {
+            return Err(Error::UnexpectedPacket(packet.packet_type));
+        }
+        if packet.payload.is_empty() {
+            return Err(Error::InvalidRedirectData(format!(
+                "listener stopped short of the declared redirect data \
+                 ({} of {declared} byte(s) received)",
+                data.len()
+            )));
+        }
+        data.extend_from_slice(&packet.payload);
+    }
+    data.truncate(declared);
+    String::from_utf8(data)
+        .map_err(|_| Error::InvalidRedirectData("redirect data is not valid UTF-8".to_string()))
+}
+
+/// Parses assembled redirect data (`"<address>\0<connect data>"`) into the
+/// target endpoint, enforcing that the redirect keeps the original transport
+/// protocol: a `tcps` connect is never silently downgraded to plain `tcp`
+/// (and a mid-connect `tcp` -> `tcps` upgrade is not supported). The address
+/// part is a TNS address/descriptor fragment, e.g.
+/// `(ADDRESS=(PROTOCOL=tcp)(HOST=dispatcher)(PORT=1621))` (reference parses
+/// it with `ConnectParamsImpl._parse_connect_string` and takes the first
+/// address). NOTE: when the original connect is `tcps`, the redirect address
+/// must say `PROTOCOL=tcps` explicitly — an omitted protocol parses as plain
+/// `tcp` and is refused as a downgrade (fail closed; the reference instead
+/// ignores the redirect protocol entirely and keeps its original transport).
+fn parse_redirect_target(
+    redirect_data: &str,
+    original_protocol: NetProtocol,
+) -> Result<RedirectTarget> {
+    let Some((address_part, connect_data)) = redirect_data.split_once('\0') else {
+        return Err(Error::InvalidRedirectData(
+            "missing NUL separator between the redirect address and its connect data".to_string(),
+        ));
+    };
+    let descriptor = connectstring_parse(address_part).map_err(|err| {
+        Error::InvalidRedirectData(format!("unparseable redirect address: {err}"))
+    })?;
+    let address = descriptor
+        .as_ref()
+        .and_then(|descriptor| descriptor.first_address())
+        .ok_or_else(|| {
+            Error::InvalidRedirectData("redirect address defines no usable endpoint".to_string())
+        })?;
+    let host = address
+        .host
+        .clone()
+        .ok_or_else(|| Error::InvalidRedirectData("redirect address has no HOST".to_string()))?;
+    let target_protocol: NetProtocol = address.protocol.into();
+    if target_protocol.is_tls() != original_protocol.is_tls() {
+        return Err(Error::RedirectUnsupported);
+    }
+    Ok(RedirectTarget {
+        host,
+        port: address.port,
+        connect_data: connect_data.to_string(),
+    })
+}
+
+/// [`oracledb_protocol::net::connectstring::parse`] under a driver-error
+/// signature (used by the redirect-target parser above).
+fn connectstring_parse(
+    input: &str,
+) -> std::result::Result<
+    Option<oracledb_protocol::net::connectstring::Descriptor>,
+    oracledb_protocol::ProtocolError,
+> {
+    oracledb_protocol::net::connectstring::parse(input)
 }
 
 fn transport_connect_timeout_duration(seconds: f64) -> Duration {
@@ -8995,29 +9210,132 @@ fn next_ttc_sequence(seq_num: &mut u8) -> u8 {
 /// (no server cursor) is never cached. Pure so it is unit-testable without a
 /// live connection.
 fn statement_cache_insert(
-    cache: &mut Vec<(String, u32)>,
+    cache: &mut Vec<CachedStatement>,
     capacity: usize,
     sql: &str,
     cursor_id: u32,
+    mut bind_shape: Vec<BindShapeSlot>,
 ) -> Vec<u32> {
     let mut to_close = Vec::new();
     if cursor_id == 0 {
         return to_close;
     }
-    if let Some(index) = cache.iter().position(|(cached_sql, _)| cached_sql == sql) {
-        let (_, cached_id) = cache.remove(index);
-        if cached_id != 0 && cached_id != cursor_id {
-            to_close.push(cached_id);
+    if let Some(index) = cache.iter().position(|entry| entry.sql == sql) {
+        let old = cache.remove(index);
+        if old.cursor_id != 0 && old.cursor_id != cursor_id {
+            to_close.push(old.cursor_id);
+        } else if old.cursor_id == cursor_id && old.bind_shape.len() == bind_shape.len() {
+            // Re-execution of the SAME open cursor: an untyped-NULL bind is
+            // written with placeholder VARCHAR metadata and does not disturb
+            // the type the cursor was parsed with, so the previous concrete
+            // slot is inherited instead of downgrading it to the placeholder.
+            for (slot, old_slot) in bind_shape.iter_mut().zip(old.bind_shape) {
+                if slot.untyped_null {
+                    *slot = old_slot;
+                }
+            }
         }
     }
-    cache.push((sql.to_string(), cursor_id));
+    cache.push(CachedStatement {
+        sql: sql.to_string(),
+        cursor_id,
+        bind_shape,
+    });
     while cache.len() > capacity {
-        let (_, evicted_id) = cache.remove(0);
-        if evicted_id != 0 {
-            to_close.push(evicted_id);
+        let evicted = cache.remove(0);
+        if evicted.cursor_id != 0 {
+            to_close.push(evicted.cursor_id);
         }
     }
     to_close
+}
+
+/// One statement-cache entry: the open server cursor for a SQL text and the
+/// bind TYPE shape it was last bound/parsed with (see
+/// [`Connection::statement_cache`] and bead rust-oracledb-ilel).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CachedStatement {
+    sql: String,
+    cursor_id: u32,
+    bind_shape: Vec<BindShapeSlot>,
+}
+
+/// Per-position bind TYPE shape used to decide whether an open cached cursor
+/// may be re-executed with the current binds. The server resolves bind
+/// conversions against the metadata the cursor was PARSED with, not the
+/// metadata sent on a re-execute: rebinding a different type through a cached
+/// cursor makes the server coerce through the stale type (ORA-01722 when text
+/// rides a NUMBER-parsed cursor). python-oracledb tracks the same change via
+/// `Statement._binds_changed` (thin/statement.pyx `_set_var`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BindShapeSlot {
+    /// Bind type folded to its interchangeable family: CHAR/VARCHAR/LONG all
+    /// map to VARCHAR and RAW/LONG_RAW to RAW (mirroring the wire writer's
+    /// `bind_metadata_types_are_compatible`), so a pure SIZE change never
+    /// invalidates the cursor — only a TYPE change does.
+    family: u8,
+    /// Character-set form: distinguishes NCHAR text from implicit-charset
+    /// text (python-oracledb `_set_var` also compares `csfrm`).
+    csfrm: u8,
+    /// True when every row's value at this position is an untyped NULL. Such
+    /// a bind is written with placeholder VARCHAR metadata and converts to
+    /// any parsed type server-side, so it is compatible with any cached slot.
+    untyped_null: bool,
+}
+
+/// Folds a wire bind type into its statement-cache compatibility family (the
+/// same classes the metadata writer merges across bind rows).
+fn bind_type_family(ora_type_num: u8) -> u8 {
+    use oracledb_protocol::thin::{
+        ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW, ORA_TYPE_NUM_RAW,
+        ORA_TYPE_NUM_VARCHAR,
+    };
+    match ora_type_num {
+        ORA_TYPE_NUM_CHAR | ORA_TYPE_NUM_LONG => ORA_TYPE_NUM_VARCHAR,
+        ORA_TYPE_NUM_LONG_RAW => ORA_TYPE_NUM_RAW,
+        other => other,
+    }
+}
+
+/// Computes the bind TYPE shape of an execute's bind rows. Mirrors the wire
+/// metadata writer's inference (`write_bind_metadata_for_rows`): the first
+/// non-NULL value in a column determines its type; a column that is untyped
+/// NULL in every row is a wildcard slot.
+fn bind_type_shape(bind_rows: &[Vec<BindValue>]) -> Vec<BindShapeSlot> {
+    use oracledb_protocol::thin::{bind_value_type_info, CS_FORM_IMPLICIT, ORA_TYPE_NUM_VARCHAR};
+    let Some(first_row) = bind_rows.first() else {
+        return Vec::new();
+    };
+    (0..first_row.len())
+        .map(|index| {
+            let info = bind_rows
+                .iter()
+                .find_map(|row| row.get(index).and_then(bind_value_type_info));
+            match info {
+                Some(info) => BindShapeSlot {
+                    family: bind_type_family(info.ora_type_num),
+                    csfrm: info.csfrm,
+                    untyped_null: false,
+                },
+                None => BindShapeSlot {
+                    family: ORA_TYPE_NUM_VARCHAR,
+                    csfrm: CS_FORM_IMPLICIT,
+                    untyped_null: true,
+                },
+            }
+        })
+        .collect()
+}
+
+/// True when a cached cursor bound with `cached` may be re-executed with
+/// binds of shape `new`: every position must keep its type family + charset
+/// form, except that an untyped NULL in the NEW binds matches anything (it is
+/// written as a placeholder and null-converts to any parsed type).
+fn bind_shape_is_compatible(cached: &[BindShapeSlot], new: &[BindShapeSlot]) -> bool {
+    cached.len() == new.len()
+        && cached.iter().zip(new).all(|(cached, new)| {
+            new.untyped_null || (cached.family == new.family && cached.csfrm == new.csfrm)
+        })
 }
 
 fn statement_is_query(sql: &str) -> bool {
@@ -9298,22 +9616,36 @@ mod tests {
         );
     }
 
+    fn cache_entry(sql: &str, cursor_id: u32) -> CachedStatement {
+        CachedStatement {
+            sql: sql.into(),
+            cursor_id,
+            bind_shape: Vec::new(),
+        }
+    }
+
     #[test]
     fn statement_cache_evicts_lru_past_capacity() {
         let mut cache = Vec::new();
         // capacity 2: a third distinct statement evicts the oldest (cursor 10).
-        assert!(statement_cache_insert(&mut cache, 2, "a", 10).is_empty());
-        assert!(statement_cache_insert(&mut cache, 2, "b", 11).is_empty());
-        assert_eq!(statement_cache_insert(&mut cache, 2, "c", 12), vec![10]);
+        assert!(statement_cache_insert(&mut cache, 2, "a", 10, Vec::new()).is_empty());
+        assert!(statement_cache_insert(&mut cache, 2, "b", 11, Vec::new()).is_empty());
+        assert_eq!(
+            statement_cache_insert(&mut cache, 2, "c", 12, Vec::new()),
+            vec![10]
+        );
         assert_eq!(
             cache,
-            vec![("b".into(), 11), ("c".into(), 12)],
+            vec![cache_entry("b", 11), cache_entry("c", 12)],
             "LRU order retained"
         );
         // Re-inserting an existing SQL with a new cursor closes the old cursor
         // and moves it to most-recently-used; nothing is evicted.
-        assert_eq!(statement_cache_insert(&mut cache, 2, "b", 99), vec![11]);
-        assert_eq!(cache, vec![("c".into(), 12), ("b".into(), 99)]);
+        assert_eq!(
+            statement_cache_insert(&mut cache, 2, "b", 99, Vec::new()),
+            vec![11]
+        );
+        assert_eq!(cache, vec![cache_entry("c", 12), cache_entry("b", 99)]);
     }
 
     #[test]
@@ -9321,11 +9653,110 @@ mod tests {
         let mut cache = Vec::new();
         // capacity 0: the freshly inserted cursor is itself evicted (queued for
         // close) and the cache stays empty — caching disabled.
-        assert_eq!(statement_cache_insert(&mut cache, 0, "a", 10), vec![10]);
+        assert_eq!(
+            statement_cache_insert(&mut cache, 0, "a", 10, Vec::new()),
+            vec![10]
+        );
         assert!(cache.is_empty(), "size 0 must never retain a statement");
         // A no-cursor (0) insert is never cached and closes nothing.
-        assert!(statement_cache_insert(&mut cache, 5, "a", 0).is_empty());
+        assert!(statement_cache_insert(&mut cache, 5, "a", 0, Vec::new()).is_empty());
         assert!(cache.is_empty());
+    }
+
+    fn shape_of(values: &[BindValue]) -> Vec<BindShapeSlot> {
+        bind_type_shape(&[values.to_vec()])
+    }
+
+    #[test]
+    fn bind_type_shape_change_is_incompatible_but_size_change_is_not() {
+        use oracledb_protocol::thin::ORA_TYPE_NUM_LONG;
+        let number = shape_of(&[BindValue::Number("42".into())]);
+        let short_text = shape_of(&[BindValue::Text("a".into())]);
+        let long_text = shape_of(&[BindValue::Text("x".repeat(40_000))]);
+        let raw = shape_of(&[BindValue::Raw(vec![1, 2, 3])]);
+        // The repro from bead rust-oracledb-ilel: NUMBER -> TEXT must NOT
+        // reuse the cached cursor (server-side ORA-01722), nor TEXT -> RAW.
+        assert!(!bind_shape_is_compatible(&number, &short_text));
+        assert!(!bind_shape_is_compatible(&short_text, &number));
+        assert!(!bind_shape_is_compatible(&short_text, &raw));
+        assert!(!bind_shape_is_compatible(&raw, &number));
+        // Same type family: identical, and a pure size change stays
+        // compatible (no re-parse on every string-length change).
+        assert!(bind_shape_is_compatible(&number, &number));
+        assert!(bind_shape_is_compatible(&short_text, &long_text));
+        assert!(bind_shape_is_compatible(&long_text, &short_text));
+        // CHAR/VARCHAR/LONG fold into one family (the wire writer merges them
+        // via bind_metadata_types_are_compatible).
+        let long_typed = shape_of(&[BindValue::TypedNull {
+            ora_type_num: ORA_TYPE_NUM_LONG,
+            csfrm: 1,
+            buffer_size: 10,
+        }]);
+        assert!(bind_shape_is_compatible(&short_text, &long_typed));
+        // Bind-count mismatch is never compatible.
+        assert!(!bind_shape_is_compatible(
+            &number,
+            &shape_of(&[BindValue::Number("1".into()), BindValue::Number("2".into())])
+        ));
+    }
+
+    #[test]
+    fn bind_type_shape_untyped_null_matches_any_cached_slot() {
+        let number = shape_of(&[BindValue::Number("42".into())]);
+        let null = shape_of(&[BindValue::Null]);
+        assert!(null[0].untyped_null);
+        // A NULL bind rides any cached cursor (written as a placeholder, the
+        // value null-converts server-side)...
+        assert!(bind_shape_is_compatible(&number, &null));
+        // ...but a concrete NUMBER does not ride a cursor parsed with the
+        // VARCHAR placeholder: re-parse for correct select-list typing.
+        assert!(!bind_shape_is_compatible(&null, &number));
+        // Text matches the placeholder family.
+        assert!(bind_shape_is_compatible(
+            &null,
+            &shape_of(&[BindValue::Text("x".into())])
+        ));
+    }
+
+    #[test]
+    fn bind_type_shape_infers_column_type_from_first_non_null_row() {
+        // executemany with a leading NULL: the column type comes from the
+        // first non-NULL row (same inference as the wire metadata writer).
+        let rows = vec![
+            vec![BindValue::Null],
+            vec![BindValue::Number("7".into())],
+            vec![BindValue::Null],
+        ];
+        let shape = bind_type_shape(&rows);
+        assert!(!shape[0].untyped_null);
+        assert_eq!(
+            shape,
+            shape_of(&[BindValue::Number("7".into())]),
+            "inferred NUMBER column"
+        );
+        // All-NULL column stays a wildcard.
+        let all_null = bind_type_shape(&[vec![BindValue::Null], vec![BindValue::Null]]);
+        assert!(all_null[0].untyped_null);
+    }
+
+    #[test]
+    fn statement_cache_insert_inherits_concrete_slot_over_untyped_null() {
+        // First execute binds NUMBER; a later re-execute of the SAME cursor
+        // binds NULL. The stored shape must keep NUMBER (the cursor is still
+        // parsed for NUMBER), so a following NUMBER execute reuses it.
+        let number = shape_of(&[BindValue::Number("42".into())]);
+        let null = shape_of(&[BindValue::Null]);
+        let mut cache = Vec::new();
+        assert!(statement_cache_insert(&mut cache, 5, "q", 10, number.clone()).is_empty());
+        assert!(statement_cache_insert(&mut cache, 5, "q", 10, null).is_empty());
+        assert_eq!(cache[0].bind_shape, number, "concrete slot inherited");
+        // A REPLACED cursor (fresh parse) records the new shape verbatim.
+        let text = shape_of(&[BindValue::Text("x".into())]);
+        assert_eq!(
+            statement_cache_insert(&mut cache, 5, "q", 11, text.clone()),
+            vec![10]
+        );
+        assert_eq!(cache[0].bind_shape, text);
     }
 
     #[test]
@@ -13384,5 +13815,465 @@ mod tests {
         );
         // ORA-01013 is the server-side code for user-requested cancel.
         assert_eq!(cancelled.ora_code(), Some(1013));
+    }
+
+    // ------------------------------------------------------------------
+    // Listener REDIRECT handling (bead rust-oracledb-pre23ai-connect-z47u.6)
+    // ------------------------------------------------------------------
+
+    /// Reads one TNS packet from a test-listener socket, returning
+    /// `(packet_type, packet_flags, payload)`.
+    fn read_tns_packet_sync(
+        socket: &mut std::net::TcpStream,
+    ) -> std::io::Result<(u8, u8, Vec<u8>)> {
+        let mut header = [0u8; 8];
+        socket.read_exact(&mut header)?;
+        let declared = usize::from(u16::from_be_bytes([header[0], header[1]]));
+        let mut payload = vec![0u8; declared.saturating_sub(header.len())];
+        socket.read_exact(&mut payload)?;
+        Ok((header[4], header[5], payload))
+    }
+
+    fn send_tns_packet_sync(
+        socket: &mut std::net::TcpStream,
+        packet_type: u8,
+        payload: &[u8],
+    ) -> std::io::Result<()> {
+        use std::io::Write as _;
+        let packet = encode_packet(packet_type, 0, None, payload, PacketLengthWidth::Legacy16)
+            .expect("encode test packet");
+        socket.write_all(&packet)
+    }
+
+    /// The REDIRECT packet payload for `redirect_data`: u16be length prefix
+    /// followed by the data bytes.
+    fn redirect_packet_payload(redirect_data: &str) -> Vec<u8> {
+        let bytes = redirect_data.as_bytes();
+        let mut payload = Vec::with_capacity(2 + bytes.len());
+        payload.extend_from_slice(
+            &u16::try_from(bytes.len())
+                .expect("test data fits")
+                .to_be_bytes(),
+        );
+        payload.extend_from_slice(bytes);
+        payload
+    }
+
+    #[test]
+    fn redirect_payload_prefix_accepts_inline_partial_and_rejects_truncated() {
+        // Well-formed: length prefix + full inline data.
+        let payload = redirect_packet_payload("abc");
+        assert_eq!(redirect_payload_prefix(&payload).unwrap(), (3, &b"abc"[..]));
+        // Declared length exceeding the inline bytes: the remainder arrives in
+        // follow-up packets; the prefix reports what is available.
+        assert_eq!(
+            redirect_payload_prefix(&[0x00, 0x10, b'x']).unwrap(),
+            (16, &b"x"[..])
+        );
+        // Length-only payload (data entirely in follow-up packets).
+        assert_eq!(
+            redirect_payload_prefix(&[0x00, 0x05]).unwrap(),
+            (5, &[][..])
+        );
+        // Trailing bytes beyond the declared length are ignored.
+        assert_eq!(
+            redirect_payload_prefix(&[0x00, 0x01, b'a', b'b']).unwrap(),
+            (1, &b"a"[..])
+        );
+        // Truncated: too short to even carry the u16 length.
+        for bad in [&[][..], &[0x00][..]] {
+            assert!(
+                matches!(
+                    redirect_payload_prefix(bad),
+                    Err(Error::InvalidRedirectData(_))
+                ),
+                "payload {bad:?} must be rejected as malformed"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_redirect_target_well_formed_and_malformed() {
+        // Well-formed: "<address>\0<connect data>".
+        let data = "(ADDRESS=(PROTOCOL=tcp)(HOST=dispatcher.example)(PORT=1621))\0\
+                    (DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=dispatcher.example)(PORT=1621))\
+                    (CONNECT_DATA=(SERVICE_NAME=svc)))";
+        let target = parse_redirect_target(data, NetProtocol::Tcp).expect("well-formed redirect");
+        assert_eq!(target.host, "dispatcher.example");
+        assert_eq!(target.port, 1621);
+        assert!(target.connect_data.starts_with("(DESCRIPTION="));
+        // Missing the NUL separator between address and connect data.
+        assert!(matches!(
+            parse_redirect_target("(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1))", NetProtocol::Tcp),
+            Err(Error::InvalidRedirectData(_))
+        ));
+        // Address part with no usable HOST.
+        assert!(matches!(
+            parse_redirect_target("(ADDRESS=(PROTOCOL=tcp)(PORT=1621))\0x", NetProtocol::Tcp),
+            Err(Error::InvalidRedirectData(_))
+        ));
+        // Unparseable address part.
+        assert!(matches!(
+            parse_redirect_target("(((\0x", NetProtocol::Tcp),
+            Err(Error::InvalidRedirectData(_))
+        ));
+    }
+
+    /// `Error::RedirectUnsupported` is kept ONLY for a redirect that demands a
+    /// transport protocol change: a `tcps` connect is never downgraded to
+    /// plain `tcp` (silent TLS strip), and a mid-connect `tcp` -> `tcps`
+    /// upgrade is not supported. Same-protocol redirects are followed.
+    #[test]
+    fn parse_redirect_target_refuses_transport_protocol_change() {
+        let tcp_addr = "(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1521))\0cd";
+        let tcps_addr = "(ADDRESS=(PROTOCOL=tcps)(HOST=h)(PORT=2484))\0cd";
+        let no_protocol = "(ADDRESS=(HOST=h)(PORT=1521))\0cd";
+        // tcps -> tcp downgrade refused, whether explicit or (fail closed)
+        // because the redirect omitted the protocol.
+        assert!(matches!(
+            parse_redirect_target(tcp_addr, NetProtocol::Tcps),
+            Err(Error::RedirectUnsupported)
+        ));
+        assert!(matches!(
+            parse_redirect_target(no_protocol, NetProtocol::Tcps),
+            Err(Error::RedirectUnsupported)
+        ));
+        // tcp -> tcps upgrade is not supported mid-connect.
+        assert!(matches!(
+            parse_redirect_target(tcps_addr, NetProtocol::Tcp),
+            Err(Error::RedirectUnsupported)
+        ));
+        // Protocol preserved: followed.
+        assert!(parse_redirect_target(tcps_addr, NetProtocol::Tcps).is_ok());
+        assert!(parse_redirect_target(no_protocol, NetProtocol::Tcp).is_ok());
+        assert!(parse_redirect_target(tcp_addr, NetProtocol::Tcp).is_ok());
+    }
+
+    /// End-to-end redirect through real sockets: the first listener answers
+    /// CONNECT with REDIRECT; the driver must reconnect to the redirected
+    /// address and resend CONNECT there carrying TNS_PACKET_FLAG_REDIRECT and
+    /// the redirect-supplied connect data. The target listener REFUSEs so the
+    /// test ends before authentication; the surfaced ListenerRefused proves
+    /// the whole redirect hop executed.
+    #[test]
+    fn connect_follows_listener_redirect_and_flags_the_new_connect() -> Result<()> {
+        let redirect_listener = TcpListener::bind("127.0.0.1:0").expect("bind redirect listener");
+        let target_listener = TcpListener::bind("127.0.0.1:0").expect("bind target listener");
+        let redirect_addr = redirect_listener.local_addr().expect("redirect addr");
+        let target_addr = target_listener.local_addr().expect("target addr");
+        let redirect_connect_data = format!(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={}))\
+             (CONNECT_DATA=(SERVICE_NAME=redirsvc)))",
+            target_addr.port()
+        );
+        let redirect_data = format!(
+            "(ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={}))\0{}",
+            target_addr.port(),
+            redirect_connect_data
+        );
+
+        let first = thread::spawn(move || -> std::io::Result<(u8, u8)> {
+            let (mut socket, _) = redirect_listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let (packet_type, packet_flags, _payload) = read_tns_packet_sync(&mut socket)?;
+            send_tns_packet_sync(
+                &mut socket,
+                TNS_PACKET_TYPE_REDIRECT,
+                &redirect_packet_payload(&redirect_data),
+            )?;
+            Ok((packet_type, packet_flags))
+        });
+        let expected_connect_data = redirect_connect_data;
+        let second = thread::spawn(move || -> std::io::Result<(u8, u8, bool)> {
+            let (mut socket, _) = target_listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let (packet_type, packet_flags, payload) = read_tns_packet_sync(&mut socket)?;
+            let carries_connect_data = payload
+                .windows(expected_connect_data.len())
+                .any(|window| window == expected_connect_data.as_bytes());
+            send_tns_packet_sync(&mut socket, TNS_PACKET_TYPE_REFUSE, b"(ERR=12514)")?;
+            Ok((packet_type, packet_flags, carries_connect_data))
+        });
+
+        let options = ConnectOptions::new(
+            format!("127.0.0.1:{}/redirsvc", redirect_addr.port()),
+            "user",
+            "password",
+            identity(),
+        );
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("ambient Cx");
+                Connection::connect(&cx, options).await
+            })
+            .expect_err("target listener refuses; the refusal must surface");
+        assert!(
+            matches!(&err, Error::ListenerRefused(msg) if msg.contains("ERR=12514")),
+            "expected the TARGET listener's refusal, got {err:?}"
+        );
+        let (first_type, first_flags) = first.join().expect("redirect listener thread")?;
+        assert_eq!(first_type, TNS_PACKET_TYPE_CONNECT);
+        assert_eq!(first_flags, 0, "initial CONNECT carries no redirect flag");
+        let (second_type, second_flags, carries_connect_data) =
+            second.join().expect("target listener thread")?;
+        assert_eq!(second_type, TNS_PACKET_TYPE_CONNECT);
+        assert_eq!(
+            second_flags, TNS_PACKET_FLAG_REDIRECT,
+            "the CONNECT resent to the redirect target must carry the REDIRECT packet flag"
+        );
+        assert!(
+            carries_connect_data,
+            "the redirected CONNECT must carry the redirect-supplied connect data"
+        );
+        Ok(())
+    }
+
+    /// Redirect/RESEND interplay plus chunked redirect data: the first
+    /// listener asks for a RESEND before redirecting, and its REDIRECT packet
+    /// carries only the u16 length (the data follows in a second REDIRECT
+    /// packet). The redirected listener then ALSO asks for a RESEND — the
+    /// resent CONNECT on the redirected connection must still carry the
+    /// REDIRECT packet flag (reference keeps the flag on the recreated
+    /// ConnectMessage across resends).
+    #[test]
+    fn connect_redirect_interleaves_with_resend_and_chunked_redirect_data() -> Result<()> {
+        let redirect_listener = TcpListener::bind("127.0.0.1:0").expect("bind redirect listener");
+        let target_listener = TcpListener::bind("127.0.0.1:0").expect("bind target listener");
+        let redirect_addr = redirect_listener.local_addr().expect("redirect addr");
+        let target_addr = target_listener.local_addr().expect("target addr");
+        let redirect_data = format!(
+            "(ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={port}))\0\
+             (DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={port}))\
+             (CONNECT_DATA=(SERVICE_NAME=redirsvc)))",
+            port = target_addr.port()
+        );
+
+        let first = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = redirect_listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let _ = read_tns_packet_sync(&mut socket)?;
+            // Ask for a resend BEFORE redirecting (pre-23ai listeners resend
+            // routinely).
+            send_tns_packet_sync(&mut socket, TNS_PACKET_TYPE_RESEND, &[])?;
+            let _ = read_tns_packet_sync(&mut socket)?;
+            // Chunked redirect: length-only REDIRECT packet, data in a
+            // follow-up REDIRECT packet.
+            let length = u16::try_from(redirect_data.len()).expect("test redirect data fits u16");
+            send_tns_packet_sync(&mut socket, TNS_PACKET_TYPE_REDIRECT, &length.to_be_bytes())?;
+            send_tns_packet_sync(
+                &mut socket,
+                TNS_PACKET_TYPE_REDIRECT,
+                redirect_data.as_bytes(),
+            )?;
+            Ok(())
+        });
+        let second = thread::spawn(move || -> std::io::Result<(u8, u8)> {
+            let (mut socket, _) = target_listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let (_, first_flags, _) = read_tns_packet_sync(&mut socket)?;
+            // The redirected listener itself asks for a resend; the resent
+            // CONNECT must still be redirect-flagged.
+            send_tns_packet_sync(&mut socket, TNS_PACKET_TYPE_RESEND, &[])?;
+            let (_, resent_flags, _) = read_tns_packet_sync(&mut socket)?;
+            send_tns_packet_sync(&mut socket, TNS_PACKET_TYPE_REFUSE, b"(ERR=12514)")?;
+            Ok((first_flags, resent_flags))
+        });
+
+        let options = ConnectOptions::new(
+            format!("127.0.0.1:{}/redirsvc", redirect_addr.port()),
+            "user",
+            "password",
+            identity(),
+        );
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("ambient Cx");
+                Connection::connect(&cx, options).await
+            })
+            .expect_err("target listener refuses; the refusal must surface");
+        assert!(
+            matches!(&err, Error::ListenerRefused(msg) if msg.contains("ERR=12514")),
+            "expected the TARGET listener's refusal, got {err:?}"
+        );
+        first.join().expect("redirect listener thread")?;
+        let (first_flags, resent_flags) = second.join().expect("target listener thread")?;
+        assert_eq!(
+            first_flags, TNS_PACKET_FLAG_REDIRECT,
+            "redirected CONNECT must be flagged"
+        );
+        assert_eq!(
+            resent_flags, TNS_PACKET_FLAG_REDIRECT,
+            "a RESEND on the redirected connection must keep the redirect flag"
+        );
+        Ok(())
+    }
+
+    /// A listener that answers every CONNECT with another REDIRECT (here: to
+    /// itself) must terminate with a structured error instead of spinning
+    /// forever — never a hang, never an opaque I/O error.
+    #[test]
+    fn connect_redirect_loop_is_bounded() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let redirect_data = format!(
+            "(ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={port}))\0\
+             (DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={port}))\
+             (CONNECT_DATA=(SERVICE_NAME=loopsvc)))",
+            port = addr.port()
+        );
+        let hops = u32::from(MAX_CONNECT_REDIRECT_ROUNDS) + 1;
+        let server = thread::spawn(move || -> std::io::Result<u32> {
+            let mut served = 0;
+            // Initial connection plus MAX redirected reconnects, each answered
+            // with a self-redirect.
+            for _ in 0..hops {
+                let (mut socket, _) = listener.accept()?;
+                socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+                let _ = read_tns_packet_sync(&mut socket)?;
+                send_tns_packet_sync(
+                    &mut socket,
+                    TNS_PACKET_TYPE_REDIRECT,
+                    &redirect_packet_payload(&redirect_data),
+                )?;
+                served += 1;
+            }
+            Ok(served)
+        });
+
+        let options = ConnectOptions::new(
+            format!("127.0.0.1:{}/loopsvc", addr.port()),
+            "user",
+            "password",
+            identity(),
+        );
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("ambient Cx");
+                Connection::connect(&cx, options).await
+            })
+            .expect_err("a redirect loop must terminate with a structured error");
+        assert!(
+            matches!(err, Error::ConnectRedirectLoop(rounds)
+                if rounds == MAX_CONNECT_REDIRECT_ROUNDS + 1),
+            "expected ConnectRedirectLoop, got {err:?}"
+        );
+        assert_eq!(err.kind(), ErrorKind::Protocol);
+        let served = server.join().expect("listener thread")?;
+        assert_eq!(served, hops, "every hop reached the listener");
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Packet-layer vs TTC-layer error labelling
+    // (bead rust-oracledb-pre23ai-connect-z47u.3)
+    // ------------------------------------------------------------------
+
+    /// The packet-layer error text is self-triaging: it names known TNS
+    /// packet types so a stray RESEND is never mistaken for TTC message 11
+    /// (IO_VECTOR) — the mislabel that once steered a triage session toward
+    /// SDU-reassembly hypotheses.
+    #[test]
+    fn unexpected_packet_error_names_tns_packet_types() {
+        assert_eq!(
+            Error::UnexpectedPacket(TNS_PACKET_TYPE_RESEND).to_string(),
+            "unexpected TNS packet type 11 (RESEND)"
+        );
+        assert_eq!(
+            Error::UnexpectedPacket(99).to_string(),
+            "unexpected TNS packet type 99 (unknown)"
+        );
+    }
+
+    /// The flag-framed boundary reader's non-DATA arm reports the NETWORK
+    /// packet type byte (header offset 4) as `Error::UnexpectedPacket`, not
+    /// as a TTC `UnknownMessageType` (which names application-layer message
+    /// types and previously mislabelled this byte with `position: 4`).
+    #[test]
+    fn flag_framed_reader_labels_non_data_packet_as_packet_layer_error() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            use std::io::Write as _;
+            let packet = encode_packet(
+                TNS_PACKET_TYPE_RESEND,
+                0,
+                None,
+                &[],
+                PacketLengthWidth::Large32,
+            )
+            .expect("encode unexpected packet");
+            socket.write_all(&packet).expect("write unexpected packet");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let err = runtime.block_on(async {
+            let cx = Cx::current().expect("ambient Cx");
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (read, write) = transport::plain_split(stream);
+            let mut conn = loopback_connection(read, write);
+            conn.core
+                .read_data_response(&cx)
+                .await
+                .expect_err("non-DATA packet must fail closed")
+        });
+
+        assert!(
+            matches!(err, Error::UnexpectedPacket(TNS_PACKET_TYPE_RESEND)),
+            "expected the packet-layer error, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("TNS packet type 11 (RESEND)"),
+            "error text must name the TNS packet type: {err}"
+        );
+        server.join().expect("server thread joins");
+        Ok(())
+    }
+
+    /// The break-drain reader (phase A: discarding in-flight responses until
+    /// the break-acknowledge MARKER) likewise reports a stray non-DATA /
+    /// non-MARKER packet as `Error::UnexpectedPacket` — a packet-layer byte,
+    /// not a TTC message type.
+    #[test]
+    fn break_drain_labels_non_data_packet_as_packet_layer_error() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            use std::io::Write as _;
+            let packet = encode_packet(
+                TNS_PACKET_TYPE_ACCEPT,
+                0,
+                None,
+                &[0x00],
+                PacketLengthWidth::Large32,
+            )
+            .expect("encode unexpected packet");
+            socket.write_all(&packet).expect("write unexpected packet");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let err = runtime.block_on(async {
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (mut read, write) = transport::plain_split(stream);
+            let write = Arc::new(AsyncMutex::with_name("break_drain_test_write", write));
+            drain_break_response_recovery(&mut read, &write)
+                .await
+                .expect_err("non-DATA/non-MARKER packet must fail closed")
+        });
+
+        assert!(
+            matches!(err, Error::UnexpectedPacket(TNS_PACKET_TYPE_ACCEPT)),
+            "expected the packet-layer error, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("TNS packet type 2 (ACCEPT)"),
+            "error text must name the TNS packet type: {err}"
+        );
+        server.join().expect("server thread joins");
+        Ok(())
     }
 }

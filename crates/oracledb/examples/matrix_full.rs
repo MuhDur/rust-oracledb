@@ -655,15 +655,14 @@ fn check_scalar_roundtrips(conn: &mut Connection) -> Suite {
     ensure!(amount == -12.75, "NUMBER f64 roundtrip: got {amount}");
 
     // VARCHAR2: multi-byte text must survive bind + fetch byte-identically.
-    // Distinct SQL text from the NUMBER probes above: the statement cache is
-    // keyed by SQL text and re-executing a cached cursor with a DIFFERENT bind
-    // type reuses the old bind metadata (tracked as a separate driver issue;
-    // the reference re-describes on bind-type change).
+    // Deliberately the SAME SQL text as the NUMBER probes above: a rebind
+    // with a different TYPE on a cached statement must re-parse instead of
+    // coercing through the stale NUMBER bind metadata (bead
+    // rust-oracledb-ilel; regression test in tests/live_statement_cache.rs).
     let unicode = "naïve-Ω-δοκιμή-支持-🎯";
-    let text: String =
-        BlockingConnection::query_one(conn, "select :1 as v_text from dual", (unicode,))
-            .map_err(|err| format!("VARCHAR2 unicode roundtrip: {err}"))?
-            .get(0)?;
+    let text: String = BlockingConnection::query_one(conn, "select :1 from dual", (unicode,))
+        .map_err(|err| format!("VARCHAR2 unicode roundtrip: {err}"))?
+        .get(0)?;
     ensure!(text == unicode, "VARCHAR2 unicode roundtrip: got {text:?}");
 
     // DATE: full second precision, decoded into the structured DateTime value.

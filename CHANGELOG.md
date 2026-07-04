@@ -5,6 +5,30 @@ is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows the SemVer contract described in
 [`docs/adr/0002-semver-contract.md`](docs/adr/0002-semver-contract.md).
 
+## [Unreleased]
+
+### Added
+
+- **Listener REDIRECT handling.** A CONNECT answered with a REDIRECT packet
+  (shared-server / RAC configurations, routine on many listeners) now follows
+  the redirect: the driver reconnects the transport to the redirected address
+  and resends CONNECT with the `TNS_PACKET_FLAG_REDIRECT` flag, bounded against
+  redirect loops. New public constant `TNS_PACKET_FLAG_REDIRECT`; new errors
+  `Error::InvalidRedirectData` and `Error::ConnectRedirectLoop`. A redirect that
+  demands a transport-protocol downgrade (e.g. `tcps` → `tcp`) is refused.
+
+### Fixed
+
+- **Statement cache no longer reuses stale bind metadata when a rebind changes
+  the bind type** — a rebind that changed a parameter's type against a cached
+  statement previously surfaced `ORA-01722`. The cache now re-describes when
+  bind types diverge from the cached shape. Live-verified on Oracle XE 18 and
+  FREE 23ai.
+- **Diagnostics: every remaining site that mislabeled a network-layer TNS
+  packet-type byte as a TTC message type** (the flag-framed boundary reader and
+  the pipeline decoder sites) now reports `Error::UnexpectedPacket` naming the
+  packet type, not `unknown TTC message type … at position 4`.
+
 ## [0.7.1] - 2026-07-04
 
 ### Added

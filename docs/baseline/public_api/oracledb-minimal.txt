@@ -516,10 +516,12 @@ pub oracledb::Error::AccessTokenRequiresTcps
 pub oracledb::Error::Bind(oracledb::BindError)
 pub oracledb::Error::CallTimeout(u32)
 pub oracledb::Error::Cancelled
+pub oracledb::Error::ConnectRedirectLoop(u8)
 pub oracledb::Error::ConnectResendLoop(u8)
 pub oracledb::Error::ConnectionClosed(alloc::string::String)
 pub oracledb::Error::Conversion(oracledb::ConversionError)
 pub oracledb::Error::FastAuthRequired
+pub oracledb::Error::InvalidRedirectData(alloc::string::String)
 pub oracledb::Error::Io(std::io::error::Error)
 pub oracledb::Error::ListenerRefused(alloc::string::String)
 pub oracledb::Error::MissingSessionField(&'static str)
