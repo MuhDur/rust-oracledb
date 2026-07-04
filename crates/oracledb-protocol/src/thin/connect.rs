@@ -197,6 +197,39 @@ pub fn build_fast_auth_token_payload(
     Ok(out)
 }
 
+/// Fast-auth bundle for **IAM instance/resource-principal token authentication**:
+/// like [`build_fast_auth_token_payload`], but the appended phase-two message also
+/// carries the `AUTH_HEADER`/`AUTH_SIGNATURE` request-signature pair and OR's the
+/// IAM_TOKEN bit into the auth mode. `auth_header` is the signing string from
+/// [`iam_signing_string`] and `auth_signature` its base64 RSA signature
+/// (`crate::crypto::iam_signature`).
+#[allow(clippy::too_many_arguments)]
+pub fn build_fast_auth_token_payload_iam(
+    user: &str,
+    token: &str,
+    driver_name: &str,
+    version_num: u32,
+    connect_string: &str,
+    edition: Option<&str>,
+    auth_header: &str,
+    auth_signature: &str,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::from_hex(FAST_AUTH_PREFIX_HEX)
+        .map_err(|_| ProtocolError::TtcDecode("invalid static fast-auth prefix"))?;
+    append_auth_phase_two_token_iam(
+        &mut out,
+        user,
+        token,
+        driver_name,
+        version_num,
+        connect_string,
+        edition,
+        auth_header,
+        auth_signature,
+    )?;
+    Ok(out)
+}
+
 pub fn build_function_payload(function_code: u8, ttc_field_version: u8) -> Vec<u8> {
     build_function_payload_with_seq(function_code, 1, ttc_field_version)
 }

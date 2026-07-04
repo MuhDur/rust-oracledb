@@ -41,6 +41,21 @@ ignore = [
     # rustls-pki-types::pem. Allow-listed so the gate stays green while the
     # migration is pending; remove once oracledb-protocol drops rustls-pemfile.
     "RUSTSEC-2025-0134",
+    # RUSTSEC-2023-0071 — "Marvin Attack" timing side-channel in the `rsa` crate.
+    # `rsa` is pulled in by oracledb-protocol solely for OCI IAM
+    # instance/resource-principal request SIGNING (crypto::iam_signature: a
+    # one-shot RSA PKCS#1 v1.5 SHA-256 signature computed locally at connect time,
+    # bead rust-oracledb-cco). The Marvin attack recovers a key by having an
+    # attacker submit many chosen ciphertexts to an RSA *decryption* oracle and
+    # measuring response timing over the network. This crate exposes no such
+    # oracle: it never RSA-decrypts, the private key signs a single
+    # locally-constructed header once per connect, and the timing of that one-shot
+    # client-side computation is not an attacker-queryable network surface. There
+    # is NO safe upgrade (upstream advisory: "No safe upgrade is available"; a
+    # constant-time rewrite is still in progress). Documented, reviewed allow so
+    # the gate stays green; revisit and remove once RustCrypto ships the
+    # constant-time `rsa` release.
+    "RUSTSEC-2023-0071",
 ]
 
 # ---------------------------------------------------------------------------

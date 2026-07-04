@@ -240,6 +240,7 @@ pub fn oracledb::ConnectOptions::auth_mode(&self) -> &oracledb::AuthMode
 pub fn oracledb::ConnectOptions::connect_string(&self) -> &str
 pub fn oracledb::ConnectOptions::edition(&self) -> core::option::Option<&str>
 pub fn oracledb::ConnectOptions::external_auth(impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
+pub fn oracledb::ConnectOptions::iam_private_key(&self) -> core::option::Option<&oracledb::IamPrivateKey>
 pub fn oracledb::ConnectOptions::identity(&self) -> &oracledb_protocol::ClientIdentity
 pub fn oracledb::ConnectOptions::kerberos_auth(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
 pub fn oracledb::ConnectOptions::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
@@ -260,6 +261,7 @@ pub fn oracledb::ConnectOptions::with_access_token(self, impl core::convert::Int
 pub fn oracledb::ConnectOptions::with_app_context(self, alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String)>) -> Self
 pub fn oracledb::ConnectOptions::with_edition(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_external_auth(self) -> Self
+pub fn oracledb::ConnectOptions::with_iam_token(self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_kerberos_auth(self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_protocol_limits(self, oracledb_protocol::wire::ProtocolLimits) -> Self
 pub fn oracledb::ConnectOptions::with_proxy_user(self, core::option::Option<alloc::string::String>) -> Self
@@ -874,6 +876,7 @@ pub fn oracledb::ConnectOptions::auth_mode(&self) -> &oracledb::AuthMode
 pub fn oracledb::ConnectOptions::connect_string(&self) -> &str
 pub fn oracledb::ConnectOptions::edition(&self) -> core::option::Option<&str>
 pub fn oracledb::ConnectOptions::external_auth(impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
+pub fn oracledb::ConnectOptions::iam_private_key(&self) -> core::option::Option<&oracledb::IamPrivateKey>
 pub fn oracledb::ConnectOptions::identity(&self) -> &oracledb_protocol::ClientIdentity
 pub fn oracledb::ConnectOptions::kerberos_auth(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
 pub fn oracledb::ConnectOptions::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
@@ -894,6 +897,7 @@ pub fn oracledb::ConnectOptions::with_access_token(self, impl core::convert::Int
 pub fn oracledb::ConnectOptions::with_app_context(self, alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String)>) -> Self
 pub fn oracledb::ConnectOptions::with_edition(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_external_auth(self) -> Self
+pub fn oracledb::ConnectOptions::with_iam_token(self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_kerberos_auth(self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_protocol_limits(self, oracledb_protocol::wire::ProtocolLimits) -> Self
 pub fn oracledb::ConnectOptions::with_proxy_user(self, core::option::Option<alloc::string::String>) -> Self
@@ -1078,6 +1082,13 @@ pub fn oracledb::ExecutemanyManager::eq(&self, &oracledb::ExecutemanyManager) ->
 impl core::fmt::Debug for oracledb::ExecutemanyManager
 pub fn oracledb::ExecutemanyManager::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb::ExecutemanyManager
+pub struct oracledb::IamPrivateKey(_)
+impl oracledb::IamPrivateKey
+pub fn oracledb::IamPrivateKey::new(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::clone::Clone for oracledb::IamPrivateKey
+pub fn oracledb::IamPrivateKey::clone(&self) -> oracledb::IamPrivateKey
+impl core::fmt::Debug for oracledb::IamPrivateKey
+pub fn oracledb::IamPrivateKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct oracledb::ObjectAttribute
 pub oracledb::ObjectAttribute::name: alloc::string::String
 pub oracledb::ObjectAttribute::type_name: alloc::string::String

@@ -53,6 +53,13 @@ asupersync = "=0.3.4"
 hex = "0.4"
 md-5 = "0.10"
 pbkdf2 = "0.12"
+# RSA PKCS#1 v1.5 signing for OCI IAM instance/resource-principal request
+# signing (AUTH_HEADER/AUTH_SIGNATURE). Pure-Rust RustCrypto, unsafe-free,
+# MIT OR Apache-2.0. The `sha2` feature guarantees `Sha256: AssociatedOid` so
+# the DigestInfo prefix matches OpenSSL `dgst -sha256 -sign` byte-for-byte.
+rsa = { version = "0.9", features = ["sha2"] }
+# Standard base64 for the AUTH_SIGNATURE value (already in the tree at 0.22).
+base64 = "0.22"
 # Property-based testing for the sans-io codecs (round-trip / metamorphic /
 # boundary suites in crates/oracledb-protocol). Dev-dependency only; gated
 # behind nothing — plain `cargo test`.

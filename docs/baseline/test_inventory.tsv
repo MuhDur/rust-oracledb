@@ -1,5 +1,6 @@
 path	test_markers
 crates/oracledb-protocol/src/capabilities.rs	2
+crates/oracledb-protocol/src/crypto.rs	4
 crates/oracledb-protocol/src/dpl.rs	22
 crates/oracledb-protocol/src/lib.rs	3
 crates/oracledb-protocol/src/net/cassette.rs	8
@@ -10,7 +11,7 @@ crates/oracledb-protocol/src/oson.rs	13
 crates/oracledb-protocol/src/packet/mod.rs	5
 crates/oracledb-protocol/src/sql.rs	20
 crates/oracledb-protocol/src/thin/aq.rs	8
-crates/oracledb-protocol/src/thin/auth.rs	3
+crates/oracledb-protocol/src/thin/auth.rs	7
 crates/oracledb-protocol/src/thin/codecs.rs	3
 crates/oracledb-protocol/src/thin/connect.rs	1
 crates/oracledb-protocol/src/thin/dbobject.rs	7
@@ -50,7 +51,7 @@ crates/oracledb-protocol/tests/tpc_golden.rs	3
 crates/oracledb-pyshim/src/dbobject.rs	3
 crates/oracledb/src/arrow/mod.rs	35
 crates/oracledb/src/cursor_logic.rs	14
-crates/oracledb/src/lib.rs	83
+crates/oracledb/src/lib.rs	85
 crates/oracledb/src/obs.rs	6
 crates/oracledb/src/pool.rs	32
 crates/oracledb/src/request.rs	7
@@ -62,7 +63,7 @@ crates/oracledb/src/soda/qbe.rs	23
 crates/oracledb/src/sql_convert.rs	29
 crates/oracledb/src/tls.rs	8
 crates/oracledb/src/transport.rs	11
-crates/oracledb/tests/access_token.rs	5
+crates/oracledb/tests/access_token.rs	7
 crates/oracledb/tests/arrow_columnar_alloc.rs	1
 crates/oracledb/tests/arrow_columnar_diff.rs	7
 crates/oracledb/tests/arrow_golden.rs	2
