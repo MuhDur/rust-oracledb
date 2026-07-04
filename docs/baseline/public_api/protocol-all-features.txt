@@ -1868,6 +1868,7 @@ pub oracledb_protocol::ProtocolError::UnsupportedFeature(&'static str)
 pub oracledb_protocol::ProtocolError::UnsupportedVerifier
 pub oracledb_protocol::ProtocolError::UnsupportedVerifier::verifier_type: u32
 pub oracledb_protocol::ProtocolError::UnsupportedVersion
+pub oracledb_protocol::ProtocolError::UnsupportedVersion::minimum: u16
 pub oracledb_protocol::ProtocolError::UnsupportedVersion::version: u16
 pub oracledb_protocol::ProtocolError::ValueTooLarge
 pub oracledb_protocol::ProtocolError::ValueTooLarge::actual_size: usize
@@ -1931,4 +1932,5 @@ pub const oracledb_protocol::PYTHON_ORACLEDB_REFERENCE_COMMIT: &str
 pub const oracledb_protocol::PYTHON_ORACLEDB_REFERENCE_TAG: &str
 pub const oracledb_protocol::TNS_VERSION_DESIRED: u16
 pub const oracledb_protocol::TNS_VERSION_MIN: u16
+pub const oracledb_protocol::TNS_VERSION_MIN_ACCEPTED: u16
 pub type oracledb_protocol::Result<T> = core::result::Result<T, oracledb_protocol::ProtocolError>
