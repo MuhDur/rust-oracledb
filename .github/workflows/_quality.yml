@@ -185,6 +185,10 @@ jobs:
         if: ${{ inputs.profile != 'canary' }}
         run: bash scripts/check_async_blocking_coverage.sh
 
+      - name: Reference version-gate parity coverage
+        if: ${{ inputs.profile != 'canary' }}
+        run: bash scripts/extract_reference_gates.sh --check
+
       - name: Provenance artifacts drift check (SBOM + dep/action inventory)
         if: ${{ inputs.profile != 'canary' }}
         run: bash scripts/gen_sbom.sh --check

@@ -472,7 +472,8 @@ mod tests {
         let mut writer = TtcWriter::new();
 
         let (ora_type_num, csfrm, buffer_size) =
-            write_bind_metadata_for_rows(&mut writer, &rows, 0).expect("metadata writes");
+            write_bind_metadata_for_rows(&mut writer, &rows, 0, TNS_CCAP_FIELD_VERSION_23_4)
+                .expect("metadata writes");
 
         assert_eq!(ora_type_num, ORA_TYPE_NUM_RAW);
         assert_eq!(csfrm, 0);
@@ -512,6 +513,7 @@ mod tests {
             ORA_TYPE_NUM_CLOB,
             CS_FORM_IMPLICIT,
             1,
+            TNS_CCAP_FIELD_VERSION_23_4,
         )
         .expect("CLOB bind metadata should encode");
         let encoded = writer.into_bytes();

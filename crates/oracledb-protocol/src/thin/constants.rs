@@ -295,6 +295,7 @@ pub(crate) const TNS_SERVER_PIGGYBACK_EXT_SYNC: u8 = 9;
 pub(crate) const TNS_SERVER_PIGGYBACK_SESS_SIGNATURE: u8 = 10;
 pub(crate) const TNS_CCAP_FIELD_VERSION: usize = 7;
 pub(crate) const TNS_CCAP_FIELD_VERSION_12_2: u8 = 8;
+pub(crate) const TNS_CCAP_FIELD_VERSION_12_2_EXT1: u8 = 9;
 pub(crate) const TNS_CCAP_FIELD_VERSION_20_1: u8 = 14;
 pub(crate) const TNS_CCAP_FIELD_VERSION_21_1: u8 = 16;
 pub(crate) const TNS_CCAP_FIELD_VERSION_23_1: u8 = 17;

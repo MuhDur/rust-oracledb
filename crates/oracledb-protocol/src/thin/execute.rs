@@ -302,13 +302,24 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
         writer.write_ub4(0); // al8pidmlrcbl
         writer.write_u8(0); // pointer (al8pidmlrcl)
     }
-    writer.write_u8(0); // pointer (al8sqlsig)
-    writer.write_ub4(0); // SQL signature length
-    writer.write_u8(0); // pointer (SQL ID)
-    writer.write_ub4(0); // allocated size of SQL ID
-    writer.write_u8(0); // pointer (length of SQL ID)
-    writer.write_u8(0); // pointer (chunk ids)
-    writer.write_ub4(0); // number of chunk ids
+    // The al8sqlsig block (SQL signature + SQL ID pointers) is gated on the
+    // negotiated field version >= 12.2, and the chunk-ids block on >= 12.2 ext1
+    // (reference messages/execute.pyx:172-180). A pre-12.2 server (ttc field
+    // version 7, Oracle 12.1 — still above our accept floor of 315) never reads
+    // these fields, so writing them unconditionally shifts every following byte
+    // and corrupts the EXECUTE. Our live matrix floor is 18c (field version 11),
+    // so both branches always fired there and the miss stayed invisible.
+    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_12_2 {
+        writer.write_u8(0); // pointer (al8sqlsig)
+        writer.write_ub4(0); // SQL signature length
+        writer.write_u8(0); // pointer (SQL ID)
+        writer.write_ub4(0); // allocated size of SQL ID
+        writer.write_u8(0); // pointer (length of SQL ID)
+        if ttc_field_version >= TNS_CCAP_FIELD_VERSION_12_2_EXT1 {
+            writer.write_u8(0); // pointer (chunk ids)
+            writer.write_ub4(0); // number of chunk ids
+        }
+    }
 
     if needs_parse {
         writer.write_bytes_with_length(sql_bytes)?;
@@ -336,6 +347,7 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
             bind_rows,
             is_plsql,
             exec_options.max_string_size,
+            ttc_field_version,
         )?;
     }
     Ok(writer.into_bytes())
@@ -346,13 +358,19 @@ pub(crate) fn write_bind_params(
     bind_rows: &[Vec<BindValue>],
     is_plsql: bool,
     max_string_size: u32,
+    ttc_field_version: u8,
 ) -> Result<()> {
     let Some(first_row) = bind_rows.first() else {
         return Ok(());
     };
     let mut bind_metadata = Vec::with_capacity(first_row.len());
     for index in 0..first_row.len() {
-        bind_metadata.push(write_bind_metadata_for_rows(writer, bind_rows, index)?);
+        bind_metadata.push(write_bind_metadata_for_rows(
+            writer,
+            bind_rows,
+            index,
+            ttc_field_version,
+        )?);
     }
     for row in bind_rows {
         if !is_plsql && row.iter().all(BindValue::is_output_only) {
@@ -408,6 +426,7 @@ pub(crate) fn write_bind_metadata_for_rows(
     writer: &mut TtcWriter,
     bind_rows: &[Vec<BindValue>],
     index: usize,
+    ttc_field_version: u8,
 ) -> Result<(u8, u8, u32)> {
     let Some(first_row) = bind_rows.first() else {
         return Ok((ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 1));
@@ -438,7 +457,14 @@ pub(crate) fn write_bind_metadata_for_rows(
             buffer_size = buffer_size.max(row_buffer_size);
         }
     }
-    write_bind_metadata_with_type(writer, metadata_value, ora_type_num, csfrm, buffer_size)?;
+    write_bind_metadata_with_type(
+        writer,
+        metadata_value,
+        ora_type_num,
+        csfrm,
+        buffer_size,
+        ttc_field_version,
+    )?;
     Ok((ora_type_num, csfrm, buffer_size))
 }
 
@@ -474,6 +500,82 @@ mod tests {
             .windows(needle.len())
             .position(|window| window == needle)
             .unwrap_or_else(|| panic!("{label} not found in execute payload"))
+    }
+
+    fn execute_payload_for_version(field_version: u8) -> Vec<u8> {
+        build_execute_payload_with_bind_rows_and_options_with_seq(
+            "select 1 from dual",
+            0,
+            7,
+            true,
+            &[],
+            ExecuteOptions::default(),
+            field_version,
+        )
+        .expect("execute payload")
+    }
+
+    // Reference messages/execute.pyx:172-180 gates the al8sqlsig block on
+    // ttc field version >= 12.2 and the chunk-ids block on >= 12.2 ext1. A
+    // pre-12.2 server (field version 7, Oracle 12.1) must not receive those
+    // bytes; writing them unconditionally shifts the SQL text and following
+    // al8i4 slots (the classic missing-version-gate corruption).
+    #[test]
+    fn execute_gates_al8sqlsig_and_chunk_ids_on_field_version() {
+        let v7 = execute_payload_for_version(TNS_CCAP_FIELD_VERSION_12_2 - 1); // 12.1
+        let v8 = execute_payload_for_version(TNS_CCAP_FIELD_VERSION_12_2); // 12.2
+        let v9 = execute_payload_for_version(TNS_CCAP_FIELD_VERSION_12_2_EXT1); // 12.2 ext1
+        let v17 = execute_payload_for_version(TNS_CCAP_FIELD_VERSION_23_1); // 23.1 (< token gate)
+
+        // al8sqlsig block = u8 + ub4(0) + u8 + ub4(0) + u8 = 5 bytes.
+        assert_eq!(
+            v8.len() - v7.len(),
+            5,
+            "the al8sqlsig block appears only at field version >= 12.2"
+        );
+        // chunk-ids block = u8 + ub4(0) = 2 bytes.
+        assert_eq!(
+            v9.len() - v8.len(),
+            2,
+            "the chunk-ids block appears only at field version >= 12.2 ext1"
+        );
+        // Nothing else on the EXECUTE write path changes between 12.2 ext1 and
+        // 23.1 (the next write gate, the ub8 pipeline token, is at 23.1 ext1),
+        // so the al8sqlsig/chunk-ids blocks are the only version-dependent bytes
+        // in this band — the fix is inert for every 12.2 ext1+ server.
+        assert_eq!(
+            v9, v17,
+            "field versions in [12.2 ext1, 23.1) produce identical EXECUTE bytes"
+        );
+    }
+
+    // Reference messages/base.pyx:1429 gates the per-column oaccolid ub4 on
+    // field version >= 12.2. The symmetric describe read (fetch.rs) already
+    // gated it; the bind write side had not.
+    #[test]
+    fn bind_column_metadata_gates_oaccolid_on_field_version() {
+        let row = vec![BindValue::Text("x".to_string())];
+        let build = |field_version: u8| {
+            build_execute_payload_with_bind_rows_and_options_with_seq(
+                "insert into t values (:1)",
+                1,
+                7,
+                false,
+                &[row.clone()],
+                ExecuteOptions::default(),
+                field_version,
+            )
+            .expect("execute payload")
+        };
+        let v7 = build(TNS_CCAP_FIELD_VERSION_12_2 - 1);
+        let v8 = build(TNS_CCAP_FIELD_VERSION_12_2);
+        // One bind column: the al8sqlsig block (5) + oaccolid (1) = 6 extra
+        // bytes at 12.2 vs 12.1 (chunk-ids still absent at exactly 12.2).
+        assert_eq!(
+            v8.len() - v7.len(),
+            6,
+            "12.2 adds the al8sqlsig block (5) and one per-column oaccolid (1)"
+        );
     }
 
     #[test]

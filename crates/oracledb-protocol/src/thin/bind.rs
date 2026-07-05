@@ -28,6 +28,7 @@ pub(crate) fn write_bind_metadata_with_type(
     ora_type_num: u8,
     csfrm: u8,
     buffer_size: u32,
+    ttc_field_version: u8,
 ) -> Result<()> {
     let (flags, max_elements) = match value {
         BindValue::Array { max_elements, .. } => {
@@ -80,7 +81,17 @@ pub(crate) fn write_bind_metadata_with_type(
         _ => 0,
     };
     writer.write_ub4(lob_prefetch_length);
-    writer.write_ub4(0);
+    // oaccolid is gated on the negotiated field version >= 12.2 (reference
+    // messages/base.pyx:1429). A pre-12.2 server (ttc field version 7, Oracle
+    // 12.1 — above our accept floor of 315) does not read it, so writing it
+    // unconditionally adds a stray ub4 per bind column and corrupts the bind
+    // metadata. The symmetric read path already gates the same skip (see
+    // fetch.rs `>= TNS_CCAP_FIELD_VERSION_12_2`); the write side had missed it.
+    // Our live matrix floor is 18c (field version 11), where the branch always
+    // fired, so the miss stayed invisible.
+    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_12_2 {
+        writer.write_ub4(0); // oaccolid
+    }
     Ok(())
 }
 
