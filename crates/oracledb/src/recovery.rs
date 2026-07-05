@@ -101,6 +101,7 @@ pub(crate) fn run_recovery_without_current_cx<R, W>(
     action: RecoveryWireAction,
     recovery_timeout: Duration,
     limits: ProtocolLimits,
+    classic: bool,
 ) -> Result<()>
 where
     R: AsyncRead + Send + Unpin + 'static,
@@ -110,10 +111,10 @@ where
         async {
             match action {
                 RecoveryWireAction::BreakAndDrain => {
-                    break_and_drain_wire_unbounded_with_limits(read, write, limits).await
+                    break_and_drain_wire_unbounded_with_limits(read, write, limits, classic).await
                 }
                 RecoveryWireAction::DrainCancel => {
-                    drain_cancel_wire_unbounded_with_limits(read, write, limits).await
+                    drain_cancel_wire_unbounded_with_limits(read, write, limits, classic).await
                 }
             }
         },

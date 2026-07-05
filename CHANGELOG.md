@@ -7,7 +7,30 @@ and the project follows the SemVer contract described in
 
 ## [Unreleased]
 
+### Fixed
+
+- **Recovery drain now respects classic (pre-23ai) framing (bead `99xu`).**
+  The break/cancel recovery drain read the trailing-error boundary assuming
+  23ai `END_OF_RESPONSE` framing; on a pre-23ai server (which never negotiates
+  it) the drain could misframe the trailing error. The session's negotiated
+  framing is now threaded into the recovery path so break/cancel recovery is
+  correct on Oracle 18c/21c as well as 23ai.
+- **TPC (two-phase commit) payloads gate the ub8 token by negotiated version
+  (bead `hkwd`).** `build_tpc_switch_payload_with_seq` /
+  `build_tpc_change_state_payload_with_seq` unconditionally emitted the ub8 TTC
+  token (23.1+ framing); a pre-23ai server misparses the stray token and fails
+  the call (`ORA-03120`) — the same class as the earlier function-header gating.
+  New version-aware `*_and_version` builders emit the token only when
+  `ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1`; the original
+  builders are retained as byte-identical wrappers (API-stable, semver-additive).
+
 ### Added
+
+- Version-portable live-test fixtures: `live_object_decode` resolves the
+  fixture owner from the connecting session's own schema (portable across the
+  matrix lanes) rather than a hard-coded owner, and `pipeline_live`
+  version-gates with an explicit, evidence-based reason (pipelining requires
+  the 23ai `END_OF_RESPONSE` capability; documented, never a silent skip).
 
 - **HA / multi-address connect-string support (bead `clvm`).** A
   `DESCRIPTION` with an `ADDRESS_LIST` / multiple `ADDRESS` entries now fails

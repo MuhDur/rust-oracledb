@@ -269,9 +269,41 @@ pub fn build_tpc_switch_payload_with_seq(
     xid: Option<&TpcXid<'_>>,
     context: Option<&[u8]>,
 ) -> Vec<u8> {
+    // Retained for API stability (this crate's public surface is semver-frozen).
+    // The original builder always emitted the ub8 TTC token, i.e. the >= 23.1
+    // (`TNS_CCAP_FIELD_VERSION_23_1_EXT_1`) framing; delegate with that version so
+    // existing callers see byte-identical output. New callers must pass the
+    // *negotiated* version via `..._and_version` so a pre-23ai server is not sent
+    // a stray token (ORA-03120). Bead rust-oracledb-hkwd.
+    build_tpc_switch_payload_with_seq_and_version(
+        seq_num,
+        operation,
+        flags,
+        timeout,
+        xid,
+        context,
+        TNS_CCAP_FIELD_VERSION_23_1_EXT_1,
+    )
+}
+
+/// Version-aware [`build_tpc_switch_payload_with_seq`]: the ub8 TTC token is
+/// emitted only when `ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1`
+/// (reference messages/base.pyx `_write_function_code`). Pre-23ai servers never
+/// negotiate that version and misparse a stray token as message content, failing
+/// the call with ORA-03120 (observed live on Oracle XE 18c/21c). Bead
+/// rust-oracledb-hkwd.
+#[allow(clippy::too_many_arguments)]
+pub fn build_tpc_switch_payload_with_seq_and_version(
+    seq_num: u8,
+    operation: u32,
+    flags: u32,
+    timeout: u32,
+    xid: Option<&TpcXid<'_>>,
+    context: Option<&[u8]>,
+    ttc_field_version: u8,
+) -> Vec<u8> {
     let mut writer = TtcWriter::new();
-    writer.write_function_code_with_seq(TNS_FUNC_TPC_TXN_SWITCH, seq_num);
-    writer.write_ub8(0); // token
+    writer.write_function_header(TNS_FUNC_TPC_TXN_SWITCH, seq_num, ttc_field_version);
     writer.write_ub4(operation);
     match context {
         Some(context) => {
@@ -316,9 +348,35 @@ pub fn build_tpc_change_state_payload_with_seq(
     xid: Option<&TpcXid<'_>>,
     context: Option<&[u8]>,
 ) -> Vec<u8> {
+    // Retained for API stability; delegates with the token-present (>= 23.1)
+    // framing this builder always emitted. New callers pass the negotiated
+    // version via `..._and_version` (bead rust-oracledb-hkwd).
+    build_tpc_change_state_payload_with_seq_and_version(
+        seq_num,
+        operation,
+        requested_state,
+        flags,
+        xid,
+        context,
+        TNS_CCAP_FIELD_VERSION_23_1_EXT_1,
+    )
+}
+
+/// Version-aware [`build_tpc_change_state_payload_with_seq`]: gates the ub8 TTC
+/// token on `ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1` so pre-23ai
+/// servers are not sent a stray token (ORA-03120). Bead rust-oracledb-hkwd.
+#[allow(clippy::too_many_arguments)]
+pub fn build_tpc_change_state_payload_with_seq_and_version(
+    seq_num: u8,
+    operation: u32,
+    requested_state: u32,
+    flags: u32,
+    xid: Option<&TpcXid<'_>>,
+    context: Option<&[u8]>,
+    ttc_field_version: u8,
+) -> Vec<u8> {
     let mut writer = TtcWriter::new();
-    writer.write_function_code_with_seq(TNS_FUNC_TPC_TXN_CHANGE_STATE, seq_num);
-    writer.write_ub8(0); // token
+    writer.write_function_header(TNS_FUNC_TPC_TXN_CHANGE_STATE, seq_num, ttc_field_version);
     writer.write_ub4(operation);
     match context {
         Some(context) => {

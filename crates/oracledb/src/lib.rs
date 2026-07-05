@@ -169,8 +169,8 @@ use oracledb_protocol::thin::{
     TNS_SUBSCR_OP_UNREGISTER,
 };
 use oracledb_protocol::thin::{
-    build_sessionless_piggyback, build_tpc_change_state_payload_with_seq,
-    build_tpc_switch_payload_with_seq, build_tpc_txn_switch_payload_with_seq,
+    build_sessionless_piggyback, build_tpc_change_state_payload_with_seq_and_version,
+    build_tpc_switch_payload_with_seq_and_version, build_tpc_txn_switch_payload_with_seq,
     parse_tpc_change_state_response_with_limits, parse_tpc_switch_response_with_limits,
 };
 use oracledb_protocol::thin::{TNS_AQ_ARRAY_DEQ, TNS_AQ_ARRAY_ENQ};
@@ -440,6 +440,12 @@ struct ConnectionCore<T: WireTransport> {
     write: SharedWriteHalf<T>,
     recovery: Arc<SessionRecovery>,
     protocol_limits: ProtocolLimits,
+    /// Whether this session negotiated the *classic* (pre-END_OF_RESPONSE)
+    /// framing, i.e. `!supports_end_of_response`. Set once at connect time from
+    /// the ACCEPT capabilities. The recovery drain reads this to decide the
+    /// trailing-error boundary the way the connected server frames it (bead
+    /// rust-oracledb-99xu); `false` (23ai framing) until the session negotiates.
+    classic_framing: bool,
 }
 
 impl<T: WireTransport> ConnectionCore<T> {
@@ -449,7 +455,15 @@ impl<T: WireTransport> ConnectionCore<T> {
             write: Arc::new(AsyncMutex::with_name(write_name, write)),
             recovery: Arc::new(SessionRecovery::new()),
             protocol_limits: ProtocolLimits::DEFAULT,
+            classic_framing: false,
         }
+    }
+
+    /// Records whether this session uses classic (pre-END_OF_RESPONSE) framing,
+    /// so the recovery drain can decide the trailing-error boundary correctly
+    /// on pre-23ai servers (bead rust-oracledb-99xu).
+    fn set_classic_framing(&mut self, classic: bool) {
+        self.classic_framing = classic;
     }
 
     fn set_protocol_limits(&mut self, limits: ProtocolLimits) -> Result<()> {
@@ -656,6 +670,7 @@ impl<T: WireTransport> ConnectionCore<T> {
         let read = self.take_read()?;
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
+        let classic = self.classic_framing;
         let thread = std::thread::Builder::new()
             .name("oracledb-recovery-drain".to_string())
             .spawn(move || {
@@ -666,6 +681,7 @@ impl<T: WireTransport> ConnectionCore<T> {
                     action,
                     recovery_timeout,
                     limits,
+                    classic,
                 );
                 (read, result)
             })
@@ -2562,6 +2578,12 @@ impl Connection {
                 }
             };
             let accept_info = parse_accept_payload(&accept.payload)?;
+            // Record the framing mode so the recovery drain (which runs on a raw
+            // read half, without the Connection) decides the trailing-error
+            // boundary the way this server frames it: pre-23ai (no
+            // END_OF_RESPONSE) needs message-driven completion (bead
+            // rust-oracledb-99xu).
+            core.set_classic_framing(!accept_info.supports_end_of_response);
             let sdu = usize::try_from(accept_info.sdu)
                 .unwrap_or(DEFAULT_SDU)
                 .max(TNS_DATA_PACKET_OVERHEAD + 1);
@@ -2937,7 +2959,22 @@ impl Connection {
             self.capabilities.ttc_field_version,
         )?;
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        // Classic-aware read: pre-23ai servers never negotiate END_OF_RESPONSE
+        // framing, so the flag-driven reader would block forever. The probe
+        // decides completion by parsing the accumulated payload (bead
+        // rust-oracledb-eyp7).
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_subscribe_response_with_limits(
+                    bytes,
+                    capabilities,
+                    limits,
+                ))
+            })
+            .await?;
         self.note_parse(parse_subscribe_response_with_limits(
             &response,
             self.capabilities,
@@ -2988,7 +3025,20 @@ impl Connection {
             self.capabilities.ttc_field_version,
         )?;
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        // Classic-aware read (pre-23ai has no END_OF_RESPONSE framing); bead
+        // rust-oracledb-eyp7.
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_subscribe_response_with_limits(
+                    bytes,
+                    capabilities,
+                    limits,
+                ))
+            })
+            .await?;
         self.note_parse(parse_subscribe_response_with_limits(
             &response,
             self.capabilities,
@@ -3274,7 +3324,20 @@ impl Connection {
             Some(transaction_id),
         );
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        // Classic-aware read (pre-23ai has no END_OF_RESPONSE framing); bead
+        // rust-oracledb-eyp7.
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_tpc_txn_switch_response_with_limits(
+                    bytes,
+                    capabilities,
+                    limits,
+                ))
+            })
+            .await?;
         let state = self.note_parse(parse_tpc_txn_switch_response_with_limits(
             &response,
             self.capabilities,
@@ -3347,7 +3410,20 @@ impl Connection {
             None,
         );
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        // Classic-aware read (pre-23ai has no END_OF_RESPONSE framing); bead
+        // rust-oracledb-eyp7.
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_tpc_txn_switch_response_with_limits(
+                    bytes,
+                    capabilities,
+                    limits,
+                ))
+            })
+            .await?;
         let state = self.note_parse(parse_tpc_txn_switch_response_with_limits(
             &response,
             self.capabilities,
@@ -3374,10 +3450,30 @@ impl Connection {
         observe_cancellation_between_round_trips(cx)?;
         self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let payload =
-            build_tpc_switch_payload_with_seq(seq_num, operation, flags, timeout, xid, context);
+        let payload = build_tpc_switch_payload_with_seq_and_version(
+            seq_num,
+            operation,
+            flags,
+            timeout,
+            xid,
+            context,
+            self.capabilities.ttc_field_version,
+        );
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        // Classic-aware read (pre-23ai has no END_OF_RESPONSE framing); bead
+        // rust-oracledb-eyp7.
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_tpc_switch_response_with_limits(
+                    bytes,
+                    capabilities,
+                    limits,
+                ))
+            })
+            .await?;
         self.note_parse(parse_tpc_switch_response_with_limits(
             &response,
             self.capabilities,
@@ -3399,16 +3495,30 @@ impl Connection {
         observe_cancellation_between_round_trips(cx)?;
         self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let payload = build_tpc_change_state_payload_with_seq(
+        let payload = build_tpc_change_state_payload_with_seq_and_version(
             seq_num,
             operation,
             requested_state,
             0,
             xid,
             context,
+            self.capabilities.ttc_field_version,
         );
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        // Classic-aware read (pre-23ai has no END_OF_RESPONSE framing); bead
+        // rust-oracledb-eyp7.
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_tpc_change_state_response_with_limits(
+                    bytes,
+                    capabilities,
+                    limits,
+                ))
+            })
+            .await?;
         self.note_parse(parse_tpc_change_state_response_with_limits(
             &response,
             self.capabilities,
@@ -5381,7 +5491,20 @@ impl Connection {
         )?;
         trace_query_bytes("AQ ENQ payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        // Classic-aware read (pre-23ai has no END_OF_RESPONSE framing); bead
+        // rust-oracledb-eyp7.
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_aq_enq_response_with_limits(
+                    bytes,
+                    capabilities,
+                    limits,
+                ))
+            })
+            .await?;
         trace_query_bytes("AQ ENQ response", &response);
         self.note_parse(parse_aq_enq_response_with_limits(
             &response,
@@ -5412,7 +5535,21 @@ impl Connection {
         )?;
         trace_query_bytes("AQ DEQ payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        // Classic-aware read (pre-23ai has no END_OF_RESPONSE framing); bead
+        // rust-oracledb-eyp7.
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_aq_deq_response_with_limits(
+                    bytes,
+                    capabilities,
+                    &queue.kind,
+                    limits,
+                ))
+            })
+            .await?;
         trace_query_bytes("AQ DEQ response", &response);
         self.note_parse(parse_aq_deq_response_with_limits(
             &response,
@@ -5448,7 +5585,23 @@ impl Connection {
         )?;
         trace_query_bytes("AQ ARRAY ENQ payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        // Classic-aware read (pre-23ai has no END_OF_RESPONSE framing); bead
+        // rust-oracledb-eyp7.
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_aq_array_response_with_limits(
+                    bytes,
+                    capabilities,
+                    TNS_AQ_ARRAY_ENQ,
+                    props_list.len() as u32,
+                    &queue.kind,
+                    limits,
+                ))
+            })
+            .await?;
         trace_query_bytes("AQ ARRAY ENQ response", &response);
         let result: AqArrayResult = self.note_parse(parse_aq_array_response_with_limits(
             &response,
@@ -5487,7 +5640,23 @@ impl Connection {
         )?;
         trace_query_bytes("AQ ARRAY DEQ payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        // Classic-aware read (pre-23ai has no END_OF_RESPONSE framing); bead
+        // rust-oracledb-eyp7.
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_aq_array_response_with_limits(
+                    bytes,
+                    capabilities,
+                    TNS_AQ_ARRAY_DEQ,
+                    max_num_messages,
+                    &queue.kind,
+                    limits,
+                ))
+            })
+            .await?;
         trace_query_bytes("AQ ARRAY DEQ response", &response);
         let result: AqArrayResult = self.note_parse(parse_aq_array_response_with_limits(
             &response,
@@ -5920,7 +6089,22 @@ impl Connection {
         )?;
         trace_query_bytes("DIRECT PATH PREPARE payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        // Classic-aware read (pre-23ai has no END_OF_RESPONSE framing); bead
+        // rust-oracledb-eyp7.
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(
+                    &oracledb_protocol::dpl::parse_direct_path_prepare_response_with_limits(
+                        bytes,
+                        capabilities,
+                        limits,
+                    ),
+                )
+            })
+            .await?;
         trace_query_bytes("DIRECT PATH PREPARE response", &response);
         oracledb_protocol::dpl::parse_direct_path_prepare_response_with_limits(
             &response,
@@ -5945,7 +6129,22 @@ impl Connection {
         )?;
         trace_query_bytes("DIRECT PATH LOAD STREAM payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        // Classic-aware read (pre-23ai has no END_OF_RESPONSE framing); bead
+        // rust-oracledb-eyp7.
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(
+                    &oracledb_protocol::dpl::parse_direct_path_simple_response_with_limits(
+                        bytes,
+                        capabilities,
+                        limits,
+                    ),
+                )
+            })
+            .await?;
         trace_query_bytes("DIRECT PATH LOAD STREAM response", &response);
         oracledb_protocol::dpl::parse_direct_path_simple_response_with_limits(
             &response,
@@ -5966,7 +6165,22 @@ impl Connection {
             oracledb_protocol::dpl::build_direct_path_op_payload(cursor_id, op_code, seq_num);
         trace_query_bytes("DIRECT PATH OP payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let response = self.core.read_data_response(cx).await?;
+        // Classic-aware read (pre-23ai has no END_OF_RESPONSE framing); bead
+        // rust-oracledb-eyp7.
+        let capabilities = self.capabilities;
+        let limits = self.protocol_limits;
+        let response = self
+            .core
+            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(
+                    &oracledb_protocol::dpl::parse_direct_path_simple_response_with_limits(
+                        bytes,
+                        capabilities,
+                        limits,
+                    ),
+                )
+            })
+            .await?;
         trace_query_bytes("DIRECT PATH OP response", &response);
         oracledb_protocol::dpl::parse_direct_path_simple_response_with_limits(
             &response,
@@ -8316,13 +8530,14 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    break_and_drain_wire_unbounded_with_limits(read, write, ProtocolLimits::DEFAULT).await
+    break_and_drain_wire_unbounded_with_limits(read, write, ProtocolLimits::DEFAULT, false).await
 }
 
 async fn break_and_drain_wire_unbounded_with_limits<R, W>(
     read: &mut R,
     write: &Arc<AsyncMutex<W>>,
     limits: ProtocolLimits,
+    classic: bool,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin,
@@ -8337,7 +8552,7 @@ where
             ))
         })?;
     // 2) Drain the whole break response.
-    drain_break_response_recovery_with_limits(read, write, limits).await
+    drain_break_response_recovery_with_limits(read, write, limits, classic).await
 }
 
 /// Sends a BREAK and drains the server's cancel response so the wire is left at
@@ -8416,19 +8631,20 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    drain_cancel_wire_unbounded_with_limits(read, write, ProtocolLimits::DEFAULT).await
+    drain_cancel_wire_unbounded_with_limits(read, write, ProtocolLimits::DEFAULT, false).await
 }
 
 async fn drain_cancel_wire_unbounded_with_limits<R, W>(
     read: &mut R,
     write: &Arc<AsyncMutex<W>>,
     limits: ProtocolLimits,
+    classic: bool,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    drain_break_response_recovery_with_limits(read, write, limits).await
+    drain_break_response_recovery_with_limits(read, write, limits, classic).await
 }
 
 /// Drop-guard that marks a connection's recovery phase `BreakSent` if a
@@ -8491,13 +8707,14 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    drain_break_response_recovery_with_limits(read, write, ProtocolLimits::DEFAULT).await
+    drain_break_response_recovery_with_limits(read, write, ProtocolLimits::DEFAULT, false).await
 }
 
 async fn drain_break_response_recovery_with_limits<R, W>(
     read: &mut R,
     write: &Arc<AsyncMutex<W>>,
     limits: ProtocolLimits,
+    classic: bool,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin,
@@ -8535,8 +8752,10 @@ where
     // Phase C: consume the trailing error response to its end-of-response
     // boundary and discard it. Reuses the same boundary loop the normal read
     // path uses, seeded with the packet `reset_after_marker` already pulled.
-    let trailing =
-        read_data_response_boundary_from_recovery_with_limits(read, write, pending, limits).await?;
+    let trailing = read_data_response_boundary_from_recovery_with_limits(
+        read, write, pending, limits, classic,
+    )
+    .await?;
     trace_connect_bytes("BREAK drain: trailing error response", &trailing.payload);
     Ok(())
 }
@@ -8688,7 +8907,9 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    read_data_response_boundary_seeded(read, Some(cx), write, in_pipeline, None, limits).await
+    // Normal (23ai / END_OF_RESPONSE-framed) read path: never classic.
+    read_data_response_boundary_seeded(read, Some(cx), write, in_pipeline, None, limits, false)
+        .await
 }
 
 /// Like [`read_data_response_boundary`] but seeds the reassembly loop with an
@@ -8712,6 +8933,7 @@ where
         write,
         seed,
         ProtocolLimits::DEFAULT,
+        false,
     )
     .await
 }
@@ -8721,12 +8943,13 @@ async fn read_data_response_boundary_from_recovery_with_limits<R, W>(
     write: &Arc<AsyncMutex<W>>,
     seed: Option<IncomingPacket>,
     limits: ProtocolLimits,
+    classic: bool,
 ) -> Result<DataResponse>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    read_data_response_boundary_seeded(read, None, write, false, seed, limits).await
+    read_data_response_boundary_seeded(read, None, write, false, seed, limits, classic).await
 }
 
 async fn read_data_response_boundary_seeded<R, W>(
@@ -8736,6 +8959,7 @@ async fn read_data_response_boundary_seeded<R, W>(
     in_pipeline: bool,
     seed: Option<IncomingPacket>,
     limits: ProtocolLimits,
+    classic: bool,
 ) -> Result<DataResponse>
 where
     R: AsyncRead + Unpin,
@@ -8816,6 +9040,19 @@ where
         limits.check_response_bytes(combined)?;
         response.extend_from_slice(payload);
         if ends {
+            break;
+        }
+        // Classic (pre-END_OF_RESPONSE) recovery framing: on a server that never
+        // negotiated END_OF_RESPONSE (protocol < 319, i.e. everything before
+        // 23ai), the trailing error response after a BREAK/RESET carries neither
+        // the END_OF_RESPONSE data flag nor a terminal marker byte -- it ends at
+        // its terminal TTC message (ERROR/STATUS). Decide completion by parsing
+        // the accumulated stream, exactly like the classic connect-phase reader,
+        // so the recovery drain does not block until its secondary timeout and
+        // surface a spurious ConnectionClosed instead of the real CallTimeout /
+        // Cancelled (bead rust-oracledb-99xu). Gated on `classic` so the 23ai
+        // flag-framed path (and its wide-row false-positive guard) is untouched.
+        if classic && classic_connect_response_is_complete(&response, limits).unwrap_or(false) {
             break;
         }
     }
@@ -13509,6 +13746,104 @@ mod tests {
             next, FRESH_BODY,
             "after break_and_drain the reused connection must read the FRESH response, \
              not the stale in-flight response ({INFLIGHT_BODY:?}) or error body ({ERROR_BODY:?})"
+        );
+        server.join().expect("server thread joins");
+    }
+
+    // bead rust-oracledb-99xu: on a pre-23ai server (no END_OF_RESPONSE framing)
+    // the trailing error response after a BREAK/RESET carries NEITHER the
+    // END_OF_RESPONSE data flag NOR a terminal marker byte -- it ends at its
+    // terminal TTC message (here a STATUS). The flag-only recovery reader could
+    // not detect that boundary and blocked until its secondary timeout, so the
+    // call-timeout / cancel surfaced as ConnectionClosed instead of the real
+    // CallTimeout / Cancelled (observed live against Oracle 18c/21c). The
+    // classic-framing drain must complete on the terminal message and leave the
+    // stream clean for the reused connection.
+    #[test]
+    fn classic_pre23ai_break_drain_completes_on_terminal_message_not_flag() {
+        // A minimal, valid classic terminal: a STATUS message (msg type 9) whose
+        // ub4 call-status and ub2 sequence are both zero-length. It carries NO
+        // end-of-response flag and does NOT end in a marker byte.
+        // TNS_MSG_TYPE_STATUS == 9 (oracledb_protocol::thin::constants).
+        const CLASSIC_STATUS_TERMINAL: &[u8] = &[9, 0, 0];
+        const FRESH_BODY: &[u8] = &[0x11, 0x22, 0x33, 0x44, 0x55];
+
+        // Guard: the flag-only detectors must NOT recognise this classic
+        // terminal, which is precisely why the `classic` completion rule is
+        // load-bearing (if either fired, the bug could never have occurred).
+        assert!(
+            !data_packet_ends_response(0, CLASSIC_STATUS_TERMINAL),
+            "flag-framed detector must not terminate a flagless classic response"
+        );
+        assert!(
+            !post_reset_packet_ends_response(CLASSIC_STATUS_TERMINAL),
+            "post-reset marker-byte detector must not terminate a STATUS terminal"
+        );
+        assert!(
+            classic_connect_response_is_complete(CLASSIC_STATUS_TERMINAL, ProtocolLimits::DEFAULT)
+                .unwrap(),
+            "the classic reader must recognise the STATUS terminal as complete"
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            use std::io::Write as _;
+
+            // The two-thread cancel path: the BREAK was already sent by the
+            // handle thread, so the drain begins at the server's break-ack
+            // MARKER. Reference cancel wire sequence, pre-23ai framing.
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))
+                .expect("write break-ack marker");
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_RESET,
+                "client must answer the marker with a RESET"
+            );
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_RESET))
+                .expect("write reset-confirm marker");
+            // Trailing error/STATUS response in CLASSIC framing: no EOR flag.
+            socket
+                .write_all(&data_packet(CLASSIC_STATUS_TERMINAL, false))
+                .expect("write flagless classic terminal");
+            // The FRESH response the reused connection must read next.
+            socket
+                .write_all(&data_packet(FRESH_BODY, true))
+                .expect("write fresh response");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let next = runtime.block_on(async {
+            let cx = Cx::current().expect("ambient Cx");
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (mut read, write) = transport::plain_split(stream);
+            let write: SharedWriteHalf =
+                Arc::new(AsyncMutex::with_name("classic_drain_test_write", write));
+
+            // classic = true: the drain completes on the terminal message.
+            drain_break_response_recovery_with_limits(
+                &mut read,
+                &write,
+                ProtocolLimits::DEFAULT,
+                true,
+            )
+            .await
+            .expect("classic drain must complete on the terminal message");
+
+            read_data_response(&mut read, &cx, &write)
+                .await
+                .expect("next read after classic drain must decode cleanly")
+        });
+
+        assert_eq!(
+            next, FRESH_BODY,
+            "after the classic drain the reused connection must read the FRESH response"
         );
         server.join().expect("server thread joins");
     }

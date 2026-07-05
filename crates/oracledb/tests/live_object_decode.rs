@@ -22,13 +22,22 @@ fn connect() -> oracledb::Connection {
     BlockingConnection::connect(ConnectOptions::new(cs, user, pw, id)).unwrap()
 }
 
+/// The schema that owns the `vx6_*` fixtures: the connecting user's own schema.
+/// Kept portable across the version matrix (pythontest on free23, testuser on
+/// the xe18/xe21 lanes) instead of a hard-coded owner. `describe_object_type`
+/// matches the data-dictionary owner case-insensitively.
+fn fixture_owner() -> String {
+    std::env::var("PYO_TEST_MAIN_USER").unwrap()
+}
+
 #[test]
 #[ignore]
 fn describe_and_decode_simple_object() {
     let mut c = connect();
 
     // Describe (case-insensitive).
-    let ty = BlockingConnection::describe_object_type(&mut c, "pythontest", "vx6_addr").unwrap();
+    let ty =
+        BlockingConnection::describe_object_type(&mut c, &fixture_owner(), "vx6_addr").unwrap();
     let names: Vec<&str> = ty.attributes.iter().map(|a| a.name.as_str()).collect();
     assert_eq!(names, vec!["STREET", "ZIP", "OK"]);
     assert_eq!(ty.attributes[0].type_name, "VARCHAR2");
@@ -93,7 +102,8 @@ fn describe_and_decode_simple_object() {
 fn describe_and_decode_collection() {
     let mut c = connect();
 
-    let ty = BlockingConnection::describe_object_type(&mut c, "pythontest", "vx6_nums").unwrap();
+    let ty =
+        BlockingConnection::describe_object_type(&mut c, &fixture_owner(), "vx6_nums").unwrap();
     assert!(ty.attributes.is_empty(), "a collection has no attributes");
     let elem = ty
         .collection_element

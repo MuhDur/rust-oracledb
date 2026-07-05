@@ -50,7 +50,7 @@ crates/oracledb-protocol/tests/tpc_golden.rs	3
 crates/oracledb-pyshim/src/dbobject.rs	3
 crates/oracledb/src/arrow/mod.rs	35
 crates/oracledb/src/cursor_logic.rs	14
-crates/oracledb/src/lib.rs	83
+crates/oracledb/src/lib.rs	84
 crates/oracledb/src/obs.rs	6
 crates/oracledb/src/pool.rs	32
 crates/oracledb/src/request.rs	7

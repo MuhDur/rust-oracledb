@@ -1474,7 +1474,9 @@ pub fn oracledb_protocol::thin::build_protocol_negotiation_payload() -> oracledb
 pub fn oracledb_protocol::thin::build_sessionless_piggyback(u8, u64, u32, u32, u32, core::option::Option<&[u8]>) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::build_subscribe_payload_with_seq(u8, u8, core::option::Option<&str>, core::option::Option<&[u8]>, u32, core::option::Option<&str>, u32, u32, u32, u8, u32, u8, u64, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_tpc_change_state_payload_with_seq(u8, u32, u32, u32, core::option::Option<&oracledb_protocol::thin::TpcXid<'_>>, core::option::Option<&[u8]>) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_tpc_change_state_payload_with_seq_and_version(u8, u32, u32, u32, core::option::Option<&oracledb_protocol::thin::TpcXid<'_>>, core::option::Option<&[u8]>, u8) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::build_tpc_switch_payload_with_seq(u8, u32, u32, u32, core::option::Option<&oracledb_protocol::thin::TpcXid<'_>>, core::option::Option<&[u8]>) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::thin::build_tpc_switch_payload_with_seq_and_version(u8, u32, u32, u32, core::option::Option<&oracledb_protocol::thin::TpcXid<'_>>, core::option::Option<&[u8]>, u8) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::build_tpc_txn_switch_payload_with_seq(u8, u64, u32, u32, u32, core::option::Option<&[u8]>) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::check_fetch_conversion(&oracledb_protocol::thin::ColumnMetadata, u8, u8) -> core::option::Option<oracledb_protocol::thin::ColumnMetadata>
 pub fn oracledb_protocol::thin::check_notification_header(&[u8]) -> oracledb_protocol::Result<usize>
