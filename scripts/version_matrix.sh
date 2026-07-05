@@ -212,10 +212,187 @@ lane_truth() {
   fi
 }
 
+# --- versions: per-lane fixture bootstrap + full live-suite matrix ----------
+#
+# The `full`/`truth` lanes above run curated example binaries. `versions` is the
+# operator's non-negotiable bar (bead rust-oracledb-6mar): for EACH working lane
+# it (1) bootstraps that lane's own fixture schema (vx6_* object types, the
+# E_TEST edition, proxy user, grants) via scripts/bootstrap_live_schema.sh, then
+# (2) RUNS every live integration suite under crates/oracledb/tests against it,
+# capturing a per-suite x per-lane GREEN / FAIL / GATED verdict. xe11 stays a
+# connect-refusal assertion only (below the protocol floor). A suite may be
+# GATED (non-green but accepted) ONLY through suite_gate_reason() below, which
+# requires a documented, evidence-backed reason — never a silent skip.
+
+# Features needed so every cfg(feature = "…")-gated live test COMPILES IN and
+# actually runs (arrow/soda suites, rust_decimal/chrono/uuid/serde_json typed
+# conversions). Kept in sync with the gates in crates/oracledb/tests/live_*.rs.
+LIVE_SUITE_FEATURES="arrow,chrono,rust_decimal,serde_json,soda,uuid"
+
+# Auto-discover the live suites (bead: "and any others under live_*.rs /
+# *_live.rs") so a newly added suite is covered without editing this script.
+discover_live_suites() {
+  local d="crates/oracledb/tests"
+  { ls "$d"/live_*.rs "$d"/*_live.rs 2>/dev/null || true; } \
+    | sed -E 's#.*/##; s#\.rs$##' | sort -u
+}
+
+# DBA password used to bootstrap fixtures for a lane. The xe18/xe21 gvenzl
+# containers use ORACLE_PASSWORD=oracle for SYS/SYSTEM; free23 uses the shared
+# ORACLE_PASSWORD. Override the xe default with ORACLEDB_XE_SYSTEM_PASSWORD.
+lane_system_password() {
+  case "$1" in
+    xe18|xe21) printf '%s\n' "${ORACLEDB_XE_SYSTEM_PASSWORD:-oracle}" ;;
+    *)         printf '%s\n' "$ORACLE_PASSWORD" ;;
+  esac
+}
+
+# Gate registry. A cell (lane:suite) is accepted as non-green ONLY when this
+# returns 0 with a one-line reason on stdout — the reason MUST cite hard proof
+# (an ORA-error / catalog absence) of a feature the server genuinely lacks. No
+# entry => a red cell is an OPEN BUG, not a quiet pass. Kept in lockstep with
+# docs/VERSION_MATRIX.md.
+suite_gate_reason() {
+  local lane="$1" suite="$2"
+  case "$lane:$suite" in
+    # SODA on Oracle 18c: the driver's SODA path uses the JSON_SERIALIZE SQL
+    # function (21c+) and the USER_SODA_COLLECTIONS catalog view, neither of
+    # which exists on 18c. PROOF: live_soda fails with `ORA-00904:
+    # "JSON_SERIALIZE": invalid identifier` at collection create, and
+    # `select count(*) from all_views where view_name='USER_SODA_COLLECTIONS'`
+    # returns 0 on this 18c. Green on xe21 (21c) and free23 (23ai). Full
+    # pre-21c SODA support is tracked in bead rust-oracledb-soda-pre21c.
+    xe18:live_soda)
+      echo "SODA requires JSON_SERIALIZE + USER_SODA_COLLECTIONS (21c+); absent on 18c (ORA-00904)"
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# Bootstrap one lane's fixture schema (idempotent drop+recreate of the app user
+# with the vx6_* fixtures, E_TEST edition and grants the suites expect).
+lane_bootstrap() {
+  local lane="$1" name image port service user password syspw proxy
+  { read -r name; read -r image; read -r port; read -r service; \
+    read -r user; read -r password; } < <(lane_fields "$lane")
+  syspw="$(lane_system_password "$lane")"
+  proxy="${user}proxy"
+  printf '=== %s BOOTSTRAP fixtures (%s %s) ===\n' "$lane" "$name" "$service"
+  ORACLEDB_CONTAINER_NAME="$name" \
+  ORACLE_PASSWORD="$syspw" \
+  ORACLEDB_PDB="$service" \
+  PYO_TEST_MAIN_USER="$user" \
+  PYO_TEST_MAIN_PASSWORD="$password" \
+  PYO_TEST_PROXY_USER="$proxy" \
+  PYO_TEST_PROXY_PASSWORD="$proxy" \
+    bash scripts/bootstrap_live_schema.sh
+}
+
+run_versions() {
+  local lane_arg="$1"
+  local out_dir="tests/artifacts/version_matrix"
+  local log_dir="${TMPDIR:-/tmp}/oracledb-versions-$$"
+  mkdir -p "$out_dir" "$log_dir"
+
+  local -a suites=() lanes_run=()
+  while read -r s; do suites+=("$s"); done < <(discover_live_suites)
+  while read -r l; do lanes_run+=("$l"); done < <(lanes_for "$lane_arg")
+
+  declare -A cell cellnote
+  local overall=pass lane suite logf summ reason
+
+  for lane in "${lanes_run[@]}"; do
+    if lane_expects_refusal "$lane"; then
+      local name image port service user password
+      { read -r name; read -r image; read -r port; read -r service; \
+        read -r user; read -r password; } < <(lane_fields "$lane")
+      printf '=== %s REFUSAL assertion (%s) ===\n' "$lane" "$service"
+      if cargo run -q --example matrix_full -- --expect-version-refusal \
+          "localhost:$port/$service" "$user" "$password" \
+          > "$log_dir/$lane-REFUSAL.log" 2>&1; then
+        cell[$lane:REFUSAL]=GREEN
+        cellnote[$lane:REFUSAL]="structured UnsupportedVersion refusal verified"
+        printf '%-7s %-28s GREEN\n' "$lane" REFUSAL
+      else
+        cell[$lane:REFUSAL]=FAIL
+        cellnote[$lane:REFUSAL]="refusal missing or malformed"
+        overall=fail
+        printf '%-7s %-28s FAIL\n' "$lane" REFUSAL
+      fi
+      continue
+    fi
+
+    eval "$(lane_env "$lane")"
+    if ! lane_bootstrap "$lane" > "$log_dir/$lane-BOOTSTRAP.log" 2>&1; then
+      printf '%-7s BOOTSTRAP FAILED (see %s)\n' "$lane" "$log_dir/$lane-BOOTSTRAP.log" >&2
+      overall=fail
+      for suite in "${suites[@]}"; do
+        cell[$lane:$suite]=FAIL
+        cellnote[$lane:$suite]="fixture bootstrap failed"
+      done
+      continue
+    fi
+
+    for suite in "${suites[@]}"; do
+      logf="$log_dir/$lane-$suite.log"
+      if cargo test -q -p oracledb --features "$LIVE_SUITE_FEATURES" \
+          --test "$suite" -- --include-ignored > "$logf" 2>&1; then
+        summ="$(grep -hE '^test result:' "$logf" | tail -1)"
+        cell[$lane:$suite]=GREEN
+        cellnote[$lane:$suite]="${summ:-ok}"
+        printf '%-7s %-28s GREEN   %s\n' "$lane" "$suite" "${summ:-}"
+      elif reason="$(suite_gate_reason "$lane" "$suite")"; then
+        cell[$lane:$suite]=GATED
+        cellnote[$lane:$suite]="$reason"
+        printf '%-7s %-28s GATED   %s\n' "$lane" "$suite" "$reason"
+      else
+        cell[$lane:$suite]=FAIL
+        cellnote[$lane:$suite]="$(grep -hE '^test result:|panicked|error\[|error:' "$logf" | tail -3 | tr '\n' ' ')"
+        overall=fail
+        printf '%-7s %-28s FAIL    %s (log: %s)\n' "$lane" "$suite" \
+          "${cellnote[$lane:$suite]}" "$logf"
+      fi
+    done
+  done
+
+  # JSON artifact for the release gate / VERSION_MATRIX doc.
+  local sha out
+  sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+  out="$out_dir/versions-$sha.json"
+  {
+    printf '{\n  "sha": "%s",\n' "$sha"
+    printf '  "recorded_at_utc": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '  "suite": "version_matrix.sh versions",\n'
+    printf '  "features": "%s",\n' "$LIVE_SUITE_FEATURES"
+    printf '  "overall": "%s",\n' "$overall"
+    printf '  "cells": [\n'
+    local first=1 key
+    for lane in "${lanes_run[@]}"; do
+      for key in "${!cell[@]}"; do
+        case "$key" in "$lane:"*) ;; *) continue ;; esac
+        [ "$first" -eq 1 ] || printf ',\n'
+        first=0
+        printf '    {"lane": "%s", "suite": "%s", "verdict": "%s", "note": "%s"}' \
+          "$lane" "${key#*:}" "${cell[$key]}" \
+          "$(printf '%s' "${cellnote[$key]}" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+      done
+    done
+    printf '\n  ]\n}\n'
+  } > "$out"
+  printf 'versions: wrote %s (overall=%s)\n' "$out" "$overall"
+  printf 'versions: per-suite logs in %s\n' "$log_dir"
+
+  [ "$overall" = pass ]
+}
+
 cmd="${1:-}"
 lane_arg="${2:-all}"
 rc=0
 case "$cmd" in
+  versions)
+    run_versions "$lane_arg" || rc=1
+    ;;
   up|health|env|smoke|full|truth)
     while read -r lane; do
       "lane_$cmd" "$lane" || rc=1
@@ -228,7 +405,7 @@ case "$cmd" in
     done < <(lanes_for "$lane_arg")
     ;;
   *)
-    printf 'usage: %s up|health|smoke|full|truth|env|stop [xe11|xe18|xe21|free23|all]\n' "$0" >&2
+    printf 'usage: %s up|health|smoke|full|truth|versions|env|stop [xe11|xe18|xe21|free23|all]\n' "$0" >&2
     exit 2
     ;;
 esac
