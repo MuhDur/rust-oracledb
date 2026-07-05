@@ -34,6 +34,12 @@
 #
 set -euo pipefail
 
+# Pin the collation so the sort order is byte-deterministic regardless of the
+# host/CI locale — otherwise the committed table and a CI regeneration diverge
+# (a `sort` under a UTF-8 locale orders differently than under C), which would
+# spuriously fail the --check drift gate. Same rule as scripts/gen_baseline.sh.
+export LC_ALL=C
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 thin_dir="${repo_root}/reference/python-oracledb/src/oracledb/impl/thin"
 inventory="${repo_root}/docs/reference-gates.tsv"
