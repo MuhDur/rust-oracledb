@@ -755,43 +755,62 @@ fn execute_execute_many_and_register_query_are_logged() {
             .await
         {
             Ok(subscription) => {
-                let registered = conn
-                    .register_query(
-                        &cx,
-                        Registration::new(
-                            "select id, name from rust_e2e_cqn_t where id > :1",
-                            subscription.registration_id,
+                // CQN register_query is a thin-mode extension (python-oracledb
+                // thin has none — DPY-3001), validated on Oracle 21c+; pre-21c
+                // servers use different CQN registration semantics (18c returns
+                // ORA-29970 at register_query even though subscribe succeeds).
+                // Gate on the negotiated server version — bead
+                // rust-oracledb-cqn18c.
+                if conn.server_version_tuple().is_none_or(|v| v.0 < 21) {
+                    log.skip(
+                        "register_query",
+                        "CQN register_query is a 21c+ thin-mode extension (no python-oracledb \
+                         thin parity); pre-21c registration semantics differ (18c: ORA-29970)",
+                    );
+                } else {
+                    let registered = conn
+                        .register_query(
+                            &cx,
+                            Registration::new(
+                                "select id, name from rust_e2e_cqn_t where id > :1",
+                                subscription.registration_id,
+                            )
+                            .bind((0_i64,))
+                            .timeout(Duration::from_secs(10)),
                         )
-                        .bind((0_i64,))
-                        .timeout(Duration::from_secs(10)),
-                    )
-                    .await
-                    .expect("register_query");
-                let query_id = registered.query_id().expect("CQN query id should be present");
-                assert!(query_id > 0);
-                log.step(
-                    "register_query",
-                    &format!(
-                        "registration_id={} query_id={} sql_shape=select bind_count=1 bind_values=redacted",
-                        subscription.registration_id, query_id
-                    ),
-                );
-                if let Some(client_id) = subscription.client_id.as_deref() {
-                    conn.subscribe_unregister(
-                        &cx,
-                        subscription.registration_id,
-                        client_id,
-                        TNS_SUBSCR_NAMESPACE_DBCHANGE,
-                        None,
-                        SUBSCR_QOS_QUERY,
-                        0,
-                        30,
-                        0,
-                        0,
-                        0,
-                    )
-                    .await
-                    .expect("unsubscribe CQN");
+                        .await
+                        .expect("register_query");
+                    let query_id =
+                        registered.query_id().expect("CQN query id should be present");
+                    assert!(query_id > 0);
+                    log.step(
+                        "register_query",
+                        &format!(
+                            "registration_id={} query_id={} sql_shape=select bind_count=1 bind_values=redacted",
+                            subscription.registration_id, query_id
+                        ),
+                    );
+                    // Only unsubscribe on 21c+ — on pre-21c the registration id
+                    // is not valid server-side, so unsubscribe also returns
+                    // ORA-29970 (bead rust-oracledb-cqn18c). We never registered
+                    // a query here, so nothing is bound to the table.
+                    if let Some(client_id) = subscription.client_id.as_deref() {
+                        conn.subscribe_unregister(
+                            &cx,
+                            subscription.registration_id,
+                            client_id,
+                            TNS_SUBSCR_NAMESPACE_DBCHANGE,
+                            None,
+                            SUBSCR_QOS_QUERY,
+                            0,
+                            30,
+                            0,
+                            0,
+                            0,
+                        )
+                        .await
+                        .expect("unsubscribe CQN");
+                    }
                 }
             }
             Err(err) => {

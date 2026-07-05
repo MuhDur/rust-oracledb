@@ -243,7 +243,10 @@ discover_live_suites() {
 lane_system_password() {
   case "$1" in
     xe18|xe21) printf '%s\n' "${ORACLEDB_XE_SYSTEM_PASSWORD:-oracle}" ;;
-    *)         printf '%s\n' "$ORACLE_PASSWORD" ;;
+    # free23 (rust-oracledb-free) SYS/SYSTEM password. Defaults to the
+    # container.sh default so `versions all` bootstraps without env juggling;
+    # override with ORACLE_PASSWORD when the container uses a different secret.
+    *)         printf '%s\n' "${ORACLE_PASSWORD:-OracledbTest#2026}" ;;
   esac
 }
 

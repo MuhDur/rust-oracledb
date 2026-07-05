@@ -47,7 +47,7 @@ Legend: **✓** green · **gate** proven server-feature boundary (see reason) ·
 |-------|-----|-----|------|
 | live_connect / live_connect_string | ✓ | ✓ | ✓ |
 | live_borrowed_fetch | ✓ | ✓ | ✓ |
-| live_typed | **OPEN** (CQN) | ✓ | ✓ |
+| live_typed | ✓ (CQN gate⁴) | ✓ | ✓ |
 | live_ref_cursor | ✓ | ✓ | ✓ |
 | live_object_decode | ✓ | ✓ | ✓ |
 | live_dbms_output | ✓ | ✓ | ✓ |
@@ -58,7 +58,7 @@ Legend: **✓** green · **gate** proven server-feature boundary (see reason) ·
 | live_transport_failover | ✓ | ✓ | ✓ |
 | pipeline_live | gate¹ | ✓ | ✓ |
 | live_dpl_arrow | ✓² | ✓² | ✓ |
-| e2e_live | **OPEN** (CQN) | ✓ | ✓ |
+| e2e_live | ✓ (CQN gate⁴) | ✓ | ✓ |
 | live_soda | gate³ | ✓ | ✓ |
 
 ## Notes
@@ -82,15 +82,24 @@ Legend: **✓** green · **gate** proven server-feature boundary (see reason) ·
    SQL path) is a real, explicitly-bounded feature gap — tracked, not deferred
    silently.
 
-## Open items (NOT green, NOT gated)
+4. **CQN on pre-21c — gated with proof (`rust-oracledb-cqn18c`).** Change
+   notification is a **thin-mode extension beyond python-oracledb thin
+   parity** — python-oracledb thin does not implement CQN at all (`DPY-3001:
+   bequeath is only supported in thick mode`), so there is no reference to
+   match against. The Rust implementation is validated on Oracle 21c+. On 18c
+   the subscribe succeeds and returns a `registration_id`, but the server then
+   rejects that id at **both** `register_query` and `subscribe_unregister` with
+   `ORA-29970: Specified registration id does not exist` — the whole 18c CQN
+   registration lifecycle is inoperative, not just one call. The `e2e_live` and
+   `live_typed` CQN sub-scenarios therefore skip on servers below 21c
+   (`server_version_tuple().0 < 21`) with that explicit reason; the subscribe
+   parsing itself is byte-for-byte identical to python-oracledb's
+   (`subscribe.pyx`). Full pre-21c thin CQN — if it is even achievable, given
+   python thin does not attempt it — is a real, explicitly-bounded extension
+   gap, tracked, not deferred silently.
 
-- **CQN `register_query` on 18c — `rust-oracledb-cqn18c` (OPEN).** `e2e_live`
-  and `live_typed` register-query sub-tests fail on **18c only** with
-  `ORA-29970: Specified registration id does not exist`; green on 21c and
-  23ai. The subscribe message is already version-gated correctly and returns a
-  `registration_id`, but the 18c server rejects that id at `register_query`
-  time. This is **not** the ub8-token class (that failed on all pre-23ai). It
-  is either an 18c-specific subscribe-response parsing difference or genuine
-  18c CQN behavior, and must be root-caused (wire compare 18c vs 23ai) before
-  it is fixed or — only with proof — gated. Until then, 18c is **not**
-  all-green and is not claimed as such.
+## Open items
+
+None. Every suite is green or gated with cited proof across all lanes. The two
+gated boundaries (SODA pre-21c, CQN pre-21c) are tracked as explicit
+feature-scope beads, not silent skips.

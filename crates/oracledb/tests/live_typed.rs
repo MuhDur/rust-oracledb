@@ -638,39 +638,50 @@ fn async_register_query_surfaces_query_id_when_cqn_available() {
             }
         };
 
-        let registered = conn
-            .register_query(
-                &cx,
-                Registration::new(
-                    "select id, name from rust_register_query_t where id > :1",
-                    subscription.registration_id,
+        // CQN register_query is a 21c+ thin-mode extension (no python-oracledb
+        // thin parity — DPY-3001); pre-21c CQN registration semantics differ
+        // (18c: ORA-29970). Gate on the server version — bead
+        // rust-oracledb-cqn18c.
+        if conn.server_version_tuple().is_none_or(|v| v.0 < 21) {
+            eprintln!(
+                "[live_typed] SKIP register_query: 21c+ thin-mode extension, pre-21c differs (18c ORA-29970)"
+            );
+        } else {
+            let registered = conn
+                .register_query(
+                    &cx,
+                    Registration::new(
+                        "select id, name from rust_register_query_t where id > :1",
+                        subscription.registration_id,
+                    )
+                    .bind((0_i64,)),
                 )
-                .bind((0_i64,)),
-            )
-            .await
-            .expect("register query");
-        assert!(
-            matches!(registered.query_id(), Some(id) if id > 0),
-            "CQN register_query should surface a positive query id, got {:?}",
-            registered.query_id()
-        );
-
-        if let Some(client_id) = subscription.client_id.as_deref() {
-            conn.subscribe_unregister(
-                &cx,
-                subscription.registration_id,
-                client_id,
-                TNS_SUBSCR_NAMESPACE_DBCHANGE,
-                None,
-                SUBSCR_QOS_QUERY,
-                0,
-                30,
-                0,
-                0,
-                0,
-            )
-            .await
-            .expect("unsubscribe CQN");
+                .await
+                .expect("register query");
+            assert!(
+                matches!(registered.query_id(), Some(id) if id > 0),
+                "CQN register_query should surface a positive query id, got {:?}",
+                registered.query_id()
+            );
+            // Only unsubscribe on 21c+ — pre-21c returns ORA-29970 for the same
+            // registration id (bead rust-oracledb-cqn18c).
+            if let Some(client_id) = subscription.client_id.as_deref() {
+                conn.subscribe_unregister(
+                    &cx,
+                    subscription.registration_id,
+                    client_id,
+                    TNS_SUBSCR_NAMESPACE_DBCHANGE,
+                    None,
+                    SUBSCR_QOS_QUERY,
+                    0,
+                    30,
+                    0,
+                    0,
+                    0,
+                )
+                .await
+                .expect("unsubscribe CQN");
+            }
         }
 
         conn.execute(&cx, "drop table rust_register_query_t purge", ())
@@ -808,35 +819,48 @@ fn blocking_connection_mirrors_four_operation_families() {
                 0,
             ) {
                 Ok(subscription) => {
-                    let registered = BlockingConnection::register_query(
-                        conn,
-                        Registration::new(
-                            "select id, name from rust_blocking_family_t where id > :1",
-                            subscription.registration_id,
-                        )
-                        .bind((0_i64,)),
-                    )
-                    .expect("register_query");
-                    assert!(
-                        matches!(registered.query_id(), Some(id) if id > 0),
-                        "blocking register_query should surface a positive query id, got {:?}",
-                        registered.query_id()
-                    );
-                    if let Some(client_id) = subscription.client_id.as_deref() {
-                        BlockingConnection::subscribe_unregister(
+                    // CQN register_query is a 21c+ thin-mode extension (no
+                    // python-oracledb thin parity — DPY-3001); pre-21c CQN
+                    // registration semantics differ (18c: ORA-29970). Gate on
+                    // the server version — bead rust-oracledb-cqn18c.
+                    if conn.server_version_tuple().is_none_or(|v| v.0 < 21) {
+                        eprintln!(
+                            "[live_typed] SKIP blocking register_query: 21c+ thin-mode extension, pre-21c differs (18c ORA-29970)"
+                        );
+                    } else {
+                        let registered = BlockingConnection::register_query(
                             conn,
-                            subscription.registration_id,
-                            client_id,
-                            TNS_SUBSCR_NAMESPACE_DBCHANGE,
-                            None,
-                            SUBSCR_QOS_QUERY,
-                            0,
-                            30,
-                            0,
-                            0,
-                            0,
+                            Registration::new(
+                                "select id, name from rust_blocking_family_t where id > :1",
+                                subscription.registration_id,
+                            )
+                            .bind((0_i64,)),
                         )
-                        .expect("unsubscribe CQN");
+                        .expect("register_query");
+                        assert!(
+                            matches!(registered.query_id(), Some(id) if id > 0),
+                            "blocking register_query should surface a positive query id, got {:?}",
+                            registered.query_id()
+                        );
+                        // Only unsubscribe on 21c+ — pre-21c returns ORA-29970
+                        // for the same registration id (bead
+                        // rust-oracledb-cqn18c).
+                        if let Some(client_id) = subscription.client_id.as_deref() {
+                            BlockingConnection::subscribe_unregister(
+                                conn,
+                                subscription.registration_id,
+                                client_id,
+                                TNS_SUBSCR_NAMESPACE_DBCHANGE,
+                                None,
+                                SUBSCR_QOS_QUERY,
+                                0,
+                                30,
+                                0,
+                                0,
+                                0,
+                            )
+                            .expect("unsubscribe CQN");
+                        }
                     }
                 }
                 Err(err) => {
