@@ -6,57 +6,75 @@
 # fails (exit 3) if a gate appears/vanishes/changes — i.e. after a reference bump, so a NEW
 # gate cannot ship unmapped. Columns 4+ are the hand-maintained mapping/coverage.
 #
+# The last column (boundary_test) names the OFFLINE, deterministic per-PR unit
+# test that flips this gate at its exact boundary (field/protocol version - 1 vs
+# version, or capability off vs on) and asserts the conditional bytes are absent
+# below and present at/above. `scripts/extract_reference_gates.sh --check-coverage`
+# fails (exit 4) if any non-parity-neutral row lacks a boundary_test that exists
+# in the crate sources — so a version gate can never ship without a boundary test,
+# even for versions below our live floor (18c, ttc field version 11) that no live
+# server can reach. Several gates share one test (it flips >1 field in one build).
+#
 # verdict codes:
 #   OK-EXERCISED    mirrored, correct constant+direction, boundary crossed by the live matrix (18c/21c/23ai)
+#                   AND pinned offline by boundary_test
 #   OK-UNEXERCISED  mirrored, correct, but the version boundary is BELOW our live floor (18c, ttc field ver 11)
-#                   so no live server crosses it — a coverage hole (feed L2 cassettes / a 12.1 lane)
+#                   so no live server crosses it — now pinned offline by boundary_test (closes the coverage hole)
 #   FIXED           was a missing/wrong gate; fixed this session (semver-additive) + unit regression test
-#   PARITY-NEUTRAL  capability for a feature we do not implement; our conservative path writes NO
-#                   version-specific bytes, so the gate cannot corrupt the wire (evidenced non-issue)
+#   PARITY-NEUTRAL  capability for a feature we do not implement (or a client-side/derived flag that is not a
+#                   wire-field gate); our conservative path writes NO version-specific bytes, so the gate cannot
+#                   corrupt the wire (evidenced non-issue). boundary_test = n/a-parity-neutral, no test required.
 #
-reference_file	line	capability_or_constant	direction	conditional_field	mirrored	our_fn	our_gate	exercised_by_test	verdict
-capabilities.pyx	126	TNS_VERSION_MIN_END_OF_RESPONSE	>=	derive supports_end_of_response/pipelining from ACCEPT flags	yes	thin/connect.rs parse_accept	protocol_version >= 319	yes (live: 23ai has EOR, 18c/21c do not)	OK-EXERCISED
-connection.pyx	680	supports_end_user_security_context	flag	send end-user security context piggyback	n/a	feature not implemented in core	(conservative: never sent)	no	PARITY-NEUTRAL
-connection.pyx	1314	supports_pipelining	flag	expose pipelining capability property	n/a	feature not implemented	(conservative: no pipelined requests)	no	PARITY-NEUTRAL
-messages/aq_array.pyx	196	TNS_CCAP_FIELD_VERSION_21_1	>=	write ub4 shard id (array enq/deq)	yes	thin/aq.rs write_array_enq/deq	ttc_field_version >= 21_1 (aq.rs:655,720)	yes (18c ver11<21_1 vs 21c ver16)	OK-EXERCISED
-messages/aq_base.pyx	129	TNS_CCAP_FIELD_VERSION_21_1	>=	read/skip ub4 shard number (deq props)	yes	thin/aq.rs process_message_props	ttc_field_version >= 21_1 (aq.rs:945)	yes	OK-EXERCISED
-messages/aq_base.pyx	197	TNS_CCAP_FIELD_VERSION_21_1	>=	write ub4 shard id (message props)	yes	thin/aq.rs write_message_props	ttc_field_version >= 21_1 (aq.rs:250)	yes	OK-EXERCISED
-messages/aq_deq.pyx	130	TNS_CCAP_FIELD_VERSION_20_1	>=	write uint8 JSON-payload flag (deq)	yes	thin/aq.rs build_deq_payload	ttc_field_version >= 20_1 (aq.rs:528)	yes (18c<20_1 vs 21c)	OK-EXERCISED
-messages/aq_deq.pyx	132	TNS_CCAP_FIELD_VERSION_21_1	>=	write ub4 shard id (-1) (deq)	yes	thin/aq.rs build_deq_payload	ttc_field_version >= 21_1 (aq.rs:531)	yes	OK-EXERCISED
-messages/aq_enq.pyx	115	TNS_CCAP_FIELD_VERSION_20_1	>=	write uint8 JSON-payload pointer (enq)	yes	thin/aq.rs build_enq_payload	ttc_field_version >= 20_1 (aq.rs:375)	yes	OK-EXERCISED
-messages/auth.pyx	186	TNS_CCAP_FIELD_VERSION_18_1_EXT_1	>=	AUTH_VERSION_NO tuple layout (5-part vs 4-part)	yes	oracledb/src/lib.rs get_version_tuple	ttc_field_version >= 18_1_EXT_1 (lib.rs:2753)	no (18c floor=11 already >= 11; no sub-11 lane)	OK-UNEXERCISED
-messages/base.pyx	238	TNS_CCAP_FIELD_VERSION_20_1	>=	skip ub4 sql-type + ub4 server-checksum (return info)	yes	thin/errors.rs parse_server_error_info	ttc_field_version >= 20_1 (errors.rs:143)	yes (error path; 18c<20_1 vs 21c)	OK-EXERCISED
-messages/base.pyx	251	supports_end_of_response	flag	infer end_of_response on error message	yes	oracledb/src/lib.rs response loop	!supports_end_of_response (lib.rs:6829)	yes (23ai EOR vs 18c/21c infer)	OK-EXERCISED
-messages/base.pyx	297	supports_end_of_response	flag	infer end_of_response on STATUS message	yes	oracledb/src/lib.rs response loop	!supports_end_of_response	yes	OK-EXERCISED
-messages/base.pyx	346	TNS_CCAP_FIELD_VERSION_12_2	>=	skip ub4 oaccolid (describe column read)	yes	thin/fetch.rs parse describe	ttc_field_version >= 12_2 (fetch.rs:756)	no (boundary 8 below live floor 11)	OK-UNEXERCISED
-messages/base.pyx	358	TNS_CCAP_FIELD_VERSION_23_1	>=	read domain_schema + domain_name (describe)	yes	thin/fetch.rs parse describe	ttc_field_version >= 23_1 (fetch.rs:769)	yes (23ai)	OK-EXERCISED
-messages/base.pyx	361	TNS_CCAP_FIELD_VERSION_23_1_EXT_3	>=	read annotations block (describe)	yes	thin/fetch.rs parse describe	ttc_field_version >= 23_1_EXT_3 (fetch.rs:773)	yes (23ai)	OK-EXERCISED
-messages/base.pyx	376	TNS_CCAP_FIELD_VERSION_23_4	>=	read vector dimensions/format/flags (describe)	yes	thin/fetch.rs parse describe	ttc_field_version >= 23_4 (fetch.rs:802)	yes (23ai)	OK-EXERCISED
-messages/base.pyx	700	TNS_CCAP_FIELD_VERSION_23_1_EXT_1	>=	write ub8 pipeline token (function header)	yes	thin/wire.rs write_function_header	ttc_field_version >= 23_1_EXT_1 (wire.rs:384)	yes (23ai; DPL/TPC session fix)	OK-EXERCISED
-messages/base.pyx	714	TNS_CCAP_FIELD_VERSION_23_1_EXT_1	>=	write ub8 pipeline token (piggyback header)	yes	thin/wire.rs write_piggyback_header	ttc_field_version >= 23_1_EXT_1 (wire.rs:400)	yes (23ai)	OK-EXERCISED
-messages/base.pyx	1429	TNS_CCAP_FIELD_VERSION_12_2	>=	write ub4 oaccolid (bind column metadata)	yes	thin/bind.rs write_bind_metadata_with_type	ttc_field_version >= 12_2 (bind.rs, FIXED)	yes (unit: bind_column_metadata_gates_oaccolid_on_field_version)	FIXED
-messages/connect.pyx	65	TNS_VERSION_MIN_ACCEPTED	<	refuse ACCEPT below 315 (12.1)	yes	thin/capabilities.rs TnsVersion::negotiate	server_version < 315 -> UnsupportedVersion	yes (xe11 11g refusal, ver 314)	OK-EXERCISED
-messages/connect.pyx	75	TNS_VERSION_MIN_OOB_CHECK	>=	read flags2 (skip 5 + uint32be) from ACCEPT	yes	thin/connect.rs parse_accept	protocol_version >= 318 (connect.rs:76)	yes (all live >= 318)	OK-EXERCISED
-messages/connect.pyx	111	supports_oob	flag	set CAN_RECV_ATTENTION + CHECK_OOB in CONNECT	yes	thin/connect.rs build CONNECT	supports_oob flag	yes (advertised each connect)	OK-EXERCISED
-messages/data_types.pyx	691	supports_end_of_response	flag	infer end_of_response after data-types response	yes	oracledb/src/lib.rs response loop	!supports_end_of_response	yes	OK-EXERCISED
-messages/execute.pyx	172	TNS_CCAP_FIELD_VERSION_12_2	>=	write al8sqlsig block (5 fields) in EXECUTE	yes	thin/execute.rs build_execute payload	ttc_field_version >= 12_2 (execute.rs, FIXED)	yes (unit: execute_gates_al8sqlsig_and_chunk_ids_on_field_version)	FIXED
-messages/execute.pyx	178	TNS_CCAP_FIELD_VERSION_12_2_EXT1	>=	write chunk-ids block (2 fields) in EXECUTE	yes	thin/execute.rs build_execute payload	ttc_field_version >= 12_2_EXT1 (execute.rs, FIXED)	yes (unit: execute_gates_al8sqlsig_and_chunk_ids_on_field_version)	FIXED
-messages/protocol.pyx	53	supports_end_of_response	flag	infer end_of_response after protocol response	yes	oracledb/src/lib.rs response loop	!supports_end_of_response	yes	OK-EXERCISED
-messages/protocol.pyx	86	TNS_CCAP_FIELD_VERSION_23_1	>=	set supports_oson_long_field_names	yes	oracledb/src/lib.rs supports_oson_long_fnames	ttc_field_version >= 23_1 (lib.rs:2830)	yes (23ai OSON long field names)	OK-EXERCISED
-messages/subscribe.pyx	61	TNS_CCAP_FIELD_VERSION_12_1	>=	read subscriber name (subscribe response)	yes	thin/subscr.rs parse response	field_version >= 12_1 (subscr.rs:168)	no (boundary 7 below live floor 11)	OK-UNEXERCISED
-messages/subscribe.pyx	63	TNS_CCAP_FIELD_VERSION_12_1	>=	read db-instances + listener addresses	yes	thin/subscr.rs parse response	field_version >= 12_1 (subscr.rs:168)	no (below floor)	OK-UNEXERCISED
-messages/subscribe.pyx	127	TNS_CCAP_FIELD_VERSION_12_1	>=	write kpninst/kpninstl/... pointer block	yes	thin/subscr.rs build subscribe	field_version >= 12_1 (subscr.rs:273,277)	no (below floor)	OK-UNEXERCISED
-packet.pyx	778	TNS_VERSION_MIN_LARGE_SDU	>=	4-byte vs 2-byte packet length framing	yes	thin/wire.rs encode_packet PacketLengthWidth	Large32 for data (Legacy16 for pre-ACCEPT CONNECT); floor 315==MIN_LARGE_SDU	yes (every live data packet)	OK-EXERCISED
-pool.pyx	205	supports_request_boundaries	flag	send session-state request-begin boundary	n/a	feature not implemented (no DRCP session-state ops)	(conservative: never sent)	no	PARITY-NEUTRAL
-protocol.pyx	65	supports_oob	flag	send OOB break for cancellation	n/a	cancellation not via OOB break	(conservative: no OOB marker)	no	PARITY-NEUTRAL
-protocol.pyx	195	supports_bool<-TNS_CCAP_FIELD_VERSION_23_1	>=	derive supports_bool (PL/SQL BOOLEAN allowed)	partial	thin/bind.rs BOOLEAN binds (23ai in practice)	no explicit pre-23ai client guard	no	OK-UNEXERCISED
-protocol.pyx	196	TNS_CCAP_FIELD_VERSION_23_1	>=	(second line of the supports_bool assignment above)	partial	see protocol.pyx:195 row	same gate as :195	no	OK-UNEXERCISED
-protocol.pyx	262	supports_oob	flag	derive supports_oob (disable_oob + platform)	yes	thin/connect.rs parse_accept supports_oob	protocol_options & CAN_RECV_ATTENTION	yes	OK-EXERCISED
-protocol.pyx	335	supports_oob	flag	send OOB check probe after connect	n/a	OOB check probe not implemented	(conservative: not sent)	no	PARITY-NEUTRAL
-protocol.pyx	347	supports_fast_auth	flag	take combined fast-auth message path	n/a	always full multi-round handshake	(conservative: slow path, server accepts both)	no	PARITY-NEUTRAL
-protocol.pyx	358	supports_end_of_response	flag	toggle EOR off/on around ping	yes	oracledb/src/lib.rs ping/response loop	!supports_end_of_response	yes	OK-EXERCISED
-protocol.pyx	479	supports_oob	flag	send in-band marker when no OOB	n/a	cancellation path (not wire-field parity)	(conservative)	no	PARITY-NEUTRAL
-protocol.pyx	516	supports_end_of_response	flag	request-boundary read gated on EOR	yes	oracledb/src/lib.rs response loop	!supports_end_of_response	yes	OK-EXERCISED
-protocol.pyx	701	supports_fast_auth	flag	take combined fast-auth message path (async)	n/a	always full multi-round handshake	(conservative)	no	PARITY-NEUTRAL
-protocol.pyx	712	supports_end_of_response	flag	toggle EOR off/on around ping (async)	yes	oracledb/src/lib.rs ping/response loop	!supports_end_of_response	yes	OK-EXERCISED
-protocol.pyx	897	supports_end_of_response	flag	request-boundary read gated on EOR (async)	yes	oracledb/src/lib.rs response loop	!supports_end_of_response	yes	OK-EXERCISED
+# reclassified to PARITY-NEUTRAL in the .1 below-floor sweep (verified non-issues, NOT code bugs):
+#   messages/connect.pyx:111 supports_oob in CONNECT — supports_oob is derived from the ACCEPT (capabilities.pyx:121),
+#     so it is always false when the CONNECT packet is built; the reference also emits a fixed TNS_GSO_DONT_CARE
+#     there. Our CONNECT is byte-identical (proven by the live truth diff). Version-independent; not a gate.
+#   protocol.pyx:195,196 supports_bool — a client-side capability flag used to validate/reject PL/SQL BOOLEAN binds,
+#     not a conditional wire field. We send the BOOLEAN bind and the server validates it; no field-shift risk.
+#
+reference_file	line	capability_or_constant	direction	conditional_field	mirrored	our_fn	our_gate	exercised_by_test	verdict	boundary_test
+capabilities.pyx	126	TNS_VERSION_MIN_END_OF_RESPONSE	>=	derive supports_end_of_response/pipelining from ACCEPT flags	yes	thin/connect.rs parse_accept	protocol_version >= 319	yes (live: 23ai has EOR, 18c/21c do not)	OK-EXERCISED	accept_parsing_gates_capabilities_on_protocol_version
+connection.pyx	680	supports_end_user_security_context	flag	send end-user security context piggyback	n/a	feature not implemented in core	(conservative: never sent)	no	PARITY-NEUTRAL	n/a-parity-neutral
+connection.pyx	1314	supports_pipelining	flag	expose pipelining capability property	n/a	feature not implemented	(conservative: no pipelined requests)	no	PARITY-NEUTRAL	n/a-parity-neutral
+messages/aq_array.pyx	196	TNS_CCAP_FIELD_VERSION_21_1	>=	write ub4 shard id (array enq/deq)	yes	thin/aq.rs write_array_enq/deq	ttc_field_version >= 21_1 (aq.rs:655,720)	yes (18c ver11<21_1 vs 21c ver16)	OK-EXERCISED	aq_array_gates_shard_id_on_21_1
+messages/aq_base.pyx	129	TNS_CCAP_FIELD_VERSION_21_1	>=	read/skip ub4 shard number (deq props)	yes	thin/aq.rs process_message_props	ttc_field_version >= 21_1 (aq.rs:945)	yes	OK-EXERCISED	aq_deq_msg_props_read_gates_shard_on_21_1
+messages/aq_base.pyx	197	TNS_CCAP_FIELD_VERSION_21_1	>=	write ub4 shard id (message props)	yes	thin/aq.rs write_message_props	ttc_field_version >= 21_1 (aq.rs:250)	yes	OK-EXERCISED	aq_msg_props_gates_shard_id_on_21_1
+messages/aq_deq.pyx	130	TNS_CCAP_FIELD_VERSION_20_1	>=	write uint8 JSON-payload flag (deq)	yes	thin/aq.rs build_deq_payload	ttc_field_version >= 20_1 (aq.rs:528)	yes (18c<20_1 vs 21c)	OK-EXERCISED	aq_deq_gates_json_payload_flag_on_20_1
+messages/aq_deq.pyx	132	TNS_CCAP_FIELD_VERSION_21_1	>=	write ub4 shard id (-1) (deq)	yes	thin/aq.rs build_deq_payload	ttc_field_version >= 21_1 (aq.rs:531)	yes	OK-EXERCISED	aq_deq_gates_shard_id_on_21_1
+messages/aq_enq.pyx	115	TNS_CCAP_FIELD_VERSION_20_1	>=	write uint8 JSON-payload pointer (enq)	yes	thin/aq.rs build_enq_payload	ttc_field_version >= 20_1 (aq.rs:375)	yes	OK-EXERCISED	aq_enq_gates_json_payload_pointer_on_20_1
+messages/auth.pyx	186	TNS_CCAP_FIELD_VERSION_18_1_EXT_1	>=	AUTH_VERSION_NO tuple layout (5-part vs 4-part)	yes	oracledb/src/lib.rs get_version_tuple	ttc_field_version >= 18_1_EXT_1 (lib.rs:2753)	no (18c floor=11 already >= 11; no sub-11 lane)	OK-UNEXERCISED	server_version_number_layout_flips_at_18_1_ext_1
+messages/base.pyx	238	TNS_CCAP_FIELD_VERSION_20_1	>=	skip ub4 sql-type + ub4 server-checksum (return info)	yes	thin/errors.rs parse_server_error_info	ttc_field_version >= 20_1 (errors.rs:143)	yes (error path; 18c<20_1 vs 21c)	OK-EXERCISED	server_error_info_gates_sql_type_and_checksum_on_20_1
+messages/base.pyx	251	supports_end_of_response	flag	infer end_of_response on error message	yes	oracledb/src/lib.rs response loop	!supports_end_of_response (lib.rs:6829)	yes (23ai EOR vs 18c/21c infer)	OK-EXERCISED	accept_parsing_gates_capabilities_on_protocol_version
+messages/base.pyx	297	supports_end_of_response	flag	infer end_of_response on STATUS message	yes	oracledb/src/lib.rs response loop	!supports_end_of_response	yes	OK-EXERCISED	accept_parsing_gates_capabilities_on_protocol_version
+messages/base.pyx	346	TNS_CCAP_FIELD_VERSION_12_2	>=	skip ub4 oaccolid (describe column read)	yes	thin/fetch.rs parse describe	ttc_field_version >= 12_2 (fetch.rs:756)	no (boundary 8 below live floor 11)	OK-UNEXERCISED	describe_column_metadata_gates_fields_on_field_version
+messages/base.pyx	358	TNS_CCAP_FIELD_VERSION_23_1	>=	read domain_schema + domain_name (describe)	yes	thin/fetch.rs parse describe	ttc_field_version >= 23_1 (fetch.rs:769)	yes (23ai)	OK-EXERCISED	describe_column_metadata_gates_fields_on_field_version
+messages/base.pyx	361	TNS_CCAP_FIELD_VERSION_23_1_EXT_3	>=	read annotations block (describe)	yes	thin/fetch.rs parse describe	ttc_field_version >= 23_1_EXT_3 (fetch.rs:773)	yes (23ai)	OK-EXERCISED	describe_column_metadata_gates_fields_on_field_version
+messages/base.pyx	376	TNS_CCAP_FIELD_VERSION_23_4	>=	read vector dimensions/format/flags (describe)	yes	thin/fetch.rs parse describe	ttc_field_version >= 23_4 (fetch.rs:802)	yes (23ai)	OK-EXERCISED	describe_column_metadata_gates_fields_on_field_version
+messages/base.pyx	700	TNS_CCAP_FIELD_VERSION_23_1_EXT_1	>=	write ub8 pipeline token (function header)	yes	thin/wire.rs write_function_header	ttc_field_version >= 23_1_EXT_1 (wire.rs:384)	yes (23ai; DPL/TPC session fix)	OK-EXERCISED	function_and_piggyback_headers_gate_pipeline_token_on_23_1_ext_1
+messages/base.pyx	714	TNS_CCAP_FIELD_VERSION_23_1_EXT_1	>=	write ub8 pipeline token (piggyback header)	yes	thin/wire.rs write_piggyback_header	ttc_field_version >= 23_1_EXT_1 (wire.rs:400)	yes (23ai)	OK-EXERCISED	function_and_piggyback_headers_gate_pipeline_token_on_23_1_ext_1
+messages/base.pyx	1429	TNS_CCAP_FIELD_VERSION_12_2	>=	write ub4 oaccolid (bind column metadata)	yes	thin/bind.rs write_bind_metadata_with_type	ttc_field_version >= 12_2 (bind.rs, FIXED)	yes (unit: bind_column_metadata_gates_oaccolid_on_field_version)	FIXED	bind_column_metadata_gates_oaccolid_on_field_version
+messages/connect.pyx	65	TNS_VERSION_MIN_ACCEPTED	<	refuse ACCEPT below 315 (12.1)	yes	thin/capabilities.rs TnsVersion::negotiate	server_version < 315 -> UnsupportedVersion	yes (xe11 11g refusal, ver 314)	OK-EXERCISED	rejects_versions_below_reference_floor
+messages/connect.pyx	75	TNS_VERSION_MIN_OOB_CHECK	>=	read flags2 (skip 5 + uint32be) from ACCEPT	yes	thin/connect.rs parse_accept	protocol_version >= 318 (connect.rs:76)	yes (all live >= 318)	OK-EXERCISED	accept_parsing_gates_capabilities_on_protocol_version
+messages/connect.pyx	111	supports_oob	flag	set CAN_RECV_ATTENTION + CHECK_OOB in CONNECT	n/a	thin/connect.rs build_connect_packet_payload	conservative: fixed TNS_GSO_DONT_CARE (supports_oob is unknown pre-ACCEPT, so false at connect)	n/a (byte-identical to reference; see header note)	PARITY-NEUTRAL	n/a-parity-neutral
+messages/data_types.pyx	691	supports_end_of_response	flag	infer end_of_response after data-types response	yes	oracledb/src/lib.rs response loop	!supports_end_of_response	yes	OK-EXERCISED	accept_parsing_gates_capabilities_on_protocol_version
+messages/execute.pyx	172	TNS_CCAP_FIELD_VERSION_12_2	>=	write al8sqlsig block (5 fields) in EXECUTE	yes	thin/execute.rs build_execute payload	ttc_field_version >= 12_2 (execute.rs, FIXED)	yes (unit: execute_gates_al8sqlsig_and_chunk_ids_on_field_version)	FIXED	execute_gates_al8sqlsig_and_chunk_ids_on_field_version
+messages/execute.pyx	178	TNS_CCAP_FIELD_VERSION_12_2_EXT1	>=	write chunk-ids block (2 fields) in EXECUTE	yes	thin/execute.rs build_execute payload	ttc_field_version >= 12_2_EXT1 (execute.rs, FIXED)	yes (unit: execute_gates_al8sqlsig_and_chunk_ids_on_field_version)	FIXED	execute_gates_al8sqlsig_and_chunk_ids_on_field_version
+messages/protocol.pyx	53	supports_end_of_response	flag	infer end_of_response after protocol response	yes	oracledb/src/lib.rs response loop	!supports_end_of_response	yes	OK-EXERCISED	accept_parsing_gates_capabilities_on_protocol_version
+messages/protocol.pyx	86	TNS_CCAP_FIELD_VERSION_23_1	>=	set supports_oson_long_field_names	yes	oracledb/src/lib.rs supports_oson_long_fnames	ttc_field_version >= 23_1 (lib.rs:2830)	yes (23ai OSON long field names)	OK-EXERCISED	long_field_names_capability_changes_oson_encoding
+messages/subscribe.pyx	61	TNS_CCAP_FIELD_VERSION_12_1	>=	read subscriber name (subscribe response)	yes	thin/subscr.rs parse response	field_version >= 12_1 (subscr.rs:168)	no (boundary 7 below live floor 11)	OK-UNEXERCISED	subscribe_response_read_gates_subscriber_and_instances_on_12_1
+messages/subscribe.pyx	63	TNS_CCAP_FIELD_VERSION_12_1	>=	read db-instances + listener addresses	yes	thin/subscr.rs parse response	field_version >= 12_1 (subscr.rs:168)	no (below floor)	OK-UNEXERCISED	subscribe_response_read_gates_subscriber_and_instances_on_12_1
+messages/subscribe.pyx	127	TNS_CCAP_FIELD_VERSION_12_1	>=	write kpninst/kpninstl/... pointer block	yes	thin/subscr.rs build subscribe	field_version >= 12_1 (subscr.rs:273,277)	no (below floor)	OK-UNEXERCISED	subscribe_build_gates_client_id_block_on_12_1
+packet.pyx	778	TNS_VERSION_MIN_LARGE_SDU	>=	4-byte vs 2-byte packet length framing	yes	thin/wire.rs encode_packet PacketLengthWidth	Large32 for data (Legacy16 for pre-ACCEPT CONNECT); floor 315==MIN_LARGE_SDU	yes (every live data packet)	OK-EXERCISED	packet_length_framing_switches_between_legacy16_and_large32
+pool.pyx	205	supports_request_boundaries	flag	send session-state request-begin boundary	n/a	feature not implemented (no DRCP session-state ops)	(conservative: never sent)	no	PARITY-NEUTRAL	n/a-parity-neutral
+protocol.pyx	65	supports_oob	flag	send OOB break for cancellation	n/a	cancellation not via OOB break	(conservative: no OOB marker)	no	PARITY-NEUTRAL	n/a-parity-neutral
+protocol.pyx	195	supports_bool<-TNS_CCAP_FIELD_VERSION_23_1	>=	derive supports_bool (PL/SQL BOOLEAN allowed)	n/a	thin/bind.rs BOOLEAN binds	client-side validation flag, not a wire-field gate (server validates BOOLEAN bind)	n/a (see header note)	PARITY-NEUTRAL	n/a-parity-neutral
+protocol.pyx	196	TNS_CCAP_FIELD_VERSION_23_1	>=	(second line of the supports_bool assignment above)	n/a	see protocol.pyx:195 row	same gate as :195	n/a (see header note)	PARITY-NEUTRAL	n/a-parity-neutral
+protocol.pyx	262	supports_oob	flag	derive supports_oob (disable_oob + platform)	yes	thin/connect.rs parse_accept supports_oob	protocol_options & CAN_RECV_ATTENTION	yes	OK-EXERCISED	accept_parsing_gates_capabilities_on_protocol_version
+protocol.pyx	335	supports_oob	flag	send OOB check probe after connect	n/a	OOB check probe not implemented	(conservative: not sent)	no	PARITY-NEUTRAL	n/a-parity-neutral
+protocol.pyx	347	supports_fast_auth	flag	take combined fast-auth message path	n/a	always full multi-round handshake	(conservative: slow path, server accepts both)	no	PARITY-NEUTRAL	n/a-parity-neutral
+protocol.pyx	358	supports_end_of_response	flag	toggle EOR off/on around ping	yes	oracledb/src/lib.rs ping/response loop	!supports_end_of_response	yes	OK-EXERCISED	accept_parsing_gates_capabilities_on_protocol_version
+protocol.pyx	479	supports_oob	flag	send in-band marker when no OOB	n/a	cancellation path (not wire-field parity)	(conservative)	no	PARITY-NEUTRAL	n/a-parity-neutral
+protocol.pyx	516	supports_end_of_response	flag	request-boundary read gated on EOR	yes	oracledb/src/lib.rs response loop	!supports_end_of_response	yes	OK-EXERCISED	accept_parsing_gates_capabilities_on_protocol_version
+protocol.pyx	701	supports_fast_auth	flag	take combined fast-auth message path (async)	n/a	always full multi-round handshake	(conservative)	no	PARITY-NEUTRAL	n/a-parity-neutral
+protocol.pyx	712	supports_end_of_response	flag	toggle EOR off/on around ping (async)	yes	oracledb/src/lib.rs ping/response loop	!supports_end_of_response	yes	OK-EXERCISED	accept_parsing_gates_capabilities_on_protocol_version
+protocol.pyx	897	supports_end_of_response	flag	request-boundary read gated on EOR (async)	yes	oracledb/src/lib.rs response loop	!supports_end_of_response	yes	OK-EXERCISED	accept_parsing_gates_capabilities_on_protocol_version

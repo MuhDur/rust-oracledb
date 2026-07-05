@@ -584,3 +584,40 @@ pub(crate) fn protocol_error_offset(err: &oracledb_protocol::ProtocolError) -> O
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    // Reference messages/auth.pyx:186 (`_get_version_tuple`) gates the
+    // AUTH_VERSION_NO bit layout on `ttc_field_version >= 18_1_EXT_1` (11):
+    // Oracle 18+ moved the minor version to bits 16..24 and the release to
+    // bits 4..12, where pre-18 servers packed them in 4-bit nibbles. Our live
+    // floor is 18c (field version 11 == the boundary), so no live lane ever
+    // exercises the pre-18 branch; this offline test pins both layouts.
+    #[test]
+    fn server_version_number_layout_flips_at_18_1_ext_1() {
+        let full = 0x1234_5678_u32;
+        let decode_at =
+            |fv: u8| decode_server_version_number(full, fv >= TNS_CCAP_FIELD_VERSION_18_1_EXT_1);
+
+        // Below the boundary (field version 10, ~Oracle 12.2): 4-bit nibbles.
+        let below = decode_at(TNS_CCAP_FIELD_VERSION_18_1_EXT_1 - 1);
+        assert_eq!(below, (18, 3, 5, 6, 8), "pre-18 nibble layout");
+
+        // At/above the boundary (field version 11, Oracle 18+): wide fields.
+        let at = decode_at(TNS_CCAP_FIELD_VERSION_18_1_EXT_1);
+        assert_eq!(at, (18, 52, 5, 103, 8), "18+ wide-field layout");
+
+        // The gate must actually change the decode, otherwise a wrong/missing
+        // boundary would silently produce identical (and wrong) version tuples.
+        assert_ne!(
+            below, at,
+            "the 18_1_EXT_1 gate must flip the AUTH_VERSION_NO layout"
+        );
+
+        // The direct-format calls agree with the field-version-gated calls.
+        assert_eq!(decode_server_version_number(full, false), below);
+        assert_eq!(decode_server_version_number(full, true), at);
+    }
+}

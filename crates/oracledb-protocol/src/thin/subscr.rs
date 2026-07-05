@@ -927,4 +927,110 @@ mod tests {
         // the truncate record carries the ALLROWS bit, so no rows are present
         assert!(messages[4].tables[0].rows.is_empty());
     }
+
+    // ---- 12.1 version-gate boundary tests ---------------------------------
+    //
+    // Reference messages/subscribe.pyx gates the client-id pointer block on the
+    // write side (:127) and the subscriber name + RAC instance/listener block
+    // on the read side (:61, :63), all on ttc field version >= 12.1 (7). 12.1's
+    // field version (7) is far below our live floor (18c == 11), so no live lane
+    // ever exercises the pre-12.1 branch; these offline tests pin both sides.
+
+    fn assert_single_insertion(lo: &[u8], hi: &[u8], label: &str) {
+        assert!(hi.len() > lo.len(), "{label}: gated block must add bytes");
+        let prefix = lo.iter().zip(hi).take_while(|(a, b)| a == b).count();
+        let suffix = lo[prefix..]
+            .iter()
+            .rev()
+            .zip(hi[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        assert_eq!(
+            prefix + suffix,
+            lo.len(),
+            "{label}: below-boundary bytes must equal above-boundary bytes minus one inserted block"
+        );
+    }
+
+    // Reference messages/subscribe.pyx:127 — the kpninst/client-id pointer block.
+    #[test]
+    fn subscribe_build_gates_client_id_block_on_12_1() {
+        let build = |fv| {
+            build_subscribe_payload_with_seq(
+                1,
+                TNS_SUBSCR_OP_REGISTER,
+                None,
+                None,
+                TNS_SUBSCR_NAMESPACE_DBCHANGE,
+                None,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                fv,
+            )
+            .expect("subscribe payload")
+        };
+        assert_single_insertion(
+            &build(TNS_CCAP_FIELD_VERSION_12_1 - 1),
+            &build(TNS_CCAP_FIELD_VERSION_12_1),
+            "subscribe client-id block (12.1)",
+        );
+    }
+
+    // Reference messages/subscribe.pyx:61,63 — subscriber name + RAC instance
+    // and listener addresses, read only at >= 12.1.
+    #[test]
+    fn subscribe_response_read_gates_subscriber_and_instances_on_12_1() {
+        let fixture = |fv: u8| {
+            let mut w = TtcWriter::new();
+            w.write_ub4(0); // kpnrl count (short registration ids)
+            w.write_ub4(1); // kpngrl count (one registration)
+            w.write_ub8(302); // registration id
+            if fv >= TNS_CCAP_FIELD_VERSION_12_1 {
+                w.write_bytes_with_two_lengths(Some(b"SUB"))
+                    .expect("subscriber name");
+            }
+            if fv >= TNS_CCAP_FIELD_VERSION_12_1 {
+                w.write_ub4(0); // num instances
+                w.write_ub4(0); // num listeners
+                w.write_bytes_with_two_lengths(Some(b"OCI:EP:301"))
+                    .expect("client id");
+            }
+            w.into_bytes()
+        };
+        let parse = |bytes: &[u8], fv: u8| -> Option<(u64, Option<Vec<u8>>, usize)> {
+            let mut reader = TtcReader::new(bytes);
+            let mut result = SubscribeResult::default();
+            parse_subscribe_return_parameters(&mut reader, fv, &mut result)
+                .ok()
+                .map(|()| (result.registration_id, result.client_id, reader.remaining()))
+        };
+        let lo = TNS_CCAP_FIELD_VERSION_12_1 - 1;
+        let hi = TNS_CCAP_FIELD_VERSION_12_1;
+
+        // Version-matched parses consume the record exactly.
+        assert_eq!(parse(&fixture(lo), lo), Some((302, None, 0)));
+        assert_eq!(
+            parse(&fixture(hi), hi),
+            Some((302, Some(b"OCI:EP:301".to_vec()), 0))
+        );
+
+        // The >= 12.1 block present but read as pre-12.1: the client id is never
+        // read and the block is left unconsumed on the wire.
+        let (reg, client, remaining) = parse(&fixture(hi), lo).expect("reg id still parses");
+        assert_eq!(reg, 302);
+        assert_eq!(client, None, "pre-12.1 read must not consume the client id");
+        assert!(
+            remaining > 0,
+            "pre-12.1 read leaves the 12.1 block unconsumed"
+        );
+
+        // The block absent but read as >= 12.1: the parser expects a subscriber
+        // name that is not there and fails closed.
+        assert_eq!(parse(&fixture(lo), hi), None, "over-read must fail closed");
+    }
 }

@@ -1243,4 +1243,185 @@ mod tests {
             .expect("build json enqueue");
         assert_eq!(bytes, GOLDEN_JSON_ENQ);
     }
+
+    // ---- version-gate boundary tests (epic rust-oracledb-xver-parity-so3w) ----
+    //
+    // Each test builds/parses the message at exactly (boundary - 1) and
+    // (boundary), proving the version-gated field is ABSENT below and PRESENT
+    // at/above the boundary. These cover the AQ rows in docs/reference-gates.tsv;
+    // the live matrix already crosses 20.1/21.1 (18c ver 11 < both vs 21c ver 16),
+    // but the offline tests pin the exact bytes on every PR, not just nightly.
+
+    /// Assert `hi` is exactly `lo` with one contiguous block inserted: the
+    /// gated field is absent below the boundary, present at/above it, and
+    /// nothing else on the wire moved.
+    fn assert_single_insertion(lo: &[u8], hi: &[u8], label: &str) {
+        assert!(
+            hi.len() > lo.len(),
+            "{label}: gated field must add bytes at/above the boundary"
+        );
+        let prefix = lo.iter().zip(hi).take_while(|(a, b)| a == b).count();
+        let suffix = lo[prefix..]
+            .iter()
+            .rev()
+            .zip(hi[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        assert_eq!(
+            prefix + suffix,
+            lo.len(),
+            "{label}: below-boundary bytes must equal above-boundary bytes minus one contiguous inserted block"
+        );
+    }
+
+    fn caps_fv(fv: u8) -> ClientCapabilities {
+        ClientCapabilities {
+            ttc_field_version: fv,
+            max_string_size: 32767,
+            charset_id: 873,
+        }
+    }
+
+    // Reference messages/aq_enq.pyx:115 — uint8 JSON-payload pointer, >= 20.1.
+    #[test]
+    fn aq_enq_gates_json_payload_pointer_on_20_1() {
+        let queue = AqQueueDesc::new("Q".to_string(), AqPayloadKind::Raw, None);
+        let props = AqMsgProps {
+            payload: Some(AqPayloadValue::Raw(b"x".to_vec())),
+            ..AqMsgProps::default()
+        };
+        let build = |fv| {
+            build_aq_enq_payload(&queue, &props, &AqEnqOptions::default(), 1, fv, false)
+                .expect("enq payload")
+        };
+        assert_single_insertion(
+            &build(TNS_CCAP_FIELD_VERSION_20_1 - 1),
+            &build(TNS_CCAP_FIELD_VERSION_20_1),
+            "aq enq JSON-payload pointer (20.1)",
+        );
+    }
+
+    // Reference messages/aq_deq.pyx:130 — uint8 JSON-payload flag, >= 20.1.
+    #[test]
+    fn aq_deq_gates_json_payload_flag_on_20_1() {
+        let queue = AqQueueDesc::new("Q".to_string(), AqPayloadKind::Raw, None);
+        let build = |fv| {
+            build_aq_deq_payload(&queue, &AqDeqOptions::default(), 1, fv).expect("deq payload")
+        };
+        assert_single_insertion(
+            &build(TNS_CCAP_FIELD_VERSION_20_1 - 1),
+            &build(TNS_CCAP_FIELD_VERSION_20_1),
+            "aq deq JSON-payload flag (20.1)",
+        );
+    }
+
+    // Reference messages/aq_deq.pyx:132 — ub4 shard id (-1), >= 21.1. The 20.1
+    // JSON flag is present on both sides (15,16 >= 14), so only the shard moves.
+    #[test]
+    fn aq_deq_gates_shard_id_on_21_1() {
+        let queue = AqQueueDesc::new("Q".to_string(), AqPayloadKind::Raw, None);
+        let build = |fv| {
+            build_aq_deq_payload(&queue, &AqDeqOptions::default(), 1, fv).expect("deq payload")
+        };
+        assert_single_insertion(
+            &build(TNS_CCAP_FIELD_VERSION_21_1 - 1),
+            &build(TNS_CCAP_FIELD_VERSION_21_1),
+            "aq deq shard id (21.1)",
+        );
+    }
+
+    // Reference messages/aq_array.pyx:196 — ub4 shard id (array enq/deq), >= 21.1.
+    // Built with an empty message list so the array-level shard is the only
+    // 21.1-gated field on the wire (a non-empty array also carries the
+    // per-message-props shard, which is covered separately above).
+    #[test]
+    fn aq_array_gates_shard_id_on_21_1() {
+        let queue = AqQueueDesc::new("Q".to_string(), AqPayloadKind::Raw, None);
+        let build = |fv| {
+            build_aq_array_enq_payload(&queue, &[], &AqEnqOptions::default(), 1, fv, false)
+                .expect("array enq payload")
+        };
+        assert_single_insertion(
+            &build(TNS_CCAP_FIELD_VERSION_21_1 - 1),
+            &build(TNS_CCAP_FIELD_VERSION_21_1),
+            "aq array shard id (21.1)",
+        );
+    }
+
+    // Reference messages/aq_base.pyx:197 — ub4 shard id (message props), >= 21.1.
+    #[test]
+    fn aq_msg_props_gates_shard_id_on_21_1() {
+        let build = |fv| {
+            let mut w = TtcWriter::new();
+            write_msg_props(&mut w, &AqMsgProps::default(), fv).expect("msg props");
+            w.into_bytes()
+        };
+        assert_single_insertion(
+            &build(TNS_CCAP_FIELD_VERSION_21_1 - 1),
+            &build(TNS_CCAP_FIELD_VERSION_21_1),
+            "aq message-props shard id (21.1)",
+        );
+    }
+
+    // Reference messages/aq_base.pyx:129 — read/skip ub4 shard number (deq
+    // props), >= 21.1. Round-trip: a response written at one field version and
+    // parsed at another must misalign, proving the read side branches on the
+    // same boundary as the write side.
+    #[test]
+    fn aq_deq_msg_props_read_gates_shard_on_21_1() {
+        let response_at = |fv: u8| {
+            let mut writer = TtcWriter::new();
+            writer.write_u8(TNS_MSG_TYPE_PARAMETER);
+            writer.write_ub4(1);
+            write_msg_props(&mut writer, &AqMsgProps::default(), fv).expect("write message props");
+            writer.write_ub4(0); // recipients
+            writer.write_ub4(0); // TOID
+            writer.write_ub4(0); // OID
+            writer.write_ub4(0); // snapshot
+            writer.write_ub2(0); // version
+            writer.write_ub4(6); // image length (4-byte header + "AB")
+            writer.write_ub2(0); // flags
+            writer
+                .write_bytes_with_length(&[0, 0, 0, 0, b'A', b'B'])
+                .expect("write raw image field");
+            writer.write_raw(&[0u8; TNS_AQ_MESSAGE_ID_LENGTH]);
+            writer.write_u8(TNS_MSG_TYPE_END_OF_RESPONSE);
+            writer.into_bytes()
+        };
+        let lo = TNS_CCAP_FIELD_VERSION_21_1 - 1;
+        let hi = TNS_CCAP_FIELD_VERSION_21_1;
+
+        // Matched field versions round-trip to the same clean RAW payload.
+        let raw_of = |resp: AqDeqResult| match resp.message.and_then(|m| m.payload) {
+            Some(AqDeqPayload::Raw(bytes)) => Some(bytes),
+            _ => None,
+        };
+        let matched_hi = raw_of(
+            parse_aq_deq_response(&response_at(hi), caps_fv(hi), &AqPayloadKind::Raw)
+                .expect("matched hi parse"),
+        );
+        let matched_lo = raw_of(
+            parse_aq_deq_response(&response_at(lo), caps_fv(lo), &AqPayloadKind::Raw)
+                .expect("matched lo parse"),
+        );
+        assert_eq!(
+            matched_hi, matched_lo,
+            "both bands decode the same RAW payload"
+        );
+        assert_eq!(matched_hi.as_deref(), Some(&b"AB"[..]));
+
+        // A response with the shard present, parsed as if it were absent, must
+        // consume the 5 shard bytes as later fields — so it either fails closed
+        // or decodes a different payload. Either way the read side branches on
+        // the 21.1 boundary.
+        let mismatched = parse_aq_deq_response(&response_at(hi), caps_fv(lo), &AqPayloadKind::Raw);
+        let diverged = match mismatched {
+            Err(_) => true,
+            Ok(resp) => raw_of(resp) != matched_hi,
+        };
+        assert!(
+            diverged,
+            "read side must consume the 21.1 shard: skipping it changes the decode"
+        );
+    }
 }

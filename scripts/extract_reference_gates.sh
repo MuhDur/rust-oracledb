@@ -116,5 +116,57 @@ if [[ "${1:-}" == "--check" ]]; then
   fi
 fi
 
+if [[ "${1:-}" == "--check-coverage" ]]; then
+  # Every non-parity-neutral reference gate must name an OFFLINE boundary test
+  # (last column) that actually exists in the crate sources. This is the per-PR
+  # guarantee that a version gate — even one below the live floor (18c, ttc field
+  # version 11) that no server can reach — cannot ship without a test proving it
+  # flips at its boundary. Parity-neutral rows (features we do not implement, or
+  # client-side/derived flags that are not wire-field gates) carry the sentinel
+  # `n/a-parity-neutral` and require no test.
+  if [[ ! -f "${inventory}" ]]; then
+    echo "inventory not found: ${inventory}" >&2
+    exit 2
+  fi
+  fail=0
+  covered=0
+  neutral=0
+  while IFS=$'\t' read -r rfile rline _cap _dir _cond _mir _fn _gate _ex verdict btest _rest; do
+    [[ "${rfile}" == \#* || -z "${rfile}" || "${rfile}" == "reference_file" ]] && continue
+    gate="${rfile}:${rline}"
+    if [[ -z "${btest}" ]]; then
+      echo "COVERAGE: ${gate} (${verdict}) has no boundary_test column" >&2
+      fail=1
+      continue
+    fi
+    if [[ "${verdict}" == "PARITY-NEUTRAL" ]]; then
+      if [[ "${btest}" != "n/a-parity-neutral" ]]; then
+        echo "COVERAGE: ${gate} is PARITY-NEUTRAL but boundary_test='${btest}' (expected n/a-parity-neutral)" >&2
+        fail=1
+      else
+        neutral=$((neutral + 1))
+      fi
+      continue
+    fi
+    if [[ "${btest}" == n/a* ]]; then
+      echo "COVERAGE: ${gate} (${verdict}) must name an offline boundary test, got '${btest}'" >&2
+      fail=1
+      continue
+    fi
+    if ! grep -rqE "fn ${btest}\b" "${repo_root}/crates"; then
+      echo "COVERAGE: ${gate} names boundary_test '${btest}' but no 'fn ${btest}' exists under crates/" >&2
+      fail=1
+      continue
+    fi
+    covered=$((covered + 1))
+  done <"${inventory}"
+  if [[ "${fail}" -ne 0 ]]; then
+    echo "COVERAGE FAILED: every non-parity-neutral reference gate needs an existing offline boundary test." >&2
+    exit 4
+  fi
+  echo "OK: coverage — ${covered} gates pinned by offline boundary tests, ${neutral} parity-neutral (no test required)."
+  exit 0
+fi
+
 printf '%s\n' "${header}"
 emit_inventory

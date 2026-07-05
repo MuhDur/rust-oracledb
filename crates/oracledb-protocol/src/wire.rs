@@ -1315,4 +1315,62 @@ mod tests {
         .expect("packet should encode");
         assert_eq!(&packet[..10], &[0, 0, 0, 13, 6, 0, 0, 0, 0, 0]);
     }
+
+    // Reference packet.pyx:778 gates the packet-length field width on
+    // protocol_version >= TNS_VERSION_MIN_LARGE_SDU (315): pre-12.1 servers use
+    // a 2-byte length + 2-byte padding, negotiated servers a 4-byte length. Our
+    // wire layer takes the width as a parameter (the caller derives it from the
+    // negotiated version); this pins that the two widths frame the length
+    // differently for the same payload.
+    #[test]
+    fn packet_length_framing_switches_between_legacy16_and_large32() {
+        let payload = [0x03, 0x93, 0x01];
+        let legacy = encode_packet(6, 0, Some(0), &payload, PacketLengthWidth::Legacy16)
+            .expect("legacy packet");
+        let large = encode_packet(6, 0, Some(0), &payload, PacketLengthWidth::Large32)
+            .expect("large packet");
+
+        // length == 13 in both, but framed as u16+u16-pad vs u32.
+        assert_eq!(
+            &legacy[..4],
+            &[0, 13, 0, 0],
+            "legacy: u16 length then u16 pad"
+        );
+        assert_eq!(&large[..4], &[0, 0, 0, 13], "large: u32 length");
+        assert_ne!(legacy, large, "the length-width gate changes the wire");
+    }
+
+    // Reference messages/base.pyx:700/714 gates the ub8 pipeline token on the
+    // function-code and piggyback headers on ttc field version >= 23.1 ext 1
+    // (18): pre-23ai servers parse a stray token byte as message content and
+    // fail the call (observed live: ORA-03120 on Oracle XE 21c). The token is
+    // appended after the fixed header, so at/above the boundary the header is
+    // exactly the pre-boundary header plus the ub8(0) token byte.
+    #[test]
+    fn function_and_piggyback_headers_gate_pipeline_token_on_23_1_ext_1() {
+        let lo = crate::thin::TNS_CCAP_FIELD_VERSION_23_1_EXT_1 - 1;
+        let hi = crate::thin::TNS_CCAP_FIELD_VERSION_23_1_EXT_1;
+
+        let function_header = |fv| {
+            let mut w = TtcWriter::new();
+            w.write_function_header(3, 5, fv);
+            w.into_bytes()
+        };
+        let f_lo = function_header(lo);
+        let f_hi = function_header(hi);
+        assert_eq!(f_hi.len(), f_lo.len() + 1, "function header gains ub8(0)");
+        assert_eq!(&f_hi[..f_lo.len()], f_lo.as_slice(), "prefix unchanged");
+        assert_eq!(f_hi[f_lo.len()], 0, "the token is ub8(0)");
+
+        let piggyback_header = |fv| {
+            let mut w = TtcWriter::new();
+            w.write_piggyback_header(3, 5, fv);
+            w.into_bytes()
+        };
+        let p_lo = piggyback_header(lo);
+        let p_hi = piggyback_header(hi);
+        assert_eq!(p_hi.len(), p_lo.len() + 1, "piggyback header gains ub8(0)");
+        assert_eq!(&p_hi[..p_lo.len()], p_lo.as_slice(), "prefix unchanged");
+        assert_eq!(p_hi[p_lo.len()], 0, "the token is ub8(0)");
+    }
 }

@@ -2869,4 +2869,120 @@ mod fuzz_regression_tests {
             "expected fail-closed protocol error, got {err:?}"
         );
     }
+
+    // ---- describe-read version-gate boundary tests -------------------------
+    //
+    // Reference messages/base.pyx `_process_column_metadata` gates four fields
+    // on the negotiated ttc field version:
+    //   :346  >= 12.2        ub4 oaccolid                (below the 18c floor)
+    //   :358  >= 23.1        domain schema + name
+    //   :361  >= 23.1 ext 3  annotations block
+    //   :376  >= 23.4        vector dimensions/format/flags
+    // parse_column_metadata mirrors each. The 12.2 boundary is below our live
+    // floor (18c field version 11), so no live server exercises the pre-12.2
+    // read path; this offline test pins every boundary by proving the parser
+    // consumes *exactly* the bytes for its field version and misaligns (fails
+    // closed, or leaves the wire unconsumed) when parsed one version off.
+
+    fn describe_caps(fv: u8) -> ClientCapabilities {
+        ClientCapabilities {
+            ttc_field_version: fv,
+            max_string_size: 32_767,
+            charset_id: 873,
+        }
+    }
+
+    /// One column-metadata record whose optional fields are present iff the
+    /// field version gates them in — i.e. exactly what a server at `fv` sends.
+    fn describe_column_bytes(fv: u8) -> Vec<u8> {
+        let mut w = TtcWriter::new();
+        w.write_u8(ORA_TYPE_NUM_VARCHAR);
+        w.write_u8(0); // flags
+        w.write_u8(0); // precision
+        w.write_u8(0); // scale
+        w.write_ub4(4000); // buffer size
+        w.write_ub4(0); // max array elements
+        w.write_ub8(0); // cont flags
+        w.write_bytes_with_two_lengths(None).expect("oid");
+        w.write_ub2(0); // version
+        w.write_ub2(0); // server charset id (ignored)
+        w.write_u8(CS_FORM_IMPLICIT);
+        w.write_ub4(4000); // max size
+        if fv >= TNS_CCAP_FIELD_VERSION_12_2 {
+            w.write_ub4(0x1122_3344); // oaccolid (5 wire bytes when present)
+        }
+        w.write_u8(1); // nullable
+        w.write_u8(0); // flags
+        w.write_bytes_with_two_lengths(Some(b"TXT")).expect("name");
+        w.write_bytes_with_two_lengths(None).expect("object schema");
+        w.write_bytes_with_two_lengths(None).expect("object type");
+        w.write_ub2(1); // column position
+        w.write_ub4(0); // uds flags
+        if fv >= TNS_CCAP_FIELD_VERSION_23_1 {
+            w.write_bytes_with_two_lengths(None).expect("domain schema");
+            w.write_bytes_with_two_lengths(None).expect("domain name");
+        }
+        if fv >= TNS_CCAP_FIELD_VERSION_23_1_EXT_3 {
+            w.write_ub4(0); // num annotations (0 => no sub-block)
+        }
+        if fv >= TNS_CCAP_FIELD_VERSION_23_4 {
+            w.write_ub4(2); // vector dimensions
+            w.write_u8(0); // format
+            w.write_u8(0); // flags
+        }
+        w.into_bytes()
+    }
+
+    /// `Some((column_name, remaining_bytes))` after a successful parse, else
+    /// `None` (failed closed). A version-matched parse decodes the name and
+    /// consumes the record exactly => `Some(("TXT", 0))`; any misaligned read
+    /// diverges (different name, leftover bytes, or a hard failure).
+    fn parse_outcome(bytes: &[u8], fv: u8) -> Option<(String, usize)> {
+        let mut reader = TtcReader::new(bytes);
+        parse_column_metadata(&mut reader, describe_caps(fv))
+            .ok()
+            .map(|meta| (meta.name().to_string(), reader.remaining()))
+    }
+
+    #[test]
+    fn describe_column_metadata_gates_fields_on_field_version() {
+        // Each (lo, hi) pair straddles exactly one gate; the other three gates
+        // are on the same side of the boundary for both, so only one field moves.
+        let boundaries = [
+            (TNS_CCAP_FIELD_VERSION_12_2 - 1, TNS_CCAP_FIELD_VERSION_12_2), // oaccolid
+            (TNS_CCAP_FIELD_VERSION_23_1 - 1, TNS_CCAP_FIELD_VERSION_23_1), // domain
+            (
+                TNS_CCAP_FIELD_VERSION_23_1_EXT_3 - 1,
+                TNS_CCAP_FIELD_VERSION_23_1_EXT_3,
+            ), // annotations
+            (TNS_CCAP_FIELD_VERSION_23_4 - 1, TNS_CCAP_FIELD_VERSION_23_4), // vector
+        ];
+        for (lo, hi) in boundaries {
+            let lo_bytes = describe_column_bytes(lo);
+            let hi_bytes = describe_column_bytes(hi);
+            assert!(
+                hi_bytes.len() > lo_bytes.len(),
+                "fv {hi}: the gated field must add bytes vs fv {lo}"
+            );
+
+            // Version-matched parses decode the name and consume exactly.
+            let matched = Some(("TXT".to_string(), 0));
+            assert_eq!(parse_outcome(&lo_bytes, lo), matched, "fv {lo} matched");
+            assert_eq!(parse_outcome(&hi_bytes, hi), matched, "fv {hi} matched");
+
+            // Parsed one version off, the record misaligns: reading `hi` bytes
+            // as `lo` skips the gated field (leftover bytes remain), and reading
+            // `lo` bytes as `hi` over-reads (fails closed). Neither matches.
+            assert_ne!(
+                parse_outcome(&hi_bytes, lo),
+                matched,
+                "fv {hi} bytes read as fv {lo} must not consume cleanly"
+            );
+            assert_ne!(
+                parse_outcome(&lo_bytes, hi),
+                matched,
+                "fv {lo} bytes read as fv {hi} must not consume cleanly"
+            );
+        }
+    }
 }

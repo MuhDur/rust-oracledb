@@ -1523,6 +1523,27 @@ mod tests {
         assert_eq!(decoded, value);
     }
 
+    // Reference protocol.pyx:86 derives supports_oson_long_field_names on
+    // ttc_field_version >= 23.1. A field name longer than the short-name limit
+    // only fits the OSON v3 long-field-names segment, so the capability flag
+    // materially changes the encoded image. This pins that boundary offline
+    // (off vs on), complementing the `long_fname_256` golden which fixes the
+    // on-capability bytes.
+    #[test]
+    fn long_field_names_capability_changes_oson_encoding() {
+        let value = obj(&[(&"A".repeat(256), num("6700"))]);
+        let with_long = encode_oson(&value, true).expect("v3 long field names");
+        match encode_oson(&value, false) {
+            Ok(without_long) => assert_ne!(
+                with_long, without_long,
+                "the long-field-names capability must change the OSON image"
+            ),
+            // Rejecting a >255-byte field name without v3 support is an equally
+            // valid boundary: the capability gates the whole code path.
+            Err(_) => {}
+        }
+    }
+
     #[test]
     fn decode_timestamp_tz_scalar_applies_offset() {
         let mut bytes = vec![

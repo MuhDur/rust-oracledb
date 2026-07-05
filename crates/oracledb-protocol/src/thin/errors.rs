@@ -254,3 +254,84 @@ pub(crate) fn has_u8_flag(flags: u8, mask: u8) -> bool {
 pub(crate) fn has_u32_flag(flags: u32, mask: u32) -> bool {
     flags & mask > 0
 }
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    // Reference messages/base.pyx:238 gates the ub4 sql-type + ub4
+    // server-checksum pair (return-info trailer) on ttc field version >= 20.1.
+    // The live matrix crosses it (18c field ver 11 < 20.1 vs 21c ver 16), but
+    // this offline test pins the exact boundary: a matched parse consumes the
+    // error record exactly, and reading it one version off misaligns the
+    // trailing message (fails closed or leaves the wire unconsumed).
+    //
+    // The reference also has an in-band fallback (`|| next byte == 0`), so the
+    // fixture uses a non-zero sql-type byte to isolate the pure version gate.
+    fn error_info_bytes(fv: u8) -> Vec<u8> {
+        let mut w = TtcWriter::new();
+        w.write_ub4(0); // call status
+        w.write_ub2(0); // seq
+        w.write_ub4(0); // current row
+        w.write_ub2(0); // error number (obsolete short)
+        w.write_ub2(0); // array elem error 1
+        w.write_ub2(0); // array elem error 2
+        w.write_ub2(0); // cursor id
+        w.write_sb4(0); // error position
+        w.write_raw(&[0u8; 5]); // skip(5)
+        w.write_u8(0); // warning flags
+                       // rowid: ub4 rba, ub2 partition, skip(1), ub4 block, ub2 slot
+        w.write_ub4(0);
+        w.write_ub2(0);
+        w.write_u8(0);
+        w.write_ub4(0);
+        w.write_ub2(0);
+        w.write_ub4(0); // os error
+        w.write_raw(&[0u8; 2]); // skip(2)
+        w.write_ub2(0); // padding
+        w.write_ub4(0); // success iters
+        w.write_bytes_with_two_lengths(None).expect("empty field");
+        w.write_ub2(0); // batch error count
+        w.write_ub4(0); // batch offset count
+        w.write_ub2(0); // batch message count
+        w.write_ub4(942); // real error number (non-zero => message follows)
+        w.write_ub8(0); // row count
+        if fv >= TNS_CCAP_FIELD_VERSION_20_1 {
+            w.write_ub4(1); // sql type (non-zero first byte => no in-band fallback)
+            w.write_ub4(0); // server checksum
+        }
+        w.write_bytes_with_length(b"boom").expect("message"); // short-form message
+        w.into_bytes()
+    }
+
+    fn parse_at(bytes: &[u8], fv: u8) -> Option<(u32, String, usize)> {
+        let mut reader = TtcReader::new(bytes);
+        parse_server_error_info(&mut reader, fv)
+            .ok()
+            .map(|info| (info.number, info.message, reader.remaining()))
+    }
+
+    #[test]
+    fn server_error_info_gates_sql_type_and_checksum_on_20_1() {
+        let lo = TNS_CCAP_FIELD_VERSION_20_1 - 1;
+        let hi = TNS_CCAP_FIELD_VERSION_20_1;
+        let lo_bytes = error_info_bytes(lo);
+        let hi_bytes = error_info_bytes(hi);
+        assert!(hi_bytes.len() > lo_bytes.len(), "the 20.1 pair adds bytes");
+
+        let expected = Some((942_u32, "boom".to_string(), 0_usize));
+        assert_eq!(parse_at(&lo_bytes, lo), expected, "matched pre-20.1 parse");
+        assert_eq!(parse_at(&hi_bytes, hi), expected, "matched 20.1 parse");
+
+        assert_ne!(
+            parse_at(&hi_bytes, lo),
+            expected,
+            "20.1 bytes read as pre-20.1 must misalign the message"
+        );
+        assert_ne!(
+            parse_at(&lo_bytes, hi),
+            expected,
+            "pre-20.1 bytes read as 20.1 must over-read and fail closed"
+        );
+    }
+}

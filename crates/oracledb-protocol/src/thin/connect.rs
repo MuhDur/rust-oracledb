@@ -325,4 +325,85 @@ mod tests {
         );
         assert_eq!(&full[FAST_AUTH_DATA_TYPES_MSG_START..], &data_types[..]);
     }
+
+    // ---- ACCEPT protocol-version gate boundary tests ----------------------
+    //
+    // parse_accept_payload mirrors three reference gates keyed on the ACCEPT's
+    // protocol_version / protocol_options (references connect.pyx:65/75/111,
+    // capabilities.pyx:126, protocol.pyx:262). The live matrix crosses these
+    // (all live servers are >= 318, 23ai advertises end-of-response), but this
+    // offline test pins each boundary exactly.
+
+    /// A full (>= 318 layout) ACCEPT payload with a caller-controlled
+    /// protocol_version field, so the same trailing flags2 bytes can be parsed
+    /// on either side of the 318/319 gates.
+    fn accept_bytes(version: u16, options: u16, flags2: u32) -> Vec<u8> {
+        let mut w = TtcWriter::new();
+        w.write_u16be(version); // protocol version
+        w.write_u16be(options); // protocol options
+        w.write_raw(&[0u8; 10]); // skip(10)
+        w.write_u8(0); // flags1 (no NA_REQUIRED)
+        w.write_raw(&[0u8; 9]); // skip(9)
+        w.write_u32be(8192); // sdu
+        w.write_raw(&[0u8; 5]); // skip(5) before flags2
+        w.write_u32be(flags2); // flags2 (only read when version >= 318)
+        w.into_bytes()
+    }
+
+    #[test]
+    fn accept_parsing_gates_capabilities_on_protocol_version() {
+        // protocol.pyx:262 — supports_oob is a plain flag on protocol_options,
+        // independent of protocol_version.
+        assert!(
+            !parse_accept_payload(&accept_bytes(319, 0, 0))
+                .unwrap()
+                .supports_oob,
+            "no CAN_RECV_ATTENTION bit => supports_oob false"
+        );
+        assert!(
+            parse_accept_payload(&accept_bytes(319, TNS_GSO_CAN_RECV_ATTENTION, 0))
+                .unwrap()
+                .supports_oob,
+            "CAN_RECV_ATTENTION bit => supports_oob true"
+        );
+
+        // connect.pyx:75 (MIN_OOB_CHECK, >= 318) — flags2 (and everything it
+        // carries) is only read at/above 318. Same trailing bytes, version off
+        // by one, must flip the derived capability.
+        let flags2 = TNS_ACCEPT_FLAG_FAST_AUTH | TNS_ACCEPT_FLAG_CHECK_OOB;
+        assert!(
+            !parse_accept_payload(&accept_bytes(317, 0, flags2))
+                .unwrap()
+                .supports_fast_auth,
+            "below 318 flags2 is not read"
+        );
+        let at_318 = parse_accept_payload(&accept_bytes(318, 0, flags2)).unwrap();
+        assert!(at_318.supports_fast_auth, "at 318 flags2 is read");
+        assert!(
+            at_318.supports_oob_check,
+            "at 318 the CHECK_OOB flag is read"
+        );
+
+        // capabilities.pyx:126 (MIN_END_OF_RESPONSE) — end-of-response requires
+        // BOTH protocol_version >= 319 AND the flag. Prove the version gate and
+        // the flag gate independently.
+        assert!(
+            !parse_accept_payload(&accept_bytes(318, 0, TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE))
+                .unwrap()
+                .supports_end_of_response,
+            "318 < 319: no end-of-response even with the flag"
+        );
+        assert!(
+            parse_accept_payload(&accept_bytes(319, 0, TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE))
+                .unwrap()
+                .supports_end_of_response,
+            "319 + flag: end-of-response negotiated"
+        );
+        assert!(
+            !parse_accept_payload(&accept_bytes(319, 0, 0))
+                .unwrap()
+                .supports_end_of_response,
+            "319 without the flag: no end-of-response"
+        );
+    }
 }
