@@ -14,7 +14,7 @@ crates/oracledb-protocol/src/thin/auth.rs	3
 crates/oracledb-protocol/src/thin/codecs.rs	3
 crates/oracledb-protocol/src/thin/connect.rs	1
 crates/oracledb-protocol/src/thin/dbobject.rs	7
-crates/oracledb-protocol/src/thin/execute.rs	2
+crates/oracledb-protocol/src/thin/execute.rs	4
 crates/oracledb-protocol/src/thin/fetch.rs	17
 crates/oracledb-protocol/src/thin/mod.rs	31
 crates/oracledb-protocol/src/thin/number.rs	7
