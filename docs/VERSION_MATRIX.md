@@ -38,6 +38,29 @@ it raises `ORA-29972`). The run writes a per-SHA verdict artifact under
 | `xe21`   | `gvenzl/oracle-xe:21-slim`    | 21c |
 | `free23` | `gvenzl/oracle-free:23-slim`  | 23ai |
 
+### Running one live suite directly
+
+The live suites are `#[ignore]` and **fully env-driven** — no lane is hardcoded
+(the free23 connect string / `pythontest` account are only *default fallbacks*
+for a bare `cargo test`). The version-matrix harness above sets these per lane;
+to run a single suite by hand, export the lane's coordinates first:
+
+```sh
+# xe18 (18c)
+export PYO_TEST_CONNECT_STRING=localhost:1518/XEPDB1 \
+       PYO_TEST_MAIN_USER=testuser PYO_TEST_MAIN_PASSWORD=testpw
+# xe21 (21c): localhost:1520/XEPDB1  testuser / testpw
+# free23 (23ai): localhost:1522/FREEPDB1  pythontest / pythontest
+
+cargo test -p oracledb --test live_connect -- --ignored
+```
+
+Suites that need a proxy or SODA also read `PYO_TEST_PROXY_USER` /
+`PYO_TEST_PROXY_PASSWORD`. Because every suite resolves its connection from
+these variables, the same test binary runs unchanged against all three
+generations — which is exactly what the matrix exercises, so portability is
+proven by the green result matrix below, not assumed.
+
 ## Result matrix
 
 Legend: **✓** green · **gate** proven server-feature boundary (see reason) ·
