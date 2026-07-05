@@ -660,6 +660,74 @@ failure byte-identically.
 | TLS/TCPS handshake fails (cert / server-DN) | wallet path, DN match, or SNI | see [docs/TLS_SETUP.md](docs/TLS_SETUP.md); a `cwallet.sso` auto-login wallet needs `--features experimental` |
 | a connect string is rejected as malformed | a typo in a TNS descriptor / EZConnect-Plus token | the error carries a **byte-offset caret** pointing at the offending token — read it; full grammar in [docs/CONNECT_STRINGS.md](docs/CONNECT_STRINGS.md) |
 
+### Capturing a connect/handshake trace
+
+When a connection fails in a way the error string alone can't explain, capture
+the wire-level handshake. Set **`ORACLEDB_TRACE_CONNECT=1`** and every step of
+the connect — plus a hex dump of each TNS packet — is written to **stderr**
+(the same detail python-oracledb thin exposes via `PYO_DEBUG_PACKETS`):
+
+```console
+$ ORACLEDB_TRACE_CONNECT=1 your-app 2> connect.trace
+```
+
+Add **`ORACLEDB_TRACE_QUERY=1`** to also hex-dump statement execute/fetch
+payloads (`oracledb::query: ...` lines) once the session is up.
+
+> **`RUST_LOG` does _not_ control this.** The trace is gated on
+> `ORACLEDB_TRACE_CONNECT`, independent of the `tracing`/`log` level — a triage
+> session running `RUST_LOG=trace` will see *nothing* here. This is a deliberate
+> hard switch so the (verbose, packet-level) dump never turns on by accident.
+
+**What a healthy handshake looks like** — transport, `CONNECT`, `ACCEPT`
+(carrying the negotiated capabilities), then the two auth phases, then
+`session established`:
+
+```text
+oracledb::connect: tcp connect
+oracledb::connect: tcp connected
+oracledb::connect: CONNECT descriptor: (DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)...
+oracledb::connect: CONNECT packet len=... hex=00...
+oracledb::connect: send CONNECT
+oracledb::connect: read ACCEPT
+oracledb::connect: ACCEPT sdu=8192 fast_auth=true end_of_response=true oob=true
+oracledb::connect: AUTH phase one payload len=... hex=...
+oracledb::connect: send AUTH phase one
+oracledb::connect: read AUTH phase one
+oracledb::connect: AUTH phase two payload len=... hex=...
+oracledb::connect: send AUTH phase two
+oracledb::connect: read AUTH phase two
+oracledb::connect: session established sid=1234 serial=5678
+```
+
+Two patterns worth recognising:
+
+- **`RESEND` — server asked to resend the `CONNECT`.** You'll see
+  `RESEND requested; resending CONNECT` between the first `send CONNECT` and the
+  eventual `read ACCEPT`. One or two is normal (pre-23ai listeners RESEND
+  routinely); a storm of them that never reaches `ACCEPT` points at a
+  descriptor the listener keeps rejecting.
+- **Missing / failed fast-auth — the classic fallback.** Read the `ACCEPT`
+  line: `fast_auth=false` means the server did not offer the combined fast-auth
+  bundle, so the driver runs the classic path and you'll see
+  `send protocol negotiation (classic)` and `send data types (classic)` before
+  `AUTH phase one`. If you *expected* fast auth (a 23ai server) but see
+  `fast_auth=false`, the negotiation — not your credentials — is the thing to
+  investigate.
+
+To pinpoint where a failing connect diverges, capture a **working** exchange and
+a **failing** one the same way and `diff` the two step streams — the first line
+that differs is where the handshake broke down.
+
+**Traces are safe to share.** Secrets never enter the trace: the password is
+O5LOGON-encrypted (`generate_verifier`) into the phase-two verifier *before* any
+byte is dumped, and the fast-auth **access token** payload is sent but never
+handed to the hex-dumper (only its token-free *response* is). So the hex you see
+is the encrypted verifier / negotiation frames, never a plaintext password or
+token. This exclusion is pinned by a regression test
+(`tests/connect_trace_secret.rs`) and a source lint
+(`scripts/check_trace_secret_exclusion.sh`).
+
 ---
 
 ## FAQ

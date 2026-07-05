@@ -36,6 +36,25 @@ and the project follows the SemVer contract described in
 
 ### Added
 
+- **Discoverable connect/handshake trace (bead `vdr0`).** The connect path's
+  packet-level trace (steps + hex dumps to stderr, python-oracledb
+  `PYO_DEBUG_PACKETS` parity) is now documented under README →
+  *Troubleshooting → Capturing a connect/handshake trace*: enable it with
+  `ORACLEDB_TRACE_CONNECT=1` (and `ORACLEDB_TRACE_QUERY=1` for statement
+  bytes), what a healthy handshake vs. a `RESEND` vs. a missing/failed
+  fast-auth exchange looks like, and how to diff a working against a failing
+  capture. The trace is gated on that env var and is deliberately **not**
+  controlled by `RUST_LOG` — a field-triage session running `RUST_LOG=trace`
+  saw zero protocol detail. Three additive milestones were added so the trace
+  reads end to end: the negotiated `ACCEPT` capabilities line (`fast_auth=…`,
+  the fork point between fast and classic auth), a `REFUSE received` step, and
+  a final `session established sid=… serial=…`. The secret-exclusion invariant
+  (passwords are O5LOGON-encrypted before tracing; the fast-auth access-token
+  payload is never dumped) is now pinned by a live regression test
+  (`tests/connect_trace_secret.rs`, `#[ignore]`) and a deterministic CI source
+  lint (`scripts/check_trace_secret_exclusion.sh`). Docs / test / lint only —
+  no public API change.
+
 - Version-portable live-test fixtures: `live_object_decode` resolves the
   fixture owner from the connecting session's own schema (portable across the
   matrix lanes) rather than a hard-coded owner, and `pipeline_live`

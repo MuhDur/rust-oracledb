@@ -2570,14 +2570,32 @@ impl Connection {
                         continue;
                     }
                     TNS_PACKET_TYPE_REFUSE => {
+                        trace_connect_step("REFUSE received");
                         return Err(Error::ListenerRefused(
                             String::from_utf8_lossy(&reply.payload).to_string(),
-                        ))
+                        ));
                     }
                     other => return Err(Error::UnexpectedPacket(other)),
                 }
             };
             let accept_info = parse_accept_payload(&accept.payload)?;
+            // Surface the negotiated ACCEPT capabilities so a captured trace
+            // shows *why* the auth path forked: `fast_auth=true` takes the
+            // combined fast-auth bundle, `fast_auth=false` falls back to the
+            // classic protocol-negotiation + data-types round trips. This is the
+            // single most useful line for diagnosing a "missing/failed fast-auth"
+            // exchange. None of these values are secret (they mirror v$session /
+            // negotiated SDU).
+            trace_connect_value(
+                "ACCEPT",
+                &format!(
+                    "sdu={} fast_auth={} end_of_response={} oob={}",
+                    accept_info.sdu,
+                    accept_info.supports_fast_auth,
+                    accept_info.supports_end_of_response,
+                    accept_info.supports_oob,
+                ),
+            );
             // Record the framing mode so the recovery drain (which runs on a raw
             // read half, without the Connection) decides the trailing-error
             // boundary the way this server frames it: pre-23ai (no
@@ -2742,6 +2760,14 @@ impl Connection {
 
             let session_id = parse_session_u32(&auth_two.session_data, "AUTH_SESSION_ID")?;
             let serial_num = parse_session_u16(&auth_two.session_data, "AUTH_SERIAL_NUM")?;
+            // Final handshake milestone: authentication succeeded and the server
+            // handed back a session. `sid`/`serial` are the v$session identifiers
+            // (not secret) and let an operator correlate a captured trace with a
+            // server-side session.
+            trace_connect_value(
+                "session established",
+                &format!("sid={session_id} serial={serial_num}"),
+            );
             let server_version = auth_two.session_data.get("AUTH_VERSION_STRING").cloned();
             let server_version_tuple = auth_two
                 .session_data
