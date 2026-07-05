@@ -129,8 +129,11 @@ pub const oracledb_protocol::dpl::TNS_FUNC_DIRECT_PATH_LOAD_STREAM: u8
 pub const oracledb_protocol::dpl::TNS_FUNC_DIRECT_PATH_OP: u8
 pub const oracledb_protocol::dpl::TNS_FUNC_DIRECT_PATH_PREPARE: u8
 pub fn oracledb_protocol::dpl::build_direct_path_load_stream_payload(u16, &oracledb_protocol::dpl::DirectPathStream, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::dpl::build_direct_path_load_stream_payload_with_version(u16, &oracledb_protocol::dpl::DirectPathStream, u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::dpl::build_direct_path_op_payload(u16, u32, u8) -> alloc::vec::Vec<u8>
+pub fn oracledb_protocol::dpl::build_direct_path_op_payload_with_version(u16, u32, u8, u8) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::dpl::build_direct_path_prepare_payload(&str, &str, &[alloc::string::String], u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::dpl::build_direct_path_prepare_payload_with_version(&str, &str, &[alloc::string::String], u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::dpl::encode_direct_path_rows(&[oracledb_protocol::thin::ColumnMetadata], &[alloc::vec::Vec<oracledb_protocol::dpl::DirectPathColumnValue>], u64) -> oracledb_protocol::Result<oracledb_protocol::dpl::DirectPathStream>
 pub fn oracledb_protocol::dpl::parse_direct_path_load_stream_response(&[u8], oracledb_protocol::thin::ClientCapabilities) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::dpl::parse_direct_path_load_stream_response_with_limits(&[u8], oracledb_protocol::thin::ClientCapabilities, oracledb_protocol::wire::ProtocolLimits) -> oracledb_protocol::Result<()>

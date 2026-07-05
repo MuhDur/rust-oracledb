@@ -76,6 +76,25 @@ pub fn build_direct_path_prepare_payload(
     column_names: &[String],
     seq_num: u8,
 ) -> Result<Vec<u8>> {
+    build_direct_path_prepare_payload_with_version(
+        schema_name,
+        table_name,
+        column_names,
+        seq_num,
+        crate::thin::TNS_CCAP_FIELD_VERSION_23_1_EXT_1,
+    )
+}
+
+/// Version-aware [`build_direct_path_prepare_payload`]: gates the ub8 TTC
+/// token on `ttc_field_version` (see `build_direct_path_op_payload_with_version`
+/// for the ORA-03147 pre-23ai rationale). Bead rust-oracledb-dpl23.
+pub fn build_direct_path_prepare_payload_with_version(
+    schema_name: &str,
+    table_name: &str,
+    column_names: &[String],
+    seq_num: u8,
+    ttc_field_version: u8,
+) -> Result<Vec<u8>> {
     let keyword_parameters_length =
         u32::try_from(column_names.len() + 2).map_err(|_| ProtocolError::InvalidPacketLength {
             length: column_names.len(),
@@ -89,8 +108,7 @@ pub fn build_direct_path_prepare_payload(
     in_values[TNS_DPP_IN_INDEX_LOCK_WAIT] = 1;
 
     let mut writer = TtcWriter::new();
-    writer.write_function_code_with_seq(TNS_FUNC_DIRECT_PATH_PREPARE, seq_num);
-    writer.write_ub8(0); // token number
+    writer.write_function_header(TNS_FUNC_DIRECT_PATH_PREPARE, seq_num, ttc_field_version);
     writer.write_ub4(TNS_DPP_OP_CODE_LOAD);
     writer.write_u8(1); // keyword parameters (pointer)
     writer.write_ub4(keyword_parameters_length);
@@ -258,9 +276,28 @@ fn apply_direct_path_metadata_overrides(metadata: &mut ColumnMetadata, charset_i
 /// Mirrors `DirectPathOpMessage._write_message`. `op_code` is
 /// [`TNS_DP_OP_FINISH`] (commits the load) or [`TNS_DP_OP_ABORT`].
 pub fn build_direct_path_op_payload(cursor_id: u16, op_code: u32, seq_num: u8) -> Vec<u8> {
+    build_direct_path_op_payload_with_version(
+        cursor_id,
+        op_code,
+        seq_num,
+        crate::thin::TNS_CCAP_FIELD_VERSION_23_1_EXT_1,
+    )
+}
+
+/// Version-aware [`build_direct_path_op_payload`]: the ub8 TTC token in the
+/// function header is written only when `ttc_field_version >=
+/// TNS_CCAP_FIELD_VERSION_23_1_EXT_1`. A pre-23ai server misparses the stray
+/// token, shifting the message so a later mandatory field is read past the end
+/// (`ORA-03147: missing mandatory TTC field`; observed live on Oracle XE
+/// 18c/21c). Bead rust-oracledb-dpl23.
+pub fn build_direct_path_op_payload_with_version(
+    cursor_id: u16,
+    op_code: u32,
+    seq_num: u8,
+    ttc_field_version: u8,
+) -> Vec<u8> {
     let mut writer = TtcWriter::new();
-    writer.write_function_code_with_seq(TNS_FUNC_DIRECT_PATH_OP, seq_num);
-    writer.write_ub8(0); // token number
+    writer.write_function_header(TNS_FUNC_DIRECT_PATH_OP, seq_num, ttc_field_version);
     writer.write_ub4(op_code);
     writer.write_ub2(cursor_id);
     writer.write_u8(0); // pointer (input values)
@@ -789,9 +826,25 @@ pub fn build_direct_path_load_stream_payload(
     stream: &DirectPathStream,
     seq_num: u8,
 ) -> Result<Vec<u8>> {
+    build_direct_path_load_stream_payload_with_version(
+        cursor_id,
+        stream,
+        seq_num,
+        crate::thin::TNS_CCAP_FIELD_VERSION_23_1_EXT_1,
+    )
+}
+
+/// Version-aware [`build_direct_path_load_stream_payload`]: gates the ub8 TTC
+/// token on `ttc_field_version` (see `build_direct_path_op_payload_with_version`
+/// for the ORA-03147 pre-23ai rationale). Bead rust-oracledb-dpl23.
+pub fn build_direct_path_load_stream_payload_with_version(
+    cursor_id: u16,
+    stream: &DirectPathStream,
+    seq_num: u8,
+    ttc_field_version: u8,
+) -> Result<Vec<u8>> {
     let mut writer = TtcWriter::new();
-    writer.write_function_code_with_seq(TNS_FUNC_DIRECT_PATH_LOAD_STREAM, seq_num);
-    writer.write_ub8(0); // token number
+    writer.write_function_header(TNS_FUNC_DIRECT_PATH_LOAD_STREAM, seq_num, ttc_field_version);
     writer.write_ub2(cursor_id);
     writer.write_u8(1); // pointer (buffer)
     writer.write_ub4(stream.total_piece_length);

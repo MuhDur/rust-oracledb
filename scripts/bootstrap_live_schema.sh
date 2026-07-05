@@ -19,10 +19,28 @@ PROXY_PASSWORD="${PYO_TEST_PROXY_PASSWORD:-pythontestproxy}"
 PDB="${ORACLEDB_PDB:-FREEPDB1}"
 
 docker exec -i "$CONTAINER_NAME" \
-  sqlplus -S -L "system/${ORACLE_PASSWORD}@localhost:1521/${PDB}" <<SQL
+  sqlplus -S -L "sys/${ORACLE_PASSWORD}@localhost:1521/${PDB} as sysdba" <<SQL
 whenever sqlerror exit failure
 set echo off feedback off heading off verify off
--- Idempotent: drop the test users if a prior run left them behind.
+-- Idempotent: drop the test users if a prior run left them behind. Terminate
+-- any lingering sessions first (a leftover INACTIVE connection from a prior
+-- suite otherwise makes DROP USER fail with ORA-01940 "cannot drop a user that
+-- is currently connected"). This matters on the reused xe18/xe21 app-user
+-- lanes where the connecting user is the same across suites.
+begin
+  for s in (
+    select sid, serial# from v\$session
+    where username in (upper('${MAIN_USER}'), upper('${PROXY_USER}'))
+  ) loop
+    begin
+      execute immediate
+        'alter system disconnect session ''' || s.sid || ',' || s.serial#
+        || ''' immediate';
+    exception when others then null;
+    end;
+  end loop;
+end;
+/
 begin
   for u in (
     select username from dba_users

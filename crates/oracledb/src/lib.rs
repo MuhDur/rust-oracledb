@@ -6081,11 +6081,12 @@ impl Connection {
         self.ensure_clean_before_request().await?;
         self.protocol_limits.check_columns(column_names.len())?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let payload = oracledb_protocol::dpl::build_direct_path_prepare_payload(
+        let payload = oracledb_protocol::dpl::build_direct_path_prepare_payload_with_version(
             schema_name,
             table_name,
             column_names,
             seq_num,
+            self.capabilities.ttc_field_version,
         )?;
         trace_query_bytes("DIRECT PATH PREPARE payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
@@ -6124,8 +6125,11 @@ impl Connection {
         observe_cancellation_between_round_trips(cx)?;
         self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let payload = oracledb_protocol::dpl::build_direct_path_load_stream_payload(
-            cursor_id, stream, seq_num,
+        let payload = oracledb_protocol::dpl::build_direct_path_load_stream_payload_with_version(
+            cursor_id,
+            stream,
+            seq_num,
+            self.capabilities.ttc_field_version,
         )?;
         trace_query_bytes("DIRECT PATH LOAD STREAM payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
@@ -6161,8 +6165,12 @@ impl Connection {
         observe_cancellation_between_round_trips(cx)?;
         self.ensure_clean_before_request().await?;
         let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let payload =
-            oracledb_protocol::dpl::build_direct_path_op_payload(cursor_id, op_code, seq_num);
+        let payload = oracledb_protocol::dpl::build_direct_path_op_payload_with_version(
+            cursor_id,
+            op_code,
+            seq_num,
+            self.capabilities.ttc_field_version,
+        );
         trace_query_bytes("DIRECT PATH OP payload", &payload);
         self.core.send_data_packet(cx, &payload, self.sdu).await?;
         // Classic-aware read (pre-23ai has no END_OF_RESPONSE framing); bead

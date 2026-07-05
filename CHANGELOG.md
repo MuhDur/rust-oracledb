@@ -9,6 +9,16 @@ and the project follows the SemVer contract described in
 
 ### Fixed
 
+- **Direct-path load worked only on 23ai (bead `dpl23`).** The direct-path
+  prepare / op / load-stream TTC messages wrote the ub8 pipeline token
+  unconditionally; a pre-23ai server misparses the stray token and reads a
+  later mandatory field past the end (`ORA-03147: missing mandatory TTC
+  field`). New `*_with_version` builders gate the token via
+  `write_function_header` on the negotiated `ttc_field_version`; the original
+  builders are retained as byte-identical wrappers (semver-additive). Found by
+  running the live suites across the version matrix; `live_dpl_arrow` now green
+  on Oracle 18c, 21c, and 23ai.
+
 - **Recovery drain now respects classic (pre-23ai) framing (bead `99xu`).**
   The break/cancel recovery drain read the trailing-error boundary assuming
   23ai `END_OF_RESPONSE` framing; on a pre-23ai server (which never negotiates
