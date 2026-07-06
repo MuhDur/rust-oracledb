@@ -18,13 +18,15 @@ use oracledb_protocol::tls::wallet::{
 /// Wallet password used when generating the encrypted fixtures (see
 /// `docs/TLS_SETUP.md` §5). Lab-only synthetic material.
 const FIXTURE_WALLET_PASSWORD: &str = "WalletPassword16";
-/// Wallet password of the orapki-generated wallet fixtures.
+/// Password for wallets under `fixtures/tls/synthetic/` (see `scripts/gen_test_wallets.sh`).
+const SYNTHETIC_WALLET_PASSWORD: &str = "oracle-test-wallet-16";
+/// Password for the genuine `orapki` 23.26 wallet pair
+/// (`ewallet_orapki.p12` / `cwallet_orapki.sso`).
 const ORAPKI_WALLET_PASSWORD: &str = "WalletPass123";
 
 fn fixture_dir() -> PathBuf {
-    // crates/oracledb-protocol/tests -> crates/oracledb/tests/fixtures/tls
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop(); // crates/
+    p.push("..");
     p.push("oracledb");
     p.push("tests");
     p.push("fixtures");
@@ -32,9 +34,33 @@ fn fixture_dir() -> PathBuf {
     p
 }
 
+fn synthetic_fixture_dir() -> PathBuf {
+    fixture_dir().join("synthetic")
+}
+
 fn read_fixture(name: &str) -> Vec<u8> {
     let path = fixture_dir().join(name);
     std::fs::read(&path).expect("read TLS wallet fixture")
+}
+
+fn read_synthetic_fixture(name: &str) -> Vec<u8> {
+    let path = synthetic_fixture_dir().join(name);
+    std::fs::read(&path).expect("read synthetic TLS wallet fixture")
+}
+
+fn assert_synthetic_subject(wallet: &oracledb_protocol::tls::wallet::WalletContents) {
+    use x509_cert::der::Decode;
+    let der = wallet
+        .client_cert_chain
+        .first()
+        .or_else(|| wallet.ca_certificates.first())
+        .expect("at least one cert");
+    let cert = x509_cert::Certificate::from_der(der).expect("valid X.509");
+    let subject = cert.tbs_certificate.subject.to_string();
+    assert!(
+        subject.contains("oracle-test.invalid"),
+        "synthetic subject was {subject:?}"
+    );
 }
 
 #[test]
@@ -344,4 +370,66 @@ fn cwallet_sso_parses_shrouded_key_wallet() {
         .as_ref()
         .expect("client private key present");
     pkcs8::PrivateKeyInfo::from_der(key_der).expect("decrypted key must be valid PKCS#8");
+}
+
+// --- Synthetic fixtures (`fixtures/tls/synthetic/`, `scripts/gen_test_wallets.sh`) ---
+
+#[test]
+fn synthetic_ewallet_pem_parses() {
+    let pem = read_synthetic_fixture("ewallet.pem");
+    let wallet = parse_ewallet_pem(&pem, None).expect("synthetic ewallet.pem");
+    assert!(!wallet.ca_certificates.is_empty());
+    assert!(wallet.has_client_identity());
+    assert_synthetic_subject(&wallet);
+}
+
+#[test]
+fn synthetic_ewallet_p12_parses_with_password() {
+    let p12 = read_synthetic_fixture("ewallet.p12");
+    let wallet =
+        parse_ewallet_p12(&p12, Some(SYNTHETIC_WALLET_PASSWORD)).expect("synthetic ewallet.p12");
+    assert!(wallet.has_client_identity());
+    assert_synthetic_subject(&wallet);
+}
+
+#[test]
+fn synthetic_pem_and_p12_same_identity() {
+    let pem = parse_ewallet_pem(&read_synthetic_fixture("ewallet.pem"), None).unwrap();
+    let p12 = parse_ewallet_p12(
+        &read_synthetic_fixture("ewallet.p12"),
+        Some(SYNTHETIC_WALLET_PASSWORD),
+    )
+    .unwrap();
+    assert_eq!(
+        pem.client_private_key, p12.client_private_key,
+        "synthetic PEM and P12 must share the same key"
+    );
+}
+
+#[test]
+fn synthetic_ewallet_encrypted_pem_decrypts_with_password() {
+    let pem = read_synthetic_fixture("ewallet_encrypted.pem");
+    let wallet = parse_ewallet_pem(&pem, Some(SYNTHETIC_WALLET_PASSWORD))
+        .expect("synthetic encrypted ewallet.pem");
+    assert!(wallet.has_client_identity());
+    assert_synthetic_subject(&wallet);
+}
+
+#[test]
+fn synthetic_ewallet_3des_p12_is_typed_unsupported_until_a2_1() {
+    // Field OID 1.2.840.113549.1.12.1.3 (PBE-SHA1-3DES). Fixture is committed for
+    // A2.1 (+des crate); parser currently fails closed with remediation.
+    let p12 = read_synthetic_fixture("ewallet_3des_openssl.p12");
+    let err = parse_ewallet_p12(&p12, Some(SYNTHETIC_WALLET_PASSWORD))
+        .expect_err("legacy 3DES PFX encryption not yet supported");
+    assert!(
+        matches!(&err, WalletError::Pkcs12(_)),
+        "expected Pkcs12, got {err:?}"
+    );
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("1.2.840.113549.1.12.1.3") || msg.contains("PBES2"),
+        "remediation must mention legacy OID or PBES2-only support: {msg}"
+    );
+    assert_redacted(&err, SYNTHETIC_WALLET_PASSWORD);
 }

@@ -340,3 +340,21 @@ The tests that consume them:
 
 These run as part of `cargo test --workspace`. The end-to-end Oracle-server TCPS
 test self-skips when no TCPS endpoint is reachable (see §4).
+
+### Synthetic throwaway wallets (`fixtures/tls/synthetic/`)
+
+For **0.7.3 / C1** offline coverage with a fictional DN (`CN=oracle-test.invalid`),
+regenerate committed artifacts with:
+
+```bash
+./scripts/gen_test_wallets.sh
+# optional: SYNTHETIC_WALLET_PASSWORD='oracle-test-wallet-16' ./scripts/gen_test_wallets.sh
+```
+
+Produces `ewallet.pem`, `ewallet_encrypted.pem`, `ewallet.p12`, and
+`ewallet_3des_openssl.p12` (OpenSSL 3 **legacy** provider required for 3DES).
+See `crates/oracledb/tests/fixtures/tls/synthetic/PROVENANCE.md` for commands.
+`cwallet.sso` is not minted here; SSO auto-login is covered by the committed
+`cwallet_orapki.sso` / `cwallet.sso` fixtures in the parent `tls/` directory.
+`crates/oracledb-protocol/tests/tls_wallet.rs` runs `synthetic_*` decrypt tests
+against the synthetic tree.
