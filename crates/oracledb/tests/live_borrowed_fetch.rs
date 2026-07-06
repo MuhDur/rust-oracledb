@@ -14,6 +14,8 @@ use oracledb::protocol::thin::{QueryValue, QueryValueRef, ORA_TYPE_NUM_CLOB};
 use oracledb::{ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;
 
+mod common;
+
 fn live_options() -> ConnectOptions {
     let identity = ClientIdentity::new(
         "rust-oracledb",
@@ -24,9 +26,8 @@ fn live_options() -> ConnectOptions {
     )
     .expect("test identity should be valid");
     ConnectOptions::new(
-        std::env::var("PYO_TEST_CONNECT_STRING")
-            .unwrap_or_else(|_| "localhost:1522/FREEPDB1".into()),
-        std::env::var("PYO_TEST_MAIN_USER").unwrap_or_else(|_| "pythontest".into()),
+        common::live_conn_string_or(common::FREE23_CONNECT_STRING),
+        common::live_user_or(common::FREE23_USER),
         std::env::var("PYO_TEST_MAIN_PASSWORD")
             .expect("PYO_TEST_MAIN_PASSWORD must be set for ignored live test"),
         identity,

@@ -24,11 +24,12 @@ use oracledb::protocol::thin::{BindValue, QueryValue};
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, ConnectOptions, Query};
 
+mod common;
+
 fn lane() -> (String, String, String) {
     (
-        std::env::var("PYO_TEST_CONNECT_STRING")
-            .unwrap_or_else(|_| "localhost:1522/FREEPDB1".to_string()),
-        std::env::var("PYO_TEST_MAIN_USER").unwrap_or_else(|_| "pythontest".to_string()),
+        common::live_conn_string_or(common::FREE23_CONNECT_STRING),
+        common::live_user_or(common::FREE23_USER),
         std::env::var("PYO_TEST_MAIN_PASSWORD")
             .expect("PYO_TEST_MAIN_PASSWORD must be set for ignored live test"),
     )

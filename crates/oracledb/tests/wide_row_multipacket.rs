@@ -29,6 +29,8 @@ use oracledb::protocol::thin::{BindValue, ExecuteOptions, QueryResult, QueryValu
 use oracledb::{BlockingConnection, ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;
 
+mod common;
+
 const PROGRAM: &str = "rust-oracledb-widerow";
 const MACHINE: &str = "widerow-machine";
 const OSUSER: &str = "widerow-osuser";
@@ -49,9 +51,11 @@ const ROW_COUNT: i64 = 3000;
 const TABLE: &str = "RUST_WIDE_MULTIPACKET";
 
 fn connect_options() -> Option<ConnectOptions> {
-    let connect_string = std::env::var("PYO_TEST_CONNECT_STRING").ok()?;
-    let user = std::env::var("PYO_TEST_MAIN_USER").ok()?;
-    let password = std::env::var("PYO_TEST_MAIN_PASSWORD").ok()?;
+    let common::LiveCreds {
+        connect_string,
+        user,
+        password,
+    } = common::live_creds_opt()?;
     let identity = ClientIdentity::new(PROGRAM, MACHINE, OSUSER, TERMINAL, DRIVER).ok()?;
     // Request the smallest legal SDU so the wide result splits into many small
     // packets. With small packets a mid-stream packet boundary lands on a 0x1d

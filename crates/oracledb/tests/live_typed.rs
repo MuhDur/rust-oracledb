@@ -37,6 +37,8 @@ use oracledb::{
 };
 use oracledb_protocol::ClientIdentity;
 
+mod common;
+
 const PROGRAM: &str = "rust-oracledb-typed-itest";
 const MACHINE: &str = "itest-machine";
 const OSUSER: &str = "itest-osuser";
@@ -44,9 +46,11 @@ const TERMINAL: &str = "itest-terminal";
 const DRIVER: &str = "rust-oracledb thn : 0.0.0";
 
 fn connect_options() -> Option<ConnectOptions> {
-    let connect_string = std::env::var("PYO_TEST_CONNECT_STRING").ok()?;
-    let user = std::env::var("PYO_TEST_MAIN_USER").ok()?;
-    let password = std::env::var("PYO_TEST_MAIN_PASSWORD").ok()?;
+    let common::LiveCreds {
+        connect_string,
+        user,
+        password,
+    } = common::live_creds_opt()?;
     let identity = ClientIdentity::new(PROGRAM, MACHINE, OSUSER, TERMINAL, DRIVER).ok()?;
     Some(ConnectOptions::new(
         connect_string,

@@ -20,6 +20,8 @@ use oracledb::{ConnectOptions, Connection};
 use oracledb_protocol::oson::OsonValue;
 use oracledb_protocol::ClientIdentity;
 
+mod common;
+
 fn connect_options() -> ConnectOptions {
     let identity = ClientIdentity::new(
         "rust-oracledb",
@@ -30,10 +32,9 @@ fn connect_options() -> ConnectOptions {
     )
     .expect("identity");
     ConnectOptions::new(
-        std::env::var("PYO_TEST_CONNECT_STRING")
-            .unwrap_or_else(|_| "localhost:1523/FREEPDB1".to_string()),
-        std::env::var("PYO_TEST_MAIN_USER").unwrap_or_else(|_| "pythontest".to_string()),
-        std::env::var("PYO_TEST_MAIN_PASSWORD").unwrap_or_else(|_| "pythontest".to_string()),
+        common::live_conn_string_or("localhost:1523/FREEPDB1"),
+        common::live_user_or(common::FREE23_USER),
+        common::live_password_or(common::FREE23_PASSWORD),
         identity,
     )
 }

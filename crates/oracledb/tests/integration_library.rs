@@ -30,6 +30,8 @@ use oracledb::protocol::vector::{Vector, VectorValues};
 use oracledb::{BlockingConnection, ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;
 
+mod common;
+
 /// Connection identity used by these tests. The fields are deliberately
 /// distinctive so a `v$session` lookup can prove the caller-set masquerade.
 const PROGRAM: &str = "rust-oracledb-itest";
@@ -41,9 +43,11 @@ const DRIVER: &str = "rust-oracledb thn : 0.0.0";
 /// Build connect options from the harness container environment, or return
 /// `None` so the caller can self-skip when the container is not configured.
 fn connect_options() -> Option<ConnectOptions> {
-    let connect_string = std::env::var("PYO_TEST_CONNECT_STRING").ok()?;
-    let user = std::env::var("PYO_TEST_MAIN_USER").ok()?;
-    let password = std::env::var("PYO_TEST_MAIN_PASSWORD").ok()?;
+    let common::LiveCreds {
+        connect_string,
+        user,
+        password,
+    } = common::live_creds_opt()?;
     let identity = ClientIdentity::new(PROGRAM, MACHINE, OSUSER, TERMINAL, DRIVER).ok()?;
     Some(ConnectOptions::new(
         connect_string,

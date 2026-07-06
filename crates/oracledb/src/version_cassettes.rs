@@ -32,9 +32,19 @@
 //! with no real machine hostname / OS user) so the recorded `CONNECT` bytes
 //! leak no local identity and are reproducible offline.
 //!
-//! Broader per-version op coverage — a post-auth typed query, and LOB / AQ /
-//! DPL / CQN round-trips — is tracked as a follow-up (needs the auth phase, so
-//! it must slice+scrub a full capture; see the discovered-from bead).
+//! # Post-auth query cassettes (bead `cwsr`)
+//!
+//! A second cassette set reaches a **post-auth typed query**. The auth phase is
+//! non-deterministic (client `OsRng` session key) and carries secrets, so it is
+//! never committed; instead a full `connect + auth + execute` session is
+//! captured, the connect+auth prefix (and trailing logoff) are sliced off, and
+//! only the deterministic, secret-free execute request/response frames are
+//! committed (`<lane>-postauth.tns-cassette`). Offline replay rebuilds a loopback
+//! [`crate::Connection`] *seeded* from the manifest with the negotiated caps and
+//! the post-auth `ttc_seq_num` — both shape the execute request bytes — so the
+//! recorded request replays byte-exact under `ReplayWriteMode::Check`. See the
+//! `record_postauth_query_cassettes` / `replay_postauth_query_cassettes_offline`
+//! pair below. LOB / AQ / DPL / CQN round-trips remain a follow-up.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -566,4 +576,530 @@ fn replay_version_connect_cassettes_offline() {
         }
     }
     assert!(failures.is_empty(), "replay failures: {failures:?}");
+}
+
+// ---- POST-AUTH validation (cwsr) ------------------------------------------
+//
+// The first cassette set stops at ACCEPT because the auth phase is
+// non-deterministic (client `OsRng` session key) and carries secrets. To reach
+// a post-auth typed query we use the "slice + loopback" approach (bead
+// `rust-oracledb-cwsr`, option b): capture a full live session, drop the
+// connect+auth prefix, and replay ONLY the deterministic, secret-free post-auth
+// frames against a loopback [`Connection`] that is *seeded* with the negotiated
+// caps and the post-auth `ttc_seq_num` the live session had.
+//
+// The reason seeding is required — and why a naive "start a fresh connection at
+// the query" fails — is that the execute request bytes are shaped by
+// `ttc_field_version` (a negotiated cap) AND by the `ttc_seq_num` counter, which
+// the auth phase has already advanced by a lane-specific amount (fast-auth vs
+// classic send a different number of TTC messages). Server-assigned values
+// (cursor id, SCN) travel back in the recorded responses, so the replay
+// reproduces them for free; only the client-side counter and caps must be
+// carried across the slice.
+//
+// This test is the empirical proof that the post-auth C->S request bytes are
+// byte-reproducible offline. It self-validates in one process (capture then
+// replay) so it needs no committed fixture; the committed-cassette harness is
+// built on top of a green result here.
+
+/// Build a loopback [`Connection`] over a replay `core`, seeded with the
+/// negotiated caps and post-auth `ttc_seq_num` of a captured live session, so
+/// its post-auth request bytes reproduce the recording byte-for-byte.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn loopback_for_replay(
+    core: ConnectionCore<DriverTransport>,
+    capabilities: oracledb_protocol::thin::ClientCapabilities,
+    ttc_seq_num: u8,
+    supports_end_of_response: bool,
+    supports_oob: bool,
+    sdu: usize,
+) -> crate::Connection {
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+    crate::Connection {
+        descriptor: crate::EasyConnect::parse("127.0.0.1:1521/FREEPDB1")
+            .expect("loopback descriptor parses"),
+        identity: oracledb_protocol::ClientIdentity::new(
+            "cassette-replay",
+            "cassette-replay",
+            "cassette",
+            "unknown",
+            "rust-oracledb-cassette",
+        )
+        .expect("loopback identity is valid"),
+        core,
+        protocol_limits: ProtocolLimits::DEFAULT,
+        session_id: 0,
+        serial_num: 0,
+        server_version: None,
+        server_version_tuple: None,
+        capabilities,
+        ttc_seq_num,
+        sdu,
+        supports_end_of_response,
+        supports_oob,
+        cursor_columns: BTreeMap::new(),
+        fetch_metadata_by_sql: HashMap::new(),
+        fetch_metadata_order: VecDeque::new(),
+        dead: false,
+        user: "cassette-replay".into(),
+        combo_key: Vec::new(),
+        statement_cache: Vec::new(),
+        statement_cache_size: crate::STATEMENT_CACHE_SIZE,
+        in_use_cursors: HashSet::new(),
+        lob_prefetch_cursors: BTreeSet::new(),
+        copied_cursors: HashSet::new(),
+        cursors_to_close: Vec::new(),
+        sessionless_data: None,
+        notification_buffer: Vec::new(),
+        notification_header_consumed: false,
+        transaction_context: None,
+        txn_in_progress: false,
+    }
+}
+
+/// Re-encode `frames` into a fresh cassette byte stream, normalizing every
+/// frame timestamp to `0` so the slice is deterministic regardless of capture
+/// timing (replay compares bytes, not timing).
+fn reencode_frames(frames: &[cassette::Frame]) -> Vec<u8> {
+    let mut out = Vec::new();
+    cassette::write_header(&mut out);
+    for frame in frames {
+        cassette::write_frame(&mut out, frame.direction, 0, &frame.bytes);
+    }
+    out
+}
+
+/// The typed query captured post-auth: a bind-free scalar whose request bytes
+/// are fully determined by the negotiated caps + `ttc_seq_num`, and whose result
+/// (`12`) is trivially assertable offline. No literal contains a `"` or `=`, so
+/// it round-trips through the manifest cleanly.
+const POSTAUTH_SQL: &str = "select cast(7 + 5 as number(6)) as v from dual";
+/// The decoded scalar the post-auth replay must reproduce.
+const POSTAUTH_EXPECTED_VALUE: &str = "12";
+
+/// A post-auth lane. Unlike the connect lanes these authenticate, so they carry
+/// per-lane default credentials — lab-only, and never written into a cassette
+/// (the slice starts after auth).
+struct PostAuthLane {
+    id: &'static str,
+    default_connect: &'static str,
+    default_user: &'static str,
+    default_password: &'static str,
+}
+
+/// The lanes covered by the post-auth query cassettes. xe11 is absent: it is
+/// below the protocol floor and never authenticates, so it has no post-auth
+/// phase to record.
+fn postauth_lanes() -> Vec<PostAuthLane> {
+    vec![
+        PostAuthLane {
+            id: "xe18",
+            default_connect: "localhost:1518/XEPDB1",
+            default_user: "testuser",
+            default_password: "testpw",
+        },
+        PostAuthLane {
+            id: "xe21",
+            default_connect: "localhost:1520/XEPDB1",
+            default_user: "testuser",
+            default_password: "testpw",
+        },
+        PostAuthLane {
+            id: "free23",
+            default_connect: "localhost:1522/FREEPDB1",
+            default_user: "pythontest",
+            default_password: "pythontest",
+        },
+    ]
+}
+
+fn postauth_cassette_path(lane_id: &str) -> PathBuf {
+    fixtures_dir().join(format!("{lane_id}-postauth.tns-cassette"))
+}
+
+fn postauth_manifest_path(lane_id: &str) -> PathBuf {
+    fixtures_dir().join(format!("{lane_id}-postauth.tns-cassette.manifest"))
+}
+
+/// The secret-free post-auth execute slice plus the negotiated state a loopback
+/// [`Connection`] must be seeded with to reproduce the recorded request bytes.
+struct PostAuthCapture {
+    service: String,
+    sliced: Vec<u8>,
+    capabilities: oracledb_protocol::thin::ClientCapabilities,
+    ttc_seq_num: u8,
+    supports_end_of_response: bool,
+    supports_oob: bool,
+    sdu: usize,
+    value: Option<String>,
+}
+
+/// Capture `connect + auth + execute` against a live lane, then slice off the
+/// connect+auth prefix and the trailing logoff, keeping only the deterministic,
+/// secret-free execute request/response frames. Errors (never panics) so the
+/// record loop can aggregate per-lane failures.
+fn capture_postauth(connect: &str, user: &str, password: &str) -> Result<PostAuthCapture> {
+    use oracledb_protocol::thin::{ExecuteOptions, QueryValue};
+
+    let (_, _, service) = split_connect(connect)?;
+    let runtime = build_io_runtime()?;
+    let (full_bytes, prefix_frames, seq0, caps, eor, oob, sdu, value) =
+        runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| Error::Runtime("missing ambient Cx in capture runtime".into()))?;
+            let scope = transport::capture_scope();
+            let identity = oracledb_protocol::ClientIdentity::new(
+                "cassette-postauth",
+                "cassette-capture",
+                "cassette",
+                "unknown",
+                "rust-oracledb-cassette",
+            )
+            .map_err(|e| Error::Runtime(e.to_string()))?;
+            let options = crate::ConnectOptions::new(
+                connect.to_string(),
+                user.to_string(),
+                password.to_string(),
+                identity,
+            );
+            let mut conn = crate::Connection::connect(&cx, options).await?;
+
+            // Boundary: every frame so far is connect + auth (the sliced-off prefix).
+            // The counter/caps captured here are what the loopback must be seeded
+            // with, because the execute request bytes depend on both.
+            let prefix_frames = scope.recorder().frame_count();
+            let seq0 = conn.ttc_seq_num;
+            let caps = conn.capabilities;
+            let eor = conn.supports_end_of_response;
+            let oob = conn.supports_oob;
+            let sdu = conn.sdu;
+
+            let exec = conn
+                .execute_raw(&cx, POSTAUTH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await?;
+            let value = exec
+                .cell(0, 0)
+                .and_then(QueryValue::as_number_text)
+                .map(|c| c.to_string());
+
+            let full = scope.to_cassette_bytes();
+            // Best-effort logoff so the capture leaves the session clean; its frames
+            // are past the execute slice and are dropped below.
+            conn.close(&cx).await.ok();
+            Ok::<_, Error>((full, prefix_frames, seq0, caps, eor, oob, sdu, value))
+        })?;
+
+    let all_frames = cassette::decode_all(&full_bytes)
+        .map_err(|e| Error::Runtime(format!("decode capture: {e}")))?;
+    if prefix_frames >= all_frames.len() {
+        return Err(Error::Runtime(format!(
+            "no post-auth frames after the connect+auth prefix ({prefix_frames} of {})",
+            all_frames.len()
+        )));
+    }
+    // Keep post-auth frames until the client's SECOND write: the first is the
+    // execute request; the second is the close/logoff piggyback, which we drop.
+    let post = &all_frames[prefix_frames..];
+    let mut end = post.len();
+    let mut seen_client_write = false;
+    for (idx, frame) in post.iter().enumerate() {
+        if frame.direction == cassette::Direction::ClientToServer {
+            if seen_client_write {
+                end = idx;
+                break;
+            }
+            seen_client_write = true;
+        }
+    }
+    let sliced = reencode_frames(&post[..end]);
+
+    // Belt-and-suspenders: the slice must carry NO auth-phase secret field name.
+    let leaks = scan_for_secret_fields(&sliced);
+    if !leaks.is_empty() {
+        return Err(Error::Runtime(format!(
+            "post-auth slice leaked secrets: {leaks:?}"
+        )));
+    }
+
+    Ok(PostAuthCapture {
+        service,
+        sliced,
+        capabilities: caps,
+        ttc_seq_num: seq0,
+        supports_end_of_response: eor,
+        supports_oob: oob,
+        sdu,
+        value,
+    })
+}
+
+/// Replay a sliced post-auth cassette against a loopback seeded from `caps` /
+/// `ttc_seq_num`, returning the decoded scalar. `ReplayWriteMode::Check` asserts
+/// every client byte matches the recording; the audit asserts full consumption.
+#[allow(clippy::too_many_arguments)]
+fn replay_postauth(
+    sliced: &[u8],
+    capabilities: oracledb_protocol::thin::ClientCapabilities,
+    ttc_seq_num: u8,
+    supports_end_of_response: bool,
+    supports_oob: bool,
+    sdu: usize,
+) -> Result<Option<String>> {
+    use oracledb_protocol::thin::{ExecuteOptions, QueryValue};
+
+    let (read, write, audit) = transport::replay_split_with_audit(sliced, ReplayWriteMode::Check)
+        .map_err(|e| Error::Runtime(format!("replay split: {e}")))?;
+    let core = ConnectionCore::<DriverTransport>::from_halves(read, write, "postauth_replay");
+    let mut conn = loopback_for_replay(
+        core,
+        capabilities,
+        ttc_seq_num,
+        supports_end_of_response,
+        supports_oob,
+        sdu,
+    );
+
+    let runtime = build_io_runtime()?;
+    let value = runtime.block_on(async {
+        let cx = Cx::current()
+            .ok_or_else(|| Error::Runtime("missing ambient Cx in replay runtime".into()))?;
+        let exec = conn
+            .execute_raw(&cx, POSTAUTH_SQL, 2, &[], ExecuteOptions::default(), None)
+            .await?;
+        Ok::<_, Error>(
+            exec.cell(0, 0)
+                .and_then(QueryValue::as_number_text)
+                .map(|c| c.to_string()),
+        )
+    })?;
+
+    audit
+        .assert_finished()
+        .map_err(|e| Error::Runtime(format!("post-auth replay audit: {e}")))?;
+    Ok(value)
+}
+
+fn build_postauth_manifest(lane_id: &str, cap: &PostAuthCapture) -> Result<String> {
+    let write_hashes = write_frame_hashes(&cap.sliced)?;
+    Ok(format!(
+        concat!(
+            "schema_version = {}\n",
+            "format_version = {}\n",
+            "commit = \"{}\"\n",
+            "profile = \"post-auth-query\"\n",
+            "lane = \"{}\"\n",
+            "service = \"{}\"\n",
+            "scenario = \"execute_select\"\n",
+            "sql = \"{}\"\n",
+            "ttc_field_version = {}\n",
+            "charset_id = {}\n",
+            "max_string_size = {}\n",
+            "ttc_seq_num = {}\n",
+            "supports_end_of_response = {}\n",
+            "supports_oob = {}\n",
+            "sdu = {}\n",
+            "expected_value = \"{}\"\n",
+            "sanitized = true\n",
+            "checksum_sha256 = \"{}\"\n",
+            "expected_writes = {}\n",
+            "expected_write_sha256 = \"{}\"\n",
+        ),
+        MANIFEST_SCHEMA_VERSION,
+        CASSETTE_FORMAT_VERSION,
+        SOURCE_COMMIT.trim(),
+        lane_id,
+        cap.service,
+        POSTAUTH_SQL,
+        cap.capabilities.ttc_field_version,
+        cap.capabilities.charset_id,
+        cap.capabilities.max_string_size,
+        cap.ttc_seq_num,
+        cap.supports_end_of_response,
+        cap.supports_oob,
+        cap.sdu,
+        cap.value.as_deref().unwrap_or(""),
+        sha256_hex(&cap.sliced),
+        write_hashes.len(),
+        write_hashes.join(","),
+    ))
+}
+
+/// Record every lane's post-auth query cassette against the live version fleet.
+/// Ignored by default (needs the Docker lanes up); run explicitly:
+///
+/// ```text
+/// cargo test -p oracledb --features cassette \
+///   record_postauth_query_cassettes -- --ignored --nocapture
+/// ```
+///
+/// Per-lane connect strings default to the `version_matrix.sh` ports and are
+/// overridable via `ORACLEDB_CASSETTE_XE18` / `_XE21` / `_FREE23`; credentials
+/// via `ORACLEDB_CASSETTE_<ID>_USER` / `_PASSWORD`. Each capture is re-verified
+/// offline before its fixture is written.
+#[test]
+#[ignore = "records the live post-auth query cassettes; needs the Docker lanes"]
+fn record_postauth_query_cassettes() {
+    let out_dir = std::env::var("ORACLEDB_CASSETTE_RECORD")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| fixtures_dir());
+    fs::create_dir_all(&out_dir).expect("create fixtures dir");
+
+    let mut failures = Vec::new();
+    for lane in postauth_lanes() {
+        let up = lane.id.to_uppercase();
+        let connect = std::env::var(format!("ORACLEDB_CASSETTE_{up}"))
+            .unwrap_or_else(|_| lane.default_connect.to_string());
+        let user = std::env::var(format!("ORACLEDB_CASSETTE_{up}_USER"))
+            .unwrap_or_else(|_| lane.default_user.to_string());
+        let password = std::env::var(format!("ORACLEDB_CASSETTE_{up}_PASSWORD"))
+            .unwrap_or_else(|_| lane.default_password.to_string());
+
+        let cap = match capture_postauth(&connect, &user, &password) {
+            Ok(cap) => cap,
+            Err(err) => {
+                failures.push(format!("{}: {err}", lane.id));
+                continue;
+            }
+        };
+        // Re-verify offline against a seeded loopback before committing.
+        match replay_postauth(
+            &cap.sliced,
+            cap.capabilities,
+            cap.ttc_seq_num,
+            cap.supports_end_of_response,
+            cap.supports_oob,
+            cap.sdu,
+        ) {
+            Ok(v) if v.as_deref() == Some(POSTAUTH_EXPECTED_VALUE) => {}
+            Ok(v) => {
+                failures.push(format!(
+                    "{}: replay value {v:?} != {POSTAUTH_EXPECTED_VALUE:?}",
+                    lane.id
+                ));
+                continue;
+            }
+            Err(err) => {
+                failures.push(format!("{}: pre-commit replay {err}", lane.id));
+                continue;
+            }
+        }
+        let manifest = match build_postauth_manifest(lane.id, &cap) {
+            Ok(m) => m,
+            Err(err) => {
+                failures.push(format!("{}: manifest {err}", lane.id));
+                continue;
+            }
+        };
+        let cass = out_dir.join(format!("{}-postauth.tns-cassette", lane.id));
+        let man = out_dir.join(format!("{}-postauth.tns-cassette.manifest", lane.id));
+        if let Err(err) = fs::write(&cass, &cap.sliced) {
+            failures.push(format!("{}: write cassette {err}", lane.id));
+            continue;
+        }
+        if let Err(err) = fs::write(&man, manifest) {
+            failures.push(format!("{}: write manifest {err}", lane.id));
+            continue;
+        }
+        eprintln!(
+            "recorded {} post-auth ({} bytes) -> {}",
+            lane.id,
+            cap.sliced.len(),
+            cass.display()
+        );
+    }
+    assert!(
+        failures.is_empty(),
+        "post-auth capture failures: {failures:?}"
+    );
+}
+
+/// Replay one committed post-auth cassette offline and assert the seeded
+/// loopback re-derives the recorded scalar with byte-matching request bytes.
+fn replay_postauth_lane_offline(lane_id: &str) -> Result<()> {
+    let cassette_bytes =
+        fs::read(postauth_cassette_path(lane_id)).map_err(|e| Error::Runtime(e.to_string()))?;
+    let manifest_text = fs::read_to_string(postauth_manifest_path(lane_id))
+        .map_err(|e| Error::Runtime(e.to_string()))?;
+    let manifest = parse_manifest(&manifest_text);
+
+    // Integrity + sanitization hold for the committed artifact.
+    let expected_checksum = manifest
+        .get("checksum_sha256")
+        .ok_or_else(|| Error::Runtime("manifest missing checksum_sha256".into()))?;
+    if &sha256_hex(&cassette_bytes) != expected_checksum {
+        return Err(Error::Runtime(format!(
+            "{lane_id}: cassette checksum != manifest"
+        )));
+    }
+    let leaks = scan_for_secret_fields(&cassette_bytes);
+    if !leaks.is_empty() {
+        return Err(Error::Runtime(format!("{lane_id}: secret leak {leaks:?}")));
+    }
+
+    let need = |key: &str| -> Result<String> {
+        manifest
+            .get(key)
+            .cloned()
+            .ok_or_else(|| Error::Runtime(format!("{lane_id}: manifest missing {key}")))
+    };
+    let parse_u8 = |key: &str| -> Result<u8> {
+        need(key)?
+            .parse()
+            .map_err(|_| Error::Runtime(format!("{lane_id}: bad {key}")))
+    };
+    let ttc_field_version = parse_u8("ttc_field_version")?;
+    let charset_id: u16 = need("charset_id")?
+        .parse()
+        .map_err(|_| Error::Runtime(format!("{lane_id}: bad charset_id")))?;
+    let max_string_size: u32 = need("max_string_size")?
+        .parse()
+        .map_err(|_| Error::Runtime(format!("{lane_id}: bad max_string_size")))?;
+    let ttc_seq_num = parse_u8("ttc_seq_num")?;
+    let eor: bool = need("supports_end_of_response")?
+        .parse()
+        .map_err(|_| Error::Runtime(format!("{lane_id}: bad supports_end_of_response")))?;
+    let oob: bool = need("supports_oob")?
+        .parse()
+        .map_err(|_| Error::Runtime(format!("{lane_id}: bad supports_oob")))?;
+    let sdu: usize = need("sdu")?
+        .parse()
+        .map_err(|_| Error::Runtime(format!("{lane_id}: bad sdu")))?;
+    let expected_value = need("expected_value")?;
+
+    let caps = oracledb_protocol::thin::ClientCapabilities {
+        ttc_field_version,
+        max_string_size,
+        charset_id,
+    };
+    let value = replay_postauth(&cassette_bytes, caps, ttc_seq_num, eor, oob, sdu)?;
+    if value.as_deref() != Some(expected_value.as_str()) {
+        return Err(Error::Runtime(format!(
+            "{lane_id}: replay value {value:?} != {expected_value:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Offline, no-database replay of every committed post-auth query cassette.
+/// This is the per-PR gate: in ordinary `cargo test --features cassette` it
+/// reconstructs each lane's seeded loopback, replays the recorded execute with
+/// `ReplayWriteMode::Check` (so a request-byte regression fails here), and
+/// asserts the decoded scalar. Lanes without a committed cassette are skipped.
+#[test]
+fn replay_postauth_query_cassettes_offline() {
+    let mut failures = Vec::new();
+    for lane in postauth_lanes() {
+        if !postauth_cassette_path(lane.id).exists() {
+            eprintln!("skip {}: no committed post-auth cassette", lane.id);
+            continue;
+        }
+        if let Err(err) = replay_postauth_lane_offline(lane.id) {
+            failures.push(err.to_string());
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "post-auth replay failures: {failures:?}"
+    );
 }

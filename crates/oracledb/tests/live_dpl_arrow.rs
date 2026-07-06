@@ -19,6 +19,8 @@ use oracledb::{ConnectOptions, Connection};
 use oracledb_protocol::dpl::DirectPathColumnValue;
 use oracledb_protocol::ClientIdentity;
 
+mod common;
+
 #[test]
 #[ignore = "requires local Oracle listener from scripts/container.sh up"]
 fn live_direct_path_load_then_arrow_fetch() {
@@ -38,10 +40,9 @@ fn live_direct_path_load_then_arrow_fetch() {
             "rust-oracledb thn : 0.0.0",
         )
         .expect("test identity should be valid");
-        let user = std::env::var("PYO_TEST_MAIN_USER").unwrap_or_else(|_| "pythontest".to_string());
+        let user = common::live_user_or(common::FREE23_USER);
         let options = ConnectOptions::new(
-            std::env::var("PYO_TEST_CONNECT_STRING")
-                .unwrap_or_else(|_| "localhost:1526/FREEPDB1".to_string()),
+            common::live_conn_string_or("localhost:1526/FREEPDB1"),
             user.clone(),
             std::env::var("PYO_TEST_MAIN_PASSWORD")
                 .expect("PYO_TEST_MAIN_PASSWORD must be set for ignored live test"),

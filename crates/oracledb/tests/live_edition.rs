@@ -12,12 +12,11 @@ use oracledb::protocol::thin::QueryValue;
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, ConnectOptions};
 
+mod common;
+
 fn env() -> (String, String, String) {
-    (
-        std::env::var("PYO_TEST_CONNECT_STRING").unwrap(),
-        std::env::var("PYO_TEST_MAIN_USER").unwrap(),
-        std::env::var("PYO_TEST_MAIN_PASSWORD").unwrap(),
-    )
+    let c = common::live_creds_required();
+    (c.connect_string, c.user, c.password)
 }
 
 fn identity() -> ClientIdentity {

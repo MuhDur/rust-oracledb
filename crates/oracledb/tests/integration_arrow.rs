@@ -18,10 +18,14 @@ use oracledb::arrow::ArrowFetchOptions;
 use oracledb::{BlockingConnection, ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;
 
+mod common;
+
 fn connect_options() -> Option<ConnectOptions> {
-    let connect_string = std::env::var("PYO_TEST_CONNECT_STRING").ok()?;
-    let user = std::env::var("PYO_TEST_MAIN_USER").ok()?;
-    let password = std::env::var("PYO_TEST_MAIN_PASSWORD").ok()?;
+    let common::LiveCreds {
+        connect_string,
+        user,
+        password,
+    } = common::live_creds_opt()?;
     let identity = ClientIdentity::new(
         "rust-oracledb-itest",
         "itest-machine",

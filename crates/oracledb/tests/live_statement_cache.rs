@@ -11,10 +11,14 @@ use oracledb::protocol::thin::{QueryResult, QueryValue};
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, ConnectOptions};
 
+mod common;
+
 fn options() -> ConnectOptions {
-    let cs = std::env::var("PYO_TEST_CONNECT_STRING").unwrap();
-    let user = std::env::var("PYO_TEST_MAIN_USER").unwrap();
-    let pw = std::env::var("PYO_TEST_MAIN_PASSWORD").unwrap();
+    let common::LiveCreds {
+        connect_string: cs,
+        user,
+        password: pw,
+    } = common::live_creds_required();
     let id = ClientIdentity::new("stmtcache", "host", "user", "term", "rust").unwrap();
     ConnectOptions::new(cs, user, pw, id)
 }

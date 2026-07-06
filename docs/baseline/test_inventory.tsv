@@ -64,7 +64,7 @@ crates/oracledb/src/soda/qbe.rs	23
 crates/oracledb/src/sql_convert.rs	29
 crates/oracledb/src/tls.rs	8
 crates/oracledb/src/transport.rs	11
-crates/oracledb/src/version_cassettes.rs	2
+crates/oracledb/src/version_cassettes.rs	4
 crates/oracledb/tests/access_token.rs	5
 crates/oracledb/tests/arrow_columnar_alloc.rs	1
 crates/oracledb/tests/arrow_columnar_diff.rs	7
@@ -72,6 +72,7 @@ crates/oracledb/tests/arrow_golden.rs	2
 crates/oracledb/tests/asupersync_spike.rs	1
 crates/oracledb/tests/cancel_then_reuse.rs	1
 crates/oracledb/tests/cassette_record_replay.rs	6
+crates/oracledb/tests/common/mod.rs	0
 crates/oracledb/tests/connect_trace_secret.rs	1
 crates/oracledb/tests/derive_trybuild.rs	1
 crates/oracledb/tests/e2e_live.rs	7

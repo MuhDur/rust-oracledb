@@ -18,6 +18,8 @@
 //! Compiled only under `--features arrow`.
 #![cfg(feature = "arrow")]
 
+mod common;
+
 use oracledb::arrow::{
     arrow_schema_for_columns, build_record_batch, build_record_batch_columnar, ArrowFetchOptions,
 };
@@ -160,9 +162,11 @@ mod live {
     use oracledb::{BlockingConnection, ConnectOptions};
 
     fn connect_options() -> Option<ConnectOptions> {
-        let connect_string = std::env::var("PYO_TEST_CONNECT_STRING").ok()?;
-        let user = std::env::var("PYO_TEST_MAIN_USER").ok()?;
-        let password = std::env::var("PYO_TEST_MAIN_PASSWORD").ok()?;
+        let crate::common::LiveCreds {
+            connect_string,
+            user,
+            password,
+        } = crate::common::live_creds_opt()?;
         let identity = ClientIdentity::new(
             "rust-oracledb-coldiff",
             "coldiff-machine",
@@ -245,9 +249,11 @@ mod leak_probe {
     use oracledb::{BlockingConnection, ConnectOptions};
 
     fn opts() -> Option<ConnectOptions> {
-        let cs = std::env::var("PYO_TEST_CONNECT_STRING").ok()?;
-        let u = std::env::var("PYO_TEST_MAIN_USER").ok()?;
-        let p = std::env::var("PYO_TEST_MAIN_PASSWORD").ok()?;
+        let crate::common::LiveCreds {
+            connect_string: cs,
+            user: u,
+            password: p,
+        } = crate::common::live_creds_opt()?;
         let id =
             ClientIdentity::new("leakprobe", "m", "o", "t", "rust-oracledb thn : 0.0.0").ok()?;
         Some(ConnectOptions::new(cs, u, p, id))

@@ -15,6 +15,8 @@
 use oracledb::protocol::thin::{ColumnMetadata, QueryResult, QueryValue};
 use oracledb::{FromRow, QueryResultExt};
 
+mod common;
+
 // ---------------------------------------------------------------------------
 // Synthetic-row helpers (no DB)
 // ---------------------------------------------------------------------------
@@ -241,9 +243,11 @@ mod live {
     }
 
     fn connect_options() -> Option<ConnectOptions> {
-        let connect_string = std::env::var("PYO_TEST_CONNECT_STRING").ok()?;
-        let user = std::env::var("PYO_TEST_MAIN_USER").ok()?;
-        let password = std::env::var("PYO_TEST_MAIN_PASSWORD").ok()?;
+        let crate::common::LiveCreds {
+            connect_string,
+            user,
+            password,
+        } = crate::common::live_creds_opt()?;
         let identity = ClientIdentity::new(PROGRAM, MACHINE, OSUSER, TERMINAL, DRIVER).ok()?;
         Some(ConnectOptions::new(
             connect_string,

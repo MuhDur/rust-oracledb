@@ -3,6 +3,8 @@ use asupersync::Cx;
 use oracledb::{ConnectOptions, Connection};
 use oracledb_protocol::{thin::QueryValue, ClientIdentity};
 
+mod common;
+
 #[test]
 #[ignore = "requires local Oracle listener from scripts/container.sh up"]
 fn live_connect_ping_and_close() {
@@ -23,9 +25,8 @@ fn live_connect_ping_and_close() {
         )
         .expect("test identity should be valid");
         let options = ConnectOptions::new(
-            std::env::var("PYO_TEST_CONNECT_STRING")
-                .unwrap_or_else(|_| "localhost:1522/FREEPDB1".to_string()),
-            std::env::var("PYO_TEST_MAIN_USER").unwrap_or_else(|_| "pythontest".to_string()),
+            common::live_conn_string_or(common::FREE23_CONNECT_STRING),
+            common::live_user_or(common::FREE23_USER),
             std::env::var("PYO_TEST_MAIN_PASSWORD")
                 .expect("PYO_TEST_MAIN_PASSWORD must be set for ignored live test"),
             identity,

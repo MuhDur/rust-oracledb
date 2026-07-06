@@ -65,6 +65,37 @@ and the project follows the SemVer contract described in
   per-version op coverage (a post-auth typed query and LOB/AQ/DPL/CQN
   round-trips) is tracked as a follow-up (`rust-oracledb-cwsr`).
 
+- **L2 cassettes reach a post-auth typed query (bead `cwsr`).** The connect
+  cassettes stop at `ACCEPT` because the auth phase is non-deterministic (the
+  client `OsRng` session key makes its `C->S` bytes unrepeatable) and carries
+  secrets. Post-auth coverage uses a **slice + seeded-loopback** approach: a
+  full `connect + auth + execute` session is captured, the connect+auth prefix
+  (and the trailing logoff) are sliced off, and only the deterministic,
+  secret-free execute request/response frames are committed
+  (`crates/oracledb/tests/fixtures/cassettes/<lane>-postauth.tns-cassette` +
+  manifest). Offline replay (`replay_postauth_query_cassettes_offline`, in
+  ordinary `cargo test --features cassette`) rebuilds a loopback `Connection`
+  *seeded* from the manifest with the negotiated capabilities and the post-auth
+  `ttc_seq_num` — both of which shape the execute request bytes — and replays a
+  recorded `select cast(7 + 5 as number(6))` under `ReplayWriteMode::Check`, so
+  a post-auth request-byte regression fails per-PR with no database. The seeding
+  is what makes the replay byte-exact across generations, which a fresh
+  connection cannot be: xe18 (`ttc_field_version=11`), xe21 (`16`) and free23
+  (`24`) each negotiate a different field version and are pinned independently.
+  Because the committed frames begin *after* authentication they carry no
+  verifier / session-key / token material; a secret-field scan gates both
+  capture and offline replay. Test-only, behind the `cassette` feature — no
+  public API or default-build change.
+
+- **Shared live-test connection helper (bead `8eew`).** The ~24 live
+  (`#[ignore]`d) integration suites each repeated the same `PYO_TEST_*`
+  environment resolution and free23 fallbacks. That resolution now lives in one
+  place (`crates/oracledb/tests/common/mod.rs`): `live_creds_opt` (skip-if-unset
+  idiom), `live_creds_required` (panic-if-unset idiom), and the
+  `live_{conn_string,user,password}_or` fallback helpers. Behavior is byte-for-
+  byte unchanged (same variable names, same per-lane defaults); test-only, no
+  driver or public API change.
+
 - **Discoverable connect/handshake trace (bead `vdr0`).** The connect path's
   packet-level trace (steps + hex dumps to stderr, python-oracledb
   `PYO_DEBUG_PACKETS` parity) is now documented under README →

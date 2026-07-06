@@ -31,6 +31,8 @@ use oracledb::{
     Batch, BlockingConnection, ConnectOptions, Connection, Error, Execute, Query, Registration, Row,
 };
 
+mod common;
+
 const PROGRAM: &str = "rust-oracledb-e2e";
 const MACHINE: &str = "e2e-machine";
 const OSUSER: &str = "e2e-osuser";
@@ -76,9 +78,11 @@ impl E2eLog {
 }
 
 fn connect_options() -> Option<ConnectOptions> {
-    let connect_string = std::env::var("PYO_TEST_CONNECT_STRING").ok()?;
-    let user = std::env::var("PYO_TEST_MAIN_USER").ok()?;
-    let password = std::env::var("PYO_TEST_MAIN_PASSWORD").ok()?;
+    let common::LiveCreds {
+        connect_string,
+        user,
+        password,
+    } = common::live_creds_opt()?;
     let identity = ClientIdentity::new(PROGRAM, MACHINE, OSUSER, TERMINAL, DRIVER).ok()?;
     Some(ConnectOptions::new(
         connect_string,
