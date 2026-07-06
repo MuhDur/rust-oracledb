@@ -27,7 +27,9 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig, ServerConnection};
 
+use oracledb::protocol::ClientIdentity;
 pub use oracledb::Error;
+use oracledb::{BlockingConnection, ConnectOptions};
 
 // `tls.rs` calls the crate's `obs_warn!` (defined in `src/obs.rs`, brought into
 // crate scope by `#[macro_use] mod obs;` in `lib.rs`). When we `#[path]`-include
@@ -567,4 +569,306 @@ fn synthetic_tcps_mutual_tls_rejects_without_client_cert() {
     let err = outcome.expect_err("a client with no certificate must be rejected by an mTLS server");
     eprintln!("[C2] mTLS without a client cert correctly rejected: {err}");
     let _ = server.join();
+}
+
+// ---------------------------------------------------------------------------
+// C3 — mock OCI IAM token source over the C2 TCPS lane.
+//
+// Covers OCI Layer 3 (the token wire path + the non-TCPS refusal) autonomously:
+// no real IAM, no cloud creds, no signing. A local provider returns a
+// throwaway JWT-shaped token; the test drives the driver's real `AUTH_TOKEN`
+// fast-auth framing over the synthetic C2 TCPS lane and asserts (a) the token
+// travels as `AUTH_TOKEN` (never as password material) across an actual TLS
+// transport, and (b) the same token on a plaintext descriptor is refused with
+// the exact typed error — before any bytes leave the process.
+//
+// The `MockIamTokenSource` here is the test-only provider that bead A3's
+// `TokenSource` trait later formalizes; C3 pins the wire behaviour it must
+// produce.
+// ---------------------------------------------------------------------------
+
+/// A mock OCI IAM token source. Returns a deterministic, throwaway JWT-shaped
+/// token — three base64url segments (`header.payload.signature`) — that is NOT a
+/// credential and never touches any cloud service. Purely local.
+struct MockIamTokenSource {
+    token: String,
+}
+
+impl MockIamTokenSource {
+    fn new() -> Self {
+        // Fake, self-contained JWT shape. base64url charset only; the segments
+        // decode to obviously-synthetic JSON but are never verified. No secret.
+        let header = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9";
+        let payload = "eyJzdWIiOiJvY2lkMS51c2VyLm9jMS4uc3ludGhldGljIiwiZXhwIjoyNTM0MDIzMDB9";
+        let signature = "c3ludGhldGljLXNpZ25hdHVyZS1ub3QtcmVhbA";
+        Self {
+            token: format!("{header}.{payload}.{signature}"),
+        }
+    }
+
+    /// Return the current token (A3's `TokenSource::get_token` analogue).
+    fn get_token(&self) -> String {
+        self.token.clone()
+    }
+}
+
+fn byte_window_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Spawn a one-shot blocking rustls server on the synthetic leaf that, after the
+/// TLS handshake, reads one length-prefixed frame (`u32` big-endian length +
+/// body) and echoes the body back. Lets the client prove that its `AUTH_TOKEN`
+/// payload traverses a real TLS transport byte-for-byte.
+fn spawn_synthetic_capture_server() -> (u16, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let config = synthetic_server_config(false);
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            let mut conn = match ServerConnection::new(config) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[C3] synthetic capture server conn setup failed: {e}");
+                    return;
+                }
+            };
+            let mut tls = rustls::Stream::new(&mut conn, &mut sock);
+            let mut len_buf = [0u8; 4];
+            if tls.read_exact(&mut len_buf).is_ok() {
+                let n = u32::from_be_bytes(len_buf) as usize;
+                let mut body = vec![0u8; n];
+                if tls.read_exact(&mut body).is_ok() {
+                    let _ = tls.write_all(&body);
+                    let _ = tls.flush();
+                }
+            }
+        }
+    });
+    (port, handle)
+}
+
+#[test]
+fn c3_mock_iam_token_frames_auth_token_over_tcps_lane() {
+    let source = MockIamTokenSource::new();
+    let token = source.get_token();
+    assert_eq!(
+        token.split('.').count(),
+        3,
+        "the mock IAM token must be JWT-shaped (header.payload.signature)"
+    );
+
+    // The exact fast-auth token bundle the driver puts on the wire for token
+    // (OCI IAM / OAuth2) auth. This is the real driver framing, not a re-encode.
+    let payload = oracledb_protocol::thin::build_fast_auth_token_payload(
+        "OCITESTUSER",
+        &token,
+        "rust-oracledb",
+        300_000_000,
+        "cs",
+        None,
+    )
+    .expect("build fast-auth token payload");
+
+    let (port, server) = spawn_synthetic_capture_server();
+    let params = synthetic_ca_trust_params(SYNTHETIC_CN, None);
+    let desc = descriptor(port);
+
+    let rt = io_runtime();
+    let sent = payload.clone();
+    let echoed: Vec<u8> = rt.block_on(async move {
+        let _cx = Cx::current().expect("ambient cx");
+        let tcp = TcpStream::connect((desc.host.clone(), desc.port))
+            .await
+            .expect("tcp connect");
+        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
+            .await
+            .expect("TCPS handshake must succeed for the C3 token lane");
+        let len = u32::try_from(sent.len()).expect("payload fits u32");
+        tls_stream
+            .write_all(&len.to_be_bytes())
+            .await
+            .expect("write frame length");
+        tls_stream
+            .write_all(&sent)
+            .await
+            .expect("write auth payload");
+        tls_stream.flush().await.expect("flush");
+        let mut buf = vec![0u8; sent.len()];
+        tls_stream
+            .read_exact(&mut buf)
+            .await
+            .expect("read echoed auth payload");
+        buf
+    });
+
+    // The AUTH_TOKEN framing traversed a real TLS transport intact.
+    assert_eq!(
+        echoed, payload,
+        "the AUTH_TOKEN fast-auth payload must round-trip byte-identically over the TCPS lane"
+    );
+    assert!(
+        byte_window_contains(&echoed, b"AUTH_TOKEN"),
+        "the wire frame must carry the AUTH_TOKEN key"
+    );
+    assert!(
+        byte_window_contains(&echoed, token.as_bytes()),
+        "the mock JWT must be carried inside AUTH_TOKEN"
+    );
+    assert!(
+        !byte_window_contains(&echoed, b"AUTH_PASSWORD")
+            && !byte_window_contains(&echoed, b"AUTH_SESSKEY"),
+        "token auth must carry no password/verifier material"
+    );
+    eprintln!(
+        "[C3] mock IAM token framed as AUTH_TOKEN and round-tripped over the C2 TCPS lane ({} bytes)",
+        echoed.len()
+    );
+    server.join().expect("server thread");
+}
+
+#[test]
+fn c3_mock_iam_token_over_plaintext_refused_before_io() {
+    let source = MockIamTokenSource::new();
+    let token = source.get_token();
+    let id = ClientIdentity::new("tok", "host", "user", "term", "rust")
+        .expect("test identity should be valid");
+
+    // A plaintext (tcp://) descriptor carrying an access token must fail closed
+    // with the precise typed variant BEFORE any bytes leave the process — the
+    // guard fires on the descriptor, so the unroutable 127.0.0.1:1 is never even
+    // dialled. Were the guard missing this would instead attempt a connection.
+    let err = BlockingConnection::connect(
+        ConnectOptions::new("127.0.0.1:1/FREEPDB1", "OCITESTUSER", "", id)
+            .with_access_token(token.as_str()),
+    )
+    .expect_err("token auth over a plaintext descriptor must be refused");
+
+    assert!(
+        matches!(err, Error::AccessTokenRequiresTcps),
+        "expected AccessTokenRequiresTcps, got: {err:?}"
+    );
+    assert!(
+        !format!("{err}").contains(&token) && !format!("{err:?}").contains(&token),
+        "the token must never appear in the error"
+    );
+    eprintln!("[C3] mock IAM token over plaintext correctly refused: {err}");
+}
+
+// ---------------------------------------------------------------------------
+// A2.3 — offline wallet + TCPS handshake validation.
+//
+// The C1 wallet-parse matrix (3DES/PBES2 p12, encrypted/plain pem, sso, and the
+// wrong-password typed-error negatives) is covered by
+// `oracledb-protocol/tests/tls_wallet.rs`; the A2.2 fallthrough negative
+// controls (undecryptable-only preserves the exact typed error, never a
+// fallthrough mention) by the `tls::tests` unit tests in `src/tls.rs`. Here we
+// add the handshake-side proofs that tie those parsers to the C2 lane:
+//   * the A2.1 legacy-3DES-decrypted client key is *cryptographically* usable in
+//     a real mutual-TLS handshake (the key must actually sign the
+//     CertificateVerify — structural PKCS#8 validity alone would not catch a
+//     mis-decrypted key), and
+//   * an undecryptable wallet fed to the handshake input preserves the exact
+//     typed `Pkcs12` error, redacted and with no fallthrough wording.
+// ---------------------------------------------------------------------------
+
+/// Password for the wallets under `fixtures/tls/synthetic/`
+/// (see `scripts/gen_test_wallets.sh`).
+const SYNTHETIC_WALLET_PASSWORD: &str = "oracle-test-wallet-16";
+
+/// An mTLS client wallet that MERGES the identity decrypted from the synthetic
+/// legacy-3DES `ewallet_3des_openssl.p12` (A2.1) with the synthetic CA trust
+/// anchor from `ca.pem`. Exercising a handshake with it proves the decrypted
+/// private key matches the leaf public key.
+fn synthetic_3des_mtls_params() -> TlsParams {
+    use oracledb_protocol::tls::wallet::{parse_ewallet_p12, WalletContents};
+    let p12 = synthetic_fixture("ewallet_3des_openssl.p12");
+    let identity = parse_ewallet_p12(&p12, Some(SYNTHETIC_WALLET_PASSWORD))
+        .expect("legacy 3DES ewallet.p12 must decrypt with the wallet password");
+    assert!(
+        identity.has_client_identity(),
+        "the 3DES p12 must carry a client identity"
+    );
+    let ca = parse_ewallet_pem(&synthetic_fixture("ca.pem"), None).expect("parse synthetic CA");
+    let wallet = WalletContents {
+        ca_certificates: ca.ca_certificates,
+        client_cert_chain: identity.client_cert_chain,
+        client_private_key: identity.client_private_key,
+    };
+    assert!(
+        wallet.has_client_identity(),
+        "merged 3DES identity + CA must be usable for mTLS"
+    );
+    TlsParams {
+        wallet: Some(wallet),
+        dn_match: true,
+        server_cert_dn: None,
+        expected_host: SYNTHETIC_CN.to_string(),
+        use_sni: false,
+    }
+}
+
+#[test]
+fn a23_mtls_handshake_with_decrypted_3des_p12_identity() {
+    // The server demands a client cert and verifies it against the synthetic CA;
+    // the client presents the identity whose key was recovered by the A2.1 3DES
+    // path. A successful mutual handshake + echo proves the decrypted key is the
+    // real private key for the leaf (rustls signs the handshake with it).
+    let (port, server) = spawn_synthetic_tls_server(true);
+    let params = synthetic_3des_mtls_params();
+    let desc = descriptor(port);
+
+    let rt = io_runtime();
+    let echoed: Vec<u8> = rt.block_on(async move {
+        let _cx = Cx::current().expect("ambient cx");
+        let tcp = TcpStream::connect((desc.host.clone(), desc.port))
+            .await
+            .expect("tcp connect");
+        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
+            .await
+            .expect("mTLS handshake with the 3DES-decrypted identity must succeed");
+        tls_stream.write_all(b"ping\n").await.expect("write");
+        tls_stream.flush().await.expect("flush");
+        let mut buf = vec![0u8; 5];
+        tls_stream.read_exact(&mut buf).await.expect("read echo");
+        buf
+    });
+    assert_eq!(
+        &echoed, b"ping\n",
+        "mTLS echo with 3DES identity must round-trip"
+    );
+    eprintln!("[A2.3] mTLS handshake OK with the A2.1 legacy-3DES-decrypted client identity");
+    server.join().expect("server thread");
+}
+
+#[test]
+fn a23_undecryptable_3des_wallet_preserves_typed_error_no_fallthrough() {
+    // Handshake-input negative control: a wrong wallet password against the
+    // legacy-3DES p12 (with no cwallet.sso to fall through to) must surface the
+    // parser's own typed `Pkcs12` error verbatim — redacted, and never rewritten
+    // to mention the auto-login fallthrough.
+    use oracledb_protocol::tls::wallet::{parse_ewallet_p12, WalletError};
+    let p12 = synthetic_fixture("ewallet_3des_openssl.p12");
+    let err = parse_ewallet_p12(&p12, Some("not-the-password!"))
+        .expect_err("a wrong wallet password must fail closed");
+    assert!(
+        matches!(&err, WalletError::Pkcs12(_)),
+        "expected the original typed Pkcs12 error, got {err:?}"
+    );
+    for rendered in [format!("{err}"), format!("{err:?}")] {
+        assert!(
+            !rendered.contains("not-the-password!"),
+            "the wallet password must not leak: {rendered}"
+        );
+        assert!(
+            !rendered.contains(SYNTHETIC_WALLET_PASSWORD),
+            "the real wallet password must not leak: {rendered}"
+        );
+        let lower = rendered.to_ascii_lowercase();
+        assert!(
+            !lower.contains("fall") && !lower.contains("auto-login") && !lower.contains("sso"),
+            "the preserved error must not mention the fallthrough: {rendered}"
+        );
+    }
+    eprintln!("[A2.3] undecryptable 3DES wallet preserved its typed Pkcs12 error (no fallthrough)");
 }

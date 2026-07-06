@@ -1183,6 +1183,11 @@ pub enum Error {
     /// never included in this error.
     #[error("DPY-3001: access token authentication requires a TLS (TCPS) connection")]
     AccessTokenRequiresTcps,
+    /// A pluggable [`TokenSource`] failed to produce a database access token.
+    /// The failure is a redacted [`TokenSourceError`] class; the token and any
+    /// provider detail never appear in this error.
+    #[error("{0}")]
+    TokenSource(TokenSourceError),
     /// The caller selected a known authentication mode that this thin build
     /// does not implement. The mode is structured so diagnostic tools can
     /// distinguish capability gaps from bad credentials, listener failures, or
@@ -1305,9 +1310,9 @@ impl Error {
             Error::Conversion(_) | Error::Bind(_) => ErrorKind::Conversion,
             #[cfg(feature = "arrow")]
             Error::ArrowConversion(_) => ErrorKind::Conversion,
-            Error::AccessTokenRequiresTcps | Error::UnsupportedAuthMode(_) => {
-                ErrorKind::Authentication
-            }
+            Error::AccessTokenRequiresTcps
+            | Error::UnsupportedAuthMode(_)
+            | Error::TokenSource(_) => ErrorKind::Authentication,
             Error::RedirectUnsupported
             | Error::InvalidRedirectData(_)
             | Error::ConnectRedirectLoop(_)
@@ -1564,6 +1569,95 @@ impl std::fmt::Debug for AccessToken {
     }
 }
 
+/// A boxed, `Send` future — the return type of [`TokenSource::get_token`].
+///
+/// Defined locally because the driver takes no dependency on the `futures`
+/// crate; it is the conventional `Pin<Box<dyn Future + Send>>` shape.
+pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// Failure classes a [`TokenSource`] may report.
+///
+/// Every variant is **fully redacted**: neither [`Debug`] nor [`Display`]
+/// reveals any inner detail. The variants carry no payload by construction, so a
+/// token, a signed assertion, or a raw provider response can never leak through
+/// a token-source failure into logs, error chains, or panic output. A provider
+/// maps its underlying error into one of these classes and drops the detail —
+/// fail-closed.
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TokenSourceError {
+    /// The provider (command / process / HTTP call) failed to execute or exited
+    /// unsuccessfully.
+    Exec,
+    /// The provider ran but returned something that is not a usable token.
+    Invalid,
+    /// The provider did not produce a token within its own deadline.
+    Timeout,
+    /// Any other provider failure.
+    Other,
+}
+
+impl TokenSourceError {
+    /// A stable, non-secret label for this failure class.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Exec => "exec",
+            Self::Invalid => "invalid",
+            Self::Timeout => "timeout",
+            Self::Other => "other",
+        }
+    }
+}
+
+impl std::fmt::Display for TokenSourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let msg = match self {
+            Self::Exec => "token source failed to execute",
+            Self::Invalid => "token source returned an invalid token",
+            Self::Timeout => "token source timed out",
+            Self::Other => "token source failed",
+        };
+        f.write_str(msg)
+    }
+}
+
+impl std::fmt::Debug for TokenSourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Only the class name — there is no payload and nothing to leak.
+        write!(f, "TokenSourceError::{}", {
+            match self {
+                Self::Exec => "Exec",
+                Self::Invalid => "Invalid",
+                Self::Timeout => "Timeout",
+                Self::Other => "Other",
+            }
+        })
+    }
+}
+
+impl std::error::Error for TokenSourceError {}
+
+/// A pluggable source of OCI IAM / OAuth2 database access tokens.
+///
+/// Implement this to obtain a fresh token at connect time (for example by
+/// shelling out to the OCI CLI, calling an instance-principal endpoint, or
+/// reading a short-lived token file). The driver calls [`get_token`] **once at
+/// connect**, and again **only if** the initial token is rejected during
+/// authentication (token refresh on expiry). The returned token is placed in
+/// `AUTH_TOKEN` and therefore requires a TCPS transport; a token source on a
+/// plaintext descriptor is refused with [`Error::AccessTokenRequiresTcps`]
+/// *before* the source is ever consulted, so a token is never fetched for a
+/// connection that could not carry it securely.
+///
+/// The token itself must never be logged; report failures as the redacted
+/// [`TokenSourceError`].
+///
+/// [`get_token`]: TokenSource::get_token
+pub trait TokenSource: Send + Sync {
+    /// Fetch a fresh database access token, or a redacted failure class.
+    fn get_token(&self) -> BoxFuture<'_, std::result::Result<String, TokenSourceError>>;
+}
+
 /// Stable classifier for the thin driver's authentication modes.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[non_exhaustive]
@@ -1770,6 +1864,13 @@ pub struct ConnectOptions {
     /// verifier is exchanged. Token auth requires a TLS/TCPS transport; see
     /// [`ConnectOptions::with_access_token`]. The token is redacted from `Debug`.
     access_token: Option<AccessToken>,
+    /// Pluggable source of database access tokens (OCI IAM / OAuth2). When set
+    /// and no static [`access_token`](Self::access_token) is present, the driver
+    /// calls it once at connect to obtain the token (and again only on an auth
+    /// rejection). Like a static token it requires TCPS; a token source on a
+    /// plaintext descriptor is refused before it is ever consulted. Set with
+    /// [`ConnectOptions::with_token_source`].
+    token_source: Option<std::sync::Arc<dyn TokenSource>>,
     /// Maximum number of open statements kept in this connection's statement
     /// cache. Defaults to 20 (the reference default). `0` disables caching
     /// entirely (every statement's cursor is closed after use, never retained),
@@ -1803,6 +1904,10 @@ impl std::fmt::Debug for ConnectOptions {
             .field("ssl_server_cert_dn", &server_cert_dn)
             .field("use_sni", &self.use_sni)
             .field("access_token", &self.access_token)
+            .field(
+                "token_source",
+                &self.token_source.as_ref().map(|_| "<token source>"),
+            )
             .field("statement_cache_size", &self.statement_cache_size)
             .field("protocol_limits", &self.protocol_limits)
             .finish()
@@ -1837,6 +1942,7 @@ impl ConnectOptions {
             use_sni: false,
             edition: None,
             access_token: None,
+            token_source: None,
             statement_cache_size: STATEMENT_CACHE_SIZE,
             protocol_limits: ProtocolLimits::DEFAULT,
         }
@@ -1918,6 +2024,28 @@ impl ConnectOptions {
         self.access_token = Some(AccessToken::new(token));
         self.auth_mode = AuthMode::IamToken;
         self
+    }
+
+    /// Authenticate with a database access token obtained from a pluggable
+    /// [`TokenSource`] (OCI IAM / OAuth2). The driver calls the source once at
+    /// connect to fetch the token — and again only if the token is rejected at
+    /// authentication (refresh on expiry). Like [`Self::with_access_token`] this
+    /// selects token auth and therefore **requires** a TLS/TCPS connection: a
+    /// token source on a plaintext descriptor fails with the typed
+    /// [`Error::AccessTokenRequiresTcps`] *before* the source is consulted, so a
+    /// token is never fetched for a transport that could not carry it securely.
+    ///
+    /// A static [`Self::with_access_token`] takes precedence if both are set.
+    #[must_use]
+    pub fn with_token_source(mut self, source: std::sync::Arc<dyn TokenSource>) -> Self {
+        self.token_source = Some(source);
+        self.auth_mode = AuthMode::IamToken;
+        self
+    }
+
+    /// The configured [`TokenSource`], if any.
+    pub fn token_source(&self) -> Option<&std::sync::Arc<dyn TokenSource>> {
+        self.token_source.as_ref()
     }
 
     /// Select passwordless external authentication intent on an existing
@@ -2343,13 +2471,38 @@ impl Connection {
     /// the supplied [`ClientIdentity`]. On success the database has recorded a
     /// session whose `program` / `machine` / `osuser` / `terminal` are exactly
     /// the identity fields.
-    pub async fn connect(cx: &Cx, options: ConnectOptions) -> Result<Self> {
+    pub async fn connect(cx: &Cx, mut options: ConnectOptions) -> Result<Self> {
         observe_cancellation_between_round_trips(cx)?;
         let protocol_limits = options.protocol_limits.validate()?;
         if let Some(unsupported) = options.auth_mode.unsupported_in_thin() {
             return Err(Error::UnsupportedAuthMode(unsupported));
         }
         let descriptor = EasyConnect::parse(&options.connect_string)?;
+        // Fail closed BEFORE any network I/O: a database access token (OCI IAM /
+        // OAuth2) must never be put on the wire in clear text. The reference
+        // enforces this during the auth exchange (protocol.pyx
+        // `ERR_ACCESS_TOKEN_REQUIRES_TCPS`); we additionally refuse up front, so
+        // the token never leaves the process when the descriptor is plaintext
+        // TCP. The in-auth guard below stays as defense in depth. Uniform typed
+        // error; the token is never rendered. A pluggable token *source* is held
+        // to the same rule and — crucially — is refused here BEFORE it is ever
+        // consulted, so no token is fetched for a transport that could not carry
+        // it securely.
+        if (options.access_token.is_some() || options.token_source.is_some())
+            && !descriptor.protocol.is_tls()
+        {
+            return Err(Error::AccessTokenRequiresTcps);
+        }
+        // Resolve a pluggable token source into a concrete access token once, at
+        // connect (the transport is now known to be TCPS). A static access token
+        // takes precedence. The provider's failure is surfaced as the redacted
+        // `Error::TokenSource`; its detail (and the token) never leak.
+        if options.access_token.is_none() {
+            if let Some(source) = options.token_source.clone() {
+                let token = source.get_token().await.map_err(Error::TokenSource)?;
+                options.access_token = Some(AccessToken::new(token));
+            }
+        }
         let full_descriptor = EasyConnect::parse_descriptor(&options.connect_string)?;
         let primary_description = full_descriptor.first_description().clone();
         let connect_timeout =
