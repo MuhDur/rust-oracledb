@@ -1103,3 +1103,67 @@ fn replay_postauth_query_cassettes_offline() {
         "post-auth replay failures: {failures:?}"
     );
 }
+
+// ---- Substrate integrity guard (a4-1s2) -----------------------------------
+//
+// The deterministic cassette-replay CI is only a force-multiplier if EVERY
+// committed cassette is actually exercised offline. A `.tns-cassette` that is
+// added to the fixtures directory but never wired to a replay lane would rot
+// silently — the per-lane replay tests skip *missing* cassettes, but nothing
+// catches an *orphan* cassette that no test reads. This guard closes that gap
+// from the other direction: it enumerates the committed cassettes and fails if
+// any is not covered by a known replay path (connect lane, post-auth lane, or
+// the synthetic record/replay fixture). New cassettes (e.g. the a4-nnnz LOB/AQ
+// post-auth set) must be registered on a lane here to pass.
+
+/// The synthetic fixture exercised by `tests/cassette_record_replay.rs`.
+const SYNTHETIC_FIXTURE: &str = "select_7_plus_5.tns-cassette";
+
+/// Every committed `.tns-cassette` that a replay test is expected to cover.
+fn expected_cassette_files() -> std::collections::BTreeSet<String> {
+    let mut expected = std::collections::BTreeSet::new();
+    for lane in lanes() {
+        expected.insert(format!("{}-connect.tns-cassette", lane.id));
+    }
+    for lane in postauth_lanes() {
+        expected.insert(format!("{}-postauth.tns-cassette", lane.id));
+    }
+    expected.insert(SYNTHETIC_FIXTURE.to_string());
+    expected
+}
+
+/// Fail if any committed `.tns-cassette` is not wired to a replay lane, and if
+/// any lane's committed cassette is empty (a truncated capture that would
+/// otherwise replay as a vacuous pass).
+#[test]
+fn every_committed_cassette_is_covered_by_a_replay_lane() {
+    let dir = fixtures_dir();
+    let expected = expected_cassette_files();
+
+    let mut orphans = Vec::new();
+    let mut empty = Vec::new();
+    for entry in fs::read_dir(&dir).expect("fixtures/cassettes dir is readable") {
+        let entry = entry.expect("dir entry is readable");
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // Cassettes only; skip the `.manifest` sidecars and anything else.
+        if !name.ends_with(".tns-cassette") {
+            continue;
+        }
+        if !expected.contains(&name) {
+            orphans.push(name.clone());
+        }
+        let len = fs::metadata(entry.path())
+            .expect("cassette metadata is readable")
+            .len();
+        if len == 0 {
+            empty.push(name);
+        }
+    }
+
+    assert!(
+        orphans.is_empty(),
+        "orphan cassette(s) with no replay lane: {orphans:?}; \
+         wire them onto a lane in version_cassettes.rs (or the synthetic fixture set)"
+    );
+    assert!(empty.is_empty(), "empty committed cassette(s): {empty:?}");
+}

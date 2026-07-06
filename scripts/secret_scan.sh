@@ -66,9 +66,9 @@ run_structural_and_denylist() {
   for pattern in "${STRUCTURAL_PATTERNS[@]}"; do
     while IFS= read -r -d '' path; do
       [[ -f "$path" ]] || continue
-      if grep -nE -- "$pattern" "$path" >/dev/null 2>&1; then
+      if grep -anE -- "$pattern" "$path" >/dev/null 2>&1; then
         echo "secret_scan: structural match ($pattern) in $path" >&2
-        grep -nE -- "$pattern" "$path" | head -5 >&2 || true
+        grep -anE -- "$pattern" "$path" | head -5 >&2 || true
         hits=$((hits + 1))
       fi
     done < <(scan_paths)
@@ -82,9 +82,9 @@ run_structural_and_denylist() {
       [[ -z "$pattern" ]] && continue
       while IFS= read -r -d '' path; do
         [[ -f "$path" ]] || continue
-        if grep -nE -- "$pattern" "$path" >/dev/null 2>&1; then
+        if grep -anE -- "$pattern" "$path" >/dev/null 2>&1; then
           echo "secret_scan: denylist match in $path (pattern from $DENYLIST_FILE)" >&2
-          grep -nE -- "$pattern" "$path" | head -5 >&2 || true
+          grep -anE -- "$pattern" "$path" | head -5 >&2 || true
           hits=$((hits + 1))
         fi
       done < <(scan_paths)
@@ -113,9 +113,9 @@ run_generic_heuristics() {
       if should_skip_generic "$path"; then
         continue
       fi
-      if grep -nE -- "$pattern" "$path" >/dev/null 2>&1; then
+      if grep -anE -- "$pattern" "$path" >/dev/null 2>&1; then
         echo "secret_scan: generic match ($pattern) in $path" >&2
-        grep -nE -- "$pattern" "$path" | head -5 >&2 || true
+        grep -anE -- "$pattern" "$path" | head -5 >&2 || true
         hits=$((hits + 1))
       fi
     done < <(scan_paths)
@@ -128,16 +128,29 @@ run_selftest() {
   local scratch
   scratch="$(mktemp)"
   trap 'rm -f "$scratch"' RETURN
-  printf '%s\n' 'CN=scan-selftest.example.oraclecloud.com' >"$scratch"
 
+  # Phase 1: a plain-text planted marker trips the structural scan.
+  printf '%s\n' 'CN=scan-selftest.example.oraclecloud.com' >"$scratch"
   SECRET_SCAN_SELFTEST_PATH="$scratch"
   if run_structural_and_denylist; then
     echo "secret_scan: self-test FAILED (scanner did not fail on planted marker)" >&2
     unset SECRET_SCAN_SELFTEST_PATH
     return 1
   fi
-  unset SECRET_SCAN_SELFTEST_PATH
   echo "secret_scan: self-test OK (planted marker trips structural scan)" >&2
+
+  # Phase 2: a marker planted inside a BINARY blob (NUL bytes, cassette-shaped)
+  # must ALSO trip the scan. Without `grep -a` the default GNU grep silently
+  # skips binary files, so a secret hidden in a `.tns-cassette` would evade the
+  # C4 gate. This is the regression guard for that gap.
+  printf 'TNSCASSETTE\x00\x00adb.us-ashburn-1.oraclecloud.com\x00\x01\x02trailer' >"$scratch"
+  if run_generic_heuristics; then
+    echo "secret_scan: self-test FAILED (scanner did not fail on binary-embedded marker)" >&2
+    unset SECRET_SCAN_SELFTEST_PATH
+    return 1
+  fi
+  unset SECRET_SCAN_SELFTEST_PATH
+  echo "secret_scan: self-test OK (binary-embedded marker trips generic scan)" >&2
   return 0
 }
 
