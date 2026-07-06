@@ -457,6 +457,11 @@ struct ConnectionCore<T: WireTransport> {
     write: SharedWriteHalf<T>,
     recovery: Arc<SessionRecovery>,
     protocol_limits: ProtocolLimits,
+    /// Optional per-read inactivity deadline (GH#14). `None` = unbounded reads
+    /// (prior behaviour); `Some(d)` fails a stalled post-auth read with
+    /// [`Error::CallTimeout`] after `d`. Set once at connect from
+    /// [`ConnectOptions::inactivity_timeout`].
+    inactivity_timeout: Option<Duration>,
     /// Whether this session negotiated the *classic* (pre-END_OF_RESPONSE)
     /// framing, i.e. `!supports_end_of_response`. Set once at connect time from
     /// the ACCEPT capabilities. The recovery drain reads this to decide the
@@ -472,6 +477,7 @@ impl<T: WireTransport> ConnectionCore<T> {
             write: Arc::new(AsyncMutex::with_name(write_name, write)),
             recovery: Arc::new(SessionRecovery::new()),
             protocol_limits: ProtocolLimits::DEFAULT,
+            inactivity_timeout: None,
             classic_framing: false,
         }
     }
@@ -486,6 +492,12 @@ impl<T: WireTransport> ConnectionCore<T> {
     fn set_protocol_limits(&mut self, limits: ProtocolLimits) -> Result<()> {
         self.protocol_limits = limits.validate()?;
         Ok(())
+    }
+
+    /// Sets the per-read inactivity deadline for this session (GH#14). `None`
+    /// leaves reads unbounded (prior behaviour).
+    fn set_inactivity_timeout(&mut self, timeout: Option<Duration>) {
+        self.inactivity_timeout = timeout;
     }
 
     fn read_mut(&mut self) -> Result<&mut T::Read> {
@@ -537,14 +549,24 @@ impl<T: WireTransport> ConnectionCore<T> {
 
     async fn read_packet(&mut self, width: PacketLengthWidth) -> Result<IncomingPacket> {
         let limits = self.protocol_limits;
-        let result = read_packet_with_limits(self.read_mut()?, width, limits).await;
+        let inactivity = self.inactivity_timeout;
+        let result = apply_inactivity_timeout(
+            inactivity,
+            read_packet_with_limits(self.read_mut()?, width, limits),
+        )
+        .await;
         self.note_post_sync_result(result)
     }
 
     async fn read_data_response(&mut self, cx: &Cx) -> Result<Vec<u8>> {
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
-        let result = read_data_response_with_limits(self.read_mut()?, cx, &write, limits).await;
+        let inactivity = self.inactivity_timeout;
+        let result = apply_inactivity_timeout(
+            inactivity,
+            read_data_response_with_limits(self.read_mut()?, cx, &write, limits),
+        )
+        .await;
         self.note_post_sync_result(result)
     }
 
@@ -556,8 +578,12 @@ impl<T: WireTransport> ConnectionCore<T> {
     async fn read_classic_data_response(&mut self, cx: &Cx) -> Result<Vec<u8>> {
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
-        let result =
-            read_classic_data_response_with_limits(self.read_mut()?, cx, &write, limits).await;
+        let inactivity = self.inactivity_timeout;
+        let result = apply_inactivity_timeout(
+            inactivity,
+            read_classic_data_response_with_limits(self.read_mut()?, cx, &write, limits),
+        )
+        .await;
         self.note_post_sync_result(result)
     }
 
@@ -583,12 +609,16 @@ impl<T: WireTransport> ConnectionCore<T> {
         }
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
-        let result = read_classic_data_response_probed_with_limits(
-            self.read_mut()?,
-            cx,
-            &write,
-            &probe,
-            limits,
+        let inactivity = self.inactivity_timeout;
+        let result = apply_inactivity_timeout(
+            inactivity,
+            read_classic_data_response_probed_with_limits(
+                self.read_mut()?,
+                cx,
+                &write,
+                &probe,
+                limits,
+            ),
         )
         .await;
         self.note_post_sync_result(result)
@@ -610,13 +640,17 @@ impl<T: WireTransport> ConnectionCore<T> {
         }
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
-        let result = read_classic_data_response_flushing_out_binds_probed_with_limits(
-            self.read_mut()?,
-            cx,
-            &write,
-            sdu,
-            &probe,
-            limits,
+        let inactivity = self.inactivity_timeout;
+        let result = apply_inactivity_timeout(
+            inactivity,
+            read_classic_data_response_flushing_out_binds_probed_with_limits(
+                self.read_mut()?,
+                cx,
+                &write,
+                sdu,
+                &probe,
+                limits,
+            ),
         )
         .await;
         self.note_post_sync_result(result)
@@ -629,12 +663,16 @@ impl<T: WireTransport> ConnectionCore<T> {
     ) -> Result<DataResponse> {
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
-        let result = read_data_response_boundary_with_limits(
-            self.read_mut()?,
-            cx,
-            &write,
-            in_pipeline,
-            limits,
+        let inactivity = self.inactivity_timeout;
+        let result = apply_inactivity_timeout(
+            inactivity,
+            read_data_response_boundary_with_limits(
+                self.read_mut()?,
+                cx,
+                &write,
+                in_pipeline,
+                limits,
+            ),
         )
         .await;
         self.note_post_sync_result(result)
@@ -647,12 +685,16 @@ impl<T: WireTransport> ConnectionCore<T> {
     ) -> Result<Vec<u8>> {
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
-        let result = read_data_response_flushing_out_binds_with_limits(
-            self.read_mut()?,
-            cx,
-            &write,
-            sdu,
-            limits,
+        let inactivity = self.inactivity_timeout;
+        let result = apply_inactivity_timeout(
+            inactivity,
+            read_data_response_flushing_out_binds_with_limits(
+                self.read_mut()?,
+                cx,
+                &write,
+                sdu,
+                limits,
+            ),
         )
         .await;
         self.note_post_sync_result(result)
@@ -1880,6 +1922,15 @@ pub struct ConnectOptions {
     statement_cache_size: usize,
     /// Resource policy for thin-protocol decoding and packet reassembly.
     protocol_limits: ProtocolLimits,
+    /// Optional read-inactivity deadline applied to every post-auth wire read
+    /// (GH#14). When `Some(d)`, a single read operation that makes no progress
+    /// within `d` fails with [`Error::CallTimeout`] rather than hanging forever
+    /// on a silent or half-open server. `None` (the default) preserves the prior
+    /// unbounded-read behaviour; operators opt in per connection with
+    /// [`ConnectOptions::with_inactivity_timeout`]. The CONNECT/ACCEPT phase is
+    /// bounded separately by the DSN transport-connect timeout, and TCP keepalive
+    /// is derived from a DSN `EXPIRE_TIME`.
+    inactivity_timeout: Option<Duration>,
 }
 
 impl std::fmt::Debug for ConnectOptions {
@@ -1910,6 +1961,7 @@ impl std::fmt::Debug for ConnectOptions {
             )
             .field("statement_cache_size", &self.statement_cache_size)
             .field("protocol_limits", &self.protocol_limits)
+            .field("inactivity_timeout", &self.inactivity_timeout)
             .finish()
     }
 }
@@ -1945,6 +1997,7 @@ impl ConnectOptions {
             token_source: None,
             statement_cache_size: STATEMENT_CACHE_SIZE,
             protocol_limits: ProtocolLimits::DEFAULT,
+            inactivity_timeout: None,
         }
     }
 
@@ -1995,6 +2048,19 @@ impl ConnectOptions {
     #[must_use]
     pub fn with_protocol_limits(mut self, limits: ProtocolLimits) -> Self {
         self.protocol_limits = limits;
+        self
+    }
+
+    /// Set a read-inactivity deadline for every post-auth wire read on this
+    /// connection (GH#14). A read operation that makes no progress within
+    /// `timeout` fails with [`Error::CallTimeout`] rather than hanging forever on
+    /// a silent or half-open peer (a half-open connection whose FIN/RST was lost
+    /// otherwise wedges the read indefinitely). Unset by default, which keeps the
+    /// prior unbounded-read behaviour. The CONNECT/ACCEPT phase is bounded by the
+    /// DSN transport-connect timeout; this governs only established-session reads.
+    #[must_use]
+    pub fn with_inactivity_timeout(mut self, timeout: Duration) -> Self {
+        self.inactivity_timeout = Some(timeout);
         self
     }
 
@@ -2253,6 +2319,10 @@ impl ConnectOptions {
     pub fn protocol_limits(&self) -> ProtocolLimits {
         self.protocol_limits
     }
+
+    pub fn inactivity_timeout(&self) -> Option<Duration> {
+        self.inactivity_timeout
+    }
 }
 
 /// A live asynchronous connection to an Oracle Database session.
@@ -2508,6 +2578,13 @@ impl Connection {
         let connect_timeout =
             transport_connect_timeout_duration(primary_description.tcp_connect_timeout);
         let connect_timeout_ms = duration_to_millis_saturating(connect_timeout);
+        // GH#14: the opt-in per-read inactivity deadline, and the TCP keepalive
+        // idle interval derived from a DSN `EXPIRE_TIME` (minutes). Both are Copy
+        // values captured into the connect block: keepalive is set on the socket
+        // right after dial (before any TLS wrap), and the inactivity deadline is
+        // installed on the session core once the transport is established.
+        let inactivity_timeout = options.inactivity_timeout;
+        let keepalive_idle = keepalive_idle_from_expire_time(primary_description.expire_time);
         let connect_result = time::timeout(time::wall_now(), connect_timeout, async {
             // Connect span (feature-gated, zero-cost when off). Carries only the
             // server address / port / service — never the password.
@@ -2581,6 +2658,14 @@ impl Connection {
                     trace_connect_step("tcp connect");
                     let stream = TcpStream::connect_timeout((host, port), connect_timeout).await?;
                     stream.set_nodelay(true)?;
+                    // GH#14: enable TCP keepalive so a half-open/dead peer is
+                    // detected instead of wedging a later read forever. The idle
+                    // interval comes from the DSN `EXPIRE_TIME` (minutes); on a
+                    // TCPS descriptor it is set on the underlying socket here,
+                    // before the TLS handshake consumes the stream.
+                    if let Some(idle) = keepalive_idle {
+                        stream.set_keepalive(Some(idle))?;
+                    }
                     trace_connect_step("tcp connected");
                     let halves = if let Some(tls_params) = tls_params {
                         trace_connect_step("tls handshake");
@@ -2654,6 +2739,7 @@ impl Connection {
             };
             let mut core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
             core.set_protocol_limits(protocol_limits)?;
+            core.set_inactivity_timeout(inactivity_timeout);
 
             let connect_descriptor = listener_connect_descriptor_with_server(
                 &descriptor,
@@ -2731,6 +2817,7 @@ impl Connection {
                         let (read, write) = dial(target.host, target.port).await?;
                         core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
                         core.set_protocol_limits(protocol_limits)?;
+                        core.set_inactivity_timeout(inactivity_timeout);
                         connect_data = target.connect_data;
                         packet_flags = TNS_PACKET_FLAG_REDIRECT;
                         // The redirected listener negotiates from scratch and
@@ -9397,6 +9484,33 @@ where
     read_packet_with_limits(stream, width, ProtocolLimits::DEFAULT).await
 }
 
+/// Derives the TCP keepalive idle interval from a DSN `EXPIRE_TIME` (minutes,
+/// reference net.pyx). `0` (the default) disables keepalive; any positive value
+/// enables it with that many minutes of socket idle time before the first probe,
+/// so a half-open/dead peer is detected instead of wedging a later read (GH#14).
+fn keepalive_idle_from_expire_time(expire_time_minutes: u32) -> Option<Duration> {
+    (expire_time_minutes > 0).then(|| Duration::from_secs(u64::from(expire_time_minutes) * 60))
+}
+
+/// Applies the connection's optional read-inactivity deadline (GH#14) to a wire
+/// read future. `None` awaits unbounded (the prior behaviour); `Some(d)` fails
+/// the read with [`Error::CallTimeout`] if it does not complete within `d`, so a
+/// silent or half-open server cannot wedge a post-auth read forever. The
+/// deadline bounds a whole read operation (which may span several framing-layer
+/// `read_exact` calls), so every one of those reads is transitively bounded.
+async fn apply_inactivity_timeout<F, U>(timeout: Option<Duration>, fut: F) -> Result<U>
+where
+    F: std::future::Future<Output = Result<U>>,
+{
+    match timeout {
+        None => fut.await,
+        Some(deadline) => match time::timeout(time::wall_now(), deadline, fut).await {
+            Ok(result) => result,
+            Err(_) => Err(Error::CallTimeout(duration_to_millis_saturating(deadline))),
+        },
+    }
+}
+
 async fn read_packet_with_limits<R>(
     stream: &mut R,
     width: PacketLengthWidth,
@@ -10168,6 +10282,107 @@ mod tests {
             ),
             Duration::from_secs(20)
         );
+    }
+
+    /// GH#14: the TCP keepalive idle interval is derived from a DSN `EXPIRE_TIME`
+    /// (minutes). `0`/absent disables it; a positive value maps to that many
+    /// minutes of socket idle time.
+    #[test]
+    fn a11_keepalive_idle_derives_from_expire_time_minutes() {
+        assert_eq!(keepalive_idle_from_expire_time(0), None);
+        assert_eq!(
+            keepalive_idle_from_expire_time(1),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            keepalive_idle_from_expire_time(5),
+            Some(Duration::from_secs(300))
+        );
+        // Tie the derivation to the DSN parser: a descriptor `EXPIRE_TIME=2`
+        // yields a 120s keepalive idle; the default descriptor disables it.
+        let with_expire =
+            EasyConnect::parse_descriptor("h:1521/svc?expire_time=2").expect("parse expire_time");
+        assert_eq!(
+            keepalive_idle_from_expire_time(with_expire.first_description().expire_time),
+            Some(Duration::from_secs(120))
+        );
+        let default_desc = EasyConnect::parse_descriptor("h:1521/svc").expect("parse default");
+        assert_eq!(
+            keepalive_idle_from_expire_time(default_desc.first_description().expire_time),
+            None
+        );
+    }
+
+    /// An `AsyncRead` that never yields a byte and never wakes — models a silent
+    /// or half-open peer whose data (or FIN/RST) never arrives, so a naive read
+    /// would hang forever.
+    #[derive(Debug)]
+    struct SilentRead;
+
+    impl asupersync::io::AsyncRead for SilentRead {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut asupersync::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    /// GH#14 / AC1+AC4+AC5: with an inactivity deadline set, a post-auth framing
+    /// read against a silent server fails at ~the deadline with `CallTimeout`
+    /// instead of hanging. Deterministic via the `SilentRead` mock transport.
+    #[test]
+    fn a11_inactivity_deadline_fires_on_a_silent_server() {
+        let runtime = build_io_runtime().expect("io runtime");
+        let elapsed = runtime.block_on(async {
+            let mut reader = SilentRead;
+            let started = std::time::Instant::now();
+            let result = apply_inactivity_timeout(
+                Some(Duration::from_millis(200)),
+                read_packet_with_limits(
+                    &mut reader,
+                    PacketLengthWidth::Large32,
+                    ProtocolLimits::DEFAULT,
+                ),
+            )
+            .await;
+            let elapsed = started.elapsed();
+            assert!(
+                matches!(result, Err(Error::CallTimeout(_))),
+                "expected CallTimeout, got {result:?}"
+            );
+            elapsed
+        });
+        // Fired promptly at ~200ms — nowhere near an unbounded hang. The bounds
+        // are generous to stay robust on a loaded CI host.
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "deadline fired too early ({elapsed:?}); it must honour the configured 200ms"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "deadline should fire promptly, took {elapsed:?}"
+        );
+    }
+
+    /// GH#14: `None` (the default) imposes no deadline — a read that completes
+    /// passes through unchanged, and a generous deadline does not disturb a fast
+    /// read. Guards against the wrapper regressing existing unbounded behaviour.
+    #[test]
+    fn a11_inactivity_none_and_slack_pass_through() {
+        let runtime = build_io_runtime().expect("io runtime");
+        runtime.block_on(async {
+            let none: Result<u32> =
+                apply_inactivity_timeout(None, async { Ok::<u32, Error>(42) }).await;
+            assert_eq!(none.expect("None passes value through"), 42);
+            let slack: Result<u32> =
+                apply_inactivity_timeout(Some(Duration::from_secs(30)), async {
+                    Ok::<u32, Error>(7)
+                })
+                .await;
+            assert_eq!(slack.expect("fast op beats the deadline"), 7);
+        });
     }
 
     #[test]
