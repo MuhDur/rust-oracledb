@@ -64,6 +64,7 @@ crates/oracledb/src/soda/qbe.rs	23
 crates/oracledb/src/sql_convert.rs	29
 crates/oracledb/src/tls.rs	8
 crates/oracledb/src/transport.rs	11
+crates/oracledb/src/version_cassettes.rs	2
 crates/oracledb/tests/access_token.rs	5
 crates/oracledb/tests/arrow_columnar_alloc.rs	1
 crates/oracledb/tests/arrow_columnar_diff.rs	7

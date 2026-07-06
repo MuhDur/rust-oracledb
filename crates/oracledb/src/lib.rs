@@ -322,6 +322,14 @@ mod sql_convert;
 pub(crate) mod tls;
 pub mod transport;
 
+/// L2 version cassettes: live capture + offline replay of the per-version
+/// connect-negotiation wire exchange (bead rust-oracledb-xver-parity-so3w.3).
+/// Test-only, and only with the `cassette` feature (it uses the record/replay
+/// transport seam). Not part of the public API and compiled out of every
+/// shipping build.
+#[cfg(all(test, feature = "cassette"))]
+mod version_cassettes;
+
 /// Re-export of the `tracing` crate for the `obs_span!` / `obs_record!` macros
 /// (`$crate::__tracing::…`). Hidden and feature-gated; not part of the public
 /// API. Only exists when the `tracing` feature is on.

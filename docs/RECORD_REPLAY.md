@@ -238,3 +238,62 @@ by default**.
   `cassette` feature, so the parity suite always runs against the byte-identical
   transport path. Parity sentinels `test_1100_connection` (57 passed / 5
   skipped) and `test_2200_number_var` (39 passed) are unchanged by this work.
+
+---
+
+## 8. Version cassettes — per-version wire, replayed offline per-PR (bead `so3w.3`)
+
+The live **version matrix** (`scripts/version_matrix.sh`) records the real TTC
+wire exchange against a Docker fleet of every supported Oracle generation, but
+it is slow and needs containers, so it only runs nightly. **L2 version
+cassettes** capture the highest-value, version-gated, *secret-free* slice of
+that exchange — the **connect-negotiation handshake** — once per version, commit
+it, and replay it **offline in ordinary unit CI**, so a cross-version wire
+regression fails on **every PR** in seconds with no database and no containers.
+
+The mechanism lives in
+[`crates/oracledb/src/version_cassettes.rs`](../crates/oracledb/src/version_cassettes.rs)
+(test-only, `cassette` feature) and reuses the seam above:
+
+* **Capture** (`record_version_connect_cassettes`, `#[ignore]`, live): for each
+  lane it dials the server, installs a `capture_scope()`, drives the
+  `CONNECT` / `RESEND*` / `ACCEPT` loop with a **fixed synthetic connect
+  descriptor** (placeholder CID — no real hostname / OS user), and **stops at
+  `ACCEPT`, before authentication**. It then runs a sanitization gate (refuses
+  to write any cassette containing a known auth field name) and writes
+  `tests/fixtures/cassettes/<lane>-connect.tns-cassette` + a `.manifest`
+  (negotiated `protocol_version` + `fast_auth` / `end_of_response` flags,
+  checksum, expected write hashes). No credentials are needed — the auth phase
+  (with its `OsRng` session key and verifier/session-key/salt secrets) is never
+  captured, so the cassette is byte-reproducible and safe to commit.
+
+  ```bash
+  cargo test -p oracledb --features cassette \
+    record_version_connect_cassettes -- --ignored --nocapture
+  # per-lane connect strings default to the version_matrix.sh ports; override
+  # with ORACLEDB_CASSETTE_XE11 / _XE18 / _XE21 / _FREE23, and the output dir
+  # with ORACLEDB_CASSETTE_RECORD.
+  ```
+
+* **Replay** (`replay_version_connect_cassettes_offline`, runs in `cargo test`):
+  for each committed cassette it rebuilds the `CONNECT` request and asserts it
+  **byte-matches** the recording (`ReplayWriteMode::Check` + `ReplayAudit`
+  exact-consume), then decodes the **real** server `ACCEPT` and asserts the
+  version-gated outcome. It re-verifies the manifest checksum and re-scans for
+  leaks on every run.
+
+The first cassette set pins the real per-generation negotiation surface:
+
+| Lane   | protocol_version | outcome                                              |
+| ------ | ---------------- | ---------------------------------------------------- |
+| xe11   | 314              | **refusal** — structured `UnsupportedVersion` (< 315 floor) |
+| xe18   | 317              | accept (no fast-auth, no end-of-response)            |
+| xe21   | 318              | accept (no fast-auth, no end-of-response)            |
+| free23 | 319              | accept — **fast-auth** + **END_OF_RESPONSE**         |
+
+This replays the REAL bytes each server generation emits (including Oracle 11g's
+short pre-12.1 `ACCEPT` layout), pinning the decoder against ground truth rather
+than a hand-crafted fixture. Broader per-version op coverage — a post-auth typed
+query and LOB / AQ / DPL / CQN round-trips — is tracked as a follow-up
+(`rust-oracledb-cwsr`); it must slice+scrub a full capture because the auth phase
+is non-deterministic and secret-bearing.

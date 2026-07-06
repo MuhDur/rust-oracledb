@@ -1,0 +1,15 @@
+schema_version = 1
+format_version = 1
+commit = "f189c3121a0018e2b4005b93633ec3bfd4454ad6"
+profile = "connect-negotiation"
+lane = "xe11"
+service = "XE"
+scenario = "connect_accept"
+outcome = "refusal"
+protocol_version = 314
+supports_fast_auth = false
+supports_end_of_response = false
+sanitized = true
+checksum_sha256 = "94c66f599beccc145eaa4796091450b7680dd24b88180724733d4f8378cc6971"
+expected_writes = 2
+expected_write_sha256 = "40a32912be302d45295608263652b49f38e8c54696f3a7ec702b4d3d7bec8f06,40a32912be302d45295608263652b49f38e8c54696f3a7ec702b4d3d7bec8f06"

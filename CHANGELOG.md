@@ -36,6 +36,35 @@ and the project follows the SemVer contract described in
 
 ### Added
 
+- **L2 version cassettes: per-version connect-negotiation wire, replayed
+  offline per-PR (bead `so3w.3`).** The live version matrix records the real
+  TTC wire exchange across the Oracle 11g/18c/21c/23ai Docker fleet, but it is
+  slow and needs containers, so it only runs nightly. L2 records the
+  connect-negotiation handshake (`CONNECT` + any `RESEND` + the server `ACCEPT`)
+  **once per version** into a committed `.tns-cassette`
+  (`crates/oracledb/tests/fixtures/cassettes/<lane>-connect.tns-cassette` +
+  manifest) and **replays it offline** in ordinary `cargo test --features
+  cassette` (`crates/oracledb/src/version_cassettes.rs`). The replay
+  reconstructs each version's `CONNECT` request and asserts it byte-matches the
+  recording (`ReplayWriteMode::Check` + `ReplayAudit`), then decodes the REAL
+  server `ACCEPT` and asserts the version-gated outcome: xe11 → structured
+  `UnsupportedVersion` refusal (protocol 314 < floor 315); xe18 → 317;
+  xe21 → 318; free23 → 319 with `fast_auth` + `END_OF_RESPONSE`. So a
+  cross-version wire regression (a version gate that flips the emitted request
+  bytes or mis-decodes a real server response) now fails on **every PR** in
+  seconds with no database and no network — pinning the negotiation decoder
+  against ground-truth wire, not a hand-crafted fixture. The cassettes carry no
+  secrets and no client randomness (the auth phase, with its `OsRng` session
+  key and verifier/session-key/salt material, is captured *and* committed
+  **never** — capture stops at `ACCEPT`) and use a fixed synthetic connect
+  descriptor so the recorded `CONNECT` bytes leak no local identity and are
+  byte-reproducible. A sanitization gate refuses to write any cassette that
+  contains a known auth field name, and the offline replay re-checks the
+  manifest checksum and re-scans for leaks. Test-only and behind the `cassette`
+  feature (off by default) — no public API or default-build change. Broader
+  per-version op coverage (a post-auth typed query and LOB/AQ/DPL/CQN
+  round-trips) is tracked as a follow-up (`rust-oracledb-cwsr`).
+
 - **Discoverable connect/handshake trace (bead `vdr0`).** The connect path's
   packet-level trace (steps + hex dumps to stderr, python-oracledb
   `PYO_DEBUG_PACKETS` parity) is now documented under README →

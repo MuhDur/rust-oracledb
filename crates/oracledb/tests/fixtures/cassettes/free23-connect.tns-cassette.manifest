@@ -1,0 +1,15 @@
+schema_version = 1
+format_version = 1
+commit = "f189c3121a0018e2b4005b93633ec3bfd4454ad6"
+profile = "connect-negotiation"
+lane = "free23"
+service = "FREEPDB1"
+scenario = "connect_accept"
+outcome = "accept"
+protocol_version = 319
+supports_fast_auth = true
+supports_end_of_response = true
+sanitized = true
+checksum_sha256 = "3dd37b6852a1b2ba1722e2c54c56eb32e601026f8cbb6761471b37aca357a8ea"
+expected_writes = 1
+expected_write_sha256 = "bf2a722fa66fe95eefa5c24e0002d11da3e0ca89374ac080e41ecc2b97cc69f0"
