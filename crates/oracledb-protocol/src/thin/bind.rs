@@ -89,7 +89,7 @@ pub(crate) fn write_bind_metadata_with_type(
     // fetch.rs `>= TNS_CCAP_FIELD_VERSION_12_2`); the write side had missed it.
     // Our live matrix floor is 18c (field version 11), where the branch always
     // fired, so the miss stayed invisible.
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_12_2 {
+    if version_gates::carries_oaccolid(ttc_field_version) {
         writer.write_ub4(0); // oaccolid
     }
     Ok(())

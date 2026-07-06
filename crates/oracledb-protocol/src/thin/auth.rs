@@ -165,7 +165,7 @@ pub fn build_auth_phase_two_payload_with_proxy_with_seq(
 ) -> Result<Vec<u8>> {
     let mut writer = TtcWriter::new();
     writer.write_function_code_with_seq(TNS_FUNC_AUTH_PHASE_TWO, seq_num);
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
+    if version_gates::writes_pipeline_token(ttc_field_version) {
         writer.write_ub8(0);
     }
     let mut num_pairs = 6u32;
@@ -252,7 +252,7 @@ pub fn build_change_password_payload_with_seq(
 ) -> Result<Vec<u8>> {
     let mut writer = TtcWriter::new();
     writer.write_function_code_with_seq(TNS_FUNC_AUTH_PHASE_TWO, seq_num);
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
+    if version_gates::writes_pipeline_token(ttc_field_version) {
         writer.write_ub8(0);
     }
     write_auth_header(

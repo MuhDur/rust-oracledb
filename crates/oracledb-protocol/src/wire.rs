@@ -381,7 +381,7 @@ impl TtcWriter {
     /// (observed live: ORA-03120 on Oracle XE 21c).
     pub fn write_function_header(&mut self, function_code: u8, seq_num: u8, ttc_field_version: u8) {
         self.write_function_code_with_seq(function_code, seq_num);
-        if ttc_field_version >= crate::thin::TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
+        if crate::thin::version_gates::writes_pipeline_token(ttc_field_version) {
             self.write_ub8(0);
         }
     }
@@ -397,7 +397,7 @@ impl TtcWriter {
         self.write_u8(crate::thin::TNS_MSG_TYPE_PIGGYBACK);
         self.write_u8(function_code);
         self.write_u8(seq_num);
-        if ttc_field_version >= crate::thin::TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
+        if crate::thin::version_gates::writes_pipeline_token(ttc_field_version) {
             self.write_ub8(0);
         }
     }

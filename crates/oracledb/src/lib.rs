@@ -421,10 +421,10 @@ use recovery::{
     classify_recovery_result, decode_server_version_number,
     observe_cancellation_between_round_trips, post_sync_protocol_error_disposition,
     protocol_error_is_session_dead, protocol_error_kind, protocol_error_offset,
-    protocol_error_ora_code, run_recovery_without_current_cx, CancelDisposition,
-    PostSyncProtocolDisposition, RecoveryWireAction, SessionRecovery, SessionRecoveryPhase,
-    CONNECTION_LOST_ORA_CODES, SESSION_DEAD_ORA_CODES, TNS_CCAP_FIELD_VERSION_18_1_EXT_1,
-    TRANSIENT_ORA_CODES,
+    protocol_error_ora_code, run_recovery_without_current_cx,
+    server_version_number_uses_extended_layout, CancelDisposition, PostSyncProtocolDisposition,
+    RecoveryWireAction, SessionRecovery, SessionRecoveryPhase, CONNECTION_LOST_ORA_CODES,
+    SESSION_DEAD_ORA_CODES, TRANSIENT_ORA_CODES,
 };
 
 use transport::{Connector, WireTransport};
@@ -2776,7 +2776,7 @@ impl Connection {
                 .map(|num| {
                     decode_server_version_number(
                         num,
-                        capabilities.ttc_field_version >= TNS_CCAP_FIELD_VERSION_18_1_EXT_1,
+                        server_version_number_uses_extended_layout(capabilities.ttc_field_version),
                     )
                 });
 

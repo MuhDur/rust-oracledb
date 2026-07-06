@@ -753,7 +753,7 @@ pub(crate) fn parse_column_metadata(
     if ora_type_num == ORA_TYPE_NUM_RAW {
         max_size = buffer_size;
     }
-    if capabilities.ttc_field_version >= TNS_CCAP_FIELD_VERSION_12_2 {
+    if version_gates::carries_oaccolid(capabilities.ttc_field_version) {
         let _oaccolid = reader.read_ub4()?;
     }
     let nulls_allowed = reader.read_u8()? != 0;
@@ -766,11 +766,11 @@ pub(crate) fn parse_column_metadata(
     let mut domain_schema = None;
     let mut domain_name = None;
     let mut annotations: Option<Vec<(String, String)>> = None;
-    if capabilities.ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1 {
+    if version_gates::reads_column_domain(capabilities.ttc_field_version) {
         domain_schema = reader.read_string_with_length()?;
         domain_name = reader.read_string_with_length()?;
     }
-    if capabilities.ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_3 {
+    if version_gates::reads_column_annotations(capabilities.ttc_field_version) {
         let num_annotations = reader.read_ub4()?;
         if num_annotations > 0 {
             reader.skip(1)?;
@@ -799,7 +799,7 @@ pub(crate) fn parse_column_metadata(
     let mut vector_dimensions = None;
     let mut vector_format = 0u8;
     let mut vector_flags = 0u8;
-    if capabilities.ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_4 {
+    if version_gates::reads_column_vector_metadata(capabilities.ttc_field_version) {
         // reference metadata.pyx: ub4 dimensions, ub1 format, ub1 flags
         let dims = reader.read_ub4()?;
         reader.limits().check_vector_dimensions(dims as usize)?;

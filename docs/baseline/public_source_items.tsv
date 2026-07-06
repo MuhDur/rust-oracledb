@@ -503,16 +503,17 @@ oracledb	crates/oracledb/src/recovery.rs	417	pub(crate) fn finish_drain_ready(&s
 oracledb	crates/oracledb/src/recovery.rs	422	pub(crate) fn mark_dead(&self) {
 oracledb	crates/oracledb/src/recovery.rs	431	pub(crate) const SESSION_DEAD_ORA_CODES: &[u32] = &[
 oracledb	crates/oracledb/src/recovery.rs	438	pub(crate) const TNS_CCAP_FIELD_VERSION_18_1_EXT_1: u8 = 11;
-oracledb	crates/oracledb/src/recovery.rs	443	pub(crate) fn decode_server_version_number(full: u32, new_format: bool) -> (u8, u8, u8, u8, u8) {
-oracledb	crates/oracledb/src/recovery.rs	481	pub(crate) const TRANSIENT_ORA_CODES: &[u32] =
-oracledb	crates/oracledb/src/recovery.rs	503	pub(crate) const CONNECTION_LOST_ORA_CODES: &[u32] = &[
-oracledb	crates/oracledb/src/recovery.rs	510	pub(crate) fn parse_ora_code_from_message(message: &str) -> Option<u32> {
-oracledb	crates/oracledb/src/recovery.rs	520	pub(crate) enum PostSyncProtocolDisposition {
-oracledb	crates/oracledb/src/recovery.rs	531	pub(crate) fn post_sync_protocol_error_disposition(
-oracledb	crates/oracledb/src/recovery.rs	545	pub(crate) fn protocol_error_is_session_dead(err: &oracledb_protocol::ProtocolError) -> bool {
-oracledb	crates/oracledb/src/recovery.rs	549	pub(crate) fn protocol_error_kind(err: &oracledb_protocol::ProtocolError) -> ErrorKind {
-oracledb	crates/oracledb/src/recovery.rs	563	pub(crate) fn protocol_error_ora_code(err: &oracledb_protocol::ProtocolError) -> Option<u32> {
-oracledb	crates/oracledb/src/recovery.rs	579	pub(crate) fn protocol_error_offset(err: &oracledb_protocol::ProtocolError) -> Option<i32> {
+oracledb	crates/oracledb/src/recovery.rs	446	pub(crate) const fn server_version_number_uses_extended_layout(ttc_field_version: u8) -> bool {
+oracledb	crates/oracledb/src/recovery.rs	453	pub(crate) fn decode_server_version_number(full: u32, new_format: bool) -> (u8, u8, u8, u8, u8) {
+oracledb	crates/oracledb/src/recovery.rs	491	pub(crate) const TRANSIENT_ORA_CODES: &[u32] =
+oracledb	crates/oracledb/src/recovery.rs	513	pub(crate) const CONNECTION_LOST_ORA_CODES: &[u32] = &[
+oracledb	crates/oracledb/src/recovery.rs	520	pub(crate) fn parse_ora_code_from_message(message: &str) -> Option<u32> {
+oracledb	crates/oracledb/src/recovery.rs	530	pub(crate) enum PostSyncProtocolDisposition {
+oracledb	crates/oracledb/src/recovery.rs	541	pub(crate) fn post_sync_protocol_error_disposition(
+oracledb	crates/oracledb/src/recovery.rs	555	pub(crate) fn protocol_error_is_session_dead(err: &oracledb_protocol::ProtocolError) -> bool {
+oracledb	crates/oracledb/src/recovery.rs	559	pub(crate) fn protocol_error_kind(err: &oracledb_protocol::ProtocolError) -> ErrorKind {
+oracledb	crates/oracledb/src/recovery.rs	573	pub(crate) fn protocol_error_ora_code(err: &oracledb_protocol::ProtocolError) -> Option<u32> {
+oracledb	crates/oracledb/src/recovery.rs	589	pub(crate) fn protocol_error_offset(err: &oracledb_protocol::ProtocolError) -> Option<i32> {
 oracledb	crates/oracledb/src/recovery.rs	81	pub(crate) fn classify_recovery_result(
 oracledb	crates/oracledb/src/recovery.rs	98	pub(crate) fn run_recovery_without_current_cx<R, W>(
 oracledb	crates/oracledb/src/request.rs	104	pub fn arraysize(mut self, n: NonZeroU32) -> Self {
@@ -1448,20 +1449,21 @@ oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	11	pub(crate) use cra
 oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	12	pub(crate) use crate::{
 oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	15	pub(crate) use hex::FromHex;
 oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	17	pub mod aq;
-oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	40	pub use auth::*;
-oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	41	pub use bind::*;
-oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	42	pub use codecs::*;
-oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	43	pub use connect::*;
-oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	44	pub use constants::*;
-oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	45	pub use dbobject::*;
-oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	46	pub use execute::*;
-oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	47	pub use fetch::*;
-oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	48	pub use lob::*;
-oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	49	pub use number::*;
-oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	50	pub use sessionless::*;
-oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	51	pub use subscr::*;
-oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	52	pub use types::*;
-oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	55	pub(crate) use errors::*;
+oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	34	pub(crate) mod version_gates;
+oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	43	pub use auth::*;
+oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	44	pub use bind::*;
+oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	45	pub use codecs::*;
+oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	46	pub use connect::*;
+oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	47	pub use constants::*;
+oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	48	pub use dbobject::*;
+oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	49	pub use execute::*;
+oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	50	pub use fetch::*;
+oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	51	pub use lob::*;
+oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	52	pub use number::*;
+oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	53	pub use sessionless::*;
+oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	54	pub use subscr::*;
+oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	55	pub use types::*;
+oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	58	pub(crate) use errors::*;
 oracledb-protocol	crates/oracledb-protocol/src/thin/mod.rs	8	pub(crate) use std::collections::BTreeMap;
 oracledb-protocol	crates/oracledb-protocol/src/thin/number.rs	110	pub fn coefficient(&self) -> Option<i128> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/number.rs	120	pub fn scale(&self) -> Option<i16> {
@@ -1630,6 +1632,18 @@ oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	962	pub fn cell(&se
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	969	pub fn column_index(&self, name: &str) -> Option<usize> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	977	pub struct LobReadResult {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	988	pub enum SessionlessTxnState {
+oracledb-protocol	crates/oracledb-protocol/src/thin/version_gates.rs	101	pub(crate) const fn carries_aq_shard_id(ttc_field_version: u8) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/version_gates.rs	109	pub(crate) const fn reads_column_domain(ttc_field_version: u8) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/version_gates.rs	117	pub(crate) const fn reads_column_annotations(ttc_field_version: u8) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/version_gates.rs	125	pub(crate) const fn reads_column_vector_metadata(ttc_field_version: u8) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/version_gates.rs	134	pub(crate) const fn writes_subscribe_client_id_block(ttc_field_version: u8) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/version_gates.rs	144	pub(crate) const fn reads_subscribe_response_details(ttc_field_version: u8) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/version_gates.rs	42	pub(crate) const fn writes_pipeline_token(ttc_field_version: u8) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/version_gates.rs	52	pub(crate) const fn carries_oaccolid(ttc_field_version: u8) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/version_gates.rs	61	pub(crate) const fn writes_al8sqlsig(ttc_field_version: u8) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/version_gates.rs	70	pub(crate) const fn writes_execute_chunk_ids(ttc_field_version: u8) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/version_gates.rs	81	pub(crate) const fn reads_error_sql_type_and_checksum(ttc_field_version: u8) -> bool {
+oracledb-protocol	crates/oracledb-protocol/src/thin/version_gates.rs	90	pub(crate) const fn writes_aq_json_payload(ttc_field_version: u8) -> bool {
 oracledb-protocol	crates/oracledb-protocol/src/tls/dn.rs	149	pub fn check_cert_dn(expected_dn: &str, server_subject_dn: &str) -> Result<(), DnMatchError> {
 oracledb-protocol	crates/oracledb-protocol/src/tls/dn.rs	165	pub fn name_matches(name_to_check: &str, cert_name: &str) -> bool {
 oracledb-protocol	crates/oracledb-protocol/src/tls/dn.rs	228	pub fn check_server_name(

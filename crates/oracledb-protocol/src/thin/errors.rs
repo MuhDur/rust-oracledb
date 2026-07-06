@@ -140,7 +140,7 @@ pub(crate) fn parse_server_error_info(
 
     let error_number = reader.read_ub4()?;
     let row_count = reader.read_ub8()?;
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_20_1
+    if version_gates::reads_error_sql_type_and_checksum(ttc_field_version)
         || (reader.remaining() > 2 && reader.peek_u8()? == 0)
     {
         let _sql_type = reader.read_ub4()?;

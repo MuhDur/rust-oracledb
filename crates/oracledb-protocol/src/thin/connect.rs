@@ -222,7 +222,7 @@ pub fn build_function_payload_with_seq_and_token(
 ) -> Vec<u8> {
     let mut writer = TtcWriter::new();
     writer.write_function_code_with_seq(function_code, seq_num);
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
+    if version_gates::writes_pipeline_token(ttc_field_version) {
         writer.write_ub8(token_num);
     } else {
         debug_assert_eq!(

@@ -247,7 +247,7 @@ fn write_msg_props(
     writer.write_ub4(0); // cscn
     writer.write_ub4(0); // dscn
     writer.write_ub4(0); // flags
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_21_1 {
+    if version_gates::carries_aq_shard_id(ttc_field_version) {
         writer.write_ub4(0xFFFF_FFFF); // shard id
     }
     Ok(())
@@ -372,7 +372,7 @@ pub fn build_aq_enq_payload(
     writer.write_ub4(0); // sender address length
     writer.write_u8(0); // sender charset id (pointer)
     writer.write_u8(0); // sender ncharset id (pointer)
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_20_1 {
+    if version_gates::writes_aq_json_payload(ttc_field_version) {
         // JSON payload (pointer)
         writer.write_u8(u8::from(queue.kind == AqPayloadKind::Json));
     }
@@ -525,10 +525,10 @@ pub fn build_aq_deq_payload(
     }
     writer.write_u8(0); // extensions
     writer.write_ub4(0); // number of extensions
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_20_1 {
+    if version_gates::writes_aq_json_payload(ttc_field_version) {
         writer.write_u8(0); // JSON payload
     }
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_21_1 {
+    if version_gates::carries_aq_shard_id(ttc_field_version) {
         writer.write_ub4(0xFFFF_FFFF); // shard id (-1)
     }
 
@@ -652,7 +652,7 @@ pub fn build_aq_array_enq_payload(
     writer.write_u8(0); // length
     writer.write_sb4(TNS_AQ_ARRAY_ENQ);
     writer.write_u8(1); // num iters (pointer)
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_21_1 {
+    if version_gates::carries_aq_shard_id(ttc_field_version) {
         writer.write_ub4(0xFFFF); // shard id
     }
     writer.write_ub4(num_iters);
@@ -717,7 +717,7 @@ pub fn build_aq_array_deq_payload(
     writer.write_u8(1); // length
     writer.write_sb4(TNS_AQ_ARRAY_DEQ);
     writer.write_u8(0); // num iters (pointer)
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_21_1 {
+    if version_gates::carries_aq_shard_id(ttc_field_version) {
         writer.write_ub4(0xFFFF); // shard id
     }
 
@@ -942,7 +942,7 @@ fn process_msg_props(
     } else {
         TNS_AQ_MSG_PERSISTENT
     };
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_21_1 {
+    if version_gates::carries_aq_shard_id(ttc_field_version) {
         let _shard = reader.read_ub4()?;
     }
     Ok(())

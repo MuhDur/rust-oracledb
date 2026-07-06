@@ -168,7 +168,7 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     // pre-23ai server parses a stray token as message content (ORA-03120).
     // Pipelining only happens on 23ai-negotiated connections, so a nonzero
     // token is never dropped here.
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_1 {
+    if version_gates::writes_pipeline_token(ttc_field_version) {
         writer.write_ub8(exec_options.token_num);
     } else {
         debug_assert_eq!(
@@ -309,13 +309,13 @@ pub fn build_execute_payload_with_bind_rows_and_options_with_seq(
     // these fields, so writing them unconditionally shifts every following byte
     // and corrupts the EXECUTE. Our live matrix floor is 18c (field version 11),
     // so both branches always fired there and the miss stayed invisible.
-    if ttc_field_version >= TNS_CCAP_FIELD_VERSION_12_2 {
+    if version_gates::writes_al8sqlsig(ttc_field_version) {
         writer.write_u8(0); // pointer (al8sqlsig)
         writer.write_ub4(0); // SQL signature length
         writer.write_u8(0); // pointer (SQL ID)
         writer.write_ub4(0); // allocated size of SQL ID
         writer.write_u8(0); // pointer (length of SQL ID)
-        if ttc_field_version >= TNS_CCAP_FIELD_VERSION_12_2_EXT1 {
+        if version_gates::writes_execute_chunk_ids(ttc_field_version) {
             writer.write_u8(0); // pointer (chunk ids)
             writer.write_ub4(0); // number of chunk ids
         }

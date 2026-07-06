@@ -29,6 +29,9 @@ mod number;
 mod sessionless;
 mod subscr;
 mod types;
+// Centralized TTC field-version gates (the "version surface"): one named
+// predicate per version decision, reached for instead of a raw literal.
+pub(crate) mod version_gates;
 
 // Property / metamorphic / boundary suites for the `pub(crate)` scalar codecs
 // (NUMBER, DATE/TIMESTAMP/TSTZ, INTERVAL YM/DS, BINARY_FLOAT/DOUBLE, text).

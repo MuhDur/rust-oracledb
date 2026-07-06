@@ -165,7 +165,7 @@ pub fn build_subscribe_payload_with_seq(
     w.write_u8(1); // pointer (num elements in array)
     w.write_u8(0); // pointer (generic out attrs)
     w.write_u8(1); // pointer (num elements in array)
-    if field_version >= TNS_CCAP_FIELD_VERSION_12_1 {
+    if version_gates::writes_subscribe_client_id_block(field_version) {
         w.write_u8(1); // kpninst
         w.write_u8(1); // kpninstl
         w.write_u8(1); // kpngcret
@@ -270,11 +270,11 @@ fn parse_subscribe_return_parameters(
     let num_values = reader.read_ub4()?; // out parameters (kpngrl)
     for _ in 0..num_values {
         result.registration_id = reader.read_ub8()?;
-        if field_version >= TNS_CCAP_FIELD_VERSION_12_1 {
+        if version_gates::reads_subscribe_response_details(field_version) {
             let _subscriber_name = reader.read_bytes_with_length()?;
         }
     }
-    if field_version >= TNS_CCAP_FIELD_VERSION_12_1 {
+    if version_gates::reads_subscribe_response_details(field_version) {
         let num_instances = reader.read_ub4()?;
         for _ in 0..num_instances {
             let _ = reader.read_bytes_with_length()?;

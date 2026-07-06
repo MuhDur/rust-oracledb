@@ -437,6 +437,16 @@ pub(crate) const SESSION_DEAD_ORA_CODES: &[u32] = &[
 /// changed (reference thin/constants.pxi `TNS_CCAP_FIELD_VERSION_18_1_EXT_1`).
 pub(crate) const TNS_CCAP_FIELD_VERSION_18_1_EXT_1: u8 = 11;
 
+/// Whether `AUTH_VERSION_NO` uses the Oracle 18+ ("extended") bit layout — the
+/// single named gate for the version-number decode decision. Reference
+/// messages/auth.pyx:186 (`_get_version_tuple`) selects the 5-part wide-field
+/// layout when `_caps.ttc_field_version >= TNS_CCAP_FIELD_VERSION_18_1_EXT_1`,
+/// otherwise the pre-18 4-bit-nibble layout. Feeds `new_format` of
+/// [`decode_server_version_number`].
+pub(crate) const fn server_version_number_uses_extended_layout(ttc_field_version: u8) -> bool {
+    ttc_field_version >= TNS_CCAP_FIELD_VERSION_18_1_EXT_1
+}
+
 /// Decode the packed `AUTH_VERSION_NO` value into the database version
 /// 5-tuple. The bit layout changed with Oracle Database 18
 /// (reference messages/auth.pyx `_get_version_tuple`).
