@@ -1,20 +1,26 @@
-# Upstream bug report — asupersync 0.3.4: short timers fire only once per process
+# asupersync 0.3.4: after the first timer, sub-250ms timeouts are floored to ~250ms
 
-**Status:** drafted + reproduced locally, ready to file upstream (needs the
-asupersync issue-tracker URL / submission access).
-**Affects:** `asupersync = "=0.3.4"` (also observed 0.3.2). **Severity:** high for
-any code that awaits more than one short timer in a process.
-**Driver impact:** worked around — see "Our workaround" below. This document is
-the reproduction + root-cause writeup to hand to the asupersync maintainers.
+**Affects:** `asupersync = "=0.3.4"` (also observed on 0.3.2). **Impact:** any code
+that awaits more than one short (`< ~250ms`) `time::timeout` / `time::sleep` in a
+runtime gets the wrong (much longer) delay on every timer after the first.
+**Not** a hang and **not** a lost wakeup — the timers fire, but late.
+
+> Note: an earlier internal draft of this report described the symptom as
+> "subsequent short timers never fire / `block_on` hangs". That was produced with
+> a runtime built **without** a reactor (`RuntimeBuilder::current_thread().build()`)
+> and is **incorrect**. With a properly configured runtime (a reactor installed,
+> as in real use) the timers fire — they are just floored to ~250ms. The accurate
+> characterization is below.
 
 ## Summary
 
-Under a `current_thread` runtime, a short `time::timeout` / `time::sleep`
-delivers its wakeup **only for the first timed use in the process**. The second
-and subsequent short timers never fire, so the awaiting task hangs forever. The
-failure is deterministic (1st-pass / 2nd-hang), not a race.
+Under a `current_thread` runtime with a reactor, the **first** timer fires
+accurately at its requested duration. **Every subsequent** timer in that runtime
+has a **~250ms floor**: a request shorter than ~250ms fires at ~250ms instead of
+its requested time; requests ≥ ~250ms are accurate. The first-timer exemption
+and the ~250ms floor are deterministic and reproducible.
 
-## Minimal reproduction
+## Reproduction
 
 ```toml
 # Cargo.toml
@@ -23,85 +29,76 @@ asupersync = "=0.3.4"
 ```
 
 ```rust
-// src/main.rs — nightly toolchain (asupersync requires nightly)
+// src/main.rs — nightly toolchain
 use std::time::{Duration, Instant};
-use asupersync::runtime::RuntimeBuilder;
+use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::time::{self, wall_now};
 
 fn main() {
-    let worker = std::thread::spawn(|| {
-        let rt = RuntimeBuilder::current_thread().build().expect("build runtime");
-        rt.block_on(async {
-            for i in 0..3u32 {
-                let start = Instant::now();
-                // A pending future that can only resolve when the timeout fires.
-                let _ = time::timeout(
-                    wall_now(),
-                    Duration::from_millis(50),
-                    std::future::pending::<()>(),
-                )
-                .await;
-                eprintln!("timer {i} fired after {:?}", start.elapsed());
-            }
-        });
+    let reactor = reactor::create_reactor().expect("reactor");
+    let rt = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        for (label, ms) in [("first", 50u64), ("second", 50), ("third", 50)] {
+            let start = Instant::now();
+            let _ = time::timeout(
+                wall_now(),
+                Duration::from_millis(ms),
+                std::future::pending::<()>(),
+            )
+            .await;
+            println!("{label}: requested {ms}ms, fired at {:?}", start.elapsed());
+        }
     });
-
-    // Independent OS-thread watchdog: 3 × 50 ms must finish well under 3 s.
-    let start = Instant::now();
-    loop {
-        if worker.is_finished() {
-            println!("RESULT: all timers fired (no bug)");
-            return;
-        }
-        if start.elapsed() > Duration::from_secs(3) {
-            println!("RESULT: BUG — a short timer after the first never fired");
-            std::process::exit(1);
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
 }
 ```
 
-**Observed:** `RESULT: BUG — a short timer after the first never fired`
-(`block_on` hangs; the loop never gets past `timer 1`).
-**Expected:** three lines `timer 0/1/2 fired after ~50ms`, then
-`RESULT: all timers fired`.
+**Observed:**
 
-## Root cause (source-level, asupersync-0.3.4)
+```
+first:  requested 50ms, fired at ~50ms      <- accurate
+second: requested 50ms, fired at ~250ms     <- floored
+third:  requested 50ms, fired at ~250ms     <- floored
+```
 
-`Sleep::poll` (`src/time/sleep.rs`) prefers a bound or ambient
-`TimerDriverHandle` over the background OS-thread fallback:
+**Expected:** all three fire at ~50ms.
 
-- On `Poll::Pending`, when a `timer_driver` is present it registers the deadline
-  with the driver and **stops/discards any existing fallback thread**
-  (`sleep.rs` ~535: `if let Some(fallback) = state.fallback.take() { request_stop_fallback(..) }`).
-- The OS-thread fallback (`sleep.rs` ~624, `if state.fallback.is_none() { spawn … }`)
-  is therefore only used when **no** driver exists.
-- `Sleep::with_time_getter` does **not** force the fallback when an ambient
-  driver is present (`sleep.rs:483/535/624`, `timeout_future.rs:231`).
+### The floor, measured across durations
 
-So `Sleep` inherits the ambient runtime timer driver's wheel behaviour, and that
-wheel appears to arm/deliver only the **first** short timer registered in the
-process; subsequent short registrations are accepted but never fire. Because
-`Sleep` has handed ownership to the (buggy) driver and torn down the fallback
-thread, there is no independent path to wake the task.
+Warming with one timer, then measuring the **second** timer at various requested
+durations (each in a fresh runtime):
 
-Two independently-actionable fixes for the maintainers to consider:
+| requested | 2nd timer fires at | verdict |
+|-----------|--------------------|---------|
+| 1 ms   | ~250 ms | floored |
+| 10 ms  | ~250 ms | floored |
+| 50 ms  | ~250 ms | floored |
+| 200 ms | ~250 ms | ~floored |
+| 300 ms | ~300 ms | accurate |
+| 500 ms | ~500 ms | accurate |
+| 1000 ms| ~1000 ms| accurate |
 
-1. Fix the timer-driver wheel so repeated short deadlines re-arm and fire
-   (the actual defect); and/or
-2. Make `Sleep`/`timeout` fall back to the OS-thread timer when the driver does
-   not confirm the registration will fire within the requested short window —
-   i.e. don't tear down the fallback until the driver has demonstrably armed the
-   timer (defence in depth so a driver wheel bug cannot silently hang tasks).
+So the effect is a **~250ms lower bound on every timer after the first**, not a
+fixed added delay and not a clamp of long timers (long timeouts are *not* fired
+early — good). The first timer of each fresh runtime is exempt (accurate at any
+duration, including 1ms).
 
-## Our workaround (rust-oracledb)
+## Hypothesis (unverified — observable behavior above is the ground truth)
 
-For the pool `TIMEDWAIT` acquire — the one place we depend on a **short** timer
-firing repeatedly — we do not rely on the asupersync wheel. `TimedAcquireDeadline`
+It looks like the first timer registration arms the precise timer path, but
+subsequent short-timer registrations do not re-arm the wheel to the nearer
+deadline and instead wait for an existing ~250ms tick / coarse background poll.
+Relevant area: `src/time/sleep.rs` `Sleep::poll` (timer-driver vs OS-thread
+fallback selection and the wheel re-arm on `Poll::Pending`). This is a
+hypothesis; please treat the repro + measurements as the authoritative report.
+
+## Workaround in the consuming project (rust-oracledb)
+
+Only short, repeated timers are affected, so for the one place we depend on a
+short timer firing on time (the connection-pool `TIMEDWAIT` acquire) we bypass
+the async timer entirely: `TimedAcquireDeadline`
 (`crates/oracledb/src/pool/acquire.rs`) spawns a dedicated `std::thread` that
-`park_timeout`s until the deadline and wakes the waiter directly, i.e. it forces
-the OS-thread timer path that `Sleep` would otherwise have used only for the
-first timer. The driver's pool and live timeout suites are green with this in
-place. Long timers (connect/read timeouts, seconds-scale) are unaffected by the
-bug and continue to use `time::timeout` directly.
+`park_timeout`s to the deadline and wakes the waiter. Seconds-scale connect/read
+timeouts use `time::timeout` directly and are unaffected (≥ 250ms is accurate).
