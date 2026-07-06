@@ -54,6 +54,7 @@ thiserror.workspace = true
 # (`#![forbid(unsafe_code)]`-clean). The `pem` feature of `der` supplies the
 # RFC 7468 decoder for the ENCRYPTED PRIVATE KEY PEM block.
 cbc.workspace = true
+des.workspace = true
 der = { workspace = true, features = ["pem"] }
 hmac.workspace = true
 # SIMD-accelerated UTF-8 validation for the borrowed fetch text path (gated by

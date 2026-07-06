@@ -50,6 +50,10 @@ harness/.results/
 # Local analysis briefs for lane agents (untracked by design, see docs/GROUND_TRUTH.md)
 .intake/
 
+# C4 secret scan: operator denylist + optional policy (never commit)
+.secret_scan_denylist
+.secret_scan_policy.json
+
 # reference may also be a symlink in lane worktrees
 reference
 

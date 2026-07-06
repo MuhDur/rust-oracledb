@@ -1,0 +1,25 @@
+{
+  "sha": "a3fc49600471bb9a960fde0fb11a6140dfc60ef2",
+  "recorded_at_utc": "2026-07-05T17:01:18Z",
+  "suite": "version_matrix.sh versions",
+  "features": "arrow,chrono,rust_decimal,serde_json,soda,uuid",
+  "overall": "fail",
+  "cells": [
+    {"lane": "xe21", "suite": "live_soda", "verdict": "GREEN", "note": "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s"},
+    {"lane": "xe21", "suite": "e2e_live", "verdict": "GREEN", "note": "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.41s"},
+    {"lane": "xe21", "suite": "live_named_bind_timeout", "verdict": "GREEN", "note": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.16s"},
+    {"lane": "xe21", "suite": "live_borrowed_fetch", "verdict": "GREEN", "note": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s"},
+    {"lane": "xe21", "suite": "live_statement_cache", "verdict": "GREEN", "note": "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s"},
+    {"lane": "xe21", "suite": "pipeline_live", "verdict": "GREEN", "note": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s"},
+    {"lane": "xe21", "suite": "live_connect_string", "verdict": "GREEN", "note": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s"},
+    {"lane": "xe21", "suite": "live_ref_cursor", "verdict": "GREEN", "note": "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s"},
+    {"lane": "xe21", "suite": "live_dbms_output", "verdict": "GREEN", "note": "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s"},
+    {"lane": "xe21", "suite": "live_error_classification", "verdict": "GREEN", "note": "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s"},
+    {"lane": "xe21", "suite": "live_typed", "verdict": "GREEN", "note": "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s"},
+    {"lane": "xe21", "suite": "live_dpl_arrow", "verdict": "FAIL", "note": "thread 'live_direct_path_load_then_arrow_fetch' (1283126) panicked at crates/oracledb/tests/live_dpl_arrow.rs:109:14: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s error: test failed, to rerun pass `-p oracledb --test live_dpl_arrow` "},
+    {"lane": "xe21", "suite": "live_edition", "verdict": "GREEN", "note": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s"},
+    {"lane": "xe21", "suite": "live_transport_failover", "verdict": "GREEN", "note": "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.00s"},
+    {"lane": "xe21", "suite": "live_object_decode", "verdict": "GREEN", "note": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s"},
+    {"lane": "xe21", "suite": "live_connect", "verdict": "GREEN", "note": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s"}
+  ]
+}

@@ -22,6 +22,8 @@ fail() {
 need cargo
 need jq
 
+bash "$ROOT/scripts/secret_scan.sh"
+
 metadata="$(cargo metadata --no-deps --format-version 1)"
 
 mapfile -t package_lines < <(jq -r '.packages[] | [.name, .version] | @tsv' <<<"$metadata")

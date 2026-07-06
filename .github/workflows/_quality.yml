@@ -189,6 +189,10 @@ jobs:
         if: ${{ inputs.profile != 'canary' }}
         run: bash scripts/check_trace_secret_exclusion.sh
 
+      - name: Confidentiality secret scan (C4)
+        if: ${{ inputs.profile != 'canary' }}
+        run: bash scripts/secret_scan.sh
+
       # reference/ is the clean-room python-oracledb checkout (gitignored, never
       # vendored); pin it at the tag docs/reference-gates.tsv was generated
       # against so both the drift check and the boundary-test coverage check see

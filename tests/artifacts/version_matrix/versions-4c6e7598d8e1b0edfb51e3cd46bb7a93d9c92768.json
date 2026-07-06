@@ -1,0 +1,25 @@
+{
+  "sha": "4c6e7598d8e1b0edfb51e3cd46bb7a93d9c92768",
+  "recorded_at_utc": "2026-07-05T17:39:33Z",
+  "suite": "version_matrix.sh versions",
+  "features": "arrow,chrono,rust_decimal,serde_json,soda,uuid",
+  "overall": "pass",
+  "cells": [
+    {"lane": "free23", "suite": "live_ref_cursor", "verdict": "GREEN", "note": "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s"},
+    {"lane": "free23", "suite": "live_error_classification", "verdict": "GREEN", "note": "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s"},
+    {"lane": "free23", "suite": "live_borrowed_fetch", "verdict": "GREEN", "note": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s"},
+    {"lane": "free23", "suite": "live_object_decode", "verdict": "GREEN", "note": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s"},
+    {"lane": "free23", "suite": "live_soda", "verdict": "GREEN", "note": "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.91s"},
+    {"lane": "free23", "suite": "live_connect", "verdict": "GREEN", "note": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s"},
+    {"lane": "free23", "suite": "live_dpl_arrow", "verdict": "GREEN", "note": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s"},
+    {"lane": "free23", "suite": "pipeline_live", "verdict": "GREEN", "note": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s"},
+    {"lane": "free23", "suite": "live_transport_failover", "verdict": "GREEN", "note": "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.01s"},
+    {"lane": "free23", "suite": "e2e_live", "verdict": "GREEN", "note": "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.32s"},
+    {"lane": "free23", "suite": "live_connect_string", "verdict": "GREEN", "note": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s"},
+    {"lane": "free23", "suite": "live_typed", "verdict": "GREEN", "note": "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s"},
+    {"lane": "free23", "suite": "live_edition", "verdict": "GREEN", "note": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s"},
+    {"lane": "free23", "suite": "live_named_bind_timeout", "verdict": "GREEN", "note": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.16s"},
+    {"lane": "free23", "suite": "live_statement_cache", "verdict": "GREEN", "note": "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s"},
+    {"lane": "free23", "suite": "live_dbms_output", "verdict": "GREEN", "note": "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s"}
+  ]
+}

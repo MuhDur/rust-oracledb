@@ -416,20 +416,46 @@ fn synthetic_ewallet_encrypted_pem_decrypts_with_password() {
 }
 
 #[test]
-fn synthetic_ewallet_3des_p12_is_typed_unsupported_until_a2_1() {
-    // Field OID 1.2.840.113549.1.12.1.3 (PBE-SHA1-3DES). Fixture is committed for
-    // A2.1 (+des crate); parser currently fails closed with remediation.
+fn synthetic_ewallet_3des_p12_decrypts_with_password() {
+    // Legacy PKCS#12 OID 1.2.840.113549.1.12.1.3 (PBE-SHA1-3DES): both the cert
+    // EncryptedData and the shrouded key bag are 3DES-EDE-CBC keyed by the RFC
+    // 7292 App.B SHA-1 KDF. A2.1 decrypts these (stock OCI ADB wallets ship them);
+    // python-oracledb does the same. The wallet must yield the same identity as
+    // its modern PBES2 sibling.
     let p12 = read_synthetic_fixture("ewallet_3des_openssl.p12");
-    let err = parse_ewallet_p12(&p12, Some(SYNTHETIC_WALLET_PASSWORD))
-        .expect_err("legacy 3DES PFX encryption not yet supported");
+    let wallet = parse_ewallet_p12(&p12, Some(SYNTHETIC_WALLET_PASSWORD))
+        .expect("legacy 3DES ewallet.p12 must decrypt with the wallet password");
+    assert!(wallet.has_client_identity());
+    assert_synthetic_subject(&wallet);
+    // The decrypted key must be valid PKCS#8 DER (proves correct 3DES + unpad).
+    use x509_cert::der::Decode;
+    let key_der = wallet
+        .client_private_key
+        .as_ref()
+        .expect("client private key present");
+    pkcs8::PrivateKeyInfo::from_der(key_der).expect("decrypted 3DES key must be valid PKCS#8");
+    // Same underlying identity as the modern PBES2 fixture.
+    let modern = parse_ewallet_p12(
+        &read_synthetic_fixture("ewallet.p12"),
+        Some(SYNTHETIC_WALLET_PASSWORD),
+    )
+    .expect("modern synthetic ewallet.p12");
+    assert_eq!(
+        wallet.client_private_key, modern.client_private_key,
+        "3DES and PBES2 fixtures must share the same key"
+    );
+}
+
+#[test]
+fn synthetic_ewallet_3des_p12_wrong_password_fails_closed() {
+    // A wrong password must fail with a typed, redacted error — never a panic
+    // and never a partial/garbage key.
+    let p12 = read_synthetic_fixture("ewallet_3des_openssl.p12");
+    let err = parse_ewallet_p12(&p12, Some("not-the-password!"))
+        .expect_err("wrong password must fail closed");
     assert!(
         matches!(&err, WalletError::Pkcs12(_)),
         "expected Pkcs12, got {err:?}"
-    );
-    let msg = format!("{err:?}");
-    assert!(
-        msg.contains("1.2.840.113549.1.12.1.3") || msg.contains("PBES2"),
-        "remediation must mention legacy OID or PBES2-only support: {msg}"
     );
     assert_redacted(&err, SYNTHETIC_WALLET_PASSWORD);
 }

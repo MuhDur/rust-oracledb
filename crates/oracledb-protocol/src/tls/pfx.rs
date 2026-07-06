@@ -4,9 +4,9 @@
 //! Oracle wallets (`ewallet.p12`, and the PKCS#12 embedded in `cwallet.sso`)
 //! and `openssl pkcs12 -export` produce — a PFX whose AuthenticatedSafe holds
 //! `encryptedData` / `data` contents encrypted with PBES2 (PBKDF2 + AES-CBC),
-//! wrapping a `SafeContents` of key/cert SafeBags. Anything outside that path
-//! returns an explicit typed error (legacy PBE-SHA1-3DES/RC2 wallets must be
-//! re-exported; see [`super::wallet`] for the supported/unsupported matrix).
+//! wrapping a `SafeContents` of key/cert SafeBags. Modern PBES2/PBKDF2/AES-CBC
+//! and legacy PKCS#12 `pbeWithSHAAnd3-KeyTripleDES-CBC` (`1.2.840.113549.1.12.1.3`)
+//! are supported; RC2 and other legacy schemes return an explicit typed error.
 //!
 //! The same PBES2 machinery also decrypts standalone PKCS#8
 //! `EncryptedPrivateKeyInfo` blocks (the `ENCRYPTED PRIVATE KEY` PEM block in
@@ -22,6 +22,8 @@ use der::{Decode, Reader, SliceReader, Tag};
 const OID_DATA: &str = "1.2.840.113549.1.7.1";
 const OID_ENCRYPTED_DATA: &str = "1.2.840.113549.1.7.6";
 const OID_PBES2: &str = "1.2.840.113549.1.5.13";
+/// PKCS#12 `pbeWithSHAAnd3-KeyTripleDES-CBC` (OpenSSL `-legacy` / `PBE-SHA1-3DES`).
+const OID_PKCS12_PBE_SHA1_3DES: &str = "1.2.840.113549.1.12.1.3";
 const OID_PBKDF2: &str = "1.2.840.113549.1.5.12";
 const OID_HMAC_SHA256: &str = "1.2.840.113549.2.9";
 const OID_HMAC_SHA1: &str = "1.2.840.113549.2.7";
@@ -72,7 +74,7 @@ pub(super) fn decrypt_encrypted_private_key_info(
             "EncryptedPrivateKeyInfo: expected AlgorithmIdentifier".to_string(),
         ));
     }
-    let (key, iv) = derive_pbes2(alg_body, password).map_err(map_err)?;
+    let (key, iv) = derive_pbes2_params(alg_body, password).map_err(map_err)?;
     let (ct_tag, ct) = read_tlv(&mut epki).map_err(map_err)?;
     if ct_tag != Tag::OctetString {
         return Err(WalletError::KeyDecrypt(
@@ -237,20 +239,78 @@ fn decrypt_encrypted_data(
     if tag != Tag::Sequence {
         return Err(p12("EncryptionAlgorithm: expected SEQUENCE"));
     }
-    let (key, iv) = derive_pbes2(alg_body, password)?;
+    let material = derive_content_encryption(alg_body, password)?;
 
     // encryptedContent [0] IMPLICIT OCTET STRING
     let (ctag, enc_content) = read_tlv(&mut eci)?;
     if !ctag.is_context_specific() {
         return Err(p12("encryptedContent: expected [0] IMPLICIT"));
     }
-    aes_cbc_decrypt(&key, &iv, enc_content)
+    decrypt_ciphertext(material, enc_content)
+}
+
+#[derive(Clone, Copy)]
+enum ContentCipher {
+    AesCbc,
+    TripleDesCbc,
+}
+
+struct DerivedEncryption {
+    key: Vec<u8>,
+    iv: Vec<u8>,
+    cipher: ContentCipher,
+}
+
+/// CBC-decrypt `ct` with the derived key/IV, dispatching on the content cipher.
+fn decrypt_ciphertext(material: DerivedEncryption, ct: &[u8]) -> Result<Vec<u8>, WalletError> {
+    match material.cipher {
+        ContentCipher::AesCbc => aes_cbc_decrypt(&material.key, &material.iv, ct),
+        ContentCipher::TripleDesCbc => des_ede3_cbc_decrypt(&material.key, &material.iv, ct),
+    }
+}
+
+/// Parse a content-encryption `AlgorithmIdentifier` and derive key + IV.
+fn derive_content_encryption(
+    alg_body: &[u8],
+    password: &[u8],
+) -> Result<DerivedEncryption, WalletError> {
+    let mut alg = into_seq(alg_body)?;
+    let algo = read_oid(&mut alg)?;
+    let oid = algo.to_string();
+    if oid == OID_PBES2 {
+        let (key, iv) = derive_pbes2_params(alg_body, password)?;
+        return Ok(DerivedEncryption {
+            key,
+            iv,
+            cipher: ContentCipher::AesCbc,
+        });
+    }
+    if oid == OID_PKCS12_PBE_SHA1_3DES {
+        let (tag, params) = read_tlv(&mut alg)?;
+        if tag != Tag::Sequence {
+            return Err(p12("PKCS#12 PBE params: expected SEQUENCE"));
+        }
+        let (key, iv) = derive_pkcs12_pbe_sha1_3des(password, params)?;
+        return Ok(DerivedEncryption {
+            key,
+            iv,
+            cipher: ContentCipher::TripleDesCbc,
+        });
+    }
+    Err(p12(format!(
+        "unsupported PFX encryption algorithm {algo}; supported: PBES2 (PBKDF2 + AES-CBC) \
+         and PKCS#12 PBE-SHA1-3DES ({OID_PKCS12_PBE_SHA1_3DES}) — re-export with a modern \
+         cipher if this is RC2 or another legacy scheme"
+    )))
 }
 
 /// Parse the PBES2 AlgorithmIdentifier and derive (key, iv).
 ///
 /// algId.algorithm == PBES2; params ::= SEQUENCE { keyDerivationFunc, encScheme }.
-fn derive_pbes2(alg_body: &[u8], password: &[u8]) -> Result<(Vec<u8>, Vec<u8>), WalletError> {
+fn derive_pbes2_params(
+    alg_body: &[u8],
+    password: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), WalletError> {
     let mut alg = into_seq(alg_body)?;
     let algo = read_oid(&mut alg)?;
     if algo.to_string() != OID_PBES2 {
@@ -416,6 +476,154 @@ fn aes_cbc_decrypt(key: &[u8], iv: &[u8], ct: &[u8]) -> Result<Vec<u8>, WalletEr
     }
 }
 
+/// 3DES-EDE (three-key) CBC decrypt with PKCS#7 unpadding — the cipher behind
+/// PKCS#12 `pbeWithSHAAnd3-KeyTripleDES-CBC`. Key is 24 bytes, IV 8 bytes.
+fn des_ede3_cbc_decrypt(key: &[u8], iv: &[u8], ct: &[u8]) -> Result<Vec<u8>, WalletError> {
+    use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+    if key.len() != 24 {
+        return Err(p12(format!("bad 3DES key length {}", key.len())));
+    }
+    if iv.len() != 8 {
+        return Err(p12(format!("3DES IV must be 8 bytes, got {}", iv.len())));
+    }
+    type Dec = cbc::Decryptor<des::TdesEde3>;
+    let mut buf = ct.to_vec();
+    let dec = Dec::new_from_slices(key, iv).map_err(|e| p12(format!("3DES init: {e}")))?;
+    let pt = dec
+        .decrypt_padded_mut::<Pkcs7>(&mut buf)
+        .map_err(|e| p12(format!("3DES decrypt/unpad: {e}")))?;
+    Ok(pt.to_vec())
+}
+
+/// Derive the 24-byte 3DES key + 8-byte IV for PKCS#12
+/// `pbeWithSHAAnd3-KeyTripleDES-CBC` from its parameters.
+///
+/// `pkcs-12PbeParams ::= SEQUENCE { salt OCTET STRING, iterations INTEGER }`.
+/// The KDF is RFC 7292 Appendix B (SHA-1): the key uses diversifier ID = 1 and
+/// the IV uses ID = 2 over the same password/salt/iteration inputs.
+fn derive_pkcs12_pbe_sha1_3des(
+    password: &[u8],
+    params: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), WalletError> {
+    let mut p = into_seq(params)?;
+    let (tag, salt) = read_tlv(&mut p)?;
+    if tag != Tag::OctetString {
+        return Err(p12("PKCS#12 PBE salt: expected OCTET STRING"));
+    }
+    let (tag, iter_bytes) = read_tlv(&mut p)?;
+    if tag != Tag::Integer {
+        return Err(p12("PKCS#12 PBE iterations: expected INTEGER"));
+    }
+    let iterations = be_uint(iter_bytes)?;
+    if iterations == 0 {
+        return Err(p12("PKCS#12 PBE iterations must be >= 1"));
+    }
+    // PKCS#12 keys the KDF off a BMPString password (UTF-16BE + NUL terminator),
+    // not the raw bytes PBES2/PBKDF2 use.
+    let bmp = password_to_bmp(password)?;
+    let key = pkcs12_kdf(PKCS12_ID_KEY, &bmp, salt, iterations, 24)?;
+    let iv = pkcs12_kdf(PKCS12_ID_IV, &bmp, salt, iterations, 8)?;
+    Ok((key, iv))
+}
+
+/// PKCS#12 KDF diversifier: key material.
+const PKCS12_ID_KEY: u8 = 1;
+/// PKCS#12 KDF diversifier: IV material.
+const PKCS12_ID_IV: u8 = 2;
+/// Upper bound on PKCS#12 iteration counts — real wallets use ~2048. Guards the
+/// SHA-1 hashing loop against a malicious wallet declaring a huge count (DoS).
+const MAX_PKCS12_ITERATIONS: u64 = 10_000_000;
+
+/// Encode a password as a PKCS#12 BMPString: UTF-16BE code units followed by a
+/// two-byte NUL terminator (RFC 7292 §B.1). Empty password → just the NUL.
+fn password_to_bmp(password: &[u8]) -> Result<Vec<u8>, WalletError> {
+    let s = std::str::from_utf8(password)
+        .map_err(|_| p12("wallet password is not valid UTF-8 for a PKCS#12 BMPString"))?;
+    let mut out = Vec::with_capacity(password.len() * 2 + 2);
+    for unit in s.encode_utf16() {
+        out.extend_from_slice(&unit.to_be_bytes());
+    }
+    out.extend_from_slice(&[0u8, 0u8]);
+    Ok(out)
+}
+
+/// RFC 7292 Appendix B.2 key derivation with SHA-1 (u = 20-byte output, v =
+/// 64-byte block). Produces `n` output bytes for diversifier `id` from the
+/// BMPString `password`, `salt` and `iterations`.
+fn pkcs12_kdf(
+    id: u8,
+    password: &[u8],
+    salt: &[u8],
+    iterations: u64,
+    n: usize,
+) -> Result<Vec<u8>, WalletError> {
+    use sha1::{Digest, Sha1};
+    const U: usize = 20;
+    const V: usize = 64;
+    if iterations > MAX_PKCS12_ITERATIONS {
+        return Err(p12(format!(
+            "PKCS#12 iteration count {iterations} exceeds maximum {MAX_PKCS12_ITERATIONS}"
+        )));
+    }
+
+    // D = v bytes all equal to the diversifier.
+    let d = [id; V];
+    // I = expand(salt, v) || expand(password, v).
+    let mut i_buf = pkcs12_expand(salt, V);
+    i_buf.extend_from_slice(&pkcs12_expand(password, V));
+
+    let blocks = n.div_ceil(U);
+    let mut out = Vec::with_capacity(blocks * U);
+    for _ in 0..blocks {
+        // A = H^iterations(D || I).
+        let mut a = {
+            let mut h = Sha1::new();
+            h.update(d);
+            h.update(&i_buf);
+            h.finalize()
+        };
+        for _ in 1..iterations {
+            let mut h = Sha1::new();
+            h.update(a);
+            a = h.finalize();
+        }
+        // B = expand(A, v); then I_j = (I_j + B + 1) mod 2^(8v) for each block.
+        let b = pkcs12_expand(&a, V);
+        let k = i_buf.len() / V;
+        for j in 0..k {
+            pkcs12_add_block(&mut i_buf[j * V..(j + 1) * V], &b);
+        }
+        out.extend_from_slice(&a);
+    }
+    out.truncate(n);
+    Ok(out)
+}
+
+/// Repeat `data` cyclically to fill `ceil(len/v)*v` bytes (RFC 7292 §B.2). An
+/// empty input yields an empty buffer.
+fn pkcs12_expand(data: &[u8], v: usize) -> Vec<u8> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    let out_len = data.len().div_ceil(v) * v;
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        out.push(data[i % data.len()]);
+    }
+    out
+}
+
+/// In place, `block = (block + b + 1) mod 2^(8*block.len())`, big-endian. `b`
+/// must be at least `block.len()` bytes (only its low `block.len()` are used).
+fn pkcs12_add_block(block: &mut [u8], b: &[u8]) {
+    let mut carry: u16 = 1;
+    for idx in (0..block.len()).rev() {
+        let sum = u16::from(block[idx]) + u16::from(b[idx]) + carry;
+        block[idx] = (sum & 0xff) as u8;
+        carry = sum >> 8;
+    }
+}
+
 /// Parse a SafeContents (`SEQUENCE OF SafeBag`) and collect certs/keys.
 ///
 /// SafeBag ::= SEQUENCE { bagId OID, bagValue [0] EXPLICIT, bagAttributes OPTIONAL }
@@ -450,8 +658,9 @@ fn read_safe_contents(
                 // bagValue [0] EXPLICIT wraps an EncryptedPrivateKeyInfo
                 // ::= SEQUENCE { encryptionAlgorithm AlgorithmIdentifier,
                 //                encryptedData OCTET STRING }.
-                // Only the PBES2/AES scheme is supported (the modern wallet
-                // format); other schemes return an explicit error.
+                // PBES2/AES (modern wallets) and PKCS#12 PBE-SHA1-3DES (legacy
+                // `openssl -keypbe PBE-SHA1-3DES` / stock OCI ADB) are both
+                // supported; other schemes return an explicit error.
                 let mut bv = into_seq(value)?;
                 let (epki_tag, epki_body) = read_tlv(&mut bv)?;
                 if epki_tag != Tag::Sequence {
@@ -462,12 +671,12 @@ fn read_safe_contents(
                 if alg_tag != Tag::Sequence {
                     return Err(p12("shrouded key: expected AlgorithmIdentifier"));
                 }
-                let (key, iv) = derive_pbes2(alg_body, password)?;
+                let material = derive_content_encryption(alg_body, password)?;
                 let (ct_tag, ct) = read_tlv(&mut epki)?;
                 if ct_tag != Tag::OctetString {
                     return Err(p12("shrouded key: expected encrypted OCTET STRING"));
                 }
-                let pkcs8 = aes_cbc_decrypt(&key, &iv, ct)?;
+                let pkcs8 = decrypt_ciphertext(material, ct)?;
                 out.client_private_key = Some(pkcs8);
             }
             OID_CERT_BAG => {
