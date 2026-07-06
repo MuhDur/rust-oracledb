@@ -71,6 +71,7 @@ crates/oracledb/tests/arrow_golden.rs	2
 crates/oracledb/tests/asupersync_spike.rs	1
 crates/oracledb/tests/cancel_then_reuse.rs	1
 crates/oracledb/tests/cassette_record_replay.rs	6
+crates/oracledb/tests/connect_trace_secret.rs	1
 crates/oracledb/tests/derive_trybuild.rs	1
 crates/oracledb/tests/e2e_live.rs	7
 crates/oracledb/tests/from_row_derive.rs	10
