@@ -1,6 +1,6 @@
 key	value
 source_commit	f189c3121a0018e2b4005b93633ec3bfd4454ad6
-workspace_version	0.7.1
+workspace_version	0.7.2
 cargo	cargo 1.97.0-nightly (a343accce 2026-05-08)
 rustc	rustc 1.97.0-nightly (4b0c9d76a 2026-05-10)
 rustc_host	x86_64-unknown-linux-gnu

@@ -7,6 +7,8 @@ and the project follows the SemVer contract described in
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-07-06
+
 ### Fixed
 
 - **Direct-path load worked only on 23ai (bead `dpl23`).** The direct-path
