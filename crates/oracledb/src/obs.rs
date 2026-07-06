@@ -215,6 +215,33 @@ macro_rules! obs_record {
     ($guard:expr, $($field:ident).+ = $value:expr) => {{}};
 }
 
+/// Emit a standalone WARN-level observability event (operator-facing, not tied
+/// to a span). Used for degraded-but-recoverable conditions the operator should
+/// know about — e.g. skipping an unusable wallet and falling back to auto-login.
+///
+/// On the `tracing` build this forwards to [`tracing::event!`] at WARN; off, it
+/// expands to nothing and none of the argument expressions are evaluated. Only
+/// non-sensitive metadata may be passed (never a password or path).
+///
+/// ```ignore
+/// obs_warn!(skipped_wallet = "ewallet.p12", "falling back to cwallet.sso");
+/// ```
+#[cfg(feature = "tracing")]
+#[macro_export]
+macro_rules! obs_warn {
+    ($($args:tt)+) => {{
+        $crate::__tracing::event!($crate::__tracing::Level::WARN, $($args)+);
+    }};
+}
+
+/// Off-build: a no-op; argument expressions are not evaluated and `tracing` is
+/// never named.
+#[cfg(not(feature = "tracing"))]
+#[macro_export]
+macro_rules! obs_warn {
+    ($($args:tt)+) => {{}};
+}
+
 #[cfg(all(test, feature = "tracing"))]
 mod tests {
     use super::sql_digest;

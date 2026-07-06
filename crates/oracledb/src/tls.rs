@@ -352,44 +352,109 @@ pub(crate) fn resolve_tls_params(
     })
 }
 
-/// Read a wallet from a directory. Precedence:
+/// Read a wallet from a directory. Precedence: `ewallet.pem` → `ewallet.p12`
+/// (when a `wallet_password` is supplied) → `cwallet.sso`.
 ///
-/// 1. `ewallet.pem` — parity with python-oracledb thin, which reads only this
-///    file (encrypted private keys are decrypted when `wallet_password` is
-///    supplied).
-/// 2. `ewallet.p12` when a `wallet_password` is supplied — the standard Oracle
-///    PKCS#12 wallet (the ADB wallet-zip case).
-/// 3. `cwallet.sso` — the auto-login wallet (no password needed).
-/// 4. `ewallet.p12` without a password — fails closed with a typed
-///    `PasswordRequired` remediation (Oracle p12 wallets are always
-///    password-protected).
+/// The first wallet in that order that yields a usable identity wins. If the
+/// chosen `ewallet.pem` / `ewallet.p12` is *present but unusable* — an
+/// unsupported cipher, or a wrong / missing wallet password — and a valid
+/// auto-login `cwallet.sso` is present, the reader falls through to the SSO
+/// wallet and logs a WARN naming the skipped wallet.
+///
+/// When no auto-login wallet is available the original typed error is surfaced
+/// **verbatim** (it never mentions the fallthrough), so a genuine
+/// misconfiguration stays diagnosable:
+///
+/// * `ewallet.p12` with no password and no `cwallet.sso` →
+///   [`WalletError::PasswordRequired`].
+/// * a wrong password / unsupported cipher with no `cwallet.sso` → the reader's
+///   own typed [`WalletError::KeyDecrypt`] / [`WalletError::Pkcs12`].
+///
+/// I/O and malformed-container errors are never treated as fallthrough-eligible;
+/// they are surfaced as-is (a broken primary wallet should not be silently
+/// masked by an unrelated auto-login wallet).
 fn load_wallet(dir: &std::path::Path, password: Option<&str>) -> Result<WalletContents, Error> {
     use oracledb_protocol::tls::wallet::{
         p12_wallet_path, pem_wallet_path, read_ewallet_p12, read_ewallet_pem, sso_wallet_path,
         WalletError,
     };
 
-    if pem_wallet_path(dir).exists() {
-        return read_ewallet_pem(dir, password).map_err(Error::from);
-    }
-    let have_p12 = p12_wallet_path(dir).exists();
-    if have_p12 && password.is_some() {
-        return read_ewallet_p12(dir, password).map_err(Error::from);
-    }
-    let sso = sso_wallet_path(dir);
-    if sso.exists() {
+    // Read + parse the auto-login cwallet.sso if present. `Ok(None)` = no sso
+    // file; `Ok(Some(_))` = a usable auto-login wallet; `Err(_)` = an sso file
+    // that itself failed to parse.
+    let read_sso = || -> Result<Option<WalletContents>, WalletError> {
+        let sso = sso_wallet_path(dir);
+        if !sso.exists() {
+            return Ok(None);
+        }
         let bytes = std::fs::read(&sso).map_err(|source| WalletError::Io {
             path: sso.display().to_string(),
             source,
         })?;
-        return oracledb_protocol::tls::sso::parse_cwallet_sso(&bytes).map_err(Error::from);
+        oracledb_protocol::tls::sso::parse_cwallet_sso(&bytes).map(Some)
+    };
+
+    // A present-but-unusable primary wallet (unsupported cipher, or a wrong /
+    // missing wallet password) may fall through to auto-login; an I/O or
+    // malformed-container error may not.
+    let falls_through_to_autologin = |e: &WalletError| {
+        matches!(
+            e,
+            WalletError::KeyDecrypt(_)
+                | WalletError::Pkcs12(_)
+                | WalletError::PasswordRequired { .. }
+                | WalletError::UnsupportedFormat { .. }
+        )
+    };
+
+    // The primary wallet, in precedence order (pem, then password-bearing p12).
+    let have_p12 = p12_wallet_path(dir).exists();
+    let primary: Option<(&'static str, Result<WalletContents, WalletError>)> =
+        if pem_wallet_path(dir).exists() {
+            Some(("ewallet.pem", read_ewallet_pem(dir, password)))
+        } else if have_p12 && password.is_some() {
+            Some(("ewallet.p12", read_ewallet_p12(dir, password)))
+        } else {
+            None
+        };
+
+    match primary {
+        Some((_, Ok(contents))) => Ok(contents),
+        Some((name, Err(primary_err))) => {
+            if falls_through_to_autologin(&primary_err) {
+                if let Ok(Some(sso)) = read_sso() {
+                    obs_warn!(
+                        skipped_wallet = name,
+                        "wallet {name} could not be used ({primary_err}); \
+                         falling back to auto-login cwallet.sso"
+                    );
+                    // `name` is referenced only by obs_warn!, which is a no-op
+                    // in the default (tracing-off) build.
+                    let _ = name;
+                    return Ok(sso);
+                }
+            }
+            // No usable auto-login wallet: surface the original typed error
+            // verbatim (never mention the fallthrough).
+            Err(primary_err.into())
+        }
+        None => {
+            // No pem and no password-bearing p12. Prefer an auto-login wallet;
+            // otherwise fall back to a typed error the operator can act on.
+            if let Some(sso) = read_sso()? {
+                return Ok(sso);
+            }
+            if have_p12 {
+                // p12 present but no password and no auto-login wallet: surface
+                // the typed supply-wallet_password remediation.
+                return read_ewallet_p12(dir, password).map_err(Error::from);
+            }
+            Err(
+                WalletError::FileMissing("ewallet.pem, ewallet.p12, or cwallet.sso".to_string())
+                    .into(),
+            )
+        }
     }
-    if have_p12 {
-        // No password and no auto-login wallet: surface the typed
-        // supply-wallet_password remediation from the p12 reader.
-        return read_ewallet_p12(dir, password).map_err(Error::from);
-    }
-    Err(WalletError::FileMissing("ewallet.pem, ewallet.p12, or cwallet.sso".to_string()).into())
 }
 
 /// A `ServerName` that is always a valid rustls DNS name, used when no SNI is
@@ -643,5 +708,55 @@ mod tests {
             std::fs::read(fixture_tls_dir().join("ewallet.pem")).expect("read pem fixture");
         let direct = parse_ewallet_pem(&pem_bytes, None).expect("parse pem fixture");
         assert_eq!(wallet.ca_certificates, direct.ca_certificates);
+    }
+
+    #[test]
+    fn unusable_p12_falls_through_to_auto_login_sso() {
+        // A2.2: when the primary ewallet.p12 is present but unusable (here a
+        // wrong wallet_password → typed Pkcs12 error) AND a valid auto-login
+        // cwallet.sso is present, the loader falls through to the SSO wallet
+        // instead of failing. The result must be the same identity the SSO
+        // wallet yields on its own.
+        let dir = temp_wallet_dir("fallthrough", &["ewallet_orapki.p12", "cwallet_orapki.sso"]);
+        let fell_through = load_wallet(&dir, Some("not-the-password!"))
+            .expect("wrong p12 password must fall through to the auto-login cwallet.sso");
+        assert!(fell_through.has_client_identity());
+        // Identical to loading the SSO wallet directly (no password).
+        let sso_only = temp_wallet_dir("fallthrough-sso", &["cwallet_orapki.sso"]);
+        let direct = load_wallet(&sso_only, None).expect("sso path must load");
+        assert_eq!(fell_through.ca_certificates, direct.ca_certificates);
+        assert_eq!(fell_through.client_private_key, direct.client_private_key);
+    }
+
+    #[test]
+    fn unusable_p12_without_sso_preserves_original_typed_error() {
+        // A2.2: with NO auto-login cwallet.sso to fall through to, the primary
+        // wallet's original typed error is surfaced verbatim — a wrong password
+        // stays a typed Pkcs12 error, never rewritten to mention a fallthrough.
+        let dir = temp_wallet_dir("no-sso", &["ewallet_orapki.p12"]);
+        let err = load_wallet(&dir, Some("not-the-password!"))
+            .expect_err("wrong p12 password with no sso must fail closed");
+        let wallet_err = if let Error::Wallet(wallet_err) = err {
+            wallet_err
+        } else {
+            panic!("expected wallet error, got {err:?}");
+        };
+        assert!(
+            matches!(
+                &wallet_err,
+                oracledb_protocol::tls::wallet::WalletError::Pkcs12(_)
+            ),
+            "expected the original typed Pkcs12 error, got {wallet_err:?}"
+        );
+        // The preserved error must NOT leak the password nor reference the
+        // fallthrough / auto-login machinery (it is the reader's own message).
+        for rendered in [format!("{wallet_err}"), format!("{wallet_err:?}")] {
+            assert!(!rendered.contains("not-the-password!"), "password leaked");
+            let lower = rendered.to_ascii_lowercase();
+            assert!(
+                !lower.contains("fall") && !lower.contains("auto-login") && !lower.contains("sso"),
+                "preserved error must not mention the fallthrough, got {rendered:?}"
+            );
+        }
     }
 }
