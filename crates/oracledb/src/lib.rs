@@ -222,6 +222,15 @@ const TNS_DATA_PACKET_OVERHEAD: usize = 10;
 
 pub use oracledb_protocol as protocol;
 
+/// The version of this driver crate, e.g. `"0.7.3"`.
+///
+/// Consumers that wrap the driver (for example `oraclemcp-db`'s `doctor`) must
+/// report the *driver's* real version, not their own: `env!("CARGO_PKG_VERSION")`
+/// evaluated inside a wrapping crate resolves to that wrapper's version. This
+/// const is evaluated in the driver crate, so it always reflects the actual
+/// `oracledb` version the wrapper is linked against.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Profiling-only read/decode attribution counters for the fetch paging loop.
 ///
 /// **This is measurement-only instrumentation, not part of the optimization.**
