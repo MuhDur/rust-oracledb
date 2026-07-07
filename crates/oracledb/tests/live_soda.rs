@@ -15,7 +15,7 @@
 
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
-use oracledb::soda::{SodaDatabase, SodaDocument, SodaError, SodaOperation};
+use oracledb::soda::{SodaCollection, SodaDatabase, SodaDocument, SodaError, SodaOperation};
 use oracledb::{ConnectOptions, Connection};
 use oracledb_protocol::oson::OsonValue;
 use oracledb_protocol::ClientIdentity;
@@ -732,6 +732,229 @@ fn soda_breadth_cursor_skip_limit_keys_and_metadata() {
             );
 
             db.drop_collection(conn, cx, "RustSodaBreadth").await.ok();
+            conn.commit(cx).await.ok();
+        })
+    });
+}
+
+/// Count matches for a QBE `filter` string, panicking with the filter on error.
+async fn qbe_count(coll: &SodaCollection, conn: &mut Connection, cx: &Cx, filter: &str) -> u64 {
+    let op = SodaOperation {
+        filter: Some(filter.to_string()),
+        ..Default::default()
+    };
+    coll.get_count(conn, cx, &op)
+        .await
+        .unwrap_or_else(|e| panic!("count {filter}: {e:?}"))
+}
+
+/// QBE operator breadth (bead a4-h74 / iec3.1.20): the query-by-example surface
+/// python-oracledb's SODA suite (test_3300 `find()`) exercises beyond the
+/// `$gt`/`$lt`/`$like`/`$startsWith` already covered — comparison, negation,
+/// regex/substring, case-folding, existence, nested paths, and logical
+/// combinators. Gated at 21c+.
+#[test]
+#[ignore = "requires live Oracle 21c+ container (xe21 / free23)"]
+fn soda_qbe_operator_breadth() {
+    with_conn(|conn, cx| {
+        Box::pin(async move {
+            let major = conn
+                .server_version_tuple()
+                .expect("server version negotiated at connect")
+                .0;
+            if major < 21 {
+                eprintln!("[soda-qbe] version={major}c: SODA unavailable (< 21c), N/A");
+                return;
+            }
+
+            let db = SodaDatabase::new();
+            drop_if_exists(&db, conn, cx, "RustSodaQbeOps").await;
+            let coll = db
+                .create_collection(conn, cx, Some("RustSodaQbeOps"), None, false)
+                .await
+                .expect("create");
+
+            let docs = vec![
+                json_doc(r#"{"name":"John","age":22,"address":{"city":"Sydney"},"active":true}"#),
+                json_doc(
+                    r#"{"name":"Johnson","age":45,"address":{"city":"Sydney"},"active":false}"#,
+                ),
+                json_doc(r#"{"name":"William","age":32,"address":{"city":"Perth"}}"#),
+                json_doc(r#"{"name":"Anne","age":29,"address":{"city":"Perth"},"active":true}"#),
+            ];
+            coll.insert_many(conn, cx, &docs, None, false)
+                .await
+                .expect("insertMany");
+            conn.commit(cx).await.expect("commit");
+
+            // Comparison + equality.
+            assert_eq!(
+                qbe_count(&coll, conn, cx, r#"{"name":{"$eq":"John"}}"#).await,
+                1
+            );
+            assert_eq!(qbe_count(&coll, conn, cx, r#"{"age":{"$ne":22}}"#).await, 3);
+            assert_eq!(
+                qbe_count(&coll, conn, cx, r#"{"age":{"$gte":32}}"#).await,
+                2
+            );
+            assert_eq!(
+                qbe_count(&coll, conn, cx, r#"{"age":{"$lte":29}}"#).await,
+                2
+            );
+
+            // Regex + substring + case-folding.
+            assert_eq!(
+                qbe_count(&coll, conn, cx, r#"{"name":{"$regex":"^Jo"}}"#).await,
+                2
+            );
+            assert_eq!(
+                qbe_count(&coll, conn, cx, r#"{"name":{"$hasSubstring":"ohn"}}"#).await,
+                2
+            );
+            assert_eq!(
+                qbe_count(
+                    &coll,
+                    conn,
+                    cx,
+                    r#"{"name":{"$upper":{"$startsWith":"JO"}}}"#
+                )
+                .await,
+                2
+            );
+
+            // Existence (William has no `active` field).
+            assert_eq!(
+                qbe_count(&coll, conn, cx, r#"{"active":{"$exists":true}}"#).await,
+                3
+            );
+            assert_eq!(
+                qbe_count(&coll, conn, cx, r#"{"active":{"$exists":false}}"#).await,
+                1
+            );
+
+            // Negation.
+            assert_eq!(
+                qbe_count(&coll, conn, cx, r#"{"age":{"$not":{"$eq":22}}}"#).await,
+                3
+            );
+
+            // Nested path.
+            assert_eq!(
+                qbe_count(&coll, conn, cx, r#"{"address.city":{"$eq":"Perth"}}"#).await,
+                2
+            );
+
+            // Logical combinators.
+            assert_eq!(
+                qbe_count(
+                    &coll,
+                    conn,
+                    cx,
+                    r#"{"$and":[{"age":{"$gte":30}},{"address.city":{"$eq":"Sydney"}}]}"#
+                )
+                .await,
+                1
+            );
+            assert_eq!(
+                qbe_count(
+                    &coll,
+                    conn,
+                    cx,
+                    r#"{"$or":[{"name":{"$eq":"William"}},{"age":{"$lt":25}}]}"#
+                )
+                .await,
+                2
+            );
+            assert_eq!(
+                qbe_count(
+                    &coll,
+                    conn,
+                    cx,
+                    r#"{"$nor":[{"name":{"$eq":"William"}},{"age":{"$lt":25}}]}"#
+                )
+                .await,
+                2
+            );
+
+            db.drop_collection(conn, cx, "RustSodaQbeOps").await.ok();
+            conn.commit(cx).await.ok();
+        })
+    });
+}
+
+/// insertManyAndGet (bead a4-h74 / iec3.1.20): the batch-insert-and-return path
+/// python-oracledb's test_3300 exercises — every returned document carries its
+/// server-assigned key and version, and the keys round-trip to the stored docs.
+/// Gated at 21c+.
+#[test]
+#[ignore = "requires live Oracle 21c+ container (xe21 / free23)"]
+fn soda_insert_many_and_get_returns_keys_and_versions() {
+    with_conn(|conn, cx| {
+        Box::pin(async move {
+            let major = conn
+                .server_version_tuple()
+                .expect("server version negotiated at connect")
+                .0;
+            if major < 21 {
+                eprintln!("[soda-iman] version={major}c: SODA unavailable (< 21c), N/A");
+                return;
+            }
+
+            let db = SodaDatabase::new();
+            drop_if_exists(&db, conn, cx, "RustSodaInsManyGet").await;
+            let coll = db
+                .create_collection(conn, cx, Some("RustSodaInsManyGet"), None, false)
+                .await
+                .expect("create");
+
+            let docs = vec![
+                json_doc(r#"{"seq":1,"who":"a"}"#),
+                json_doc(r#"{"seq":2,"who":"b"}"#),
+                json_doc(r#"{"seq":3,"who":"c"}"#),
+            ];
+            let returned = coll
+                .insert_many(conn, cx, &docs, None, true)
+                .await
+                .expect("insertManyAndGet")
+                .expect("return_docs=true yields docs");
+            conn.commit(cx).await.expect("commit");
+
+            assert_eq!(returned.len(), 3, "one returned doc per input");
+            let mut keys = Vec::new();
+            for doc in &returned {
+                let key = doc.key.clone().expect("returned doc carries a key");
+                assert!(!key.is_empty(), "key must be non-empty");
+                assert!(
+                    doc.version.as_deref().is_some_and(|v| !v.is_empty()),
+                    "returned doc carries a version"
+                );
+                keys.push(key);
+            }
+            assert_eq!(
+                {
+                    keys.sort();
+                    keys.dedup();
+                    keys.len()
+                },
+                3,
+                "keys are distinct"
+            );
+
+            // The returned keys round-trip to the stored documents.
+            let by_keys = SodaOperation {
+                keys: Some(keys.clone()),
+                ..Default::default()
+            };
+            assert_eq!(
+                coll.get_count(conn, cx, &by_keys)
+                    .await
+                    .expect("count keys"),
+                3
+            );
+
+            db.drop_collection(conn, cx, "RustSodaInsManyGet")
+                .await
+                .ok();
             conn.commit(cx).await.ok();
         })
     });
