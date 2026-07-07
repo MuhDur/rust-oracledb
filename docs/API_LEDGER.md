@@ -147,11 +147,9 @@ pub mod oracledb_protocol::wire	keep	Wire helper namespace.
 *oracledb::RoutineCall*	keep	Driver-native stored procedure/function call builder (0.7.3 a4-plsql-routine): IN, OUT, and function-RETURN binds.
 *oracledb::RoutineOutcome*	keep	Driver-native routine OUT/RETURN outcome accessor (0.7.3 a4-plsql-routine).
 *oracledb::OutType*	keep	Typed OUT-bind kind selector for RoutineCall (0.7.3 a4-plsql-routine).
-*oracledb::lob_stream*	keep	Lazy LOB streaming module: constant-memory BLOB/CLOB reader and writer (0.7.3 a4-bbx).
 *oracledb::LobReader*	keep	Lazy BLOB streaming reader re-export (0.7.3 a4-bbx).
 *oracledb::LobWriter*	keep	Lazy LOB streaming writer re-export (0.7.3 a4-bbx).
 *oracledb::ClobReader*	keep	UTF-16-aware lazy CLOB streaming reader re-export (0.7.3 a4-bbx).
-*oracledb::shape_cache*	keep	Cross-connection statement-shape cache module with DDL-invalidation self-heal (0.7.3 a4-8pp).
 *oracledb::StatementShapeCache*	keep	Cross-connection statement-shape cache re-export (0.7.3 a4-8pp).
 *oracledb::ColumnShape*	keep	Described-column shape fingerprint re-export for the shape cache (0.7.3 a4-8pp).
 *oracledb::ShapeObservation*	keep	Per-SQL shape observation (first_seen/generation/self_healed) re-export (0.7.3 a4-8pp).
@@ -160,6 +158,8 @@ pub mod oracledb_protocol::wire	keep	Wire helper namespace.
 *oracledb::VERSION*	keep	Crate version constant consumed by the server doctor (0.7.3 A6).
 *oracledb::BoxFuture*	keep	Boxed-future type alias used in the public async trait surface.
 *oracledb::obs_warn*	keep	Observability warning macro exported for the differentiator surfaces.
+*oracledb::shape_cache*	keep	Cross-connection statement-shape cache module with DDL-invalidation self-heal (0.7.3 a4-8pp).
+*oracledb::lob_stream*	keep	Lazy LOB streaming module: constant-memory BLOB/CLOB reader and writer (0.7.3 a4-bbx).
 ```
 
 ## Accidental-Leak Decisions

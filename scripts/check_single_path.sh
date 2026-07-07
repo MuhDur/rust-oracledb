@@ -37,6 +37,34 @@ oracledb_protocol::Result oracledb_protocol::sql::Result
 EOF
 )"
 
+# Allowlisted re-export dual-paths (W1-T9 exception). These 6 types shipped in
+# oracledb 0.7.3 exposed via BOTH the crate-root re-export (the canonical path)
+# AND their defining `pub mod` (shape_cache / lob_stream). Consolidating to the
+# single canonical root path is a public-API REMOVAL (breaking under SemVer), so
+# it is deferred to the next minor (0.8.0) — tracked as the driver single-path
+# consolidation bead. DO NOT add new entries: any NEW dual-path must be
+# single-path from the start (make the defining module `pub(crate)`).
+REEXPORT_DUAL_PATHS="$(cat <<'EOF'
+oracledb::ColumnShape oracledb::shape_cache::ColumnShape
+oracledb::ShapeObservation oracledb::shape_cache::ShapeObservation
+oracledb::StatementShapeCache oracledb::shape_cache::StatementShapeCache
+oracledb::ClobReader oracledb::lob_stream::ClobReader
+oracledb::LobReader oracledb::lob_stream::LobReader
+oracledb::LobWriter oracledb::lob_stream::LobWriter
+EOF
+)"
+
+is_reexport_allowlisted() {
+  local probe="$1 $2"
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    if [ "$line" = "$probe" ]; then
+      return 0
+    fi
+  done <<< "$REEXPORT_DUAL_PATHS"
+  return 1
+}
+
 is_distinct_pair() {
   # $1 shorter path, $2 longer path
   local probe="$1 $2"
@@ -96,6 +124,9 @@ for crate in oracledb oracledb-protocol; do
   while IFS=$'\t' read -r shorter longer; do
     [ -z "$shorter" ] && continue
     if is_distinct_pair "$shorter" "$longer"; then
+      continue
+    fi
+    if is_reexport_allowlisted "$shorter" "$longer"; then
       continue
     fi
     leaf="${shorter##*::}"

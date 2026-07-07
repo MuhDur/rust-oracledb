@@ -699,9 +699,9 @@
         }
       ],
       "name": "crossbeam-epoch",
-      "purl": "pkg:cargo/crossbeam-epoch@0.9.18",
+      "purl": "pkg:cargo/crossbeam-epoch@0.9.20",
       "type": "library",
-      "version": "0.9.18"
+      "version": "0.9.20"
     },
     {
       "licenses": [
@@ -884,6 +884,19 @@
       "purl": "pkg:cargo/deranged@0.5.8",
       "type": "library",
       "version": "0.5.8"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
+      "name": "des",
+      "purl": "pkg:cargo/des@0.8.1",
+      "type": "library",
+      "version": "0.8.1"
     },
     {
       "licenses": [
@@ -1804,9 +1817,9 @@
         }
       ],
       "name": "oracledb-derive",
-      "purl": "pkg:cargo/oracledb-derive@0.7.3",
+      "purl": "pkg:cargo/oracledb-derive@0.7.4",
       "type": "library",
-      "version": "0.7.3"
+      "version": "0.7.4"
     },
     {
       "licenses": [
@@ -1817,9 +1830,9 @@
         }
       ],
       "name": "oracledb-protocol",
-      "purl": "pkg:cargo/oracledb-protocol@0.7.3",
+      "purl": "pkg:cargo/oracledb-protocol@0.7.4",
       "type": "library",
-      "version": "0.7.3"
+      "version": "0.7.4"
     },
     {
       "licenses": [
@@ -3743,9 +3756,9 @@
         }
       ],
       "name": "oracledb",
-      "purl": "pkg:cargo/oracledb@0.7.3",
+      "purl": "pkg:cargo/oracledb@0.7.4",
       "type": "library",
-      "version": "0.7.3"
+      "version": "0.7.4"
     }
   },
   "specVersion": "1.5",
