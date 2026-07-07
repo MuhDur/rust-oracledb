@@ -119,4 +119,42 @@ end;
 exit
 SQL
 
-echo "bootstrap-live-schema: created ${MAIN_USER} + ${PROXY_USER} in ${PDB}"
+# Synthetic AQ queue for the post-auth AQ cassette (bead iec3.1.32). Provisioned
+# as the MAIN_USER (which holds aq_administrator_role, granted above) so the
+# captured enqueue/dequeue slice carries no DDL. Idempotent: stop + drop first.
+docker exec -i "$CONTAINER_NAME" \
+  sqlplus -S -L "${MAIN_USER}/${MAIN_PASSWORD}@localhost:1521/${PDB}" <<SQL
+whenever sqlerror exit failure
+set echo off feedback off heading off verify off pagesize 0
+declare
+  procedure ignore_err(stmt varchar2) is begin
+    execute immediate stmt;
+  exception when others then null; end;
+begin
+  ignore_err(q'[begin dbms_aqadm.stop_queue(queue_name => 'RUST_CASS_RAWQ'); end;]');
+  ignore_err(q'[begin dbms_aqadm.drop_queue(queue_name => 'RUST_CASS_RAWQ'); end;]');
+  ignore_err(q'[begin dbms_aqadm.drop_queue_table(queue_table => 'RUST_CASS_RAWQT', force => true); end;]');
+end;
+/
+begin
+  dbms_aqadm.create_queue_table(
+    queue_table        => 'RUST_CASS_RAWQT',
+    queue_payload_type => 'RAW',
+    multiple_consumers => false);
+  dbms_aqadm.create_queue(
+    queue_name  => 'RUST_CASS_RAWQ',
+    queue_table => 'RUST_CASS_RAWQT');
+  dbms_aqadm.start_queue(queue_name => 'RUST_CASS_RAWQ');
+end;
+/
+-- Empty target table for the direct-path-load (DPL) post-auth cassette. Every
+-- loaded row carries the same value, so the cassette's read-back is deterministic
+-- even if a re-capture appends more rows. Idempotent: drop + recreate empty.
+begin execute immediate 'drop table RUST_CASS_DPL purge'; exception when others then null; end;
+/
+create table RUST_CASS_DPL (v number(6))
+/
+exit
+SQL
+
+echo "bootstrap-live-schema: created ${MAIN_USER} + ${PROXY_USER} in ${PDB} (+ AQ queue RUST_CASS_RAWQ, DPL table RUST_CASS_DPL)"

@@ -33,7 +33,7 @@ pub use cassette_seam::{
     capture_scope, CaptureScope, CassetteError, CassetteRecorder, ReplayMismatch, ReplayWriteMode,
 };
 #[cfg(all(test, feature = "cassette"))]
-pub(crate) use cassette_seam::{replay_split, replay_split_with_audit};
+pub(crate) use cassette_seam::{replay_split, replay_split_with_audit, wrap_if_capturing};
 
 /// A TLS stream shared between the read and write halves.
 type SharedTls = Arc<Mutex<TlsStream<TcpStream>>>;
@@ -408,7 +408,7 @@ mod cassette_seam {
     /// [`plain_split`](super::plain_split) / [`tls_split`](super::tls_split) so
     /// `Connection::connect` captures end-to-end with no API change.
     #[must_use]
-    pub(super) fn wrap_if_capturing(
+    pub(crate) fn wrap_if_capturing(
         halves: (OracleReadHalf, OracleWriteHalf),
     ) -> (OracleReadHalf, OracleWriteHalf) {
         match ACTIVE_RECORDER.with(|slot| slot.borrow().clone()) {

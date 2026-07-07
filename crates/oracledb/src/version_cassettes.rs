@@ -54,10 +54,41 @@
 //! as `<lane>-lob.tns-cassette`. Its three LOB TTC calls are byte-deterministic:
 //! the server-assigned locator travels back in the recorded create response and
 //! the client only echoes it, so write/read replay byte-exact under
-//! `ReplayWriteMode::Check`. AQ / DPL / CQN round-trips remain a follow-up — the
-//! scenario registry is ready for them, but their request bytes embed
-//! server-assigned message/transaction ids that would need a decoded-assert
-//! (non-`Check`) replay model rather than the byte-exact one used here.
+//! `ReplayWriteMode::Check`.
+//!
+//! # AQ post-auth cassettes + decoded-assert replay (bead iec3.1.32)
+//!
+//! AQ (Advanced Queuing: `DBMS_AQ` enqueue / dequeue) and DPL (direct-path load)
+//! do **not** replay byte-exact across separate captures the way the scalar / LOB
+//! scenarios do. Their request bytes embed a **server-assigned id** that the
+//! server picks fresh on every run — AQ dequeue-by-message-id echoes the 16-byte
+//! message id the enqueue returned (and enqueue may carry a 16-byte transaction
+//! id); DPL echoes the server-assigned direct-path cursor id. A recording made in
+//! run #1 (id = X) and a recording made in run #2 (id = Y) differ **only** in
+//! those id bytes, so a byte-exact [`ReplayWriteMode::Check`] would reject run #2
+//! against run #1 even though the two are semantically identical.
+//!
+//! [`ReplayMode::DecodedAssert`] is the replay model for those surfaces. It
+//! relaxes the byte-exact write check to [`ReplayWriteMode::Ignore`] and proves
+//! fidelity two ways instead: (1) the driver's decoded semantic return value
+//! (the dequeued payload) must equal the recording, and (2) the driver's
+//! re-issued request stream must equal the recording after **masking every
+//! server-assigned id byte-run** — i.e. the ONLY tolerated differences are
+//! id-shaped runs whose length is a known id length (16 for an AQ message /
+//! transaction id). Any other request divergence still fails. The offline
+//! `decoded_assert_survives_server_id_divergence_that_check_rejects` test proves
+//! the model with no database: it takes a committed cassette whose request echoes
+//! a server-assigned id, mutates only those id bytes (simulating a second capture
+//! run), and shows the mutated cassette replays green under `DecodedAssert` but
+//! is rejected under `Check`.
+//!
+//! Both AQ and DPL are captured this way. DPL (direct-path load) echoes the
+//! server-assigned **direct-path cursor id** in its load-stream and finish
+//! requests — the same class of id — so it too replays under `DecodedAssert`
+//! (`PostAuthScenario::DplLoadReadback`, `<lane>-dpl.tns-cassette`). CQN (change
+//! notification) remains a follow-up: its registration id is the same class of
+//! server-assigned id, so the model already covers it — only the capture scenario
+//! is unwritten.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -69,8 +100,8 @@ use sha2::{Digest, Sha256};
 
 use oracledb_protocol::net::cassette::{self, Direction};
 use oracledb_protocol::thin::{
-    build_connect_packet_payload, parse_accept_payload, TNS_PACKET_TYPE_ACCEPT,
-    TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_RESEND,
+    build_connect_packet_payload, parse_accept_payload, TNS_AQ_MESSAGE_ID_LENGTH,
+    TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_RESEND,
 };
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth, ProtocolLimits};
 use oracledb_protocol::ProtocolError;
@@ -727,19 +758,92 @@ const LOB_EXPECTED_VALUE: &str = "rust-oracledb cassette blob payload";
 /// single read drains the whole BLOB.
 const LOB_READ_AMOUNT: u64 = 4000;
 
-/// A deterministic, secret-free post-auth flow whose request bytes are fully
-/// determined by the negotiated caps + `ttc_seq_num` (plus, for LOB, the
-/// server-assigned locator echoed back from the recorded execute response).
+/// The AQ post-auth scenario (bead iec3.1.32): enqueue one RAW message into a
+/// single-consumer queue, then dequeue it **by message id**. The dequeue request
+/// echoes the 16-byte server-assigned message id the enqueue returned, so — unlike
+/// the LOB locator, which is reproduced byte-for-byte from the recorded response —
+/// two independent captures differ in those id bytes and cannot share a byte-exact
+/// `Check` replay. This is the archetypal [`ReplayMode::DecodedAssert`] surface.
+///
+/// The queue is pre-provisioned by `scripts/bootstrap_live_schema.sh`
+/// (`DBMS_AQADM.create_queue_table` / `create_queue` / `start_queue`), so the
+/// captured slice is just the two enqueue/dequeue round-trips — no DDL round-trips
+/// leak into the cassette.
+const AQ_QUEUE_NAME: &str = "RUST_CASS_RAWQ";
+/// Human-readable scenario description recorded in the manifest `sql` field.
+/// Free of `"`/`=` so it round-trips the manifest cleanly.
+const AQ_SCENARIO_DESC: &str = "aq: raw enqueue + dequeue-by-msgid (single-consumer)";
+/// The RAW payload enqueued then dequeued; the replay must reproduce it exactly.
+/// Pure ASCII, free of `"`/`=`, so it round-trips the manifest cleanly.
+const AQ_EXPECTED_VALUE: &str = "rust-oracledb cassette aq raw payload";
+
+/// The DPL (direct-path load) post-auth scenario (bead iec3.1.32): direct-path
+/// load one single-column NUMBER row, then read it back. The load's server-
+/// assigned **direct-path cursor id** (a ub2 the server picks in the PREPARE
+/// response) is echoed in the load-stream and FINISH requests — the same class of
+/// server-assigned id as the AQ message id — so this too is a
+/// [`ReplayMode::DecodedAssert`] surface. Offline replay is still byte-exact (the
+/// cursor id is reproduced from the recorded PREPARE response, like the LOB
+/// locator); DecodedAssert bounds a *re-capture* divergence to the cursor-id
+/// field. The table is pre-provisioned by `scripts/bootstrap_live_schema.sh`.
+const DPL_TABLE_NAME: &str = "RUST_CASS_DPL";
+/// The schema the direct-path load targets. Fixed (not `conn.user`) so the
+/// PREPARE request bytes are identical on capture and on the loopback replay —
+/// this is the synthetic free23 lab schema, the only lane DPL is captured on.
+const DPL_SCHEMA: &str = "PYTHONTEST";
+/// Single NUMBER column loaded and read back.
+const DPL_COLUMN: &str = "v";
+/// Read-back query (returns the loaded value). Every loaded row carries the same
+/// value, so `rownum = 1` is deterministic even after a re-capture appends rows.
+const DPL_READBACK_SQL: &str = "select v from RUST_CASS_DPL where rownum = 1";
+/// Human-readable scenario description recorded in the manifest `sql` field.
+const DPL_SCENARIO_DESC: &str = "dpl: direct-path load one number row + read-back";
+/// The loaded (and read-back) NUMBER value. Free of `"`/`=` for the manifest.
+const DPL_EXPECTED_VALUE: &str = "4242";
+
+/// How an offline post-auth replay validates the driver's re-issued request bytes.
+///
+/// The two modes differ only in how strictly the *client write* stream is checked;
+/// both always assert the decoded semantic return value. See the module docs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ReplayMode {
+    /// Byte-exact ([`ReplayWriteMode::Check`]): every re-issued client byte must
+    /// equal the recording. Used by scenarios whose request bytes carry no
+    /// server-assigned ids — the scalar select, and LOB (whose locator is echoed
+    /// from the recorded response, so it too reproduces byte-for-byte).
+    Check,
+    /// Decoded-assert ([`ReplayWriteMode::Ignore`] plus a masked request compare):
+    /// the request stream embeds server-assigned ids that differ run-to-run, so
+    /// the byte-exact check is relaxed. Fidelity is proven by the decoded return
+    /// value AND by requiring the re-issued request stream to equal the recording
+    /// after masking every server-assigned id byte-run: the only tolerated
+    /// differences are runs whose length is one of `id_lengths`.
+    DecodedAssert { id_lengths: Vec<usize> },
+}
+
+/// A deterministic-or-decoded, secret-free post-auth flow. Request bytes are
+/// fully determined by the negotiated caps + `ttc_seq_num` (plus, for LOB, the
+/// server-assigned locator echoed back from the recorded execute response; for
+/// AQ, the server-assigned message id — see [`ReplayMode`]).
 ///
 /// The same [`drive_scenario`] runs in both capture and replay, so the client
-/// byte-stream is identical on both sides and `ReplayWriteMode::Check` proves
-/// byte-reproducibility.
+/// byte-stream is identical on both sides. Byte-exact scenarios prove that under
+/// `ReplayWriteMode::Check`; AQ proves it under [`ReplayMode::DecodedAssert`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PostAuthScenario {
     /// A bind-free scalar select (one execute round-trip).
     ExecuteSelect,
     /// A temp BLOB round-trip: create-temp, write, read (three LOB TTC calls).
     LobBlob,
+    /// A RAW AQ round-trip: enqueue, then dequeue-by-message-id (two TTC calls).
+    /// The dequeue request embeds the server-assigned message id, so this replays
+    /// under [`ReplayMode::DecodedAssert`], not byte-exact `Check`.
+    AqRawRoundTrip,
+    /// A direct-path load of one NUMBER row, then a read-back (four TTC calls:
+    /// prepare, load-stream, finish, select). The load-stream and finish requests
+    /// embed the server-assigned direct-path cursor id, so this too replays under
+    /// [`ReplayMode::DecodedAssert`].
+    DplLoadReadback,
 }
 
 impl PostAuthScenario {
@@ -748,6 +852,8 @@ impl PostAuthScenario {
         match self {
             PostAuthScenario::ExecuteSelect => "postauth",
             PostAuthScenario::LobBlob => "lob",
+            PostAuthScenario::AqRawRoundTrip => "aq",
+            PostAuthScenario::DplLoadReadback => "dpl",
         }
     }
 
@@ -755,6 +861,8 @@ impl PostAuthScenario {
         match self {
             PostAuthScenario::ExecuteSelect => POSTAUTH_SQL,
             PostAuthScenario::LobBlob => LOB_SCENARIO_DESC,
+            PostAuthScenario::AqRawRoundTrip => AQ_SCENARIO_DESC,
+            PostAuthScenario::DplLoadReadback => DPL_SCENARIO_DESC,
         }
     }
 
@@ -762,6 +870,8 @@ impl PostAuthScenario {
         match self {
             PostAuthScenario::ExecuteSelect => POSTAUTH_EXPECTED_VALUE,
             PostAuthScenario::LobBlob => LOB_EXPECTED_VALUE,
+            PostAuthScenario::AqRawRoundTrip => AQ_EXPECTED_VALUE,
+            PostAuthScenario::DplLoadReadback => DPL_EXPECTED_VALUE,
         }
     }
 
@@ -770,17 +880,55 @@ impl PostAuthScenario {
         match self {
             PostAuthScenario::ExecuteSelect => "execute_select",
             PostAuthScenario::LobBlob => "temp_lob_create_write_read",
+            PostAuthScenario::AqRawRoundTrip => "aq_raw_enq_deq_by_msgid",
+            PostAuthScenario::DplLoadReadback => "dpl_load_readback",
         }
     }
 
     /// How many client writes the scenario emits before the trailing logoff.
     /// The slice keeps exactly this many (and their responses), dropping the
     /// close. `ExecuteSelect` = 1 (unchanged from the original slicer);
-    /// `LobBlob` = 3 (create-temp, write, read).
+    /// `LobBlob` = 3 (create-temp, write, read); `AqRawRoundTrip` = 2 (enqueue,
+    /// dequeue); `DplLoadReadback` = 4 (prepare, load-stream, finish, select).
     fn client_writes(self) -> usize {
         match self {
             PostAuthScenario::ExecuteSelect => 1,
             PostAuthScenario::LobBlob => 3,
+            PostAuthScenario::AqRawRoundTrip => 2,
+            PostAuthScenario::DplLoadReadback => 4,
+        }
+    }
+
+    /// The replay model this scenario's committed cassette is validated under.
+    /// Byte-deterministic scenarios use `Check`; AQ and DPL use `DecodedAssert`
+    /// because their requests embed a server-assigned id (AQ's 16-byte message
+    /// id; DPL's ub2 direct-path cursor id).
+    fn replay_mode(self) -> ReplayMode {
+        match self {
+            PostAuthScenario::ExecuteSelect | PostAuthScenario::LobBlob => ReplayMode::Check,
+            PostAuthScenario::AqRawRoundTrip => ReplayMode::DecodedAssert {
+                id_lengths: vec![TNS_AQ_MESSAGE_ID_LENGTH],
+            },
+            // The direct-path cursor id is a ub2, wire-encoded as a 1-3 byte
+            // length-prefixed field. Offline replay reproduces it byte-for-byte
+            // (echoed from the recorded PREPARE response), so these tolerances
+            // only bound a re-capture divergence.
+            PostAuthScenario::DplLoadReadback => ReplayMode::DecodedAssert {
+                id_lengths: vec![1, 2, 3],
+            },
+        }
+    }
+
+    /// Whether this scenario is captured on `lane_id`. AQ needs a pre-provisioned
+    /// queue + `aq_administrator_role`, and DPL a pre-provisioned target table,
+    /// which only the free23 lane's schema has — so both are captured there
+    /// alone; the byte-exact scenarios run every lane.
+    fn applies_to_lane(self, lane_id: &str) -> bool {
+        match self {
+            PostAuthScenario::AqRawRoundTrip | PostAuthScenario::DplLoadReadback => {
+                lane_id == "free23"
+            }
+            _ => true,
         }
     }
 }
@@ -821,6 +969,80 @@ async fn drive_scenario(
             let text = String::from_utf8(bytes)
                 .map_err(|e| Error::Runtime(format!("BLOB read not UTF-8: {e}")))?;
             Ok(Some(text))
+        }
+        PostAuthScenario::AqRawRoundTrip => {
+            use oracledb_protocol::thin::aq::{
+                AqDeqOptions, AqDeqPayload, AqEnqOptions, AqMsgProps, AqPayloadKind,
+                AqPayloadValue, AqQueueDesc,
+            };
+            // Enqueue one RAW message with IMMEDIATE visibility (visibility=1) so
+            // it is committed without a separate COMMIT round-trip and is
+            // dequeuable in the same session. The enqueue returns the 16-byte
+            // server-assigned message id.
+            let queue = AqQueueDesc::new(AQ_QUEUE_NAME.to_string(), AqPayloadKind::Raw, None);
+            let props = AqMsgProps {
+                payload: Some(AqPayloadValue::Raw(AQ_EXPECTED_VALUE.as_bytes().to_vec())),
+                ..AqMsgProps::default()
+            };
+            let enq_options = AqEnqOptions {
+                visibility: 1,
+                ..AqEnqOptions::default()
+            };
+            let msgid = conn
+                .aq_enq_one(cx, &queue, &props, &enq_options)
+                .await?
+                .ok_or_else(|| Error::Runtime("AQ enqueue returned no message id".into()))?;
+            // Dequeue BY the server-assigned message id: the request embeds those
+            // 16 bytes, so it is NOT byte-reproducible across independent captures
+            // — hence DecodedAssert. IMMEDIATE visibility (visibility=1) removes
+            // the message in an autonomous transaction, no COMMIT round-trip.
+            let deq_options = AqDeqOptions {
+                visibility: 1,
+                msgid: Some(msgid),
+                ..AqDeqOptions::default()
+            };
+            let result = conn.aq_deq_one(cx, &queue, &deq_options).await?;
+            let text = match result.message.and_then(|m| m.payload) {
+                Some(AqDeqPayload::Raw(bytes)) => Some(
+                    String::from_utf8(bytes)
+                        .map_err(|e| Error::Runtime(format!("AQ RAW payload not UTF-8: {e}")))?,
+                ),
+                Some(_) => {
+                    return Err(Error::Runtime("AQ dequeue returned non-RAW payload".into()))
+                }
+                None => None,
+            };
+            Ok(text)
+        }
+        PostAuthScenario::DplLoadReadback => {
+            use oracledb_protocol::dpl::DirectPathColumnValue;
+            use oracledb_protocol::thin::{ExecuteOptions, QueryValue};
+            // Direct-path load one row (prepare + one load-stream + finish). The
+            // server-assigned direct-path cursor id from the PREPARE response is
+            // echoed in the load-stream and finish requests. `batch_size` is a
+            // large upper bound so the single row streams in one message.
+            let columns = [DPL_COLUMN.to_string()];
+            let rows = [vec![DirectPathColumnValue::Number(
+                DPL_EXPECTED_VALUE.to_string(),
+            )]];
+            conn.direct_path_load(cx, DPL_SCHEMA, DPL_TABLE_NAME, &columns, &rows, 1000)
+                .await?;
+            // Read the loaded value back — a real decoded semantic assertion that
+            // the direct-path load committed and is queryable.
+            let exec = conn
+                .execute_raw(
+                    cx,
+                    DPL_READBACK_SQL,
+                    2,
+                    &[],
+                    ExecuteOptions::default(),
+                    None,
+                )
+                .await?;
+            Ok(exec
+                .cell(0, 0)
+                .and_then(QueryValue::as_number_text)
+                .map(|c| c.to_string()))
         }
     }
 }
@@ -972,9 +1194,74 @@ fn capture_postauth(
     })
 }
 
+/// The concatenated client-to-server byte stream of a cassette (all `C->S`
+/// frame payloads in order). Used by the decoded-assert masked write compare.
+fn client_write_stream(cassette_bytes: &[u8]) -> Result<Vec<u8>> {
+    let frames = cassette::decode_all(cassette_bytes)
+        .map_err(|e| Error::Runtime(format!("cassette decode: {e}")))?;
+    let mut out = Vec::new();
+    for frame in frames {
+        if frame.direction == Direction::ClientToServer {
+            out.extend_from_slice(&frame.bytes);
+        }
+    }
+    Ok(out)
+}
+
+/// Assert the driver's re-issued client-write stream (`produced`) equals the
+/// recorded client-write stream (`recorded`) after masking every server-assigned
+/// id byte-run. The two concatenations must be the same length (a server id
+/// substitution never changes length), and every maximal run of differing bytes
+/// must have a length in `id_lengths`. Any other divergence — a length mismatch,
+/// or a differing run of an unexpected length — is a real request regression, not
+/// id noise, and fails. This is what makes [`ReplayMode::DecodedAssert`] stricter
+/// than a blind `Ignore`: it tolerates ONLY the volatile id fields.
+fn assert_masked_writes_match(
+    produced: &[u8],
+    recorded: &[u8],
+    id_lengths: &[usize],
+) -> Result<()> {
+    if produced.len() != recorded.len() {
+        return Err(Error::Runtime(format!(
+            "decoded-assert: re-issued client writes are {} bytes, recording is {} — a \
+             server-assigned id substitution never changes length, so this is a real \
+             request regression",
+            produced.len(),
+            recorded.len()
+        )));
+    }
+    let mut i = 0usize;
+    while i < produced.len() {
+        if produced[i] == recorded[i] {
+            i += 1;
+            continue;
+        }
+        let run_start = i;
+        while i < produced.len() && produced[i] != recorded[i] {
+            i += 1;
+        }
+        let run_len = i - run_start;
+        if !id_lengths.contains(&run_len) {
+            return Err(Error::Runtime(format!(
+                "decoded-assert: re-issued client writes differ from the recording in a \
+                 {run_len}-byte run at offset {run_start}, whose length is not a known \
+                 server-assigned id length ({id_lengths:?}) — a real request regression, not \
+                 id noise"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Replay a sliced post-auth cassette against a loopback seeded from `caps` /
-/// `ttc_seq_num`, returning the decoded scalar. `ReplayWriteMode::Check` asserts
-/// every client byte matches the recording; the audit asserts full consumption.
+/// `ttc_seq_num`, returning the decoded scalar.
+///
+/// * [`ReplayMode::Check`] asserts every re-issued client byte matches the
+///   recording (`ReplayWriteMode::Check`) and the audit asserts full consumption.
+/// * [`ReplayMode::DecodedAssert`] relaxes the byte check to
+///   `ReplayWriteMode::Ignore`, tees the driver's re-issued writes, and asserts
+///   they equal the recording after masking the server-assigned id byte-runs (see
+///   [`assert_masked_writes_match`]). Server responses are still consumed exactly.
 #[allow(clippy::too_many_arguments)]
 fn replay_postauth(
     sliced: &[u8],
@@ -984,9 +1271,26 @@ fn replay_postauth(
     supports_oob: bool,
     sdu: usize,
     scenario: PostAuthScenario,
+    mode: &ReplayMode,
 ) -> Result<Option<String>> {
-    let (read, write, audit) = transport::replay_split_with_audit(sliced, ReplayWriteMode::Check)
+    let write_mode = match mode {
+        ReplayMode::Check => ReplayWriteMode::Check,
+        ReplayMode::DecodedAssert { .. } => ReplayWriteMode::Ignore,
+    };
+
+    // For DecodedAssert, tee the driver's replay writes so we can compare them
+    // (masked) against the recording. The scope must be installed before the
+    // halves are wrapped; it records on whichever thread `block_on` runs (the
+    // recorder is cloned into the halves, so it is thread-independent).
+    let capture = matches!(mode, ReplayMode::DecodedAssert { .. }).then(transport::capture_scope);
+
+    let (read, write, audit) = transport::replay_split_with_audit(sliced, write_mode)
         .map_err(|e| Error::Runtime(format!("replay split: {e}")))?;
+    let (read, write) = if capture.is_some() {
+        transport::wrap_if_capturing((read, write))
+    } else {
+        (read, write)
+    };
     let core = ConnectionCore::<DriverTransport>::from_halves(read, write, "postauth_replay");
     let mut conn = loopback_for_replay(
         core,
@@ -1003,6 +1307,13 @@ fn replay_postauth(
             .ok_or_else(|| Error::Runtime("missing ambient Cx in replay runtime".into()))?;
         drive_scenario(&mut conn, &cx, scenario).await
     })?;
+
+    if let ReplayMode::DecodedAssert { id_lengths } = mode {
+        let scope = capture.expect("DecodedAssert installs a capture scope");
+        let produced = client_write_stream(&scope.to_cassette_bytes())?;
+        let recorded = client_write_stream(sliced)?;
+        assert_masked_writes_match(&produced, &recorded, id_lengths)?;
+    }
 
     audit
         .assert_finished()
@@ -1034,6 +1345,7 @@ fn build_postauth_manifest(
             "supports_oob = {}\n",
             "sdu = {}\n",
             "expected_value = \"{}\"\n",
+            "replay_mode = \"{}\"\n",
             "sanitized = true\n",
             "checksum_sha256 = \"{}\"\n",
             "expected_writes = {}\n",
@@ -1054,6 +1366,10 @@ fn build_postauth_manifest(
         cap.supports_oob,
         cap.sdu,
         cap.value.as_deref().unwrap_or(""),
+        match scenario.replay_mode() {
+            ReplayMode::Check => "check",
+            ReplayMode::DecodedAssert { .. } => "decoded_assert",
+        },
         sha256_hex(&cap.sliced),
         write_hashes.len(),
         write_hashes.join(","),
@@ -1091,6 +1407,39 @@ fn record_postauth_lob_cassettes() {
     record_postauth_scenario(PostAuthScenario::LobBlob);
 }
 
+/// Record the AQ post-auth cassette (bead iec3.1.32) against the live free23
+/// lane. Needs the queue provisioned by `scripts/bootstrap_live_schema.sh`
+/// (`DBMS_AQADM` create-queue-table / create-queue / start-queue) and the
+/// `pythontest` user's `aq_administrator_role`. Run explicitly:
+///
+/// ```text
+/// cargo test -p oracledb --features cassette \
+///   record_postauth_aq_cassettes -- --ignored --nocapture
+/// ```
+///
+/// The pre-commit re-verify runs under [`ReplayMode::DecodedAssert`] (the
+/// dequeue request embeds a server-assigned message id), so a non-deterministic
+/// non-id divergence still fails here rather than committing a bad cassette.
+#[test]
+#[ignore = "records the live AQ post-auth cassette; needs free23 + a provisioned queue"]
+fn record_postauth_aq_cassettes() {
+    record_postauth_scenario(PostAuthScenario::AqRawRoundTrip);
+}
+
+/// Record the DPL (direct-path load) post-auth cassette (bead iec3.1.32) against
+/// the live free23 lane. Needs the target table provisioned by
+/// `scripts/bootstrap_live_schema.sh`. Run explicitly:
+///
+/// ```text
+/// cargo test -p oracledb --features cassette \
+///   record_postauth_dpl_cassettes -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "records the live DPL post-auth cassette; needs free23 + a provisioned table"]
+fn record_postauth_dpl_cassettes() {
+    record_postauth_scenario(PostAuthScenario::DplLoadReadback);
+}
+
 /// Capture, pre-verify offline, and commit every lane's cassette for `scenario`.
 /// Shared by the query and LOB recorders. Each capture is replayed against a
 /// seeded loopback before its fixture is written, so a non-deterministic capture
@@ -1103,6 +1452,11 @@ fn record_postauth_scenario(scenario: PostAuthScenario) {
 
     let mut failures = Vec::new();
     for lane in postauth_lanes() {
+        // A scenario that does not apply to this lane (AQ is free23-only) is
+        // skipped rather than attempted against a lane with no queue.
+        if !scenario.applies_to_lane(lane.id) {
+            continue;
+        }
         let up = lane.id.to_uppercase();
         let connect = std::env::var(format!("ORACLEDB_CASSETTE_{up}"))
             .unwrap_or_else(|_| lane.default_connect.to_string());
@@ -1127,6 +1481,7 @@ fn record_postauth_scenario(scenario: PostAuthScenario) {
             cap.supports_oob,
             cap.sdu,
             scenario,
+            &scenario.replay_mode(),
         ) {
             Ok(v) if v.as_deref() == Some(scenario.expected_value()) => {}
             Ok(v) => {
@@ -1178,9 +1533,21 @@ fn record_postauth_scenario(scenario: PostAuthScenario) {
     );
 }
 
-/// Replay one committed post-auth cassette offline and assert the seeded
-/// loopback re-derives the recorded scalar with byte-matching request bytes.
-fn replay_postauth_lane_offline(lane_id: &str, scenario: PostAuthScenario) -> Result<()> {
+/// A committed post-auth cassette plus the loopback seed parsed from its manifest.
+struct PostAuthFixture {
+    cassette_bytes: Vec<u8>,
+    caps: oracledb_protocol::thin::ClientCapabilities,
+    ttc_seq_num: u8,
+    supports_end_of_response: bool,
+    supports_oob: bool,
+    sdu: usize,
+    expected_value: String,
+}
+
+/// Read a committed post-auth cassette + manifest, verify integrity and
+/// sanitization, and parse the loopback seed. Shared by the offline replay gate
+/// and the decoded-assert proof.
+fn read_postauth_fixture(lane_id: &str, scenario: PostAuthScenario) -> Result<PostAuthFixture> {
     let cassette_bytes = fs::read(postauth_cassette_path(lane_id, scenario))
         .map_err(|e| Error::Runtime(e.to_string()))?;
     let manifest_text = fs::read_to_string(postauth_manifest_path(lane_id, scenario))
@@ -1231,15 +1598,39 @@ fn replay_postauth_lane_offline(lane_id: &str, scenario: PostAuthScenario) -> Re
         .map_err(|_| Error::Runtime(format!("{lane_id}: bad sdu")))?;
     let expected_value = need("expected_value")?;
 
-    let caps = oracledb_protocol::thin::ClientCapabilities {
-        ttc_field_version,
-        max_string_size,
-        charset_id,
-    };
-    let value = replay_postauth(&cassette_bytes, caps, ttc_seq_num, eor, oob, sdu, scenario)?;
-    if value.as_deref() != Some(expected_value.as_str()) {
+    Ok(PostAuthFixture {
+        cassette_bytes,
+        caps: oracledb_protocol::thin::ClientCapabilities {
+            ttc_field_version,
+            max_string_size,
+            charset_id,
+        },
+        ttc_seq_num,
+        supports_end_of_response: eor,
+        supports_oob: oob,
+        sdu,
+        expected_value,
+    })
+}
+
+/// Replay one committed post-auth cassette offline and assert the seeded
+/// loopback re-derives the recorded value under the scenario's replay mode.
+fn replay_postauth_lane_offline(lane_id: &str, scenario: PostAuthScenario) -> Result<()> {
+    let fx = read_postauth_fixture(lane_id, scenario)?;
+    let value = replay_postauth(
+        &fx.cassette_bytes,
+        fx.caps,
+        fx.ttc_seq_num,
+        fx.supports_end_of_response,
+        fx.supports_oob,
+        fx.sdu,
+        scenario,
+        &scenario.replay_mode(),
+    )?;
+    if value.as_deref() != Some(fx.expected_value.as_str()) {
         return Err(Error::Runtime(format!(
-            "{lane_id}: replay value {value:?} != {expected_value:?}"
+            "{lane_id}: replay value {value:?} != {:?}",
+            fx.expected_value
         )));
     }
     Ok(())
@@ -1264,10 +1655,35 @@ fn replay_postauth_lob_cassettes_offline() {
     replay_postauth_scenario_offline(PostAuthScenario::LobBlob);
 }
 
+/// Offline, no-database replay of the committed AQ post-auth cassette (bead
+/// iec3.1.32). Unlike the byte-exact scenarios this runs under
+/// [`ReplayMode::DecodedAssert`]: the dequeue request embeds the server-assigned
+/// message id, so the gate asserts the decoded RAW payload AND that the re-issued
+/// requests match the recording after masking the 16-byte id runs. Self-skips
+/// when the cassette is not committed (the capture is operator-run against a live
+/// queue).
+#[test]
+fn replay_postauth_aq_cassettes_offline() {
+    replay_postauth_scenario_offline(PostAuthScenario::AqRawRoundTrip);
+}
+
+/// Offline, no-database replay of the committed DPL post-auth cassette (bead
+/// iec3.1.32) under [`ReplayMode::DecodedAssert`]. The gate asserts the decoded
+/// read-back value AND that the re-issued prepare/load-stream/finish/select
+/// requests match the recording after masking the direct-path cursor-id runs.
+/// Self-skips when the cassette is not committed.
+#[test]
+fn replay_postauth_dpl_cassettes_offline() {
+    replay_postauth_scenario_offline(PostAuthScenario::DplLoadReadback);
+}
+
 /// Replay every committed cassette for `scenario` offline, aggregating failures.
 fn replay_postauth_scenario_offline(scenario: PostAuthScenario) {
     let mut failures = Vec::new();
     for lane in postauth_lanes() {
+        if !scenario.applies_to_lane(lane.id) {
+            continue;
+        }
         if !postauth_cassette_path(lane.id, scenario).exists() {
             eprintln!(
                 "skip {}: no committed {} cassette",
@@ -1283,6 +1699,171 @@ fn replay_postauth_scenario_offline(scenario: PostAuthScenario) {
     assert!(
         failures.is_empty(),
         "{} replay failures: {failures:?}",
+        scenario.suffix()
+    );
+}
+
+// ---- decoded-assert proof (bead iec3.1.32, offline, no database) ----------
+//
+// The `DecodedAssert` model exists so an AQ / DPL cassette — whose request bytes
+// embed a server-assigned id the server picks fresh each run — can still be
+// replayed even though two independent captures differ in those id bytes. The
+// test below proves the model with NO database, entirely offline, on a committed
+// cassette whose request echoes a server-assigned id: it mutates ONLY those id
+// bytes (simulating a second capture run) and shows the mutated cassette replays
+// green under `DecodedAssert` yet is rejected under byte-exact `Check`.
+
+/// The fixed length of the server-assigned id the proof mutates. 16 bytes is the
+/// AQ message-id / transaction-id length, and a 16-byte sub-window of the longer
+/// LOB locator serves identically when AQ is not captured.
+const ECHOED_ID_LEN: usize = TNS_AQ_MESSAGE_ID_LENGTH;
+
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.len() <= haystack.len() && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Find a [`ECHOED_ID_LEN`]-byte window inside a client-to-server frame that also
+/// appears in an EARLIER server-to-client frame — i.e. a server-assigned id the
+/// server returned and the client echoed back in a later request. Returns the
+/// `(frame_index, offset)` of the first such window, skipping constant (all-equal
+/// byte) windows like zero padding. This locates the AQ message id in the
+/// dequeue-by-msgid request (or a window of the LOB locator in write/read).
+fn find_echoed_id_region(frames: &[cassette::Frame]) -> Option<(usize, usize)> {
+    for (i, frame) in frames.iter().enumerate() {
+        if frame.direction != Direction::ClientToServer || frame.bytes.len() < ECHOED_ID_LEN {
+            continue;
+        }
+        let earlier_server: Vec<&[u8]> = frames[..i]
+            .iter()
+            .filter(|f| f.direction == Direction::ServerToClient)
+            .map(|f| f.bytes.as_slice())
+            .collect();
+        for offset in 0..=(frame.bytes.len() - ECHOED_ID_LEN) {
+            let window = &frame.bytes[offset..offset + ECHOED_ID_LEN];
+            if window.iter().all(|&b| b == window[0]) {
+                continue; // constant run (padding) — not a server id
+            }
+            if earlier_server.iter().any(|s| contains_subslice(s, window)) {
+                return Some((i, offset));
+            }
+        }
+    }
+    None
+}
+
+/// Build a copy of `cassette_bytes` with a single server-assigned id run flipped
+/// (XOR 0xFF, so every byte differs) inside ONE client-to-server frame, leaving
+/// all server responses intact. Returns the mutated cassette and the mutated
+/// frame index. Errors if no echoed id is present.
+fn mutate_echoed_id(cassette_bytes: &[u8]) -> Result<(Vec<u8>, usize)> {
+    let mut frames = cassette::decode_all(cassette_bytes)
+        .map_err(|e| Error::Runtime(format!("cassette decode: {e}")))?;
+    let (frame_index, offset) = find_echoed_id_region(&frames).ok_or_else(|| {
+        Error::Runtime("cassette has no server-assigned id echoed in a request frame".into())
+    })?;
+    for byte in &mut frames[frame_index].bytes[offset..offset + ECHOED_ID_LEN] {
+        *byte ^= 0xFF;
+    }
+    Ok((reencode_frames(&frames), frame_index))
+}
+
+/// The committed cassette used to prove the decoded-assert model: prefer the AQ
+/// cassette (its dequeue request literally echoes a server-assigned message id);
+/// otherwise fall back to a LOB cassette (whose write/read requests echo the
+/// server-assigned temp-lob locator — the same class of value). One of these is
+/// always committed, so the proof exercises real driver code rather than skipping.
+fn id_echo_proof_lane() -> Option<(PostAuthScenario, &'static str)> {
+    for lane in postauth_lanes() {
+        let aq = PostAuthScenario::AqRawRoundTrip;
+        if aq.applies_to_lane(lane.id) && postauth_cassette_path(lane.id, aq).exists() {
+            return Some((aq, lane.id));
+        }
+    }
+    for lane in postauth_lanes() {
+        let lob = PostAuthScenario::LobBlob;
+        if postauth_cassette_path(lane.id, lob).exists() {
+            return Some((lob, lane.id));
+        }
+    }
+    None
+}
+
+/// Offline proof of [`ReplayMode::DecodedAssert`] (bead iec3.1.32). With no
+/// database: take a committed cassette whose request echoes a server-assigned id,
+/// prove the pristine cassette replays byte-exact under `Check`, then mutate ONLY
+/// the id bytes (a second capture run differs there and nowhere else) and prove
+/// the mutated cassette is REJECTED under `Check` but replays GREEN under
+/// `DecodedAssert`, with the decoded payload intact.
+#[test]
+fn decoded_assert_survives_server_id_divergence_that_check_rejects() {
+    let Some((scenario, lane_id)) = id_echo_proof_lane() else {
+        // Neither AQ nor LOB cassette committed — nothing to prove against. The
+        // LOB set is normally committed, so this only trips on a bare checkout.
+        eprintln!("skip: no committed id-echo cassette (AQ or LOB) available");
+        return;
+    };
+    let fx = read_postauth_fixture(lane_id, scenario).expect("id-echo fixture loads");
+
+    let replay = |bytes: &[u8], mode: &ReplayMode| {
+        replay_postauth(
+            bytes,
+            fx.caps,
+            fx.ttc_seq_num,
+            fx.supports_end_of_response,
+            fx.supports_oob,
+            fx.sdu,
+            scenario,
+            mode,
+        )
+    };
+
+    // Baseline: the pristine committed cassette replays byte-exact under Check —
+    // the driver reproduces the recorded request bytes (the server id is echoed
+    // from the recorded response), so byte-exact holds run-over-run in-process.
+    let pristine = replay(&fx.cassette_bytes, &ReplayMode::Check)
+        .expect("pristine cassette replays byte-exact under Check");
+    assert_eq!(
+        pristine.as_deref(),
+        Some(fx.expected_value.as_str()),
+        "{lane_id}/{}: pristine decoded value",
+        scenario.suffix()
+    );
+
+    // Simulate a SECOND capture run: mutate ONLY the server-assigned id a request
+    // echoes (responses untouched). The driver, reading the untouched response,
+    // re-issues the ORIGINAL id, so its request now diverges from the recording
+    // in exactly those id bytes — "two runs differ ONLY in the server-assigned ids".
+    let (mutated, _frame) =
+        mutate_echoed_id(&fx.cassette_bytes).expect("cassette echoes a server id to mutate");
+    assert_ne!(
+        mutated, fx.cassette_bytes,
+        "mutation must actually change the cassette"
+    );
+
+    // (1) Byte-exact Check REJECTS the divergent id run.
+    let checked = replay(&mutated, &ReplayMode::Check);
+    assert!(
+        checked.is_err(),
+        "{lane_id}/{}: byte-exact Check must reject a request whose server-id bytes diverge \
+         from the recording, but it passed: {checked:?}",
+        scenario.suffix()
+    );
+
+    // (2) DecodedAssert ACCEPTS it: the only difference is one 16-byte id run, so
+    // masking id-length runs leaves the requests equal and the decoded payload is
+    // intact. (If the mutation had touched a non-id byte, the masked compare would
+    // still fail — proving DecodedAssert is stricter than a blind Ignore.)
+    let decoded = replay(
+        &mutated,
+        &ReplayMode::DecodedAssert {
+            id_lengths: vec![ECHOED_ID_LEN],
+        },
+    )
+    .expect("DecodedAssert masks the server-id run and replays green");
+    assert_eq!(
+        decoded.as_deref(),
+        Some(fx.expected_value.as_str()),
+        "{lane_id}/{}: decoded-assert decoded value",
         scenario.suffix()
     );
 }
@@ -1312,6 +1893,14 @@ fn expected_cassette_files() -> std::collections::BTreeSet<String> {
         expected.insert(format!("{}-postauth.tns-cassette", lane.id));
         // The LOB post-auth set (bead a4-nnnz) shares the same lanes.
         expected.insert(format!("{}-lob.tns-cassette", lane.id));
+        // The AQ + DPL post-auth sets (bead iec3.1.32) are captured only where the
+        // scenario applies (free23 has the provisioned queue + AQ role + table).
+        if PostAuthScenario::AqRawRoundTrip.applies_to_lane(lane.id) {
+            expected.insert(format!("{}-aq.tns-cassette", lane.id));
+        }
+        if PostAuthScenario::DplLoadReadback.applies_to_lane(lane.id) {
+            expected.insert(format!("{}-dpl.tns-cassette", lane.id));
+        }
     }
     expected.insert(SYNTHETIC_FIXTURE.to_string());
     expected
