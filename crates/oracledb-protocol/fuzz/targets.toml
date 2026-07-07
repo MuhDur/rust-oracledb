@@ -246,6 +246,21 @@ iterations = 500
 max_total_time_seconds = 5
 
 [[targets]]
+name = "lob_text_decoder"
+owner = "protocol/lob"
+parser_entry = "crates/oracledb-protocol/src/thin/dbobject.rs:541 LobTextDecoder::push"
+risk_tier = "required"
+corpus_dir = "corpus/lob_text_decoder"
+dictionary = ""
+max_input_bytes = 1_000_000
+timeout_seconds = 10
+rss_limit_mb = 2048
+malloc_limit_mb = 2048
+lane = "ci-smoke"
+iterations = 500
+max_total_time_seconds = 5
+
+[[targets]]
 name = "sessionless_tpc"
 owner = "protocol/sessionless-tpc"
 parser_entry = "crates/oracledb-protocol/src/thin/sessionless.rs:131 parse_tpc_txn_switch_response"

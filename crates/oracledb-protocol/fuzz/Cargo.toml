@@ -135,6 +135,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "lob_text_decoder"
+path = "fuzz_targets/lob_text_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "sessionless_tpc"
 path = "fuzz_targets/sessionless_tpc.rs"
 test = false
