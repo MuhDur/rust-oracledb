@@ -12,7 +12,7 @@
 #![cfg(feature = "arrow")]
 
 use arrow_array::cast::AsArray;
-use arrow_array::types::{Float64Type, Int64Type};
+use arrow_array::types::{Float32Type, Float64Type, Int64Type};
 use arrow_schema::DataType;
 use oracledb::arrow::ArrowFetchOptions;
 use oracledb::{BlockingConnection, ConnectOptions, Connection};
@@ -116,4 +116,101 @@ fn fetch_record_batch_from_live_query() {
             None,
         );
     });
+}
+
+/// A COLD `fetch_all_record_batch` on a VECTOR column — with NO prior query on
+/// the statement — must return the correct `FixedSizeList(Float32, N)` batch on
+/// 23ai with no desync (bead a4-0mk). The Arrow columnar fast path used to send
+/// the execute with inline prefetch before the VECTOR client-side define was
+/// established, so a cold fetch desynced with "invalid ub8 length"; it only
+/// worked once a prior query had cached the describe. This proves the standalone
+/// cold fetch works with no warm-up.
+#[test]
+fn cold_fetch_all_record_batch_vector_fixed_size_list() {
+    with_connection(
+        "cold_fetch_all_record_batch_vector_fixed_size_list",
+        |conn| {
+            // VECTOR is a 23ai-only datatype; skip on older lanes.
+            let major = conn.server_version_tuple().map(|(m, ..)| m).unwrap_or(0);
+            if major < 23 {
+                eprintln!(
+                    "skipped cold VECTOR arrow fetch: server major {major} < 23 (no VECTOR type)"
+                );
+                return;
+            }
+
+            let _ = BlockingConnection::execute_raw(
+                conn,
+                "drop table rust_itest_arrow_vec purge",
+                1,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
+            );
+            BlockingConnection::execute_raw(
+                conn,
+                "create table rust_itest_arrow_vec (id number(5), embedding vector(3, float32))",
+                1,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
+            )
+            .expect("create vector table");
+            for (id, lit) in [(1, "[1.5, 2.5, 3.5]"), (2, "[4.5, 5.5, 6.5]")] {
+                BlockingConnection::execute_raw(
+                    conn,
+                    &format!("insert into rust_itest_arrow_vec values ({id}, to_vector('{lit}'))"),
+                    1,
+                    &[],
+                    oracledb::protocol::thin::ExecuteOptions::default(),
+                    None,
+                )
+                .expect("insert vector");
+            }
+            BlockingConnection::commit(conn).expect("commit");
+
+            // COLD arrow fetch: no prior query_all/query warm-up on this SQL, so the
+            // statement's describe is not cached. This is exactly the standalone
+            // path that used to desync.
+            let options = ArrowFetchOptions::new().with_vector_fixed_size_list(true);
+            let batch = BlockingConnection::fetch_all_record_batch(
+                conn,
+                "select embedding from rust_itest_arrow_vec order by id",
+                100,
+                &options,
+            )
+            .expect("cold arrow fetch on a VECTOR column should not desync");
+
+            assert_eq!(batch.num_rows(), 2, "expected 2 VECTOR rows");
+            match batch.schema().field(0).data_type() {
+                DataType::FixedSizeList(field, 3) => {
+                    assert_eq!(
+                        field.data_type(),
+                        &DataType::Float32,
+                        "FixedSizeList element type must be Float32"
+                    );
+                }
+                other => panic!("VECTOR must map to FixedSizeList(Float32, 3), got {other:?}"),
+            }
+            let list = batch.column(0).as_fixed_size_list();
+            let expected = [[1.5f32, 2.5, 3.5], [4.5, 5.5, 6.5]];
+            for (i, want) in expected.iter().enumerate() {
+                let got: Vec<f32> = list
+                    .value(i)
+                    .as_primitive::<Float32Type>()
+                    .values()
+                    .to_vec();
+                assert_eq!(&got, want, "VECTOR row {i} mismatch");
+            }
+
+            let _ = BlockingConnection::execute_raw(
+                conn,
+                "drop table rust_itest_arrow_vec purge",
+                1,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
+            );
+        },
+    );
 }

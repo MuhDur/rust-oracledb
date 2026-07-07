@@ -252,6 +252,10 @@ impl crate::Connection {
         options: &ArrowFetchOptions,
     ) -> crate::Result<RecordBatch> {
         let size = fetch_array_size.max(1);
+        // Capture warmth BEFORE the execute: a cold (freshly parsed) VECTOR/JSON/
+        // LOB cursor needs a define-fetch first (bead a4-0mk), while a warm cached
+        // cursor keeps the server-side define from an earlier fetch.
+        let warm = self.statement_has_cached_cursor(sql);
         let mut result = self
             .execute_query_with_bind_rows_and_options_core(
                 cx,
@@ -262,6 +266,8 @@ impl crate::Connection {
             )
             .await?;
         require_result_set(&result.columns)?;
+        self.establish_cold_define(cx, warm, &mut result, size)
+            .await?;
         let columns = std::mem::take(&mut result.columns);
         let cursor_id = result.cursor_id;
         let mut rows = std::mem::take(&mut result.rows);
@@ -303,6 +309,10 @@ impl crate::Connection {
         options: &ArrowFetchOptions,
     ) -> crate::Result<RecordBatch> {
         let size = fetch_array_size.max(1);
+        // See `fetch_all_record_batch`: a cold define-requiring query (VECTOR,
+        // which falls back to the row path below) needs its client-side define
+        // established before the first fetch (bead a4-0mk).
+        let warm = self.statement_has_cached_cursor(sql);
         let mut result = self
             .execute_query_with_bind_rows_and_options_core(
                 cx,
@@ -313,6 +323,8 @@ impl crate::Connection {
             )
             .await?;
         require_result_set(&result.columns)?;
+        self.establish_cold_define(cx, warm, &mut result, size)
+            .await?;
         let columns = std::mem::take(&mut result.columns);
         let cursor_id = result.cursor_id;
         let schema = Arc::new(arrow_schema_for_columns(&columns, options)?);
@@ -380,7 +392,10 @@ impl crate::Connection {
         options: &ArrowFetchOptions,
     ) -> crate::Result<RecordBatchFetch> {
         let size = batch_size.max(1);
-        let result = self
+        // See `fetch_all_record_batch`: establish the client-side define for a
+        // cold define-requiring query before the first batch (bead a4-0mk).
+        let warm = self.statement_has_cached_cursor(sql);
+        let mut result = self
             .execute_query_with_bind_rows_and_options_core(
                 cx,
                 sql,
@@ -390,6 +405,8 @@ impl crate::Connection {
             )
             .await?;
         require_result_set(&result.columns)?;
+        self.establish_cold_define(cx, warm, &mut result, size)
+            .await?;
         let schema = Arc::new(arrow_schema_for_columns(&result.columns, options)?);
         Ok(RecordBatchFetch {
             schema,

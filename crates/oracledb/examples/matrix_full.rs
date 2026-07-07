@@ -1163,24 +1163,11 @@ fn check_vector_fixed_size_list(conn: &mut Connection, major: u8) -> Suite {
 
     let select = format!("select embedding from {VECTOR_TABLE} order by id");
 
-    // First prove the VECTOR decodes correctly through the standard fetch path.
-    // This also establishes the statement's cached describe, which the driver
-    // uses to suppress inline prefetch for VECTOR columns (client-side define);
-    // the Arrow convenience path below relies on that cached describe — a cold
-    // `fetch_all_record_batch` on a VECTOR column currently inline-prefetches
-    // and desyncs ("invalid ub8 length"), so we describe-then-Arrow-fetch.
-    let std_rows = BlockingConnection::query_all(conn, &select, ())?;
-    ensure!(
-        std_rows.len() == 2,
-        "standard VECTOR fetch: expected 2 rows, got {}",
-        std_rows.len()
-    );
-    let v0: Vec<f32> = std_rows[0].get(0)?;
-    ensure!(
-        v0 == vec![1.5f32, 2.5, 3.5],
-        "standard VECTOR decode row 0: expected [1.5, 2.5, 3.5], got {v0:?}"
-    );
-
+    // COLD Arrow fetch FIRST — no prior query on this statement (bead a4-0mk).
+    // A VECTOR column comes back from the execute as describe-only metadata; the
+    // Arrow fetch path establishes the client-side define before its first fetch,
+    // so `fetch_all_record_batch` works standalone (it used to desync with
+    // "invalid ub8 length" unless a prior query had warmed the cursor's define).
     let options = ArrowFetchOptions::new().with_vector_fixed_size_list(true);
     let batch = BlockingConnection::fetch_all_record_batch(conn, &select, 100, &options)?;
     ensure!(
@@ -1212,6 +1199,19 @@ fn check_vector_fixed_size_list(conn: &mut Connection, major: u8) -> Suite {
             "VECTOR row {i}: expected {want:?}, got {got:?}"
         );
     }
+
+    // Also prove the standard row fetch path decodes VECTOR correctly (now warm).
+    let std_rows = BlockingConnection::query_all(conn, &select, ())?;
+    ensure!(
+        std_rows.len() == 2,
+        "standard VECTOR fetch: expected 2 rows, got {}",
+        std_rows.len()
+    );
+    let v0: Vec<f32> = std_rows[0].get(0)?;
+    ensure!(
+        v0 == vec![1.5f32, 2.5, 3.5],
+        "standard VECTOR decode row 0: expected [1.5, 2.5, 3.5], got {v0:?}"
+    );
 
     drop_table_if_exists(conn, VECTOR_TABLE);
     pass(

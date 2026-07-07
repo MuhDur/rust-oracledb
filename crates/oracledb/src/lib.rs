@@ -4160,6 +4160,65 @@ impl Connection {
         Ok(result)
     }
 
+    /// True when `sql` already has an open server cursor in the statement cache.
+    /// The Arrow fetch entry points use this to tell a COLD query (freshly
+    /// parsed cursor, no server-side define yet) from a WARM one (a cached cursor
+    /// whose client-side define was established by an earlier fetch and persists
+    /// server-side) — see [`Self::establish_cold_define`].
+    #[cfg(feature = "arrow")]
+    pub(crate) fn statement_has_cached_cursor(&self, sql: &str) -> bool {
+        self.statement_cache
+            .iter()
+            .any(|entry| entry.sql == sql && entry.cursor_id != 0)
+    }
+
+    /// Establishes the client-side define for a COLD define-requiring query
+    /// (`VECTOR` / native `JSON` / `CLOB` / `BLOB`) so the first fetch on the
+    /// freshly parsed cursor carries the define. Such columns come back from the
+    /// execute as describe-only metadata (an empty first page); the server only
+    /// streams their values once a define-fetch has told it the client's buffer
+    /// shape. The row query paths ([`Self::query_with`],
+    /// [`Self::execute_query_collect_core`]) already do this; the Arrow fetch
+    /// paths ran a plain fetch instead and desynced ("invalid ub8 length") on a
+    /// cold `VECTOR` (bead a4-0mk).
+    ///
+    /// `warm` (from [`Self::statement_has_cached_cursor`], captured BEFORE the
+    /// execute) skips this: a warm cursor already carries the server-side define
+    /// from an earlier fetch, so a plain fetch is correct — this keeps the
+    /// already-working warm Arrow path byte-identical. Non-define-requiring
+    /// queries (the scalar columnar fast path) and executes that streamed rows
+    /// inline are also no-ops.
+    #[cfg(feature = "arrow")]
+    pub(crate) async fn establish_cold_define(
+        &mut self,
+        cx: &Cx,
+        warm: bool,
+        result: &mut QueryResult,
+        prefetch_rows: u32,
+    ) -> Result<()> {
+        if warm
+            || result.cursor_id == 0
+            || !result.rows.is_empty()
+            || !columns_require_define(&result.columns)
+        {
+            return Ok(());
+        }
+        let cursor_id = result.cursor_id;
+        let columns = result.columns.clone();
+        let fetched = self
+            .define_and_fetch_rows_with_columns(cx, cursor_id, prefetch_rows.max(1), &columns, None)
+            .await?;
+        result.rows = fetched.rows;
+        result.more_rows = fetched.more_rows;
+        if !fetched.columns.is_empty() {
+            result.columns = fetched.columns;
+        }
+        if result.cursor_id == 0 {
+            result.cursor_id = cursor_id;
+        }
+        Ok(())
+    }
+
     /// Ergonomic query: bind typed Rust values positionally and return a lazy
     /// [`Rows`] facade. `params` is anything that converts into [`Params`]: a tuple
     /// `(40, "alice")`, a homogeneous array `[1, 2, 3]`, a raw
