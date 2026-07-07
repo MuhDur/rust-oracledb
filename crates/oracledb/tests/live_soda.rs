@@ -15,7 +15,7 @@
 
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
-use oracledb::soda::{SodaDatabase, SodaDocument, SodaOperation};
+use oracledb::soda::{SodaDatabase, SodaDocument, SodaError, SodaOperation};
 use oracledb::{ConnectOptions, Connection};
 use oracledb_protocol::oson::OsonValue;
 use oracledb_protocol::ClientIdentity;
@@ -415,6 +415,95 @@ fn soda_truncate_and_index_and_names() {
                 db.drop_collection(conn, cx, n).await.ok();
             }
             conn.commit(cx).await.ok();
+        })
+    });
+}
+
+/// Proof-of-gate for SODA on pre-21c servers (bead a4-soda-pre21c / iec3.1.21).
+///
+/// Thin-mode SODA serializes documents with the `JSON_SERIALIZE` SQL function,
+/// which only exists on 21c+ — that function is the real capability boundary.
+/// (The `USER_SODA_COLLECTIONS` name resolves to a *public synonym* present
+/// even on 18c, where it is selectable, so its catalog presence is NOT a usable
+/// version signal. Verified live: the synonym is in `ALL_OBJECTS` and selectable
+/// on 18c, 21c and 23ai alike; `ALL_VIEWS` misses it on every lane because it is
+/// a synonym, not a view. The `JSON_SERIALIZE` function is what actually differs.)
+///
+/// Rather than silently `#[ignore]`-skipping SODA on old servers, this test
+/// makes the gate an **active, documented assertion** that runs on every lane
+/// and proves the capability boundary from both sides:
+///
+///   * `< 21c` (the xe18 lane): assert a direct `JSON_SERIALIZE` probe fails AND
+///     that `create_collection` fails with ORA-00904 (`"JSON_SERIALIZE":
+///     invalid identifier`). The capability is proven missing — an honest,
+///     evidence-backed XFAIL, never a quiet skip.
+///   * `>= 21c` (xe21 / free23): assert the `JSON_SERIALIZE` probe succeeds AND
+///     that `create_collection` succeeds, then clean up.
+///
+/// This mirrors the `xe18:live_soda` gate reason in
+/// `scripts/version_matrix.sh` (`suite_gate_reason`) but asserts it in-process
+/// so the gate cannot rot into a silent pass. Run with the lane env set:
+///
+/// ```text
+/// cargo test -p oracledb --features soda --test live_soda \
+///   soda_gated_on_pre21c_with_proof -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "requires live Oracle container (xe18 proves the gate; xe21/free23 prove support)"]
+fn soda_gated_on_pre21c_with_proof() {
+    with_conn(|conn, cx| {
+        Box::pin(async move {
+            let major = conn
+                .server_version_tuple()
+                .expect("server version negotiated at connect")
+                .0;
+
+            // Capability probe: does the JSON_SERIALIZE SQL function resolve?
+            // This is the real 21c+ boundary the thin SODA write path depends
+            // on (unlike USER_SODA_COLLECTIONS, a synonym present on every lane).
+            let probe = conn
+                .query_one(
+                    cx,
+                    "select json_serialize('{\"a\":1}' returning varchar2) from dual",
+                    (),
+                )
+                .await;
+
+            let db = SodaDatabase::new();
+            let create = db
+                .create_collection(conn, cx, Some("RustSodaGateProbe"), None, false)
+                .await;
+
+            if major < 21 {
+                // GATE branch: SODA genuinely unavailable — prove it, don't skip.
+                let probe_err = probe.expect_err("JSON_SERIALIZE must not resolve on pre-21c");
+                let err = create.expect_err("SODA create must fail on pre-21c");
+                let SodaError::Driver(driver_err) = &err else {
+                    panic!("expected a driver error carrying an ORA code, got: {err:?}");
+                };
+                assert_eq!(
+                    driver_err.ora_code(),
+                    Some(904),
+                    "pre-21c SODA create must fail with ORA-00904 \
+                     (JSON_SERIALIZE invalid identifier); got: {driver_err:?}"
+                );
+                eprintln!(
+                    "[soda-gate] version={major}c GATED: JSON_SERIALIZE absent \
+                     (probe -> {:?}), create_collection -> ORA-00904 \
+                     (documented XFAIL, not skipped)",
+                    probe_err.ora_code()
+                );
+            } else {
+                // SUPPORT branch: SODA present — prove it works, then clean up.
+                probe.expect("JSON_SERIALIZE must resolve on 21c+");
+                let coll = create.expect("SODA create must succeed on 21c+");
+                assert_eq!(coll.name(), "RustSodaGateProbe");
+                db.drop_collection(conn, cx, "RustSodaGateProbe").await.ok();
+                conn.commit(cx).await.ok();
+                eprintln!(
+                    "[soda-gate] version={major}c SUPPORTED: JSON_SERIALIZE + SODA available"
+                );
+            }
         })
     });
 }
