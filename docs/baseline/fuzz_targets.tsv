@@ -9,6 +9,7 @@ dbobject_image	crates/oracledb-protocol/fuzz/fuzz_targets/dbobject_image.rs
 dbobject_scalars	crates/oracledb-protocol/fuzz/fuzz_targets/dbobject_scalars.rs
 dpl_response	crates/oracledb-protocol/fuzz/fuzz_targets/dpl_response.rs
 lob_responses	crates/oracledb-protocol/fuzz/fuzz_targets/lob_responses.rs
+lob_text_decoder	crates/oracledb-protocol/fuzz/fuzz_targets/lob_text_decoder.rs
 oac_record	crates/oracledb-protocol/fuzz/fuzz_targets/oac_record.rs
 oson_decoder	crates/oracledb-protocol/fuzz/fuzz_targets/oson_decoder.rs
 packet_framing	crates/oracledb-protocol/fuzz/fuzz_targets/packet_framing.rs

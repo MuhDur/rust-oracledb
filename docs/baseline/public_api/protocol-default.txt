@@ -1067,6 +1067,16 @@ pub fn oracledb_protocol::thin::LobReadResult::default() -> oracledb_protocol::t
 impl core::fmt::Debug for oracledb_protocol::thin::LobReadResult
 pub fn oracledb_protocol::thin::LobReadResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb_protocol::thin::LobReadResult
+pub struct oracledb_protocol::thin::LobTextDecoder
+impl oracledb_protocol::thin::LobTextDecoder
+pub fn oracledb_protocol::thin::LobTextDecoder::finish(self) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::thin::LobTextDecoder::from_lob(u8, core::option::Option<&[u8]>) -> Self
+pub fn oracledb_protocol::thin::LobTextDecoder::new(bool, bool) -> Self
+pub fn oracledb_protocol::thin::LobTextDecoder::push(&mut self, &[u8]) -> oracledb_protocol::Result<alloc::string::String>
+impl core::clone::Clone for oracledb_protocol::thin::LobTextDecoder
+pub fn oracledb_protocol::thin::LobTextDecoder::clone(&self) -> oracledb_protocol::thin::LobTextDecoder
+impl core::fmt::Debug for oracledb_protocol::thin::LobTextDecoder
+pub fn oracledb_protocol::thin::LobTextDecoder::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct oracledb_protocol::thin::LobValue
 pub oracledb_protocol::thin::LobValue::chunk_size: u32
 pub oracledb_protocol::thin::LobValue::csfrm: u8

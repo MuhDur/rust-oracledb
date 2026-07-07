@@ -63,6 +63,7 @@ connection	oracledb::Connection	trim_lob	oracledb::BlockingConnection	trim_lob	c
 connection	oracledb::Connection	trim_lob_with_timeout	oracledb::BlockingConnection	trim_lob_with_timeout	covered	blocking twin present
 connection	oracledb::Connection	write_lob	oracledb::BlockingConnection	write_lob	covered	blocking twin present
 connection	oracledb::Connection	write_lob_with_timeout	oracledb::BlockingConnection	write_lob_with_timeout	covered	blocking twin present
+connection	oracledb::Connection	call_routine	oracledb::BlockingConnection	call_routine	covered	blocking twin present
 connection	oracledb::Connection	fetch_all_record_batch	oracledb::BlockingConnection	fetch_all_record_batch	covered	blocking twin present
 connection	oracledb::Connection	fetch_all_record_batch_columnar	oracledb::BlockingConnection	fetch_all_record_batch_columnar	covered	blocking twin present
 connection	oracledb::Connection	fetch_record_batches	oracledb::BlockingConnection	fetch_record_batches	covered	blocking twin present
@@ -130,6 +131,7 @@ connection	oracledb::Connection	trim_lob	oracledb::BlockingConnection	trim_lob	c
 connection	oracledb::Connection	trim_lob_with_timeout	oracledb::BlockingConnection	trim_lob_with_timeout	covered	blocking twin present
 connection	oracledb::Connection	write_lob	oracledb::BlockingConnection	write_lob	covered	blocking twin present
 connection	oracledb::Connection	write_lob_with_timeout	oracledb::BlockingConnection	write_lob_with_timeout	covered	blocking twin present
+connection	oracledb::Connection	call_routine	oracledb::BlockingConnection	call_routine	covered	blocking twin present
 connection	oracledb::Connection	fetch_all_record_batch	oracledb::BlockingConnection	fetch_all_record_batch	covered	blocking twin present
 connection	oracledb::Connection	fetch_all_record_batch_columnar	oracledb::BlockingConnection	fetch_all_record_batch_columnar	covered	blocking twin present
 connection	oracledb::Connection	fetch_record_batches	oracledb::BlockingConnection	fetch_record_batches	covered	blocking twin present
