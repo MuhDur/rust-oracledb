@@ -326,6 +326,9 @@ mod recovery;
 mod request;
 mod routine;
 mod rows;
+/// Cross-connection statement-shape cache with DDL-invalidation self-heal
+/// (bead a4-8pp). The user-facing types are re-exported at the crate root.
+pub mod shape_cache;
 #[cfg(feature = "soda")]
 pub mod soda;
 mod sql_convert;
@@ -365,6 +368,8 @@ pub use rows::{
 };
 
 pub use routine::{OutType, RoutineCall, RoutineOutcome};
+
+pub use shape_cache::{ColumnShape, ShapeObservation, StatementShapeCache};
 
 pub use sql_convert::{
     BindError, ConversionError, FromRow, FromSql, IntoBinds, Params, QueryResultExt, ToSql,
@@ -1934,6 +1939,15 @@ pub struct ConnectOptions {
     /// bounded separately by the DSN transport-connect timeout, and TCP keepalive
     /// is derived from a DSN `EXPIRE_TIME`.
     inactivity_timeout: Option<Duration>,
+    /// Optional cross-connection statement-shape cache (bead a4-8pp). When set,
+    /// every connection built from these options shares this cache, so a query's
+    /// described result-column shape is tracked across connections and a
+    /// concurrent DDL that changes the shape triggers a self-heal (re-describe)
+    /// on the next execute instead of a stale decode. `None` (default) gives
+    /// each connection a private cache, preserving the prior per-connection
+    /// behaviour. Set with
+    /// [`ConnectOptions::with_shared_statement_shape_cache`].
+    statement_shape_cache: Option<Arc<StatementShapeCache>>,
 }
 
 impl std::fmt::Debug for ConnectOptions {
@@ -1965,6 +1979,13 @@ impl std::fmt::Debug for ConnectOptions {
             .field("statement_cache_size", &self.statement_cache_size)
             .field("protocol_limits", &self.protocol_limits)
             .field("inactivity_timeout", &self.inactivity_timeout)
+            .field(
+                "statement_shape_cache",
+                &self
+                    .statement_shape_cache
+                    .as_ref()
+                    .map(|_| "<shared statement-shape cache>"),
+            )
             .finish()
     }
 }
@@ -2001,6 +2022,7 @@ impl ConnectOptions {
             statement_cache_size: STATEMENT_CACHE_SIZE,
             protocol_limits: ProtocolLimits::DEFAULT,
             inactivity_timeout: None,
+            statement_shape_cache: None,
         }
     }
 
@@ -2115,6 +2137,24 @@ impl ConnectOptions {
     /// The configured [`TokenSource`], if any.
     pub fn token_source(&self) -> Option<&std::sync::Arc<dyn TokenSource>> {
         self.token_source.as_ref()
+    }
+
+    /// Share a [`StatementShapeCache`] across every connection built from these
+    /// options (bead a4-8pp). With a shared cache, a query's described
+    /// result-column shape is tracked cross-connection: if a concurrent DDL on
+    /// one connection changes the shape, the next execute of the same statement
+    /// on any sharing connection self-heals (re-describes) rather than decoding
+    /// against the stale shape. Without this, each connection keeps a private
+    /// cache and behaves exactly as before.
+    #[must_use]
+    pub fn with_shared_statement_shape_cache(mut self, cache: Arc<StatementShapeCache>) -> Self {
+        self.statement_shape_cache = Some(cache);
+        self
+    }
+
+    /// The shared [`StatementShapeCache`], if one was configured.
+    pub fn statement_shape_cache(&self) -> Option<&Arc<StatementShapeCache>> {
+        self.statement_shape_cache.as_ref()
     }
 
     /// Select passwordless external authentication intent on an existing
@@ -2368,6 +2408,13 @@ pub struct Connection {
     fetch_metadata_by_sql: HashMap<String, Vec<ColumnMetadata>>,
     /// Insertion order for [`Self::fetch_metadata_by_sql`] eviction.
     fetch_metadata_order: VecDeque<String>,
+    /// Cross-connection statement-shape cache (bead a4-8pp). Private per
+    /// connection unless a shared one was supplied via
+    /// [`ConnectOptions::with_shared_statement_shape_cache`]. Each query execute
+    /// observes its freshly-described shape here; a cross-connection shape change
+    /// (concurrent DDL) self-heals by dropping this connection's retained per-SQL
+    /// fetch metadata so it re-describes instead of serving a stale decode.
+    shape_cache: Arc<StatementShapeCache>,
     dead: bool,
     /// Logon user, retained for the change-password call.
     user: String,
@@ -3057,6 +3104,7 @@ impl Connection {
                 cursor_columns: BTreeMap::new(),
                 fetch_metadata_by_sql: HashMap::new(),
                 fetch_metadata_order: VecDeque::new(),
+                shape_cache: options.statement_shape_cache.clone().unwrap_or_default(),
                 dead: false,
                 user: options.user,
                 combo_key,
@@ -6810,6 +6858,17 @@ impl Connection {
     ) -> Result<QueryResult> {
         if result.columns.is_empty() {
             return Ok(result);
+        }
+        // Cross-connection statement-shape observation (bead a4-8pp): record the
+        // freshly-described shape in the shared cache. If another connection
+        // changed the shape since it was last seen (a concurrent DDL), self-heal
+        // by dropping THIS connection's retained per-SQL fetch metadata so the
+        // adjust below cannot re-define the fresh columns toward the now-stale
+        // shape. The decode itself always uses the live `result.columns`, so it
+        // is never stale; the cache only forces a re-describe when the shape
+        // drifted. Self-heal only ever invalidates (heals down), never loosens.
+        if self.shape_cache.observe(sql, &result.columns).self_healed {
+            self.forget_fetch_metadata(sql);
         }
         if let Some(previous_columns) = self.fetch_metadata_by_sql.get(sql) {
             let mut adjusted = result.columns.clone();
@@ -11023,6 +11082,7 @@ mod tests {
             cursor_columns: BTreeMap::new(),
             fetch_metadata_by_sql: HashMap::new(),
             fetch_metadata_order: VecDeque::new(),
+            shape_cache: Arc::new(StatementShapeCache::new()),
             dead: false,
             user: "test_user".into(),
             combo_key: Vec::new(),
