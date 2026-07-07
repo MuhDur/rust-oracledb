@@ -14080,6 +14080,128 @@ mod tests {
     }
 
     #[test]
+    fn oob_cancel_on_one_lane_leaves_other_lane_undisturbed() -> Result<()> {
+        // a4-cn4 (rust-oracledb iec3.1.16) cross-lane isolation: an out-of-band
+        // cancel — a bare BREAK fired from a `CancelHandle` (python-oracledb
+        // `_break_external`) — on lane A must break + recover ONLY lane A. Lane B,
+        // a fully independent `Connection` with its own socket, write mutex, and
+        // recovery state, must complete its query untouched. The driver holds NO
+        // cross-connection lock, so the isolation is structural; this pins it and
+        // doubles as the no-cancel negative control (lane B never cancels).
+        const A_INFLIGHT: &[u8] = b"lane-A in-flight response";
+        const A_CANCEL_ERROR: &[u8] = &[0x04, 0x01, 0x0d]; // ORA-01013 user cancel
+
+        // --- lane A: scripts the out-of-band cancel choreography ---
+        let listener_a = TcpListener::bind("127.0.0.1:0").expect("bind lane A");
+        let addr_a = listener_a.local_addr().expect("lane A address");
+        let server_a = thread::spawn(move || {
+            use std::io::Write as _;
+            let (mut socket, _) = listener_a.accept().expect("accept lane A");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_BREAK,
+                "lane A must receive the out-of-band BREAK"
+            );
+            socket
+                .write_all(&data_packet(A_INFLIGHT, true))
+                .expect("write lane A in-flight response");
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))
+                .expect("write lane A break-ack marker");
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_RESET,
+                "lane A owner drain answers the break marker with RESET"
+            );
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_RESET))
+                .expect("write lane A reset-confirm marker");
+            socket
+                .write_all(&data_packet(A_CANCEL_ERROR, true))
+                .expect("write lane A trailing cancel error");
+        });
+
+        // --- lane B: answers an ordinary query, never cancelled ---
+        let listener_b = TcpListener::bind("127.0.0.1:0").expect("bind lane B");
+        let addr_b = listener_b.local_addr().expect("lane B address");
+        let server_b = thread::spawn(move || {
+            use std::io::Write as _;
+            let (mut socket, _) = listener_b.accept().expect("accept lane B");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            let _query_request = read_one_wire_packet(&mut socket);
+            socket
+                .write_all(&data_packet(
+                    &synthetic_pipeline_execute_response_payload(),
+                    true,
+                ))
+                .expect("write lane B query response");
+            socket.flush().expect("flush lane B");
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let (read_a, write_a) = transport::plain_split(TcpStream::connect(addr_a).await?);
+            let mut conn_a = loopback_connection(read_a, write_a);
+            let (read_b, write_b) = transport::plain_split(TcpStream::connect(addr_b).await?);
+            let mut conn_b = loopback_connection(read_b, write_b);
+
+            // Out-of-band cancel lane A: fire the bare BREAK from the handle, then
+            // the owner drains the multi-stage cancel response back to Ready.
+            let mut handle = conn_a.cancel_handle()?;
+            handle.cancel(&cx).await?;
+            assert_eq!(
+                conn_a.core.recovery.phase(),
+                SessionRecoveryPhase::BreakSent,
+                "the out-of-band handle only requests the break"
+            );
+            conn_a.drain_cancel_response().await?;
+            assert_eq!(
+                conn_a.core.recovery.phase(),
+                SessionRecoveryPhase::Ready,
+                "lane A recovers cleanly from the out-of-band cancel"
+            );
+            assert!(
+                !conn_a.is_dead(),
+                "an out-of-band cancel keeps lane A's session alive"
+            );
+
+            // Lane B — untouched by lane A's cancel — completes its query
+            // correctly (the no-cancel negative control).
+            let result_b = conn_b
+                .execute_raw(
+                    &cx,
+                    "select value from synthetic_fixture",
+                    2,
+                    &[],
+                    ExecuteOptions::default(),
+                    None,
+                )
+                .await?;
+            assert_eq!(
+                result_b,
+                sequential_op_decode(&synthetic_pipeline_execute_response_payload()),
+                "lane B's query is undisturbed by lane A's out-of-band cancel"
+            );
+            assert_eq!(
+                conn_b.core.recovery.phase(),
+                SessionRecoveryPhase::Ready,
+                "lane B never entered recovery"
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        server_a.join().expect("lane A server joins");
+        server_b.join().expect("lane B server joins");
+        Ok(())
+    }
+
+    #[test]
     fn scripted_transport_injects_errors_and_eof() -> Result<()> {
         let payload = encode_packet(
             TNS_PACKET_TYPE_CONNECT,
