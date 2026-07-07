@@ -31,9 +31,14 @@
 #   full    deep suite with VALUE assertions (examples/matrix_full.rs):
 #           identity, multi-packet fetch, wide rows, bind DML +
 #           rollback/commit, CLOB/BLOB write+readback, describe, NULLs,
-#           scalar round-trips, error paths; xe11: structured-refusal
-#           assertion. This is the standing release gate (see
-#           scripts/release_matrix_gate.sh).
+#           scalar round-trips, error paths; PLUS per-capability 0.7.3
+#           differentiator value-asserts (A5.1) — pipelining (23ai gate),
+#           batch-error continuation, call timeout, statement-shape self-heal,
+#           VECTOR->FixedSizeList (23ai gate), LOB streaming, the idempotency-
+#           gated retry executor, and thin SODA (21c gate). Built with
+#           --features "$MATRIX_FULL_FEATURES" (soda,arrow). xe11:
+#           structured-refusal assertion. This is the standing release gate
+#           (see scripts/release_matrix_gate.sh).
 #   truth   statement-suite ground-truth differential (bead
 #           rust-oracledb-rwoh): runs the IDENTICAL statement corpus through
 #           the Rust driver (examples/statement_ground_truth.rs) AND
@@ -55,6 +60,12 @@ set -euo pipefail
 ORACLE_PASSWORD="${ORACLE_PASSWORD:-OracledbTest#2026}"
 APP_USER="${ORACLEDB_MATRIX_APP_USER:-testuser}"
 APP_USER_PASSWORD="${ORACLEDB_MATRIX_APP_PASSWORD:-testpw}"
+
+# Features the `full`/`smoke` example (examples/matrix_full.rs) is built with so
+# the 0.7.3 per-capability differentiator value-asserts (A5.1) actually compile
+# in and run: `soda` (thin SODA, 21c+ gate) and `arrow` (VECTOR -> FixedSizeList,
+# 23ai gate). Without these the SODA and VECTOR sections are cfg'd out.
+MATRIX_FULL_FEATURES="${ORACLEDB_MATRIX_FULL_FEATURES:-soda,arrow}"
 
 # lane -> name / image / host port / service / suite user / suite password
 lane_fields() {
@@ -141,7 +152,7 @@ lane_smoke() {
   printf '=== %s (%s) localhost:%s/%s ===\n' "$lane" "$image" "$port" "$service"
   if lane_expects_refusal "$lane"; then
     # Below-floor lane: PASS means the driver cleanly refused the server.
-    if cargo run -q --example matrix_full -- --expect-version-refusal \
+    if cargo run -q --features "$MATRIX_FULL_FEATURES" --example matrix_full -- --expect-version-refusal \
         "localhost:$port/$service" "$user" "$password"; then
       printf '%-7s SMOKE GREEN (structured refusal verified)\n' "$lane"
     else
@@ -166,7 +177,7 @@ lane_full() {
   if lane_expects_refusal "$lane"; then
     refusal_flag=(--expect-version-refusal)
   fi
-  if cargo run -q --example matrix_full -- "${refusal_flag[@]}" \
+  if cargo run -q --features "$MATRIX_FULL_FEATURES" --example matrix_full -- "${refusal_flag[@]}" \
       "localhost:$port/$service" "$user" "$password"; then
     printf '%-7s FULL GREEN\n' "$lane"
   else
@@ -311,7 +322,7 @@ run_versions() {
       { read -r name; read -r image; read -r port; read -r service; \
         read -r user; read -r password; } < <(lane_fields "$lane")
       printf '=== %s REFUSAL assertion (%s) ===\n' "$lane" "$service"
-      if cargo run -q --example matrix_full -- --expect-version-refusal \
+      if cargo run -q --features "$MATRIX_FULL_FEATURES" --example matrix_full -- --expect-version-refusal \
           "localhost:$port/$service" "$user" "$password" \
           > "$log_dir/$lane-REFUSAL.log" 2>&1; then
         cell[$lane:REFUSAL]=GREEN

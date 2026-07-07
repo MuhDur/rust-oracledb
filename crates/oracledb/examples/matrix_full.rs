@@ -36,12 +36,22 @@ use oracledb::protocol::thin::{
     ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_VARCHAR,
 };
 use oracledb::protocol::{ProtocolError, TNS_VERSION_MIN_ACCEPTED};
-use oracledb::{Connection, Query};
+use oracledb::retry::{run_with_retry, Idempotency, RetryPolicy};
+use oracledb::{Batch, Connection, Execute, PipelineRequest, Query, StatementShapeCache};
+
+use asupersync::runtime::{reactor, RuntimeBuilder};
+use asupersync::Cx;
 
 type Suite = Result<(), Box<dyn std::error::Error>>;
 
 const DML_TABLE: &str = "matrix_full_dml";
 const LOB_TABLE: &str = "matrix_full_lob";
+const PIPE_TABLE: &str = "matrix_full_pipe";
+const BATCH_TABLE: &str = "matrix_full_batch";
+const SHAPE_TABLE: &str = "matrix_full_shape";
+const RETRY_TABLE: &str = "matrix_full_retry";
+#[cfg(feature = "arrow")]
+const VECTOR_TABLE: &str = "matrix_full_vector";
 
 fn resolve(arg: Option<String>, env_key: &str, default: &str) -> String {
     arg.or_else(|| std::env::var(env_key).ok())
@@ -783,6 +793,871 @@ fn check_error_paths(conn: &mut Connection, options: &ConnectOptions) -> Suite {
 }
 
 // ---------------------------------------------------------------------------
+// 0.7.3 differentiator sections (per-capability VALUE asserts)
+//
+// Beyond the wire-correctness suite above, these prove the 0.7.3 surpass
+// features against THIS server generation, asserting the actual capability
+// behavior (not just "connects"). Version-specific capabilities gate on the
+// negotiated server major version: SODA at 21c+, VECTOR at 23ai. The rest
+// (pipelining, batch errors, call timeout, shape-cache self-heal, LOB
+// streaming, the retry executor) work identically across 18c/21c/23ai and are
+// asserted to do so on every working lane.
+// ---------------------------------------------------------------------------
+
+/// Pipelining (A8 / a4-pipeline): N ops collapsed into ONE server round trip.
+/// Version-specific — pipelining needs END_OF_RESPONSE framing (23ai+); on
+/// pre-23ai servers the driver refuses it with a typed `UnsupportedFeature`.
+fn check_pipeline_single_round_trip(conn: &mut Connection, major: u8) -> Suite {
+    section("pipelining: N ops collapsed into one round trip (A8; 23ai-only)");
+
+    if major < 23 {
+        // Version gate: pipelining requires END_OF_RESPONSE framing, negotiated
+        // only by 23ai+. The driver must refuse it with the typed feature error.
+        let probe = [PipelineRequest::execute(
+            "select 1 from dual".to_string(),
+            Vec::new(),
+            1,
+        )];
+        let err = match BlockingConnection::run_pipeline(conn, &probe, false) {
+            Err(err) => err,
+            Ok(_) => return Err("pipelining unexpectedly succeeded on a pre-23ai server".into()),
+        };
+        ensure!(
+            matches!(
+                err,
+                oracledb::Error::Protocol(oracledb::protocol::ProtocolError::UnsupportedFeature(_))
+            ),
+            "pre-23ai pipelining must fail with a typed UnsupportedFeature error, got: {err}"
+        );
+        pass(
+            "pipelining gate",
+            &format!("version={major}c: pipelining refused (UnsupportedFeature); needs 23ai END_OF_RESPONSE framing"),
+        );
+        return Ok(());
+    }
+
+    drop_table_if_exists(conn, PIPE_TABLE);
+    BlockingConnection::execute(
+        conn,
+        &format!("create table {PIPE_TABLE} (id number(5), val varchar2(16))"),
+        (),
+    )?;
+
+    // `run_pipeline`/`run_pipeline_decoded` both actually EXECUTE the ops, so
+    // the single-round-trip collapse is proven with a READ-ONLY pipeline (safe
+    // to run for the raw-payload count) and the per-op decode + mutation is
+    // proven once with a decoded pipeline.
+
+    // Collapse proof: three independent SELECTs return one payload per op plus
+    // the trailing end-pipeline marker (N + 1). Un-pipelined, this would be N
+    // separate round trips with no end marker.
+    let read_only = [
+        PipelineRequest::execute("select 1 from dual".to_string(), Vec::new(), 1),
+        PipelineRequest::execute("select 2 from dual".to_string(), Vec::new(), 1),
+        PipelineRequest::execute("select 3 from dual".to_string(), Vec::new(), 1),
+    ];
+    let raw = BlockingConnection::run_pipeline(conn, &read_only, false)?;
+    ensure!(
+        raw.len() == read_only.len() + 1,
+        "pipeline must return one response per op plus the end-pipeline marker: \
+         expected {}, got {}",
+        read_only.len() + 1,
+        raw.len()
+    );
+
+    // Decode proof: a single mutating pipeline (2 inserts + commit + select),
+    // run exactly once. Value-assert each op's decoded outcome.
+    let mutating = [
+        PipelineRequest::execute(
+            format!("insert into {PIPE_TABLE} values (1, 'one')"),
+            Vec::new(),
+            1,
+        ),
+        PipelineRequest::execute(
+            format!("insert into {PIPE_TABLE} values (:1, :2)"),
+            vec![vec![
+                BindValue::Number("2".to_string()),
+                BindValue::Text("two".to_string()),
+            ]],
+            1,
+        ),
+        PipelineRequest::commit(),
+        PipelineRequest::execute(
+            format!("select id, val from {PIPE_TABLE} order by id"),
+            Vec::new(),
+            100,
+        ),
+    ];
+    let decoded = BlockingConnection::run_pipeline_decoded(conn, &mutating, false)?;
+    ensure!(
+        decoded.len() == mutating.len(),
+        "decoded pipeline results: expected {}, got {}",
+        mutating.len(),
+        decoded.len()
+    );
+    for op in [0usize, 1] {
+        let insert = decoded[op]
+            .as_ref()
+            .map_err(|e| format!("pipeline insert op {op}: {e}"))?;
+        ensure!(
+            insert.row_count == 1,
+            "pipeline insert op {op}: row_count expected 1, got {}",
+            insert.row_count
+        );
+    }
+    let select = decoded[3]
+        .as_ref()
+        .map_err(|e| format!("pipeline select op: {e}"))?;
+    ensure!(
+        select.rows.len() == 2,
+        "pipeline select: expected 2 rows, got {}",
+        select.rows.len()
+    );
+    for (i, expected) in ["1", "2"].iter().enumerate() {
+        let id_ok = matches!(
+            &select.rows[i][0],
+            Some(v) if v.as_number_text().as_deref() == Some(*expected)
+        );
+        ensure!(
+            id_ok,
+            "pipeline select row {i}: expected id {expected}, got {:?}",
+            select.rows[i][0]
+        );
+    }
+
+    drop_table_if_exists(conn, PIPE_TABLE);
+    pass(
+        "pipelining",
+        "3-op read pipeline collapses to N+1 responses; 4-op mutating pipeline decoded + verified",
+    );
+    Ok(())
+}
+
+/// Batch executemany (a4-j1w): per-row `BatchError` continuation — the good
+/// rows still apply while the offending row is reported by index + ORA code.
+fn check_batch_errors(conn: &mut Connection) -> Suite {
+    section("batch executemany: per-row BatchError continuation (a4-j1w)");
+    drop_table_if_exists(conn, BATCH_TABLE);
+    BlockingConnection::execute(
+        conn,
+        &format!("create table {BATCH_TABLE} (id number(5) primary key, label varchar2(32))"),
+        (),
+    )?;
+    // Seed id=2 so the middle row of the batch collides with the primary key.
+    BlockingConnection::execute(
+        conn,
+        &format!("insert into {BATCH_TABLE} values (2, 'seed')"),
+        (),
+    )?;
+    BlockingConnection::commit(conn)?;
+
+    let rows: Vec<Vec<BindValue>> = [1i64, 2, 3]
+        .iter()
+        .map(|id| {
+            vec![
+                BindValue::Number(id.to_string()),
+                BindValue::Text(format!("row-{id}")),
+            ]
+        })
+        .collect();
+    let outcome = BlockingConnection::execute_many_with(
+        conn,
+        Batch::new(
+            &format!("insert into {BATCH_TABLE} (id, label) values (:1, :2)"),
+            &rows,
+        )
+        .collect_errors(),
+    )?;
+    ensure!(
+        outcome.errors().len() == 1,
+        "batch must report exactly one row error, got {}",
+        outcome.errors().len()
+    );
+    let err = &outcome.errors()[0];
+    ensure!(
+        err.row_index() == 1,
+        "batch error row_index: expected 1 (the duplicate), got {}",
+        err.row_index()
+    );
+    ensure!(
+        err.code() == 1,
+        "batch error code: expected ORA-00001 (unique constraint), got ORA-{:05}",
+        err.code()
+    );
+    // Continuation: the two good rows (0 and 2) were applied despite the middle
+    // failure — seed(2) + row(1) + row(3) = 3.
+    let count: i64 =
+        BlockingConnection::query_one(conn, &format!("select count(*) from {BATCH_TABLE}"), ())?
+            .get(0)?;
+    ensure!(
+        count == 3,
+        "batch continuation: expected 3 rows (seed + 2 good), got {count}"
+    );
+
+    BlockingConnection::rollback(conn)?;
+    drop_table_if_exists(conn, BATCH_TABLE);
+    pass(
+        "batch errors",
+        "row 1 -> ORA-00001 at correct index; rows 0 and 2 continued and applied",
+    );
+    Ok(())
+}
+
+/// Call timeout (A1.1 / GH#14): a slow server call surfaces the typed
+/// `Error::CallTimeout` at the configured budget, and the session survives it.
+fn check_call_timeout(conn: &mut Connection) -> Suite {
+    section("call timeout: slow call -> Error::CallTimeout, session survives (A1.1 / GH#14)");
+    let slow = "begin dbms_session.sleep(3); end;";
+    let outcome = BlockingConnection::execute_with(
+        conn,
+        Execute::new(slow).timeout(Duration::from_millis(500)),
+    );
+    match outcome {
+        Err(oracledb::Error::CallTimeout(ms)) => {
+            ensure!(
+                ms == 500,
+                "CallTimeout must report the configured 500ms budget, got {ms}"
+            );
+        }
+        Err(other) => return Err(format!("expected Error::CallTimeout, got: {other}").into()),
+        Ok(_) => return Err("the 3s sleep must have timed out at 500ms".into()),
+    }
+    // The connection must remain usable: a call timeout drains the server
+    // response and leaves the session intact (not connection-lost).
+    let alive: i64 = BlockingConnection::query_one(conn, "select 42 from dual", ())?.get(0)?;
+    ensure!(alive == 42, "session must survive a call timeout");
+    pass(
+        "call timeout",
+        "3s sleep interrupted at 500ms as Error::CallTimeout(500); session reusable",
+    );
+    Ok(())
+}
+
+/// Cross-connection statement-shape cache + DDL-invalidation self-heal
+/// (a4-8pp): a real describe on connection A records generation 1; DDL from a
+/// SECOND connection changes the shape; A re-describes and the cache self-heals
+/// to generation 2, flagging that a rebind is required.
+fn check_shape_cache_self_heal(conn: &mut Connection, options: &ConnectOptions) -> Suite {
+    section("statement-shape cache: DDL-invalidation self-heal (a4-8pp)");
+    drop_table_if_exists(conn, SHAPE_TABLE);
+    BlockingConnection::execute(
+        conn,
+        &format!("create table {SHAPE_TABLE} (id number(10), label varchar2(32))"),
+        (),
+    )?;
+    let sql = format!("select * from {SHAPE_TABLE}");
+    let cache = StatementShapeCache::new();
+
+    // Connection A: describe the pre-DDL 2-column shape (generation 1).
+    let rows_v1 = BlockingConnection::query(conn, &sql, ())?;
+    let cols_v1 = rows_v1.columns().len();
+    let obs1 = cache.observe(&sql, rows_v1.columns());
+    drop(rows_v1);
+    ensure!(
+        cols_v1 == 2,
+        "pre-DDL shape must have 2 columns, got {cols_v1}"
+    );
+    ensure!(
+        obs1.first_seen && !obs1.self_healed && obs1.generation == 1,
+        "first observation must be generation 1, first-seen, not self-healed: {obs1:?}"
+    );
+
+    // A SECOND connection alters the table shape (adds a column).
+    let mut other = BlockingConnection::connect(ConnectOptions::new(
+        options.connect_string().to_string(),
+        options.user().to_string(),
+        options.password().to_string(),
+        identity()?,
+    ))?;
+    BlockingConnection::execute(
+        &mut other,
+        &format!("alter table {SHAPE_TABLE} add (extra number(3))"),
+        (),
+    )?;
+    BlockingConnection::close(other)?;
+
+    // Connection A re-describes: the cache self-heals to the 3-column shape.
+    let rows_v2 = BlockingConnection::query(conn, &sql, ())?;
+    let cols_v2 = rows_v2.columns().len();
+    let obs2 = cache.observe(&sql, rows_v2.columns());
+    drop(rows_v2);
+    ensure!(
+        cols_v2 == 3,
+        "post-DDL shape must have 3 columns, got {cols_v2}"
+    );
+    ensure!(
+        obs2.self_healed && obs2.requires_rebind() && obs2.generation == 2,
+        "post-DDL observation must self-heal to generation 2 requiring rebind: {obs2:?}"
+    );
+    let (gen, _) = cache
+        .current(&sql)
+        .ok_or("shape must be cached after observe")?;
+    ensure!(
+        gen == 2,
+        "cached generation must be 2 after self-heal, got {gen}"
+    );
+
+    drop_table_if_exists(conn, SHAPE_TABLE);
+    pass(
+        "shape cache",
+        "gen1 (2 cols) -> cross-connection DDL -> self-heal gen2 (3 cols), rebind required",
+    );
+    Ok(())
+}
+
+/// VECTOR -> Arrow `FixedSizeList` columnar fast path (a4-0mk). 23ai-only: on
+/// pre-23ai lanes the VECTOR type does not exist, which the gate asserts as a
+/// real server error; on 23ai it fetches dense VECTORs into a
+/// `FixedSizeList(Float32, dim)` and value-checks the elements.
+#[cfg(feature = "arrow")]
+fn check_vector_fixed_size_list(conn: &mut Connection, major: u8) -> Suite {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::Float32Type;
+    use arrow_schema::DataType;
+    use oracledb::arrow::ArrowFetchOptions;
+
+    section("VECTOR -> Arrow FixedSizeList columnar fast path (a4-0mk; 23ai-only)");
+    drop_table_if_exists(conn, VECTOR_TABLE);
+    let create = BlockingConnection::execute(
+        conn,
+        &format!("create table {VECTOR_TABLE} (id number(5), embedding vector(3, float32))"),
+        (),
+    );
+
+    if major < 23 {
+        // Version gate: the VECTOR datatype does not exist before 23ai.
+        let err = match create {
+            Err(err) => err,
+            Ok(_) => {
+                drop_table_if_exists(conn, VECTOR_TABLE);
+                return Err(
+                    "VECTOR table create unexpectedly succeeded on a pre-23ai server".into(),
+                );
+            }
+        };
+        let code = err
+            .ora_code()
+            .ok_or_else(|| format!("pre-23ai VECTOR create must be a real server error: {err}"))?;
+        pass(
+            "VECTOR gate",
+            &format!(
+                "version={major}c: VECTOR type unavailable (ORA-{code:05}); \
+                 FixedSizeList fast path N/A (23ai-only)"
+            ),
+        );
+        return Ok(());
+    }
+
+    create?;
+    BlockingConnection::execute(
+        conn,
+        &format!("insert into {VECTOR_TABLE} values (1, to_vector('[1.5, 2.5, 3.5]'))"),
+        (),
+    )?;
+    BlockingConnection::execute(
+        conn,
+        &format!("insert into {VECTOR_TABLE} values (2, to_vector('[4.5, 5.5, 6.5]'))"),
+        (),
+    )?;
+    BlockingConnection::commit(conn)?;
+
+    let select = format!("select embedding from {VECTOR_TABLE} order by id");
+
+    // First prove the VECTOR decodes correctly through the standard fetch path.
+    // This also establishes the statement's cached describe, which the driver
+    // uses to suppress inline prefetch for VECTOR columns (client-side define);
+    // the Arrow convenience path below relies on that cached describe — a cold
+    // `fetch_all_record_batch` on a VECTOR column currently inline-prefetches
+    // and desyncs ("invalid ub8 length"), so we describe-then-Arrow-fetch.
+    let std_rows = BlockingConnection::query_all(conn, &select, ())?;
+    ensure!(
+        std_rows.len() == 2,
+        "standard VECTOR fetch: expected 2 rows, got {}",
+        std_rows.len()
+    );
+    let v0: Vec<f32> = std_rows[0].get(0)?;
+    ensure!(
+        v0 == vec![1.5f32, 2.5, 3.5],
+        "standard VECTOR decode row 0: expected [1.5, 2.5, 3.5], got {v0:?}"
+    );
+
+    let options = ArrowFetchOptions::new().with_vector_fixed_size_list(true);
+    let batch = BlockingConnection::fetch_all_record_batch(conn, &select, 100, &options)?;
+    ensure!(
+        batch.num_rows() == 2,
+        "expected 2 VECTOR rows, got {}",
+        batch.num_rows()
+    );
+    match batch.schema().field(0).data_type() {
+        DataType::FixedSizeList(field, 3) => {
+            ensure!(
+                matches!(field.data_type(), DataType::Float32),
+                "FixedSizeList element type must be Float32, got {:?}",
+                field.data_type()
+            );
+        }
+        other => {
+            return Err(
+                format!("VECTOR must map to FixedSizeList(Float32, 3), got {other:?}").into(),
+            )
+        }
+    }
+    let list = batch.column(0).as_fixed_size_list();
+    let expected = [[1.5f32, 2.5, 3.5], [4.5, 5.5, 6.5]];
+    for (i, want) in expected.iter().enumerate() {
+        let cell = list.value(i);
+        let got: Vec<f32> = cell.as_primitive::<Float32Type>().values().to_vec();
+        ensure!(
+            got == want,
+            "VECTOR row {i}: expected {want:?}, got {got:?}"
+        );
+    }
+
+    drop_table_if_exists(conn, VECTOR_TABLE);
+    pass(
+        "VECTOR FixedSizeList",
+        &format!("version={major}c: 2 dense VECTORs fetched as FixedSizeList(Float32, 3), values verified"),
+    );
+    Ok(())
+}
+
+// --- async-surface differentiators (LOB streaming, retry executor, SODA) ----
+//
+// These three capabilities live on the async `Connection` surface, so they run
+// on a dedicated current-thread asupersync runtime with their own connection —
+// the same shape the driver's own live integration tests use.
+
+/// Lazy LOB streaming reader/writer + CLOB UTF-16 boundary (a4-bbx).
+async fn check_lob_stream(conn: &mut Connection, cx: &Cx) -> Suite {
+    use oracledb::protocol::thin::{LobValue, CS_FORM_IMPLICIT};
+    use oracledb::{ClobReader, LobReader, LobWriter};
+
+    section("lazy LOB streaming reader/writer + CLOB UTF-16 boundary (a4-bbx)");
+
+    // BLOB: stream-write in 8 KiB chunks, stream-read back in 4 KiB chunks,
+    // byte-identical across the many round trips.
+    let payload: Vec<u8> = (0u32..64 * 1024)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .collect();
+    let temp = conn
+        .create_temp_lob(cx, ORA_TYPE_NUM_BLOB, CS_FORM_IMPLICIT)
+        .await
+        .map_err(|e| format!("create temp BLOB: {e}"))?;
+    let mut writer = LobWriter::new(temp.locator);
+    for chunk in payload.chunks(8 * 1024) {
+        writer
+            .write_chunk(conn, cx, chunk)
+            .await
+            .map_err(|e| format!("LOB write_chunk: {e}"))?;
+    }
+    let blob_locator = writer.into_locator();
+    let mut reader = LobReader::from_parts(blob_locator.clone(), payload.len() as u64, 4 * 1024);
+    let back = reader
+        .read_to_end(conn, cx)
+        .await
+        .map_err(|e| format!("LOB read_to_end: {e}"))?;
+    ensure!(
+        back == payload,
+        "streamed BLOB must round-trip byte-identical: {} back vs {} written",
+        back.len(),
+        payload.len()
+    );
+    conn.free_temp_lobs(cx, &[blob_locator]).await.ok();
+
+    // CLOB carrying astral (surrogate-pair) codepoints: Oracle measures CLOB
+    // length in UTF-16 code units, and a tiny character chunk splits surrogate
+    // pairs across reads — the reader must reassemble them.
+    let text = "emoji 😀 party 🎉🎊 漢字 café ✓ end \u{10FFFF}";
+    let temp = conn
+        .create_temp_lob(cx, ORA_TYPE_NUM_CLOB, CS_FORM_IMPLICIT)
+        .await
+        .map_err(|e| format!("create temp CLOB: {e}"))?;
+    let mut clob_locator = temp.locator;
+    let encoded = encode_lob_text(text, CS_FORM_IMPLICIT, Some(&clob_locator));
+    let written = conn
+        .write_lob(cx, &clob_locator, 1, &encoded)
+        .await
+        .map_err(|e| format!("CLOB write_lob: {e}"))?;
+    if !written.locator.is_empty() {
+        clob_locator = written.locator;
+    }
+    let lob = LobValue {
+        ora_type_num: ORA_TYPE_NUM_CLOB,
+        csfrm: CS_FORM_IMPLICIT,
+        locator: clob_locator.clone(),
+        size: text.encode_utf16().count() as u64,
+        chunk_size: 0,
+    };
+    let got = ClobReader::new(&lob, 3)
+        .read_to_string(conn, cx)
+        .await
+        .map_err(|e| format!("CLOB stream read: {e}"))?;
+    ensure!(
+        got == text,
+        "streamed CLOB must decode identically across surrogate-splitting chunks"
+    );
+    conn.free_temp_lobs(cx, &[clob_locator]).await.ok();
+
+    pass(
+        "LOB streaming",
+        "64 KiB BLOB chunked round-trip + astral CLOB via UTF-16-aware ClobReader",
+    );
+    Ok(())
+}
+
+/// Idempotency-gated retry executor over the live ORA taxonomy (a4-r9a).
+///
+/// Proven deterministically against a REAL server error: a row locked by a
+/// second session makes `SELECT ... FOR UPDATE NOWAIT` fail with ORA-00054
+/// (which the taxonomy classifies retry-same-connection). We assert (a) the
+/// executor runs an idempotent op through to success, (b) the idempotency gate
+/// surfaces a real retryable failure without replay when the op is
+/// non-idempotent, and (c) an idempotent op is genuinely re-run up to the
+/// budget on that same real retryable error.
+//
+// The retry executor's op is an `FnMut` factory whose future must borrow the
+// connection each attempt, so the connection lives behind a `RefCell` and the
+// borrow is held across the `await` inside the op — exactly the pattern the
+// driver's own `tests/live_retry.rs` executor uses. The borrow is single-
+// threaded and re-entrancy-free (the op future is the only thing running), so
+// the `await_holding_refcell_ref` lint is not a real hazard here.
+#[allow(clippy::await_holding_refcell_ref)]
+async fn check_retry_executor(
+    conn: &mut Connection,
+    cx: &Cx,
+    cs: &str,
+    user: &str,
+    password: &str,
+) -> Suite {
+    use std::cell::{Cell, RefCell};
+
+    section("idempotency-gated retry executor over the live ORA taxonomy (a4-r9a)");
+
+    // Fixture row, then hold an exclusive lock on it from a SECOND session.
+    conn.execute(cx, &format!("drop table {RETRY_TABLE} purge"), ())
+        .await
+        .ok();
+    conn.execute(
+        cx,
+        &format!("create table {RETRY_TABLE} (id number(5))"),
+        (),
+    )
+    .await
+    .map_err(|e| format!("create retry fixture: {e}"))?;
+    conn.execute(cx, &format!("insert into {RETRY_TABLE} values (1)"), ())
+        .await
+        .map_err(|e| format!("seed retry fixture: {e}"))?;
+    conn.commit(cx)
+        .await
+        .map_err(|e| format!("commit seed: {e}"))?;
+
+    let mut locker = Connection::connect(
+        cx,
+        ConnectOptions::new(
+            cs.to_string(),
+            user.to_string(),
+            password.to_string(),
+            identity()?,
+        ),
+    )
+    .await
+    .map_err(|e| format!("locker connect: {e}"))?;
+    locker
+        .query_one(
+            cx,
+            &format!("select id from {RETRY_TABLE} where id = 1 for update"),
+            (),
+        )
+        .await
+        .map_err(|e| format!("locker lock: {e}"))?;
+
+    let cell = RefCell::new(conn);
+    let contended = format!("select id from {RETRY_TABLE} where id = 1 for update nowait");
+
+    // (a) happy path: an idempotent op runs through the executor exactly once.
+    {
+        let calls = Cell::new(0usize);
+        let out: oracledb::Result<i64> = run_with_retry(
+            cx,
+            &RetryPolicy::default(),
+            Idempotency::Idempotent,
+            || async {
+                calls.set(calls.get() + 1);
+                let mut g = cell.borrow_mut();
+                g.query_one(cx, "select 7 from dual", ())
+                    .await?
+                    .get::<i64>(0)
+            },
+        )
+        .await;
+        ensure!(
+            out.map_err(|e| format!("retry happy path: {e}"))? == 7,
+            "retry executor must return the idempotent op's real value"
+        );
+        ensure!(
+            calls.get() == 1,
+            "a succeeding op must run exactly once, ran {}",
+            calls.get()
+        );
+    }
+
+    // (b) idempotency gate: a REAL retryable failure (ORA-00054) is surfaced
+    // WITHOUT replay when the operation is non-idempotent.
+    {
+        let calls = Cell::new(0usize);
+        let out: oracledb::Result<i64> = run_with_retry(
+            cx,
+            &RetryPolicy::default(),
+            Idempotency::NonIdempotent,
+            || async {
+                calls.set(calls.get() + 1);
+                let mut g = cell.borrow_mut();
+                g.query_one(cx, &contended, ()).await?.get::<i64>(0)
+            },
+        )
+        .await;
+        let err = out
+            .err()
+            .ok_or("non-idempotent contended select must fail")?;
+        ensure!(
+            err.ora_code() == Some(54),
+            "gate must surface the real ORA-00054, got: {err}"
+        );
+        ensure!(
+            calls.get() == 1,
+            "the idempotency gate must NOT replay a non-idempotent op (ran {})",
+            calls.get()
+        );
+    }
+
+    // (c) idempotent retry loop: the SAME real ORA-00054 is classified
+    // retryable, so an idempotent op is re-run up to the budget (1 initial + 2
+    // retries) before surfacing.
+    {
+        let calls = Cell::new(0usize);
+        let policy = RetryPolicy {
+            max_retries: 2,
+            base_backoff: Duration::ZERO,
+            max_backoff: Duration::ZERO,
+        };
+        let out: oracledb::Result<i64> =
+            run_with_retry(cx, &policy, Idempotency::Idempotent, || async {
+                calls.set(calls.get() + 1);
+                let mut g = cell.borrow_mut();
+                g.query_one(cx, &contended, ()).await?.get::<i64>(0)
+            })
+            .await;
+        let err = out
+            .err()
+            .ok_or("still-contended select must fail after the budget")?;
+        ensure!(
+            err.ora_code() == Some(54),
+            "loop must surface the real ORA-00054 after exhausting the budget, got: {err}"
+        );
+        ensure!(
+            calls.get() == 3,
+            "idempotent op must be retried to the budget (1 + 2 = 3 runs), ran {}",
+            calls.get()
+        );
+    }
+
+    // Release the lock and drop the fixture.
+    locker.rollback(cx).await.ok();
+    locker.close(cx).await.ok();
+    let conn = cell.into_inner();
+    conn.execute(cx, &format!("drop table {RETRY_TABLE} purge"), ())
+        .await
+        .ok();
+
+    pass(
+        "retry executor",
+        "idempotent success (1 run); ORA-00054 gate surfaces non-idempotent (1 run); \
+         idempotent retries to budget (3 runs)",
+    );
+    Ok(())
+}
+
+/// Thin-mode SODA: gated on pre-21c, works on 21c+ (a4-h74 / a4-soda-pre21c).
+///
+/// `JSON_SERIALIZE` is the exact SQL primitive the thin SODA write path depends
+/// on and is the real 21c boundary; it is asserted on every lane (privilege
+/// free). On 21c+ where the connecting user holds SODA_APP, a real
+/// create/insert/get/drop round trip additionally value-asserts the stored
+/// document content.
+#[cfg(feature = "soda")]
+async fn check_soda_version_gate(conn: &mut Connection, cx: &Cx, major: u8) -> Suite {
+    use oracledb::protocol::oson::OsonValue;
+    use oracledb::soda::{SodaDatabase, SodaDocument, SodaError, SodaOperation};
+
+    fn oson_name(doc: &SodaDocument) -> Option<String> {
+        match doc.content_as_oson()? {
+            OsonValue::Object(entries) => {
+                entries
+                    .iter()
+                    .find(|(k, _)| k == "name")
+                    .and_then(|(_, v)| match v {
+                        OsonValue::String(s) => Some(s.clone()),
+                        _ => None,
+                    })
+            }
+            _ => None,
+        }
+    }
+
+    section("thin-mode SODA: gated <21c, works 21c+ (a4-h74 / a4-soda-pre21c)");
+
+    let probe = conn
+        .query_one(
+            cx,
+            "select json_serialize('{\"a\":1}' returning varchar2) from dual",
+            (),
+        )
+        .await;
+
+    let db = SodaDatabase::new();
+    db.drop_collection(conn, cx, "MatrixFullSoda").await.ok();
+    conn.commit(cx).await.ok();
+    let create = db
+        .create_collection(conn, cx, Some("MatrixFullSoda"), None, false)
+        .await;
+
+    if major < 21 {
+        ensure!(probe.is_err(), "JSON_SERIALIZE must NOT resolve before 21c");
+        let err = match create {
+            Err(err) => err,
+            Ok(_) => return Err("SODA create must fail before 21c".into()),
+        };
+        match &err {
+            SodaError::Driver(driver) => ensure!(
+                driver.ora_code() == Some(904),
+                "pre-21c SODA create must fail with ORA-00904 (JSON_SERIALIZE invalid \
+                 identifier), got: {driver}"
+            ),
+            other => {
+                return Err(
+                    format!("pre-21c SODA error must carry an ORA code, got: {other:?}").into(),
+                )
+            }
+        }
+        pass(
+            "SODA gate",
+            &format!(
+                "version={major}c GATED: JSON_SERIALIZE absent, create_collection -> ORA-00904"
+            ),
+        );
+        return Ok(());
+    }
+
+    // 21c+: the version-enabling primitive must resolve.
+    probe.map_err(|e| format!("JSON_SERIALIZE must resolve on 21c+: {e}"))?;
+
+    // If the connecting user has SODA_APP, prove the full round trip; otherwise
+    // the JSON_SERIALIZE boundary above is the version proof and the full
+    // surface is covered by the `versions` live_soda suite (which bootstraps
+    // SODA_APP). Report honestly which path ran.
+    let soda_app: i64 = conn
+        .query_one(
+            cx,
+            "select count(*) from session_roles where role = 'SODA_APP'",
+            (),
+        )
+        .await
+        .and_then(|r| r.get::<i64>(0))
+        .unwrap_or(0);
+    if soda_app == 0 {
+        // create may legitimately fail on a user without SODA_APP; do not treat
+        // a privilege gap as a version failure.
+        create.ok();
+        pass(
+            "SODA",
+            &format!(
+                "version={major}c: JSON_SERIALIZE available (21c+ boundary); SODA_APP not granted \
+                 to this user — full round trip covered by `versions`/live_soda"
+            ),
+        );
+        return Ok(());
+    }
+
+    let coll = create.map_err(|e| format!("SODA create on 21c+ with SODA_APP: {e}"))?;
+    let stored = coll
+        .insert_one(
+            conn,
+            cx,
+            &SodaDocument::from_bytes(br#"{"name":"George","age":47}"#.to_vec(), None, None),
+            None,
+            true,
+        )
+        .await
+        .map_err(|e| format!("SODA insert_one: {e}"))?
+        .ok_or("insert_one must return the stored document")?;
+    let key = stored
+        .key
+        .clone()
+        .ok_or("stored document must carry a key")?;
+    let op = SodaOperation {
+        key: Some(key),
+        ..Default::default()
+    };
+    let found = coll
+        .get_one(conn, cx, &op)
+        .await
+        .map_err(|e| format!("SODA get_one: {e}"))?
+        .ok_or("get_one by key must find the stored document")?;
+    let name = oson_name(&found).ok_or("stored document must expose a string 'name' field")?;
+    ensure!(
+        name == "George",
+        "SODA readback name: expected George, got {name:?}"
+    );
+    db.drop_collection(conn, cx, "MatrixFullSoda").await.ok();
+    conn.commit(cx).await.ok();
+
+    pass(
+        "SODA",
+        &format!("version={major}c: create/insert/get_one/drop round trip, content verified"),
+    );
+    Ok(())
+}
+
+/// Drive the async-surface differentiators on a dedicated runtime + connection.
+fn run_async_differentiators(connect_string: &str, user: &str, password: &str, major: u8) -> Suite {
+    let reactor = reactor::create_reactor().map_err(|e| format!("create reactor: {e}"))?;
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .map_err(|e| format!("build runtime: {e}"))?;
+    let cs = connect_string.to_string();
+    let user = user.to_string();
+    let password = password.to_string();
+    runtime.block_on(async move {
+        let cx = Cx::current().ok_or("no ambient Cx in runtime")?;
+        let mut conn = Connection::connect(
+            &cx,
+            ConnectOptions::new(cs.clone(), user.clone(), password.clone(), identity()?),
+        )
+        .await
+        .map_err(|e| format!("async connect: {e}"))?;
+        let result: Suite = async {
+            check_lob_stream(&mut conn, &cx).await?;
+            check_retry_executor(&mut conn, &cx, &cs, &user, &password).await?;
+            #[cfg(feature = "soda")]
+            check_soda_version_gate(&mut conn, &cx, major).await?;
+            #[cfg(not(feature = "soda"))]
+            {
+                let _ = major;
+                eprintln!(
+                    "[matrix-full] SODA section compiled out (build with --features soda to \
+                     assert the 21c gate)"
+                );
+            }
+            Ok(())
+        }
+        .await;
+        conn.close(&cx).await.ok();
+        result
+    })
+}
+
+// ---------------------------------------------------------------------------
 // modes
 // ---------------------------------------------------------------------------
 
@@ -801,6 +1676,10 @@ fn run_full(connect_string: &str, user: &str, password: &str) -> Suite {
         identity()?,
     ))?;
 
+    // Negotiated server major version, used to gate version-specific
+    // differentiators (SODA at 21c+, VECTOR at 23ai).
+    let major = conn.server_version_tuple().map(|(m, ..)| m).unwrap_or(0);
+
     let result = (|| -> Suite {
         check_session_identity(&mut conn, user)?;
         check_multi_packet_fetch(&mut conn)?;
@@ -811,6 +1690,18 @@ fn run_full(connect_string: &str, user: &str, password: &str) -> Suite {
         check_null_handling(&mut conn)?;
         check_scalar_roundtrips(&mut conn)?;
         check_error_paths(&mut conn, &options)?;
+        // 0.7.3 differentiator value-asserts (blocking surface).
+        check_pipeline_single_round_trip(&mut conn, major)?;
+        check_batch_errors(&mut conn)?;
+        check_call_timeout(&mut conn)?;
+        check_shape_cache_self_heal(&mut conn, &options)?;
+        #[cfg(feature = "arrow")]
+        check_vector_fixed_size_list(&mut conn, major)?;
+        #[cfg(not(feature = "arrow"))]
+        eprintln!(
+            "[matrix-full] VECTOR/Arrow section compiled out (build with --features arrow \
+             to assert the 23ai FixedSizeList fast path)"
+        );
         Ok(())
     })();
 
@@ -819,6 +1710,11 @@ fn run_full(connect_string: &str, user: &str, password: &str) -> Suite {
     drop_table_if_exists(&mut conn, LOB_TABLE);
     let _ = BlockingConnection::close(conn);
     result?;
+
+    // 0.7.3 differentiator value-asserts on the async surface (own runtime +
+    // connection): LOB streaming, the retry executor, and the SODA version gate.
+    run_async_differentiators(connect_string, user, password, major)?;
+
     eprintln!("[matrix-full] ALL SECTIONS PASSED");
     Ok(())
 }
