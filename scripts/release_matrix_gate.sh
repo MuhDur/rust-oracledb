@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Release gate: run the FULL live version matrix (scripts/version_matrix.sh
 # full) against every lane and record the verdict for the current git SHA.
+# "Every lane" = the four server generations (xe11/xe18/xe21/free23) PLUS the
+# local OCI TCPS lane (octcps, A5.2) — the latter has no container and runs the
+# rustls TCPS + wallet suites over the C1 synthetic fixtures.
 #
 # A release CANNOT ship without a green record from this script for the exact
 # release SHA: scripts/release_preflight.sh (which runs in the tag-driven
@@ -23,7 +26,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 BOOT_TIMEOUT="${ORACLEDB_MATRIX_BOOT_TIMEOUT_SECS:-600}"
+# Container lanes (one per server generation) — these get `up`/`health`.
 LANES=(xe11 xe18 xe21 free23)
+# The full gate set also runs the OCI TCPS lane (A5.2 / bead iec3.1.26): a local
+# rustls TCPS + wallet lane over the C1 synthetic fixtures. It has no container,
+# so it is NOT brought up/health-checked — it just runs its `full` suite and its
+# verdict lands in the same artifact the preflight verifies.
+GATE_LANES=("${LANES[@]}" octcps)
 OUT_DIR="tests/artifacts/version_matrix"
 
 sha="$(git rev-parse HEAD)"
@@ -48,11 +57,12 @@ for lane in "${LANES[@]}"; do
   echo "release-matrix-gate: $lane healthy"
 done
 
-# Run the full suite per lane, recording each verdict (keep going on failure so
-# the artifact shows the complete picture).
+# Run the full suite per lane (container generations + the OCI TCPS lane),
+# recording each verdict (keep going on failure so the artifact shows the
+# complete picture).
 declare -A verdict
 overall=pass
-for lane in "${LANES[@]}"; do
+for lane in "${GATE_LANES[@]}"; do
   if bash scripts/version_matrix.sh full "$lane"; then
     verdict[$lane]=pass
   else
@@ -70,10 +80,10 @@ out="$OUT_DIR/results-$sha.json"
   printf '  "recorded_at_utc": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf '  "suite": "version_matrix.sh full",\n'
   printf '  "lanes": {\n'
-  for i in "${!LANES[@]}"; do
-    lane="${LANES[$i]}"
+  for i in "${!GATE_LANES[@]}"; do
+    lane="${GATE_LANES[$i]}"
     sep=,
-    [ "$i" -eq $((${#LANES[@]} - 1)) ] && sep=
+    [ "$i" -eq $((${#GATE_LANES[@]} - 1)) ] && sep=
     printf '    "%s": "%s"%s\n' "$lane" "${verdict[$lane]}" "$sep"
   done
   printf '  },\n'
@@ -82,7 +92,7 @@ out="$OUT_DIR/results-$sha.json"
 } >"$out"
 
 echo "release-matrix-gate: wrote $out"
-for lane in "${LANES[@]}"; do
+for lane in "${GATE_LANES[@]}"; do
   printf 'release-matrix-gate: %-7s %s\n' "$lane" "${verdict[$lane]}"
 done
 
