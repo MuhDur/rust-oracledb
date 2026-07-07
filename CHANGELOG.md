@@ -7,6 +7,76 @@ and the project follows the SemVer contract described in
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-07-07
+
+### Added
+
+- **OCI wallet + TCPS transport (`A2.1` / `A2.2` / `C1` / `C2`).** The driver
+  can now connect over TCPS (TLS) using an Oracle wallet: it decrypts the
+  legacy-3DES PKCS#12 client identity (`ewallet.p12`, bead `A2.1`) and falls
+  through to `cwallet.sso` when the primary wallet is unusable (bead `A2.2`).
+  The TCPS handshake is driven over rustls with the Oracle server-cert chain
+  validation and DN / CN name match (positive plus the fail-closed negatives:
+  host mismatch, cert-DN mismatch, wrong trust anchor). Exercised offline by a
+  local rustls TCPS lane over synthetic wallet fixtures whose identifiers are
+  fictional (`CN=oracle-test.invalid`), so no live wallet or secret is required
+  to test it (`C1` fixtures + `gen_test_wallets.sh`, `C2` handshake lane).
+- **OCI IAM token authentication seam (`A3` / `C3`).** A `TokenSource` trait lets
+  a caller supply an OCI IAM database token; the driver sends the `AUTH_TOKEN`
+  fast-auth frame over a TCPS descriptor and fail-closed refuses a token over a
+  plaintext descriptor. Validated with a mock token source over the local TCPS
+  lane (`C3`); no OCI account needed for the offline suite.
+- **Pipelining: N operations in a single round trip (`A8`, 23ai).** Independent
+  operations are buffered per-op and collapsed into one server round trip
+  (N+1 responses), decoded and verified individually. Gated to 23ai, which
+  negotiates the framing.
+- **`executemany` per-row error continuation (`a4-j1w`).** A batch DML that hits
+  a row-level error (e.g. `ORA-00001`) now reports a per-row `BatchError` at the
+  correct index and continues applying the remaining rows, rather than aborting
+  the whole batch.
+- **VECTOR → Arrow `FixedSizeList` columnar fast path (`a4-0mk`, opt-in).**
+  Fixed-dimension `VECTOR` columns can be fetched into a single Arrow
+  `FixedSizeList` array (opt-in) for a columnar zero-copy-friendly read path.
+- **Cross-connection statement-shape cache + DDL self-heal (`a4-8pp`).** The
+  describe/bind shape of a statement is cached across connections and
+  automatically invalidated and re-derived when DDL changes the underlying
+  object, so a shape change never yields a stale decode.
+- **Lazy LOB streaming reader/writer (`a4-bbx`).** CLOB/BLOB values can be read
+  and written as streams rather than materialized whole, with a UTF-16-aware
+  CLOB boundary so multi-byte characters are never split across chunks.
+- **Idempotency-gated retry executor (`a4-r9a`).** A retry executor classifies
+  failures against the ORA error taxonomy and retries only idempotent
+  operations up to a budget; a non-idempotent failure (e.g. `ORA-00054`) is
+  surfaced rather than retried.
+- **Cancel-safe async row streaming and out-of-band cancel (`a4-x3s` /
+  `a4-cn4`).** Async row streams are cancel-safe, and an out-of-band cancel
+  (break/marker) leaves the session cleanly recovered and reusable.
+- **Driver-native `RoutineCall` API (`a4-plsql-routine`).** Call stored
+  procedures and functions directly with `IN`, `OUT`, and `RETURN` binds without
+  hand-writing the anonymous PL/SQL block.
+- **Thin-mode SODA breadth (`a4-h74`, gated < 21c).** Thin-mode SODA gains
+  cursor / skip / limit / keys / version support and `insertManyAndGet` /
+  QBE-operator breadth; version-gated below 21c (proof-of-gate test
+  `a4-soda-pre21c`).
+- **`oracledb::VERSION` constant (`A6`).** The crate version is exported as a
+  `pub const` for callers that report it.
+- **Deterministic cassette-replay CI (`a4-nnnz` / `a4-1s2`).** Post-auth LOB
+  (create/write/read) exchanges are recorded and replayed byte-for-byte offline,
+  with an orphan guard and a binary secret-scan hardening the CI capture.
+- **Reference conformance + version matrix.** Behavior is checked against
+  python-oracledb (field-by-field ground-truth differential), and the release
+  gate runs the full live suite across Oracle 18c / 21c / 23ai plus the local
+  OCI TCPS lane (the 11g lane asserts the below-floor structured version
+  refusal).
+
+### Fixed
+
+- **Cold VECTOR fetch desync for define-requiring columns (bead `a4-0mk`).** A
+  `VECTOR` (or other define-requiring) column fetched on a cold cursor could
+  desync the row decode because no client-side define was established first. The
+  driver now establishes the client-side define up front, so the first fetch of
+  such a column decodes correctly.
+
 ## [0.7.2] - 2026-07-06
 
 ### Fixed
