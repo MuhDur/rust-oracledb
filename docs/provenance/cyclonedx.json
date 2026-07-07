@@ -1817,9 +1817,9 @@
         }
       ],
       "name": "oracledb-derive",
-      "purl": "pkg:cargo/oracledb-derive@0.7.4",
+      "purl": "pkg:cargo/oracledb-derive@0.8.0",
       "type": "library",
-      "version": "0.7.4"
+      "version": "0.8.0"
     },
     {
       "licenses": [
@@ -1830,9 +1830,9 @@
         }
       ],
       "name": "oracledb-protocol",
-      "purl": "pkg:cargo/oracledb-protocol@0.7.4",
+      "purl": "pkg:cargo/oracledb-protocol@0.8.0",
       "type": "library",
-      "version": "0.7.4"
+      "version": "0.8.0"
     },
     {
       "licenses": [
@@ -3756,9 +3756,9 @@
         }
       ],
       "name": "oracledb",
-      "purl": "pkg:cargo/oracledb@0.7.4",
+      "purl": "pkg:cargo/oracledb@0.8.0",
       "type": "library",
-      "version": "0.7.4"
+      "version": "0.8.0"
     }
   },
   "specVersion": "1.5",

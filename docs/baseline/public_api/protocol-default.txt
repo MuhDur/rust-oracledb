@@ -598,6 +598,9 @@ pub oracledb_protocol::thin::BindValue::DateTime::minute: u8
 pub oracledb_protocol::thin::BindValue::DateTime::month: u8
 pub oracledb_protocol::thin::BindValue::DateTime::second: u8
 pub oracledb_protocol::thin::BindValue::DateTime::year: i32
+pub oracledb_protocol::thin::BindValue::InOut
+pub oracledb_protocol::thin::BindValue::InOut::out_buffer_size: u32
+pub oracledb_protocol::thin::BindValue::InOut::value: alloc::boxed::Box<oracledb_protocol::thin::BindValue>
 pub oracledb_protocol::thin::BindValue::IntervalDS
 pub oracledb_protocol::thin::BindValue::IntervalDS::days: i32
 pub oracledb_protocol::thin::BindValue::IntervalDS::microseconds: i32

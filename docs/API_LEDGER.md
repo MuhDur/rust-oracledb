@@ -158,8 +158,6 @@ pub mod oracledb_protocol::wire	keep	Wire helper namespace.
 *oracledb::VERSION*	keep	Crate version constant consumed by the server doctor (0.7.3 A6).
 *oracledb::BoxFuture*	keep	Boxed-future type alias used in the public async trait surface.
 *oracledb::obs_warn*	keep	Observability warning macro exported for the differentiator surfaces.
-*oracledb::shape_cache*	keep	Cross-connection statement-shape cache module with DDL-invalidation self-heal (0.7.3 a4-8pp).
-*oracledb::lob_stream*	keep	Lazy LOB streaming module: constant-memory BLOB/CLOB reader and writer (0.7.3 a4-bbx).
 ```
 
 ## Accidental-Leak Decisions

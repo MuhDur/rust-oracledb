@@ -322,9 +322,8 @@ mod cursor_logic;
 #[macro_use]
 mod obs;
 /// Lazy, on-demand streaming over LOB locators (bead a4-bbx). The user-facing
-/// types are re-exported at the crate root (the canonical path; the module path
-/// is an allowlisted dual-path pending single-path consolidation in 0.8.0).
-pub mod lob_stream;
+/// types are re-exported at the crate root (the single canonical public path).
+pub(crate) mod lob_stream;
 pub mod pool;
 mod recovery;
 mod request;
@@ -334,9 +333,8 @@ mod routine;
 mod rows;
 /// Cross-connection statement-shape cache with DDL-invalidation self-heal
 /// (bead a4-8pp). The user-facing types are re-exported at the crate root (the
-/// canonical path; the module path is an allowlisted dual-path pending
-/// single-path consolidation in 0.8.0).
-pub mod shape_cache;
+/// single canonical public path).
+pub(crate) mod shape_cache;
 #[cfg(feature = "soda")]
 pub mod soda;
 mod sql_convert;
