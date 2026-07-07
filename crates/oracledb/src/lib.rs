@@ -13961,6 +13961,125 @@ mod tests {
     }
 
     #[test]
+    fn streaming_cancel_mid_stream_leaves_connection_reusable() -> Result<()> {
+        // a4-x3s (rust-oracledb iec3.1.12) offline negative control: cancelling
+        // the async row stream mid-flight must leave the connection at a CLEAN
+        // wire boundary and fully reusable — no protocol desync, no leaked BREAK,
+        // no stranded response bytes bleeding into the next query.
+        //
+        // The stream is `fetch_rows_ref` (the constant-memory borrowed-batch
+        // lending iterator). Dropping its in-flight response read arms the
+        // `CancelDrainGuard` (phase -> BreakSent). The NEXT operation runs the
+        // shared `ensure_clean_before_request` drain: BREAK, then drain the
+        // server's stranded response + break-ack MARKER + RESET handshake +
+        // trailing ORA-01013 cancel error, then issue its own request against a
+        // clean wire (mirrors python-oracledb `_break_external`/`_reset`,
+        // protocol.pyx). Reuse is proven by running a REAL query afterwards and
+        // decoding it byte-identically to the reference — not merely a phase.
+        const STRANDED_BODY: &[u8] = b"stranded stream response";
+        const TRAILING_CANCEL_ERROR: &[u8] = &[0x04, 0x01, 0x0d]; // ORA-01013 user cancel
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+
+            // 1) The stream's fetch request goes out first.
+            let _fetch_request = read_one_wire_packet(&mut socket);
+
+            // 2) The reuse op's cancel drain breaks and drains the stranded call.
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_BREAK,
+                "the reuse op must BREAK the stranded stream before its own request"
+            );
+            socket
+                .write_all(&data_packet(STRANDED_BODY, true))
+                .expect("write stranded stream response");
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))
+                .expect("write break-ack marker");
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_RESET,
+                "the drain must answer the server break marker with RESET"
+            );
+            socket
+                .write_all(&marker_packet(TNS_MARKER_TYPE_RESET))
+                .expect("write reset-confirm marker");
+            socket
+                .write_all(&data_packet(TRAILING_CANCEL_ERROR, true))
+                .expect("write trailing cancel error packet");
+
+            // 3) The reuse query's fresh request lands on a clean wire; answer it.
+            let _reuse_request = read_one_wire_packet(&mut socket);
+            socket
+                .write_all(&data_packet(
+                    &synthetic_pipeline_execute_response_payload(),
+                    true,
+                ))
+                .expect("write reuse query response");
+            socket.flush().expect("flush responses");
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+
+            // Start streaming, drive the request out, then cancel mid-stream by
+            // dropping the borrowed-batch fetch future while its response read is
+            // still pending.
+            {
+                let mut fetch = pin!(connection.fetch_rows_ref(&cx, 42, 10, None));
+                let first = poll_fn(|task_cx| Poll::Ready(fetch.as_mut().poll(task_cx))).await;
+                assert!(
+                    matches!(first, Poll::Pending),
+                    "the stream must be waiting on the server response when cancelled"
+                );
+            }
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::BreakSent,
+                "cancelling the stream mid-read arms break/drain recovery"
+            );
+
+            // Reuse the SAME connection: a real query must decode correctly,
+            // proving the wire was drained to a clean boundary.
+            let reused = connection
+                .execute_raw(
+                    &cx,
+                    "select value from synthetic_fixture",
+                    2,
+                    &[],
+                    ExecuteOptions::default(),
+                    None,
+                )
+                .await?;
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready,
+                "after the drain the connection is back to Ready"
+            );
+            assert_eq!(
+                reused,
+                sequential_op_decode(&synthetic_pipeline_execute_response_payload()),
+                "the reused connection decodes the follow-up query byte-identically"
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        server.join().expect("server thread joins");
+        Ok(())
+    }
+
+    #[test]
     fn scripted_transport_injects_errors_and_eof() -> Result<()> {
         let payload = encode_packet(
             TNS_PACKET_TYPE_CONNECT,
