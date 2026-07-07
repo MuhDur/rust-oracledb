@@ -11815,6 +11815,181 @@ mod tests {
         Ok(())
     }
 
+    // ---- A8 (bead oraclemcp-release-073-iec3.1.11): native single-round-trip
+    // pipelining, proven offline over a loopback socket -----------------------
+    //
+    // `run_pipeline`/`run_pipeline_decoded` write every operation *before*
+    // reading any response (one write burst, then N+1 boundary reads), so an
+    // N-statement batch is a single wire round trip. python-oracledb's thin
+    // mode issues the same batch as N sequential execute round trips. The
+    // loopback "server" below refuses to answer until it has read the whole
+    // batch, which terminates only if the client truly pipelined — a
+    // deterministic, offline proof of the collapse (no live server, cassette
+    // decode reused for the per-op result-materialization layer).
+
+    /// The synthetic execute response payload reused from the committed
+    /// `select_7_plus_5` cassette fixture — no live capture, pure TNS framing +
+    /// TTC decoder exercise. Decodes with the *same* per-op decoder the
+    /// sequential execute path uses.
+    fn synthetic_pipeline_execute_response_payload() -> Vec<u8> {
+        const HEX: &str = concat!(
+            "101710740fb986350b6010fbcb6e06a74ed0787e060a110328014001018201800000",
+            "014000000000020369010140023ffe010501050556414c554500000000000000000000",
+            "010707787e060a110b1000021fe8010a010a00062201010001020000000708414c33",
+            "32555446380801060323a4d500010100000000000004010102013b010102057b0000",
+            "01010003000000000000000000000000030001010000000002057b0101010300194f",
+            "52412d30313430333a206e6f206461746120666f756e640a1d",
+        );
+        let raw = HEX.as_bytes();
+        let mut bytes = Vec::with_capacity(raw.len() / 2);
+        let mut index = 0;
+        while index < raw.len() {
+            let hi = (raw[index] as char).to_digit(16).expect("hex digit");
+            let lo = (raw[index + 1] as char).to_digit(16).expect("hex digit");
+            bytes.push(((hi << 4) | lo) as u8);
+            index += 2;
+        }
+        bytes
+    }
+
+    /// Reference decode of one op's response through the *same* public decoder
+    /// the sequential execute path invokes (default caps/limits, matching the
+    /// loopback connection) — the "sequential" side of the byte-identity check.
+    fn sequential_op_decode(payload: &[u8]) -> QueryResult {
+        parse_query_response_with_binds_options_columns_and_limits(
+            payload,
+            ClientCapabilities::default(),
+            &[],
+            ExecuteOptions::default(),
+            &[],
+            ProtocolLimits::DEFAULT,
+        )
+        .expect("synthetic execute response decodes")
+    }
+
+    /// Read one whole Large32-framed TNS packet (header + body) from a blocking
+    /// std socket, returning the packet-type byte. Post-connect every packet on
+    /// the wire is a Large32 DATA packet.
+    fn read_one_wire_packet(socket: &mut std::net::TcpStream) -> u8 {
+        let mut header = [0u8; 8];
+        socket.read_exact(&mut header).expect("read packet header");
+        let declared = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let mut body = vec![0u8; declared - header.len()];
+        socket.read_exact(&mut body).expect("read packet body");
+        header[4]
+    }
+
+    /// Drive an `n`-statement pipeline over a loopback socket whose server side
+    /// reads the ENTIRE batch (n ops + end-pipeline) before writing any byte
+    /// back. Returns the decoded per-op results and the number of request
+    /// packets the server read before it answered (== `n + 1` iff the client
+    /// pipelined into a single round trip; a sequential client would deadlock
+    /// this server after op-1).
+    fn pipeline_batch_over_loopback(n: usize) -> (Vec<QueryResult>, usize) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            let mut requests_before_first_response = 0usize;
+            for _ in 0..=n {
+                let _packet_type = read_one_wire_packet(&mut socket);
+                requests_before_first_response += 1;
+            }
+            let execute_response =
+                data_packet(&synthetic_pipeline_execute_response_payload(), true);
+            for _ in 0..n {
+                socket
+                    .write_all(&execute_response)
+                    .expect("write op response");
+            }
+            // The (n+1)-th (end-pipeline) response: a bare END_OF_RESPONSE frame,
+            // consumed by the runner for framing only.
+            socket
+                .write_all(&data_packet(
+                    &[oracledb_protocol::thin::TNS_MSG_TYPE_END_OF_RESPONSE],
+                    true,
+                ))
+                .expect("write end-pipeline response");
+            socket.flush().expect("flush responses");
+            requests_before_first_response
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let results = runtime.block_on(async {
+            let cx = Cx::current().expect("ambient Cx");
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (read, write) = transport::plain_split(stream);
+            let mut conn = loopback_connection(read, write);
+            let requests: Vec<PipelineRequest> = (0..n)
+                .map(|_| {
+                    PipelineRequest::execute("select value from synthetic_fixture", Vec::new(), 2)
+                })
+                .collect();
+            conn.run_pipeline_decoded(&cx, &requests, false)
+                .await
+                .expect("pipelined batch runs as one round trip")
+                .into_iter()
+                .enumerate()
+                .map(|(index, op)| op.unwrap_or_else(|err| panic!("op {index} decoded: {err:?}")))
+                .collect::<Vec<_>>()
+        });
+
+        let requests_before_first_response = server.join().expect("server thread joins");
+        (results, requests_before_first_response)
+    }
+
+    #[test]
+    fn pipeline_batch_offline_collapses_to_one_round_trip() {
+        const N: usize = 10;
+        let (results, requests_before_first_response) = pipeline_batch_over_loopback(N);
+
+        assert_eq!(
+            requests_before_first_response,
+            N + 1,
+            "all {N} ops + end-pipeline are written before any response is read == 1 round trip"
+        );
+        assert_eq!(results.len(), N, "one decoded result per pipelined op");
+
+        // Byte-identical to sequential: each pipelined op decodes through the
+        // same per-op decoder the ordinary execute path uses, over the same wire
+        // bytes, so the materialized QueryResult is identical.
+        let reference = sequential_op_decode(&synthetic_pipeline_execute_response_payload());
+        for (index, decoded) in results.into_iter().enumerate() {
+            assert_eq!(
+                decoded, reference,
+                "pipelined op {index} decodes byte-identically to the sequential path"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_pipeline_batches_do_not_serialize() {
+        // Two independent connections each run a pipeline concurrently on their
+        // own OS thread + runtime. The driver holds no cross-connection lock
+        // (each Connection owns its transport), so — unlike python-oracledb's
+        // GIL-bound thin mode — the batches proceed in parallel. Both must
+        // complete with results identical to the sequential decode.
+        const N: usize = 10;
+        let reference = sequential_op_decode(&synthetic_pipeline_execute_response_payload());
+
+        let worker_a = thread::spawn(|| pipeline_batch_over_loopback(N));
+        let worker_b = thread::spawn(|| pipeline_batch_over_loopback(N));
+        let (results_a, count_a) = worker_a.join().expect("worker a joins");
+        let (results_b, count_b) = worker_b.join().expect("worker b joins");
+
+        assert_eq!(count_a, N + 1, "batch A collapsed to one round trip");
+        assert_eq!(count_b, N + 1, "batch B collapsed to one round trip");
+        assert_eq!(results_a.len(), N);
+        assert_eq!(results_b.len(), N);
+        for (index, decoded) in results_a.iter().chain(results_b.iter()).enumerate() {
+            assert_eq!(
+                *decoded, reference,
+                "concurrent pipelined op {index} matches the sequential decode"
+            );
+        }
+    }
+
     #[test]
     fn in_flight_packet_resource_limit_marks_connection_dead() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");

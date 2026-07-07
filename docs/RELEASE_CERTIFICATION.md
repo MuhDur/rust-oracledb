@@ -61,7 +61,7 @@ no throughput/concurrency benchmark. (4) Bench host was shared/busy (variance no
   full scalar type set (lossless NUMBER, charsets, datetime/interval family, RAW/LONG, ROWID,
   BOOLEAN, BINARY_FLOAT/DOUBLE), LOB, object types/collections, XMLType, native JSON/OSON, VECTOR
   (dense/binary/sparse), pooling+DRCP, scrollable cursors, DML RETURNING, implicit results, batch
-  errors, pipelining (sequential runner), sessionless transactions, Arrow dataframes, direct path load.
+  errors, pipelining (native single-round-trip runner), sessionless transactions, Arrow dataframes, direct path load.
 - **Explicitly excluded (coverage debt, by design):** AQ, SODA, XA/TPC, CQN/subscription, sharding,
   plus external-OCI/thick-only modules. 15 modules.
 - **Standalone-crate proof:** 13 native Rust integration tests exercise the public `oracledb` crate
@@ -74,7 +74,7 @@ no throughput/concurrency benchmark. (4) Bench host was shared/busy (variance no
 |---|---|---|
 | TLS / TCPS + wallet (ewallet.pem, cwallet.sso) | NOT IMPLEMENTED (M3) | needed for TLS-required environments (e.g. OCI ADB); requires standing up a TCPS listener to test |
 | 10 `not_implemented` shim edge sites (persistent-LOB write, quoted-identifier edge, a few value-conversion corners) | EXPLICIT fail-closed errors | implement when a downstream consumer needs the specific path; never silent |
-| Native single-round-trip pipelining | BUILT + flagged off (`supports_pipelining()=false`); sequential runner used | wire the per-op result-materialization layer; transport already proven at driver layer |
+| Native single-round-trip pipelining | ENABLED — `supports_pipelining()` returns the negotiated END_OF_RESPONSE flag and `run_pipeline_decoded` materializes each op through the ordinary execute decoder. Offline loopback proof `tests::pipeline_batch_offline_collapses_to_one_round_trip` pins the 10→1 round-trip collapse + byte-identity to the sequential decode | done (was: wire the per-op result-materialization layer) |
 | Full d49 migration (driver logic still partly in shim) | PARTIAL (define-fetch moved to crate via `execute_query_collect`) | continue moving SQL/bind/type logic shim→crate; suite-green is the gate |
 | Perf vs rust-oracle (thick) | NOT RUN | requires Oracle Instant Client (deliberately avoided) |
 | Formal gauntlet 10-round soak / e-process / conformal-band | NOT RUN | run when a statistical release-grade certification is required |
