@@ -44,7 +44,20 @@
 //! the post-auth `ttc_seq_num` — both shape the execute request bytes — so the
 //! recorded request replays byte-exact under `ReplayWriteMode::Check`. See the
 //! `record_postauth_query_cassettes` / `replay_postauth_query_cassettes_offline`
-//! pair below. LOB / AQ / DPL / CQN round-trips remain a follow-up.
+//! pair below.
+//!
+//! # LOB post-auth cassettes (bead a4-nnnz)
+//!
+//! The same slice+loopback machinery is generalized over a [`PostAuthScenario`]
+//! so it can carry more than a typed scalar. The first extra surface is a temp
+//! **BLOB** round-trip — `create_temp_lob` + `write_lob` + `read_lob` — committed
+//! as `<lane>-lob.tns-cassette`. Its three LOB TTC calls are byte-deterministic:
+//! the server-assigned locator travels back in the recorded create response and
+//! the client only echoes it, so write/read replay byte-exact under
+//! `ReplayWriteMode::Check`. AQ / DPL / CQN round-trips remain a follow-up — the
+//! scenario registry is ready for them, but their request bytes embed
+//! server-assigned message/transaction ids that would need a decoded-assert
+//! (non-`Check`) replay model rather than the byte-exact one used here.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -655,6 +668,7 @@ fn loopback_for_replay(
         notification_header_consumed: false,
         transaction_context: None,
         txn_in_progress: false,
+        shape_cache: std::sync::Arc::new(crate::StatementShapeCache::new()),
     }
 }
 
@@ -670,6 +684,24 @@ fn reencode_frames(frames: &[cassette::Frame]) -> Vec<u8> {
     out
 }
 
+/// Keep the frames of a post-auth scenario that emits `client_writes` client
+/// requests: every frame up to (but not including) the `client_writes + 1`-th
+/// client write — that next write is the trailing close/logoff, which is
+/// dropped. If the capture ends before that many writes (e.g. the logoff was
+/// piggybacked or absent), the whole tail is kept.
+fn slice_scenario_frames(post: &[cassette::Frame], client_writes: usize) -> &[cassette::Frame] {
+    let mut seen = 0usize;
+    for (idx, frame) in post.iter().enumerate() {
+        if frame.direction == cassette::Direction::ClientToServer {
+            seen += 1;
+            if seen > client_writes {
+                return &post[..idx];
+            }
+        }
+    }
+    post
+}
+
 /// The typed query captured post-auth: a bind-free scalar whose request bytes
 /// are fully determined by the negotiated caps + `ttc_seq_num`, and whose result
 /// (`12`) is trivially assertable offline. No literal contains a `"` or `=`, so
@@ -677,6 +709,121 @@ fn reencode_frames(frames: &[cassette::Frame]) -> Vec<u8> {
 const POSTAUTH_SQL: &str = "select cast(7 + 5 as number(6)) as v from dual";
 /// The decoded scalar the post-auth replay must reproduce.
 const POSTAUTH_EXPECTED_VALUE: &str = "12";
+
+/// The LOB post-auth scenario (bead a4-nnnz): create a temporary BLOB, write a
+/// fixed payload into it, and read it back. This is the first post-auth cassette
+/// that goes *beyond a typed scalar* — it exercises three locator-bearing LOB
+/// TTC calls (create-temp, write, read). Each round-trip's request bytes are
+/// deterministic given the negotiated caps + `ttc_seq_num`, plus the temp-LOB
+/// locator, which the server hands back in the recorded create response and the
+/// client only echoes — so write/read bytes are reproduced for free on replay.
+/// A BLOB (binary) sidesteps CLOB wire-charset encoding entirely: the bytes
+/// written are the bytes read.
+const LOB_SCENARIO_DESC: &str = "lob: create_temp_lob + write_lob + read_lob (blob)";
+/// The payload written then read back; the replay must reproduce it exactly.
+/// Pure ASCII, and free of `"`/`=`, so it round-trips the manifest cleanly.
+const LOB_EXPECTED_VALUE: &str = "rust-oracledb cassette blob payload";
+/// Bytes requested per `read_lob` — comfortably larger than the payload so a
+/// single read drains the whole BLOB.
+const LOB_READ_AMOUNT: u64 = 4000;
+
+/// A deterministic, secret-free post-auth flow whose request bytes are fully
+/// determined by the negotiated caps + `ttc_seq_num` (plus, for LOB, the
+/// server-assigned locator echoed back from the recorded execute response).
+///
+/// The same [`drive_scenario`] runs in both capture and replay, so the client
+/// byte-stream is identical on both sides and `ReplayWriteMode::Check` proves
+/// byte-reproducibility.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PostAuthScenario {
+    /// A bind-free scalar select (one execute round-trip).
+    ExecuteSelect,
+    /// A temp BLOB round-trip: create-temp, write, read (three LOB TTC calls).
+    LobBlob,
+}
+
+impl PostAuthScenario {
+    /// Fixture filename suffix: `{lane}-{suffix}.tns-cassette`.
+    fn suffix(self) -> &'static str {
+        match self {
+            PostAuthScenario::ExecuteSelect => "postauth",
+            PostAuthScenario::LobBlob => "lob",
+        }
+    }
+
+    fn sql(self) -> &'static str {
+        match self {
+            PostAuthScenario::ExecuteSelect => POSTAUTH_SQL,
+            PostAuthScenario::LobBlob => LOB_SCENARIO_DESC,
+        }
+    }
+
+    fn expected_value(self) -> &'static str {
+        match self {
+            PostAuthScenario::ExecuteSelect => POSTAUTH_EXPECTED_VALUE,
+            PostAuthScenario::LobBlob => LOB_EXPECTED_VALUE,
+        }
+    }
+
+    /// Manifest `scenario` tag.
+    fn tag(self) -> &'static str {
+        match self {
+            PostAuthScenario::ExecuteSelect => "execute_select",
+            PostAuthScenario::LobBlob => "temp_lob_create_write_read",
+        }
+    }
+
+    /// How many client writes the scenario emits before the trailing logoff.
+    /// The slice keeps exactly this many (and their responses), dropping the
+    /// close. `ExecuteSelect` = 1 (unchanged from the original slicer);
+    /// `LobBlob` = 3 (create-temp, write, read).
+    fn client_writes(self) -> usize {
+        match self {
+            PostAuthScenario::ExecuteSelect => 1,
+            PostAuthScenario::LobBlob => 3,
+        }
+    }
+}
+
+/// Drive a post-auth scenario on `conn`, returning the decoded assertion value.
+/// Shared verbatim by capture and replay so the emitted client bytes match.
+#[cfg(test)]
+async fn drive_scenario(
+    conn: &mut crate::Connection,
+    cx: &Cx,
+    scenario: PostAuthScenario,
+) -> Result<Option<String>> {
+    match scenario {
+        PostAuthScenario::ExecuteSelect => {
+            use oracledb_protocol::thin::{ExecuteOptions, QueryValue};
+            let exec = conn
+                .execute_raw(cx, scenario.sql(), 2, &[], ExecuteOptions::default(), None)
+                .await?;
+            Ok(exec
+                .cell(0, 0)
+                .and_then(QueryValue::as_number_text)
+                .map(|c| c.to_string()))
+        }
+        PostAuthScenario::LobBlob => {
+            use oracledb_protocol::thin::{CS_FORM_IMPLICIT, ORA_TYPE_NUM_BLOB};
+            // Create a temp BLOB, write the payload at byte offset 1, read it back.
+            // The locator comes back in the create response; write/read only echo
+            // it, so all three request byte-streams are deterministic on replay.
+            // BLOB is binary — the bytes read are exactly the bytes written.
+            let temp = conn
+                .create_temp_lob(cx, ORA_TYPE_NUM_BLOB, CS_FORM_IMPLICIT)
+                .await?;
+            let locator = temp.locator;
+            conn.write_lob(cx, &locator, 1, LOB_EXPECTED_VALUE.as_bytes())
+                .await?;
+            let read = conn.read_lob(cx, &locator, 1, LOB_READ_AMOUNT).await?;
+            let bytes = read.data.unwrap_or_default();
+            let text = String::from_utf8(bytes)
+                .map_err(|e| Error::Runtime(format!("BLOB read not UTF-8: {e}")))?;
+            Ok(Some(text))
+        }
+    }
+}
 
 /// A post-auth lane. Unlike the connect lanes these authenticate, so they carry
 /// per-lane default credentials — lab-only, and never written into a cassette
@@ -714,12 +861,15 @@ fn postauth_lanes() -> Vec<PostAuthLane> {
     ]
 }
 
-fn postauth_cassette_path(lane_id: &str) -> PathBuf {
-    fixtures_dir().join(format!("{lane_id}-postauth.tns-cassette"))
+fn postauth_cassette_path(lane_id: &str, scenario: PostAuthScenario) -> PathBuf {
+    fixtures_dir().join(format!("{lane_id}-{}.tns-cassette", scenario.suffix()))
 }
 
-fn postauth_manifest_path(lane_id: &str) -> PathBuf {
-    fixtures_dir().join(format!("{lane_id}-postauth.tns-cassette.manifest"))
+fn postauth_manifest_path(lane_id: &str, scenario: PostAuthScenario) -> PathBuf {
+    fixtures_dir().join(format!(
+        "{lane_id}-{}.tns-cassette.manifest",
+        scenario.suffix()
+    ))
 }
 
 /// The secret-free post-auth execute slice plus the negotiated state a loopback
@@ -739,9 +889,12 @@ struct PostAuthCapture {
 /// connect+auth prefix and the trailing logoff, keeping only the deterministic,
 /// secret-free execute request/response frames. Errors (never panics) so the
 /// record loop can aggregate per-lane failures.
-fn capture_postauth(connect: &str, user: &str, password: &str) -> Result<PostAuthCapture> {
-    use oracledb_protocol::thin::{ExecuteOptions, QueryValue};
-
+fn capture_postauth(
+    connect: &str,
+    user: &str,
+    password: &str,
+    scenario: PostAuthScenario,
+) -> Result<PostAuthCapture> {
     let (_, _, service) = split_connect(connect)?;
     let runtime = build_io_runtime()?;
     let (full_bytes, prefix_frames, seq0, caps, eor, oob, sdu, value) =
@@ -775,17 +928,11 @@ fn capture_postauth(connect: &str, user: &str, password: &str) -> Result<PostAut
             let oob = conn.supports_oob;
             let sdu = conn.sdu;
 
-            let exec = conn
-                .execute_raw(&cx, POSTAUTH_SQL, 2, &[], ExecuteOptions::default(), None)
-                .await?;
-            let value = exec
-                .cell(0, 0)
-                .and_then(QueryValue::as_number_text)
-                .map(|c| c.to_string());
+            let value = drive_scenario(&mut conn, &cx, scenario).await?;
 
             let full = scope.to_cassette_bytes();
             // Best-effort logoff so the capture leaves the session clean; its frames
-            // are past the execute slice and are dropped below.
+            // are past the scenario slice and are dropped below.
             conn.close(&cx).await.ok();
             Ok::<_, Error>((full, prefix_frames, seq0, caps, eor, oob, sdu, value))
         })?;
@@ -798,21 +945,12 @@ fn capture_postauth(connect: &str, user: &str, password: &str) -> Result<PostAut
             all_frames.len()
         )));
     }
-    // Keep post-auth frames until the client's SECOND write: the first is the
-    // execute request; the second is the close/logoff piggyback, which we drop.
+    // Keep the scenario's post-auth frames — its `client_writes()` request(s) and
+    // their responses — and drop everything from the trailing close/logoff write
+    // onward. `ExecuteSelect` keeps 1 write (identical to the original slicer);
+    // `LobBlob` keeps 3 (create-temp, write, read).
     let post = &all_frames[prefix_frames..];
-    let mut end = post.len();
-    let mut seen_client_write = false;
-    for (idx, frame) in post.iter().enumerate() {
-        if frame.direction == cassette::Direction::ClientToServer {
-            if seen_client_write {
-                end = idx;
-                break;
-            }
-            seen_client_write = true;
-        }
-    }
-    let sliced = reencode_frames(&post[..end]);
+    let sliced = reencode_frames(slice_scenario_frames(post, scenario.client_writes()));
 
     // Belt-and-suspenders: the slice must carry NO auth-phase secret field name.
     let leaks = scan_for_secret_fields(&sliced);
@@ -845,9 +983,8 @@ fn replay_postauth(
     supports_end_of_response: bool,
     supports_oob: bool,
     sdu: usize,
+    scenario: PostAuthScenario,
 ) -> Result<Option<String>> {
-    use oracledb_protocol::thin::{ExecuteOptions, QueryValue};
-
     let (read, write, audit) = transport::replay_split_with_audit(sliced, ReplayWriteMode::Check)
         .map_err(|e| Error::Runtime(format!("replay split: {e}")))?;
     let core = ConnectionCore::<DriverTransport>::from_halves(read, write, "postauth_replay");
@@ -864,14 +1001,7 @@ fn replay_postauth(
     let value = runtime.block_on(async {
         let cx = Cx::current()
             .ok_or_else(|| Error::Runtime("missing ambient Cx in replay runtime".into()))?;
-        let exec = conn
-            .execute_raw(&cx, POSTAUTH_SQL, 2, &[], ExecuteOptions::default(), None)
-            .await?;
-        Ok::<_, Error>(
-            exec.cell(0, 0)
-                .and_then(QueryValue::as_number_text)
-                .map(|c| c.to_string()),
-        )
+        drive_scenario(&mut conn, &cx, scenario).await
     })?;
 
     audit
@@ -880,7 +1010,11 @@ fn replay_postauth(
     Ok(value)
 }
 
-fn build_postauth_manifest(lane_id: &str, cap: &PostAuthCapture) -> Result<String> {
+fn build_postauth_manifest(
+    lane_id: &str,
+    cap: &PostAuthCapture,
+    scenario: PostAuthScenario,
+) -> Result<String> {
     let write_hashes = write_frame_hashes(&cap.sliced)?;
     Ok(format!(
         concat!(
@@ -890,7 +1024,7 @@ fn build_postauth_manifest(lane_id: &str, cap: &PostAuthCapture) -> Result<Strin
             "profile = \"post-auth-query\"\n",
             "lane = \"{}\"\n",
             "service = \"{}\"\n",
-            "scenario = \"execute_select\"\n",
+            "scenario = \"{}\"\n",
             "sql = \"{}\"\n",
             "ttc_field_version = {}\n",
             "charset_id = {}\n",
@@ -910,7 +1044,8 @@ fn build_postauth_manifest(lane_id: &str, cap: &PostAuthCapture) -> Result<Strin
         SOURCE_COMMIT.trim(),
         lane_id,
         cap.service,
-        POSTAUTH_SQL,
+        scenario.tag(),
+        scenario.sql(),
         cap.capabilities.ttc_field_version,
         cap.capabilities.charset_id,
         cap.capabilities.max_string_size,
@@ -940,6 +1075,27 @@ fn build_postauth_manifest(lane_id: &str, cap: &PostAuthCapture) -> Result<Strin
 #[test]
 #[ignore = "records the live post-auth query cassettes; needs the Docker lanes"]
 fn record_postauth_query_cassettes() {
+    record_postauth_scenario(PostAuthScenario::ExecuteSelect);
+}
+
+/// Record every lane's LOB post-auth cassette (bead a4-nnnz) against the live
+/// fleet. Same driver as the query recorder; run explicitly:
+///
+/// ```text
+/// cargo test -p oracledb --features cassette \
+///   record_postauth_lob_cassettes -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "records the live LOB post-auth cassettes; needs the Docker lanes"]
+fn record_postauth_lob_cassettes() {
+    record_postauth_scenario(PostAuthScenario::LobBlob);
+}
+
+/// Capture, pre-verify offline, and commit every lane's cassette for `scenario`.
+/// Shared by the query and LOB recorders. Each capture is replayed against a
+/// seeded loopback before its fixture is written, so a non-deterministic capture
+/// fails here rather than committing a cassette that cannot replay.
+fn record_postauth_scenario(scenario: PostAuthScenario) {
     let out_dir = std::env::var("ORACLEDB_CASSETTE_RECORD")
         .map(PathBuf::from)
         .unwrap_or_else(|_| fixtures_dir());
@@ -955,7 +1111,7 @@ fn record_postauth_query_cassettes() {
         let password = std::env::var(format!("ORACLEDB_CASSETTE_{up}_PASSWORD"))
             .unwrap_or_else(|_| lane.default_password.to_string());
 
-        let cap = match capture_postauth(&connect, &user, &password) {
+        let cap = match capture_postauth(&connect, &user, &password, scenario) {
             Ok(cap) => cap,
             Err(err) => {
                 failures.push(format!("{}: {err}", lane.id));
@@ -970,12 +1126,14 @@ fn record_postauth_query_cassettes() {
             cap.supports_end_of_response,
             cap.supports_oob,
             cap.sdu,
+            scenario,
         ) {
-            Ok(v) if v.as_deref() == Some(POSTAUTH_EXPECTED_VALUE) => {}
+            Ok(v) if v.as_deref() == Some(scenario.expected_value()) => {}
             Ok(v) => {
                 failures.push(format!(
-                    "{}: replay value {v:?} != {POSTAUTH_EXPECTED_VALUE:?}",
-                    lane.id
+                    "{}: replay value {v:?} != {:?}",
+                    lane.id,
+                    scenario.expected_value()
                 ));
                 continue;
             }
@@ -984,15 +1142,19 @@ fn record_postauth_query_cassettes() {
                 continue;
             }
         }
-        let manifest = match build_postauth_manifest(lane.id, &cap) {
+        let manifest = match build_postauth_manifest(lane.id, &cap, scenario) {
             Ok(m) => m,
             Err(err) => {
                 failures.push(format!("{}: manifest {err}", lane.id));
                 continue;
             }
         };
-        let cass = out_dir.join(format!("{}-postauth.tns-cassette", lane.id));
-        let man = out_dir.join(format!("{}-postauth.tns-cassette.manifest", lane.id));
+        let cass = out_dir.join(format!("{}-{}.tns-cassette", lane.id, scenario.suffix()));
+        let man = out_dir.join(format!(
+            "{}-{}.tns-cassette.manifest",
+            lane.id,
+            scenario.suffix()
+        ));
         if let Err(err) = fs::write(&cass, &cap.sliced) {
             failures.push(format!("{}: write cassette {err}", lane.id));
             continue;
@@ -1002,24 +1164,26 @@ fn record_postauth_query_cassettes() {
             continue;
         }
         eprintln!(
-            "recorded {} post-auth ({} bytes) -> {}",
+            "recorded {} {} ({} bytes) -> {}",
             lane.id,
+            scenario.suffix(),
             cap.sliced.len(),
             cass.display()
         );
     }
     assert!(
         failures.is_empty(),
-        "post-auth capture failures: {failures:?}"
+        "{} capture failures: {failures:?}",
+        scenario.suffix()
     );
 }
 
 /// Replay one committed post-auth cassette offline and assert the seeded
 /// loopback re-derives the recorded scalar with byte-matching request bytes.
-fn replay_postauth_lane_offline(lane_id: &str) -> Result<()> {
-    let cassette_bytes =
-        fs::read(postauth_cassette_path(lane_id)).map_err(|e| Error::Runtime(e.to_string()))?;
-    let manifest_text = fs::read_to_string(postauth_manifest_path(lane_id))
+fn replay_postauth_lane_offline(lane_id: &str, scenario: PostAuthScenario) -> Result<()> {
+    let cassette_bytes = fs::read(postauth_cassette_path(lane_id, scenario))
+        .map_err(|e| Error::Runtime(e.to_string()))?;
+    let manifest_text = fs::read_to_string(postauth_manifest_path(lane_id, scenario))
         .map_err(|e| Error::Runtime(e.to_string()))?;
     let manifest = parse_manifest(&manifest_text);
 
@@ -1072,7 +1236,7 @@ fn replay_postauth_lane_offline(lane_id: &str) -> Result<()> {
         max_string_size,
         charset_id,
     };
-    let value = replay_postauth(&cassette_bytes, caps, ttc_seq_num, eor, oob, sdu)?;
+    let value = replay_postauth(&cassette_bytes, caps, ttc_seq_num, eor, oob, sdu, scenario)?;
     if value.as_deref() != Some(expected_value.as_str()) {
         return Err(Error::Runtime(format!(
             "{lane_id}: replay value {value:?} != {expected_value:?}"
@@ -1088,19 +1252,38 @@ fn replay_postauth_lane_offline(lane_id: &str) -> Result<()> {
 /// asserts the decoded scalar. Lanes without a committed cassette are skipped.
 #[test]
 fn replay_postauth_query_cassettes_offline() {
+    replay_postauth_scenario_offline(PostAuthScenario::ExecuteSelect);
+}
+
+/// Offline, no-database replay of every committed LOB post-auth cassette (bead
+/// a4-nnnz). Same gate as the query replay: `ReplayWriteMode::Check` proves the
+/// create/write/read request bytes are byte-reproducible, and the decoded BLOB
+/// text is asserted. Lanes without a committed cassette are skipped.
+#[test]
+fn replay_postauth_lob_cassettes_offline() {
+    replay_postauth_scenario_offline(PostAuthScenario::LobBlob);
+}
+
+/// Replay every committed cassette for `scenario` offline, aggregating failures.
+fn replay_postauth_scenario_offline(scenario: PostAuthScenario) {
     let mut failures = Vec::new();
     for lane in postauth_lanes() {
-        if !postauth_cassette_path(lane.id).exists() {
-            eprintln!("skip {}: no committed post-auth cassette", lane.id);
+        if !postauth_cassette_path(lane.id, scenario).exists() {
+            eprintln!(
+                "skip {}: no committed {} cassette",
+                lane.id,
+                scenario.suffix()
+            );
             continue;
         }
-        if let Err(err) = replay_postauth_lane_offline(lane.id) {
+        if let Err(err) = replay_postauth_lane_offline(lane.id, scenario) {
             failures.push(err.to_string());
         }
     }
     assert!(
         failures.is_empty(),
-        "post-auth replay failures: {failures:?}"
+        "{} replay failures: {failures:?}",
+        scenario.suffix()
     );
 }
 
@@ -1127,6 +1310,8 @@ fn expected_cassette_files() -> std::collections::BTreeSet<String> {
     }
     for lane in postauth_lanes() {
         expected.insert(format!("{}-postauth.tns-cassette", lane.id));
+        // The LOB post-auth set (bead a4-nnnz) shares the same lanes.
+        expected.insert(format!("{}-lob.tns-cassette", lane.id));
     }
     expected.insert(SYNTHETIC_FIXTURE.to_string());
     expected
