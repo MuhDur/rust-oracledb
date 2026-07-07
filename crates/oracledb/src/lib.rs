@@ -324,6 +324,7 @@ mod obs;
 pub mod pool;
 mod recovery;
 mod request;
+mod routine;
 mod rows;
 #[cfg(feature = "soda")]
 pub mod soda;
@@ -362,6 +363,8 @@ pub use rows::{
     BatchError, BatchOutcome, BlockingRows, ExecuteOutcome, OutBinds, RegistrationOutcome,
     ReturningRows, Row, Rows,
 };
+
+pub use routine::{OutType, RoutineCall, RoutineOutcome};
 
 pub use sql_convert::{
     BindError, ConversionError, FromRow, FromSql, IntoBinds, Params, QueryResultExt, ToSql,
@@ -9508,6 +9511,105 @@ where
             Ok(result) => result,
             Err(_) => Err(Error::CallTimeout(duration_to_millis_saturating(deadline))),
         },
+    }
+}
+
+/// Deterministic, container-free coverage for the GH#14 connect/idle/keepalive
+/// timeouts (bead a4/A1.1). The marquee change — a per-read inactivity deadline
+/// and a keepalive interval derived from `EXPIRE_TIME` — is wired into every
+/// `ConnectionCore` read via [`apply_inactivity_timeout`] (each `read_*` method
+/// wraps its read future, so every framing-layer `read_exact` is transitively
+/// bounded, AC4) and into the CONNECT/ACCEPT phase via the `time::timeout`
+/// around the connect block. These tests pin the two behaviours the DoD calls
+/// out — the deadline FIRES on a silent peer instead of hanging (AC1), and a
+/// successful read RESETS the window (AC2) — plus the `EXPIRE_TIME` derivation,
+/// without a live server: a never-completing future stands in for a silent
+/// socket and a bounded sleep stands in for a slow-but-alive one.
+#[cfg(test)]
+mod inactivity_timeout_tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// `EXPIRE_TIME=0` disables keepalive; a positive value derives an idle
+    /// interval of that many MINUTES before the first probe (GH#14, net.pyx).
+    #[test]
+    fn keepalive_idle_is_derived_from_expire_time_minutes() {
+        assert_eq!(keepalive_idle_from_expire_time(0), None);
+        assert_eq!(
+            keepalive_idle_from_expire_time(1),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            keepalive_idle_from_expire_time(30),
+            Some(Duration::from_secs(30 * 60))
+        );
+    }
+
+    /// AC1: a silent peer must not wedge a read forever. With a deadline set, a
+    /// never-completing read fails with `CallTimeout` reporting the deadline (a
+    /// tiny stand-in for the 5 s the bead specifies) — the test terminating at
+    /// all is the proof it did not hang past the deadline.
+    #[test]
+    fn silent_read_trips_the_inactivity_deadline() {
+        let runtime = build_io_runtime().expect("io runtime");
+        runtime.block_on(async {
+            let deadline = Duration::from_millis(120);
+            let start = Instant::now();
+            let result: Result<()> =
+                apply_inactivity_timeout(Some(deadline), std::future::pending::<Result<()>>())
+                    .await;
+            let elapsed = start.elapsed();
+            match result {
+                Err(Error::CallTimeout(ms)) => {
+                    assert_eq!(ms, duration_to_millis_saturating(deadline));
+                }
+                other => panic!("expected CallTimeout, got {other:?}"),
+            }
+            // Fired at ~the deadline, not far beyond it (generous ceiling so a
+            // loaded CI box stays green while still catching a real hang).
+            assert!(
+                elapsed < Duration::from_secs(5),
+                "inactivity deadline fired far too late: {elapsed:?}"
+            );
+        });
+    }
+
+    /// A read that completes within the deadline returns its value untouched;
+    /// `None` awaits unbounded (the pre-GH#14 behaviour is preserved).
+    #[test]
+    fn completing_read_is_not_disturbed() {
+        let runtime = build_io_runtime().expect("io runtime");
+        runtime.block_on(async {
+            let bounded: Result<u32> =
+                apply_inactivity_timeout(Some(Duration::from_secs(30)), async { Ok(42u32) }).await;
+            assert_eq!(bounded.expect("bounded read ok"), 42);
+
+            let unbounded: Result<u32> = apply_inactivity_timeout(None, async { Ok(7u32) }).await;
+            assert_eq!(unbounded.expect("unbounded read ok"), 7);
+        });
+    }
+
+    /// AC2: each read OPERATION gets a fresh deadline window, so a successful
+    /// read resets the inactivity clock. Two sequential reads that each finish
+    /// inside the deadline both succeed even though their combined time exceeds
+    /// a single deadline — a live peer answering keepalives is never wrongly
+    /// timed out.
+    #[test]
+    fn deadline_resets_per_read_operation() {
+        let runtime = build_io_runtime().expect("io runtime");
+        runtime.block_on(async {
+            let deadline = Duration::from_millis(200);
+            let op_delay = Duration::from_millis(130);
+            // Two ops of 130 ms = 260 ms total, past the 200 ms single-op window.
+            for _ in 0..2 {
+                let res: Result<()> = apply_inactivity_timeout(Some(deadline), async {
+                    time::sleep(time::wall_now(), op_delay).await;
+                    Ok(())
+                })
+                .await;
+                res.expect("each within-deadline read succeeds — the deadline resets per op");
+            }
+        });
     }
 }
 
