@@ -12,14 +12,15 @@
 //!
 //! # Scope
 //!
-//! v1 covers **IN**, **OUT**, and **function RETURN** binds — the surface the
-//! downstream `plsql-mcp` consumer needs to stop hand-rolling `call_routine`
-//! over `execute_raw`. **IN OUT** is intentionally not offered: the driver's
-//! [`BindValue`] models a bind as *either* an input value *or* an output
-//! placeholder, with no combined variant, so a faithful IN OUT bind needs a
-//! protocol-level bind-model extension (tracked as a follow-up). The live
-//! bind round-trip is exercised on the version matrix; the offline tests here
-//! pin the generated block, the bind layout, and the OUT/return value mapping.
+//! Covers **IN**, **OUT**, **IN OUT**, and **function RETURN** binds — the
+//! surface the downstream `plsql-mcp` consumer needs to stop hand-rolling
+//! `call_routine` over `execute_raw`. **IN OUT** ([`arg_in_out`](RoutineCall::arg_in_out))
+//! rides the combined [`BindValue::InOut`] bind variant: the input value is
+//! sent, the position is read back into the [`RoutineOutcome`], and the wire
+//! bind is sized to hold whichever of the input or the returned value is larger.
+//! The live bind round-trip is exercised on the version matrix; the offline
+//! tests here pin the generated block, the bind layout, and the OUT/IN-OUT/return
+//! value mapping.
 
 use std::borrow::Cow;
 
@@ -48,6 +49,16 @@ pub enum OutType {
 }
 
 impl OutType {
+    /// The number of bytes an output slot of this type reserves on the wire.
+    /// Used to size an IN OUT bind so the returned value fits (an OUT-only bind
+    /// takes this via [`placeholder`](Self::placeholder)).
+    fn buffer_size(self) -> u32 {
+        match self {
+            OutType::Varchar { buffer_size } => buffer_size,
+            OutType::Number => NUMBER_BUFFER_SIZE,
+        }
+    }
+
     /// The wire placeholder for this OUT type. `is_return` selects the function
     /// RETURN form ([`BindValue::ReturnOutput`]) over a plain OUT
     /// ([`BindValue::Output`]).
@@ -81,6 +92,9 @@ enum RoutineArg {
     In(BindValue),
     /// An OUT argument registering a typed placeholder read back after the call.
     Out(OutType),
+    /// An IN OUT argument: an input value that the routine may overwrite; the
+    /// `OutType` sizes/types the slot the modified value is read back into.
+    InOut(BindValue, OutType),
 }
 
 /// A driver-native call to a PL/SQL stored procedure or function (GH#13).
@@ -151,6 +165,18 @@ impl RoutineCall {
         self
     }
 
+    /// Append an **IN OUT** argument: `value` is sent as the input and the
+    /// (possibly routine-modified) value is read back by declaration order via
+    /// [`RoutineOutcome::out`], counted alongside plain OUT arguments. `out`
+    /// sizes and types the read-back slot, so it must match the parameter's
+    /// type; make its buffer large enough for the value the routine writes back
+    /// (e.g. `OutType::Varchar { buffer_size }` for an IN OUT `VARCHAR2`).
+    #[must_use]
+    pub fn arg_in_out(mut self, value: impl crate::ToSql, out: OutType) -> Self {
+        self.args.push(RoutineArg::InOut(value.to_sql(), out));
+        self
+    }
+
     /// Whether this is a function call (has a RETURN).
     fn is_function(&self) -> bool {
         self.return_type.is_some()
@@ -174,6 +200,10 @@ impl RoutineCall {
             match arg {
                 RoutineArg::In(value) => binds.push(value.clone()),
                 RoutineArg::Out(out) => binds.push(out.placeholder(false)),
+                RoutineArg::InOut(value, out) => binds.push(BindValue::InOut {
+                    value: Box::new(value.clone()),
+                    out_buffer_size: out.buffer_size(),
+                }),
             }
             arg_placeholders.push(next);
             next += 1;
@@ -199,8 +229,9 @@ impl RoutineCall {
 /// The OUT and function-RETURN values produced by a [`RoutineCall`].
 ///
 /// Values are keyed by declaration order: [`returned`](Self::returned) is the
-/// function RETURN (if any), and [`out(n)`](Self::out) is the `n`-th OUT
-/// argument (0-based, counting only OUT arguments — IN arguments are skipped).
+/// function RETURN (if any), and [`out(n)`](Self::out) is the `n`-th
+/// output-producing argument (0-based, counting OUT and IN OUT arguments in
+/// declaration order — plain IN arguments are skipped).
 #[derive(Clone, Debug)]
 pub struct RoutineOutcome {
     /// Output values in wire/bind order: `[return?, out-args...]`.
@@ -235,8 +266,9 @@ impl RoutineOutcome {
         }
     }
 
-    /// The `index`-th OUT argument's value (0-based over OUT arguments only), or
-    /// `None` if out of range or NULL.
+    /// The `index`-th output-producing argument's value (0-based over OUT and
+    /// IN OUT arguments in declaration order), or `None` if out of range or
+    /// NULL. For an IN OUT argument this is the value the routine wrote back.
     pub fn out(&self, index: usize) -> Option<&QueryValue> {
         let offset = usize::from(self.has_return);
         self.outputs.get(index + offset).and_then(Option::as_ref)
@@ -390,5 +422,71 @@ mod tests {
         assert_eq!(outcome.returned(), None);
         assert_eq!(outcome.out(0), Some(&QueryValue::Text("first".into())));
         assert_eq!(outcome.out(1), Some(&QueryValue::Text("second".into())));
+    }
+
+    #[test]
+    fn procedure_with_in_out_builds_combined_bind() {
+        let (block, binds) = RoutineCall::procedure("dbl")
+            .arg_in_out(21i64, OutType::Number)
+            .build();
+        assert_eq!(block, "BEGIN dbl(:1); END;");
+        assert_eq!(binds.len(), 1);
+        // The bind is the combined IN OUT variant: it carries the input value
+        // (sent to the server) and reserves a NUMBER-sized output slot.
+        match &binds[0] {
+            BindValue::InOut {
+                value,
+                out_buffer_size,
+            } => {
+                assert!(matches!(value.as_ref(), BindValue::Number(_)));
+                assert_eq!(*out_buffer_size, NUMBER_BUFFER_SIZE);
+            }
+            other => panic!("expected BindValue::InOut, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn in_out_varchar_sizes_slot_from_out_type_buffer() {
+        let (_, binds) = RoutineCall::procedure("shout")
+            .arg_in_out("hi", OutType::Varchar { buffer_size: 400 })
+            .build();
+        match &binds[0] {
+            BindValue::InOut {
+                value,
+                out_buffer_size,
+            } => {
+                assert!(matches!(value.as_ref(), BindValue::Text(_)));
+                assert_eq!(*out_buffer_size, 400);
+            }
+            other => panic!("expected BindValue::InOut, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mixed_in_inout_out_args_place_in_declaration_order() {
+        // Positional order is preserved regardless of direction; only the OUT and
+        // IN OUT positions are read back (in declaration order) by `out(n)`.
+        let (block, binds) = RoutineCall::procedure("mix")
+            .arg_in(1i64)
+            .arg_in_out(2i64, OutType::Number)
+            .arg_out(OutType::Number)
+            .build();
+        assert_eq!(block, "BEGIN mix(:1, :2, :3); END;");
+        assert_eq!(binds.len(), 3);
+        assert!(matches!(binds[0], BindValue::Number(_)));
+        assert!(matches!(binds[1], BindValue::InOut { .. }));
+        assert!(matches!(binds[2], BindValue::Output { .. }));
+
+        // Read-back wire order for [IN, IN OUT, OUT] is [in_out_val, out_val]:
+        // the IN OUT value is out(0), the OUT value is out(1).
+        let outcome = RoutineOutcome::from_outputs(
+            vec![
+                Some(QueryValue::Text("inout".into())),
+                Some(QueryValue::Text("out".into())),
+            ],
+            false,
+        );
+        assert_eq!(outcome.out(0), Some(&QueryValue::Text("inout".into())));
+        assert_eq!(outcome.out(1), Some(&QueryValue::Text("out".into())));
     }
 }

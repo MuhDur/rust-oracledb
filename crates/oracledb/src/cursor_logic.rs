@@ -124,13 +124,18 @@ impl ExecutemanyManager {
 /// Whether a bound value is an output (OUT / IN OUT / RETURNING) placeholder.
 ///
 /// This mirrors the reference's notion of an output bind for the purpose of the
-/// executemany strategy decision: explicit OUT binds, DML-returning output
-/// binds, and DbObject output binds. Plain values and typed NULLs are not
-/// outputs.
+/// executemany strategy decision: explicit OUT binds, IN OUT binds,
+/// DML-returning output binds, and DbObject output binds. Plain values and typed
+/// NULLs are not outputs. An IN OUT bind returns a value per execution (the
+/// server flags it `TNS_BIND_DIR_INPUT_OUTPUT`), so it must force the same
+/// per-row accumulation an OUT bind does.
 fn bind_value_is_output(value: &BindValue) -> bool {
     matches!(
         value,
-        BindValue::Output { .. } | BindValue::ReturnOutput { .. } | BindValue::ObjectOutput { .. }
+        BindValue::Output { .. }
+            | BindValue::ReturnOutput { .. }
+            | BindValue::ObjectOutput { .. }
+            | BindValue::InOut { .. }
     )
 }
 

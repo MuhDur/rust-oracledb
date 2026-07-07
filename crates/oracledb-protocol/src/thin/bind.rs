@@ -98,6 +98,26 @@ pub(crate) fn write_bind_metadata_with_type(
 pub fn bind_value_type_info(value: &BindValue) -> Option<BindTypeInfo> {
     let (ora_type_num, csfrm, buffer_size) = match value {
         BindValue::Null => return None,
+        // An IN OUT bind carries an input value (whose Oracle type/charset form
+        // is the bind's type) but must reserve enough buffer for the value the
+        // server writes back, so its effective buffer is the larger of the
+        // input's natural size and the caller's requested output size. A NULL
+        // input carries no type; fall back to VARCHAR so the OUT slot is still
+        // typed and sized.
+        BindValue::InOut {
+            value,
+            out_buffer_size,
+        } => {
+            let (ora_type_num, csfrm, input_size) = match bind_value_type_info(value) {
+                Some(info) => (info.ora_type_num, info.csfrm, info.buffer_size),
+                None => (ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 0),
+            };
+            return Some(BindTypeInfo {
+                ora_type_num,
+                csfrm,
+                buffer_size: input_size.max(*out_buffer_size).max(1),
+            });
+        }
         BindValue::TypedNull {
             ora_type_num,
             csfrm,
@@ -701,6 +721,8 @@ pub fn public_dbtype_name_from_bind(value: &BindValue) -> &'static str {
             ..
         } => public_dbtype_name_from_type_info(*ora_type_num, *csfrm),
         BindValue::ObjectOutput { .. } | BindValue::ObjectInput { .. } => "DB_TYPE_OBJECT",
+        // An IN OUT bind's public type is that of its input value.
+        BindValue::InOut { value, .. } => public_dbtype_name_from_bind(value),
         BindValue::Text(_) => "DB_TYPE_VARCHAR",
         BindValue::Raw(_) => "DB_TYPE_RAW",
         BindValue::Lob {
@@ -949,6 +971,11 @@ pub(crate) fn write_bind_value(writer: &mut TtcWriter, value: &BindValue, csfrm:
             writer.write_u8(0);
             Ok(())
         }
+        // An IN OUT bind sends its input value bytes (never a null indicator);
+        // the read-back is driven by the server's IO-vector direction, not by
+        // anything written here. Recurse with the resolved csfrm (which the
+        // metadata derived from this same inner value).
+        BindValue::InOut { value, .. } => write_bind_value(writer, value, csfrm),
         BindValue::ObjectOutput { .. } => {
             // NULL object image (empty OUT bind): reference messages/base.pyx
             // 1462-1468.
@@ -1118,5 +1145,98 @@ pub(crate) fn encode_text_value(value: &str, csfrm: u8) -> Vec<u8> {
         bytes
     } else {
         value.as_bytes().to_vec()
+    }
+}
+
+#[cfg(test)]
+mod in_out_bind_tests {
+    use super::*;
+
+    fn written_bytes(value: &BindValue, csfrm: u8) -> Vec<u8> {
+        let mut writer = TtcWriter::new();
+        write_bind_value(&mut writer, value, csfrm).expect("write bind value");
+        writer.into_bytes()
+    }
+
+    // An IN OUT NUMBER bind sends its input value (not a null indicator) and its
+    // metadata reserves an output slot. NUMBER is a fixed 22-byte type, so the
+    // input and output sizes coincide; the point here is that the value bytes
+    // are on the wire exactly as a plain IN bind writes them.
+    #[test]
+    fn in_out_number_writes_input_and_reserves_output_slot() {
+        let inout = BindValue::InOut {
+            value: Box::new(BindValue::Number("21".to_string())),
+            out_buffer_size: ORA_TYPE_SIZE_NUMBER,
+        };
+        // Not an output-only placeholder: the input value is sent, never a null.
+        assert!(!inout.is_output_only(), "IN OUT carries an input value");
+        assert!(!inout.is_return_output(), "IN OUT is not a function RETURN");
+
+        let info = bind_value_type_info(&inout).expect("IN OUT NUMBER has type info");
+        assert_eq!(info.ora_type_num, ORA_TYPE_NUM_NUMBER);
+        assert_eq!(info.csfrm, 0);
+        assert_eq!(info.buffer_size, ORA_TYPE_SIZE_NUMBER);
+
+        // The bytes on the wire are byte-identical to a plain IN NUMBER(21):
+        // an IN OUT bind is encoded as an input bind.
+        assert_eq!(
+            written_bytes(&inout, 0),
+            written_bytes(&BindValue::Number("21".to_string()), 0),
+            "IN OUT sends the input value, same bytes as a plain IN bind"
+        );
+    }
+
+    // An IN OUT VARCHAR must size its bind buffer for the *returned* value, which
+    // is typically larger than the (possibly short) input. The metadata takes the
+    // max of the input's natural size and the requested output size; the value
+    // bytes are still just the input text.
+    #[test]
+    fn in_out_varchar_sizes_output_slot_and_writes_input_text() {
+        // input "ab" natural size = 2 chars * 4 = 8; the OUT slot wants 200.
+        let inout = BindValue::InOut {
+            value: Box::new(BindValue::Text("ab".to_string())),
+            out_buffer_size: 200,
+        };
+        let info = bind_value_type_info(&inout).expect("IN OUT VARCHAR has type info");
+        assert_eq!(info.ora_type_num, ORA_TYPE_NUM_VARCHAR);
+        assert_eq!(info.csfrm, CS_FORM_IMPLICIT);
+        assert_eq!(
+            info.buffer_size, 200,
+            "the OUT slot is sized for the returned value, not the short input"
+        );
+
+        // The written bytes are exactly the input text (same as a plain IN Text).
+        assert_eq!(
+            written_bytes(&inout, CS_FORM_IMPLICIT),
+            written_bytes(&BindValue::Text("ab".to_string()), CS_FORM_IMPLICIT),
+        );
+
+        // When the input is the larger side, its natural size wins.
+        let big_input = BindValue::InOut {
+            value: Box::new(BindValue::Text("abcdefghij".to_string())), // 10 * 4 = 40
+            out_buffer_size: 4,
+        };
+        assert_eq!(
+            bind_value_type_info(&big_input).unwrap().buffer_size,
+            40,
+            "buffer is max(input natural size, requested output size)"
+        );
+    }
+
+    // The read-back metadata a server response is decoded against
+    // (`bind_column_metadata`) must carry the IN OUT bind's Oracle type and the
+    // reserved output buffer, so the returned value parses correctly.
+    #[test]
+    fn in_out_read_back_metadata_matches_output_slot() {
+        let inout = BindValue::InOut {
+            value: Box::new(BindValue::Text("ab".to_string())),
+            out_buffer_size: 200,
+        };
+        let column = crate::thin::bind_column_metadata(&inout);
+        assert_eq!(column.ora_type_num, ORA_TYPE_NUM_VARCHAR);
+        assert_eq!(column.csfrm, CS_FORM_IMPLICIT);
+        assert_eq!(column.buffer_size, 200);
+        assert_eq!(column.max_size, 200);
+        assert!(!column.is_array);
     }
 }

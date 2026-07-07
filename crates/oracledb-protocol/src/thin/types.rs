@@ -727,6 +727,26 @@ pub enum BindValue {
         csfrm: u8,
         buffer_size: u32,
     },
+    /// A combined **IN OUT** bind: `value` is sent to the server as the input
+    /// (its Oracle type drives the wire bind type / charset form), and the same
+    /// bind position is read back as an output. `out_buffer_size` reserves room
+    /// for the returned value, which may exceed the input's natural size (e.g. a
+    /// `VARCHAR2` IN OUT whose input is shorter than the value the routine
+    /// writes back); the effective bind buffer is the max of the input's natural
+    /// size and this field.
+    ///
+    /// The bind direction is *not* encoded on the wire by the client. The server
+    /// derives IN OUT from the PL/SQL parameter mode and flags the position
+    /// `TNS_BIND_DIR_INPUT_OUTPUT` (48) in the returned IO vector; that flag is
+    /// what drives the read-back (`parse_io_vector`, keyed off
+    /// `!= TNS_BIND_DIR_INPUT`), exactly as for a plain OUT bind
+    /// (`TNS_BIND_DIR_OUTPUT` = 16). Encoding-wise an IN OUT bind is therefore an
+    /// input bind (the value bytes are written, never a null indicator) sized to
+    /// hold the output.
+    InOut {
+        value: Box<BindValue>,
+        out_buffer_size: u32,
+    },
     ObjectOutput {
         schema: String,
         type_name: String,
@@ -824,6 +844,7 @@ impl BindValue {
             BindValue::TypedNull { .. } => "TypedNull",
             BindValue::Output { .. } => "Output",
             BindValue::ReturnOutput { .. } => "ReturnOutput",
+            BindValue::InOut { .. } => "InOut",
             BindValue::ObjectOutput { .. } => "ObjectOutput",
             BindValue::ObjectInput { .. } => "ObjectInput",
             BindValue::Text(_) => "Text",

@@ -2937,6 +2937,88 @@ mod out_bind_boolean_regression_tests {
 }
 
 #[cfg(test)]
+mod in_out_io_vector_tests {
+    use super::*;
+
+    // The three TNS bind directions the server tags each bind with in the IO
+    // vector (reference thin_impl.c: OUTPUT=16, INPUT=32, INPUT_OUTPUT=48). The
+    // client emits no direction on the wire — it reads back every bind the server
+    // flags as not pure INPUT, i.e. OUT (16) or IN OUT (48). These locals pin the
+    // exact wire values this test exercises.
+    const TNS_BIND_DIR_OUTPUT: u8 = 16;
+    const TNS_BIND_DIR_INPUT_OUTPUT: u8 = 48;
+
+    // Layout consumed by `parse_io_vector`: flags(u8), num_binds low(ub2) /
+    // high(ub4), num_iters(ub4), uac_buffer_length(ub2), fast_fetch_len(ub2),
+    // rowid_len(ub2), then one direction byte per bind.
+    fn io_vector_payload(directions: &[u8]) -> Vec<u8> {
+        let mut writer = TtcWriter::new();
+        writer.write_u8(0);
+        writer.write_ub2(u16::try_from(directions.len()).unwrap());
+        writer.write_ub4(0);
+        writer.write_ub4(1);
+        writer.write_ub2(0);
+        writer.write_ub2(0);
+        writer.write_ub2(0);
+        for &direction in directions {
+            writer.write_u8(direction);
+        }
+        writer.into_bytes()
+    }
+
+    #[test]
+    fn in_out_and_out_directions_read_back_pure_input_does_not() {
+        // bind 0 = plain IN (send-only), bind 1 = IN OUT, bind 2 = OUT.
+        let payload = io_vector_payload(&[
+            TNS_BIND_DIR_INPUT,
+            TNS_BIND_DIR_INPUT_OUTPUT,
+            TNS_BIND_DIR_OUTPUT,
+        ]);
+        let mut reader = TtcReader::new(&payload);
+        let out_indexes = parse_io_vector(&mut reader, 3).expect("parse io vector");
+        assert_eq!(
+            out_indexes,
+            vec![1, 2],
+            "IN OUT (48) and OUT (16) are read back; pure IN (32) is not"
+        );
+    }
+
+    // End-to-end read-back: a VARCHAR IN OUT bind whose routine writes back a
+    // value longer than the input. The returned bytes decode against the IN OUT
+    // bind's own metadata (buffer sized to 200, well beyond the 2-char input), so
+    // the longer value survives.
+    #[test]
+    fn in_out_varchar_reads_back_value_larger_than_input() {
+        let inout = BindValue::InOut {
+            value: Box::new(BindValue::Text("ab".to_string())),
+            out_buffer_size: 200,
+        };
+        let bind_columns = [bind_column_metadata(&inout)];
+        let out_bind_indexes = [0usize];
+
+        // Server OUT-slot response: the routine-modified value "ABCD", then the
+        // zero "actual bytes" trailer (present, not truncated).
+        let mut writer = TtcWriter::new();
+        writer
+            .write_bytes_with_length(b"ABCD")
+            .expect("write returned varchar");
+        writer.write_sb4(0);
+        let payload = writer.into_bytes();
+
+        let mut reader = TtcReader::new(&payload);
+        let mut result = QueryResult::default();
+        parse_out_bind_row_data(&mut reader, &mut result, &bind_columns, &out_bind_indexes)
+            .expect("parse IN OUT VARCHAR read-back");
+
+        assert_eq!(
+            result.out_values,
+            vec![(0, Some(QueryValue::Text("ABCD".to_string())))],
+            "the routine-modified IN OUT value is read back against its bind metadata"
+        );
+    }
+}
+
+#[cfg(test)]
 mod fuzz_regression_tests {
     use super::*;
 
