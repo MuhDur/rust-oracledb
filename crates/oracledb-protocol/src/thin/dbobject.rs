@@ -491,6 +491,155 @@ pub fn decode_lob_text(bytes: &[u8], csfrm: u8, locator: Option<&[u8]>) -> Resul
     Ok(out)
 }
 
+/// Stateful, incremental decoder for streamed CLOB/NCLOB text.
+///
+/// [`decode_lob_text`] decodes a whole LOB buffer in one shot. A *lazy* LOB
+/// reader instead pulls the LOB in chunks, and a chunk boundary can fall in the
+/// middle of a multi-byte codepoint — an incomplete UTF-8 sequence, or (for the
+/// UTF-16 / AL16UTF16 form the server uses for multi-byte CLOBs) an odd trailing
+/// byte or a high surrogate whose low half is in the next chunk. Feeding those
+/// chunks to this decoder yields exactly the same `String` as decoding the whole
+/// buffer at once: the incomplete tail is carried across [`push`](Self::push)
+/// calls and stitched to the next chunk, and [`finish`](Self::finish) reports a
+/// truncated stream.
+///
+/// This is a new untrusted-decode surface (LOB bytes come off the wire), so its
+/// boundary handling is validated offline against `decode_lob_text` at every
+/// split point and is a fuzz target.
+#[derive(Clone, Debug)]
+pub struct LobTextDecoder {
+    use_utf16: bool,
+    little_endian: bool,
+    /// Bytes that could not yet form a complete unit: a single odd byte for the
+    /// UTF-16 form, or up to three continuation-pending bytes for UTF-8.
+    carry: Vec<u8>,
+    /// A UTF-16 high surrogate awaiting its low half in a later chunk.
+    pending_high: Option<u16>,
+}
+
+impl LobTextDecoder {
+    /// Build a decoder for the given character-set form and encoding direction.
+    pub fn new(use_utf16: bool, little_endian: bool) -> Self {
+        LobTextDecoder {
+            use_utf16,
+            little_endian,
+            carry: Vec::new(),
+            pending_high: None,
+        }
+    }
+
+    /// Build a decoder for a LOB from its `csfrm` and locator flags, matching the
+    /// same UTF-16/endianness decision [`decode_lob_text`] makes.
+    pub fn from_lob(csfrm: u8, locator: Option<&[u8]>) -> Self {
+        let (use_utf16, little_endian) = lob_text_uses_utf16(csfrm, locator);
+        Self::new(use_utf16, little_endian)
+    }
+
+    /// Decode as much of `bytes` (prefixed by any carried tail) as forms complete
+    /// codepoints, returning the newly decoded text. Any incomplete trailing
+    /// sequence is retained for the next call.
+    pub fn push(&mut self, bytes: &[u8]) -> Result<String> {
+        if self.use_utf16 {
+            self.push_utf16(bytes)
+        } else {
+            self.push_utf8(bytes)
+        }
+    }
+
+    /// Assert the stream ended on a codepoint boundary. Errors if a partial
+    /// unit or a dangling high surrogate remains (a truncated LOB stream).
+    pub fn finish(self) -> Result<()> {
+        if self.pending_high.is_some() || !self.carry.is_empty() {
+            return Err(ProtocolError::TtcDecode(if self.use_utf16 {
+                "incomplete LOB UTF-16 text"
+            } else {
+                "incomplete LOB UTF-8 text"
+            }));
+        }
+        Ok(())
+    }
+
+    fn push_utf16(&mut self, bytes: &[u8]) -> Result<String> {
+        let mut buf = Vec::with_capacity(self.carry.len() + bytes.len());
+        buf.extend_from_slice(&self.carry);
+        buf.extend_from_slice(bytes);
+        self.carry.clear();
+
+        let mut out = String::with_capacity(buf.len() / 2);
+        let mut i = 0;
+        while i + 2 <= buf.len() {
+            let unit = if self.little_endian {
+                u16::from_le_bytes([buf[i], buf[i + 1]])
+            } else {
+                u16::from_be_bytes([buf[i], buf[i + 1]])
+            };
+            i += 2;
+            self.push_unit(unit, &mut out)?;
+        }
+        if i < buf.len() {
+            // A lone trailing byte: carry it to the next chunk.
+            self.carry.push(buf[i]);
+        }
+        Ok(out)
+    }
+
+    fn push_unit(&mut self, unit: u16, out: &mut String) -> Result<()> {
+        const HIGH: core::ops::RangeInclusive<u16> = 0xD800..=0xDBFF;
+        const LOW: core::ops::RangeInclusive<u16> = 0xDC00..=0xDFFF;
+        if let Some(high) = self.pending_high.take() {
+            if LOW.contains(&unit) {
+                let combined =
+                    0x1_0000 + (((u32::from(high) - 0xD800) << 10) | (u32::from(unit) - 0xDC00));
+                let ch = char::from_u32(combined)
+                    .ok_or(ProtocolError::TtcDecode("invalid LOB UTF-16 text"))?;
+                out.push(ch);
+                return Ok(());
+            }
+            // High surrogate not followed by a low half.
+            return Err(ProtocolError::TtcDecode("invalid LOB UTF-16 text"));
+        }
+        if HIGH.contains(&unit) {
+            self.pending_high = Some(unit);
+            Ok(())
+        } else if LOW.contains(&unit) {
+            Err(ProtocolError::TtcDecode("invalid LOB UTF-16 text"))
+        } else {
+            out.push(
+                char::from_u32(u32::from(unit))
+                    .ok_or(ProtocolError::TtcDecode("invalid LOB UTF-16 text"))?,
+            );
+            Ok(())
+        }
+    }
+
+    fn push_utf8(&mut self, bytes: &[u8]) -> Result<String> {
+        let mut buf = Vec::with_capacity(self.carry.len() + bytes.len());
+        buf.extend_from_slice(&self.carry);
+        buf.extend_from_slice(bytes);
+        self.carry.clear();
+
+        match core::str::from_utf8(&buf) {
+            Ok(s) => Ok(s.to_owned()),
+            Err(err) => {
+                let valid = err.valid_up_to();
+                match err.error_len() {
+                    // Incomplete sequence at the tail: emit the valid prefix and
+                    // carry the remainder (at most three bytes) to the next chunk.
+                    None => {
+                        let out = core::str::from_utf8(&buf[..valid])
+                            .map_err(|_| ProtocolError::TtcDecode("invalid LOB UTF-8 text"))?
+                            .to_owned();
+                        self.carry.extend_from_slice(&buf[valid..]);
+                        Ok(out)
+                    }
+                    // A genuine encoding error mid-buffer.
+                    Some(_) => Err(ProtocolError::TtcDecode("invalid LOB UTF-8 text")),
+                }
+            }
+        }
+    }
+}
+
 pub fn encode_lob_text(value: &str, csfrm: u8, locator: Option<&[u8]>) -> Vec<u8> {
     let (use_utf16, little_endian) = lob_text_uses_utf16(csfrm, locator);
     if !use_utf16 {
@@ -770,5 +919,93 @@ mod decode_lob_text_tests {
         // invalid UTF-8 errors like String::from_utf8.
         let bad = [0x66, 0x6f, 0xff, 0x6f];
         assert!(decode_lob_text(&bad, 1, Some(&loc)).is_err());
+    }
+
+    /// Drive the streaming decoder over `bytes` split into fixed `chunk`-byte
+    /// pieces (so multi-byte codepoints and surrogate pairs land across the
+    /// boundary), concatenating what each `push` returns.
+    fn stream_utf16(bytes: &[u8], little_endian: bool, chunk: usize) -> Result<String> {
+        let mut dec = LobTextDecoder::new(true, little_endian);
+        let mut out = String::new();
+        for piece in bytes.chunks(chunk.max(1)) {
+            out.push_str(&dec.push(piece)?);
+        }
+        dec.finish()?;
+        Ok(out)
+    }
+
+    #[test]
+    fn streaming_utf16_matches_whole_decode_at_every_boundary() {
+        // Astral codepoints (surrogate pairs) interleaved with BMP + ASCII so a
+        // 1-, 2-, or 3-byte chunk always splits a pair somewhere.
+        let samples = [
+            "emoji 😀 party 🎉🎊 end",
+            "漢字 😀 café 🚀 mix",
+            "\u{10000}\u{10FFFF} boundary astral",
+            "plain ascii only",
+            "",
+        ];
+        for sample in samples {
+            for little_endian in [false, true] {
+                let bytes = encode_utf16(sample, little_endian);
+                let loc = utf16_locator(little_endian);
+                let whole =
+                    decode_lob_text(&bytes, CS_FORM_NCHAR, Some(&loc)).expect("whole decode");
+                assert_eq!(whole, sample);
+                // Every chunk size from a single byte upward, plus a size that
+                // exceeds the buffer (single push).
+                for chunk in 1..=bytes.len().max(1) + 1 {
+                    let streamed = stream_utf16(&bytes, little_endian, chunk).unwrap_or_else(|e| {
+                        panic!("stream {sample:?} le={little_endian} chunk={chunk}: {e:?}")
+                    });
+                    assert_eq!(
+                        streamed, whole,
+                        "sample {sample:?} le={little_endian} chunk={chunk}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_utf8_matches_whole_decode_at_every_boundary() {
+        let samples = ["café — utf8 ✓ 漢字 😀 tail", "ascii", ""];
+        for sample in samples {
+            let bytes = sample.as_bytes();
+            for chunk in 1..=bytes.len().max(1) + 1 {
+                let mut dec = LobTextDecoder::new(false, false);
+                let mut out = String::new();
+                for piece in bytes.chunks(chunk) {
+                    out.push_str(&dec.push(piece).expect("utf8 push"));
+                }
+                dec.finish().expect("utf8 finish");
+                assert_eq!(out, sample, "sample {sample:?} chunk={chunk}");
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_finish_rejects_truncated_streams() {
+        // Dangling high surrogate (pushed whole, no low half).
+        let mut dec = LobTextDecoder::new(true, false);
+        dec.push(&0xD83Du16.to_be_bytes()).expect("push high");
+        assert!(dec.finish().is_err(), "dangling high surrogate must fail");
+
+        // Odd trailing byte carried with no partner.
+        let mut dec = LobTextDecoder::new(true, false);
+        assert_eq!(dec.push(&[0x00]).expect("push odd"), "");
+        assert!(dec.finish().is_err(), "odd trailing byte must fail");
+
+        // Incomplete UTF-8 sequence at the tail (lead byte of a 3-byte codepoint).
+        let mut dec = LobTextDecoder::new(false, false);
+        assert_eq!(dec.push(&[0xE6]).expect("push utf8 lead"), "");
+        assert!(dec.finish().is_err(), "incomplete UTF-8 tail must fail");
+    }
+
+    #[test]
+    fn streaming_rejects_lone_low_surrogate_like_whole() {
+        // A low surrogate with no preceding high half is invalid mid-stream.
+        let mut dec = LobTextDecoder::new(true, false);
+        assert!(dec.push(&0xDC00u16.to_be_bytes()).is_err());
     }
 }

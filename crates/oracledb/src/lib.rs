@@ -321,6 +321,9 @@ mod cursor_logic;
 /// no `tracing` dependency. See `docs/OBSERVABILITY.md`.
 #[macro_use]
 mod obs;
+/// Lazy, on-demand streaming over LOB locators (bead a4-bbx). Re-exported at
+/// the crate root.
+pub mod lob_stream;
 pub mod pool;
 mod recovery;
 mod request;
@@ -370,6 +373,8 @@ pub use rows::{
 pub use routine::{OutType, RoutineCall, RoutineOutcome};
 
 pub use shape_cache::{ColumnShape, ShapeObservation, StatementShapeCache};
+
+pub use lob_stream::{ClobReader, LobReader, LobWriter};
 
 pub use sql_convert::{
     BindError, ConversionError, FromRow, FromSql, IntoBinds, Params, QueryResultExt, ToSql,
