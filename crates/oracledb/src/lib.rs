@@ -327,6 +327,8 @@ pub mod lob_stream;
 pub mod pool;
 mod recovery;
 mod request;
+/// Idempotency-gated retry executor over the ORA error taxonomy (bead a4-r9a).
+pub mod retry;
 mod routine;
 mod rows;
 /// Cross-connection statement-shape cache with DDL-invalidation self-heal
