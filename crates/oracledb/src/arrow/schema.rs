@@ -60,7 +60,7 @@ pub(super) const VECTOR_META_FLAG_SPARSE_VECTOR: u8 = 0x02;
 /// `vector_format == 0` is the flexible (unspecified) format Oracle reports
 /// when a query produces vectors of differing element formats; the reference
 /// raises `ERR_ARROW_UNSUPPORTED_VECTOR_FORMAT` (our DPY-3031).
-fn vector_data_type(column: &ColumnMetadata) -> Result<DataType> {
+fn vector_data_type(column: &ColumnMetadata, options: &ArrowFetchOptions) -> Result<DataType> {
     let format = match column.vector_format() {
         VECTOR_FORMAT_FLOAT32 => VectorFormat::Float32,
         VECTOR_FORMAT_FLOAT64 => VectorFormat::Float64,
@@ -70,7 +70,35 @@ fn vector_data_type(column: &ColumnMetadata) -> Result<DataType> {
         _ => return Err(ArrowConversionError::UnsupportedVectorFormat),
     };
     let sparse = column.vector_flags() & VECTOR_META_FLAG_SPARSE_VECTOR != 0;
+    // Opt-in FixedSizeList upgrade (bead a4-0mk): only dense, concretely-sized
+    // vectors qualify. `vector_dimensions()` is `Some(dim)` only when the server
+    // described a fixed dimension (flexible-dim columns report `None`); sparse
+    // vectors keep the struct mapping. Anything ineligible falls through to the
+    // default `List`/`Struct` mapping, so the default behavior is unchanged.
+    if options.vector_fixed_size_list() && !sparse {
+        if let Some(dim) = column.vector_dimensions() {
+            if dim > 0 {
+                if let Ok(len) = i32::try_from(dim) {
+                    return Ok(vector_fixed_size_list_type(format, len));
+                }
+            }
+        }
+    }
     Ok(vector_arrow_type(format, sparse))
+}
+
+/// Arrow `FixedSizeList(element, dim)` for a dense fixed-dimension VECTOR column
+/// (bead a4-0mk). The element type matches [`vector_arrow_type`]'s dense child
+/// so values decode identically to the `List` path; only the outer list type
+/// differs (fixed vs variable length).
+pub fn vector_fixed_size_list_type(format: VectorFormat, dim: i32) -> DataType {
+    let element = match format {
+        VectorFormat::Float32 => DataType::Float32,
+        VectorFormat::Float64 => DataType::Float64,
+        VectorFormat::Int8 => DataType::Int8,
+        VectorFormat::Binary => DataType::UInt8,
+    };
+    DataType::FixedSizeList(Arc::new(Field::new("item", element, true)), dim)
 }
 
 /// Reference-style `DB_TYPE_*` name for a fetched column (used in DPY-3030 /
@@ -198,7 +226,7 @@ fn default_arrow_type(column: &ColumnMetadata, options: &ArrowFetchOptions) -> R
             };
             Ok(DataType::Timestamp(unit, None))
         }
-        ORA_TYPE_NUM_VECTOR => vector_data_type(column),
+        ORA_TYPE_NUM_VECTOR => vector_data_type(column, options),
         _ => Err(ArrowConversionError::UnsupportedDataType {
             db_type_name: db_type_name(column),
         }),

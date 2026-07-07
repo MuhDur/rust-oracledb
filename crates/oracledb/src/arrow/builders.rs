@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use arrow_array::builder::{
     BinaryBuilder, BooleanBuilder, Date32Builder, Date64Builder, Decimal128Builder,
-    FixedSizeBinaryBuilder, Float32Builder, Float64Builder, Int16Builder, Int32Builder,
-    Int64Builder, Int8Builder, LargeBinaryBuilder, LargeStringBuilder, ListBuilder, StringBuilder,
-    UInt16Builder, UInt32Builder, UInt64Builder, UInt8Builder,
+    FixedSizeBinaryBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder, Int16Builder,
+    Int32Builder, Int64Builder, Int8Builder, LargeBinaryBuilder, LargeStringBuilder, ListBuilder,
+    StringBuilder, UInt16Builder, UInt32Builder, UInt64Builder, UInt8Builder,
 };
 use arrow_array::types::{
     ArrowTimestampType, TimestampMicrosecondType, TimestampMillisecondType,
@@ -625,6 +625,9 @@ fn build_column_array<'a>(
         // VECTOR columns are the only Oracle type mapping to List / Struct
         // (dense -> List<child>, sparse -> Struct{num_dimensions,indices,values}).
         DataType::List(item) => build_vector_list_column(item, column, cells, capacity),
+        DataType::FixedSizeList(item, dim) => {
+            build_vector_fixed_size_list_column(item, *dim, column, cells, capacity)
+        }
         DataType::Struct(fields) => build_vector_struct_column(fields, column, cells, capacity),
         other => Err(ArrowConversionError::CannotConvertToArrow {
             arrow_type: arrow_type_name(other),
@@ -737,6 +740,137 @@ fn build_vector_list_column<'a>(
                     // Reference: append_sparse_vector -> ERR_ARROW_SPARSE_VECTOR_NOT_ALLOWED.
                     return Err(ArrowConversionError::SparseVectorNotAllowed);
                 }
+            },
+            Some(_) => return Err(invalid_value(column, "expected a vector value")),
+        }
+    }
+    Ok(builder.finish())
+}
+
+/// A `FixedSizeListBuilder` specialized to the VECTOR element type (bead
+/// a4-0mk). Unlike the variable-length `List` path, every appended list must
+/// carry exactly `dim` child values; a NULL cell still pushes `dim` NULL child
+/// slots (the fixed-length invariant) before the null list bit.
+enum VectorFixedSizeListBuilder {
+    Float32(FixedSizeListBuilder<Float32Builder>),
+    Float64(FixedSizeListBuilder<Float64Builder>),
+    Int8(FixedSizeListBuilder<Int8Builder>),
+    UInt8(FixedSizeListBuilder<UInt8Builder>),
+}
+
+impl VectorFixedSizeListBuilder {
+    /// Builder for the child arrow type carried by the fixed-size-list field,
+    /// with the fixed `dim` element count baked in.
+    fn for_item(item: &DataType, dim: i32) -> Result<Self> {
+        Ok(match item {
+            DataType::Float32 => VectorFixedSizeListBuilder::Float32(FixedSizeListBuilder::new(
+                Float32Builder::new(),
+                dim,
+            )),
+            DataType::Float64 => VectorFixedSizeListBuilder::Float64(FixedSizeListBuilder::new(
+                Float64Builder::new(),
+                dim,
+            )),
+            DataType::Int8 => {
+                VectorFixedSizeListBuilder::Int8(FixedSizeListBuilder::new(Int8Builder::new(), dim))
+            }
+            DataType::UInt8 => VectorFixedSizeListBuilder::UInt8(FixedSizeListBuilder::new(
+                UInt8Builder::new(),
+                dim,
+            )),
+            _ => {
+                return Err(ArrowConversionError::NotImplemented(
+                    "unsupported vector fixed-size-list element type",
+                ))
+            }
+        })
+    }
+
+    /// Pushes `dim` NULL child slots then a NULL list bit (fixed-length keeps the
+    /// child value buffer aligned even for null lists).
+    fn append_null(&mut self, dim: i32) {
+        let n = dim.max(0) as usize;
+        match self {
+            VectorFixedSizeListBuilder::Float32(b) => {
+                b.values().append_nulls(n);
+                b.append(false);
+            }
+            VectorFixedSizeListBuilder::Float64(b) => {
+                b.values().append_nulls(n);
+                b.append(false);
+            }
+            VectorFixedSizeListBuilder::Int8(b) => {
+                b.values().append_nulls(n);
+                b.append(false);
+            }
+            VectorFixedSizeListBuilder::UInt8(b) => {
+                b.values().append_nulls(n);
+                b.append(false);
+            }
+        }
+    }
+
+    /// Appends one dense vector's `dim` element values as a fixed-size list row.
+    /// The value's element count MUST equal `dim`; a mismatch is a described-vs-
+    /// stored inconsistency surfaced as `invalid_value` (fail-closed) rather than
+    /// silently padding/truncating.
+    fn push(&mut self, column: &ColumnMetadata, values: &VectorValues, dim: i32) -> Result<()> {
+        let dim = dim.max(0) as usize;
+        macro_rules! push_slice {
+            ($b:expr, $v:expr) => {{
+                if $v.len() != dim {
+                    return Err(invalid_value(
+                        column,
+                        format!(
+                            "vector has {} elements but the column's fixed dimension is {dim}",
+                            $v.len()
+                        ),
+                    ));
+                }
+                $b.values().append_slice($v);
+                $b.append(true);
+            }};
+        }
+        match (self, values) {
+            (VectorFixedSizeListBuilder::Float32(b), VectorValues::Float32(v)) => push_slice!(b, v),
+            (VectorFixedSizeListBuilder::Float64(b), VectorValues::Float64(v)) => push_slice!(b, v),
+            (VectorFixedSizeListBuilder::Int8(b), VectorValues::Int8(v)) => push_slice!(b, v),
+            (VectorFixedSizeListBuilder::UInt8(b), VectorValues::Binary(v)) => push_slice!(b, v),
+            _ => return Err(invalid_value(column, "vector format mismatch")),
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> ArrayRef {
+        match self {
+            VectorFixedSizeListBuilder::Float32(b) => Arc::new(b.finish()),
+            VectorFixedSizeListBuilder::Float64(b) => Arc::new(b.finish()),
+            VectorFixedSizeListBuilder::Int8(b) => Arc::new(b.finish()),
+            VectorFixedSizeListBuilder::UInt8(b) => Arc::new(b.finish()),
+        }
+    }
+}
+
+/// Builds the Arrow `FixedSizeList<child; dim>` array for a dense, fixed-
+/// dimension VECTOR column (bead a4-0mk, opt-in). Element decoding is identical
+/// to [`build_vector_list_column`]; only the outer list type differs. A NULL
+/// cell (or SQL NULL vector) becomes a NULL fixed-size-list element. A sparse
+/// value here is impossible (the schema only selects FixedSizeList for dense,
+/// non-flexible columns) but is rejected fail-closed for safety.
+fn build_vector_fixed_size_list_column<'a>(
+    item: &Arc<Field>,
+    dim: i32,
+    column: &ColumnMetadata,
+    cells: impl Iterator<Item = Option<&'a QueryValue>>,
+    _capacity: usize,
+) -> Result<ArrayRef> {
+    let mut builder = VectorFixedSizeListBuilder::for_item(item.data_type(), dim)?;
+    for cell in cells {
+        match cell {
+            None => builder.append_null(dim),
+            Some(QueryValue::Vector(vector)) => match vector.as_ref() {
+                Vector::Dense(values) => builder.push(column, values, dim)?,
+                Vector::Sparse { .. } => return Err(ArrowConversionError::SparseVectorNotAllowed),
             },
             Some(_) => return Err(invalid_value(column, "expected a vector value")),
         }
@@ -1240,10 +1374,12 @@ fn push_timestamp_ref(
 /// (List/Struct) columns fall back to the row-materialize path so the cold,
 /// rarely-fetched vector types keep their fully-tested converter.
 pub(super) fn columnar_supported(schema: &Schema) -> bool {
-    schema
-        .fields()
-        .iter()
-        .all(|f| !matches!(f.data_type(), DataType::List(_) | DataType::Struct(_)))
+    schema.fields().iter().all(|f| {
+        !matches!(
+            f.data_type(),
+            DataType::List(_) | DataType::FixedSizeList(_, _) | DataType::Struct(_)
+        )
+    })
 }
 
 /// Accumulating columnar batch builder: holds one [`ColumnBuilder`] per column

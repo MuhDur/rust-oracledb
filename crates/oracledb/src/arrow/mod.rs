@@ -28,7 +28,7 @@ pub use builders::{
 pub use direct_path::record_batch_to_direct_path_rows;
 pub use schema::{
     arrow_define_columns, arrow_schema_for_columns, arrow_type_name, check_convert_from_arrow,
-    db_type_name, vector_arrow_type,
+    db_type_name, vector_arrow_type, vector_fixed_size_list_type,
 };
 
 use builders::{columnar_supported, ColumnarBatchBuilder};
@@ -111,6 +111,15 @@ pub struct ArrowFetchOptions {
     /// Must have exactly one field per fetched column; renames the output
     /// columns and coerces values per the reference conversion matrix.
     requested_schema: Option<SchemaRef>,
+    /// Opt-in: represent dense, fixed-dimension VECTOR columns as an Arrow
+    /// `FixedSizeList(element, dim)` instead of the default `List(element)`.
+    ///
+    /// OFF by default so the schema stays byte-identical to python-oracledb
+    /// (which always emits `List`). When ON, it only upgrades columns that the
+    /// server described with a concrete `vector_dimensions` AND that are dense
+    /// (non-sparse) with a fixed element format; flexible-dimension, sparse, or
+    /// flexible-format vectors keep their existing `List`/`Struct` mapping.
+    vector_fixed_size_list: bool,
 }
 
 impl ArrowFetchOptions {
@@ -135,6 +144,19 @@ impl ArrowFetchOptions {
     #[must_use]
     pub fn with_requested_schema(mut self, schema: SchemaRef) -> Self {
         self.requested_schema = Some(schema);
+        self
+    }
+
+    pub fn vector_fixed_size_list(&self) -> bool {
+        self.vector_fixed_size_list
+    }
+
+    /// Opt into `FixedSizeList(element, dim)` for dense fixed-dimension VECTOR
+    /// columns. See [`ArrowFetchOptions::vector_fixed_size_list`] for the exact
+    /// eligibility rules; the default (`false`) preserves the `List` mapping.
+    #[must_use]
+    pub fn with_vector_fixed_size_list(mut self, enabled: bool) -> Self {
+        self.vector_fixed_size_list = enabled;
         self
     }
 }
@@ -832,6 +854,104 @@ mod tests {
         let row2 = list.value(2);
         let row2 = row2.as_primitive::<Float32Type>();
         assert_eq!(row2.values(), &[34.6_f32, 77.8, 55.9]);
+    }
+
+    #[test]
+    fn fixed_size_list_opt_in_upgrades_dense_fixed_dim_vector() {
+        use arrow_array::FixedSizeListArray;
+
+        // Dense float32 vector column the server described with a fixed dim of 3.
+        let columns =
+            vec![vector_column("V", VECTOR_FORMAT_FLOAT32, 0).with_vector_dimensions(Some(3))];
+        let rows = vec![
+            vec![Some(QueryValue::Vector(Box::new(Vector::Dense(
+                VectorValues::Float32(vec![1.0, 2.0, 3.0]),
+            ))))],
+            vec![None],
+            vec![Some(QueryValue::Vector(Box::new(Vector::Dense(
+                VectorValues::Float32(vec![4.0, 5.0, 6.0]),
+            ))))],
+        ];
+
+        // Default: unchanged List mapping (python-oracledb parity).
+        let default_batch =
+            build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
+        assert_eq!(
+            default_batch.schema().field(0).data_type(),
+            &DataType::List(Arc::new(Field::new("item", DataType::Float32, true))),
+            "default must keep List mapping"
+        );
+
+        // Opt-in: FixedSizeList(Float32, 3).
+        let options = ArrowFetchOptions::new().with_vector_fixed_size_list(true);
+        let batch = build_record_batch(&columns, &rows, &options).expect("batch");
+        assert_eq!(
+            batch.schema().field(0).data_type(),
+            &DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 3)
+        );
+
+        let fsl = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .expect("fixed size list array");
+        assert_eq!(fsl.len(), 3);
+        assert!(fsl.is_null(1));
+        // Values round-trip identical to the row (List) path, element for element.
+        let list = default_batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow_array::ListArray>()
+            .expect("list array");
+        for row in [0usize, 2] {
+            let fsl_row = fsl.value(row);
+            let list_row = list.value(row);
+            assert_eq!(
+                fsl_row.as_primitive::<Float32Type>().values(),
+                list_row.as_primitive::<Float32Type>().values(),
+                "row {row} values must match the List path"
+            );
+        }
+        assert_eq!(
+            fsl.value(0).as_primitive::<Float32Type>().values(),
+            &[1.0_f32, 2.0, 3.0]
+        );
+        assert_eq!(
+            fsl.value(2).as_primitive::<Float32Type>().values(),
+            &[4.0_f32, 5.0, 6.0]
+        );
+    }
+
+    #[test]
+    fn fixed_size_list_opt_in_keeps_list_for_flexible_dim() {
+        // Flag ON but the column has no concrete dimension (flexible-dim vector):
+        // the mapping must stay List, never a fixed-size list.
+        let columns = vec![vector_column("V", VECTOR_FORMAT_FLOAT32, 0)];
+        let options = ArrowFetchOptions::new().with_vector_fixed_size_list(true);
+        let schema = arrow_schema_for_columns(&columns, &options).expect("schema");
+        assert_eq!(
+            schema.field(0).data_type(),
+            &DataType::List(Arc::new(Field::new("item", DataType::Float32, true))),
+            "flexible-dim vector must keep List even with the flag on"
+        );
+    }
+
+    #[test]
+    fn fixed_size_list_opt_in_rejects_wrong_length_vector() {
+        // A stored vector whose element count disagrees with the described fixed
+        // dimension is a server inconsistency: fail closed, never pad/truncate.
+        let columns =
+            vec![vector_column("V", VECTOR_FORMAT_FLOAT32, 0).with_vector_dimensions(Some(3))];
+        let rows = vec![vec![Some(QueryValue::Vector(Box::new(Vector::Dense(
+            VectorValues::Float32(vec![1.0, 2.0]),
+        ))))]];
+        let options = ArrowFetchOptions::new().with_vector_fixed_size_list(true);
+        let err =
+            build_record_batch(&columns, &rows, &options).expect_err("length mismatch must error");
+        assert!(
+            err.to_string().contains("fixed dimension"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
