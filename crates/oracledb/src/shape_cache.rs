@@ -161,40 +161,62 @@ impl StatementShapeCache {
             };
         }
         let key = normalize_sql(sql);
-        let mut map = self.lock();
-        match map.get_mut(&key) {
-            None => {
-                map.insert(
-                    key,
-                    CachedShape {
-                        shape,
+        // Scope the lock: compute the observation, then drop the guard before
+        // emitting the (feature-gated) telemetry so no tracing work runs under
+        // the mutex.
+        let observation = {
+            let mut map = self.lock();
+            match map.get_mut(&key) {
+                None => {
+                    map.insert(
+                        key,
+                        CachedShape {
+                            shape,
+                            generation: 1,
+                        },
+                    );
+                    ShapeObservation {
                         generation: 1,
-                    },
-                );
-                ShapeObservation {
-                    generation: 1,
-                    self_healed: false,
-                    first_seen: true,
+                        self_healed: false,
+                        first_seen: true,
+                    }
                 }
-            }
-            Some(entry) if entry.shape == shape => ShapeObservation {
-                generation: entry.generation,
-                self_healed: false,
-                first_seen: false,
-            },
-            Some(entry) => {
-                // Shape drift (concurrent DDL). Self-heal: discard the stale
-                // record, adopt the fresh shape, bump the generation. This only
-                // ever replaces downward; it never merges the two shapes.
-                entry.shape = shape;
-                entry.generation += 1;
-                ShapeObservation {
+                Some(entry) if entry.shape == shape => ShapeObservation {
                     generation: entry.generation,
-                    self_healed: true,
+                    self_healed: false,
                     first_seen: false,
+                },
+                Some(entry) => {
+                    // Shape drift (concurrent DDL). Self-heal: discard the stale
+                    // record, adopt the fresh shape, bump the generation. This
+                    // only ever replaces downward; it never merges the two shapes.
+                    entry.shape = shape;
+                    entry.generation += 1;
+                    ShapeObservation {
+                        generation: entry.generation,
+                        self_healed: true,
+                        first_seen: false,
+                    }
                 }
             }
-        }
+        };
+        // Operator-facing cache-lookup span (feature-gated, zero-cost when off):
+        // an enum-kind outcome + the version stamp. NEVER the SQL text — only the
+        // shape's cross-connection lifecycle. miss/hit/self_heal are the
+        // aggregatable counters an operator watches for warm-up and DDL-drift
+        // behaviour. The field expressions are not evaluated in the default build.
+        let _span = obs_span!(
+            "oracledb.shape_cache",
+            db.cache_event = if observation.first_seen {
+                "miss"
+            } else if observation.self_healed {
+                "self_heal"
+            } else {
+                "hit"
+            },
+            db.cache_generation = observation.generation,
+        );
+        observation
     }
 
     /// Returns the currently-recorded `(generation, shape)` for `sql`, if any.
@@ -210,7 +232,16 @@ impl StatementShapeCache {
     /// first sight. Returns whether an entry existed.
     pub fn invalidate(&self, sql: &str) -> bool {
         let key = normalize_sql(sql);
-        self.lock().remove(&key).is_some()
+        let existed = self.lock().remove(&key).is_some();
+        // Operator-facing invalidation span (feature-gated, zero-cost when off):
+        // only the fact of an invalidation + whether an entry was present. NEVER
+        // the SQL text.
+        let _span = obs_span!(
+            "oracledb.shape_cache",
+            db.cache_event = "invalidate",
+            db.cache_existed = existed,
+        );
+        existed
     }
 
     /// Number of distinct statements currently tracked.

@@ -225,15 +225,30 @@ impl BatchOutcome {
     }
 
     pub(crate) fn from_query_result(result: QueryResult) -> Self {
+        let rows_affected = result.row_count;
+        let per_row_counts = result.array_dml_row_counts;
+        let errors: Vec<BatchError> = result
+            .batch_errors
+            .into_iter()
+            .map(BatchError::from_server)
+            .collect();
+        let returning = ReturningRows::coalesced(result.return_values);
+        // Operator/agent-facing per-row batch span (feature-gated, zero-cost when
+        // off): the per-row ERROR COUNT and the per-row CONTINUATION count (the
+        // array-DML row-count entries that survived), plus total rows affected.
+        // Counts only — NEVER an error message (which can carry row data) or a
+        // bound value. Field expressions are not evaluated in the default build.
+        let _span = obs_span!(
+            "oracledb.batch",
+            db.batch_row_error_count = errors.len() as u64,
+            db.batch_row_count = per_row_counts.as_ref().map_or(0, Vec::len) as u64,
+            db.batch_rows_affected = rows_affected,
+        );
         Self {
-            rows_affected: result.row_count,
-            per_row_counts: result.array_dml_row_counts,
-            errors: result
-                .batch_errors
-                .into_iter()
-                .map(BatchError::from_server)
-                .collect(),
-            returning: ReturningRows::coalesced(result.return_values),
+            rows_affected,
+            per_row_counts,
+            errors,
+            returning,
         }
     }
 
@@ -914,5 +929,132 @@ mod tests {
         assert_eq!(with_id.query_id(), Some(123));
         assert_eq!(zero_id.query_id(), None);
         assert_eq!(without_id.query_id(), None);
+    }
+}
+
+/// Offline observability coverage for the j1w (execute-many) continuation
+/// telemetry: `BatchOutcome::from_query_result` must emit a structured event
+/// carrying the per-row error COUNT and the per-row continuation COUNT — moving
+/// under a synthetic batch — while NEVER putting an error message (which can
+/// carry row data) into any span/event field. Pure and offline (no live DB):
+/// the emit point is `pub(crate)`, so this lives beside the surface rather than
+/// in `tests/observability.rs`. Compiled only under `--features tracing`.
+#[cfg(all(test, feature = "tracing"))]
+mod obs_tests {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    use oracledb_protocol::thin::{BatchServerError, QueryResult};
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Record};
+    use tracing::subscriber::with_default;
+    use tracing::{Id, Metadata, Subscriber};
+
+    use super::BatchOutcome;
+
+    #[derive(Default)]
+    struct FieldCollector(BTreeMap<String, String>);
+    impl Visit for FieldCollector {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    /// Captures each new span's name + fields.
+    #[derive(Clone, Default)]
+    struct SpanCapture {
+        spans: Arc<Mutex<Vec<(String, BTreeMap<String, String>)>>>,
+    }
+    impl Subscriber for SpanCapture {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, attrs: &Attributes<'_>) -> Id {
+            let mut collector = FieldCollector::default();
+            attrs.record(&mut collector);
+            let mut spans = self.spans.lock().unwrap();
+            spans.push((attrs.metadata().name().to_string(), collector.0));
+            Id::from_u64(spans.len() as u64)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, _: &tracing::Event<'_>) {}
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    #[test]
+    fn batch_outcome_emits_row_error_and_continuation_counts_without_leaking_messages() {
+        // An error message that embeds a synthetic PII-shaped token: it MUST NOT
+        // reach any emitted field (only counts are emitted).
+        const SECRET_MSG: &str = "ORA-00001: unique constraint (SECRET_PII_4111) violated";
+
+        let capture = SpanCapture::default();
+        with_default(capture.clone(), || {
+            // A 5-row batch: rows 1 and 3 failed (2 per-row errors), 5 per-row
+            // continuation counts, 3 rows committed.
+            let result = QueryResult {
+                row_count: 3,
+                batch_errors: vec![
+                    BatchServerError::new(1, 1, SECRET_MSG),
+                    BatchServerError::new(1400, 3, "cannot insert NULL row-data"),
+                ],
+                array_dml_row_counts: Some(vec![1, 0, 1, 0, 1]),
+                ..QueryResult::default()
+            };
+            let outcome = BatchOutcome::from_query_result(result);
+            assert_eq!(outcome.errors().len(), 2, "both row errors survive");
+        });
+
+        let spans = capture.spans.lock().unwrap().clone();
+        let (_, batch) = spans
+            .iter()
+            .find(|(name, _)| name == "oracledb.batch")
+            .expect("a batch continuation span was emitted");
+        // The counters MOVED and match the synthetic batch.
+        assert_eq!(
+            batch.get("db.batch_row_error_count").map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            batch.get("db.batch_row_count").map(String::as_str),
+            Some("5")
+        );
+        assert_eq!(
+            batch.get("db.batch_rows_affected").map(String::as_str),
+            Some("3")
+        );
+
+        // DoD: no error message / row data leaked into ANY span field value, and
+        // no field name looks like it carries a value/credential.
+        for (_, fields) in &spans {
+            for (name, value) in fields {
+                assert!(
+                    !value.contains("SECRET_PII_4111") && !value.contains("row-data"),
+                    "a batch span leaked an error message: {name}={value:?}"
+                );
+                let lower = name.to_ascii_lowercase();
+                assert!(
+                    !lower.contains("password")
+                        && !lower.contains("secret")
+                        && !lower.contains("credential")
+                        && !lower.contains("bind_value"),
+                    "batch span field {name} looks like it leaks sensitive data"
+                );
+            }
+        }
     }
 }

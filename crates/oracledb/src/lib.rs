@@ -5395,6 +5395,28 @@ impl Connection {
     where
         F: FnMut(&[Option<QueryValueRef<'_>>]) -> Result<()>,
     {
+        // Streaming-query span (feature-gated, zero-cost when off). Carries the
+        // SQL digest and the arraysize (the prefetch fill target); filled after
+        // the loop with the total rows streamed, the number of paged fetch round
+        // trips, and the max prefetch look-ahead depth. This path keeps a single
+        // page in flight, so the look-ahead (queue) depth is 0 or 1 — the
+        // backpressure signal; rows/sec is the operator's db.rows_streamed over
+        // the span duration. NEVER row data.
+        let _stream_span = obs_span!(
+            "oracledb.stream",
+            db.statement = %crate::obs::sql_digest(sql),
+            db.arraysize = arraysize as u64,
+            db.rows_streamed = tracing::field::Empty,
+            db.pages_fetched = tracing::field::Empty,
+            db.prefetch_inflight_max = tracing::field::Empty,
+        );
+        #[cfg(feature = "tracing")]
+        let mut rows_streamed: u64 = 0;
+        #[cfg(feature = "tracing")]
+        let mut pages_fetched: u64 = 0;
+        #[cfg(feature = "tracing")]
+        let mut prefetch_inflight_max: u64 = 0;
+
         // First round trip: EXECUTE + first fetch batch (owned), to obtain the
         // open cursor id and column metadata. The first batch's rows are decoded
         // borrowed by re-parsing nothing — instead we capture them from the
@@ -5425,6 +5447,10 @@ impl Connection {
                 .collect();
             callback(&refs)?;
         }
+        #[cfg(feature = "tracing")]
+        {
+            rows_streamed += first.rows.len() as u64;
+        }
 
         let mut more_rows = first.more_rows;
         let mut previous_row: Option<Vec<Option<oracledb_protocol::thin::QueryValue>>> =
@@ -5453,6 +5479,11 @@ impl Connection {
         // Prime the pipeline: request the first paged batch ahead of decoding.
         if more_rows && cursor_id != 0 {
             self.fetch_rows_request(cx, cursor_id, arraysize).await?;
+            #[cfg(feature = "tracing")]
+            {
+                // One page is now outstanding on the wire (look-ahead depth 1).
+                prefetch_inflight_max = 1;
+            }
         }
 
         while more_rows && cursor_id != 0 {
@@ -5478,6 +5509,14 @@ impl Connection {
             // logic left in `last_owned`. Seed correctness is covered by the
             // duplicate-CLOB compression regression in `live_borrowed_fetch`.
             let row_count = result.batch.row_count();
+            #[cfg(feature = "tracing")]
+            {
+                pages_fetched += 1;
+                rows_streamed += row_count as u64;
+                if next_more {
+                    prefetch_inflight_max = prefetch_inflight_max.max(1);
+                }
+            }
             let mut last_owned: Option<Vec<Option<oracledb_protocol::thin::QueryValue>>> = None;
             let mut row_idx = 0usize;
             result.batch.for_each_row_ref(|row| {
@@ -5497,6 +5536,12 @@ impl Connection {
             more_rows = next_more;
         }
 
+        obs_record!(_stream_span, db.rows_streamed = rows_streamed);
+        obs_record!(_stream_span, db.pages_fetched = pages_fetched);
+        obs_record!(
+            _stream_span,
+            db.prefetch_inflight_max = prefetch_inflight_max
+        );
         self.release_cursor(cursor_id);
         Ok(())
     }

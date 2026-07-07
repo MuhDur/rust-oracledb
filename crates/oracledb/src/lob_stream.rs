@@ -76,7 +76,19 @@ impl LobReader {
         let want = (self.total - self.pos + 1).min(self.chunk);
         let result = conn.read_lob(cx, &self.locator, self.pos, want).await?;
         self.pos += want;
-        Ok(Some(result.data.unwrap_or_default()))
+        let data = result.data.unwrap_or_default();
+        // Stream-level chunk span (feature-gated, zero-cost when off): one span
+        // per chunk pulled off the locator, carrying the requested unit span +
+        // decoded byte size. Only counts — NEVER the LOB bytes or the locator.
+        // The `oracledb.lob` round-trip span (in `read_lob`) covers the wire op;
+        // this is the stream-reader's own chunk counter. Field expressions are
+        // not evaluated in the default build.
+        let _span = obs_span!(
+            "oracledb.lob_stream",
+            db.lob_chunk_units = want,
+            db.lob_chunk_bytes = data.len() as u64,
+        );
+        Ok(Some(data))
     }
 
     /// Drain the whole LOB into one buffer, one chunk at a time.
@@ -117,7 +129,26 @@ impl ClobReader {
         cx: &Cx,
     ) -> Result<Option<String>> {
         match self.inner.read_chunk(conn, cx).await? {
-            Some(bytes) => Ok(Some(self.decoder.push(&bytes).map_err(Error::Protocol)?)),
+            Some(bytes) => {
+                let text = self.decoder.push(&bytes).map_err(Error::Protocol)?;
+                // UTF-16 / multi-byte boundary-split span (feature-gated,
+                // zero-cost when off). A split means this chunk ended in the
+                // middle of a codepoint or a surrogate pair, so the decoder is
+                // carrying an incomplete tail to the next chunk. Detected with a
+                // cheap clone + `finish()` probe over the decoder's PUBLIC
+                // surface (`finish()` errors iff a partial unit / dangling high
+                // surrogate remains) — no decoder internals, no public API
+                // change. Because `obs_span!` discards its field expressions in
+                // the default build, the clone/`finish()` probe runs ONLY under
+                // the feature (zero-cost when off). Only a boolean + a char count
+                // are recorded — never the decoded text.
+                let _span = obs_span!(
+                    "oracledb.lob_stream_text",
+                    db.lob_utf16_boundary_split = self.decoder.clone().finish().is_err(),
+                    db.lob_chunk_chars = text.chars().count() as u64,
+                );
+                Ok(Some(text))
+            }
             None => Ok(None),
         }
     }
