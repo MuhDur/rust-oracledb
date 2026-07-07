@@ -47,11 +47,17 @@
 #           .venv-py313, override with ORACLEDB_GT_PYTHON), then diffs the
 #           two JSON documents field-by-field. Any mismatch fails the lane.
 #           Skipped for xe11 (below the protocol floor; nothing to compare).
+#   tcps    OCI TCPS lane (A5.2): local rustls TCPS + wallet suites over the C1
+#           synthetic wallet fixtures — wallet decrypt, TCPS handshake, DN/name
+#           match (+negatives), mutual TLS, and the OCI IAM token frame +
+#           non-TCPS refusal. No container (gvenzl cannot speak TCPS); offline
+#           and deterministic. Equivalent to `full octcps`.
 #   env     print PYO_TEST_* exports for the lane
 #   stop    stop the lane container(s)
 #
-# usage: scripts/version_matrix.sh up|health|smoke|full|truth|env|stop [lane]
-#   lane: xe11 | xe18 | xe21 | free23 | all (default all)
+# usage: scripts/version_matrix.sh up|health|smoke|full|truth|tcps|env|stop [lane]
+#   lane: xe11 | xe18 | xe21 | free23 | octcps | all (default all)
+#   (octcps is the local TCPS lane; it supports `full`/`tcps` only, no container)
 
 # The lane_* functions are dispatched dynamically via "lane_$cmd".
 # shellcheck disable=SC2329
@@ -168,8 +174,48 @@ lane_smoke() {
   fi
 }
 
+# OCI TCPS lane (A5.2 / bead iec3.1.26): a LOCAL TLS (TCPS) lane driven over the
+# C1 synthetic wallet fixtures and the C2 rustls TCPS harness — NOT a gvenzl
+# container (the gvenzl images cannot speak TCPS). It runs entirely offline and
+# deterministically, and exercises the OCI wallet + transport surface autonomously
+# and secret-free:
+#
+#   * wallet decrypt — the legacy 3DES PKCS12 client identity (a23 mTLS test);
+#   * TCPS handshake — CA-trusted + mutual-TLS handshakes against a real rustls
+#     server presenting the synthetic leaf (C2);
+#   * DN / CN name match — positive and the fail-closed negatives (host mismatch,
+#     cert-DN mismatch, wrong trust anchor);
+#   * OCI IAM token — the AUTH_TOKEN fast-auth frame over the TCPS lane, and the
+#     fail-closed refusal of a token over a plaintext descriptor (C3).
+#
+# The synthetic fixtures carry only fictional identifiers (CN=oracle-test.invalid),
+# so secret_scan stays clean. This is the local-wallet TLS lane the release gate
+# runs alongside the four server generations.
+lane_tcps() {
+  printf '=== octcps FULL (local TCPS over C1 synthetic wallets; no container) ===\n'
+  local ok=1
+  # C1/C2/C3: driver-side TCPS handshake, DN/name match, mTLS, 3DES wallet
+  # decrypt, and the OCI IAM token frame + non-TCPS refusal.
+  if ! cargo test -q -p oracledb --test tls_handshake; then ok=0; fi
+  # Wallet reader breadth over the same synthetic fixtures (ewallet.pem incl.
+  # encrypted keys, ewallet.p12/3DES, cwallet.sso).
+  if ! cargo test -q -p oracledb-protocol --test tls_wallet; then ok=0; fi
+  if [ "$ok" -eq 1 ]; then
+    printf '%-7s FULL GREEN\n' octcps
+  else
+    printf '%-7s FULL FAILED\n' octcps
+    return 1
+  fi
+}
+
 lane_full() {
   local lane="$1" name image port service user password
+  # The OCI TCPS lane is not a container: it runs the local rustls TCPS + wallet
+  # suites over the C1 synthetic fixtures instead of connecting to a server.
+  if [ "$lane" = "octcps" ]; then
+    lane_tcps
+    return $?
+  fi
   { read -r name; read -r image; read -r port; read -r service; \
     read -r user; read -r password; } < <(lane_fields "$lane")
   printf '=== %s FULL (%s) localhost:%s/%s ===\n' "$lane" "$image" "$port" "$service"
@@ -407,6 +453,10 @@ case "$cmd" in
   versions)
     run_versions "$lane_arg" || rc=1
     ;;
+  tcps)
+    # OCI TCPS lane (A5.2): local TLS over the C1 synthetic wallets, no container.
+    lane_tcps || rc=1
+    ;;
   up|health|env|smoke|full|truth)
     while read -r lane; do
       "lane_$cmd" "$lane" || rc=1
@@ -419,7 +469,7 @@ case "$cmd" in
     done < <(lanes_for "$lane_arg")
     ;;
   *)
-    printf 'usage: %s up|health|smoke|full|truth|versions|env|stop [xe11|xe18|xe21|free23|all]\n' "$0" >&2
+    printf 'usage: %s up|health|smoke|full|truth|versions|tcps|env|stop [xe11|xe18|xe21|free23|octcps|all]\n' "$0" >&2
     exit 2
     ;;
 esac
