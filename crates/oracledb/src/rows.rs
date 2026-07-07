@@ -803,6 +803,52 @@ mod tests {
     }
 
     #[test]
+    fn batch_outcome_maps_multiple_mid_batch_errors_and_keeps_commit_counts() {
+        // a4-j1w (rust-oracledb iec3.1.13) public-API bridge: the decoder emits a
+        // QueryResult shaped like a real `executemany(batcherrors=True,
+        // arraydmlrowcounts=True)` continuation (rows 1 and 3 of a 5-row batch
+        // failed; 0/2/4 committed). BatchOutcome must surface EACH failure keyed
+        // to its input-row index while still reporting the surviving rows' commit
+        // counts — no coalescing, no reordering, no dropped rows.
+        let result = QueryResult {
+            row_count: 3,
+            batch_errors: vec![
+                BatchServerError::new(1, 1, "ORA-00001: unique constraint violated"),
+                BatchServerError::new(1400, 3, "ORA-01400: cannot insert NULL"),
+            ],
+            array_dml_row_counts: Some(vec![1, 0, 1, 0, 1]),
+            ..QueryResult::default()
+        };
+
+        let outcome = BatchOutcome::from_query_result(result);
+
+        // Per-row error map: two distinct failures at input-row indices 1 and 3.
+        assert_eq!(outcome.errors().len(), 2, "both mid-batch failures survive");
+        assert_eq!(outcome.errors()[0].row_index(), 1);
+        assert_eq!(outcome.errors()[0].code(), 1);
+        assert_eq!(
+            outcome.errors()[0].message(),
+            "ORA-00001: unique constraint violated"
+        );
+        assert_eq!(outcome.errors()[1].row_index(), 3);
+        assert_eq!(outcome.errors()[1].code(), 1400);
+        assert_eq!(
+            outcome.errors()[1].message(),
+            "ORA-01400: cannot insert NULL"
+        );
+
+        // Successful rows still commit-count: per-row 1/0/1/0/1 and 3 total.
+        assert_eq!(outcome.per_row_counts(), Some([1, 0, 1, 0, 1].as_slice()));
+        assert_eq!(outcome.rows_affected(), 3);
+        let committed: u64 = outcome
+            .per_row_counts()
+            .expect("row counts present")
+            .iter()
+            .sum();
+        assert_eq!(committed, 3, "the 3 non-failing rows committed");
+    }
+
+    #[test]
     fn batch_outcome_coalesces_array_dml_returning_per_bind() {
         // Regression: array DML decodes RETURNING once per iteration, so a
         // single RETURNING bind (index 2) arrives as one group per affected

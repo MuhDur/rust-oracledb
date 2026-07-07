@@ -2370,6 +2370,174 @@ mod return_parameter_tests {
 }
 
 #[cfg(test)]
+mod batch_error_continuation_tests {
+    use super::*;
+
+    // Offline proof of the `executemany(batcherrors=True, arraydmlrowcounts=True)`
+    // continuation contract (bead a4-j1w / rust-oracledb iec3.1.13). The server
+    // does NOT abort on the first bad row: it processes the whole bind array,
+    // returns a per-iteration affected-row-count vector, and reports the failing
+    // rows through the ORA-24381 batch-error arrays instead of raising a fatal
+    // error (reference impl/thin/messages/base.pyx `_process_error_info`). This
+    // exercises the REAL wire decoder end to end offline — no live array DML — and
+    // asserts continuation (every iteration accounted for), the per-row error map
+    // (each failure keyed to its input-row offset), and that the surviving rows
+    // still report their commit counts.
+
+    /// Writes the `_process_return_parameters` block (num-params / parameter-bytes
+    /// / keyword-pairs / registration-block, all empty) followed by the
+    /// `arraydmlrowcounts` tail carrying one affected-row count per bind row.
+    fn write_return_parameters_with_row_counts(w: &mut TtcWriter, row_counts: &[u64]) {
+        w.write_ub2(0); // num params
+        w.write_ub2(0); // parameter bytes
+        w.write_ub2(0); // keyword/value pairs
+        w.write_ub2(0); // registration-info block bytes
+        w.write_ub4(u32::try_from(row_counts.len()).expect("row count fits u32"));
+        for &count in row_counts {
+            w.write_ub8(count);
+        }
+    }
+
+    /// Writes an `ORA-24381` server-error-info record whose batch-error code /
+    /// offset / message arrays mirror `parse_server_error_info`. The fixed header
+    /// matches the parser field-for-field (same shape as the errors.rs boundary
+    /// fixture); the arrays use the short (non-`0xfe`) packed-length form.
+    fn write_batch_error_info(w: &mut TtcWriter, errors: &[(u32, u32, &str)]) {
+        // --- fixed header (mirrors parse_server_error_info) ---
+        w.write_ub4(0); // call status
+        w.write_ub2(0); // seq
+        w.write_ub4(0); // current row
+        w.write_ub2(0); // error number (obsolete short)
+        w.write_ub2(0); // array elem error 1
+        w.write_ub2(0); // array elem error 2
+        w.write_ub2(0); // cursor id
+        w.write_sb4(0); // error position
+        w.write_raw(&[0u8; 5]); // skip(5)
+        w.write_u8(0); // warning flags
+                       // rowid: ub4 rba, ub2 partition, skip(1), ub4 block, ub2 slot
+        w.write_ub4(0);
+        w.write_ub2(0);
+        w.write_u8(0);
+        w.write_ub4(0);
+        w.write_ub2(0);
+        w.write_ub4(0); // os error
+        w.write_raw(&[0u8; 2]); // skip(2)
+        w.write_ub2(0); // padding
+        w.write_ub4(0); // success iters
+        w.write_bytes_with_two_lengths(None)
+            .expect("empty rowid-diagnostic field"); // read_bytes_with_length
+
+        let count = errors.len();
+        // --- batch error CODE array ---
+        w.write_ub2(u16::try_from(count).expect("error count fits u16"));
+        if count > 0 {
+            w.write_u8(u8::try_from(count).expect("packed length fits u8")); // != 0xfe
+            for &(code, _, _) in errors {
+                w.write_ub2(u16::try_from(code).expect("ORA code fits u16"));
+            }
+        }
+        // --- batch error OFFSET (input-row index) array ---
+        w.write_ub4(u32::try_from(count).expect("offset count fits u32"));
+        if count > 0 {
+            w.write_u8(u8::try_from(count).expect("packed length fits u8"));
+            for &(_, offset, _) in errors {
+                w.write_ub4(offset);
+            }
+        }
+        // --- batch error MESSAGE array ---
+        w.write_ub2(u16::try_from(count).expect("message count fits u16"));
+        if count > 0 {
+            w.write_u8(0); // packed size (parser skips 1)
+            for &(_, _, message) in errors {
+                w.write_ub2(u16::try_from(message.len()).expect("message len fits u16")); // discarded chunk len
+                w.write_bytes_with_length(message.as_bytes())
+                    .expect("batch error message");
+                w.write_raw(&[0u8, 0u8]); // 2-byte end marker
+            }
+        }
+        // --- trailing error number / row count / (20.1+) sql-type+checksum / message ---
+        w.write_ub4(TNS_ERR_ARRAY_DML_ERRORS);
+        w.write_ub8(0); // row count
+                        // ClientCapabilities::default() negotiates ttc field version 24 (>= 20.1),
+                        // so a modern server sends the sql-type + server-checksum pair here
+                        // (reference messages/base.pyx:238). Emit it so the summary message frames.
+        w.write_ub4(0); // sql type
+        w.write_ub4(0); // server checksum
+        w.write_bytes_with_length(b"ORA-24381: error(s) in array DML operation")
+            .expect("summary message");
+    }
+
+    #[test]
+    fn execute_response_decodes_batch_error_continuation_and_row_counts() {
+        // A 5-row batch where input rows 1 and 3 violate constraints; rows 0, 2
+        // and 4 commit. A pre-fix / abort-on-first-error server would stop at
+        // row 1 — the row-count vector and the SECOND error prove it did not.
+        let row_counts = [1u64, 0, 1, 0, 1];
+        let errors: [(u32, u32, &str); 2] = [
+            (1, 1, "ORA-00001: unique constraint (X.PK) violated"),
+            (
+                1400,
+                3,
+                "ORA-01400: cannot insert NULL into (\"X\".\"T\".\"C\")",
+            ),
+        ];
+
+        let mut writer = TtcWriter::new();
+        writer.write_u8(TNS_MSG_TYPE_PARAMETER);
+        write_return_parameters_with_row_counts(&mut writer, &row_counts);
+        writer.write_u8(TNS_MSG_TYPE_ERROR);
+        write_batch_error_info(&mut writer, &errors);
+        let payload = writer.into_bytes();
+
+        let options = ExecuteOptions::default().with_arraydmlrowcounts(true);
+        let result = parse_query_response_with_binds_and_options(
+            &payload,
+            ClientCapabilities::default(),
+            &[],
+            options,
+        )
+        .expect("batch-error execute response decodes");
+
+        // Continuation: every iteration is accounted for — the batch was NOT
+        // aborted on the first failing row.
+        assert_eq!(
+            result.array_dml_row_counts.as_deref(),
+            Some(row_counts.as_slice()),
+            "per-iteration counts survive: committed rows report 1, failed rows 0"
+        );
+
+        // Per-row error map: each failure is keyed to its input-row offset, with
+        // its own ORA code and message (not coalesced, not misordered).
+        assert_eq!(
+            result.batch_errors.len(),
+            2,
+            "both failing rows are reported, proving continuation past row 1"
+        );
+        assert_eq!(result.batch_errors[0].code(), 1);
+        assert_eq!(result.batch_errors[0].offset(), 1);
+        assert_eq!(
+            result.batch_errors[0].message(),
+            "ORA-00001: unique constraint (X.PK) violated"
+        );
+        assert_eq!(result.batch_errors[1].code(), 1400);
+        assert_eq!(result.batch_errors[1].offset(), 3);
+        assert_eq!(
+            result.batch_errors[1].message(),
+            "ORA-01400: cannot insert NULL into (\"X\".\"T\".\"C\")"
+        );
+
+        // The surviving (non-failing) rows still commit-count: 3 rows affected.
+        let committed: u64 = result
+            .array_dml_row_counts
+            .as_deref()
+            .expect("row counts present")
+            .iter()
+            .sum();
+        assert_eq!(committed, 3, "the 3 non-failing rows committed");
+    }
+}
+
+#[cfg(test)]
 mod borrowed_fetch_tests {
     use super::*;
     use crate::thin::codecs::encode_number_text;
