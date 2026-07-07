@@ -82,6 +82,15 @@ fn oson_str<'a>(doc: &'a SodaDocument, key: &str) -> Option<&'a str> {
     }
 }
 
+/// Extract a numeric field as its canonical string form (OSON numbers are
+/// carried as decimal strings).
+fn oson_str_num<'a>(doc: &'a SodaDocument, key: &str) -> Option<&'a str> {
+    match oson_get(doc, key)? {
+        OsonValue::Number(s) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
 async fn drop_if_exists(db: &SodaDatabase, conn: &mut Connection, cx: &Cx, name: &str) {
     let _ = db.drop_collection(conn, cx, name).await;
     let _ = conn.commit(cx).await;
@@ -504,6 +513,226 @@ fn soda_gated_on_pre21c_with_proof() {
                     "[soda-gate] version={major}c SUPPORTED: JSON_SERIALIZE + SODA available"
                 );
             }
+        })
+    });
+}
+
+/// Thin-mode SODA breadth (bead a4-h74 / iec3.1.20): the read/write surface the
+/// python-oracledb SODA suites (test_3300 collections, test_3400 documents)
+/// exercise beyond the create/insert/find happy path — streaming cursors with a
+/// server refill, `skip`/`limit` paging, multi-`keys` filters, per-document
+/// metadata (version/timestamps) on the read path, and optimistic-locking
+/// replace by version.
+///
+/// Gated at 21c+ (thin-mode SODA needs `JSON_SERIALIZE`; the pre-21c boundary is
+/// proven by `soda_gated_on_pre21c_with_proof`). On an <21c lane this test
+/// self-documents and returns rather than falsely passing. Run with a 21c+ lane:
+///
+/// ```text
+/// cargo test -p oracledb --features soda --test live_soda \
+///   soda_breadth_cursor_skip_limit_keys_and_metadata -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "requires live Oracle 21c+ container (xe21 / free23)"]
+fn soda_breadth_cursor_skip_limit_keys_and_metadata() {
+    with_conn(|conn, cx| {
+        Box::pin(async move {
+            let major = conn
+                .server_version_tuple()
+                .expect("server version negotiated at connect")
+                .0;
+            if major < 21 {
+                eprintln!(
+                    "[soda-breadth] version={major}c: thin-mode SODA unavailable \
+                     (< 21c), breadth N/A — see soda_gated_on_pre21c_with_proof"
+                );
+                return;
+            }
+
+            let db = SodaDatabase::new();
+            drop_if_exists(&db, conn, cx, "RustSodaBreadth").await;
+            let coll = db
+                .create_collection(conn, cx, Some("RustSodaBreadth"), None, false)
+                .await
+                .expect("create");
+
+            // Seed 5 ordered docs, capturing their server-assigned keys.
+            let mut keys = Vec::new();
+            for n in 1..=5 {
+                let doc = coll
+                    .insert_one(
+                        conn,
+                        cx,
+                        &json_doc(&format!(r#"{{"n":{n},"grp":"g"}}"#)),
+                        None,
+                        true,
+                    )
+                    .await
+                    .expect("insert")
+                    .expect("returned doc");
+                keys.push(doc.key.clone().expect("key"));
+            }
+            conn.commit(cx).await.expect("commit");
+
+            // (1) Streaming cursor: a small fetch batch (< row count) forces a
+            // server-side refill through `fetch_more`. Ordered by `n` so the
+            // sequence is deterministic across batches; every row must carry the
+            // SODA-managed metadata columns.
+            let ordered = SodaOperation {
+                filter: Some(r#"{"$orderby":[{"path":"n","order":"asc"}]}"#.into()),
+                fetch_array_size: 2,
+                ..Default::default()
+            };
+            let mut cursor = coll
+                .open_cursor(conn, cx, &ordered)
+                .await
+                .expect("open_cursor");
+            // The default collection carries key + version columns; timestamp
+            // columns are optional in the default metadata, so we only require
+            // that whichever the collection exposes are populated uniformly.
+            let mut seen = Vec::new();
+            let mut lastmod_seen = 0usize;
+            while let Some(doc) = cursor.next_doc(conn, cx).await.expect("next_doc") {
+                assert!(doc.key.is_some(), "cursor doc must carry a key");
+                assert!(doc.version.is_some(), "cursor doc must carry a version");
+                if doc.last_modified.is_some() {
+                    lastmod_seen += 1;
+                }
+                match oson_get(&doc, "n") {
+                    Some(OsonValue::Number(s)) => seen.push(s.parse::<i64>().expect("n int")),
+                    other => panic!("expected numeric n, got {other:?}"),
+                }
+            }
+            assert!(
+                lastmod_seen == 0 || lastmod_seen == seen.len(),
+                "last_modified must be populated for all rows or none (collection metadata), \
+                 got {lastmod_seen}/{}",
+                seen.len()
+            );
+            assert_eq!(
+                seen,
+                vec![1, 2, 3, 4, 5],
+                "cursor must stream all rows in order across multiple batches"
+            );
+            cursor.close(conn, cx).await.expect("close cursor");
+            assert!(cursor.is_closed());
+            assert!(
+                cursor.next_doc(conn, cx).await.is_err(),
+                "next_doc on a closed cursor must error"
+            );
+
+            // (2) skip + limit paging (deterministic via the same $orderby).
+            let page_op = SodaOperation {
+                filter: Some(r#"{"$orderby":[{"path":"n","order":"asc"}]}"#.into()),
+                skip: Some(1),
+                limit: Some(2),
+                ..Default::default()
+            };
+            let page = coll
+                .get_documents(conn, cx, &page_op)
+                .await
+                .expect("skip/limit page");
+            let page_n: Vec<Option<&str>> = page.iter().map(|d| oson_str_num(d, "n")).collect();
+            assert_eq!(
+                page_n,
+                vec![Some("2"), Some("3")],
+                "skip=1 limit=2 must return the 2nd and 3rd docs"
+            );
+
+            // (3) multi-keys filter: count + fetch a specific subset.
+            let keys_op = SodaOperation {
+                keys: Some(vec![keys[0].clone(), keys[4].clone()]),
+                ..Default::default()
+            };
+            assert_eq!(
+                coll.get_count(conn, cx, &keys_op)
+                    .await
+                    .expect("count by keys"),
+                2
+            );
+            assert_eq!(
+                coll.get_documents(conn, cx, &keys_op)
+                    .await
+                    .expect("get by keys")
+                    .len(),
+                2
+            );
+
+            // (4) optimistic locking: replaceOne matching the current version
+            // succeeds and rotates the version; replaying the now-stale version
+            // no longer matches.
+            let current = coll
+                .get_one(
+                    conn,
+                    cx,
+                    &SodaOperation {
+                        key: Some(keys[0].clone()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("getOne")
+                .expect("present");
+            let version = current.version.clone().expect("version");
+            let (replaced, _) = coll
+                .replace_one(
+                    conn,
+                    cx,
+                    &SodaOperation {
+                        key: Some(keys[0].clone()),
+                        version: Some(version.clone()),
+                        ..Default::default()
+                    },
+                    &json_doc(r#"{"n":1,"grp":"g","v":2}"#),
+                    false,
+                )
+                .await
+                .expect("replace matching version");
+            assert!(
+                replaced,
+                "replaceOne with the matching version must succeed"
+            );
+            conn.commit(cx).await.expect("commit");
+
+            let (stale, _) = coll
+                .replace_one(
+                    conn,
+                    cx,
+                    &SodaOperation {
+                        key: Some(keys[0].clone()),
+                        version: Some(version),
+                        ..Default::default()
+                    },
+                    &json_doc(r#"{"n":1,"grp":"g","v":3}"#),
+                    false,
+                )
+                .await
+                .expect("replace stale version");
+            assert!(!stale, "replaceOne with a stale version must not match");
+
+            // (5) remove by multi-keys.
+            let removed = coll
+                .remove(
+                    conn,
+                    cx,
+                    &SodaOperation {
+                        keys: Some(vec![keys[1].clone(), keys[2].clone()]),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("remove by keys");
+            assert_eq!(removed, 2);
+            conn.commit(cx).await.expect("commit");
+            assert_eq!(
+                coll.get_count(conn, cx, &SodaOperation::default())
+                    .await
+                    .expect("count after remove"),
+                3
+            );
+
+            db.drop_collection(conn, cx, "RustSodaBreadth").await.ok();
+            conn.commit(cx).await.ok();
         })
     });
 }
