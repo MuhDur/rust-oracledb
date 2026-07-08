@@ -12,7 +12,7 @@ if [ ! -f "$REFERENCE" ]; then
 fi
 
 echo "perf-regression: running deterministic criterion benches"
-cargo bench -p oracledb --features cassette --bench single_packet_passthrough -- --noplot
+cargo bench -p oracledb --features cassette --bench single_packet_passthrough --locked -- --noplot
 
 python3 - "$REFERENCE" "$CRITERION_DIR" <<'PY'
 import json

@@ -13,6 +13,10 @@ typed conversion, bind metadata / execute payload construction, large
 multi-packet response reassembly, cassette framing, and the single-packet
 response passthrough.
 
+The CI gate is wired through `.github/workflows/_quality.yml` for the `soak` and
+`release-qualification` profiles. It intentionally stays out of the `required`
+profile so ordinary PRs are not failed by noisy runner timing.
+
 ## Baseline Capture
 
 - Date: 2026-06-21
@@ -52,3 +56,17 @@ export CARGO_TARGET_DIR=/home/durakovic/.cargo-target-rust-oracledb-e9
 export TMPDIR=/home/durakovic/.tmp-rust-oracledb
 bash scripts/check_perf_regression.sh
 ```
+
+## Hyperfine Wall-Time Capture
+
+Criterion is the enforced regression source of truth. For local wall-clock
+evidence, install `hyperfine` and capture the same deterministic bench command:
+
+```sh
+export CARGO_TARGET_DIR=/home/durakovic/.cargo-target-rust-oracledb-e9
+hyperfine --warmup 1 --runs 3 \
+  'cargo bench -p oracledb --features cassette --bench single_packet_passthrough --locked -- --noplot'
+```
+
+Do not use hyperfine wall time as the CI pass/fail threshold; it measures the
+entire bench process, including compile/cache effects and Criterion bookkeeping.

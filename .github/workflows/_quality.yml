@@ -252,6 +252,10 @@ jobs:
       - name: Supply-chain checks
         run: cargo deny check
 
+      - name: Deterministic performance regression gate
+        if: ${{ inputs.profile == 'soak' || inputs.profile == 'release-qualification' }}
+        run: bash scripts/check_perf_regression.sh
+
       - name: Package crates
         if: ${{ steps.budget.outputs.package == 'true' }}
         run: cargo package --workspace --exclude oracledb-pyshim --locked
