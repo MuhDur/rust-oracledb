@@ -474,6 +474,9 @@ impl oracledb::Connection
 pub async fn oracledb::Connection::fetch_all_record_batch(&mut self, &asupersync::cx::cx::Cx, &str, u32, &oracledb::arrow::ArrowFetchOptions) -> oracledb::Result<arrow_array::record_batch::RecordBatch>
 pub async fn oracledb::Connection::fetch_all_record_batch_columnar(&mut self, &asupersync::cx::cx::Cx, &str, u32, &oracledb::arrow::ArrowFetchOptions) -> oracledb::Result<arrow_array::record_batch::RecordBatch>
 pub async fn oracledb::Connection::fetch_record_batches(&mut self, &asupersync::cx::cx::Cx, &str, u32, &oracledb::arrow::ArrowFetchOptions) -> oracledb::Result<oracledb::arrow::RecordBatchFetch>
+impl oracledb::Connection
+pub async fn oracledb::Connection::into_query_stream<'p>(self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::OwnedRowStream>
+pub async fn oracledb::Connection::into_row_stream<'q>(self, &asupersync::cx::cx::Cx, oracledb::Query<'q>) -> oracledb::Result<oracledb::OwnedRowStream>
 impl core::fmt::Debug for oracledb::Connection
 pub fn oracledb::Connection::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub trait oracledb::prelude::FromRow: core::marker::Sized
@@ -1257,6 +1260,9 @@ impl oracledb::Connection
 pub async fn oracledb::Connection::fetch_all_record_batch(&mut self, &asupersync::cx::cx::Cx, &str, u32, &oracledb::arrow::ArrowFetchOptions) -> oracledb::Result<arrow_array::record_batch::RecordBatch>
 pub async fn oracledb::Connection::fetch_all_record_batch_columnar(&mut self, &asupersync::cx::cx::Cx, &str, u32, &oracledb::arrow::ArrowFetchOptions) -> oracledb::Result<arrow_array::record_batch::RecordBatch>
 pub async fn oracledb::Connection::fetch_record_batches(&mut self, &asupersync::cx::cx::Cx, &str, u32, &oracledb::arrow::ArrowFetchOptions) -> oracledb::Result<oracledb::arrow::RecordBatchFetch>
+impl oracledb::Connection
+pub async fn oracledb::Connection::into_query_stream<'p>(self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::OwnedRowStream>
+pub async fn oracledb::Connection::into_row_stream<'q>(self, &asupersync::cx::cx::Cx, oracledb::Query<'q>) -> oracledb::Result<oracledb::OwnedRowStream>
 impl core::fmt::Debug for oracledb::Connection
 pub fn oracledb::Connection::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct oracledb::DbmsOutput
@@ -1407,6 +1413,18 @@ pub fn oracledb::OutBinds::default() -> oracledb::OutBinds
 impl core::fmt::Debug for oracledb::OutBinds
 pub fn oracledb::OutBinds::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb::OutBinds
+pub struct oracledb::OwnedRowStream
+impl oracledb::OwnedRowStream
+pub fn oracledb::OwnedRowStream::columns(&self) -> &[oracledb_protocol::thin::types::ColumnMetadata]
+pub fn oracledb::OwnedRowStream::cursor(&self) -> core::option::Option<&oracledb::Cursor>
+pub fn oracledb::OwnedRowStream::into_connection(self) -> oracledb::Result<oracledb::Connection>
+impl core::fmt::Debug for oracledb::OwnedRowStream
+pub fn oracledb::OwnedRowStream::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::ops::drop::Drop for oracledb::OwnedRowStream
+pub fn oracledb::OwnedRowStream::drop(&mut self)
+impl futures_core::stream::Stream for oracledb::OwnedRowStream
+pub type oracledb::OwnedRowStream::Item = core::result::Result<alloc::vec::Vec<core::option::Option<oracledb_protocol::thin::types::QueryValue>>, oracledb::Error>
+pub fn oracledb::OwnedRowStream::poll_next(core::pin::Pin<&mut Self>, &mut core::task::wake::Context<'_>) -> core::task::poll::Poll<core::option::Option<Self::Item>>
 #[non_exhaustive] pub struct oracledb::Query<'a>
 impl<'a> oracledb::Query<'a>
 pub fn oracledb::Query<'a>::arraysize(self, core::num::nonzero::NonZeroU32) -> Self

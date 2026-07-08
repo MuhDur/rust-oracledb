@@ -87,6 +87,7 @@ pub fn oracledb::ConnectOptions::*	keep	ConnectOptions fields are already privat
 *oracledb::ReturningRows*	keep	Public execute-family RETURNING accessor.
 *oracledb::RetryHint*	keep	Public conservative retry guidance returned by Error::retry_hint.
 *oracledb::Cursor*	keep	Public REF CURSOR handle alias used by Rows.
+*oracledb::OwnedRowStream*	keep	0.8.2 K10: owned-row futures_core::Stream taking Connection by value (into_row_stream/into_query_stream on Connection); yields Vec<Option<QueryValue>> pages without holding &mut Connection across the yield, enabling true row-by-row streaming downstream. Covers the struct, columns/cursor/into_connection/poll_next accessors, and the Stream/Debug/Drop impls.
 *oracledb::QueryResultExt*	keep	Public convenience extension for query results.
 *oracledb::Query*	keep	Public query-family request builder.
 *oracledb::Rows*	keep	Public lazy row-result facade for the query family.

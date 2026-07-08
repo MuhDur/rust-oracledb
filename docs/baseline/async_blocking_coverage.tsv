@@ -67,6 +67,8 @@ connection	oracledb::Connection	call_routine	oracledb::BlockingConnection	call_r
 connection	oracledb::Connection	fetch_all_record_batch	oracledb::BlockingConnection	fetch_all_record_batch	covered	blocking twin present
 connection	oracledb::Connection	fetch_all_record_batch_columnar	oracledb::BlockingConnection	fetch_all_record_batch_columnar	covered	blocking twin present
 connection	oracledb::Connection	fetch_record_batches	oracledb::BlockingConnection	fetch_record_batches	covered	blocking twin present
+connection	oracledb::Connection	into_query_stream	oracledb::BlockingConnection	into_query_stream	exception	K10 OwnedRowStream is a futures_core::Stream, inherently async; a blocking caller uses BlockingConnection::query_all for eager owned rows.
+connection	oracledb::Connection	into_row_stream	oracledb::BlockingConnection	into_row_stream	exception	K10 OwnedRowStream is a futures_core::Stream, inherently async; a blocking caller uses BlockingConnection::query_all for eager owned rows.
 connection	oracledb::Connection	aq_deq_many	oracledb::BlockingConnection	aq_deq_many	covered	blocking twin present
 connection	oracledb::Connection	aq_deq_one	oracledb::BlockingConnection	aq_deq_one	covered	blocking twin present
 connection	oracledb::Connection	aq_enq_many	oracledb::BlockingConnection	aq_enq_many	covered	blocking twin present
@@ -135,6 +137,8 @@ connection	oracledb::Connection	call_routine	oracledb::BlockingConnection	call_r
 connection	oracledb::Connection	fetch_all_record_batch	oracledb::BlockingConnection	fetch_all_record_batch	covered	blocking twin present
 connection	oracledb::Connection	fetch_all_record_batch_columnar	oracledb::BlockingConnection	fetch_all_record_batch_columnar	covered	blocking twin present
 connection	oracledb::Connection	fetch_record_batches	oracledb::BlockingConnection	fetch_record_batches	covered	blocking twin present
+connection	oracledb::Connection	into_query_stream	oracledb::BlockingConnection	into_query_stream	exception	K10 OwnedRowStream is a futures_core::Stream, inherently async; a blocking caller uses BlockingConnection::query_all for eager owned rows.
+connection	oracledb::Connection	into_row_stream	oracledb::BlockingConnection	into_row_stream	exception	K10 OwnedRowStream is a futures_core::Stream, inherently async; a blocking caller uses BlockingConnection::query_all for eager owned rows.
 rows	oracledb::Rows	collect	oracledb::BlockingRows	collect	covered	blocking twin present
 rows	oracledb::Rows	next_batch	oracledb::BlockingRows	next_batch	covered	blocking twin present
 rows	oracledb::Rows	scroll	oracledb::BlockingRows	scroll	covered	blocking twin present

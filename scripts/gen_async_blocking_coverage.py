@@ -52,6 +52,8 @@ SURFACES = [
             "fetch_rows_ref_response": "Zero-copy borrowed fetch response is async-only because borrowed buffers cannot cross the block_on facade.",
             "fetch_rows_request": "Half-round-trip borrowed-fetch primitive is async-only; blocking callers use fetch_rows/fetch_rows_with_columns.",
             "for_each_row_ref": "Borrowed-row callback is async-only because QueryValueRef lifetimes cannot cross the block_on facade.",
+            "into_row_stream": "K10 OwnedRowStream is a futures_core::Stream, inherently async; a blocking caller uses BlockingConnection::query_all for eager owned rows.",
+            "into_query_stream": "K10 OwnedRowStream is a futures_core::Stream, inherently async; a blocking caller uses BlockingConnection::query_all for eager owned rows.",
         },
     ),
     Surface(
