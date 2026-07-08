@@ -169,6 +169,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "typed_decode_boundary"
+path = "fuzz_targets/typed_decode_boundary.rs"
+test = false
+doc = false
+bench = false
+
 # Release profile with debug assertions on: catches arithmetic overflow panics
 # (the protocol decoder must fail-closed, never panic on overflow) while keeping
 # libFuzzer fast.

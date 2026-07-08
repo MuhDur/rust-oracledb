@@ -135,7 +135,7 @@ jobs:
           sudo apt-get install -y musl-tools
           bash scripts/check_musl_size.sh
 
-  # The 20 cargo-fuzz targets are listed in
+  # The manifest-driven cargo-fuzz targets are listed in
   # crates/oracledb-protocol/fuzz/targets.toml and live in the standalone
   # crates/oracledb-protocol/fuzz crate (not a workspace member), so nothing
   # else in CI compiles them. This non-blocking job keeps them from bit-rotting.
@@ -145,6 +145,8 @@ jobs:
     name: fuzz targets compile/smoke (nightly)
     runs-on: ubuntu-latest
     continue-on-error: true
+    env:
+      CARGO_BUILD_JOBS: "16"
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:

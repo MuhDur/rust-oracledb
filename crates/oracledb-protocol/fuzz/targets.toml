@@ -321,6 +321,21 @@ iterations = 500
 max_total_time_seconds = 5
 
 [[targets]]
+name = "typed_decode_boundary"
+owner = "protocol/thin-decode"
+parser_entry = "crates/oracledb-protocol/fuzz/fuzz_targets/typed_decode_boundary.rs typed TTC scalar/row/vector/json boundary"
+risk_tier = "required"
+corpus_dir = "corpus/typed_decode_boundary"
+dictionary = ""
+max_input_bytes = 65_536
+timeout_seconds = 10
+rss_limit_mb = 2048
+malloc_limit_mb = 2048
+lane = "ci-smoke"
+iterations = 500
+max_total_time_seconds = 5
+
+[[targets]]
 name = "alter_session"
 owner = "protocol/sql"
 parser_entry = "crates/oracledb-protocol/src/sql.rs:706 parse_alter_session_value"
