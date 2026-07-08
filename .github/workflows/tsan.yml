@@ -1,0 +1,48 @@
+name: TSan cancel-safety
+
+# ThreadSanitizer campaign over the async cancel / concurrency paths (K10 and the
+# cross-thread BREAK + recovery-drain machinery). Instrumented builds rebuild std
+# via -Zbuild-std and take a few minutes, so this is a gated nightly / manual lane
+# rather than a per-PR gate — the deterministic DPOR + pool concurrency tests in
+# the ordinary `cargo test` job already run on every PR.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "16"
+
+jobs:
+  tsan:
+    name: TSan offline instrumented suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      # rust-src is required by -Zbuild-std so std itself is TSan-instrumented;
+      # the gnu target is the sanitizer target.
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: nightly-2026-05-11
+          components: rust-src
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      # The offline half needs no database: it covers the DPOR cancel/timeout
+      # saturation, the multi-threaded async pool acquire/return/close/reap tests,
+      # streaming-cancel-mid-stream reuse, and the OwnedRowStream drop path. The
+      # live half (real BREAK thread, LOB cancel, connection teardown) runs from
+      # the same script when PYO_TEST_* is exported — see the `live` lane / a local
+      # run against a gvenzl container.
+      - name: TSan cancel-safety campaign (offline)
+        run: bash scripts/tsan_campaign.sh
