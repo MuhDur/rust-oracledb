@@ -90,3 +90,63 @@ Residual misses after hardening:
 These residual misses are documented for the orchestrator-side D6.4 audit
 guard. Driver-side changes remain test-only and do not alter the public API
 contract.
+
+## Round 2 Full Rerun
+
+The round-2 work re-established the full selected baseline on the current tree
+before editing:
+
+Output: `/tmp/rust-oracledb-mutants-d64-round2-baseline-20260708145237`
+
+| Metric | Count |
+| --- | ---: |
+| Mutants tested | 431 |
+| Caught | 301 |
+| Missed | 112 |
+| Unviable | 18 |
+| Kill rate, excluding unviable | 72.9% |
+
+Additional tests were then added for:
+
+- Direct heap/stack NUMBER part decoding: emitted digits, decimal-point index,
+  integer flag, sign, fused coefficient, and canonical formatted text.
+- Owned response wrappers and dispatch: IO vector OUT bind read-back, DML
+  RETURNING rows, STATUS/ERROR transaction state, cursor id, row count,
+  compilation-warning propagation, rowid, TOKEN, server-side piggyback, flush
+  termination, and no-data fetch finalization.
+- IO-vector fast-fetch/rowid zero and one-byte boundary skips.
+- Describe and column metadata: zero-column describes, annotations, domain
+  fields, JSON/OSON flags, and VECTOR dimensions/format/flags.
+- Owned column value decode for binary float/double, boolean, intervals,
+  timestamps, LOB, VECTOR, JSON, object, cursor, and UROWID boundaries.
+- Borrowed row slot decode for borrowed text/raw/number, NCHAR fallback,
+  boolean, intervals, and datetime.
+- Borrowed response dispatch for DESCRIBE, row header, bit vector, row data,
+  parameter, status, server-side piggyback, implicit resultset, token, error,
+  duplicate-column carry-forward, and flush termination.
+- Query return parameters: registration-info query id and row-count tail.
+
+Final full selected run:
+
+Output: `/tmp/rust-oracledb-mutants-d64-round2-after-tests-20260708152456`
+
+| Metric | Count |
+| --- | ---: |
+| Mutants tested | 431 |
+| Caught | 376 |
+| Missed | 38 |
+| Unviable | 17 |
+| Kill rate, excluding unviable | 90.8% |
+
+Residual misses after the final run:
+
+| Area | Missed | Notes |
+| --- | ---: | --- |
+| NUMBER digit-walk arithmetic/branch substitutions | 6 | Heap/stack paths remain byte-identical for the tested corpus; the remaining `%` and final-digit branch variants need narrower synthetic wire fixtures. |
+| Owned response status/no-data flag condition variants | 4 | Bitwise flag substitutions and no-data branching around response state. |
+| Column metadata JSON/OSON flag bitwise variants | 4 | The parsed field values are covered; bitwise alternatives can still survive for some flag combinations. |
+| Owned RAW/ROWID arm deletions | 2 | Semantically straightforward follow-up coverage, below the round-2 threshold. |
+| Borrowed slot arm deletions | 6 | Most fall back to owned decode and preserve `to_owned_value`; zero-copy shape is covered for hot text, raw, and number paths. |
+| Borrowed response bit-vector/error condition variants | 6 | Duplicate-column and no-data behavior is covered; residual condition substitutions remain. |
+| Query return parameter block/offset variants | 8 | Query-id and row-count decoding are covered; zero/nonzero block-boundary and byte-offset mutants remain. |
+| `QueryValueRef::as_number_text` arm deletions | 2 | Direct and owned fallback accessors are covered by existing tests; inline owned numbers intentionally have no borrowed text. |

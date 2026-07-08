@@ -868,4 +868,167 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn number_part_decoders_emit_exact_digits_decimal_and_coefficient() {
+        use super::super::number::{DecodedNumber, DecodedNumberStack, MAX_DIGITS};
+
+        struct Case<'a> {
+            wire: &'a [u8],
+            digits: &'a [u8],
+            is_negative: bool,
+            decimal_point_index: i16,
+            is_integer: bool,
+            coefficient: Option<i128>,
+            text: &'a str,
+        }
+
+        let cases = [
+            // Forces the `first_digit == 10` carry branch. The wire is unusual
+            // but valid for the decoder contract: it must produce canonical
+            // "100", not "10", "1.0", or a zero-length stack result.
+            Case {
+                wire: &[193, 101],
+                digits: &[1, 0],
+                is_negative: false,
+                decimal_point_index: 3,
+                is_integer: true,
+                coefficient: Some(10),
+                text: "100",
+            },
+            // Leading zero base-100 group: decimal point moves left before any
+            // significant digit is emitted, but the intermediate zero digit is
+            // still retained because another group follows.
+            Case {
+                wire: &[193, 1, 2],
+                digits: &[0, 0, 1],
+                is_negative: false,
+                decimal_point_index: 1,
+                is_integer: false,
+                coefficient: Some(1),
+                text: "0.01",
+            },
+            // Negative terminator byte must be excluded from the digit walk.
+            Case {
+                wire: &[62, 100, 102],
+                digits: &[1],
+                is_negative: true,
+                decimal_point_index: 1,
+                is_integer: true,
+                coefficient: Some(-1),
+                text: "-1",
+            },
+            // Long digit sequence: the final zero of the last base-100 group is
+            // suppressed, and the fused coefficient must match the emitted
+            // digit stream exactly.
+            Case {
+                wire: &[
+                    211, 13, 35, 57, 79, 91, 13, 35, 57, 79, 91, 13, 35, 57, 79, 91, 13, 35, 57,
+                    79, 91,
+                ],
+                digits: &[
+                    1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6,
+                    7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+                ],
+                is_negative: false,
+                decimal_point_index: 38,
+                is_integer: false,
+                coefficient: Some(123456789012345678901234567890123456789),
+                text: "12345678901234567890123456789012345678.9",
+            },
+        ];
+
+        for case in cases {
+            let mut heap_digits = Vec::new();
+            let mut text = String::new();
+            let decoded = decode_number_parts(case.wire, &mut heap_digits, &mut text)
+                .expect("heap NUMBER part decode");
+            assert!(
+                matches!(decoded, DecodedNumber::Parts { .. }),
+                "expected heap NUMBER parts for {:02x?}",
+                case.wire
+            );
+            if let DecodedNumber::Parts {
+                is_negative,
+                decimal_point_index,
+                is_integer,
+            } = decoded
+            {
+                assert_eq!(
+                    heap_digits, case.digits,
+                    "heap digits for {:02x?}",
+                    case.wire
+                );
+                assert_eq!(
+                    is_negative, case.is_negative,
+                    "heap sign for {:02x?}",
+                    case.wire
+                );
+                assert_eq!(
+                    decimal_point_index, case.decimal_point_index,
+                    "heap decimal point for {:02x?}",
+                    case.wire
+                );
+                assert_eq!(
+                    is_integer, case.is_integer,
+                    "heap integer flag for {:02x?}",
+                    case.wire
+                );
+                format_number_digits(&heap_digits, is_negative, decimal_point_index, &mut text);
+                assert_eq!(text, case.text, "heap text for {:02x?}", case.wire);
+            }
+
+            let mut stack_digits = [0u8; MAX_DIGITS];
+            let decoded = decode_number_parts_stack(case.wire, &mut stack_digits)
+                .expect("stack NUMBER part decode");
+            assert!(
+                matches!(decoded, DecodedNumberStack::Parts { .. }),
+                "expected stack NUMBER parts for {:02x?}",
+                case.wire
+            );
+            if let DecodedNumberStack::Parts {
+                digit_len,
+                is_negative,
+                decimal_point_index,
+                is_integer,
+                coefficient,
+            } = decoded
+            {
+                assert_eq!(
+                    &stack_digits[..digit_len],
+                    case.digits,
+                    "stack digits for {:02x?}",
+                    case.wire
+                );
+                assert_eq!(
+                    is_negative, case.is_negative,
+                    "stack sign for {:02x?}",
+                    case.wire
+                );
+                assert_eq!(
+                    decimal_point_index, case.decimal_point_index,
+                    "stack decimal point for {:02x?}",
+                    case.wire
+                );
+                assert_eq!(
+                    is_integer, case.is_integer,
+                    "stack integer flag for {:02x?}",
+                    case.wire
+                );
+                assert_eq!(
+                    coefficient, case.coefficient,
+                    "stack coefficient for {:02x?}",
+                    case.wire
+                );
+                let mut stack_text = String::new();
+                format_number_digits(
+                    &stack_digits[..digit_len],
+                    is_negative,
+                    decimal_point_index,
+                    &mut stack_text,
+                );
+                assert_eq!(stack_text, case.text, "stack text for {:02x?}", case.wire);
+            }
+        }
+    }
 }

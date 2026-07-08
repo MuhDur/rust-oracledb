@@ -2370,6 +2370,978 @@ mod return_parameter_tests {
 }
 
 #[cfg(test)]
+mod mutation_decode_tests {
+    use super::*;
+    use crate::oson::{encode_oson, OsonValue};
+    use crate::vector::{encode_vector, Vector, VectorValues};
+
+    fn caps(ttc_field_version: u8) -> ClientCapabilities {
+        ClientCapabilities {
+            ttc_field_version,
+            max_string_size: 32_767,
+            charset_id: 873,
+        }
+    }
+
+    fn column(name: &str, ora_type_num: u8, csfrm: u8, buffer_size: u32) -> ColumnMetadata {
+        ColumnMetadata {
+            name: name.to_string(),
+            ora_type_num,
+            csfrm,
+            buffer_size,
+            max_size: buffer_size,
+            nulls_allowed: true,
+            ..ColumnMetadata::default()
+        }
+    }
+
+    struct ColumnRecord<'a> {
+        name: &'a str,
+        ora_type_num: u8,
+        csfrm: u8,
+        buffer_size: u32,
+        max_size: u32,
+        uds_flags: u32,
+        vector_dimensions: Option<u32>,
+        vector_format: u8,
+        vector_flags: u8,
+        object_schema: Option<&'a str>,
+        object_type_name: Option<&'a str>,
+        annotations: &'a [(&'a str, &'a str)],
+    }
+
+    impl<'a> ColumnRecord<'a> {
+        fn scalar(name: &'a str, ora_type_num: u8, csfrm: u8, buffer_size: u32) -> Self {
+            Self {
+                name,
+                ora_type_num,
+                csfrm,
+                buffer_size,
+                max_size: buffer_size,
+                uds_flags: 0,
+                vector_dimensions: None,
+                vector_format: 0,
+                vector_flags: 0,
+                object_schema: None,
+                object_type_name: None,
+                annotations: &[],
+            }
+        }
+
+        fn write(&self, writer: &mut TtcWriter, field_version: u8) {
+            writer.write_u8(self.ora_type_num);
+            writer.write_u8(0); // flags
+            writer.write_u8(7); // precision
+            writer.write_u8(2); // scale
+            writer.write_ub4(self.buffer_size);
+            writer.write_ub4(0); // max array elements
+            writer.write_ub8(0); // cont flags
+            writer
+                .write_bytes_with_two_lengths(None)
+                .expect("column oid");
+            writer.write_ub2(0); // version
+            writer.write_ub2(0); // server charset id
+            writer.write_u8(self.csfrm);
+            writer.write_ub4(self.max_size);
+            if field_version >= TNS_CCAP_FIELD_VERSION_12_2 {
+                writer.write_ub4(0x1122_3344); // oaccolid
+            }
+            writer.write_u8(1); // nullable
+            writer.write_u8(0); // flags
+            writer
+                .write_bytes_with_two_lengths(Some(self.name.as_bytes()))
+                .expect("column name");
+            writer
+                .write_bytes_with_two_lengths(self.object_schema.map(str::as_bytes))
+                .expect("object schema");
+            writer
+                .write_bytes_with_two_lengths(self.object_type_name.map(str::as_bytes))
+                .expect("object type");
+            writer.write_ub2(1); // column position
+            writer.write_ub4(self.uds_flags);
+            if field_version >= TNS_CCAP_FIELD_VERSION_23_1 {
+                writer
+                    .write_bytes_with_two_lengths(Some(b"DOMSCHEMA"))
+                    .expect("domain schema");
+                writer
+                    .write_bytes_with_two_lengths(Some(b"DOMNAME"))
+                    .expect("domain name");
+            }
+            if field_version >= TNS_CCAP_FIELD_VERSION_23_1_EXT_3 {
+                writer.write_ub4(u32::try_from(self.annotations.len()).expect("annotation count"));
+                if !self.annotations.is_empty() {
+                    writer.write_u8(0); // marker
+                    writer.write_ub4(
+                        u32::try_from(self.annotations.len()).expect("annotation count"),
+                    );
+                    writer.write_u8(0); // marker
+                    for &(key, value) in self.annotations {
+                        writer
+                            .write_bytes_with_two_lengths(Some(key.as_bytes()))
+                            .expect("annotation key");
+                        writer
+                            .write_bytes_with_two_lengths(Some(value.as_bytes()))
+                            .expect("annotation value");
+                        writer.write_ub4(0); // annotation flags
+                    }
+                    writer.write_ub4(0); // annotation block flags
+                }
+            }
+            if field_version >= TNS_CCAP_FIELD_VERSION_23_4 {
+                writer.write_ub4(self.vector_dimensions.unwrap_or(0));
+                writer.write_u8(self.vector_format);
+                writer.write_u8(self.vector_flags);
+            }
+        }
+    }
+
+    fn write_describe_body(
+        writer: &mut TtcWriter,
+        field_version: u8,
+        columns: &[ColumnRecord<'_>],
+    ) {
+        writer.write_ub4(4096); // max row size
+        writer.write_ub4(u32::try_from(columns.len()).expect("column count"));
+        if !columns.is_empty() {
+            writer.write_u8(0); // describe column marker
+        }
+        for column in columns {
+            column.write(writer, field_version);
+        }
+        writer
+            .write_bytes_with_two_lengths(None)
+            .expect("current date");
+        writer.write_ub4(0); // dcbflag
+        writer.write_ub4(0); // dcbmdbz
+        writer.write_ub4(0); // dcbmnpr
+        writer.write_ub4(0); // dcbmxpr
+        writer.write_bytes_with_two_lengths(None).expect("dcbqcky");
+    }
+
+    fn write_io_vector_body(
+        writer: &mut TtcWriter,
+        directions: &[u8],
+        fast_fetch_bytes: &[u8],
+        rowid_bytes: &[u8],
+    ) {
+        writer.write_u8(0); // flags
+        writer.write_ub2(u16::try_from(directions.len()).expect("direction count"));
+        writer.write_ub4(0); // high num-binds chunk
+        writer.write_ub4(1); // iterations this time
+        writer.write_ub2(0); // uac buffer length
+        writer.write_ub2(u16::try_from(fast_fetch_bytes.len()).expect("fast fetch len"));
+        writer.write_raw(fast_fetch_bytes);
+        writer.write_ub2(u16::try_from(rowid_bytes.len()).expect("rowid len"));
+        writer.write_raw(rowid_bytes);
+        for &direction in directions {
+            writer.write_u8(direction);
+        }
+    }
+
+    struct ErrorInfo<'a> {
+        number: u32,
+        message: &'a str,
+        cursor_id: u16,
+        row_count: u64,
+        call_status: u32,
+        warning_flags: u8,
+        rowid: Option<(u32, u16, u32, u16)>,
+    }
+
+    fn write_error_info(writer: &mut TtcWriter, info: ErrorInfo<'_>) {
+        writer.write_ub4(info.call_status);
+        writer.write_ub2(0); // seq
+        writer.write_ub4(0); // current row
+        writer.write_ub2(0); // obsolete short error number
+        writer.write_ub2(0); // array elem error 1
+        writer.write_ub2(0); // array elem error 2
+        writer.write_ub2(info.cursor_id);
+        writer.write_sb4(0); // error position
+        writer.write_raw(&[0u8; 5]);
+        writer.write_u8(info.warning_flags);
+        let (rba, partition_id, block_num, slot_num) = info.rowid.unwrap_or((0, 0, 0, 0));
+        writer.write_ub4(rba);
+        writer.write_ub2(partition_id);
+        writer.write_u8(0);
+        writer.write_ub4(block_num);
+        writer.write_ub2(slot_num);
+        writer.write_ub4(0); // os error
+        writer.write_raw(&[0u8; 2]);
+        writer.write_ub2(0); // padding
+        writer.write_ub4(0); // success iterations
+        writer
+            .write_bytes_with_two_lengths(None)
+            .expect("diagnostic field");
+        writer.write_ub2(0); // batch error count
+        writer.write_ub4(0); // batch offset count
+        writer.write_ub2(0); // batch message count
+        writer.write_ub4(info.number);
+        writer.write_ub8(info.row_count);
+        writer.write_ub4(0); // sql type (field version >= 20.1)
+        writer.write_ub4(0); // server checksum
+        if info.number != 0 {
+            writer
+                .write_bytes_with_length(info.message.as_bytes())
+                .expect("server error message");
+        }
+    }
+
+    fn write_return_parameters(
+        writer: &mut TtcWriter,
+        registration_block: &[u8],
+        row_counts: Option<&[u64]>,
+    ) {
+        writer.write_ub2(0); // num params
+        writer.write_ub2(0); // parameter bytes
+        writer.write_ub2(0); // keyword/value pairs
+        writer.write_ub2(u16::try_from(registration_block.len()).expect("registration len"));
+        writer.write_raw(registration_block);
+        if let Some(row_counts) = row_counts {
+            writer.write_ub4(u32::try_from(row_counts.len()).expect("row count len"));
+            for &count in row_counts {
+                writer.write_ub8(count);
+            }
+        }
+    }
+
+    fn write_prefetched_lob_value(writer: &mut TtcWriter, data: &[u8]) {
+        writer.write_ub4(u32::try_from(data.len()).expect("data len"));
+        writer.write_ub8(u64::try_from(data.len()).expect("data size"));
+        writer.write_ub4(8192);
+        writer
+            .write_bytes_with_length(data)
+            .expect("prefetched data");
+        writer.write_bytes_with_length(b"locator").expect("locator");
+    }
+
+    fn write_physical_urowid_cell(writer: &mut TtcWriter) -> String {
+        let rba: u32 = 0x0102_0304;
+        let partition_id: u16 = 0x0506;
+        let block_num: u32 = 0x0708_090a;
+        let slot_num: u16 = 0x0b0c;
+        let mut encoded = Vec::new();
+        encoded.push(1);
+        encoded.extend_from_slice(&rba.to_be_bytes());
+        encoded.extend_from_slice(&partition_id.to_be_bytes());
+        encoded.extend_from_slice(&block_num.to_be_bytes());
+        encoded.extend_from_slice(&slot_num.to_be_bytes());
+        writer.write_bytes_with_length(&[1]).expect("urowid probe");
+        writer
+            .write_bytes_with_length(&encoded)
+            .expect("physical urowid");
+        encode_physical_rowid(rba, partition_id, block_num, slot_num)
+    }
+
+    #[test]
+    fn response_wrappers_parse_out_binds_returning_status_token_and_error_state() {
+        let binds = [
+            BindValue::InOut {
+                value: Box::new(BindValue::Text("in".to_string())),
+                out_buffer_size: 20,
+            },
+            BindValue::ReturnOutput {
+                ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                csfrm: CS_FORM_IMPLICIT,
+                buffer_size: 20,
+            },
+        ];
+
+        let mut out_payload = TtcWriter::new();
+        out_payload.write_u8(TNS_MSG_TYPE_IO_VECTOR);
+        write_io_vector_body(&mut out_payload, &[16, TNS_BIND_DIR_INPUT], b"F", b"R");
+        out_payload.write_u8(TNS_MSG_TYPE_ROW_DATA);
+        out_payload
+            .write_bytes_with_length(b"OUT")
+            .expect("out bind value");
+        out_payload.write_sb4(0);
+        out_payload.write_u8(TNS_MSG_TYPE_STATUS);
+        out_payload.write_ub4(TNS_EOCS_FLAGS_TXN_IN_PROGRESS);
+        out_payload.write_ub2(0);
+        out_payload.write_u8(TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK);
+        out_payload.write_u8(TNS_SERVER_PIGGYBACK_QUERY_CACHE_INVALIDATION);
+        out_payload.write_u8(TNS_MSG_TYPE_TOKEN);
+        out_payload.write_ub8(0x1122_3344_5566_7788);
+        out_payload.write_u8(TNS_MSG_TYPE_ERROR);
+        write_error_info(
+            &mut out_payload,
+            ErrorInfo {
+                number: 0,
+                message: "",
+                cursor_id: 77,
+                row_count: 3,
+                call_status: 0,
+                warning_flags: 0x20,
+                rowid: Some((1, 2, 3, 4)),
+            },
+        );
+
+        let result = parse_query_response_with_binds_options_and_columns(
+            &out_payload.into_bytes(),
+            caps(TNS_CCAP_FIELD_VERSION_23_4),
+            &binds,
+            ExecuteOptions::default(),
+            &[],
+        )
+        .expect("owned response with OUT bind/status/token/error");
+        assert_eq!(
+            result.out_values,
+            vec![(0, Some(QueryValue::Text("OUT".to_string())))]
+        );
+        assert_eq!(result.txn_in_progress, Some(false));
+        assert_eq!(result.cursor_id, 77);
+        assert_eq!(result.row_count, 3);
+        assert!(result.compilation_error_warning);
+        assert_eq!(result.last_rowid, Some(encode_physical_rowid(1, 2, 3, 4)));
+        assert_eq!(result.token_num, Some(0x1122_3344_5566_7788));
+
+        let mut returning_payload = TtcWriter::new();
+        returning_payload.write_u8(TNS_MSG_TYPE_ROW_DATA);
+        returning_payload.write_ub4(2);
+        returning_payload
+            .write_bytes_with_length(b"A")
+            .expect("returning value 1");
+        returning_payload.write_sb4(0);
+        returning_payload
+            .write_bytes_with_length(b"B")
+            .expect("returning value 2");
+        returning_payload.write_sb4(0);
+        returning_payload.write_u8(TNS_MSG_TYPE_END_OF_RESPONSE);
+
+        let returning = parse_query_response_with_binds_options_columns_and_limits(
+            &returning_payload.into_bytes(),
+            caps(TNS_CCAP_FIELD_VERSION_23_4),
+            &binds,
+            ExecuteOptions::default(),
+            &[],
+            ProtocolLimits::DEFAULT,
+        )
+        .expect("owned response with RETURNING values");
+        assert_eq!(
+            returning.return_values,
+            vec![(
+                1,
+                vec![
+                    Some(QueryValue::Text("A".to_string())),
+                    Some(QueryValue::Text("B".to_string()))
+                ]
+            )]
+        );
+    }
+
+    #[test]
+    fn response_flush_breaks_before_trailing_unknown_message() {
+        let payload = [TNS_MSG_TYPE_FLUSH_OUT_BINDS, 0xff];
+        parse_query_response(&payload, caps(TNS_CCAP_FIELD_VERSION_23_4))
+            .expect("flush should stop response parsing before trailing bytes");
+    }
+
+    #[test]
+    fn no_data_error_marks_more_rows_false_when_columns_are_known() {
+        let mut payload = TtcWriter::new();
+        payload.write_u8(TNS_MSG_TYPE_ERROR);
+        write_error_info(
+            &mut payload,
+            ErrorInfo {
+                number: TNS_ERR_NO_DATA_FOUND,
+                message: "ORA-01403: no data found",
+                cursor_id: 91,
+                row_count: 11,
+                call_status: TNS_EOCS_FLAGS_TXN_IN_PROGRESS,
+                warning_flags: 0,
+                rowid: None,
+            },
+        );
+        let columns = [column("C", ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 30)];
+
+        let result = parse_query_response_with_context(
+            &payload.into_bytes(),
+            caps(TNS_CCAP_FIELD_VERSION_23_4),
+            &columns,
+            None,
+        )
+        .expect("no-data end-of-call should finalize fetch");
+
+        assert!(!result.more_rows);
+        assert_eq!(result.cursor_id, 91);
+        assert_eq!(result.row_count, 11);
+        assert_eq!(result.txn_in_progress, Some(true));
+    }
+
+    #[test]
+    fn io_vector_boundaries_skip_zero_and_one_byte_payloads_and_filter_returning() {
+        let mut zero = TtcWriter::new();
+        write_io_vector_body(&mut zero, &[16, 48, TNS_BIND_DIR_INPUT], &[], &[]);
+        let zero_bytes = zero.into_bytes();
+        let mut reader = TtcReader::new(&zero_bytes);
+        assert_eq!(
+            parse_io_vector(&mut reader, 2).expect("zero skips"),
+            vec![0, 1]
+        );
+        assert_eq!(reader.remaining(), 0);
+
+        let mut one = TtcWriter::new();
+        write_io_vector_body(&mut one, &[TNS_BIND_DIR_INPUT, 16, 48], b"X", b"Y");
+        let one_bytes = one.into_bytes();
+        let mut reader = TtcReader::new(&one_bytes);
+        assert_eq!(
+            parse_io_vector(&mut reader, 2).expect("one-byte skips"),
+            vec![1]
+        );
+        assert_eq!(reader.remaining(), 0);
+    }
+
+    #[test]
+    fn describe_and_column_metadata_decode_zero_columns_annotations_flags_and_vector() {
+        let field_version = TNS_CCAP_FIELD_VERSION_23_4;
+
+        let mut zero_body = TtcWriter::new();
+        write_describe_body(&mut zero_body, field_version, &[]);
+        let zero_bytes = zero_body.into_bytes();
+        let mut zero_reader = TtcReader::new(&zero_bytes);
+        let mut zero_result = QueryResult::default();
+        parse_describe_info(&mut zero_reader, caps(field_version), &mut zero_result)
+            .expect("zero-column describe");
+        assert!(zero_result.columns.is_empty());
+        assert_eq!(zero_reader.remaining(), 0);
+
+        let annotated_vector = ColumnRecord {
+            name: "VEC",
+            ora_type_num: ORA_TYPE_NUM_VECTOR,
+            csfrm: CS_FORM_IMPLICIT,
+            buffer_size: 16,
+            max_size: 32,
+            uds_flags: TNS_UDS_FLAGS_IS_JSON | TNS_UDS_FLAGS_IS_OSON,
+            vector_dimensions: Some(1536),
+            vector_format: 2,
+            vector_flags: 0xa5,
+            object_schema: None,
+            object_type_name: None,
+            annotations: &[("purpose", "mutation")],
+        };
+        let mut one_body = TtcWriter::new();
+        write_describe_body(&mut one_body, field_version, &[annotated_vector]);
+        let one_bytes = one_body.into_bytes();
+        let mut one_reader = TtcReader::new(&one_bytes);
+        let mut one_result = QueryResult::default();
+        parse_describe_info(&mut one_reader, caps(field_version), &mut one_result)
+            .expect("one-column describe");
+        let meta = one_result.columns.first().expect("described column");
+        assert_eq!(meta.name(), "VEC");
+        assert_eq!(meta.buffer_size(), 16);
+        assert_eq!(meta.max_size(), 32);
+        assert!(meta.is_json());
+        assert!(meta.is_oson());
+        assert_eq!(meta.domain_schema(), Some("DOMSCHEMA"));
+        assert_eq!(meta.domain_name(), Some("DOMNAME"));
+        assert_eq!(
+            meta.annotations(),
+            Some(&[("purpose".to_string(), "mutation".to_string())][..])
+        );
+        assert_eq!(meta.vector_dimensions(), Some(1536));
+        assert_eq!(meta.vector_format(), 2);
+        assert_eq!(meta.vector_flags(), 0xa5);
+        assert_eq!(one_reader.remaining(), 0);
+    }
+
+    #[test]
+    fn row_header_returns_embedded_bit_vector() {
+        let mut writer = TtcWriter::new();
+        writer.write_u8(0); // skip
+        writer.write_ub2(1); // requests
+        writer.write_ub4(2); // iteration
+        writer.write_ub4(3); // num iters
+        writer.write_ub2(4); // buffer length
+        writer.write_ub4(1); // bit-vector bytes
+        writer.write_u8(0); // marker
+        writer.write_raw(&[0b1111_1101]);
+        writer
+            .write_bytes_with_two_lengths(Some(b"rid"))
+            .expect("rxhrid");
+        let bytes = writer.into_bytes();
+        let mut reader = TtcReader::new(&bytes);
+
+        assert_eq!(
+            parse_row_header(&mut reader).expect("row header"),
+            Some(vec![0b1111_1101])
+        );
+        assert_eq!(reader.remaining(), 0);
+    }
+
+    #[test]
+    fn owned_column_value_decodes_scalar_and_cold_variants() {
+        let scalar_cases: Vec<(ColumnMetadata, Vec<u8>, Option<QueryValue>)> = vec![
+            (
+                column("D", ORA_TYPE_NUM_BINARY_DOUBLE, CS_FORM_IMPLICIT, 8),
+                encode_binary_double(-2.5).to_vec(),
+                Some(QueryValue::BinaryDouble("-2.5".to_string())),
+            ),
+            (
+                column("F", ORA_TYPE_NUM_BINARY_FLOAT, CS_FORM_IMPLICIT, 4),
+                encode_binary_float(3.25).to_vec(),
+                Some(QueryValue::BinaryDouble("3.25".to_string())),
+            ),
+            (
+                column("B", ORA_TYPE_NUM_BOOLEAN, CS_FORM_IMPLICIT, 1),
+                vec![0, 1],
+                Some(QueryValue::Boolean(true)),
+            ),
+            (
+                column("DS", ORA_TYPE_NUM_INTERVAL_DS, CS_FORM_IMPLICIT, 11),
+                encode_interval_ds(4, 5 * 3600 + 6 * 60 + 7, 890)
+                    .expect("interval ds")
+                    .to_vec(),
+                Some(QueryValue::IntervalDS {
+                    days: 4,
+                    hours: 5,
+                    minutes: 6,
+                    seconds: 7,
+                    fseconds: 890,
+                }),
+            ),
+            (
+                column("YM", ORA_TYPE_NUM_INTERVAL_YM, CS_FORM_IMPLICIT, 5),
+                encode_interval_ym(-3, 2).expect("interval ym").to_vec(),
+                Some(QueryValue::IntervalYM {
+                    years: -3,
+                    months: 2,
+                }),
+            ),
+            (
+                column("TS", ORA_TYPE_NUM_TIMESTAMP, CS_FORM_IMPLICIT, 11),
+                encode_oracle_timestamp(2026, 7, 8, 9, 10, 11, 123_456_789).expect("timestamp"),
+                Some(QueryValue::DateTime {
+                    year: 2026,
+                    month: 7,
+                    day: 8,
+                    hour: 9,
+                    minute: 10,
+                    second: 11,
+                    nanosecond: 123_456_789,
+                }),
+            ),
+        ];
+
+        for (metadata, bytes, expected) in scalar_cases {
+            let mut writer = TtcWriter::new();
+            writer
+                .write_bytes_with_length(&bytes)
+                .expect("framed scalar");
+            let payload = writer.into_bytes();
+            let mut reader = TtcReader::new(&payload);
+            assert_eq!(
+                parse_column_value(&mut reader, &metadata).expect("scalar decode"),
+                expected,
+                "owned scalar decode for {}",
+                metadata.name()
+            );
+            assert_eq!(reader.remaining(), 0);
+        }
+
+        let mut lob_writer = TtcWriter::new();
+        lob_writer.write_ub4(3);
+        lob_writer.write_ub8(3);
+        lob_writer.write_ub4(8192);
+        lob_writer
+            .write_bytes_with_length(b"lob")
+            .expect("lob locator");
+        let lob_bytes = lob_writer.into_bytes();
+        let mut reader = TtcReader::new(&lob_bytes);
+        assert!(matches!(
+            parse_column_value(
+                &mut reader,
+                &column("CLOB", ORA_TYPE_NUM_CLOB, CS_FORM_IMPLICIT, 4000)
+            )
+            .expect("lob decode"),
+            Some(QueryValue::Lob(_))
+        ));
+
+        let vector = Vector::Dense(VectorValues::Int8(vec![-1, 0, 7]));
+        let vector_image = encode_vector(&vector);
+        let mut writer = TtcWriter::new();
+        write_prefetched_lob_value(&mut writer, &vector_image);
+        let bytes = writer.into_bytes();
+        let mut reader = TtcReader::new(&bytes);
+        assert_eq!(
+            parse_column_value(
+                &mut reader,
+                &column("VEC", ORA_TYPE_NUM_VECTOR, CS_FORM_IMPLICIT, 4000)
+            )
+            .expect("vector decode"),
+            Some(QueryValue::Vector(Box::new(vector)))
+        );
+
+        let json = OsonValue::Object(vec![("k".to_string(), OsonValue::String("v".to_string()))]);
+        let json_image = encode_oson(&json, false).expect("encode oson");
+        let mut writer = TtcWriter::new();
+        write_prefetched_lob_value(&mut writer, &json_image);
+        let bytes = writer.into_bytes();
+        let mut reader = TtcReader::new(&bytes);
+        assert_eq!(
+            parse_column_value(
+                &mut reader,
+                &column("JSON", ORA_TYPE_NUM_JSON, CS_FORM_IMPLICIT, 4000)
+            )
+            .expect("json decode"),
+            Some(QueryValue::Json(Box::new(json)))
+        );
+
+        let object_metadata = ColumnMetadata {
+            name: "OBJ".to_string(),
+            ora_type_num: ORA_TYPE_NUM_OBJECT,
+            buffer_size: 4000,
+            object_schema: Some("S".to_string()),
+            object_type_name: Some("T".to_string()),
+            ..ColumnMetadata::default()
+        };
+        let mut writer = TtcWriter::new();
+        writer
+            .write_bytes_with_two_lengths(Some(b"toid"))
+            .expect("toid");
+        writer
+            .write_bytes_with_two_lengths(Some(b"oid"))
+            .expect("oid");
+        writer
+            .write_bytes_with_two_lengths(Some(b"snap"))
+            .expect("snapshot");
+        writer.write_ub2(1);
+        writer.write_ub4(4);
+        writer.write_raw(&[0, 0]);
+        writer
+            .write_bytes_with_length(b"PACK")
+            .expect("object payload");
+        let bytes = writer.into_bytes();
+        let mut reader = TtcReader::new(&bytes);
+        assert!(matches!(
+            parse_column_value(&mut reader, &object_metadata).expect("object decode"),
+            Some(QueryValue::Object(object))
+                if object.schema.as_deref() == Some("S")
+                    && object.type_name.as_deref() == Some("T")
+                    && object.packed_data == b"PACK"
+        ));
+
+        let mut writer = TtcWriter::new();
+        writer.write_u8(0); // cursor flags
+        write_describe_body(&mut writer, TNS_CCAP_FIELD_VERSION_23_4, &[]);
+        writer.write_ub2(44);
+        let bytes = writer.into_bytes();
+        let mut reader = TtcReader::new(&bytes);
+        assert!(matches!(
+            parse_column_value(
+                &mut reader,
+                &column("CUR", ORA_TYPE_NUM_CURSOR, CS_FORM_IMPLICIT, 1)
+            )
+            .expect("cursor decode"),
+            Some(QueryValue::Cursor(cursor)) if cursor.cursor_id == 44
+        ));
+    }
+
+    #[test]
+    fn urowid_requires_full_physical_payload() {
+        let mut truncated = TtcWriter::new();
+        truncated
+            .write_bytes_with_length(&[1])
+            .expect("urowid probe");
+        truncated
+            .write_bytes_with_length(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+            .expect("truncated physical urowid");
+        let truncated_bytes = truncated.into_bytes();
+        let mut reader = TtcReader::new(&truncated_bytes);
+        assert!(parse_urowid_value(&mut reader).is_err());
+
+        let mut ok = TtcWriter::new();
+        let expected = write_physical_urowid_cell(&mut ok);
+        let ok_bytes = ok.into_bytes();
+        let mut reader = TtcReader::new(&ok_bytes);
+        assert_eq!(
+            parse_urowid_value(&mut reader).expect("physical urowid"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn rowid_parser_distinguishes_null_and_physical_rowid() {
+        let null_payload = [0u8];
+        let mut reader = TtcReader::new(&null_payload);
+        assert_eq!(parse_rowid_value(&mut reader).expect("null ROWID"), None);
+
+        let rba: u32 = 0x0102_0304;
+        let partition_id: u16 = 0x0506;
+        let block_num: u32 = 0x0708_090a;
+        let slot_num: u16 = 0x0b0c;
+        let mut physical = TtcWriter::new();
+        physical.write_u8(1);
+        physical.write_ub4(rba);
+        physical.write_ub2(partition_id);
+        physical.write_u8(0);
+        physical.write_ub4(block_num);
+        physical.write_ub2(slot_num);
+        let physical_bytes = physical.into_bytes();
+        let mut reader = TtcReader::new(&physical_bytes);
+
+        assert_eq!(
+            parse_rowid_value(&mut reader).expect("physical ROWID"),
+            Some(encode_physical_rowid(
+                rba,
+                partition_id,
+                block_num,
+                slot_num
+            ))
+        );
+        assert_eq!(reader.remaining(), 0);
+    }
+
+    #[test]
+    fn borrowed_slots_cover_scalar_variants_and_nchar_fallback() {
+        let columns = vec![
+            column("TEXT", ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 20),
+            column("NCHAR", ORA_TYPE_NUM_VARCHAR, CS_FORM_NCHAR, 20),
+            column("RAW", ORA_TYPE_NUM_RAW, CS_FORM_IMPLICIT, 20),
+            column("NUM", ORA_TYPE_NUM_NUMBER, CS_FORM_IMPLICIT, 22),
+            column("BOOL", ORA_TYPE_NUM_BOOLEAN, CS_FORM_IMPLICIT, 1),
+            column("DS", ORA_TYPE_NUM_INTERVAL_DS, CS_FORM_IMPLICIT, 11),
+            column("YM", ORA_TYPE_NUM_INTERVAL_YM, CS_FORM_IMPLICIT, 5),
+            column("TS", ORA_TYPE_NUM_TIMESTAMP, CS_FORM_IMPLICIT, 11),
+        ];
+        let mut writer = TtcWriter::new();
+        writer.write_bytes_with_length(b"hello").expect("text");
+        writer
+            .write_bytes_with_length(&[0, b'H', 0, b'i'])
+            .expect("nchar utf16");
+        writer.write_bytes_with_length(&[0xde, 0xad]).expect("raw");
+        let number = encode_number_text("123.45").expect("number");
+        writer
+            .write_bytes_with_length(&number)
+            .expect("number cell");
+        writer.write_bytes_with_length(&[1]).expect("boolean");
+        writer
+            .write_bytes_with_length(
+                &encode_interval_ds(1, 2 * 3600 + 3 * 60 + 4, 5).expect("interval ds"),
+            )
+            .expect("interval ds cell");
+        writer
+            .write_bytes_with_length(&encode_interval_ym(6, 7).expect("interval ym"))
+            .expect("interval ym cell");
+        writer
+            .write_bytes_with_length(
+                &encode_oracle_timestamp(2026, 7, 8, 9, 10, 11, 0).expect("timestamp"),
+            )
+            .expect("timestamp cell");
+        let buffer = writer.into_bytes();
+        let ptr_range = {
+            let start = buffer.as_ptr() as usize;
+            start..start + buffer.len()
+        };
+        let batch = BorrowedRowBatch::new(buffer, columns, vec![0]);
+
+        batch
+            .for_each_row_ref(|row| {
+                assert!(matches!(row[0], Some(QueryValueRef::Text("hello"))));
+                if let Some(QueryValueRef::Text(text)) = row[0] {
+                    assert!(ptr_range.contains(&(text.as_ptr() as usize)));
+                }
+                assert_eq!(
+                    row[1].as_ref().map(QueryValueRef::to_owned_value),
+                    Some(QueryValue::Text("Hi".to_string()))
+                );
+                assert_eq!(
+                    row[2].as_ref().and_then(|v| v.as_raw()),
+                    Some(&[0xde, 0xad][..])
+                );
+                assert_eq!(
+                    row[3].as_ref().and_then(|v| v.as_number_text()),
+                    Some("123.45")
+                );
+                assert_eq!(
+                    row[4].as_ref().map(QueryValueRef::to_owned_value),
+                    Some(QueryValue::Boolean(true))
+                );
+                assert!(matches!(
+                    row[5].as_ref().map(QueryValueRef::to_owned_value),
+                    Some(QueryValue::IntervalDS {
+                        days: 1,
+                        hours: 2,
+                        minutes: 3,
+                        seconds: 4,
+                        fseconds: 5
+                    })
+                ));
+                assert_eq!(
+                    row[6].as_ref().map(QueryValueRef::to_owned_value),
+                    Some(QueryValue::IntervalYM {
+                        years: 6,
+                        months: 7
+                    })
+                );
+                assert!(matches!(
+                    row[7].as_ref().map(QueryValueRef::to_owned_value),
+                    Some(QueryValue::DateTime {
+                        year: 2026,
+                        month: 7,
+                        day: 8,
+                        hour: 9,
+                        minute: 10,
+                        second: 11,
+                        nanosecond: 0
+                    })
+                ));
+                Ok::<(), ProtocolError>(())
+            })
+            .expect("borrowed scalar slots");
+    }
+
+    #[test]
+    fn borrowed_response_dispatches_messages_and_surfaces_non_default_state() {
+        let field_version = TNS_CCAP_FIELD_VERSION_23_4;
+        let mut payload = TtcWriter::new();
+        payload.write_u8(0);
+        payload.write_u8(TNS_MSG_TYPE_DESCRIBE_INFO);
+        payload
+            .write_bytes_with_length(b"describe")
+            .expect("describe name");
+        write_describe_body(
+            &mut payload,
+            field_version,
+            &[ColumnRecord::scalar(
+                "N",
+                ORA_TYPE_NUM_NUMBER,
+                CS_FORM_IMPLICIT,
+                22,
+            )],
+        );
+        payload.write_u8(TNS_MSG_TYPE_ROW_HEADER);
+        payload.write_u8(0);
+        payload.write_ub2(1);
+        payload.write_ub4(1);
+        payload.write_ub4(1);
+        payload.write_ub2(0);
+        payload.write_ub4(0);
+        payload
+            .write_bytes_with_two_lengths(None)
+            .expect("row header rxhrid");
+        payload.write_u8(TNS_MSG_TYPE_ROW_DATA);
+        let number = encode_number_text("7").expect("number");
+        payload
+            .write_bytes_with_length(&number)
+            .expect("row number");
+        payload.write_u8(TNS_MSG_TYPE_PARAMETER);
+        write_return_parameters(&mut payload, &[], None);
+        payload.write_u8(TNS_MSG_TYPE_STATUS);
+        payload.write_ub4(TNS_EOCS_FLAGS_TXN_IN_PROGRESS);
+        payload.write_ub2(0);
+        payload.write_u8(TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK);
+        payload.write_u8(TNS_SERVER_PIGGYBACK_QUERY_CACHE_INVALIDATION);
+        payload.write_u8(TNS_MSG_TYPE_IMPLICIT_RESULTSET);
+        payload.write_ub4(0);
+        payload.write_u8(TNS_MSG_TYPE_TOKEN);
+        payload.write_ub8(99);
+        payload.write_u8(TNS_MSG_TYPE_ERROR);
+        write_error_info(
+            &mut payload,
+            ErrorInfo {
+                number: TNS_ERR_NO_DATA_FOUND,
+                message: "ORA-01403: no data found",
+                cursor_id: 123,
+                row_count: 1,
+                call_status: 0,
+                warning_flags: 0,
+                rowid: None,
+            },
+        );
+
+        let borrowed =
+            parse_query_response_borrowed(&payload.into_bytes(), caps(field_version), &[], None)
+                .expect("borrowed response");
+        assert!(!borrowed.more_rows);
+        assert_eq!(borrowed.cursor_id, 123);
+        assert_eq!(borrowed.row_count, 1);
+        assert_eq!(borrowed.batch.columns()[0].name(), "N");
+        assert_eq!(borrowed.batch.row_count(), 1);
+        let mut rows = Vec::new();
+        borrowed
+            .batch
+            .for_each_row_ref(|row| {
+                rows.push(
+                    row[0]
+                        .as_ref()
+                        .and_then(|value| value.as_number_text())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| "<missing>".to_string()),
+                );
+                Ok::<(), ProtocolError>(())
+            })
+            .expect("iterate borrowed response");
+        assert_eq!(rows, vec!["7".to_string()]);
+    }
+
+    #[test]
+    fn borrowed_response_uses_bit_vector_duplicates_and_breaks_on_flush() {
+        let columns = vec![
+            column("A", ORA_TYPE_NUM_NUMBER, CS_FORM_IMPLICIT, 22),
+            column("B", ORA_TYPE_NUM_NUMBER, CS_FORM_IMPLICIT, 22),
+        ];
+        let previous_row = vec![
+            Some(QueryValue::number_from_text("10", true)),
+            Some(QueryValue::number_from_text("20", true)),
+        ];
+        let mut payload = TtcWriter::new();
+        payload.write_u8(TNS_MSG_TYPE_BIT_VECTOR);
+        payload.write_ub2(2);
+        payload.write_raw(&[0b1111_1101]); // column 1 is duplicate
+        payload.write_u8(TNS_MSG_TYPE_ROW_DATA);
+        let value = encode_number_text("30").expect("number");
+        payload
+            .write_bytes_with_length(&value)
+            .expect("first column");
+        payload.write_u8(TNS_MSG_TYPE_FLUSH_OUT_BINDS);
+        payload.write_u8(0xff);
+
+        let borrowed = parse_query_response_borrowed(
+            &payload.into_bytes(),
+            caps(TNS_CCAP_FIELD_VERSION_23_4),
+            &columns,
+            Some(&previous_row),
+        )
+        .expect("borrowed bit-vector response");
+        assert_eq!(borrowed.batch.row_count(), 1);
+        borrowed
+            .batch
+            .for_each_row_ref(|row| {
+                assert_eq!(row[0].as_ref().and_then(|v| v.as_number_text()), Some("30"));
+                assert_eq!(
+                    row[1]
+                        .as_ref()
+                        .map(QueryValueRef::to_owned_value)
+                        .and_then(|value| value.as_i64()),
+                    Some(20)
+                );
+                Ok::<(), ProtocolError>(())
+            })
+            .expect("duplicate column resolution");
+    }
+
+    #[test]
+    fn return_parameters_decode_registration_block_and_row_counts() {
+        let mut writer = TtcWriter::new();
+        write_return_parameters(
+            &mut writer,
+            &[
+                0xaa, 0xbb, 0xcc, 0xdd, // lsb
+                0x11, 0x22, 0x33, 0x44, // msb
+            ],
+            Some(&[2, 0, 5]),
+        );
+        let payload = writer.into_bytes();
+        let mut reader = TtcReader::new(&payload);
+
+        let params = parse_query_return_parameters(&mut reader, true).expect("return parameters");
+
+        assert_eq!(params.query_id, Some(0x1122_3344_aabb_ccdd));
+        assert_eq!(params.row_counts, Some(vec![2, 0, 5]));
+        assert_eq!(reader.remaining(), 0);
+    }
+}
+
+#[cfg(test)]
 mod batch_error_continuation_tests {
     use super::*;
 
