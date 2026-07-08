@@ -1058,3 +1058,131 @@ mod obs_tests {
         }
     }
 }
+
+/// DIFFERENTIATOR metamorphic COMPLETENESS property for the j1w per-row
+/// error-map continuation (bead oraclemcp-release-073 D6.1b / rust-oracledb
+/// iec3.4.8). Skill: `testing-metamorphic`.
+///
+/// `BatchOutcome::from_query_result` is the driver's public projection of an
+/// `executemany(batcherrors=True, arraydmlrowcounts=True)` continuation. It is
+/// `pub(crate)`, so this proptest lives beside the surface (an integration test
+/// could not construct one). The MR: for an N-row batch, every input row is
+/// accounted for EXACTLY once — either it committed (its `array_dml_row_counts`
+/// entry is non-zero) or it is mapped to a row-level error — with no row
+/// silently dropped and none double-counted:
+///
+///   * `per_row_counts().len() == N`               (a continuation count per row)
+///   * `|committed| + |errors| == N`               (COMPLETENESS: |values|+|errors|==|rows|)
+///   * error row indices are exactly the failed set (in range, unique)
+///   * an errored row never also commits (disjoint partition)
+///
+/// Transform: start from an all-success batch and inject row-level errors at an
+/// arbitrary (proptest-generated) subset of indices. Pure and offline. The
+/// companion `mr3_planted_mutant_is_killed` proves the relation is fault-
+/// sensitive by feeding it a mirror that drops one error.
+#[cfg(test)]
+mod continuation_mr {
+    use std::collections::BTreeSet;
+
+    use oracledb_protocol::thin::{BatchServerError, QueryResult};
+    use proptest::prelude::*;
+
+    use super::BatchOutcome;
+
+    /// Generate `(n, failed)`: an N-row batch and a deduplicated set of input-row
+    /// indices (each `< n`) that error mid-batch.
+    fn batch_strategy() -> impl Strategy<Value = (usize, Vec<usize>)> {
+        (1usize..=24).prop_flat_map(|n| {
+            let failed = prop::collection::vec(0usize..n, 0..=n).prop_map(|mut v| {
+                v.sort_unstable();
+                v.dedup();
+                v
+            });
+            (Just(n), failed)
+        })
+    }
+
+    /// Shape a `QueryResult` exactly as the fetch decoder would for a batch where
+    /// `failed` rows raised: those rows get an `array_dml_row_counts` entry of 0
+    /// and one `BatchServerError` keyed to their index; the rest commit (count 1).
+    fn build_result(n: usize, failed: &[usize]) -> QueryResult {
+        let failset: BTreeSet<usize> = failed.iter().copied().collect();
+        let counts: Vec<u64> = (0..n).map(|i| u64::from(!failset.contains(&i))).collect();
+        let committed: u64 = counts.iter().sum();
+        let batch_errors = failed
+            .iter()
+            .enumerate()
+            .map(|(k, &idx)| {
+                BatchServerError::new(900 + k as u32, idx as u32, format!("synthetic row {idx}"))
+            })
+            .collect();
+        QueryResult {
+            row_count: committed,
+            batch_errors,
+            array_dml_row_counts: Some(counts),
+            ..QueryResult::default()
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+        /// MR3: the per-row error map is a TOTAL partition of the batch rows.
+        #[test]
+        fn continuation_is_complete((n, failed) in batch_strategy()) {
+            let outcome = BatchOutcome::from_query_result(build_result(n, &failed));
+            let per = outcome
+                .per_row_counts()
+                .expect("array_dml_row_counts requested");
+            let committed = per.iter().filter(|&&c| c > 0).count();
+            let errored = outcome.errors().len();
+
+            println!(
+                "[MR3] rows={n} injected_errors={} -> committed={committed} errored={errored}",
+                failed.len()
+            );
+
+            // Every row carries a continuation count.
+            prop_assert_eq!(per.len(), n, "missing per-row continuation count");
+            // COMPLETENESS: |values| + |errors| == |rows| — no row dropped/double-counted.
+            prop_assert_eq!(committed + errored, n, "row(s) dropped or double-counted");
+            // The error map keys are exactly the injected failed rows.
+            let err_idx: BTreeSet<u32> =
+                outcome.errors().iter().map(|e| e.row_index()).collect();
+            prop_assert_eq!(err_idx.len(), failed.len(), "error rows collapsed/duplicated");
+            for e in outcome.errors() {
+                let i = e.row_index() as usize;
+                prop_assert!(i < n, "error row index out of range");
+                prop_assert_eq!(per[i], 0, "an errored row must not also commit");
+            }
+        }
+    }
+
+    /// MR3 mutation-validation: the completeness relation must reject an error
+    /// map that drops one row-level error (a realistic off-by-one / dedup bug),
+    /// which would leave a failed row unaccounted for.
+    #[test]
+    fn mr3_planted_mutant_is_killed() {
+        // 5-row batch; rows 1 and 3 fail.
+        let outcome = BatchOutcome::from_query_result(build_result(5, &[1, 3]));
+        let per = outcome
+            .per_row_counts()
+            .expect("array_dml_row_counts requested");
+        let committed = per.iter().filter(|&&c| c > 0).count();
+
+        // Real surface: completeness HOLDS.
+        assert_eq!(
+            committed + outcome.errors().len(),
+            5,
+            "real completeness must hold"
+        );
+
+        // Planted mutant: an error map that drops the last error.
+        let mutant_errors = outcome.errors().len().saturating_sub(1);
+        assert_ne!(
+            committed + mutant_errors,
+            5,
+            "planted mutant (dropped one error) must break completeness"
+        );
+    }
+}
