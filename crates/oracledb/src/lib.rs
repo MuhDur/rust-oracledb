@@ -339,6 +339,12 @@ pub(crate) mod shape_cache;
 pub mod soda;
 mod sql_convert;
 pub(crate) mod tls;
+// The `tls` module itself is crate-private, but the wallet-precedence
+// resolution accessor and its outcome types are part of the public API (a
+// server doctor calls them to report which wallet file wins without re-deriving
+// the driver's precedence). Re-exported flat at the crate root — the single
+// public path for each.
+pub use tls::{resolve_wallet, WalletFile, WalletResolution};
 pub mod transport;
 
 /// L2 version cassettes: live capture + offline replay of the per-version
@@ -2401,6 +2407,15 @@ pub struct Connection {
     capabilities: ClientCapabilities,
     ttc_seq_num: u8,
     sdu: usize,
+    /// Negotiated TTC protocol version from the server's ACCEPT
+    /// (`AcceptInfo.protocol_version`). Surfaced via
+    /// [`Connection::protocol_version`].
+    protocol_version: u16,
+    /// Whether authentication used the combined fast-auth bundle: the server
+    /// advertised `TNS_ACCEPT_FLAG_FAST_AUTH` (`AcceptInfo.supports_fast_auth`)
+    /// and the driver took the single-round-trip auth path. Surfaced via
+    /// [`Connection::supports_fast_auth`].
+    supports_fast_auth: bool,
     supports_end_of_response: bool,
     /// Whether the server negotiated out-of-band (urgent-TCP) break support
     /// (`protocol_options & TNS_GSO_CAN_RECV_ATTENTION`, reference
@@ -3107,6 +3122,8 @@ impl Connection {
                 capabilities,
                 ttc_seq_num,
                 sdu,
+                protocol_version: accept_info.protocol_version,
+                supports_fast_auth: accept_info.supports_fast_auth,
                 supports_end_of_response: accept_info.supports_end_of_response,
                 supports_oob: accept_info.supports_oob,
                 cursor_columns: BTreeMap::new(),
@@ -3184,6 +3201,23 @@ impl Connection {
     /// the prerequisite for pipelining (impl/thin/capabilities.pyx:126-130).
     pub fn supports_pipelining(&self) -> bool {
         self.supports_end_of_response
+    }
+
+    /// The negotiated TTC protocol version from the server's ACCEPT packet
+    /// (`AcceptInfo.protocol_version`, reference connect.pyx). This is the
+    /// TNS_VERSION_* level the client and server agreed on (e.g. 319 for a
+    /// 19c+/23ai-era server that supports END_OF_RESPONSE framing).
+    pub fn protocol_version(&self) -> u16 {
+        self.protocol_version
+    }
+
+    /// Whether this session authenticated over the combined fast-auth bundle:
+    /// the server advertised `TNS_ACCEPT_FLAG_FAST_AUTH` at accept time and the
+    /// driver used the single-round-trip fast-auth path (23ai-era servers). A
+    /// `false` value means the classic protocol-negotiation + data-types
+    /// handshake was used instead.
+    pub fn supports_fast_auth(&self) -> bool {
+        self.supports_fast_auth
     }
 
     pub fn cancel_handle(&self) -> Result<CancelHandle> {
@@ -11189,6 +11223,8 @@ mod tests {
             protocol_limits: ProtocolLimits::DEFAULT,
             ttc_seq_num: 0,
             sdu: 8192,
+            protocol_version: 0,
+            supports_fast_auth: false,
             supports_end_of_response: true,
             supports_oob: false,
             cursor_columns: BTreeMap::new(),
@@ -11925,6 +11961,40 @@ mod tests {
         drop(conn);
         server.join().expect("server thread joins");
         Ok(())
+    }
+
+    #[test]
+    fn protocol_version_and_fast_auth_accessors_report_negotiated_values() {
+        // K2 ServerFeatures accessors: the two getters read the fields the
+        // ACCEPT negotiation populates. Build a loopback connection, set the
+        // two accept-derived fields to distinct non-default values, and assert
+        // each getter returns its own field (distinct types u16/bool guarantee
+        // they cannot be transposed).
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (_socket, _) = listener.accept().expect("accept test client");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let mut conn = runtime.block_on(async {
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (read, write) = transport::plain_split(stream);
+            loopback_connection(read, write)
+        });
+
+        // Defaults from the loopback constructor.
+        assert_eq!(conn.protocol_version(), 0);
+        assert!(!conn.supports_fast_auth());
+
+        // Simulate a negotiated ACCEPT: TNS version 319 over the fast-auth path.
+        conn.protocol_version = 319;
+        conn.supports_fast_auth = true;
+        assert_eq!(conn.protocol_version(), 319);
+        assert!(conn.supports_fast_auth());
+
+        drop(conn);
+        server.join().expect("server thread joins");
     }
 
     // ---- A8 (bead oraclemcp-release-073-iec3.1.11): native single-round-trip

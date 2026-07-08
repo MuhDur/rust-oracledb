@@ -139,6 +139,112 @@ impl WalletContents {
     pub fn has_client_identity(&self) -> bool {
         !self.client_cert_chain.is_empty() && self.client_private_key.is_some()
     }
+
+    /// Parse the X.509 validity window ([`CertMetadata`]) of every certificate
+    /// this wallet holds — the trust anchors ([`Self::ca_certificates`]) first,
+    /// then the client identity chain ([`Self::client_cert_chain`]), in that
+    /// order.
+    ///
+    /// Purely offline: it inspects the DER bytes already parsed into this
+    /// struct, so no connection or network I/O is involved. A non-certificate
+    /// or otherwise unparseable DER entry is silently skipped (it never fails
+    /// the whole call), so one odd entry does not hide the metadata of the
+    /// rest. This lets a doctor warn on a near-expiry trust anchor or client
+    /// certificate.
+    #[must_use]
+    pub fn certificate_metadata(&self) -> Vec<CertMetadata> {
+        self.ca_certificates
+            .iter()
+            .chain(self.client_cert_chain.iter())
+            .filter_map(|der| CertMetadata::from_der(der))
+            .collect()
+    }
+}
+
+/// The X.509 validity window of a wallet certificate, as Unix-epoch seconds.
+///
+/// Both fields are seconds since the Unix epoch (1970-01-01T00:00:00Z, UTC) —
+/// the form the certificate's `notBefore` / `notAfter` decode to. Plain seconds
+/// (rather than a richer date type) keeps this dependency-free and trivially
+/// comparable: a doctor compares [`Self::not_after`] against the current time
+/// to warn on an expired or soon-to-expire certificate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CertMetadata {
+    /// `notBefore`: Unix-epoch seconds at/after which the certificate is valid.
+    pub not_before: i64,
+    /// `notAfter`: Unix-epoch seconds after which the certificate is expired.
+    pub not_after: i64,
+}
+
+impl CertMetadata {
+    /// Parse the validity window out of a single DER-encoded X.509
+    /// certificate, or `None` when `der` is not a certificate we can read
+    /// (wrong ASN.1 shape, truncated, an out-of-range time, etc.). The parse is
+    /// deliberately narrow — it walks the `Certificate` → `TBSCertificate`
+    /// SEQUENCE only far enough to reach the `validity` field — so it never
+    /// pulls in a full X.509 stack and never fails on an unrelated DER blob.
+    #[must_use]
+    pub fn from_der(der: &[u8]) -> Option<Self> {
+        use der::asn1::{GeneralizedTime, UtcTime};
+        use der::{Decode, Header, Reader, SliceReader, Tag};
+
+        /// Read the body slice of a SEQUENCE, advancing `reader` past it.
+        fn seq_body<'a>(reader: &mut SliceReader<'a>) -> Option<&'a [u8]> {
+            let header = Header::decode(reader).ok()?;
+            if header.tag != Tag::Sequence {
+                return None;
+            }
+            reader.read_slice(header.length).ok()
+        }
+
+        /// Consume (skip) one TLV element, whatever its tag.
+        fn skip_tlv(reader: &mut SliceReader<'_>) -> Option<()> {
+            let header = Header::decode(reader).ok()?;
+            reader.read_slice(header.length).ok()?;
+            Some(())
+        }
+
+        /// Decode a `Time` CHOICE (UTCTime or GeneralizedTime) to Unix seconds.
+        fn read_time(reader: &mut SliceReader<'_>) -> Option<i64> {
+            let unix = match reader.peek_tag().ok()? {
+                Tag::UtcTime => UtcTime::decode(reader).ok()?.to_unix_duration(),
+                Tag::GeneralizedTime => GeneralizedTime::decode(reader).ok()?.to_unix_duration(),
+                _ => return None,
+            };
+            i64::try_from(unix.as_secs()).ok()
+        }
+
+        // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, sig }
+        let mut root = SliceReader::new(der).ok()?;
+        let cert_body = seq_body(&mut root)?;
+        let mut cert = SliceReader::new(cert_body).ok()?;
+
+        // TBSCertificate ::= SEQUENCE {
+        //   version [0] EXPLICIT DEFAULT v1, serialNumber, signature, issuer,
+        //   validity, subject, ... }
+        let tbs_body = seq_body(&mut cert)?;
+        let mut tbs = SliceReader::new(tbs_body).ok()?;
+
+        // The optional [0] EXPLICIT version tag is context-specific; when
+        // present, skip it. Then skip serialNumber, signature, and issuer to
+        // land on validity.
+        if tbs.peek_tag().ok()?.is_context_specific() {
+            skip_tlv(&mut tbs)?; // version [0]
+        }
+        skip_tlv(&mut tbs)?; // serialNumber INTEGER
+        skip_tlv(&mut tbs)?; // signature AlgorithmIdentifier SEQUENCE
+        skip_tlv(&mut tbs)?; // issuer Name SEQUENCE
+
+        // Validity ::= SEQUENCE { notBefore Time, notAfter Time }
+        let validity_body = seq_body(&mut tbs)?;
+        let mut validity = SliceReader::new(validity_body).ok()?;
+        let not_before = read_time(&mut validity)?;
+        let not_after = read_time(&mut validity)?;
+        Some(CertMetadata {
+            not_before,
+            not_after,
+        })
+    }
 }
 
 /// Resolve the wallet directory the way python-oracledb does.
@@ -464,5 +570,66 @@ mod tests {
         };
         assert!(!format!("{err}").contains(sensitive_path));
         assert!(!format!("{err:?}").contains(sensitive_path));
+    }
+
+    /// A synthetic self-signed X.509 certificate (DER) minted only for this
+    /// test with a *fixed* validity window so the parsed epochs are exact and
+    /// deterministic:
+    ///   subject/issuer CN=oracle-test.invalid (fictional; never a real host)
+    ///   notBefore = 2020-01-02T03:04:05Z (Unix 1_577_934_245)
+    ///   notAfter  = 2030-01-02T03:04:05Z (Unix 1_893_553_445)
+    /// (`openssl req -x509 -not_before 20200102030405Z -not_after
+    /// 20300102030405Z`). Both dates fall in 1950..2050 so they encode as
+    /// ASN.1 UTCTime.
+    const SYNTHETIC_CERT_DER_HEX: &str = "308203773082025fa00302010202142a2157bcbcc8fd4e52f45c36edb8b5e8ba8309c7300d06092a864886f70d01010b0500304b311c301a06035504030c136f7261636c652d746573742e696e76616c6964311e301c060355040a0c154f7261636c652053796e7468657469632054657374310b3009060355040613025553301e170d3230303130323033303430355a170d3330303130323033303430355a304b311c301a06035504030c136f7261636c652d746573742e696e76616c6964311e301c060355040a0c154f7261636c652053796e7468657469632054657374310b300906035504061302555330820122300d06092a864886f70d01010105000382010f003082010a0282010100a76a70aa8dc41c8254dca98dd01d683b253cf5cc189b019fa26f56f35c5c1ab57f5823b669d5f67cf15195d1d98e1da710ee06bde99133095c6fed0936a69d07d9d79c88d9d2741a0f680708e5a857c3df8f007ae963e5354af008211dbf6e1240e7ebf48a83ba7ead7c708e5775ecf2904caeadfc4464fdfa32a2d5040f6f63126762034ff65e816f63d59cfb0cb6a8a10da6f7fd49780cd5066eda2abc356970cab783743a8a556cc7c780fff5c73cee534a2eeddcfb54527ff3db40ffa202c5ec2e85bc6b9d97c54ab87acb3cfa895bcbc76b3935b080d8e6f98603c4c446e5c56ab0f4b33577affd36e12919d8fe520e5900b7919477bf3e81f493f516b30203010001a3533051301d0603551d0e041604147bc6964ed97e4e23f79f5f58ccdca185fb223893301f0603551d230418301680147bc6964ed97e4e23f79f5f58ccdca185fb223893300f0603551d130101ff040530030101ff300d06092a864886f70d01010b05000382010100904c05f871771ba1e15d9b18e92b7ed40d872b5eb84a7f795c1a908436d9a9a22d3a65f54f75dc8619820fbdb19738b9052849ef0b21b0b5ee0c455bb5eb019495a8abc517bf180f09cc8a937c1d7109d42a73f2ad9d716693676fee0a3b1d50d8908cfea7c9bb1d94a12408d7e967b6fb99705edfeda6de9f73dec4047d913e4173a2bfb4a196f571584d9b9fd84af455eaf228dcbcb1d2cf1a3fa9928b61a19f66400024ea92f9b9f70a2af994f831c017fca3563698a228367712112673175d505725318017ed3e3e5736465b174bf5669d7a8bae6fd595c4a03edb44b30465b32d7fd2d0d91f13fa40fd5c6ee0a79aec57472beb7be93cf0de05d0f01ad1";
+
+    #[test]
+    fn cert_metadata_parses_known_validity_dates() {
+        let der = hex::decode(SYNTHETIC_CERT_DER_HEX).expect("decode synthetic cert hex");
+        let meta = CertMetadata::from_der(&der).expect("synthetic cert must parse");
+        assert_eq!(
+            meta.not_before, 1_577_934_245,
+            "notBefore 2020-01-02T03:04:05Z"
+        );
+        assert_eq!(
+            meta.not_after, 1_893_553_445,
+            "notAfter 2030-01-02T03:04:05Z"
+        );
+        assert!(meta.not_before < meta.not_after);
+    }
+
+    #[test]
+    fn cert_metadata_skips_non_certificate_der() {
+        // Random bytes and a bare (non-cert) SEQUENCE are not certificates: the
+        // parser returns None instead of erroring.
+        assert!(CertMetadata::from_der(b"").is_none());
+        assert!(CertMetadata::from_der(&[0xDE, 0xAD, 0xBE, 0xEF]).is_none());
+        // A well-formed but empty SEQUENCE (0x30 0x00) — no TBSCertificate.
+        assert!(CertMetadata::from_der(&[0x30, 0x00]).is_none());
+    }
+
+    #[test]
+    fn certificate_metadata_collects_and_skips_cleanly() {
+        let der = hex::decode(SYNTHETIC_CERT_DER_HEX).expect("decode synthetic cert hex");
+        // ca_certificates holds one real cert plus a junk entry; client chain
+        // holds the same real cert. The junk entry is skipped, the two real
+        // certs are reported in order (CA first, then client chain).
+        let wallet = WalletContents {
+            ca_certificates: vec![der.clone(), vec![0x01, 0x02, 0x03]],
+            client_cert_chain: vec![der.clone()],
+            client_private_key: None,
+        };
+        let all = wallet.certificate_metadata();
+        assert_eq!(
+            all.len(),
+            2,
+            "one junk CA entry is skipped, two certs remain"
+        );
+        for meta in &all {
+            assert_eq!(meta.not_before, 1_577_934_245);
+            assert_eq!(meta.not_after, 1_893_553_445);
+        }
+        // A wallet with no certificates yields an empty vec (never panics).
+        assert!(WalletContents::default().certificate_metadata().is_empty());
     }
 }

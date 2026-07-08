@@ -374,6 +374,101 @@ pub(crate) fn resolve_tls_params(
 /// they are surfaced as-is (a broken primary wallet should not be silently
 /// masked by an unrelated auto-login wallet).
 fn load_wallet(dir: &std::path::Path, password: Option<&str>) -> Result<WalletContents, Error> {
+    resolve_wallet_inner(dir, password).map(|(_, contents)| contents)
+}
+
+/// Which wallet file in a wallet directory supplied the resolved TLS identity.
+///
+/// The precedence order the driver applies (mirroring python-oracledb) is
+/// `ewallet.pem` → `ewallet.p12` → `cwallet.sso`; see [`load_wallet`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WalletFile {
+    /// `ewallet.pem` (PEM trust anchors + optional client identity).
+    Pem,
+    /// `ewallet.p12` (password-bearing PKCS#12 wallet).
+    P12,
+    /// `cwallet.sso` (SSO auto-login wallet).
+    Sso,
+}
+
+impl WalletFile {
+    /// The on-disk file name of this wallet file (`ewallet.pem`,
+    /// `ewallet.p12`, or `cwallet.sso`).
+    #[must_use]
+    pub fn file_name(self) -> &'static str {
+        use oracledb_protocol::tls::wallet::{
+            P12_WALLET_FILE_NAME, PEM_WALLET_FILE_NAME, SSO_WALLET_FILE_NAME,
+        };
+        match self {
+            WalletFile::Pem => PEM_WALLET_FILE_NAME,
+            WalletFile::P12 => P12_WALLET_FILE_NAME,
+            WalletFile::Sso => SSO_WALLET_FILE_NAME,
+        }
+    }
+}
+
+/// The outcome of wallet-file precedence resolution in a wallet directory.
+///
+/// [`resolve_wallet`] returns this so a caller (e.g. a server doctor) can report
+/// exactly which wallet file won — and whether resolution fell through the
+/// precedence chain to the auto-login wallet — instead of re-deriving the
+/// driver's precedence by hand and risking drift. It is the *same* decision
+/// [`load_wallet`] makes internally (both go through the one resolver), just
+/// without the parsed key material.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WalletResolution {
+    /// The wallet file that supplied the resolved identity.
+    pub chosen: WalletFile,
+    /// The primary wallet (`ewallet.pem` or `ewallet.p12`) the driver attempted
+    /// before any fallthrough, or `None` when no primary was present and the
+    /// auto-login `cwallet.sso` was chosen directly.
+    pub attempted_primary: Option<WalletFile>,
+    /// `true` when the primary wallet was present but unusable and resolution
+    /// fell through to the auto-login `cwallet.sso`. Implies `chosen == Sso`
+    /// and `attempted_primary.is_some()`.
+    pub fell_through: bool,
+    /// Whether the attempted primary's failure was *fallthrough-eligible* — an
+    /// unusable-but-present classification (unsupported cipher, or a wrong /
+    /// missing wallet password): `WalletError::{KeyDecrypt, Pkcs12,
+    /// PasswordRequired, UnsupportedFormat}`. An I/O or malformed-container
+    /// error is never eligible. `false` when there was no primary, or the
+    /// primary loaded cleanly.
+    pub fallthrough_eligible: bool,
+}
+
+/// Resolve which wallet file in `dir` wins the precedence chain and report the
+/// [`WalletResolution`] outcome, without exposing the parsed key material.
+///
+/// This is the public, drift-free accessor for the precedence [`load_wallet`]
+/// applies internally. Both go through the same resolver, so the reported
+/// decision cannot drift from the one the connection actually uses. Resolution
+/// must genuinely read and parse the wallet files (that is the only way to know
+/// whether a primary is usable and whether a fallthrough occurred); the parsed
+/// [`WalletContents`] is then discarded and only the decision is returned.
+/// Offline — no connection or network I/O is involved.
+///
+/// # Errors
+/// Returns the same typed [`Error::Wallet`] `load_wallet` would surface when no
+/// usable wallet is found. When the primary is present but unusable and there is
+/// no auto-login `cwallet.sso` to fall through to, the primary's original typed
+/// error is preserved verbatim (it never mentions the fallthrough).
+pub fn resolve_wallet(
+    dir: &std::path::Path,
+    password: Option<&str>,
+) -> Result<WalletResolution, Error> {
+    resolve_wallet_inner(dir, password).map(|(resolution, _)| resolution)
+}
+
+/// The single wallet-precedence resolver. Returns both the [`WalletResolution`]
+/// decision and the parsed [`WalletContents`]; [`load_wallet`] keeps the
+/// contents, [`resolve_wallet`] keeps the decision. Precedence: `ewallet.pem` →
+/// password-bearing `ewallet.p12` → auto-login `cwallet.sso`, with a
+/// present-but-unusable primary falling through to `cwallet.sso` only for the
+/// fallthrough-eligible error classes.
+fn resolve_wallet_inner(
+    dir: &std::path::Path,
+    password: Option<&str>,
+) -> Result<(WalletResolution, WalletContents), Error> {
     use oracledb_protocol::tls::wallet::{
         p12_wallet_path, pem_wallet_path, read_ewallet_p12, read_ewallet_pem, sso_wallet_path,
         WalletError,
@@ -409,20 +504,29 @@ fn load_wallet(dir: &std::path::Path, password: Option<&str>) -> Result<WalletCo
 
     // The primary wallet, in precedence order (pem, then password-bearing p12).
     let have_p12 = p12_wallet_path(dir).exists();
-    let primary: Option<(&'static str, Result<WalletContents, WalletError>)> =
+    let primary: Option<(WalletFile, Result<WalletContents, WalletError>)> =
         if pem_wallet_path(dir).exists() {
-            Some(("ewallet.pem", read_ewallet_pem(dir, password)))
+            Some((WalletFile::Pem, read_ewallet_pem(dir, password)))
         } else if have_p12 && password.is_some() {
-            Some(("ewallet.p12", read_ewallet_p12(dir, password)))
+            Some((WalletFile::P12, read_ewallet_p12(dir, password)))
         } else {
             None
         };
 
     match primary {
-        Some((_, Ok(contents))) => Ok(contents),
-        Some((name, Err(primary_err))) => {
+        Some((file, Ok(contents))) => Ok((
+            WalletResolution {
+                chosen: file,
+                attempted_primary: Some(file),
+                fell_through: false,
+                fallthrough_eligible: false,
+            },
+            contents,
+        )),
+        Some((file, Err(primary_err))) => {
             if falls_through_to_autologin(&primary_err) {
                 if let Ok(Some(sso)) = read_sso() {
+                    let name = file.file_name();
                     obs_warn!(
                         skipped_wallet = name,
                         "wallet {name} could not be used ({primary_err}); \
@@ -431,7 +535,15 @@ fn load_wallet(dir: &std::path::Path, password: Option<&str>) -> Result<WalletCo
                     // `name` is referenced only by obs_warn!, which is a no-op
                     // in the default (tracing-off) build.
                     let _ = name;
-                    return Ok(sso);
+                    return Ok((
+                        WalletResolution {
+                            chosen: WalletFile::Sso,
+                            attempted_primary: Some(file),
+                            fell_through: true,
+                            fallthrough_eligible: true,
+                        },
+                        sso,
+                    ));
                 }
             }
             // No usable auto-login wallet: surface the original typed error
@@ -442,12 +554,32 @@ fn load_wallet(dir: &std::path::Path, password: Option<&str>) -> Result<WalletCo
             // No pem and no password-bearing p12. Prefer an auto-login wallet;
             // otherwise fall back to a typed error the operator can act on.
             if let Some(sso) = read_sso()? {
-                return Ok(sso);
+                return Ok((
+                    WalletResolution {
+                        chosen: WalletFile::Sso,
+                        attempted_primary: None,
+                        fell_through: false,
+                        fallthrough_eligible: false,
+                    },
+                    sso,
+                ));
             }
             if have_p12 {
                 // p12 present but no password and no auto-login wallet: surface
                 // the typed supply-wallet_password remediation.
-                return read_ewallet_p12(dir, password).map_err(Error::from);
+                return read_ewallet_p12(dir, password)
+                    .map(|contents| {
+                        (
+                            WalletResolution {
+                                chosen: WalletFile::P12,
+                                attempted_primary: Some(WalletFile::P12),
+                                fell_through: false,
+                                fallthrough_eligible: false,
+                            },
+                            contents,
+                        )
+                    })
+                    .map_err(Error::from);
             }
             Err(
                 WalletError::FileMissing("ewallet.pem, ewallet.p12, or cwallet.sso".to_string())
@@ -758,5 +890,83 @@ mod tests {
                 "preserved error must not mention the fallthrough, got {rendered:?}"
             );
         }
+    }
+
+    #[test]
+    fn resolve_wallet_reports_pem_first_no_fallthrough() {
+        // With ewallet.pem present it wins the precedence outright.
+        let dir = temp_wallet_dir(
+            "resolve-pem-first",
+            &["ewallet.pem", "ewallet_orapki.p12", "cwallet_orapki.sso"],
+        );
+        let res = resolve_wallet(&dir, None).expect("pem must resolve");
+        assert_eq!(res.chosen, WalletFile::Pem);
+        assert_eq!(res.attempted_primary, Some(WalletFile::Pem));
+        assert!(!res.fell_through);
+        assert!(!res.fallthrough_eligible);
+        assert_eq!(res.chosen.file_name(), "ewallet.pem");
+    }
+
+    #[test]
+    fn resolve_wallet_adb_dir_reports_p12_with_password_sso_without() {
+        // ADB-style dir (p12 + sso, no pem): password -> p12, none -> sso.
+        let dir = temp_wallet_dir("resolve-adb", &["ewallet_orapki.p12", "cwallet_orapki.sso"]);
+        let with_pw =
+            resolve_wallet(&dir, Some("WalletPass123")).expect("p12 resolves with password");
+        assert_eq!(with_pw.chosen, WalletFile::P12);
+        assert_eq!(with_pw.attempted_primary, Some(WalletFile::P12));
+        assert!(!with_pw.fell_through);
+        assert!(!with_pw.fallthrough_eligible);
+
+        let without_pw = resolve_wallet(&dir, None).expect("sso resolves without password");
+        assert_eq!(without_pw.chosen, WalletFile::Sso);
+        assert_eq!(without_pw.attempted_primary, None);
+        assert!(!without_pw.fell_through);
+        assert!(!without_pw.fallthrough_eligible);
+        assert_eq!(without_pw.chosen.file_name(), "cwallet.sso");
+    }
+
+    #[test]
+    fn resolve_wallet_unusable_p12_reports_fallthrough_to_sso() {
+        // A wrong p12 password with a valid cwallet.sso present -> the outcome
+        // records the fallthrough: chosen == Sso, primary attempted was P12,
+        // and the failure was fallthrough-eligible.
+        let dir = temp_wallet_dir(
+            "resolve-fallthrough",
+            &["ewallet_orapki.p12", "cwallet_orapki.sso"],
+        );
+        let res = resolve_wallet(&dir, Some("not-the-password!"))
+            .expect("wrong p12 password falls through to cwallet.sso");
+        assert_eq!(res.chosen, WalletFile::Sso);
+        assert_eq!(res.attempted_primary, Some(WalletFile::P12));
+        assert!(res.fell_through);
+        assert!(res.fallthrough_eligible);
+    }
+
+    #[test]
+    fn resolve_wallet_does_not_drift_from_load_wallet() {
+        // The public accessor and the private loader go through the one
+        // resolver: when resolve_wallet says a wallet file won, load_wallet
+        // yields the identity from that same resolution.
+        let dir = temp_wallet_dir(
+            "resolve-parity",
+            &["ewallet_orapki.p12", "cwallet_orapki.sso"],
+        );
+        let res = resolve_wallet(&dir, Some("WalletPass123")).expect("resolve with password");
+        assert_eq!(res.chosen, WalletFile::P12);
+        let loaded = load_wallet(&dir, Some("WalletPass123")).expect("load with password");
+        assert!(loaded.has_client_identity());
+    }
+
+    #[test]
+    fn resolve_wallet_empty_dir_is_typed_wallet_error() {
+        // No wallet file at all: the same typed Wallet error load_wallet
+        // surfaces (never a panic, never a spurious success).
+        let dir = temp_wallet_dir("resolve-empty", &[]);
+        let err = resolve_wallet(&dir, None).expect_err("empty wallet dir must error");
+        assert!(
+            matches!(err, Error::Wallet(_)),
+            "expected wallet error, got {err:?}"
+        );
     }
 }
