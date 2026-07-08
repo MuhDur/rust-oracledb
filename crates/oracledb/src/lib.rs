@@ -2498,6 +2498,18 @@ pub struct Connection {
     /// trip (reference protocol.pyx `_process_call_status` /
     /// `_txn_in_progress`).
     txn_in_progress: bool,
+    /// Secret-free support-capture guard (bead K6). Armed only when
+    /// `ORACLEDB_CAPTURE` was set at connect time and the `cassette` feature is
+    /// compiled in; on drop/close it writes a scrubbed, secret-free
+    /// `.tns-cassette` of the whole session to that path (fail-closed: a
+    /// surviving secret refuses the write and leaves no file). `None` otherwise,
+    /// in which case the transport path is byte-identical to a non-capturing
+    /// session.
+    ///
+    /// Held only for its `Drop` side effect (persist-on-session-end), never read.
+    #[cfg(feature = "cassette")]
+    #[allow(dead_code)]
+    capture_guard: Option<transport::CaptureGuard>,
 }
 
 /// Mirrors the reference `_SessionlessData` (impl/thin/connection.pyx): the
@@ -2718,6 +2730,20 @@ impl Connection {
                 tls::decide_sni(tls_params.use_sni, &descriptor.service_name, server_type)?;
             }
             let connector = DriverConnector::default();
+            // Secret-free support capture (bead K6): when `ORACLEDB_CAPTURE` is
+            // set, a recorder is created here and installed around each dial's
+            // transport split so the WHOLE session (connect + auth + queries) is
+            // teed into it. The recorder handle rides on the returned
+            // `Connection`; on drop/close the auth phase is scrubbed and a
+            // fail-closed refuse gate persists the cassette to the path (or
+            // refuses if any secret survives). Off / feature-absent = no
+            // behaviour change.
+            #[cfg(feature = "cassette")]
+            let capture_path = transport::capture_path_from_env();
+            #[cfg(feature = "cassette")]
+            let capture_recorder = capture_path
+                .as_ref()
+                .map(|_| transport::CassetteRecorder::new());
             // Dials one listener endpoint: TCP connect, then — for a TCPS
             // original — the TLS handshake on the whole socket before
             // splitting and before any TNS bytes are sent (implicit TLS,
@@ -2727,6 +2753,8 @@ impl Connection {
                 let descriptor = &descriptor;
                 let connector = &connector;
                 let tls_params = tls_params.as_ref();
+                #[cfg(feature = "cassette")]
+                let capture_recorder = capture_recorder.as_ref();
                 async move {
                     trace_connect_step("tcp connect");
                     let stream = TcpStream::connect_timeout((host, port), connect_timeout).await?;
@@ -2745,8 +2773,17 @@ impl Connection {
                         let tls_stream =
                             tls::tls_handshake(descriptor, server_type, tls_params, stream).await?;
                         trace_connect_step("tls established");
+                        // Install the capture recorder around the SYNCHRONOUS
+                        // split only (no await while held) so the thread-local
+                        // is observed on the thread performing the split.
+                        #[cfg(feature = "cassette")]
+                        let _capture =
+                            capture_recorder.map(|r| transport::install_recorder_scope(r.clone()));
                         connector.tls_split(tls_stream)
                     } else {
+                        #[cfg(feature = "cassette")]
+                        let _capture =
+                            capture_recorder.map(|r| transport::install_recorder_scope(r.clone()));
                         connector.plain_split(stream)
                     };
                     Ok::<_, Error>(halves)
@@ -3110,6 +3147,14 @@ impl Connection {
                     )
                 });
 
+            // Arm the support-capture guard from the recorder installed at dial
+            // time (both `Some` iff `ORACLEDB_CAPTURE` was set). On drop/close it
+            // scrubs + gate-checks + persists the cassette.
+            #[cfg(feature = "cassette")]
+            let capture_guard = match (capture_recorder, capture_path) {
+                (Some(recorder), Some(path)) => Some(transport::CaptureGuard::new(recorder, path)),
+                _ => None,
+            };
             Ok(Self {
                 descriptor,
                 identity,
@@ -3144,6 +3189,8 @@ impl Connection {
                 notification_header_consumed: false,
                 transaction_context: None,
                 txn_in_progress: false,
+                #[cfg(feature = "cassette")]
+                capture_guard,
             })
         })
         .await;
@@ -11245,6 +11292,8 @@ mod tests {
             notification_header_consumed: false,
             transaction_context: None,
             txn_in_progress: false,
+            #[cfg(feature = "cassette")]
+            capture_guard: None,
         }
     }
 
@@ -14694,6 +14743,126 @@ mod tests {
             assert_eq!(fetch_response, FETCH_RESPONSE);
             Ok::<_, Error>(())
         })?;
+        Ok(())
+    }
+
+    /// K6 DoD: a captured query-FAILURE session is scrubbed of auth secrets,
+    /// the artifact passes the secret-scan (C4), and offline replay of the
+    /// artifact reproduces the failure with no database.
+    #[cfg(feature = "cassette")]
+    #[test]
+    fn support_capture_scrubbed_cassette_replays_query_failure() -> Result<()> {
+        use oracledb_protocol::net::cassette::{self, Direction};
+
+        const QUERY_BODY: &[u8] = b"SELECT * FROM missing_table";
+        // The failure that offline replay must reproduce (secret-free ORA text).
+        const ERROR_RESPONSE: &[u8] = b"ORA-00942: table or view does not exist";
+
+        let connect_packet = encode_packet(
+            TNS_PACKET_TYPE_CONNECT,
+            0,
+            None,
+            b"K6-CONNECT",
+            PacketLengthWidth::Legacy16,
+        )?;
+        let accept_packet = encode_packet(
+            TNS_PACKET_TYPE_ACCEPT,
+            0,
+            None,
+            b"K6-ACCEPT",
+            PacketLengthWidth::Legacy16,
+        )?;
+        // Auth-phase frames carrying secret material (password verifier +
+        // session key) — exactly what a naive capture would leak to disk.
+        let mut auth_body = b"AUTH_PASSWORD=hunter2 AUTH_SESSKEY=".to_vec();
+        auth_body.extend_from_slice(&[0x5A_u8; 48]);
+        let auth_request = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            &auth_body,
+            PacketLengthWidth::Large32,
+        )?;
+        let auth_response_body = b"AUTH_SVR SESSION_KEY=deadbeefcafef00ddeadbeefcafef00d".to_vec();
+        let query_packet = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            QUERY_BODY,
+            PacketLengthWidth::Large32,
+        )?;
+
+        // The raw captured session, as the recording transport would produce it.
+        let mut raw = Vec::new();
+        cassette::write_header(&mut raw);
+        cassette::write_frame(&mut raw, Direction::ClientToServer, 0, &connect_packet);
+        cassette::write_frame(&mut raw, Direction::ServerToClient, 1, &accept_packet);
+        cassette::write_frame(&mut raw, Direction::ClientToServer, 2, &auth_request);
+        cassette::write_frame(
+            &mut raw,
+            Direction::ServerToClient,
+            3,
+            &data_packet(&auth_response_body, true),
+        );
+        cassette::write_frame(&mut raw, Direction::ClientToServer, 4, &query_packet);
+        cassette::write_frame(
+            &mut raw,
+            Direction::ServerToClient,
+            5,
+            &data_packet(ERROR_RESPONSE, true),
+        );
+
+        // The RAW capture carries secrets — this is why the scrub gate exists.
+        assert!(
+            !transport::scan_for_secret_fields(&raw).is_empty(),
+            "raw capture is expected to contain auth secrets"
+        );
+
+        // Scrub the auth phase and run the fail-closed refuse gate.
+        let (scrubbed, report) = transport::scrub_and_gate(&raw)
+            .map_err(|e| Error::Runtime(format!("scrub gate refused unexpectedly: {e}")))?;
+        assert!(report.redacted_frames >= 1, "auth frames must be redacted");
+        // C4 secret-scan passes on the persisted artifact.
+        assert!(
+            transport::scan_for_secret_fields(&scrubbed).is_empty(),
+            "scrubbed artifact must pass the secret scan"
+        );
+
+        // Persist as a shareable file, reload it, and confirm it still scans clean.
+        let path = std::env::temp_dir().join(format!(
+            "oracledb-k6-replay-{}.tns-cassette",
+            std::process::id()
+        ));
+        std::fs::write(&path, &scrubbed).map_err(|e| Error::Runtime(e.to_string()))?;
+        let from_disk = std::fs::read(&path).map_err(|e| Error::Runtime(e.to_string()))?;
+        assert!(transport::scan_for_secret_fields(&from_disk).is_empty());
+
+        // Offline replay reproduces the query FAILURE with no database.
+        let (read, write) = transport::replay_split(&from_disk, transport::ReplayWriteMode::Ignore)
+            .map_err(|err| Error::Runtime(format!("invalid replay cassette: {err}")))?;
+        let mut core =
+            ConnectionCore::<DriverTransport>::from_halves(read, write, "k6_replay_write");
+        let runtime = build_io_runtime()?;
+        let replay = runtime.block_on(async {
+            let cx = test_cx()?;
+            core.write_all(&cx, &connect_packet).await?;
+            let accept = core.read_packet(PacketLengthWidth::Legacy16).await?;
+            assert_eq!(accept.packet_type, TNS_PACKET_TYPE_ACCEPT);
+
+            // Auth round-trip: the recorded server frame is redacted but its TNS
+            // framing is intact, so the decoder walks past it structurally.
+            core.send_data_packet(&cx, &auth_body, 8192).await?;
+            let _auth_response = core.read_data_response(&cx).await?;
+
+            core.send_data_packet(&cx, QUERY_BODY, 8192).await?;
+            core.read_data_response(&cx).await
+        });
+        let _ = std::fs::remove_file(&path);
+        let failure = replay?;
+        assert_eq!(
+            failure, ERROR_RESPONSE,
+            "offline replay must reproduce the recorded query failure"
+        );
         Ok(())
     }
 

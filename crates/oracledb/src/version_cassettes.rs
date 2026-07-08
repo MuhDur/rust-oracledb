@@ -106,7 +106,7 @@ use oracledb_protocol::thin::{
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth, ProtocolLimits};
 use oracledb_protocol::ProtocolError;
 
-use crate::transport::{self, ReplayWriteMode};
+use crate::transport::{self, scan_for_secret_fields, ReplayWriteMode};
 use crate::{
     build_io_runtime, ConnectionCore, DriverTransport, Error, IncomingPacket, Result,
     MAX_CONNECT_RESEND_ROUNDS,
@@ -277,31 +277,10 @@ async fn drive_connect_handshake(
 
 // ---- secret / sanitization guard ------------------------------------------
 
-/// Known auth-phase field names that must NEVER appear in a committed cassette.
-/// The connect-negotiation capture stops before auth, so this is a belt-and-
-/// suspenders assertion: if any appears, we refuse to write the fixture.
-const SECRET_FIELD_NAMES: &[&str] = &[
-    "AUTH_PASSWORD",
-    "AUTH_SESSKEY",
-    "AUTH_VFR_DATA",
-    "AUTH_PBKDF2_CSK_SALT",
-    "AUTH_PBKDF2_SPEEDY_KEY",
-    "AUTH_TOKEN",
-    "SESSION_TOKEN",
-    "SESSION_KEY",
-    "ACCESS_TOKEN",
-    "REFRESH_TOKEN",
-    "PRIVATE_KEY",
-];
-
-fn scan_for_secret_fields(bytes: &[u8]) -> Vec<&'static str> {
-    let haystack = String::from_utf8_lossy(bytes).to_ascii_uppercase();
-    SECRET_FIELD_NAMES
-        .iter()
-        .copied()
-        .filter(|field| haystack.contains(field))
-        .collect()
-}
+// The auth-phase secret-field scanner (`SECRET_FIELD_NAMES` +
+// `scan_for_secret_fields`) is the single source of truth in
+// `crate::transport` (bead K6); it is imported above and reused here so the
+// refuse gate can never drift between the two capture paths.
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
@@ -680,6 +659,8 @@ fn loopback_for_replay(
         capabilities,
         ttc_seq_num,
         sdu,
+        protocol_version: 0,
+        supports_fast_auth: false,
         supports_end_of_response,
         supports_oob,
         cursor_columns: BTreeMap::new(),
@@ -700,6 +681,7 @@ fn loopback_for_replay(
         transaction_context: None,
         txn_in_progress: false,
         shape_cache: std::sync::Arc::new(crate::StatementShapeCache::new()),
+        capture_guard: None,
     }
 }
 

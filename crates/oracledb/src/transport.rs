@@ -29,11 +29,17 @@ use asupersync::net::{OwnedReadHalf, OwnedWriteHalf, TcpStream};
 use asupersync::tls::TlsStream;
 
 #[cfg(feature = "cassette")]
+pub(crate) use cassette_seam::{capture_path_from_env, install_recorder_scope, CaptureGuard};
+#[cfg(feature = "cassette")]
 pub use cassette_seam::{
-    capture_scope, CaptureScope, CassetteError, CassetteRecorder, ReplayMismatch, ReplayWriteMode,
+    capture_scope, CaptureScope, CassetteCaptureError, CassetteCaptureReport, CassetteError,
+    CassetteRecorder, ReplayMismatch, ReplayWriteMode,
 };
 #[cfg(all(test, feature = "cassette"))]
-pub(crate) use cassette_seam::{replay_split, replay_split_with_audit, wrap_if_capturing};
+pub(crate) use cassette_seam::{
+    replay_split, replay_split_with_audit, scan_for_secret_fields, scrub_and_gate,
+    wrap_if_capturing,
+};
 
 /// A TLS stream shared between the read and write halves.
 type SharedTls = Arc<Mutex<TlsStream<TcpStream>>>;
@@ -280,7 +286,10 @@ impl AsyncWrite for OracleWriteHalf {
 #[cfg(feature = "cassette")]
 mod cassette_seam {
     use std::collections::VecDeque;
+    use std::fmt;
+    use std::fs;
     use std::io;
+    use std::path::{Path, PathBuf};
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
     use std::task::{Context, Poll};
@@ -288,9 +297,6 @@ mod cassette_seam {
 
     use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
     use oracledb_protocol::net::cassette::{self, Direction, Frame};
-
-    #[cfg(test)]
-    use std::fmt;
 
     use super::{OracleReadHalf, OracleWriteHalf};
 
@@ -369,6 +375,483 @@ mod cassette_seam {
     impl Default for CassetteRecorder {
         fn default() -> Self {
             Self::new()
+        }
+    }
+
+    // ---- secret-free support capture (bead K6) ----------------------------
+    //
+    // A CassetteRecorder can record the FULL session — including the auth phase
+    // (password verifier, session key, tokens). Persisting that raw would leak
+    // secrets to disk. `scrub_and_write` is the safe path: it scrubs the
+    // auth-phase frames, then runs a fail-closed REFUSE-ON-SECRET gate over the
+    // whole artifact, and only writes if nothing secret-shaped survives. The
+    // gate is deliberately dumb-but-total (a substring tripwire) and the scrub
+    // is scoped to the auth window, so the gate still catches a secret the
+    // scrubber missed (e.g. one leaked into post-auth user traffic).
+
+    /// Auth-phase field-name markers that must NEVER survive into a persisted
+    /// cassette. On the Oracle wire the secret VALUE (password verifier,
+    /// session key, token) is sent right after its ASCII-labelled key, so the
+    /// label is a reliable tripwire for a leaked secret. Single source of truth
+    /// for both the auth-phase scrubber and the refuse gate; `version_cassettes`
+    /// reuses it via [`scan_for_secret_fields`].
+    pub(crate) const SECRET_FIELD_NAMES: &[&str] = &[
+        "AUTH_PASSWORD",
+        "AUTH_SESSKEY",
+        "AUTH_VFR_DATA",
+        "AUTH_PBKDF2_CSK_SALT",
+        "AUTH_PBKDF2_SPEEDY_KEY",
+        "AUTH_TOKEN",
+        "SESSION_TOKEN",
+        "SESSION_KEY",
+        "ACCESS_TOKEN",
+        "REFRESH_TOKEN",
+        "PRIVATE_KEY",
+    ];
+
+    /// Fail-closed refuse gate: return every secret field name that still
+    /// appears (case-insensitively) in `bytes`. A non-empty result means the
+    /// artifact MUST NOT be persisted.
+    #[must_use]
+    pub(crate) fn scan_for_secret_fields(bytes: &[u8]) -> Vec<&'static str> {
+        let haystack = String::from_utf8_lossy(bytes).to_ascii_uppercase();
+        SECRET_FIELD_NAMES
+            .iter()
+            .copied()
+            .filter(|field| haystack.contains(field))
+            .collect()
+    }
+
+    /// The auth handshake always completes within the first few round-trips of
+    /// a session, so the scrubber only redacts secret material within this
+    /// leading window. Anything beyond it is user traffic that must be
+    /// secret-free on its own merit — the refuse gate enforces that fail-closed.
+    const AUTH_PHASE_FRAME_LIMIT: usize = 32;
+
+    /// Bytes overwritten forward from each secret marker: the label itself plus
+    /// a generous window over the value that follows it on the wire.
+    const AUTH_REDACT_WINDOW: usize = 512;
+
+    /// Deterministic redaction fill byte (`0xEE` is not valid UTF-8 leading, so
+    /// a redacted region cannot be mistaken for readable field text).
+    const REDACTION_BYTE: u8 = 0xEE;
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        if needle.is_empty() || needle.len() > haystack.len() {
+            return None;
+        }
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// Overwrite every secret-marker occurrence in `bytes` (and the value window
+    /// that follows it) with [`REDACTION_BYTE`], in place and length-preserving
+    /// so the surrounding TNS packet framing is untouched. Returns whether any
+    /// redaction was made.
+    fn redact_secret_windows(bytes: &mut [u8]) -> bool {
+        // Uppercase a copy to locate markers case-insensitively, then redact the
+        // matching byte ranges in the live buffer.
+        let upper = bytes.to_ascii_uppercase();
+        let mut hit = false;
+        for name in SECRET_FIELD_NAMES {
+            let needle = name.as_bytes();
+            let mut from = 0usize;
+            while let Some(pos) = find_subslice(&upper[from..], needle) {
+                let start = from + pos;
+                let end = start.saturating_add(AUTH_REDACT_WINDOW).min(bytes.len());
+                for byte in &mut bytes[start..end] {
+                    *byte = REDACTION_BYTE;
+                }
+                hit = true;
+                from = start + needle.len();
+                if from >= upper.len() {
+                    break;
+                }
+            }
+        }
+        hit
+    }
+
+    /// Scrub the auth-phase frames in place: within the leading auth window,
+    /// overwrite each secret marker and its trailing value window. Returns the
+    /// number of frames in which at least one redaction was made.
+    fn scrub_auth_frames(frames: &mut [Frame]) -> usize {
+        let mut redacted = 0usize;
+        for frame in frames.iter_mut().take(AUTH_PHASE_FRAME_LIMIT) {
+            if redact_secret_windows(&mut frame.bytes) {
+                redacted += 1;
+            }
+        }
+        redacted
+    }
+
+    /// Outcome of a successful secret-free support capture.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct CassetteCaptureReport {
+        /// Total frames in the captured session.
+        pub frame_count: usize,
+        /// Frames in which at least one auth-phase secret window was redacted.
+        pub redacted_frames: usize,
+        /// Size in bytes of the persisted (scrubbed) cassette.
+        pub byte_len: usize,
+    }
+
+    /// Why a support-capture write was refused or failed.
+    #[derive(Debug)]
+    pub enum CassetteCaptureError {
+        /// The fail-closed refusal: a secret field name survived scrubbing, so
+        /// the refuse gate aborted the write. NO file was written.
+        SecretLeak {
+            /// The secret field name(s) that tripped the gate.
+            fields: Vec<&'static str>,
+        },
+        /// The recorded bytes were not a decodable cassette.
+        Decode(CassetteError),
+        /// A filesystem error while persisting the gate-passed cassette.
+        Io(io::Error),
+    }
+
+    impl fmt::Display for CassetteCaptureError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::SecretLeak { fields } => write!(
+                    f,
+                    "refused to write cassette: secret field(s) survived scrubbing: {fields:?}"
+                ),
+                Self::Decode(err) => write!(f, "cannot capture: {err}"),
+                Self::Io(err) => write!(f, "cassette write failed: {err}"),
+            }
+        }
+    }
+
+    impl std::error::Error for CassetteCaptureError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            match self {
+                Self::Decode(err) => Some(err),
+                Self::Io(err) => Some(err),
+                Self::SecretLeak { .. } => None,
+            }
+        }
+    }
+
+    /// Decode `cassette_bytes`, scrub the auth-phase frames, re-encode, and run
+    /// the fail-closed refuse gate over the FULL re-encoded artifact. On success
+    /// returns the scrubbed cassette bytes and a report; on any surviving secret
+    /// returns [`CassetteCaptureError::SecretLeak`] and NO bytes, so the caller
+    /// writes nothing. This is the pure (bytes-in, bytes-out) safety core.
+    ///
+    /// # Errors
+    ///
+    /// [`CassetteCaptureError::Decode`] if `cassette_bytes` is not a valid
+    /// cassette; [`CassetteCaptureError::SecretLeak`] if a secret field name
+    /// survived scrubbing.
+    pub(crate) fn scrub_and_gate(
+        cassette_bytes: &[u8],
+    ) -> Result<(Vec<u8>, CassetteCaptureReport), CassetteCaptureError> {
+        let mut frames =
+            cassette::decode_all(cassette_bytes).map_err(CassetteCaptureError::Decode)?;
+        let frame_count = frames.len();
+        let redacted_frames = scrub_auth_frames(&mut frames);
+
+        let mut scrubbed = Vec::with_capacity(cassette_bytes.len());
+        cassette::write_header(&mut scrubbed);
+        for frame in &frames {
+            cassette::write_frame(&mut scrubbed, frame.direction, frame.micros, &frame.bytes);
+        }
+
+        // Fail-closed: the gate runs over the WHOLE re-encoded artifact, so a
+        // secret the scrubber missed (out of the auth window, or a marker it
+        // didn't recognize) still aborts the write.
+        let leaks = scan_for_secret_fields(&scrubbed);
+        if !leaks.is_empty() {
+            return Err(CassetteCaptureError::SecretLeak { fields: leaks });
+        }
+
+        let report = CassetteCaptureReport {
+            frame_count,
+            redacted_frames,
+            byte_len: scrubbed.len(),
+        };
+        Ok((scrubbed, report))
+    }
+
+    /// Write `bytes` to `path` atomically: write a uniquely-named sibling temp
+    /// file, then rename it into place. The gate has already passed by the time
+    /// this runs, and a refused capture never reaches here, so no partial or
+    /// secret-bearing file is ever left behind.
+    fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+        let mut tmp_name = path.as_os_str().to_owned();
+        tmp_name.push(format!(".{}.tmp", std::process::id()));
+        let tmp = PathBuf::from(tmp_name);
+        fs::write(&tmp, bytes)?;
+        match fs::rename(&tmp, path) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                let _ = fs::remove_file(&tmp);
+                Err(err)
+            }
+        }
+    }
+
+    impl CassetteRecorder {
+        /// Scrub the auth phase, run the fail-closed REFUSE-ON-SECRET gate, and
+        /// — only if no secret survives — atomically write the shareable,
+        /// offline `.tns-cassette` to `path`. On a surviving secret the write is
+        /// REFUSED and no file is left behind. This is the safety core of
+        /// secret-free support capture: a scrub bug fails closed, never leaks.
+        ///
+        /// # Errors
+        ///
+        /// [`CassetteCaptureError::SecretLeak`] if a secret field survived
+        /// scrubbing (nothing written); [`CassetteCaptureError::Decode`] if the
+        /// recording is not a valid cassette; [`CassetteCaptureError::Io`] on a
+        /// filesystem error.
+        pub fn scrub_and_write(
+            &self,
+            path: &Path,
+        ) -> Result<CassetteCaptureReport, CassetteCaptureError> {
+            let (scrubbed, report) = scrub_and_gate(&self.to_cassette_bytes())?;
+            atomic_write(path, &scrubbed).map_err(CassetteCaptureError::Io)?;
+            Ok(report)
+        }
+    }
+
+    /// Read the `ORACLEDB_CAPTURE` support-capture target path from the
+    /// environment. `None` (unset or empty) means capture is disabled and the
+    /// transport path is byte-identical to a non-capturing session.
+    #[must_use]
+    pub(crate) fn capture_path_from_env() -> Option<PathBuf> {
+        match std::env::var_os("ORACLEDB_CAPTURE") {
+            Some(value) if !value.is_empty() => Some(PathBuf::from(value)),
+            _ => None,
+        }
+    }
+
+    /// Install an EXISTING `recorder` as the active recorder for the current
+    /// thread and return a scope guard. Unlike [`capture_scope`], the recorder
+    /// is supplied by the caller so its frames can be persisted after the
+    /// connection ends. Install it around the SYNCHRONOUS transport split only
+    /// (never hold it across an await) so the thread-local is observed on the
+    /// same thread that performs the split.
+    pub(crate) fn install_recorder_scope(recorder: CassetteRecorder) -> CaptureScope {
+        let previous = ACTIVE_RECORDER.with(|slot| slot.borrow_mut().replace(recorder.clone()));
+        CaptureScope { recorder, previous }
+    }
+
+    /// Session-lifetime guard that persists a scrubbed, secret-free cassette
+    /// when the connection is dropped or closed. Armed only when
+    /// `ORACLEDB_CAPTURE` was set at connect time. Writing is best-effort and
+    /// fail-closed: a surviving secret refuses the write (no file) and logs,
+    /// never panics on the drop path.
+    pub(crate) struct CaptureGuard {
+        recorder: CassetteRecorder,
+        path: PathBuf,
+    }
+
+    impl CaptureGuard {
+        pub(crate) fn new(recorder: CassetteRecorder, path: PathBuf) -> Self {
+            Self { recorder, path }
+        }
+    }
+
+    impl fmt::Debug for CaptureGuard {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            // Never render recorded frames (they carry the raw session bytes).
+            f.debug_struct("CaptureGuard")
+                .field("path", &self.path)
+                .field("frames", &self.recorder.frame_count())
+                .finish()
+        }
+    }
+
+    impl Drop for CaptureGuard {
+        fn drop(&mut self) {
+            if self.recorder.frame_count() == 0 {
+                return;
+            }
+            match self.recorder.scrub_and_write(&self.path) {
+                Ok(report) => eprintln!(
+                    "oracledb: wrote support cassette {} ({} frames, {} redacted, {} bytes)",
+                    self.path.display(),
+                    report.frame_count,
+                    report.redacted_frames,
+                    report.byte_len,
+                ),
+                Err(CassetteCaptureError::SecretLeak { fields }) => eprintln!(
+                    "oracledb: REFUSED to write support cassette {}: secret field(s) survived \
+                     scrubbing: {fields:?} (no file written)",
+                    self.path.display(),
+                ),
+                Err(err) => eprintln!(
+                    "oracledb: support cassette write failed for {}: {err}",
+                    self.path.display(),
+                ),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod capture_tests {
+        use super::*;
+
+        /// Encode a list of `(direction, payload)` frames into cassette bytes.
+        fn cassette_of(frames: &[(Direction, Vec<u8>)]) -> Vec<u8> {
+            let mut out = Vec::new();
+            cassette::write_header(&mut out);
+            for (i, (direction, bytes)) in frames.iter().enumerate() {
+                cassette::write_frame(&mut out, *direction, i as u64, bytes);
+            }
+            out
+        }
+
+        /// A recorder pre-loaded with `frames` (uses the private record path).
+        fn recorder_of(frames: &[(Direction, Vec<u8>)]) -> CassetteRecorder {
+            let recorder = CassetteRecorder::new();
+            for (direction, bytes) in frames {
+                recorder.record(*direction, bytes);
+            }
+            recorder
+        }
+
+        fn unique_temp_path(tag: &str) -> PathBuf {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            std::env::temp_dir().join(format!(
+                "oracledb-k6-{tag}-{}-{nanos}.tns-cassette",
+                std::process::id()
+            ))
+        }
+
+        #[test]
+        fn auth_window_secret_is_scrubbed_and_gate_passes() {
+            // A realistic C->S auth frame carrying the password verifier + a fake
+            // session key, followed by a secret-free query + response.
+            let mut auth = b"KEY AUTH_PASSWORD=hunter2super AUTH_SESSKEY=".to_vec();
+            auth.extend_from_slice(&[0x5A_u8; 48]); // fake session-key blob
+            let frames = vec![
+                (Direction::ClientToServer, b"CONNECT-DESCRIPTOR".to_vec()),
+                (Direction::ServerToClient, b"ACCEPT".to_vec()),
+                (Direction::ClientToServer, auth),
+                (
+                    Direction::ServerToClient,
+                    b"AUTH_SVR_RESPONSE SESSION_KEY=deadbeefcafef00d".to_vec(),
+                ),
+                (Direction::ClientToServer, b"SELECT * FROM nope".to_vec()),
+                (
+                    Direction::ServerToClient,
+                    b"ORA-00942: table or view".to_vec(),
+                ),
+            ];
+            let bytes = cassette_of(&frames);
+
+            let (scrubbed, report) = scrub_and_gate(&bytes).expect("gate must pass after scrub");
+            assert!(report.redacted_frames >= 1, "auth frames must be redacted");
+            assert_eq!(report.frame_count, frames.len());
+
+            // C4 secret-scan: NO secret field name survives.
+            assert!(
+                scan_for_secret_fields(&scrubbed).is_empty(),
+                "scrubbed artifact must pass the secret scan"
+            );
+            // The secret VALUES are gone, not just the labels.
+            assert!(!contains(&scrubbed, b"hunter2super"));
+            assert!(!contains(&scrubbed, b"deadbeefcafef00d"));
+            // The post-auth failure is preserved for offline replay.
+            assert!(contains(&scrubbed, b"ORA-00942: table or view"));
+        }
+
+        #[test]
+        fn plant_secret_beyond_auth_window_is_refused() {
+            // Belt-and-suspenders: a secret that the auth-phase scrubber does NOT
+            // reach (planted well past the auth window, as if leaked into user
+            // traffic) is still caught by the total refuse gate.
+            let mut frames: Vec<(Direction, Vec<u8>)> = (0..AUTH_PHASE_FRAME_LIMIT + 4)
+                .map(|i| {
+                    (
+                        Direction::ClientToServer,
+                        format!("benign-frame-{i}").into_bytes(),
+                    )
+                })
+                .collect();
+            // Plant beyond the auth window.
+            frames[AUTH_PHASE_FRAME_LIMIT + 2] = (
+                Direction::ServerToClient,
+                b"leaked AUTH_TOKEN=eyJ0aGlzIjoiYSBzZWNyZXQifQ".to_vec(),
+            );
+            let bytes = cassette_of(&frames);
+
+            match scrub_and_gate(&bytes) {
+                Err(CassetteCaptureError::SecretLeak { fields }) => {
+                    assert!(fields.contains(&"AUTH_TOKEN"), "gate must name the leak");
+                }
+                other => panic!("planted secret must be REFUSED, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn scrub_and_write_refuses_planted_secret_and_leaves_no_file() {
+            let mut frames: Vec<(Direction, Vec<u8>)> = (0..AUTH_PHASE_FRAME_LIMIT + 4)
+                .map(|i| {
+                    (
+                        Direction::ClientToServer,
+                        format!("benign-{i}").into_bytes(),
+                    )
+                })
+                .collect();
+            frames[AUTH_PHASE_FRAME_LIMIT + 1] = (
+                Direction::ServerToClient,
+                b"oops PRIVATE_KEY=-----BEGIN".to_vec(),
+            );
+            let recorder = recorder_of(&frames);
+
+            let path = unique_temp_path("refuse");
+            let err = recorder
+                .scrub_and_write(&path)
+                .expect_err("planted secret must refuse the write");
+            assert!(matches!(err, CassetteCaptureError::SecretLeak { .. }));
+            assert!(
+                !path.exists(),
+                "a refused capture must leave NO file behind"
+            );
+        }
+
+        #[test]
+        fn scrub_and_write_persists_scrubbed_cassette() {
+            let mut auth = b"AUTH_PASSWORD=topsecretpw AUTH_VFR_DATA=".to_vec();
+            auth.extend_from_slice(&[0x11_u8; 32]);
+            let frames = vec![
+                (Direction::ClientToServer, b"CONNECT".to_vec()),
+                (Direction::ServerToClient, b"ACCEPT".to_vec()),
+                (Direction::ClientToServer, auth),
+                (Direction::ClientToServer, b"SELECT 1 FROM dual".to_vec()),
+                (Direction::ServerToClient, b"ORA-01013: cancelled".to_vec()),
+            ];
+            let recorder = recorder_of(&frames);
+
+            let path = unique_temp_path("persist");
+            let report = recorder.scrub_and_write(&path).expect("write must succeed");
+            assert!(report.redacted_frames >= 1);
+
+            let written = fs::read(&path).expect("cassette file must exist");
+            assert!(scan_for_secret_fields(&written).is_empty());
+            assert!(!contains(&written, b"topsecretpw"));
+            assert!(contains(&written, b"ORA-01013: cancelled"));
+
+            let _ = fs::remove_file(&path);
+        }
+
+        #[test]
+        fn empty_recorder_writes_nothing_via_guard() {
+            let path = unique_temp_path("empty");
+            {
+                let _guard = CaptureGuard::new(CassetteRecorder::new(), path.clone());
+            }
+            assert!(!path.exists(), "an empty session must not write a cassette");
+        }
+
+        fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+            find_subslice(haystack, needle).is_some()
         }
     }
 
