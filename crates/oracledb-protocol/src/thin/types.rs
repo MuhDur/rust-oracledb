@@ -1408,4 +1408,56 @@ mod query_value_ref_tests {
         is_copy::<QueryValueRef<'static>>();
         assert!(core::mem::size_of::<QueryValueRef<'static>>() <= 32);
     }
+
+    #[test]
+    fn query_value_ref_accessors_cover_borrowed_and_owned_fallbacks() {
+        let text = QueryValueRef::Text("hello");
+        assert_eq!(text.as_text(), Some("hello"));
+        assert_eq!(text.as_number_text(), None);
+        assert_eq!(text.as_raw(), None);
+
+        let owned_text = QueryValue::Text("owned".to_string());
+        let owned_text_ref = QueryValueRef::Owned(&owned_text);
+        assert_eq!(owned_text_ref.as_text(), Some("owned"));
+        assert_eq!(owned_text_ref.as_number_text(), None);
+        assert_eq!(owned_text_ref.as_raw(), None);
+
+        let number = QueryValueRef::Number {
+            text: "123.45",
+            is_integer: false,
+        };
+        assert_eq!(number.as_number_text(), Some("123.45"));
+        assert_eq!(number.as_text(), None);
+        assert_eq!(number.as_raw(), None);
+
+        let owned_number = QueryValue::number_from_text("987654321098765432109876543210", true);
+        let owned_number_ref = QueryValueRef::Owned(&owned_number);
+        assert_eq!(
+            owned_number_ref.as_number_text(),
+            owned_number
+                .as_number()
+                .and_then(|num| num.as_borrowed_text())
+        );
+        assert_eq!(owned_number_ref.as_text(), None);
+        assert_eq!(owned_number_ref.as_raw(), None);
+
+        let raw_bytes = [0xde, 0xad, 0xbe, 0xef];
+        let raw = QueryValueRef::Raw(&raw_bytes);
+        assert_eq!(raw.as_raw(), Some(raw_bytes.as_slice()));
+        assert_eq!(raw.as_text(), None);
+        assert_eq!(raw.as_number_text(), None);
+
+        let owned_raw = QueryValue::Raw(vec![1, 2, 3]);
+        let owned_raw_ref = QueryValueRef::Owned(&owned_raw);
+        assert_eq!(owned_raw_ref.as_raw(), Some([1, 2, 3].as_slice()));
+        assert_eq!(owned_raw_ref.as_text(), None);
+        assert_eq!(owned_raw_ref.as_number_text(), None);
+    }
+
+    #[test]
+    fn execute_options_parse_only_accessor_round_trips() {
+        let options = ExecuteOptions::default().with_parse_only(true);
+        assert!(options.parse_only());
+        assert!(!options.with_parse_only(false).parse_only());
+    }
 }

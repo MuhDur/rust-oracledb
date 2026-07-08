@@ -818,4 +818,54 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn interval_ds_rejects_truncated_wire_value() {
+        let wire = encode_interval_ds(-2, -(3 * 3600 + 4 * 60 + 5), -123_456_789)
+            .expect("encode negative interval");
+        assert!(decode_interval_ds(&wire[..10]).is_err());
+    }
+
+    #[test]
+    fn number_decode_heap_and_stack_paths_match_edge_corpus() {
+        for (text, is_integer) in [
+            ("0", true),
+            ("0.01", false),
+            ("0.1", false),
+            ("0.99", false),
+            ("9.9", false),
+            ("10", true),
+            ("99", true),
+            ("100", true),
+            ("101", true),
+            ("-0.01", false),
+            ("-0.1", false),
+            ("-0.99", false),
+            ("-9.9", false),
+            ("-10", true),
+            ("-99", true),
+            ("-100", true),
+            ("-101", true),
+            ("12345678901234567890123456789012345678", true),
+            ("-12345678901234567890123456789012345678", true),
+        ] {
+            let wire = encode_number_text(text).expect("encode NUMBER edge");
+            let mut digits = Vec::new();
+            let mut decoded = String::new();
+            let decoded_is_integer =
+                decode_number_text_into(&wire, &mut digits, &mut decoded).expect("decode text");
+            let owned = decode_number_value(&wire).expect("decode owned NUMBER");
+
+            assert_eq!(decoded, text, "canonical NUMBER text for wire {wire:02x?}");
+            assert_eq!(
+                decoded_is_integer, is_integer,
+                "integer flag for NUMBER wire {wire:02x?}"
+            );
+            assert_eq!(
+                owned.as_number_text().as_deref(),
+                Some(decoded.as_str()),
+                "owned stack decode must match heap text decode for {text}"
+            );
+        }
+    }
 }

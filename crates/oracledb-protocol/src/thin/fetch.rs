@@ -2044,10 +2044,10 @@ mod lob_fetch_shape_tests {
             .expect("synthetic locator length is encodable");
     }
 
-    fn first_lob(result: &QueryResult) -> &LobValue {
-        match &result.rows[0][0] {
-            Some(QueryValue::Lob(lob)) => lob.as_ref(),
-            other => panic!("expected LOB value, got {other:?}"),
+    fn first_lob(result: &QueryResult) -> Option<&LobValue> {
+        match result.rows.first()?.first()? {
+            Some(QueryValue::Lob(lob)) => Some(lob.as_ref()),
+            _ => None,
         }
     }
 
@@ -2112,7 +2112,7 @@ mod lob_fetch_shape_tests {
         )
         .expect("plain fetch CLOB locator should decode");
 
-        let lob = first_lob(&result);
+        let lob = first_lob(&result).expect("plain fetch should return a LOB value");
         assert_eq!(lob.locator, locator);
         assert_eq!(lob.size, 0);
         assert_eq!(lob.chunk_size, 0);
@@ -2133,14 +2133,14 @@ mod lob_fetch_shape_tests {
         )
         .expect("define fetch CLOB locator should decode");
 
-        let lob = first_lob(&result);
+        let lob = first_lob(&result).expect("define fetch should return a LOB value");
         assert_eq!(lob.locator, locator);
         assert_eq!(lob.size, 23);
         assert_eq!(lob.chunk_size, 8060);
     }
 
     #[test]
-    fn borrowed_define_fetch_lob_page_matches_owned_decode() {
+    fn borrowed_define_fetch_lob_page_matches_owned_parse() {
         let columns = [clob_column(), blob_column()];
         let clob_locator_a: Vec<u8> = (0u8..114).collect();
         let blob_locator_a: Vec<u8> = (128u8..242).collect();
@@ -2164,7 +2164,7 @@ mod lob_fetch_shape_tests {
             None,
             ProtocolLimits::DEFAULT,
         )
-        .expect("owned define fetch CLOB/BLOB page should decode");
+        .expect("owned define fetch CLOB/BLOB page should parse");
         let borrowed = parse_define_fetch_response_borrowed_with_limits(
             &payload,
             ClientCapabilities::default(),
@@ -2172,7 +2172,7 @@ mod lob_fetch_shape_tests {
             None,
             ProtocolLimits::DEFAULT,
         )
-        .expect("borrowed define fetch CLOB/BLOB page should decode");
+        .expect("borrowed define fetch CLOB/BLOB page should parse");
 
         let mut borrowed_rows: Vec<Vec<Option<QueryValue>>> = Vec::new();
         borrowed
@@ -2187,15 +2187,15 @@ mod lob_fetch_shape_tests {
             })
             .expect("borrowed define fetch CLOB/BLOB page should iterate");
 
-        assert_eq!(owned.rows.len(), 2, "owned decode sees both rows");
+        assert_eq!(owned.rows.len(), 2, "owned parse sees both rows");
         assert_eq!(
             borrowed.batch.row_count(),
             2,
-            "borrowed decode sees both rows"
+            "borrowed parse sees both rows"
         );
         assert_eq!(
             borrowed_rows, owned.rows,
-            "borrowed DefineMetadata LOB decode must match owned decode"
+            "borrowed DefineMetadata LOB parse must match owned parse"
         );
     }
 }
@@ -2952,14 +2952,24 @@ mod in_out_io_vector_tests {
     // high(ub4), num_iters(ub4), uac_buffer_length(ub2), fast_fetch_len(ub2),
     // rowid_len(ub2), then one direction byte per bind.
     fn io_vector_payload(directions: &[u8]) -> Vec<u8> {
+        io_vector_payload_with_skips(directions, &[], &[])
+    }
+
+    fn io_vector_payload_with_skips(
+        directions: &[u8],
+        fast_fetch_bytes: &[u8],
+        rowid_bytes: &[u8],
+    ) -> Vec<u8> {
         let mut writer = TtcWriter::new();
         writer.write_u8(0);
         writer.write_ub2(u16::try_from(directions.len()).unwrap());
         writer.write_ub4(0);
         writer.write_ub4(1);
         writer.write_ub2(0);
-        writer.write_ub2(0);
-        writer.write_ub2(0);
+        writer.write_ub2(u16::try_from(fast_fetch_bytes.len()).unwrap());
+        writer.write_raw(fast_fetch_bytes);
+        writer.write_ub2(u16::try_from(rowid_bytes.len()).unwrap());
+        writer.write_raw(rowid_bytes);
         for &direction in directions {
             writer.write_u8(direction);
         }
@@ -2981,6 +2991,28 @@ mod in_out_io_vector_tests {
             vec![1, 2],
             "IN OUT (48) and OUT (16) are read back; pure IN (32) is not"
         );
+    }
+
+    #[test]
+    fn io_vector_skips_optional_payloads_and_ignores_unbound_slots() {
+        let payload = io_vector_payload_with_skips(
+            &[
+                TNS_BIND_DIR_OUTPUT,
+                TNS_BIND_DIR_INPUT,
+                TNS_BIND_DIR_INPUT_OUTPUT,
+            ],
+            b"ff",
+            b"rid",
+        );
+        let mut reader = TtcReader::new(&payload);
+        let out_indexes = parse_io_vector(&mut reader, 2).expect("parse io vector with skips");
+
+        assert_eq!(
+            out_indexes,
+            vec![0],
+            "optional fast-fetch/rowid payloads are skipped, and directions beyond bind_count are ignored"
+        );
+        assert_eq!(reader.remaining(), 0);
     }
 
     // End-to-end read-back: a VARCHAR IN OUT bind whose routine writes back a

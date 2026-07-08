@@ -18,5 +18,6 @@ scalar_codecs	crates/oracledb-protocol/fuzz/fuzz_targets/scalar_codecs.rs
 server_error_info	crates/oracledb-protocol/fuzz/fuzz_targets/server_error_info.rs
 sessionless_tpc	crates/oracledb-protocol/fuzz/fuzz_targets/sessionless_tpc.rs
 subscr_response	crates/oracledb-protocol/fuzz/fuzz_targets/subscr_response.rs
+typed_decode_boundary	crates/oracledb-protocol/fuzz/fuzz_targets/typed_decode_boundary.rs
 vector_decoder	crates/oracledb-protocol/fuzz/fuzz_targets/vector_decoder.rs
 wallet_parsers	crates/oracledb-protocol/fuzz/fuzz_targets/wallet_parsers.rs
