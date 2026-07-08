@@ -663,7 +663,7 @@ impl<'conn> BlockingRows<'conn> {
     }
 }
 
-fn first_cursor_from_result(result: &QueryResult) -> Option<Cursor> {
+pub(crate) fn first_cursor_from_result(result: &QueryResult) -> Option<Cursor> {
     result
         .implicit_resultsets
         .as_ref()

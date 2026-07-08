@@ -71,6 +71,14 @@ arrow-schema = { workspace = true, optional = true }
 # over the async TCP socket and supply our own Oracle ServerCertVerifier.
 asupersync = { workspace = true, features = ["tls"] }
 chrono = { version = "0.4", optional = true, default-features = false, features = ["std"] }
+# Trait-only `Stream` for the `OwnedRowStream` row-by-row streaming API (K10).
+# `default-features = false` keeps it to the `Stream`/`FusedStream` traits with
+# no executor/runtime lock-in and no transitive deps; the public type drives
+# asupersync I/O internally while implementing the ecosystem-standard trait.
+# License is `MIT OR Apache-2.0` from crates.io — both atoms are already in
+# deny.toml's allow-list and the registry is already permitted, so no deny.toml
+# change is required.
+futures-core = { version = "0.3", default-features = false }
 oracledb-derive = { path = "../oracledb-derive", version = "0.8.2", optional = true }
 oracledb-protocol = { path = "../oracledb-protocol", version = "0.8.2" }
 rust_decimal = { version = "1", optional = true, default-features = false, features = ["std"] }

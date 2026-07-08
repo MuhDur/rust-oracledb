@@ -330,6 +330,9 @@ mod request;
 /// Idempotency-gated retry executor over the ORA error taxonomy (bead a4-r9a).
 pub mod retry;
 mod routine;
+/// Owning row-by-row query stream (K10). The user-facing [`OwnedRowStream`] is
+/// re-exported at the crate root (the single canonical public path).
+mod row_stream;
 mod rows;
 /// Cross-connection statement-shape cache with DDL-invalidation self-heal
 /// (bead a4-8pp). The user-facing types are re-exported at the crate root (the
@@ -374,6 +377,7 @@ pub use cursor_logic::{
 
 use request::QueryDeadline;
 pub use request::{Batch, BatchRows, Execute, Query, Registration, Scroll};
+pub use row_stream::OwnedRowStream;
 pub use rows::{
     BatchError, BatchOutcome, BlockingRows, ExecuteOutcome, OutBinds, RegistrationOutcome,
     ReturningRows, Row, Rows,
