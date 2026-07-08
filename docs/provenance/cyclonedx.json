@@ -218,9 +218,9 @@
         }
       ],
       "name": "asupersync",
-      "purl": "pkg:cargo/asupersync@0.3.4",
+      "purl": "pkg:cargo/asupersync@0.3.5",
       "type": "library",
-      "version": "0.3.4"
+      "version": "0.3.5"
     },
     {
       "licenses": [
@@ -231,9 +231,9 @@
         }
       ],
       "name": "asupersync-macros",
-      "purl": "pkg:cargo/asupersync-macros@0.3.4",
+      "purl": "pkg:cargo/asupersync-macros@0.3.5",
       "type": "library",
-      "version": "0.3.4"
+      "version": "0.3.5"
     },
     {
       "licenses": [
@@ -283,22 +283,22 @@
         }
       ],
       "name": "bincode-next",
-      "purl": "pkg:cargo/bincode-next@2.1.0",
+      "purl": "pkg:cargo/bincode-next@3.1.1",
       "type": "library",
-      "version": "2.1.0"
+      "version": "3.1.1"
     },
     {
       "licenses": [
         {
           "license": {
-            "name": "MIT"
+            "name": "MIT or Apache-2.0"
           }
         }
       ],
       "name": "bincode_derive-next",
-      "purl": "pkg:cargo/bincode_derive-next@2.1.0",
+      "purl": "pkg:cargo/bincode_derive-next@3.1.1",
       "type": "library",
-      "version": "2.1.0"
+      "version": "3.1.1"
     },
     {
       "licenses": [
@@ -928,6 +928,19 @@
       "licenses": [
         {
           "license": {
+            "name": "Zlib OR Apache-2.0 OR MIT"
+          }
+        }
+      ],
+      "name": "dispatch2",
+      "purl": "pkg:cargo/dispatch2@0.3.1",
+      "type": "library",
+      "version": "0.3.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
             "name": "MIT OR Apache-2.0"
           }
         }
@@ -1089,9 +1102,9 @@
         }
       ],
       "name": "franken-decision",
-      "purl": "pkg:cargo/franken-decision@0.3.4",
+      "purl": "pkg:cargo/franken-decision@0.3.5",
       "type": "library",
-      "version": "0.3.4"
+      "version": "0.3.5"
     },
     {
       "licenses": [
@@ -1102,9 +1115,9 @@
         }
       ],
       "name": "franken-evidence",
-      "purl": "pkg:cargo/franken-evidence@0.3.4",
+      "purl": "pkg:cargo/franken-evidence@0.3.5",
       "type": "library",
-      "version": "0.3.4"
+      "version": "0.3.5"
     },
     {
       "licenses": [
@@ -1115,9 +1128,9 @@
         }
       ],
       "name": "franken-kernel",
-      "purl": "pkg:cargo/franken-kernel@0.3.4",
+      "purl": "pkg:cargo/franken-kernel@0.3.5",
       "type": "library",
-      "version": "0.3.4"
+      "version": "0.3.5"
     },
     {
       "licenses": [
@@ -1362,9 +1375,9 @@
         }
       ],
       "name": "hkdf",
-      "purl": "pkg:cargo/hkdf@0.12.4",
+      "purl": "pkg:cargo/hkdf@0.13.0",
       "type": "library",
-      "version": "0.12.4"
+      "version": "0.13.0"
     },
     {
       "licenses": [
@@ -1773,6 +1786,84 @@
       "licenses": [
         {
           "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "objc2",
+      "purl": "pkg:cargo/objc2@0.6.4",
+      "type": "library",
+      "version": "0.6.4"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "Zlib OR Apache-2.0 OR MIT"
+          }
+        }
+      ],
+      "name": "objc2-core-foundation",
+      "purl": "pkg:cargo/objc2-core-foundation@0.3.2",
+      "type": "library",
+      "version": "0.3.2"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "objc2-encode",
+      "purl": "pkg:cargo/objc2-encode@4.1.0",
+      "type": "library",
+      "version": "4.1.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "objc2-foundation",
+      "purl": "pkg:cargo/objc2-foundation@0.3.2",
+      "type": "library",
+      "version": "0.3.2"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "Zlib OR Apache-2.0 OR MIT"
+          }
+        }
+      ],
+      "name": "objc2-io-kit",
+      "purl": "pkg:cargo/objc2-io-kit@0.3.2",
+      "type": "library",
+      "version": "0.3.2"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "Zlib OR Apache-2.0 OR MIT"
+          }
+        }
+      ],
+      "name": "objc2-open-directory",
+      "purl": "pkg:cargo/objc2-open-directory@0.3.2",
+      "type": "library",
+      "version": "0.3.2"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
             "name": "MIT OR Apache-2.0"
           }
         }
@@ -1817,9 +1908,9 @@
         }
       ],
       "name": "oracledb-derive",
-      "purl": "pkg:cargo/oracledb-derive@0.8.1",
+      "purl": "pkg:cargo/oracledb-derive@0.8.2",
       "type": "library",
-      "version": "0.8.1"
+      "version": "0.8.2"
     },
     {
       "licenses": [
@@ -1830,9 +1921,9 @@
         }
       ],
       "name": "oracledb-protocol",
-      "purl": "pkg:cargo/oracledb-protocol@0.8.1",
+      "purl": "pkg:cargo/oracledb-protocol@0.8.2",
       "type": "library",
-      "version": "0.8.1"
+      "version": "0.8.2"
     },
     {
       "licenses": [
@@ -1872,6 +1963,19 @@
       "purl": "pkg:cargo/parking_lot_core@0.9.12",
       "type": "library",
       "version": "0.9.12"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
+      "name": "pastey",
+      "purl": "pkg:cargo/pastey@0.2.3",
+      "type": "library",
+      "version": "0.2.3"
     },
     {
       "licenses": [
@@ -2206,23 +2310,10 @@
           }
         }
       ],
-      "name": "rayon",
-      "purl": "pkg:cargo/rayon@1.12.0",
+      "name": "rapidhash",
+      "purl": "pkg:cargo/rapidhash@4.5.1",
       "type": "library",
-      "version": "1.12.0"
-    },
-    {
-      "licenses": [
-        {
-          "license": {
-            "name": "MIT OR Apache-2.0"
-          }
-        }
-      ],
-      "name": "rayon-core",
-      "purl": "pkg:cargo/rayon-core@1.13.0",
-      "type": "library",
-      "version": "1.13.0"
+      "version": "4.5.1"
     },
     {
       "licenses": [
@@ -2766,9 +2857,9 @@
         }
       ],
       "name": "sysinfo",
-      "purl": "pkg:cargo/sysinfo@0.33.1",
+      "purl": "pkg:cargo/sysinfo@0.39.5",
       "type": "library",
-      "version": "0.33.1"
+      "version": "0.39.5"
     },
     {
       "licenses": [
@@ -3078,9 +3169,9 @@
         }
       ],
       "name": "unty-next",
-      "purl": "pkg:cargo/unty-next@0.1.1",
+      "purl": "pkg:cargo/unty-next@0.1.2",
       "type": "library",
-      "version": "0.1.1"
+      "version": "0.1.2"
     },
     {
       "licenses": [
@@ -3325,9 +3416,22 @@
         }
       ],
       "name": "windows",
-      "purl": "pkg:cargo/windows@0.57.0",
+      "purl": "pkg:cargo/windows@0.62.2",
       "type": "library",
-      "version": "0.57.0"
+      "version": "0.62.2"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
+      "name": "windows-collections",
+      "purl": "pkg:cargo/windows-collections@0.3.2",
+      "type": "library",
+      "version": "0.3.2"
     },
     {
       "licenses": [
@@ -3350,10 +3454,49 @@
           }
         }
       ],
+      "name": "windows-core",
+      "purl": "pkg:cargo/windows-core@0.62.2",
+      "type": "library",
+      "version": "0.62.2"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
+      "name": "windows-future",
+      "purl": "pkg:cargo/windows-future@0.3.2",
+      "type": "library",
+      "version": "0.3.2"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
       "name": "windows-implement",
       "purl": "pkg:cargo/windows-implement@0.57.0",
       "type": "library",
       "version": "0.57.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
+      "name": "windows-implement",
+      "purl": "pkg:cargo/windows-implement@0.60.2",
+      "type": "library",
+      "version": "0.60.2"
     },
     {
       "licenses": [
@@ -3376,6 +3519,19 @@
           }
         }
       ],
+      "name": "windows-interface",
+      "purl": "pkg:cargo/windows-interface@0.59.3",
+      "type": "library",
+      "version": "0.59.3"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
       "name": "windows-link",
       "purl": "pkg:cargo/windows-link@0.2.1",
       "type": "library",
@@ -3389,10 +3545,49 @@
           }
         }
       ],
+      "name": "windows-numerics",
+      "purl": "pkg:cargo/windows-numerics@0.3.1",
+      "type": "library",
+      "version": "0.3.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
       "name": "windows-result",
       "purl": "pkg:cargo/windows-result@0.1.2",
       "type": "library",
       "version": "0.1.2"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
+      "name": "windows-result",
+      "purl": "pkg:cargo/windows-result@0.4.1",
+      "type": "library",
+      "version": "0.4.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
+      "name": "windows-strings",
+      "purl": "pkg:cargo/windows-strings@0.5.1",
+      "type": "library",
+      "version": "0.5.1"
     },
     {
       "licenses": [
@@ -3432,6 +3627,19 @@
       "purl": "pkg:cargo/windows-targets@0.52.6",
       "type": "library",
       "version": "0.52.6"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
+      "name": "windows-threading",
+      "purl": "pkg:cargo/windows-threading@0.2.1",
+      "type": "library",
+      "version": "0.2.1"
     },
     {
       "licenses": [
@@ -3684,6 +3892,19 @@
       "licenses": [
         {
           "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
+      "name": "xattr",
+      "purl": "pkg:cargo/xattr@1.6.1",
+      "type": "library",
+      "version": "1.6.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
             "name": "BSD-2-Clause OR Apache-2.0 OR MIT"
           }
         }
@@ -3756,9 +3977,9 @@
         }
       ],
       "name": "oracledb",
-      "purl": "pkg:cargo/oracledb@0.8.1",
+      "purl": "pkg:cargo/oracledb@0.8.2",
       "type": "library",
-      "version": "0.8.1"
+      "version": "0.8.2"
     }
   },
   "specVersion": "1.5",
