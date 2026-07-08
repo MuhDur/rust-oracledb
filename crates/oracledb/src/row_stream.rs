@@ -70,10 +70,17 @@ type OwnedRow = Vec<Option<QueryValue>>;
 /// it back; only a dropped in-flight future loses it (which poisons the stream).
 type FetchOutcome = (Connection, Result<QueryResult>);
 
-/// Boxed, `'static`, `Send` in-flight fetch future. `'static` because it owns
+/// Boxed, `'static` in-flight fetch future. `'static` because it owns
 /// everything it touches (the connection, a cloned `Cx`, the columns `Arc`, and
 /// the duplicate-column seed), so it holds no borrow of the stream.
-type FetchFuture = Pin<Box<dyn Future<Output = FetchOutcome> + Send>>;
+///
+/// NOT `+ Send`: the fetch path transitively enters an observability span
+/// (`ensure_clean_before_request`'s `obs_span!`) whose `tracing::EnteredSpan`
+/// guard is held across an await, so under `--features tracing` the future is
+/// `!Send` (the driver's other async methods share this shape but are never
+/// boxed-as-`Send`, so it was never forced). `OwnedRowStream` is driven on a
+/// single asupersync lane (current-thread executor), so `Send` is not required.
+type FetchFuture = Pin<Box<dyn Future<Output = FetchOutcome>>>;
 
 /// Internal poll state of an [`OwnedRowStream`].
 enum OwnedRowStreamState {
