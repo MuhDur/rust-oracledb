@@ -1626,11 +1626,26 @@ impl core::fmt::Debug for oracledb_protocol::tls::wallet::WalletError
 pub fn oracledb_protocol::tls::wallet::WalletError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::fmt::Display for oracledb_protocol::tls::wallet::WalletError
 pub fn oracledb_protocol::tls::wallet::WalletError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb_protocol::tls::wallet::CertMetadata
+pub oracledb_protocol::tls::wallet::CertMetadata::not_after: i64
+pub oracledb_protocol::tls::wallet::CertMetadata::not_before: i64
+impl oracledb_protocol::tls::wallet::CertMetadata
+pub fn oracledb_protocol::tls::wallet::CertMetadata::from_der(&[u8]) -> core::option::Option<Self>
+impl core::clone::Clone for oracledb_protocol::tls::wallet::CertMetadata
+pub fn oracledb_protocol::tls::wallet::CertMetadata::clone(&self) -> oracledb_protocol::tls::wallet::CertMetadata
+impl core::cmp::Eq for oracledb_protocol::tls::wallet::CertMetadata
+impl core::cmp::PartialEq for oracledb_protocol::tls::wallet::CertMetadata
+pub fn oracledb_protocol::tls::wallet::CertMetadata::eq(&self, &oracledb_protocol::tls::wallet::CertMetadata) -> bool
+impl core::fmt::Debug for oracledb_protocol::tls::wallet::CertMetadata
+pub fn oracledb_protocol::tls::wallet::CertMetadata::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb_protocol::tls::wallet::CertMetadata
+impl core::marker::StructuralPartialEq for oracledb_protocol::tls::wallet::CertMetadata
 pub struct oracledb_protocol::tls::wallet::WalletContents
 pub oracledb_protocol::tls::wallet::WalletContents::ca_certificates: alloc::vec::Vec<alloc::vec::Vec<u8>>
 pub oracledb_protocol::tls::wallet::WalletContents::client_cert_chain: alloc::vec::Vec<alloc::vec::Vec<u8>>
 pub oracledb_protocol::tls::wallet::WalletContents::client_private_key: core::option::Option<alloc::vec::Vec<u8>>
 impl oracledb_protocol::tls::wallet::WalletContents
+pub fn oracledb_protocol::tls::wallet::WalletContents::certificate_metadata(&self) -> alloc::vec::Vec<oracledb_protocol::tls::wallet::CertMetadata>
 pub fn oracledb_protocol::tls::wallet::WalletContents::has_client_identity(&self) -> bool
 impl core::clone::Clone for oracledb_protocol::tls::wallet::WalletContents
 pub fn oracledb_protocol::tls::wallet::WalletContents::clone(&self) -> oracledb_protocol::tls::wallet::WalletContents

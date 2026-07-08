@@ -59,6 +59,9 @@ pub fn oracledb::ConnectOptions::*	keep	ConnectOptions fields are already privat
 *oracledb::Connection::execute_raw*	keep	W2-T1: low-level raw-execute primitive (returns the unprojected QueryResult). Execute-side counterpart to the retained fetch_rows*/define_and_fetch/scroll_cursor/fetch_cursor primitives; part of the 1.0 contract. Surfaced during the pyshim migration as the gap W1-T3 missed: the four families project QueryResult into curated outcomes, so a statement-type-agnostic / raw consumer needs an un-deprecated raw entry point.
 *oracledb::ConnectionDisposition*	keep	Public connection-reuse classification returned by Error::connection_disposition.
 *oracledb::Connection*	keep	Primary async connection API.
+*oracledb::resolve_wallet*	keep	0.8.1: public wallet-resolution accessor returning the driver's real precedence decision (chosen file / fell-through / eligibility) so the server doctor reads it instead of mirroring the private load path.
+*oracledb::WalletResolution*	keep	0.8.1: the wallet-resolution outcome struct returned by resolve_wallet.
+*oracledb::WalletFile*	keep	0.8.1: enum of wallet file kinds (Pem/P12/Sso) named in WalletResolution.
 *oracledb::ColumnIndex*	keep	Public owned-row index resolver for usize and &str access.
 *oracledb::ConversionError*	keep	Public conversion failure taxonomy.
 *oracledb::DbmsOutput*	keep	Public DBMS_OUTPUT result type.

@@ -330,6 +330,7 @@ pub async fn oracledb::Connection::notify_register(&mut self, &asupersync::cx::c
 pub async fn oracledb::Connection::ping(&mut self, &asupersync::cx::cx::Cx) -> oracledb::Result<()>
 pub async fn oracledb::Connection::ping_with_timeout(&mut self, &asupersync::cx::cx::Cx, u32) -> oracledb::Result<()>
 pub fn oracledb::Connection::prepare_sessionless_suspend_on_success(&mut self) -> oracledb::Result<()>
+pub fn oracledb::Connection::protocol_version(&self) -> u16
 pub async fn oracledb::Connection::query<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::Rows<'_>>
 pub async fn oracledb::Connection::query_all<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<alloc::vec::Vec<oracledb::Row>>
 pub async fn oracledb::Connection::query_one<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::Row>
@@ -354,6 +355,7 @@ pub fn oracledb::Connection::session_id(&self) -> u32
 pub async fn oracledb::Connection::subscribe_register(&mut self, &asupersync::cx::cx::Cx, u32, core::option::Option<&str>, u32, u32, u32, u8, u32, u8) -> oracledb::Result<oracledb_protocol::thin::subscr::SubscribeResult>
 pub async fn oracledb::Connection::subscribe_unregister(&mut self, &asupersync::cx::cx::Cx, u64, &[u8], u32, core::option::Option<&str>, u32, u32, u32, u8, u32, u8) -> oracledb::Result<()>
 pub async fn oracledb::Connection::supplement_json_column_metadata(&mut self, &asupersync::cx::cx::Cx, &mut [oracledb_protocol::thin::types::ColumnMetadata], core::option::Option<u32>) -> oracledb::Result<()>
+pub fn oracledb::Connection::supports_fast_auth(&self) -> bool
 pub fn oracledb::Connection::supports_oob(&self) -> bool
 pub fn oracledb::Connection::supports_pipelining(&self) -> bool
 pub async fn oracledb::Connection::suspend_sessionless_transaction(&mut self, &asupersync::cx::cx::Cx) -> oracledb::Result<()>
@@ -799,6 +801,21 @@ impl core::fmt::Display for oracledb::TokenSourceError
 pub fn oracledb::TokenSourceError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for oracledb::TokenSourceError
 impl core::marker::StructuralPartialEq for oracledb::TokenSourceError
+pub enum oracledb::WalletFile
+pub oracledb::WalletFile::P12
+pub oracledb::WalletFile::Pem
+pub oracledb::WalletFile::Sso
+impl oracledb::WalletFile
+pub fn oracledb::WalletFile::file_name(self) -> &'static str
+impl core::clone::Clone for oracledb::WalletFile
+pub fn oracledb::WalletFile::clone(&self) -> oracledb::WalletFile
+impl core::cmp::Eq for oracledb::WalletFile
+impl core::cmp::PartialEq for oracledb::WalletFile
+pub fn oracledb::WalletFile::eq(&self, &oracledb::WalletFile) -> bool
+impl core::fmt::Debug for oracledb::WalletFile
+pub fn oracledb::WalletFile::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb::WalletFile
+impl core::marker::StructuralPartialEq for oracledb::WalletFile
 pub struct oracledb::AccessToken(_)
 impl oracledb::AccessToken
 pub fn oracledb::AccessToken::new(impl core::convert::Into<alloc::string::String>) -> Self
@@ -1084,6 +1101,7 @@ pub async fn oracledb::Connection::notify_register(&mut self, &asupersync::cx::c
 pub async fn oracledb::Connection::ping(&mut self, &asupersync::cx::cx::Cx) -> oracledb::Result<()>
 pub async fn oracledb::Connection::ping_with_timeout(&mut self, &asupersync::cx::cx::Cx, u32) -> oracledb::Result<()>
 pub fn oracledb::Connection::prepare_sessionless_suspend_on_success(&mut self) -> oracledb::Result<()>
+pub fn oracledb::Connection::protocol_version(&self) -> u16
 pub async fn oracledb::Connection::query<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::Rows<'_>>
 pub async fn oracledb::Connection::query_all<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<alloc::vec::Vec<oracledb::Row>>
 pub async fn oracledb::Connection::query_one<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::Row>
@@ -1108,6 +1126,7 @@ pub fn oracledb::Connection::session_id(&self) -> u32
 pub async fn oracledb::Connection::subscribe_register(&mut self, &asupersync::cx::cx::Cx, u32, core::option::Option<&str>, u32, u32, u32, u8, u32, u8) -> oracledb::Result<oracledb_protocol::thin::subscr::SubscribeResult>
 pub async fn oracledb::Connection::subscribe_unregister(&mut self, &asupersync::cx::cx::Cx, u64, &[u8], u32, core::option::Option<&str>, u32, u32, u32, u8, u32, u8) -> oracledb::Result<()>
 pub async fn oracledb::Connection::supplement_json_column_metadata(&mut self, &asupersync::cx::cx::Cx, &mut [oracledb_protocol::thin::types::ColumnMetadata], core::option::Option<u32>) -> oracledb::Result<()>
+pub fn oracledb::Connection::supports_fast_auth(&self) -> bool
 pub fn oracledb::Connection::supports_oob(&self) -> bool
 pub fn oracledb::Connection::supports_pipelining(&self) -> bool
 pub async fn oracledb::Connection::suspend_sessionless_transaction(&mut self, &asupersync::cx::cx::Cx) -> oracledb::Result<()>
@@ -1444,6 +1463,20 @@ impl core::fmt::Display for oracledb::UnsupportedAuthMode
 pub fn oracledb::UnsupportedAuthMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Copy for oracledb::UnsupportedAuthMode
 impl core::marker::StructuralPartialEq for oracledb::UnsupportedAuthMode
+pub struct oracledb::WalletResolution
+pub oracledb::WalletResolution::attempted_primary: core::option::Option<oracledb::WalletFile>
+pub oracledb::WalletResolution::chosen: oracledb::WalletFile
+pub oracledb::WalletResolution::fallthrough_eligible: bool
+pub oracledb::WalletResolution::fell_through: bool
+impl core::clone::Clone for oracledb::WalletResolution
+pub fn oracledb::WalletResolution::clone(&self) -> oracledb::WalletResolution
+impl core::cmp::Eq for oracledb::WalletResolution
+impl core::cmp::PartialEq for oracledb::WalletResolution
+pub fn oracledb::WalletResolution::eq(&self, &oracledb::WalletResolution) -> bool
+impl core::fmt::Debug for oracledb::WalletResolution
+pub fn oracledb::WalletResolution::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oracledb::WalletResolution
+impl core::marker::StructuralPartialEq for oracledb::WalletResolution
 pub const oracledb::VERSION: &str
 pub trait oracledb::ColumnIndex: oracledb::column_index_private::Sealed
 impl oracledb::ColumnIndex for &str
@@ -1574,6 +1607,7 @@ pub fn oracledb::fetch_profile_arm(bool)
 pub fn oracledb::fetch_profile_read_decode_ns() -> (u64, u64)
 pub fn oracledb::fetch_profile_reset()
 pub fn oracledb::render_caret(&str, usize, &str) -> alloc::string::String
+pub fn oracledb::resolve_wallet(&std::path::Path, core::option::Option<&str>) -> core::result::Result<oracledb::WalletResolution, oracledb::Error>
 pub type oracledb::BoxFuture<'a, T> = core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = T> + core::marker::Send + 'a)>>
 pub type oracledb::Cursor = oracledb_protocol::thin::types::CursorValue
 pub type oracledb::Result<T> = core::result::Result<T, oracledb::Error>
