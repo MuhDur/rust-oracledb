@@ -3432,8 +3432,7 @@ impl Connection {
         let capabilities = self.capabilities;
         let limits = self.protocol_limits;
         let response = self
-            .core
-            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+            .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 response_complete(&parse_subscribe_response_with_limits(
                     bytes,
                     capabilities,
@@ -3496,8 +3495,7 @@ impl Connection {
         let capabilities = self.capabilities;
         let limits = self.protocol_limits;
         let response = self
-            .core
-            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+            .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 response_complete(&parse_subscribe_response_with_limits(
                     bytes,
                     capabilities,
@@ -12195,6 +12193,93 @@ mod tests {
         payload.into_bytes()
     }
 
+    fn synthetic_subscribe_register_response_payload() -> Vec<u8> {
+        // Real thin CQN register response captured by the protocol golden at
+        // `thin::subscr::tests::subscribe_response_decodes_registration_and_client_id`.
+        let payload = vec![
+            0x08, 0x01, 0x01, 0x00, 0x02, 0x01, 0x2E, 0x01, 0x01, 0x02, 0x01, 0x2E, 0x00, 0x00,
+            0x01, 0x01, 0x01, 0x36, 0x36, 0x28, 0x41, 0x44, 0x44, 0x52, 0x45, 0x53, 0x53, 0x3D,
+            0x28, 0x50, 0x52, 0x4F, 0x54, 0x4F, 0x43, 0x4F, 0x4C, 0x3D, 0x54, 0x43, 0x50, 0x29,
+            0x28, 0x48, 0x4F, 0x53, 0x54, 0x3D, 0x32, 0x39, 0x30, 0x61, 0x63, 0x30, 0x33, 0x30,
+            0x30, 0x33, 0x38, 0x37, 0x29, 0x28, 0x50, 0x4F, 0x52, 0x54, 0x3D, 0x31, 0x35, 0x32,
+            0x31, 0x29, 0x29, 0x01, 0x0A, 0x0A, 0x4F, 0x43, 0x49, 0x3A, 0x45, 0x50, 0x3A, 0x33,
+            0x30, 0x31, 0x09, 0x01, 0x01, 0x02, 0xDD, 0x48, 0x1D,
+        ];
+        let decoded = parse_subscribe_response_with_limits(
+            &payload,
+            ClientCapabilities::default(),
+            ProtocolLimits::DEFAULT,
+        )
+        .expect("captured CQN register response decodes");
+        assert_eq!(decoded.registration_id, 302);
+        assert_eq!(decoded.client_id.as_deref(), Some(&b"OCI:EP:301"[..]));
+        payload
+    }
+
+    fn serve_dropped_cqn_response_recovery(
+        listener: TcpListener,
+        expected_request: Vec<u8>,
+        stranded_response: Vec<u8>,
+        request_seen: std::sync::mpsc::Sender<()>,
+    ) -> std::io::Result<bool> {
+        const TRAILING_CANCEL_ERROR: &[u8] = &[0x04, 0x01, 0x0d];
+
+        use std::io::Write as _;
+        let (mut socket, _) = listener.accept()?;
+        socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+        assert_eq!(
+            read_one_wire_data_payload(&mut socket),
+            expected_request,
+            "CQN request must preserve its exact FUNC 125 payload"
+        );
+        request_seen
+            .send(())
+            .expect("client waits for CQN request proof");
+
+        let (next_packet_type, next_body) = read_one_wire_packet_bytes(&mut socket);
+        if next_packet_type == TNS_PACKET_TYPE_MARKER {
+            assert_eq!(
+                next_body,
+                vec![1, 0, TNS_MARKER_TYPE_BREAK],
+                "reuse must BREAK the stranded CQN response before its request"
+            );
+            socket.write_all(&data_packet(&stranded_response, true))?;
+            socket.write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))?;
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_RESET,
+                "CQN response drain must complete the RESET handshake"
+            );
+            socket.write_all(&marker_packet(TNS_MARKER_TYPE_RESET))?;
+            socket.write_all(&data_packet(TRAILING_CANCEL_ERROR, true))?;
+
+            assert_eq!(
+                read_one_wire_packet(&mut socket),
+                TNS_PACKET_TYPE_DATA,
+                "fresh execute follows the completed CQN drain"
+            );
+            socket.write_all(&data_packet(
+                &synthetic_pipeline_execute_response_payload(),
+                true,
+            ))?;
+            socket.flush()?;
+            Ok(true)
+        } else {
+            assert_eq!(
+                next_packet_type, TNS_PACKET_TYPE_DATA,
+                "without recovery the next operation is sent directly"
+            );
+            socket.write_all(&data_packet(&stranded_response, true))?;
+            socket.write_all(&data_packet(
+                &synthetic_pipeline_execute_response_payload(),
+                true,
+            ))?;
+            socket.flush()?;
+            Ok(false)
+        }
+    }
+
     fn synthetic_aq_enqueue_request() -> (AqQueueDesc, AqMsgProps, AqEnqOptions) {
         let queue = AqQueueDesc::new(
             "AQ_QUEUE".to_owned(),
@@ -15718,6 +15803,377 @@ mod tests {
                 .join()
                 .expect("pre-cancel password-change server joins")?,
             "pre-cancelled PASSWORD CHANGE must not write any wire bytes"
+        );
+        assert_eq!(phase, SessionRecoveryPhase::Ready);
+        assert_eq!(sequence_after, sequence_before);
+        Ok(())
+    }
+
+    #[test]
+    fn dropped_subscribe_register_mid_response_drains_before_connection_reuse() -> Result<()> {
+        const FRESH_SQL: &str = "select value from subscribe_register_reuse_fixture";
+
+        let expected_request = build_subscribe_payload_with_seq(
+            1,
+            TNS_SUBSCR_OP_REGISTER,
+            Some("test_user"),
+            None,
+            oracledb_protocol::thin::TNS_SUBSCR_NAMESPACE_DBCHANGE,
+            None,
+            oracledb_protocol::thin::SUBSCR_QOS_ROWIDS,
+            0,
+            10,
+            0,
+            0,
+            0,
+            0,
+            ClientCapabilities::default().ttc_field_version,
+        )?;
+        let stranded_response = synthetic_subscribe_register_response_payload();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            serve_dropped_cqn_response_recovery(
+                listener,
+                expected_request,
+                stranded_response,
+                request_seen_tx,
+            )
+        });
+
+        let runtime = build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+
+            {
+                let mut subscribe = pin!(connection.subscribe_register(
+                    &cx,
+                    oracledb_protocol::thin::TNS_SUBSCR_NAMESPACE_DBCHANGE,
+                    None,
+                    oracledb_protocol::thin::SUBSCR_QOS_ROWIDS,
+                    0,
+                    10,
+                    0,
+                    0,
+                    0,
+                ));
+                let first = poll_fn(|task_cx| Poll::Ready(subscribe.as_mut().poll(task_cx))).await;
+                assert!(
+                    matches!(first, Poll::Pending),
+                    "CQN register must be waiting for its response before drop"
+                );
+                request_seen_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("server observed CQN register request");
+            }
+
+            let phase_after_drop = connection.core.recovery.phase();
+            let reused = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await;
+            Ok::<_, Error>((phase_after_drop, reused, connection.core.recovery.phase()))
+        });
+
+        let recovered = server.join().expect("CQN register server joins")?;
+        let (phase_after_drop, reused, final_phase) = outcome?;
+        let reused = reused.expect("fresh execute must not decode the stranded CQN register");
+        assert_eq!(
+            reused,
+            sequential_op_decode(&synthetic_pipeline_execute_response_payload()),
+            "reuse must decode its own response byte-identically"
+        );
+        assert!(recovered, "reuse must take the BREAK/drain branch");
+        assert_eq!(phase_after_drop, SessionRecoveryPhase::BreakSent);
+        assert_eq!(final_phase, SessionRecoveryPhase::Ready);
+        Ok(())
+    }
+
+    #[test]
+    fn dropped_subscribe_unregister_mid_response_drains_before_connection_reuse() -> Result<()> {
+        const FRESH_SQL: &str = "select value from subscribe_unregister_reuse_fixture";
+        const CLIENT_ID: &[u8] = b"OCI:EP:301";
+
+        let expected_request = build_subscribe_payload_with_seq(
+            1,
+            TNS_SUBSCR_OP_UNREGISTER,
+            Some("test_user"),
+            Some(CLIENT_ID),
+            oracledb_protocol::thin::TNS_SUBSCR_NAMESPACE_DBCHANGE,
+            None,
+            oracledb_protocol::thin::SUBSCR_QOS_ROWIDS,
+            0,
+            10,
+            0,
+            0,
+            0,
+            302,
+            ClientCapabilities::default().ttc_field_version,
+        )?;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            serve_dropped_cqn_response_recovery(
+                listener,
+                expected_request,
+                vec![TNS_MSG_TYPE_END_OF_RESPONSE],
+                request_seen_tx,
+            )
+        });
+
+        let runtime = build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+
+            {
+                let mut unsubscribe = pin!(connection.subscribe_unregister(
+                    &cx,
+                    302,
+                    CLIENT_ID,
+                    oracledb_protocol::thin::TNS_SUBSCR_NAMESPACE_DBCHANGE,
+                    None,
+                    oracledb_protocol::thin::SUBSCR_QOS_ROWIDS,
+                    0,
+                    10,
+                    0,
+                    0,
+                    0,
+                ));
+                let first =
+                    poll_fn(|task_cx| Poll::Ready(unsubscribe.as_mut().poll(task_cx))).await;
+                assert!(
+                    matches!(first, Poll::Pending),
+                    "CQN unregister must be waiting for its response before drop"
+                );
+                request_seen_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("server observed CQN unregister request");
+            }
+
+            let phase_after_drop = connection.core.recovery.phase();
+            let reused = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await;
+            Ok::<_, Error>((phase_after_drop, reused, connection.core.recovery.phase()))
+        });
+
+        let recovered = server.join().expect("CQN unregister server joins")?;
+        let (phase_after_drop, reused, final_phase) = outcome?;
+        let reused = reused.expect("fresh execute must not decode the stranded CQN unregister");
+        assert_eq!(
+            reused,
+            sequential_op_decode(&synthetic_pipeline_execute_response_payload()),
+            "reuse must decode its own response byte-identically"
+        );
+        assert!(recovered, "reuse must take the BREAK/drain branch");
+        assert_eq!(phase_after_drop, SessionRecoveryPhase::BreakSent);
+        assert_eq!(final_phase, SessionRecoveryPhase::Ready);
+        Ok(())
+    }
+
+    #[test]
+    fn successful_subscribe_round_trips_disarm_recovery_before_reuse() -> Result<()> {
+        const CLIENT_ID: &[u8] = b"OCI:EP:301";
+        const FRESH_SQL: &str = "select value from subscribe_success_fixture";
+
+        let register_request = build_subscribe_payload_with_seq(
+            1,
+            TNS_SUBSCR_OP_REGISTER,
+            Some("test_user"),
+            None,
+            oracledb_protocol::thin::TNS_SUBSCR_NAMESPACE_DBCHANGE,
+            None,
+            oracledb_protocol::thin::SUBSCR_QOS_ROWIDS,
+            0,
+            10,
+            0,
+            0,
+            0,
+            0,
+            ClientCapabilities::default().ttc_field_version,
+        )?;
+        let unregister_request = build_subscribe_payload_with_seq(
+            2,
+            TNS_SUBSCR_OP_UNREGISTER,
+            Some("test_user"),
+            Some(CLIENT_ID),
+            oracledb_protocol::thin::TNS_SUBSCR_NAMESPACE_DBCHANGE,
+            None,
+            oracledb_protocol::thin::SUBSCR_QOS_ROWIDS,
+            0,
+            10,
+            0,
+            0,
+            0,
+            302,
+            ClientCapabilities::default().ttc_field_version,
+        )?;
+        let register_response = synthetic_subscribe_register_response_payload();
+        let execute_response = synthetic_pipeline_execute_response_payload();
+        let server_execute_response = execute_response.clone();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+
+            assert_eq!(
+                read_one_wire_data_payload(&mut socket),
+                register_request,
+                "successful CQN register request remains byte-identical"
+            );
+            socket.write_all(&data_packet(&register_response, true))?;
+            socket.flush()?;
+
+            assert_eq!(
+                read_one_wire_data_payload(&mut socket),
+                unregister_request,
+                "successful CQN unregister must follow directly without a spurious BREAK"
+            );
+            socket.write_all(&data_packet(&[TNS_MSG_TYPE_END_OF_RESPONSE], true))?;
+            socket.flush()?;
+
+            assert_eq!(
+                read_one_wire_packet(&mut socket),
+                TNS_PACKET_TYPE_DATA,
+                "fresh execute must follow both completed CQN responses directly"
+            );
+            socket.write_all(&data_packet(&server_execute_response, true))?;
+            socket.flush()
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            connection.supports_end_of_response = false;
+
+            let registered = connection
+                .subscribe_register(
+                    &cx,
+                    oracledb_protocol::thin::TNS_SUBSCR_NAMESPACE_DBCHANGE,
+                    None,
+                    oracledb_protocol::thin::SUBSCR_QOS_ROWIDS,
+                    0,
+                    10,
+                    0,
+                    0,
+                    0,
+                )
+                .await?;
+            assert_eq!(registered.registration_id, 302);
+            assert_eq!(registered.client_id.as_deref(), Some(CLIENT_ID));
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready,
+                "completed classic CQN register response must disarm its guard"
+            );
+
+            connection
+                .subscribe_unregister(
+                    &cx,
+                    registered.registration_id,
+                    CLIENT_ID,
+                    oracledb_protocol::thin::TNS_SUBSCR_NAMESPACE_DBCHANGE,
+                    None,
+                    oracledb_protocol::thin::SUBSCR_QOS_ROWIDS,
+                    0,
+                    10,
+                    0,
+                    0,
+                    0,
+                )
+                .await?;
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready,
+                "completed classic CQN unregister response must disarm its guard"
+            );
+
+            let reused = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await?;
+            assert_eq!(reused, sequential_op_decode(&execute_response));
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        server.join().expect("successful CQN server joins")?;
+        Ok(())
+    }
+
+    #[test]
+    fn precancelled_subscribe_register_writes_nothing_and_keeps_wire_ready() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<bool> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_millis(300)))?;
+            let mut byte = [0u8; 1];
+            match socket.read(&mut byte) {
+                Ok(0) => Ok(false),
+                Ok(_) => Ok(true),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    Ok(false)
+                }
+                Err(err) => Err(err),
+            }
+        });
+
+        let runtime = build_io_runtime()?;
+        let (phase, sequence_before, sequence_after) = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            let sequence_before = connection.ttc_seq_num;
+            cx.cancel_fast(CancelKind::User);
+
+            let err = connection
+                .subscribe_register(
+                    &cx,
+                    oracledb_protocol::thin::TNS_SUBSCR_NAMESPACE_DBCHANGE,
+                    None,
+                    oracledb_protocol::thin::SUBSCR_QOS_ROWIDS,
+                    0,
+                    10,
+                    0,
+                    0,
+                    0,
+                )
+                .await
+                .expect_err("pending cancellation stops before CQN REGISTER");
+            assert!(matches!(err, Error::Cancelled), "{err:?}");
+            Ok::<_, Error>((
+                connection.core.recovery.phase(),
+                sequence_before,
+                connection.ttc_seq_num,
+            ))
+        })?;
+
+        assert!(
+            !server
+                .join()
+                .expect("pre-cancel CQN register server joins")?,
+            "pre-cancelled CQN REGISTER must not write any wire bytes"
         );
         assert_eq!(phase, SessionRecoveryPhase::Ready);
         assert_eq!(sequence_after, sequence_before);
