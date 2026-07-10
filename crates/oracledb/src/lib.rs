@@ -5724,8 +5724,7 @@ impl Connection {
         let capabilities = self.capabilities;
         let limits = self.protocol_limits;
         let response = self
-            .core
-            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+            .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 response_complete(&parse_define_fetch_response_with_context_and_limits(
                     bytes,
                     capabilities,
@@ -15111,6 +15110,248 @@ mod tests {
         })?;
 
         server.join().expect("server thread joins");
+        Ok(())
+    }
+
+    #[test]
+    fn dropped_define_fetch_mid_read_drains_before_connection_reuse() -> Result<()> {
+        const CURSOR_ID: u32 = 42;
+        const STRANDED_BODY: &[u8] = b"stranded define-fetch response";
+        const TRAILING_CANCEL_ERROR: &[u8] = &[0x04, 0x01, 0x0d];
+        const FRESH_SQL: &str = "select value from define_fetch_reuse_fixture";
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let (define_seen_tx, define_seen_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || -> std::io::Result<bool> {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+            assert_eq!(
+                read_one_wire_packet(&mut socket),
+                TNS_PACKET_TYPE_DATA,
+                "define-fetch must send a DATA request"
+            );
+            define_seen_tx
+                .send(())
+                .expect("client waits for define-fetch request proof");
+
+            let (next_packet_type, next_body) = read_one_wire_packet_bytes(&mut socket);
+            if next_packet_type == TNS_PACKET_TYPE_MARKER {
+                assert_eq!(
+                    next_body,
+                    vec![1, 0, TNS_MARKER_TYPE_BREAK],
+                    "reuse must BREAK the stranded define-fetch before its request"
+                );
+                socket.write_all(&data_packet(STRANDED_BODY, true))?;
+                socket.write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))?;
+                assert_eq!(
+                    read_marker_type(&mut socket),
+                    TNS_MARKER_TYPE_RESET,
+                    "define-fetch drain must complete the RESET handshake"
+                );
+                socket.write_all(&marker_packet(TNS_MARKER_TYPE_RESET))?;
+                socket.write_all(&data_packet(TRAILING_CANCEL_ERROR, true))?;
+
+                assert_eq!(
+                    read_one_wire_packet(&mut socket),
+                    TNS_PACKET_TYPE_DATA,
+                    "fresh execute follows the completed drain"
+                );
+                socket.write_all(&data_packet(
+                    &synthetic_pipeline_execute_response_payload(),
+                    true,
+                ))?;
+                socket.flush()?;
+                Ok(true)
+            } else {
+                assert_eq!(
+                    next_packet_type, TNS_PACKET_TYPE_DATA,
+                    "without recovery the next operation is sent directly"
+                );
+                // Reproduce stale-wire poisoning: the abandoned define-fetch
+                // response arrives before the fresh execute response.
+                socket.write_all(&data_packet(STRANDED_BODY, true))?;
+                socket.write_all(&data_packet(
+                    &synthetic_pipeline_execute_response_payload(),
+                    true,
+                ))?;
+                socket.flush()?;
+                Ok(false)
+            }
+        });
+
+        let runtime = build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            let define_columns = vec![ColumnMetadata::new(
+                "DOC",
+                oracledb_protocol::thin::ORA_TYPE_NUM_JSON,
+            )];
+
+            {
+                let mut define = pin!(connection.define_and_fetch_rows_with_columns(
+                    &cx,
+                    CURSOR_ID,
+                    10,
+                    &define_columns,
+                    None,
+                ));
+                let first = poll_fn(|task_cx| Poll::Ready(define.as_mut().poll(task_cx))).await;
+                assert!(
+                    matches!(first, Poll::Pending),
+                    "define-fetch must be waiting for its response before drop"
+                );
+                define_seen_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("server observed define-fetch request");
+            }
+
+            let reused = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await;
+            Ok::<_, Error>((reused, connection.core.recovery.phase()))
+        });
+
+        let recovered = server.join().expect("define-fetch server joins")?;
+        let (reused, phase) = outcome?;
+        let reused = reused.expect("fresh execute must not decode the stranded define-fetch");
+        assert_eq!(
+            reused,
+            sequential_op_decode(&synthetic_pipeline_execute_response_payload()),
+            "reuse must decode its own response byte-identically"
+        );
+        assert!(recovered, "reuse must take the BREAK/drain branch");
+        assert_eq!(phase, SessionRecoveryPhase::Ready);
+        Ok(())
+    }
+
+    #[test]
+    fn precancelled_define_fetch_writes_nothing_and_keeps_wire_ready() -> Result<()> {
+        const CURSOR_ID: u32 = 42;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<bool> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_millis(300)))?;
+            let mut byte = [0u8; 1];
+            match socket.read(&mut byte) {
+                Ok(0) => Ok(false),
+                Ok(_) => Ok(true),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    Ok(false)
+                }
+                Err(err) => Err(err),
+            }
+        });
+
+        let runtime = build_io_runtime()?;
+        let (phase, sequence_before, sequence_after) = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            let sequence_before = connection.ttc_seq_num;
+            cx.cancel_fast(CancelKind::User);
+
+            let err = connection
+                .define_and_fetch_rows_with_columns(
+                    &cx,
+                    CURSOR_ID,
+                    10,
+                    &[ColumnMetadata::new(
+                        "DOC",
+                        oracledb_protocol::thin::ORA_TYPE_NUM_JSON,
+                    )],
+                    None,
+                )
+                .await
+                .expect_err("pending cancellation stops before DEFINE-FETCH");
+            assert!(matches!(err, Error::Cancelled), "{err:?}");
+            Ok::<_, Error>((
+                connection.core.recovery.phase(),
+                sequence_before,
+                connection.ttc_seq_num,
+            ))
+        })?;
+
+        assert!(
+            !server.join().expect("pre-cancel server joins")?,
+            "pre-cancelled DEFINE-FETCH must not write any wire bytes"
+        );
+        assert_eq!(phase, SessionRecoveryPhase::Ready);
+        assert_eq!(sequence_after, sequence_before);
+        Ok(())
+    }
+
+    #[test]
+    fn successful_define_fetch_disarms_recovery_before_reuse() -> Result<()> {
+        const CURSOR_ID: u32 = 42;
+        const FRESH_SQL: &str = "select value from define_fetch_success_fixture";
+        let response = synthetic_pipeline_execute_response_payload();
+        let server_response = response.clone();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            assert_eq!(read_one_wire_packet(&mut socket), TNS_PACKET_TYPE_DATA);
+            socket.write_all(&data_packet(&server_response, true))?;
+            socket.flush()?;
+
+            assert_eq!(
+                read_one_wire_packet(&mut socket),
+                TNS_PACKET_TYPE_DATA,
+                "a successful DEFINE-FETCH must not cause a spurious BREAK on reuse"
+            );
+            socket.write_all(&data_packet(&server_response, true))?;
+            socket.flush()
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            let columns = vec![ColumnMetadata::new(
+                "VALUE",
+                oracledb_protocol::thin::ORA_TYPE_NUM_NUMBER,
+            )];
+
+            let defined = connection
+                .define_and_fetch_rows_with_columns(&cx, CURSOR_ID, 10, &columns, None)
+                .await?;
+            assert_eq!(defined.rows.len(), 1);
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready
+            );
+
+            let reused = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await?;
+            assert_eq!(reused, sequential_op_decode(&response));
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        server
+            .join()
+            .expect("successful define-fetch server joins")?;
         Ok(())
     }
 
