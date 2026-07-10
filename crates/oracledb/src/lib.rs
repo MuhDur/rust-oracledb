@@ -6097,8 +6097,7 @@ impl Connection {
         let capabilities = self.capabilities;
         let limits = self.protocol_limits;
         let response = self
-            .core
-            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+            .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 response_complete(&parse_aq_enq_response_with_limits(
                     bytes,
                     capabilities,
@@ -6141,8 +6140,7 @@ impl Connection {
         let capabilities = self.capabilities;
         let limits = self.protocol_limits;
         let response = self
-            .core
-            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+            .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 response_complete(&parse_aq_deq_response_with_limits(
                     bytes,
                     capabilities,
@@ -6191,8 +6189,7 @@ impl Connection {
         let capabilities = self.capabilities;
         let limits = self.protocol_limits;
         let response = self
-            .core
-            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+            .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 response_complete(&parse_aq_array_response_with_limits(
                     bytes,
                     capabilities,
@@ -6246,8 +6243,7 @@ impl Connection {
         let capabilities = self.capabilities;
         let limits = self.protocol_limits;
         let response = self
-            .core
-            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+            .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 response_complete(&parse_aq_array_response_with_limits(
                     bytes,
                     capabilities,
@@ -12191,6 +12187,30 @@ mod tests {
         payload.into_bytes()
     }
 
+    fn synthetic_aq_enqueue_response_payload(msgid: &[u8; 16]) -> Vec<u8> {
+        let mut payload = oracledb_protocol::wire::TtcWriter::new();
+        payload.write_u8(oracledb_protocol::thin::TNS_MSG_TYPE_PARAMETER);
+        payload.write_raw(msgid);
+        payload.write_ub2(0);
+        payload.write_u8(TNS_MSG_TYPE_END_OF_RESPONSE);
+        payload.into_bytes()
+    }
+
+    fn synthetic_aq_enqueue_request() -> (AqQueueDesc, AqMsgProps, AqEnqOptions) {
+        let queue = AqQueueDesc::new(
+            "AQ_QUEUE".to_owned(),
+            oracledb_protocol::thin::aq::AqPayloadKind::Raw,
+            None,
+        );
+        let props = AqMsgProps {
+            payload: Some(oracledb_protocol::thin::aq::AqPayloadValue::Raw(
+                b"payload".to_vec(),
+            )),
+            ..AqMsgProps::default()
+        };
+        (queue, props, AqEnqOptions::default())
+    }
+
     /// The committed single-row execute fixture ends with ORA-01403, which
     /// marks the cursor exhausted. Rewrite only that terminal error number and
     /// omit its message to model the same decoded row/metadata with an open
@@ -15561,6 +15581,231 @@ mod tests {
         assert!(recovered, "reuse must take the BREAK/drain branch");
         assert_eq!(phase_after_drop, SessionRecoveryPhase::BreakSent);
         assert_eq!(final_phase, SessionRecoveryPhase::Ready);
+        Ok(())
+    }
+
+    #[test]
+    fn dropped_aq_enqueue_mid_response_drains_before_connection_reuse() -> Result<()> {
+        const TRAILING_CANCEL_ERROR: &[u8] = &[0x04, 0x01, 0x0d];
+        const FRESH_SQL: &str = "select value from aq_enqueue_reuse_fixture";
+
+        let msgid = [0x2a; 16];
+        let stranded_response = synthetic_aq_enqueue_response_payload(&msgid);
+        let server_stranded_response = stranded_response.clone();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let (aq_seen_tx, aq_seen_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || -> std::io::Result<bool> {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+            assert_eq!(
+                read_one_wire_packet(&mut socket),
+                TNS_PACKET_TYPE_DATA,
+                "AQ enqueue must send a DATA request"
+            );
+            aq_seen_tx
+                .send(())
+                .expect("client waits for AQ enqueue request proof");
+
+            let (next_packet_type, next_body) = read_one_wire_packet_bytes(&mut socket);
+            if next_packet_type == TNS_PACKET_TYPE_MARKER {
+                assert_eq!(
+                    next_body,
+                    vec![1, 0, TNS_MARKER_TYPE_BREAK],
+                    "reuse must BREAK the stranded AQ enqueue before its request"
+                );
+                socket.write_all(&data_packet(&server_stranded_response, true))?;
+                socket.write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))?;
+                assert_eq!(
+                    read_marker_type(&mut socket),
+                    TNS_MARKER_TYPE_RESET,
+                    "AQ enqueue drain must complete the RESET handshake"
+                );
+                socket.write_all(&marker_packet(TNS_MARKER_TYPE_RESET))?;
+                socket.write_all(&data_packet(TRAILING_CANCEL_ERROR, true))?;
+
+                assert_eq!(
+                    read_one_wire_packet(&mut socket),
+                    TNS_PACKET_TYPE_DATA,
+                    "fresh execute follows the completed drain"
+                );
+                socket.write_all(&data_packet(
+                    &synthetic_pipeline_execute_response_payload(),
+                    true,
+                ))?;
+                socket.flush()?;
+                Ok(true)
+            } else {
+                assert_eq!(
+                    next_packet_type, TNS_PACKET_TYPE_DATA,
+                    "without recovery the next operation is sent directly"
+                );
+                socket.write_all(&data_packet(&server_stranded_response, true))?;
+                socket.write_all(&data_packet(
+                    &synthetic_pipeline_execute_response_payload(),
+                    true,
+                ))?;
+                socket.flush()?;
+                Ok(false)
+            }
+        });
+
+        let runtime = build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            let (queue, props, options) = synthetic_aq_enqueue_request();
+
+            {
+                let mut enqueue = pin!(connection.aq_enq_one(&cx, &queue, &props, &options));
+                let first = poll_fn(|task_cx| Poll::Ready(enqueue.as_mut().poll(task_cx))).await;
+                assert!(
+                    matches!(first, Poll::Pending),
+                    "AQ enqueue must be waiting for its response before drop"
+                );
+                aq_seen_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("server observed AQ enqueue request");
+            }
+
+            let phase_after_drop = connection.core.recovery.phase();
+            let reused = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await;
+            Ok::<_, Error>((phase_after_drop, reused, connection.core.recovery.phase()))
+        });
+
+        let recovered = server.join().expect("AQ enqueue server joins")?;
+        let (phase_after_drop, reused, final_phase) = outcome?;
+        let reused = reused.expect("fresh execute must not decode the stranded AQ response");
+        assert_eq!(
+            reused,
+            sequential_op_decode(&synthetic_pipeline_execute_response_payload()),
+            "reuse must decode its own response byte-identically"
+        );
+        assert!(recovered, "reuse must take the BREAK/drain branch");
+        assert_eq!(phase_after_drop, SessionRecoveryPhase::BreakSent);
+        assert_eq!(final_phase, SessionRecoveryPhase::Ready);
+        Ok(())
+    }
+
+    #[test]
+    fn successful_aq_enqueue_disarms_recovery_before_reuse() -> Result<()> {
+        const FRESH_SQL: &str = "select value from aq_enqueue_success_fixture";
+        let msgid = [0x2a; 16];
+        let aq_response = synthetic_aq_enqueue_response_payload(&msgid);
+        let execute_response = synthetic_pipeline_execute_response_payload();
+        let server_execute_response = execute_response.clone();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+
+            assert_eq!(
+                read_one_wire_packet(&mut socket),
+                TNS_PACKET_TYPE_DATA,
+                "AQ enqueue must send a DATA request"
+            );
+            socket.write_all(&data_packet(&aq_response, true))?;
+            socket.flush()?;
+
+            assert_eq!(
+                read_one_wire_packet(&mut socket),
+                TNS_PACKET_TYPE_DATA,
+                "a successful AQ enqueue must not cause a spurious BREAK on reuse"
+            );
+            socket.write_all(&data_packet(&server_execute_response, true))?;
+            socket.flush()
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            let (queue, props, options) = synthetic_aq_enqueue_request();
+
+            let assigned = connection.aq_enq_one(&cx, &queue, &props, &options).await?;
+            assert_eq!(assigned.as_deref(), Some(&msgid[..]));
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready,
+                "a completed AQ response must disarm its guard"
+            );
+
+            let reused = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await?;
+            assert_eq!(reused, sequential_op_decode(&execute_response));
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        server.join().expect("successful AQ enqueue server joins")?;
+        Ok(())
+    }
+
+    #[test]
+    fn precancelled_aq_enqueue_writes_nothing_and_keeps_wire_ready() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<bool> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_millis(300)))?;
+            let mut byte = [0u8; 1];
+            match socket.read(&mut byte) {
+                Ok(0) => Ok(false),
+                Ok(_) => Ok(true),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    Ok(false)
+                }
+                Err(err) => Err(err),
+            }
+        });
+
+        let runtime = build_io_runtime()?;
+        let (phase, sequence_before, sequence_after) = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            let sequence_before = connection.ttc_seq_num;
+            let (queue, props, options) = synthetic_aq_enqueue_request();
+            cx.cancel_fast(CancelKind::User);
+
+            let err = connection
+                .aq_enq_one(&cx, &queue, &props, &options)
+                .await
+                .expect_err("pending cancellation stops before AQ ENQUEUE");
+            assert!(matches!(err, Error::Cancelled), "{err:?}");
+            Ok::<_, Error>((
+                connection.core.recovery.phase(),
+                sequence_before,
+                connection.ttc_seq_num,
+            ))
+        })?;
+
+        assert!(
+            !server.join().expect("pre-cancel AQ enqueue server joins")?,
+            "pre-cancelled AQ ENQUEUE must not write any wire bytes"
+        );
+        assert_eq!(phase, SessionRecoveryPhase::Ready);
+        assert_eq!(sequence_after, sequence_before);
         Ok(())
     }
 
