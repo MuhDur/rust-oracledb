@@ -375,8 +375,8 @@ pub use cursor_logic::{
     bind_rows_need_iterative_plsql, ExecutemanyManager, ExecutemanyManagerError,
 };
 
-use request::QueryDeadline;
 pub use request::{Batch, BatchRows, Execute, Query, Registration, Scroll};
+use request::{DeadlineExpiry, QueryDeadline};
 pub use row_stream::OwnedRowStream;
 pub use rows::{
     BatchError, BatchOutcome, BlockingRows, ExecuteOutcome, OutBinds, RegistrationOutcome,
@@ -3582,18 +3582,14 @@ impl Connection {
         if timeout_ms == 0 {
             return self.ping(cx).await;
         }
-        match time::timeout(
-            time::wall_now(),
-            Duration::from_millis(u64::from(timeout_ms)),
-            self.ping(cx),
-        )
-        .await
-        {
+        let deadline = QueryDeadline::from_timeout(Duration::from_millis(u64::from(timeout_ms)));
+        match deadline.run(self.ping(cx)).await {
             Ok(result) => result,
+            Err(DeadlineExpiry::BeforeStart) => self.reject_before_operation_start(cx, timeout_ms),
             // Previously this returned bare CallTimeout without even sending a
             // BREAK, leaving the half-sent ping round trip on the wire to poison
             // the next reuse. Break + drain like every other timeout path.
-            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
+            Err(DeadlineExpiry::InFlight) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -4424,7 +4420,10 @@ impl Connection {
             .await
         {
             Ok(result) => result?,
-            Err(()) => {
+            Err(DeadlineExpiry::BeforeStart) => {
+                return self.reject_before_operation_start(cx, deadline.timeout_ms());
+            }
+            Err(DeadlineExpiry::InFlight) => {
                 return self
                     .recover_from_call_timeout(cx, deadline.timeout_ms())
                     .await
@@ -4448,7 +4447,11 @@ impl Connection {
                 .await
             {
                 Ok(result) => result?,
-                Err(()) => {
+                Err(DeadlineExpiry::BeforeStart) => {
+                    self.release_cursor(cursor_id);
+                    return self.reject_before_operation_start(cx, deadline.timeout_ms());
+                }
+                Err(DeadlineExpiry::InFlight) => {
                     return self
                         .recover_from_call_timeout(cx, deadline.timeout_ms())
                         .await
@@ -4485,10 +4488,20 @@ impl Connection {
         cx: &Cx,
         execute: Execute<'e>,
     ) -> Result<ExecuteOutcome> {
+        let deadline = QueryDeadline::new(cx, execute.timeout_duration());
+        self.execute_with_deadline(cx, execute, deadline).await
+    }
+
+    async fn execute_with_deadline<'e>(
+        &mut self,
+        cx: &Cx,
+        execute: Execute<'e>,
+        deadline: QueryDeadline,
+    ) -> Result<ExecuteOutcome> {
         let Execute {
             sql,
             params,
-            timeout,
+            timeout: _,
             options,
         } = execute;
         let sql_owned = sql.into_owned();
@@ -4498,7 +4511,6 @@ impl Connection {
         } else {
             vec![binds]
         };
-        let deadline = QueryDeadline::new(cx, timeout);
         let result = match deadline
             .run(self.execute_query_with_bind_rows_and_options_core(
                 cx, &sql_owned, 0, &bind_rows, options,
@@ -4506,7 +4518,10 @@ impl Connection {
             .await
         {
             Ok(result) => result?,
-            Err(()) => {
+            Err(DeadlineExpiry::BeforeStart) => {
+                return self.reject_before_operation_start(cx, deadline.timeout_ms());
+            }
+            Err(DeadlineExpiry::InFlight) => {
                 return self
                     .recover_from_call_timeout(cx, deadline.timeout_ms())
                     .await
@@ -4555,7 +4570,10 @@ impl Connection {
             .await
         {
             Ok(result) => result?,
-            Err(()) => {
+            Err(DeadlineExpiry::BeforeStart) => {
+                return self.reject_before_operation_start(cx, deadline.timeout_ms());
+            }
+            Err(DeadlineExpiry::InFlight) => {
                 return self
                     .recover_from_call_timeout(cx, deadline.timeout_ms())
                     .await
@@ -4596,7 +4614,10 @@ impl Connection {
             .await
         {
             Ok(result) => result?,
-            Err(()) => {
+            Err(DeadlineExpiry::BeforeStart) => {
+                return self.reject_before_operation_start(cx, deadline.timeout_ms());
+            }
+            Err(DeadlineExpiry::InFlight) => {
                 return self
                     .recover_from_call_timeout(cx, deadline.timeout_ms())
                     .await
@@ -4962,21 +4983,20 @@ impl Connection {
                 )
                 .await;
         };
-        match time::timeout(
-            time::wall_now(),
-            Duration::from_millis(u64::from(timeout_ms)),
-            self.execute_query_with_bind_rows_and_options_core(
+        let deadline = QueryDeadline::from_timeout(Duration::from_millis(u64::from(timeout_ms)));
+        match deadline
+            .run(self.execute_query_with_bind_rows_and_options_core(
                 cx,
                 sql,
                 prefetch_rows,
                 bind_rows,
                 exec_options,
-            ),
-        )
-        .await
+            ))
+            .await
         {
             Ok(result) => result,
-            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
+            Err(DeadlineExpiry::BeforeStart) => self.reject_before_operation_start(cx, timeout_ms),
+            Err(DeadlineExpiry::InFlight) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -6429,21 +6449,20 @@ impl Connection {
                 )
                 .await;
         };
-        match time::timeout(
-            time::wall_now(),
-            Duration::from_millis(u64::from(timeout_ms)),
-            self.execute_query_with_bind_rows_and_options_core(
+        let deadline = QueryDeadline::from_timeout(Duration::from_millis(u64::from(timeout_ms)));
+        match deadline
+            .run(self.execute_query_with_bind_rows_and_options_core(
                 cx,
                 sql,
                 prefetch_rows,
                 &[],
                 ExecuteOptions::default(),
-            ),
-        )
-        .await
+            ))
+            .await
         {
             Ok(result) => result,
-            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
+            Err(DeadlineExpiry::BeforeStart) => self.reject_before_operation_start(cx, timeout_ms),
+            Err(DeadlineExpiry::InFlight) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -6460,15 +6479,14 @@ impl Connection {
                 .execute_query_with_binds_core(cx, sql, prefetch_rows, binds)
                 .await;
         };
-        match time::timeout(
-            time::wall_now(),
-            Duration::from_millis(u64::from(timeout_ms)),
-            self.execute_query_with_binds_core(cx, sql, prefetch_rows, binds),
-        )
-        .await
+        let deadline = QueryDeadline::from_timeout(Duration::from_millis(u64::from(timeout_ms)));
+        match deadline
+            .run(self.execute_query_with_binds_core(cx, sql, prefetch_rows, binds))
+            .await
         {
             Ok(result) => result,
-            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
+            Err(DeadlineExpiry::BeforeStart) => self.reject_before_operation_start(cx, timeout_ms),
+            Err(DeadlineExpiry::InFlight) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -6492,21 +6510,20 @@ impl Connection {
                 )
                 .await;
         };
-        match time::timeout(
-            time::wall_now(),
-            Duration::from_millis(u64::from(timeout_ms)),
-            self.execute_query_with_bind_rows_and_options_core(
+        let deadline = QueryDeadline::from_timeout(Duration::from_millis(u64::from(timeout_ms)));
+        match deadline
+            .run(self.execute_query_with_bind_rows_and_options_core(
                 cx,
                 sql,
                 prefetch_rows,
                 bind_rows,
                 ExecuteOptions::default(),
-            ),
-        )
-        .await
+            ))
+            .await
         {
             Ok(result) => result,
-            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
+            Err(DeadlineExpiry::BeforeStart) => self.reject_before_operation_start(cx, timeout_ms),
+            Err(DeadlineExpiry::InFlight) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -6521,15 +6538,14 @@ impl Connection {
         let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
             return self.read_lob(cx, locator, offset, amount).await;
         };
-        match time::timeout(
-            time::wall_now(),
-            Duration::from_millis(u64::from(timeout_ms)),
-            self.read_lob(cx, locator, offset, amount),
-        )
-        .await
+        let deadline = QueryDeadline::from_timeout(Duration::from_millis(u64::from(timeout_ms)));
+        match deadline
+            .run(self.read_lob(cx, locator, offset, amount))
+            .await
         {
             Ok(result) => result,
-            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
+            Err(DeadlineExpiry::BeforeStart) => self.reject_before_operation_start(cx, timeout_ms),
+            Err(DeadlineExpiry::InFlight) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -6544,15 +6560,14 @@ impl Connection {
         let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
             return self.write_lob(cx, locator, offset, data).await;
         };
-        match time::timeout(
-            time::wall_now(),
-            Duration::from_millis(u64::from(timeout_ms)),
-            self.write_lob(cx, locator, offset, data),
-        )
-        .await
+        let deadline = QueryDeadline::from_timeout(Duration::from_millis(u64::from(timeout_ms)));
+        match deadline
+            .run(self.write_lob(cx, locator, offset, data))
+            .await
         {
             Ok(result) => result,
-            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
+            Err(DeadlineExpiry::BeforeStart) => self.reject_before_operation_start(cx, timeout_ms),
+            Err(DeadlineExpiry::InFlight) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -6566,15 +6581,11 @@ impl Connection {
         let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
             return self.trim_lob(cx, locator, new_size).await;
         };
-        match time::timeout(
-            time::wall_now(),
-            Duration::from_millis(u64::from(timeout_ms)),
-            self.trim_lob(cx, locator, new_size),
-        )
-        .await
-        {
+        let deadline = QueryDeadline::from_timeout(Duration::from_millis(u64::from(timeout_ms)));
+        match deadline.run(self.trim_lob(cx, locator, new_size)).await {
             Ok(result) => result,
-            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
+            Err(DeadlineExpiry::BeforeStart) => self.reject_before_operation_start(cx, timeout_ms),
+            Err(DeadlineExpiry::InFlight) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -6587,15 +6598,11 @@ impl Connection {
         let Some(timeout_ms) = timeout_ms.filter(|value| *value > 0) else {
             return self.free_temp_lobs(cx, locators).await;
         };
-        match time::timeout(
-            time::wall_now(),
-            Duration::from_millis(u64::from(timeout_ms)),
-            self.free_temp_lobs(cx, locators),
-        )
-        .await
-        {
+        let deadline = QueryDeadline::from_timeout(Duration::from_millis(u64::from(timeout_ms)));
+        match deadline.run(self.free_temp_lobs(cx, locators)).await {
             Ok(result) => result,
-            Err(_) => self.recover_from_call_timeout(cx, timeout_ms).await,
+            Err(DeadlineExpiry::BeforeStart) => self.reject_before_operation_start(cx, timeout_ms),
+            Err(DeadlineExpiry::InFlight) => self.recover_from_call_timeout(cx, timeout_ms).await,
         }
     }
 
@@ -6858,6 +6865,26 @@ impl Connection {
                 Err(err)
             }
         }
+    }
+
+    /// Reject an operation whose deadline elapsed before its future was ever
+    /// polled. No request bytes can exist, so sending BREAK here would corrupt
+    /// an idle session; structured context cancellation still determines the
+    /// public error and whether the connection remains reusable.
+    pub(crate) fn reject_before_operation_start<T>(
+        &mut self,
+        cx: &Cx,
+        timeout_ms: u32,
+    ) -> Result<T> {
+        let disposition = cx
+            .cancel_reason()
+            .map(|reason| CancelDisposition::from_kind(reason.kind))
+            .unwrap_or(CancelDisposition::Timeout);
+        if disposition == CancelDisposition::Close {
+            self.core.recovery.mark_dead();
+            self.dead = true;
+        }
+        Err(disposition.into_error(timeout_ms))
     }
 
     /// Common tail for every `*_call_timeout` arm: the in-flight operation hit
@@ -10558,7 +10585,7 @@ fn trace_query_bytes(label: &'static str, bytes: &[u8]) {
 mod tests {
     use super::*;
     use asupersync::lab::{DporExplorer, ExplorerConfig, LabRuntime};
-    use asupersync::types::{Budget, CancelKind};
+    use asupersync::types::{Budget, CancelKind, Time};
     use oracledb_protocol::thin::QueryValue;
     use std::future::{poll_fn, Future};
     use std::io::Read;
@@ -15264,6 +15291,194 @@ mod tests {
         });
 
         server.join().expect("server thread joins");
+    }
+
+    #[test]
+    fn preexpired_query_deadline_does_not_break_idle_connection() -> Result<()> {
+        const INFLIGHT_BODY: &[u8] = &[0xd1, 0xa1, 0xb1];
+        const CANCEL_ERROR: &[u8] = &[0x04, 0x01, 0x0d];
+
+        let commit_packet = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            &build_function_payload_with_seq(
+                TNS_FUNC_COMMIT,
+                1,
+                ClientCapabilities::default().ttc_field_version,
+            ),
+            PacketLengthWidth::Large32,
+        )?;
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<usize> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+            use std::io::Write as _;
+
+            let mut break_count = 0usize;
+            loop {
+                let mut header = [0u8; 8];
+                socket.read_exact(&mut header)?;
+                let declared =
+                    u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+                let mut packet = header.to_vec();
+                let mut body = vec![0u8; declared - header.len()];
+                socket.read_exact(&mut body)?;
+                packet.extend_from_slice(&body);
+                if packet[4] == TNS_PACKET_TYPE_MARKER {
+                    assert_eq!(packet[10], TNS_MARKER_TYPE_BREAK);
+                    break_count += 1;
+                    socket.write_all(&data_packet(INFLIGHT_BODY, true))?;
+                    socket.write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))?;
+                    assert_eq!(read_marker_type(&mut socket), TNS_MARKER_TYPE_RESET);
+                    socket.write_all(&marker_packet(TNS_MARKER_TYPE_RESET))?;
+                    socket.write_all(&data_packet(CANCEL_ERROR, true))?;
+                    socket.flush()?;
+                    continue;
+                }
+
+                assert_eq!(
+                    packet, commit_packet,
+                    "the first ordinary request after both local expiries must be COMMIT"
+                );
+                socket.write_all(&data_packet(&[TNS_MSG_TYPE_END_OF_RESPONSE], true))?;
+                socket.flush()?;
+                return Ok(break_count);
+            }
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs an ambient Cx");
+            let socket = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(socket);
+            let mut connection = loopback_connection(read, write);
+
+            fn assert_send<T: Send>(_: &T) {}
+            let zero_timeout = connection.execute_with(
+                &cx,
+                Execute::new("begin null; end;").timeout(Duration::ZERO),
+            );
+            assert_send(&zero_timeout);
+            let err = zero_timeout
+                .await
+                .expect_err("an already-expired query deadline must fail");
+            assert!(
+                matches!(err, Error::CallTimeout(0)),
+                "pre-expired deadline must surface CallTimeout(0), got {err:?}"
+            );
+
+            let ambient_deadline = QueryDeadline::from_budget(
+                asupersync::time::wall_now(),
+                Budget::new().with_deadline(Time::ZERO),
+                None,
+            );
+            let ambient_err = connection
+                .execute_with_deadline(&cx, Execute::new("begin null; end;"), ambient_deadline)
+                .await
+                .expect_err("an expired ambient deadline must fail before polling");
+            assert!(
+                matches!(ambient_err, Error::CallTimeout(0)),
+                "expired ambient deadline must surface CallTimeout(0), got {ambient_err:?}"
+            );
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready,
+                "a future that was never polled must not arm wire recovery"
+            );
+            assert!(
+                !connection.dead,
+                "local before-start expiry must not mark a healthy connection dead"
+            );
+
+            connection.commit(&cx).await?;
+            Ok::<_, Error>(())
+        })?;
+
+        let break_count = server.join().expect("server thread joins")?;
+        assert_eq!(
+            break_count, 0,
+            "neither a zero request timeout nor an expired ambient deadline may send BREAK"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn prestart_expiry_preserves_structured_cancel_without_wire_io() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<Vec<usize>> {
+            let mut received = Vec::with_capacity(2);
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept()?;
+                socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+                let mut bytes = Vec::new();
+                socket.read_to_end(&mut bytes)?;
+                received.push(bytes.len());
+            }
+            Ok(received)
+        });
+
+        for kind in [CancelKind::User, CancelKind::Shutdown] {
+            let runtime = build_io_runtime()?;
+            runtime.block_on(async {
+                let socket = TcpStream::connect(addr).await?;
+                let (read, write) = transport::plain_split(socket);
+                let mut connection = loopback_connection(read, write);
+                let cx = Cx::current().expect("runtime installs an ambient Cx");
+                cx.cancel_with(kind, Some("pre-start cancellation test"));
+
+                let err = connection
+                    .execute_with(
+                        &cx,
+                        Execute::new("begin null; end;").timeout(Duration::ZERO),
+                    )
+                    .await
+                    .expect_err("an already-expired operation must not start");
+
+                match kind {
+                    CancelKind::User => {
+                        assert!(
+                            matches!(err, Error::Cancelled),
+                            "user cancellation must remain distinct, got {err:?}"
+                        );
+                        assert!(
+                            !connection.is_dead(),
+                            "user cancellation before start leaves the connection reusable"
+                        );
+                        assert_eq!(
+                            connection.core.recovery.phase(),
+                            SessionRecoveryPhase::Ready
+                        );
+                    }
+                    CancelKind::Shutdown => {
+                        assert!(
+                            matches!(err, Error::ConnectionClosed(_)),
+                            "shutdown cancellation must close the connection, got {err:?}"
+                        );
+                        assert!(
+                            connection.is_dead(),
+                            "shutdown cancellation before start must mark the connection dead"
+                        );
+                        assert_eq!(connection.core.recovery.phase(), SessionRecoveryPhase::Dead);
+                    }
+                    _ => unreachable!("the test covers exactly User and Shutdown"),
+                }
+
+                drop(connection);
+                Ok::<_, Error>(())
+            })?;
+        }
+
+        let received = server.join().expect("server thread joins")?;
+        assert_eq!(
+            received,
+            vec![0, 0],
+            "before-start cancellation must emit neither a request nor BREAK"
+        );
+        Ok(())
     }
 
     // bead rust-oracledb-yhz: a compliant-but-non-minimal server may send

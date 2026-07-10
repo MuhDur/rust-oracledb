@@ -5,7 +5,7 @@ use asupersync::Cx;
 use oracledb_protocol::thin::{BatchServerError, ColumnMetadata, QueryResult, QueryValue};
 
 use crate::recovery::observe_cancellation_between_round_trips;
-use crate::request::QueryDeadline;
+use crate::request::{DeadlineExpiry, QueryDeadline};
 use crate::{
     block_on_io, ColumnIndex, Connection, Cursor, Error, FromRow, FromSql, Result, Scroll, TypedRow,
 };
@@ -438,7 +438,13 @@ impl Rows<'_> {
             .await
         {
             Ok(result) => result?,
-            Err(()) => {
+            Err(DeadlineExpiry::BeforeStart) => {
+                self.release_cursor();
+                return self
+                    .connection
+                    .reject_before_operation_start(cx, self.deadline.timeout_ms());
+            }
+            Err(DeadlineExpiry::InFlight) => {
                 self.release_cursor();
                 return self
                     .connection
@@ -554,7 +560,13 @@ impl Rows<'_> {
             .await
         {
             Ok(result) => result?,
-            Err(()) => {
+            Err(DeadlineExpiry::BeforeStart) => {
+                self.release_cursor();
+                return self
+                    .connection
+                    .reject_before_operation_start(cx, self.deadline.timeout_ms());
+            }
+            Err(DeadlineExpiry::InFlight) => {
                 self.release_cursor();
                 return self
                     .connection

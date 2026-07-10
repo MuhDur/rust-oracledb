@@ -420,12 +420,38 @@ pub(crate) struct QueryDeadline {
     timeout_ms: u32,
 }
 
+/// How a [`QueryDeadline`] elapsed, which determines whether wire recovery is
+/// required. A future rejected before its first poll cannot have sent bytes;
+/// once the operation future has actually been polled, callers must
+/// conservatively recover.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeadlineExpiry {
+    BeforeStart,
+    InFlight,
+}
+
 impl QueryDeadline {
+    pub(crate) fn from_timeout(timeout: Duration) -> Self {
+        let now = time::wall_now();
+        Self {
+            deadline: Some(now.saturating_add_nanos(duration_to_nanos_saturating(timeout))),
+            timeout_ms: duration_to_millis_saturating(timeout),
+        }
+    }
+
     pub(crate) fn new(cx: &Cx, timeout: Option<Duration>) -> Self {
         let now = time::wall_now();
+        Self::from_budget(now, cx.budget(), timeout)
+    }
+
+    pub(crate) fn from_budget(
+        now: asupersync::types::Time,
+        budget: asupersync::types::Budget,
+        timeout: Option<Duration>,
+    ) -> Self {
         let query_deadline = timeout
             .map(|duration| now.saturating_add_nanos(duration_to_nanos_saturating(duration)));
-        let cx_deadline = cx.budget().deadline;
+        let cx_deadline = budget.deadline;
         let deadline = match (query_deadline, cx_deadline) {
             (Some(query), Some(cx)) => Some(query.min(cx)),
             (Some(query), None) => Some(query),
@@ -435,7 +461,7 @@ impl QueryDeadline {
         let timeout_ms = timeout
             .map(duration_to_millis_saturating)
             .or_else(|| {
-                cx.budget()
+                budget
                     .remaining_time(now)
                     .map(duration_to_millis_saturating)
             })
@@ -450,7 +476,7 @@ impl QueryDeadline {
         self.timeout_ms
     }
 
-    pub(crate) async fn run<T, F>(self, future: F) -> std::result::Result<Result<T>, ()>
+    pub(crate) async fn run<T, F>(self, future: F) -> std::result::Result<Result<T>, DeadlineExpiry>
     where
         F: Future<Output = Result<T>>,
     {
@@ -459,12 +485,39 @@ impl QueryDeadline {
         };
         let now = time::wall_now();
         if now >= deadline {
-            return Err(());
+            return Err(DeadlineExpiry::BeforeStart);
         }
+        self.run_after_precheck(now, deadline, future).await
+    }
+
+    async fn run_after_precheck<T, F>(
+        self,
+        now: asupersync::types::Time,
+        deadline: asupersync::types::Time,
+        future: F,
+    ) -> std::result::Result<Result<T>, DeadlineExpiry>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        debug_assert!(now < deadline, "precheck must reject an elapsed deadline");
         let remaining = Duration::from_nanos(deadline.as_nanos().saturating_sub(now.as_nanos()));
-        match time::timeout(now, remaining, future).await {
+        // The timeout wrapper is allowed to observe an elapsed timer before it
+        // polls its inner future. Track that first poll explicitly: only an
+        // actually-polled database future can have emitted wire bytes and need
+        // BREAK/drain recovery.
+        let polled = std::sync::atomic::AtomicBool::new(false);
+        let mut future = std::pin::pin!(future);
+        let tracked = std::future::poll_fn(|cx| {
+            polled.store(true, std::sync::atomic::Ordering::Relaxed);
+            future.as_mut().poll(cx)
+        });
+        let result = time::timeout(now, remaining, tracked).await;
+        match result {
             Ok(result) => Ok(result),
-            Err(_) => Err(()),
+            Err(_) if polled.load(std::sync::atomic::Ordering::Relaxed) => {
+                Err(DeadlineExpiry::InFlight)
+            }
+            Err(_) => Err(DeadlineExpiry::BeforeStart),
         }
     }
 }
@@ -472,8 +525,11 @@ impl QueryDeadline {
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
+    use asupersync::types::{Budget, Time};
     use asupersync::Cx;
     use oracledb_protocol::thin::{BindValue, ExecuteOptions, TNS_FETCH_ORIENTATION_ABSOLUTE};
 
@@ -513,6 +569,110 @@ mod tests {
                 deadline.deadline,
                 Some(captured),
                 "the deadline is captured once and then carried by value"
+            );
+        });
+    }
+
+    #[test]
+    fn preexpired_query_deadline_is_classified_before_start_without_polling() {
+        let runtime = crate::build_io_runtime().expect("runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs Cx");
+            let deadline = QueryDeadline::new(&cx, Some(Duration::ZERO));
+            let polled = Arc::new(AtomicBool::new(false));
+            let observed = Arc::clone(&polled);
+
+            let result = deadline
+                .run(async move {
+                    observed.store(true, Ordering::SeqCst);
+                    Ok::<_, Error>(())
+                })
+                .await;
+
+            assert!(matches!(result, Err(DeadlineExpiry::BeforeStart)));
+            assert!(
+                !polled.load(Ordering::SeqCst),
+                "before-start expiry must not poll the operation future"
+            );
+        });
+    }
+
+    #[test]
+    fn expired_ambient_deadline_is_before_start_without_request_timeout() {
+        let runtime = crate::build_io_runtime().expect("runtime");
+        runtime.block_on(async {
+            let deadline = QueryDeadline::from_budget(
+                asupersync::time::wall_now(),
+                Budget::new().with_deadline(Time::ZERO),
+                None,
+            );
+            let polled = Arc::new(AtomicBool::new(false));
+            let observed = Arc::clone(&polled);
+
+            let result = deadline
+                .run(async move {
+                    observed.store(true, Ordering::SeqCst);
+                    Ok::<_, Error>(())
+                })
+                .await;
+
+            assert!(matches!(result, Err(DeadlineExpiry::BeforeStart)));
+            assert!(
+                !polled.load(Ordering::SeqCst),
+                "an expired ambient budget must reject before polling the operation"
+            );
+        });
+    }
+
+    #[test]
+    fn armed_query_deadline_is_classified_in_flight_after_polling() {
+        let runtime = crate::build_io_runtime().expect("runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs Cx");
+            let deadline = QueryDeadline::new(&cx, Some(Duration::from_millis(100)));
+            let polled = Arc::new(AtomicBool::new(false));
+            let observed = Arc::clone(&polled);
+
+            let result = deadline
+                .run(async move {
+                    observed.store(true, Ordering::SeqCst);
+                    std::future::pending::<Result<()>>().await
+                })
+                .await;
+
+            assert!(matches!(result, Err(DeadlineExpiry::InFlight)));
+            assert!(
+                polled.load(Ordering::SeqCst),
+                "in-flight expiry must mean the operation future was armed"
+            );
+        });
+    }
+
+    #[test]
+    fn timeout_wrapper_expiry_before_inner_poll_is_classified_before_start() {
+        let runtime = crate::build_io_runtime().expect("runtime");
+        runtime.block_on(async {
+            let deadline = QueryDeadline {
+                deadline: Some(Time::from_nanos(1)),
+                timeout_ms: 0,
+            };
+            let inner_polled = Arc::new(AtomicBool::new(false));
+            let observed = Arc::clone(&inner_polled);
+
+            // Supply a synthetic precheck time just before the deadline while
+            // the runtime's ambient timer is already far past it. Asupersync's
+            // timeout wrapper wins before polling its inner future.
+            let result = deadline
+                .run_after_precheck(Time::ZERO, Time::from_nanos(1), async move {
+                    observed.store(true, Ordering::SeqCst);
+                    Ok::<_, Error>(())
+                })
+                .await;
+
+            assert!(matches!(result, Err(DeadlineExpiry::BeforeStart)));
+            assert!(
+                !inner_polled.load(Ordering::SeqCst),
+                "timeout-before-inner-poll cannot have emitted request bytes"
             );
         });
     }

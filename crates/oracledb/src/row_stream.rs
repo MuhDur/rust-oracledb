@@ -57,7 +57,7 @@ use asupersync::Cx;
 use futures_core::Stream;
 use oracledb_protocol::thin::{ColumnMetadata, ExecuteOptions, QueryResult, QueryValue};
 
-use crate::request::QueryDeadline;
+use crate::request::{DeadlineExpiry, QueryDeadline};
 use crate::rows::first_cursor_from_result;
 use crate::{columns_require_define, Connection, Cursor, Error, Params, Query, Result};
 
@@ -268,7 +268,11 @@ fn build_fetch_future(
             .await
         {
             Ok(result) => result,
-            Err(()) => {
+            Err(DeadlineExpiry::BeforeStart) => {
+                connection.release_cursor(cursor_id);
+                connection.reject_before_operation_start(&cx, deadline.timeout_ms())
+            }
+            Err(DeadlineExpiry::InFlight) => {
                 connection
                     .recover_from_call_timeout(&cx, deadline.timeout_ms())
                     .await
@@ -445,7 +449,10 @@ impl Connection {
             .await
         {
             Ok(result) => result?,
-            Err(()) => {
+            Err(DeadlineExpiry::BeforeStart) => {
+                return connection.reject_before_operation_start(cx, deadline.timeout_ms());
+            }
+            Err(DeadlineExpiry::InFlight) => {
                 return connection
                     .recover_from_call_timeout(cx, deadline.timeout_ms())
                     .await
@@ -472,7 +479,11 @@ impl Connection {
                 .await
             {
                 Ok(result) => result?,
-                Err(()) => {
+                Err(DeadlineExpiry::BeforeStart) => {
+                    connection.release_cursor(cursor_id);
+                    return connection.reject_before_operation_start(cx, deadline.timeout_ms());
+                }
+                Err(DeadlineExpiry::InFlight) => {
                     return connection
                         .recover_from_call_timeout(cx, deadline.timeout_ms())
                         .await
@@ -655,7 +666,8 @@ mod tests {
             let cx = Cx::current().expect("runtime installs an ambient Cx");
             let socket = TcpStream::connect(addr).await?;
             let (read, write) = crate::transport::plain_split(socket);
-            let connection = crate::tests::loopback_connection(read, write);
+            let mut connection = crate::tests::loopback_connection(read, write);
+            connection.in_use_cursors.insert(42);
             let result = QueryResult {
                 columns: cols(&["A"]),
                 rows: vec![text_row(&["first"])],
@@ -678,6 +690,15 @@ mod tests {
             assert!(
                 matches!(second, Some(Err(Error::CallTimeout(40)))),
                 "expired logical query must fail immediately, got {second:?}"
+            );
+            assert!(
+                !stream
+                    .connection
+                    .as_ref()
+                    .expect("connection is returned after the failed fetch")
+                    .in_use_cursors
+                    .contains(&42),
+                "before-start expiry must release the cursor without wire recovery"
             );
             Ok::<_, Error>(())
         })?;
