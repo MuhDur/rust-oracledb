@@ -8,6 +8,8 @@ use crate::Error;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SodaError {
+    /// A public SODA operation argument is malformed.
+    InvalidArgument(String),
     /// The collection metadata JSON could not be parsed into a usable shape.
     InvalidMetadata(String),
     /// A query-by-example filter could not be translated to SQL/JSON.
@@ -21,6 +23,7 @@ pub enum SodaError {
 impl std::fmt::Display for SodaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            SodaError::InvalidArgument(m) => write!(f, "invalid SODA argument: {m}"),
             SodaError::InvalidMetadata(m) => write!(f, "invalid SODA metadata: {m}"),
             SodaError::Qbe(m) => write!(f, "invalid SODA QBE filter: {m}"),
             SodaError::NotSupported(m) => write!(f, "SODA feature not supported in thin mode: {m}"),

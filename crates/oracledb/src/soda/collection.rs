@@ -126,6 +126,10 @@ impl SodaCollection {
     ) -> Result<u64> {
         let (sql, binds) = op.build_count_sql(&self.metadata)?;
         let result = execute_with_binds_raw(conn, cx, &sql, 1, &binds).await?;
+        // This API consumes the prefetched scalar rather than handing a
+        // cursor to its caller. Return the statement to the cache before any
+        // local decoding can fail.
+        conn.release_cursor(result.cursor_id);
         let count = result
             .cell(0, 0)
             .and_then(QueryValue::as_i64)
@@ -149,6 +153,9 @@ impl SodaCollection {
     ) -> Result<Option<SodaDocument>> {
         let (sql, binds, layout) = op.build_select_sql(&self.metadata)?;
         let result = execute_collect_with_binds(conn, cx, &sql, 1, &binds).await?;
+        // `get_one` owns the query result outright. There is no cursor handle
+        // in its return type that could release this ownership later.
+        conn.release_cursor(result.cursor_id);
         if result.rows.is_empty() {
             return Ok(None);
         }
@@ -165,10 +172,22 @@ impl SodaCollection {
     ) -> Result<Vec<SodaDocument>> {
         let mut cursor = self.open_cursor(conn, cx, op).await?;
         let mut out = Vec::new();
-        while let Some(doc) = cursor.next_doc(conn, cx).await? {
-            out.push(doc);
+        loop {
+            match cursor.next_doc(conn, cx).await {
+                Ok(Some(doc)) => out.push(doc),
+                Ok(None) => {
+                    cursor.release(conn);
+                    return Ok(out);
+                }
+                Err(err) => {
+                    // Release a still-valid cursor on local conversion errors.
+                    // Fetch failures already retired it through the fail-closed
+                    // path, making this cleanup an intentional no-op.
+                    cursor.release(conn);
+                    return Err(err);
+                }
+            }
         }
-        Ok(out)
     }
 
     /// Open a streaming cursor over matching documents.
@@ -453,21 +472,22 @@ impl SodaCollection {
         // why HEXTORAW(:bind) does not match in a WHERE comparison).
         let key_is_raw = meta.key_sql_type.eq_ignore_ascii_case("RAW");
         if key_is_raw {
-            binds.push(BindValue::Raw(operation::hex_decode(key)));
+            binds.push(BindValue::Raw(operation::hex_decode(key)?));
         } else {
             binds.push(BindValue::Text(key.clone()));
         }
         let mut where_clause = format!("{} = :{next_bind}", quote_ident(&meta.key_column));
         next_bind += 1;
         if let Some(version) = &op.version {
-            if let Some(vc) = &meta.version_column {
-                if matches!(meta.version_method, VersionMethod::None) && meta.native {
-                    binds.push(BindValue::Raw(operation::hex_decode(version)));
-                } else {
-                    binds.push(BindValue::Text(version.clone()));
-                }
-                where_clause.push_str(&format!(" AND {} = :{next_bind}", quote_ident(vc)));
+            let vc = meta.version_column.as_ref().ok_or_else(|| {
+                SodaError::NotSupported("collection has no version column".to_string())
+            })?;
+            if matches!(meta.version_method, VersionMethod::None) && meta.native {
+                binds.push(BindValue::Raw(operation::hex_decode(version)?));
+            } else {
+                binds.push(BindValue::Text(version.clone()));
             }
+            where_clause.push_str(&format!(" AND {} = :{next_bind}", quote_ident(vc)));
         }
 
         let mut sql = format!(
@@ -723,7 +743,20 @@ impl SodaCollection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::soda::database::collect_owned_query_result;
     use crate::soda::metadata::KeyAssignment;
+    use crate::soda::SodaDatabase;
+    use asupersync::{net::TcpStream, CancelKind};
+    use oracledb_protocol::thin::{
+        CS_FORM_IMPLICIT, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_VARCHAR,
+        TNS_DATA_FLAGS_END_OF_RESPONSE, TNS_MSG_TYPE_DESCRIBE_INFO, TNS_MSG_TYPE_ERROR,
+        TNS_MSG_TYPE_ROW_DATA, TNS_MSG_TYPE_ROW_HEADER, TNS_PACKET_TYPE_DATA,
+    };
+    use oracledb_protocol::wire::{encode_packet, PacketLengthWidth, TtcWriter};
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Duration;
 
     fn mixed_case_collection() -> SodaCollection {
         SodaCollection::new(
@@ -754,6 +787,1059 @@ mod tests {
             Some("client-key".to_string()),
             Some("application/json".to_string()),
         )
+    }
+
+    fn response_packet(payload: &[u8]) -> Vec<u8> {
+        encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(TNS_DATA_FLAGS_END_OF_RESPONSE),
+            payload,
+            PacketLengthWidth::Large32,
+        )
+        .expect("encode SODA test response")
+    }
+
+    fn read_one_packet(socket: &mut std::net::TcpStream) -> std::io::Result<()> {
+        let mut header = [0u8; 8];
+        socket.read_exact(&mut header)?;
+        let declared = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        if declared < header.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "test request packet shorter than its header",
+            ));
+        }
+        let mut body = vec![0u8; declared - header.len()];
+        socket.read_exact(&mut body)
+    }
+
+    fn write_test_column(writer: &mut TtcWriter, name: &[u8], ora_type_num: u8, position: u16) {
+        // Full default-capability (field version 24) describe record. Keeping
+        // this fixture in TTC form makes the test drive the real execute
+        // decoder before it reaches the initial DEFINE-FETCH failure.
+        writer.write_u8(ora_type_num);
+        writer.write_u8(0); // flags
+        writer.write_u8(0); // precision
+        writer.write_u8(0); // scale
+        writer.write_ub4(4000); // buffer size
+        writer.write_ub4(0); // max array elements
+        writer.write_ub8(0); // continuation flags
+        writer
+            .write_bytes_with_two_lengths(None)
+            .expect("column oid");
+        writer.write_ub2(0); // version
+        writer.write_ub2(0); // server charset id
+        writer.write_u8(CS_FORM_IMPLICIT);
+        writer.write_ub4(4000); // max size
+        writer.write_ub4(0); // oaccolid (12.2+)
+        writer.write_u8(1); // nullable
+        writer.write_u8(0); // flags
+        writer
+            .write_bytes_with_two_lengths(Some(name))
+            .expect("column name");
+        writer
+            .write_bytes_with_two_lengths(None)
+            .expect("object schema");
+        writer
+            .write_bytes_with_two_lengths(None)
+            .expect("object type");
+        writer.write_ub2(position);
+        writer.write_ub4(0); // uds flags
+        writer
+            .write_bytes_with_two_lengths(None)
+            .expect("domain schema");
+        writer
+            .write_bytes_with_two_lengths(None)
+            .expect("domain name");
+        writer.write_ub4(0); // annotation count
+        writer.write_ub4(0); // vector dimensions
+        writer.write_u8(0); // vector format
+        writer.write_u8(0); // vector flags
+    }
+
+    fn write_error_info(
+        writer: &mut TtcWriter,
+        cursor_id: u16,
+        number: u32,
+        row_count: u64,
+        message: &str,
+    ) {
+        writer.write_ub4(0); // call status
+        writer.write_ub2(0); // sequence
+        writer.write_ub4(0); // current row
+        writer.write_ub2(0); // obsolete error number
+        writer.write_ub2(0); // array element error 1
+        writer.write_ub2(0); // array element error 2
+        writer.write_ub2(cursor_id);
+        writer.write_sb4(0); // error position
+        writer.write_raw(&[0u8; 5]);
+        writer.write_u8(0); // warning flags
+        writer.write_ub4(0); // rowid rba
+        writer.write_ub2(0); // rowid partition
+        writer.write_u8(0);
+        writer.write_ub4(0); // rowid block
+        writer.write_ub2(0); // rowid slot
+        writer.write_ub4(0); // os error
+        writer.write_raw(&[0u8; 2]);
+        writer.write_ub2(0); // padding
+        writer.write_ub4(0); // successful iterations
+        writer
+            .write_bytes_with_two_lengths(None)
+            .expect("diagnostic field");
+        writer.write_ub2(0); // batch error count
+        writer.write_ub4(0); // batch offset count
+        writer.write_ub2(0); // batch message count
+        writer.write_ub4(number);
+        writer.write_ub8(row_count);
+        writer.write_ub4(0); // SQL type (20.1+)
+        writer.write_ub4(0); // server checksum
+        if number != 0 {
+            writer
+                .write_bytes_with_length(message.as_bytes())
+                .expect("server error message");
+        }
+    }
+
+    fn write_success_error_info(writer: &mut TtcWriter, cursor_id: u16) {
+        write_error_info(writer, cursor_id, 0, 0, "");
+    }
+
+    fn write_no_data_error_info(writer: &mut TtcWriter, cursor_id: u16, row_count: u64) {
+        write_error_info(
+            writer,
+            cursor_id,
+            1403,
+            row_count,
+            "ORA-01403: no data found",
+        );
+    }
+
+    fn json_describe_execute_response(cursor_id: u16, terminal: bool) -> Vec<u8> {
+        let mut writer = TtcWriter::new();
+        writer.write_u8(TNS_MSG_TYPE_DESCRIBE_INFO);
+        writer
+            .write_bytes_with_length(b"soda initial define")
+            .expect("describe name");
+        writer.write_ub4(4096); // max row size
+        writer.write_ub4(1); // column count
+        writer.write_u8(0); // describe column marker
+        write_test_column(&mut writer, b"DOC", ORA_TYPE_NUM_JSON, 1);
+        writer
+            .write_bytes_with_two_lengths(None)
+            .expect("current date");
+        writer.write_ub4(0); // dcbflag
+        writer.write_ub4(0); // dcbmdbz
+        writer.write_ub4(0); // dcbmnpr
+        writer.write_ub4(0); // dcbmxpr
+        writer.write_bytes_with_two_lengths(None).expect("dcbqcky");
+        writer.write_u8(TNS_MSG_TYPE_ERROR);
+        if terminal {
+            write_no_data_error_info(&mut writer, cursor_id, 0);
+        } else {
+            write_success_error_info(&mut writer, cursor_id);
+        }
+        writer.into_bytes()
+    }
+
+    fn scalar_execute_response(
+        cursor_id: u16,
+        column_name: &[u8],
+        ora_type_num: u8,
+        value: &[u8],
+    ) -> Vec<u8> {
+        let mut writer = TtcWriter::new();
+        writer.write_u8(TNS_MSG_TYPE_DESCRIBE_INFO);
+        writer
+            .write_bytes_with_length(b"soda one-shot scalar")
+            .expect("describe name");
+        writer.write_ub4(4096); // max row size
+        writer.write_ub4(1); // column count
+        writer.write_u8(0); // describe column marker
+        write_test_column(&mut writer, column_name, ora_type_num, 1);
+        writer
+            .write_bytes_with_two_lengths(None)
+            .expect("current date");
+        writer.write_ub4(0); // dcbflag
+        writer.write_ub4(0); // dcbmdbz
+        writer.write_ub4(0); // dcbmnpr
+        writer.write_ub4(0); // dcbmxpr
+        writer.write_bytes_with_two_lengths(None).expect("dcbqcky");
+        writer.write_u8(TNS_MSG_TYPE_ROW_HEADER);
+        writer.write_u8(0); // flags
+        writer.write_ub2(1); // request count
+        writer.write_ub4(1); // iteration number
+        writer.write_ub4(1); // iteration count
+        writer.write_ub2(0); // buffer length
+        writer.write_ub4(0); // no duplicate-column bit vector
+        writer
+            .write_bytes_with_two_lengths(None)
+            .expect("row header id");
+        writer.write_u8(TNS_MSG_TYPE_ROW_DATA);
+        writer.write_bytes_with_length(value).expect("scalar value");
+        writer.write_u8(TNS_MSG_TYPE_ERROR);
+        write_no_data_error_info(&mut writer, cursor_id, 1);
+        writer.into_bytes()
+    }
+
+    fn collection_name_rows_response(
+        cursor_id: u16,
+        values: &[String],
+        include_describe: bool,
+        terminal: bool,
+    ) -> Vec<u8> {
+        let mut writer = TtcWriter::new();
+        if include_describe {
+            writer.write_u8(TNS_MSG_TYPE_DESCRIBE_INFO);
+            writer
+                .write_bytes_with_length(b"soda collection names")
+                .expect("describe name");
+            writer.write_ub4(4096); // max row size
+            writer.write_ub4(1); // column count
+            writer.write_u8(0); // describe column marker
+            write_test_column(&mut writer, b"URI_NAME", ORA_TYPE_NUM_VARCHAR, 1);
+            writer
+                .write_bytes_with_two_lengths(None)
+                .expect("current date");
+            writer.write_ub4(0); // dcbflag
+            writer.write_ub4(0); // dcbmdbz
+            writer.write_ub4(0); // dcbmnpr
+            writer.write_ub4(0); // dcbmxpr
+            writer.write_bytes_with_two_lengths(None).expect("dcbqcky");
+        }
+        writer.write_u8(TNS_MSG_TYPE_ROW_HEADER);
+        writer.write_u8(0); // flags
+        writer.write_ub2(1); // request count
+        writer.write_ub4(1); // iteration number
+        writer.write_ub4(u32::try_from(values.len()).expect("test row count fits u32"));
+        writer.write_ub2(0); // buffer length
+        writer.write_ub4(0); // no duplicate-column bit vector
+        writer
+            .write_bytes_with_two_lengths(None)
+            .expect("row header id");
+        for value in values {
+            writer.write_u8(TNS_MSG_TYPE_ROW_DATA);
+            writer
+                .write_bytes_with_length(value.as_bytes())
+                .expect("collection name");
+        }
+        writer.write_u8(TNS_MSG_TYPE_ERROR);
+        if terminal {
+            write_no_data_error_info(
+                &mut writer,
+                cursor_id,
+                u64::try_from(values.len()).expect("test row count fits u64"),
+            );
+        } else {
+            write_success_error_info(&mut writer, cursor_id);
+        }
+        writer.into_bytes()
+    }
+
+    fn one_shot_document_execute_response(cursor_id: u16, terminal: bool) -> Vec<u8> {
+        let mut writer = TtcWriter::new();
+        writer.write_u8(TNS_MSG_TYPE_DESCRIBE_INFO);
+        writer
+            .write_bytes_with_length(b"soda one-shot document")
+            .expect("describe name");
+        writer.write_ub4(4096); // max row size
+        writer.write_ub4(2); // column count
+        writer.write_u8(0); // describe column marker
+        write_test_column(&mut writer, b"KEY", ORA_TYPE_NUM_VARCHAR, 1);
+        write_test_column(&mut writer, b"DOC", ORA_TYPE_NUM_VARCHAR, 2);
+        writer
+            .write_bytes_with_two_lengths(None)
+            .expect("current date");
+        writer.write_ub4(0); // dcbflag
+        writer.write_ub4(0); // dcbmdbz
+        writer.write_ub4(0); // dcbmnpr
+        writer.write_ub4(0); // dcbmxpr
+        writer.write_bytes_with_two_lengths(None).expect("dcbqcky");
+        writer.write_u8(TNS_MSG_TYPE_ROW_HEADER);
+        writer.write_u8(0); // flags
+        writer.write_ub2(1); // request count
+        writer.write_ub4(1); // iteration number
+        writer.write_ub4(1); // iteration count
+        writer.write_ub2(0); // buffer length
+        writer.write_ub4(0); // no duplicate-column bit vector
+        writer
+            .write_bytes_with_two_lengths(None)
+            .expect("row header id");
+        writer.write_u8(TNS_MSG_TYPE_ROW_DATA);
+        writer
+            .write_bytes_with_length(b"doc-key")
+            .expect("document key");
+        writer
+            .write_bytes_with_length(br#"{"one":1}"#)
+            .expect("document content");
+        writer.write_u8(TNS_MSG_TYPE_ERROR);
+        if terminal {
+            write_no_data_error_info(&mut writer, cursor_id, 1);
+        } else {
+            write_success_error_info(&mut writer, cursor_id);
+        }
+        writer.into_bytes()
+    }
+
+    fn one_shot_collection() -> SodaCollection {
+        SodaCollection::new(
+            "OneShot".to_string(),
+            SodaCollectionMetadata {
+                table_name: "OneShot".to_string(),
+                schema_name: None,
+                key_column: "KEY".to_string(),
+                key_sql_type: "VARCHAR2".to_string(),
+                key_assignment: KeyAssignment::Client,
+                key_path: None,
+                content_column: "DOC".to_string(),
+                content_sql_type: ContentSqlType::Varchar2,
+                version_column: None,
+                version_method: VersionMethod::None,
+                last_modified_column: None,
+                creation_time_column: None,
+                media_type_column: None,
+                read_only: false,
+                native: false,
+            },
+        )
+    }
+
+    fn native_json_collection() -> SodaCollection {
+        SodaCollection::new(
+            "NativeEmpty".to_string(),
+            SodaCollectionMetadata {
+                table_name: "NativeEmpty".to_string(),
+                schema_name: None,
+                key_column: "RESID".to_string(),
+                key_sql_type: "RAW".to_string(),
+                key_assignment: KeyAssignment::EmbeddedOid,
+                key_path: Some("_id".to_string()),
+                content_column: "DOC".to_string(),
+                content_sql_type: ContentSqlType::Json,
+                version_column: None,
+                version_method: VersionMethod::None,
+                last_modified_column: None,
+                creation_time_column: None,
+                media_type_column: None,
+                read_only: false,
+                native: true,
+            },
+        )
+    }
+
+    #[test]
+    fn failed_initial_define_fetch_retires_cursor_once() -> crate::Result<()> {
+        const CURSOR_ID: u32 = 91;
+        const SQL: &str = "select soda initial define probe";
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            read_one_packet(&mut socket)?;
+            socket.write_all(&response_packet(&json_describe_execute_response(
+                u16::try_from(CURSOR_ID).expect("test cursor id fits u16"),
+                false,
+            )))?;
+            socket.flush()?;
+            read_one_packet(&mut socket)?;
+            socket.write_all(&response_packet(&[0xff]))?;
+            socket.flush()
+        });
+
+        let runtime = crate::build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| crate::Error::Runtime("missing ambient test Cx".to_string()))?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = crate::transport::plain_split(stream);
+            let mut conn = crate::tests::loopback_connection(read, write);
+
+            let err = execute_collect_with_binds(&mut conn, &cx, SQL, 1, &[])
+                .await
+                .expect_err("malformed initial DEFINE-FETCH must fail");
+            assert!(matches!(err, SodaError::Driver(_)), "{err:?}");
+            assert!(!conn.in_use_cursors.contains(&CURSOR_ID));
+            assert!(conn
+                .statement_cache
+                .iter()
+                .all(|entry| entry.cursor_id != CURSOR_ID));
+            assert!(!conn.cursor_columns.contains_key(&CURSOR_ID));
+            assert!(!conn.lob_prefetch_cursors.contains(&CURSOR_ID));
+
+            let failed_again: crate::Result<QueryResult> =
+                Err(crate::Error::Runtime("repeat failure".to_string()));
+            finish_cursor_operation(&mut conn, CURSOR_ID, failed_again)
+                .expect_err("repeated retirement remains an error");
+            assert_eq!(
+                conn.cursors_to_close
+                    .iter()
+                    .filter(|cursor_id| **cursor_id == CURSOR_ID)
+                    .count(),
+                1,
+                "fail-closed cleanup must not queue duplicate closes"
+            );
+            Ok::<_, crate::Error>(())
+        });
+
+        server.join().expect("initial define mapper server joins")?;
+        outcome
+    }
+
+    #[test]
+    fn terminal_empty_native_json_query_skips_define_fetch() -> crate::Result<()> {
+        const CURSOR_ID: u32 = 128;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<bool> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            read_one_packet(&mut socket)?;
+            socket.write_all(&response_packet(&json_describe_execute_response(
+                u16::try_from(CURSOR_ID).expect("test cursor id fits u16"),
+                true,
+            )))?;
+            socket.flush()?;
+
+            socket.set_read_timeout(Some(Duration::from_millis(300)))?;
+            match read_one_packet(&mut socket) {
+                Ok(()) => {
+                    let mut payload = TtcWriter::new();
+                    payload.write_u8(TNS_MSG_TYPE_ERROR);
+                    write_no_data_error_info(
+                        &mut payload,
+                        u16::try_from(CURSOR_ID).expect("test cursor id fits u16"),
+                        0,
+                    );
+                    socket.write_all(&response_packet(&payload.into_bytes()))?;
+                    socket.flush()?;
+                    Ok(true)
+                }
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::UnexpectedEof
+                    ) =>
+                {
+                    Ok(false)
+                }
+                Err(err) => Err(err),
+            }
+        });
+
+        let runtime = crate::build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| crate::Error::Runtime("missing ambient test Cx".to_string()))?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = crate::transport::plain_split(stream);
+            let mut conn = crate::tests::loopback_connection(read, write);
+
+            let doc = native_json_collection()
+                .get_one(&mut conn, &cx, &SodaOperation::default())
+                .await
+                .expect("empty native JSON query succeeds");
+            assert!(doc.is_none());
+            assert!(!conn.in_use_cursors.contains(&CURSOR_ID));
+            assert!(conn
+                .statement_cache
+                .iter()
+                .any(|entry| entry.cursor_id == CURSOR_ID));
+            assert!(conn.cursors_to_close.is_empty());
+            Ok::<_, crate::Error>(())
+        });
+
+        let sent_define_fetch = server.join().expect("empty JSON server joins")?;
+        outcome?;
+        assert!(
+            !sent_define_fetch,
+            "terminal ORA-01403 already proves there is nothing to define-fetch"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_get_one_releases_query_cursor_ownership() -> crate::Result<()> {
+        const CURSOR_ID: u32 = 117;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            for _ in 0..2 {
+                read_one_packet(&mut socket)?;
+                socket.write_all(&response_packet(&one_shot_document_execute_response(
+                    u16::try_from(CURSOR_ID).expect("test cursor id fits u16"),
+                    true,
+                )))?;
+                socket.flush()?;
+            }
+            Ok(())
+        });
+
+        let runtime = crate::build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| crate::Error::Runtime("missing ambient test Cx".to_string()))?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = crate::transport::plain_split(stream);
+            let mut conn = crate::tests::loopback_connection(read, write);
+            let collection = one_shot_collection();
+
+            for _ in 0..2 {
+                let doc = collection
+                    .get_one(&mut conn, &cx, &SodaOperation::default())
+                    .await
+                    .expect("one-shot SODA query succeeds")
+                    .expect("one document returned");
+                assert_eq!(doc.key.as_deref(), Some("doc-key"));
+                assert_eq!(doc.content_bytes.as_deref(), Some(&br#"{"one":1}"#[..]));
+            }
+
+            assert!(!conn.in_use_cursors.contains(&CURSOR_ID));
+            assert!(conn.copied_cursors.is_empty());
+            assert_eq!(
+                conn.statement_cache
+                    .iter()
+                    .filter(|entry| entry.cursor_id == CURSOR_ID)
+                    .count(),
+                1,
+                "repeated one-shot reads must reuse one released cached cursor"
+            );
+            assert!(conn.cursors_to_close.is_empty());
+            Ok::<_, crate::Error>(())
+        });
+
+        server.join().expect("one-shot SODA server joins")?;
+        outcome
+    }
+
+    #[test]
+    fn repeated_get_count_releases_query_cursor_ownership() -> crate::Result<()> {
+        const CURSOR_ID: u32 = 118;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            for _ in 0..2 {
+                read_one_packet(&mut socket)?;
+                socket.write_all(&response_packet(&scalar_execute_response(
+                    u16::try_from(CURSOR_ID).expect("test cursor id fits u16"),
+                    b"COUNT(*)",
+                    ORA_TYPE_NUM_NUMBER,
+                    &[0xc1, 0x08], // Oracle NUMBER 7
+                )))?;
+                socket.flush()?;
+            }
+            Ok(())
+        });
+
+        let runtime = crate::build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| crate::Error::Runtime("missing ambient test Cx".to_string()))?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = crate::transport::plain_split(stream);
+            let mut conn = crate::tests::loopback_connection(read, write);
+            let collection = one_shot_collection();
+
+            for _ in 0..2 {
+                assert_eq!(
+                    collection
+                        .get_count(&mut conn, &cx, &SodaOperation::default())
+                        .await
+                        .expect("one-shot count succeeds"),
+                    7
+                );
+            }
+
+            assert!(!conn.in_use_cursors.contains(&CURSOR_ID));
+            assert!(conn.copied_cursors.is_empty());
+            assert_eq!(
+                conn.statement_cache
+                    .iter()
+                    .filter(|entry| entry.cursor_id == CURSOR_ID)
+                    .count(),
+                1,
+                "repeated counts must reuse one released cached cursor"
+            );
+            assert!(conn.cursors_to_close.is_empty());
+            Ok::<_, crate::Error>(())
+        });
+
+        server.join().expect("one-shot count server joins")?;
+        outcome
+    }
+
+    #[test]
+    fn get_documents_releases_drained_cursor_ownership() -> crate::Result<()> {
+        const CURSOR_ID: u32 = 119;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            read_one_packet(&mut socket)?;
+            socket.write_all(&response_packet(&one_shot_document_execute_response(
+                u16::try_from(CURSOR_ID).expect("test cursor id fits u16"),
+                true,
+            )))?;
+            socket.flush()
+        });
+
+        let runtime = crate::build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| crate::Error::Runtime("missing ambient test Cx".to_string()))?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = crate::transport::plain_split(stream);
+            let mut conn = crate::tests::loopback_connection(read, write);
+
+            let docs = one_shot_collection()
+                .get_documents(&mut conn, &cx, &SodaOperation::default())
+                .await
+                .expect("getDocuments drains its cursor");
+            assert_eq!(docs.len(), 1);
+            assert_eq!(docs[0].key.as_deref(), Some("doc-key"));
+            assert_eq!(docs[0].content_bytes.as_deref(), Some(&br#"{"one":1}"#[..]));
+            assert!(!conn.in_use_cursors.contains(&CURSOR_ID));
+            assert!(conn.copied_cursors.is_empty());
+            assert!(conn
+                .statement_cache
+                .iter()
+                .any(|entry| entry.cursor_id == CURSOR_ID));
+            assert!(conn.cursors_to_close.is_empty());
+            Ok::<_, crate::Error>(())
+        });
+
+        server.join().expect("getDocuments server joins")?;
+        outcome
+    }
+
+    #[test]
+    fn get_documents_fetch_failure_stays_retired() -> crate::Result<()> {
+        const CURSOR_ID: u32 = 123;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            read_one_packet(&mut socket)?;
+            socket.write_all(&response_packet(&one_shot_document_execute_response(
+                u16::try_from(CURSOR_ID).expect("test cursor id fits u16"),
+                false,
+            )))?;
+            socket.flush()?;
+            read_one_packet(&mut socket)?;
+            socket.write_all(&response_packet(&[0xff]))?;
+            socket.flush()
+        });
+
+        let runtime = crate::build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| crate::Error::Runtime("missing ambient test Cx".to_string()))?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = crate::transport::plain_split(stream);
+            let mut conn = crate::tests::loopback_connection(read, write);
+
+            let err = one_shot_collection()
+                .get_documents(&mut conn, &cx, &SodaOperation::default())
+                .await
+                .expect_err("malformed continuation fetch must fail");
+            assert!(matches!(err, SodaError::Driver(_)), "{err:?}");
+            assert!(!conn.in_use_cursors.contains(&CURSOR_ID));
+            assert!(conn
+                .statement_cache
+                .iter()
+                .all(|entry| entry.cursor_id != CURSOR_ID));
+            assert_eq!(
+                conn.cursors_to_close
+                    .iter()
+                    .filter(|cursor_id| **cursor_id == CURSOR_ID)
+                    .count(),
+                1,
+                "getDocuments cleanup must not release a failed cursor back to cache"
+            );
+            Ok::<_, crate::Error>(())
+        });
+
+        server.join().expect("failed getDocuments server joins")?;
+        outcome
+    }
+
+    #[test]
+    fn open_cursor_retains_ownership_until_explicit_close() -> crate::Result<()> {
+        const CURSOR_ID: u32 = 120;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            read_one_packet(&mut socket)?;
+            socket.write_all(&response_packet(&one_shot_document_execute_response(
+                u16::try_from(CURSOR_ID).expect("test cursor id fits u16"),
+                true,
+            )))?;
+            socket.flush()
+        });
+
+        let runtime = crate::build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| crate::Error::Runtime("missing ambient test Cx".to_string()))?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = crate::transport::plain_split(stream);
+            let mut conn = crate::tests::loopback_connection(read, write);
+
+            let mut cursor = one_shot_collection()
+                .open_cursor(&mut conn, &cx, &SodaOperation::default())
+                .await
+                .expect("openCursor succeeds");
+            assert!(conn.in_use_cursors.contains(&CURSOR_ID));
+            assert!(cursor
+                .next_doc(&mut conn, &cx)
+                .await
+                .expect("first document decodes")
+                .is_some());
+            assert!(cursor
+                .next_doc(&mut conn, &cx)
+                .await
+                .expect("cursor reaches end of data")
+                .is_none());
+            assert!(
+                conn.in_use_cursors.contains(&CURSOR_ID),
+                "draining a caller-owned cursor does not close it implicitly"
+            );
+
+            cursor
+                .close(&mut conn, &cx)
+                .await
+                .expect("explicit close succeeds");
+            assert!(cursor.is_closed());
+            assert!(!conn.in_use_cursors.contains(&CURSOR_ID));
+            assert!(conn
+                .statement_cache
+                .iter()
+                .any(|entry| entry.cursor_id == CURSOR_ID));
+            Ok::<_, crate::Error>(())
+        });
+
+        server.join().expect("openCursor server joins")?;
+        outcome
+    }
+
+    #[test]
+    fn repeated_database_reads_release_query_cursor_ownership() -> crate::Result<()> {
+        const OPEN_CURSOR_ID: u32 = 121;
+        const LIST_CURSOR_ID: u32 = 122;
+        const DESCRIPTOR: &[u8] = br#"{"tableName":"OneShot","keyColumn":{"name":"KEY","sqlType":"VARCHAR2","assignmentMethod":"CLIENT"},"contentColumn":{"name":"DOC","sqlType":"VARCHAR2"}}"#;
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            for _ in 0..2 {
+                read_one_packet(&mut socket)?;
+                socket.write_all(&response_packet(&scalar_execute_response(
+                    u16::try_from(OPEN_CURSOR_ID).expect("test cursor id fits u16"),
+                    b"JSON_DESCRIPTOR",
+                    ORA_TYPE_NUM_VARCHAR,
+                    DESCRIPTOR,
+                )))?;
+                socket.flush()?;
+            }
+            for _ in 0..2 {
+                read_one_packet(&mut socket)?;
+                socket.write_all(&response_packet(&scalar_execute_response(
+                    u16::try_from(LIST_CURSOR_ID).expect("test cursor id fits u16"),
+                    b"URI_NAME",
+                    ORA_TYPE_NUM_VARCHAR,
+                    b"OneShot",
+                )))?;
+                socket.flush()?;
+            }
+            Ok(())
+        });
+
+        let runtime = crate::build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| crate::Error::Runtime("missing ambient test Cx".to_string()))?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = crate::transport::plain_split(stream);
+            let mut conn = crate::tests::loopback_connection(read, write);
+            let database = SodaDatabase::new();
+
+            for _ in 0..2 {
+                let opened = database
+                    .open_collection(&mut conn, &cx, "OneShot")
+                    .await
+                    .expect("openCollection succeeds")
+                    .expect("collection exists");
+                assert_eq!(opened.name(), "OneShot");
+                assert_eq!(opened.metadata().content_sql_type, ContentSqlType::Varchar2);
+            }
+            for _ in 0..2 {
+                assert_eq!(
+                    database
+                        .get_collection_names(&mut conn, &cx, None, 0)
+                        .await
+                        .expect("getCollectionNames succeeds"),
+                    vec!["OneShot".to_string()]
+                );
+            }
+
+            assert!(!conn.in_use_cursors.contains(&OPEN_CURSOR_ID));
+            assert!(!conn.in_use_cursors.contains(&LIST_CURSOR_ID));
+            assert!(conn.copied_cursors.is_empty());
+            for cursor_id in [OPEN_CURSOR_ID, LIST_CURSOR_ID] {
+                assert_eq!(
+                    conn.statement_cache
+                        .iter()
+                        .filter(|entry| entry.cursor_id == cursor_id)
+                        .count(),
+                    1,
+                    "each repeated database query reuses its released cursor"
+                );
+            }
+            assert!(conn.cursors_to_close.is_empty());
+            Ok::<_, crate::Error>(())
+        });
+
+        server.join().expect("database read server joins")?;
+        outcome
+    }
+
+    #[test]
+    fn open_collection_releases_cursor_before_local_decode_error() -> crate::Result<()> {
+        const CURSOR_ID: u32 = 124;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            read_one_packet(&mut socket)?;
+            socket.write_all(&response_packet(&scalar_execute_response(
+                u16::try_from(CURSOR_ID).expect("test cursor id fits u16"),
+                b"JSON_DESCRIPTOR",
+                ORA_TYPE_NUM_VARCHAR,
+                b"not valid JSON",
+            )))?;
+            socket.flush()
+        });
+
+        let runtime = crate::build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| crate::Error::Runtime("missing ambient test Cx".to_string()))?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = crate::transport::plain_split(stream);
+            let mut conn = crate::tests::loopback_connection(read, write);
+
+            let err = SodaDatabase::new()
+                .open_collection(&mut conn, &cx, "Broken")
+                .await
+                .expect_err("invalid descriptor must fail locally");
+            assert!(matches!(err, SodaError::InvalidMetadata(_)), "{err:?}");
+            assert!(!conn.in_use_cursors.contains(&CURSOR_ID));
+            assert!(conn
+                .statement_cache
+                .iter()
+                .any(|entry| entry.cursor_id == CURSOR_ID));
+            assert!(conn.copied_cursors.is_empty());
+            assert!(conn.cursors_to_close.is_empty());
+            Ok::<_, crate::Error>(())
+        });
+
+        server.join().expect("invalid descriptor server joins")?;
+        outcome
+    }
+
+    #[test]
+    fn unlimited_collection_names_fetches_beyond_initial_prefetch() -> crate::Result<()> {
+        const CURSOR_ID: u32 = 125;
+        let expected: Vec<String> = (0..=100).map(|n| format!("Collection{n:03}")).collect();
+        let initial = expected[..100].to_vec();
+        let continuation = expected[100..].to_vec();
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            read_one_packet(&mut socket)?;
+            socket.write_all(&response_packet(&collection_name_rows_response(
+                u16::try_from(CURSOR_ID).expect("test cursor id fits u16"),
+                &initial,
+                true,
+                false,
+            )))?;
+            socket.flush()?;
+            read_one_packet(&mut socket)?;
+            socket.write_all(&response_packet(&collection_name_rows_response(
+                u16::try_from(CURSOR_ID).expect("test cursor id fits u16"),
+                &continuation,
+                false,
+                true,
+            )))?;
+            socket.flush()
+        });
+
+        let runtime = crate::build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| crate::Error::Runtime("missing ambient test Cx".to_string()))?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = crate::transport::plain_split(stream);
+            let mut conn = crate::tests::loopback_connection(read, write);
+
+            let names = SodaDatabase::new()
+                .get_collection_names(&mut conn, &cx, None, 0)
+                .await
+                .expect("unlimited collection-name query succeeds");
+            assert_eq!(names, expected, "limit=0 must consume every fetch page");
+            assert!(!conn.in_use_cursors.contains(&CURSOR_ID));
+            assert!(conn
+                .statement_cache
+                .iter()
+                .any(|entry| entry.cursor_id == CURSOR_ID));
+            Ok::<_, crate::Error>(())
+        });
+
+        server.join().expect("unlimited names server joins")?;
+        outcome
+    }
+
+    #[test]
+    fn collection_names_failed_continuation_retires_cursor_once() -> crate::Result<()> {
+        const CURSOR_ID: u32 = 126;
+        let initial: Vec<String> = (0..100).map(|n| format!("Collection{n:03}")).collect();
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            read_one_packet(&mut socket)?;
+            socket.write_all(&response_packet(&collection_name_rows_response(
+                u16::try_from(CURSOR_ID).expect("test cursor id fits u16"),
+                &initial,
+                true,
+                false,
+            )))?;
+            socket.flush()?;
+            read_one_packet(&mut socket)?;
+            socket.write_all(&response_packet(&[0xff]))?;
+            socket.flush()
+        });
+
+        let runtime = crate::build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| crate::Error::Runtime("missing ambient test Cx".to_string()))?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = crate::transport::plain_split(stream);
+            let mut conn = crate::tests::loopback_connection(read, write);
+
+            let err = SodaDatabase::new()
+                .get_collection_names(&mut conn, &cx, None, 0)
+                .await
+                .expect_err("malformed continuation fetch must fail");
+            assert!(matches!(err, SodaError::Driver(_)), "{err:?}");
+            assert!(!conn.in_use_cursors.contains(&CURSOR_ID));
+            assert!(conn
+                .statement_cache
+                .iter()
+                .all(|entry| entry.cursor_id != CURSOR_ID));
+            assert_eq!(
+                conn.cursors_to_close
+                    .iter()
+                    .filter(|cursor_id| **cursor_id == CURSOR_ID)
+                    .count(),
+                1,
+                "failed pagination must queue one fail-closed cursor retirement"
+            );
+            Ok::<_, crate::Error>(())
+        });
+
+        server.join().expect("failed names server joins")?;
+        outcome
+    }
+
+    #[test]
+    fn collection_names_precancel_releases_without_fetch() -> crate::Result<()> {
+        const CURSOR_ID: u32 = 127;
+        const SQL: &str = "select collection names cancellation probe";
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<Option<u8>> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_millis(300)))?;
+            let mut byte = [0u8; 1];
+            match socket.read(&mut byte) {
+                Ok(0) => Ok(None),
+                Ok(_) => Ok(Some(byte[0])),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    Ok(None)
+                }
+                Err(err) => Err(err),
+            }
+        });
+
+        let runtime = crate::build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = Cx::current()
+                .ok_or_else(|| crate::Error::Runtime("missing ambient test Cx".to_string()))?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = crate::transport::plain_split(stream);
+            let mut conn = crate::tests::loopback_connection(read, write);
+            let columns = vec![ColumnMetadata::new("URI_NAME", ORA_TYPE_NUM_VARCHAR)];
+            conn.statement_cache_put(SQL, CURSOR_ID, Vec::new());
+            conn.in_use_cursors.insert(CURSOR_ID);
+            conn.cursor_columns.insert(CURSOR_ID, columns.clone());
+
+            cx.cancel_fast(CancelKind::User);
+            let err = collect_owned_query_result(
+                &mut conn,
+                &cx,
+                100,
+                QueryResult {
+                    columns,
+                    rows: vec![vec![Some(QueryValue::Text("Collection000".to_string()))]],
+                    cursor_id: CURSOR_ID,
+                    more_rows: true,
+                    ..QueryResult::default()
+                },
+            )
+            .await
+            .expect_err("pending cancellation must stop before FETCH");
+            assert!(matches!(err, SodaError::Driver(crate::Error::Cancelled)));
+            assert!(!conn.in_use_cursors.contains(&CURSOR_ID));
+            assert!(conn
+                .statement_cache
+                .iter()
+                .any(|entry| entry.cursor_id == CURSOR_ID));
+            assert!(conn.cursors_to_close.is_empty());
+            Ok::<_, crate::Error>(())
+        });
+
+        assert_eq!(
+            server.join().expect("pre-cancel names server joins")?,
+            None,
+            "a cancellation before continuation must not write FETCH"
+        );
+        outcome
     }
 
     #[test]
@@ -802,6 +1888,47 @@ mod tests {
         assert!(sql.contains("TO_CHAR(\"LastModifiedAt\""), "{sql}");
         assert_eq!(binds.len(), 3);
         assert_eq!(layout.expect("returning layout").bind_count, 4);
+    }
+
+    #[test]
+    fn replace_rejects_invalid_native_raw_key_and_version() {
+        let mut collection = native_json_collection();
+        collection.metadata.version_column = Some("ETAG".to_string());
+        let doc = document();
+
+        let invalid_key = SodaOperation {
+            key: Some("AAzzBB".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            collection.build_replace_sql(&invalid_key, &doc, false),
+            Err(SodaError::InvalidArgument(_))
+        ));
+
+        let invalid_version = SodaOperation {
+            key: Some("AABB".to_string()),
+            version: Some("odd".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            collection.build_replace_sql(&invalid_version, &doc, false),
+            Err(SodaError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn replace_never_ignores_a_requested_version() {
+        let collection = native_json_collection();
+        let op = SodaOperation {
+            key: Some("AABB".to_string()),
+            version: Some("CCDD".to_string()),
+            ..Default::default()
+        };
+
+        let err = collection
+            .build_replace_sql(&op, &document(), false)
+            .expect_err("optimistic locking requires a version column");
+        assert!(matches!(err, SodaError::NotSupported(_)), "{err:?}");
     }
 }
 
@@ -859,6 +1986,19 @@ fn columns_require_define(columns: &[ColumnMetadata]) -> bool {
     })
 }
 
+/// Finish an operation on an already-open SODA cursor. Once a fetch or define
+/// operation fails, the server-side cursor state is no longer proven valid, so
+/// it must be evicted from every local registry and queued for close instead of
+/// being returned to the statement cache.
+pub(super) fn finish_cursor_operation<T>(
+    conn: &mut Connection,
+    cursor_id: u32,
+    result: crate::Result<T>,
+) -> Result<T> {
+    conn.close_cursor_on_error(cursor_id, result)
+        .map_err(SodaError::Driver)
+}
+
 /// Execute a parameterised query and, if the result projects columns that
 /// require a client-side define (native JSON / LOB / VECTOR), perform the
 /// define-fetch round trip so the values are actually delivered.
@@ -873,7 +2013,7 @@ pub(crate) async fn execute_collect_with_binds(
     binds: &[BindValue],
 ) -> Result<QueryResult> {
     let mut result = execute_with_binds_raw(conn, cx, sql, prefetch_rows, binds).await?;
-    if !columns_require_define(&result.columns) || result.cursor_id == 0 {
+    if !columns_require_define(&result.columns) || result.cursor_id == 0 || !result.more_rows {
         return Ok(result);
     }
     if !result.rows.is_empty() {
@@ -881,10 +2021,10 @@ pub(crate) async fn execute_collect_with_binds(
     }
     let cursor_id = result.cursor_id;
     let columns = result.columns.clone();
-    let fetched = conn
+    let fetched_result = conn
         .define_and_fetch_rows_with_columns(cx, cursor_id, prefetch_rows.max(1), &columns, None)
-        .await
-        .map_err(SodaError::Driver)?;
+        .await;
+    let fetched = finish_cursor_operation(conn, cursor_id, fetched_result)?;
     result.rows = fetched.rows;
     result.more_rows = fetched.more_rows;
     if !fetched.columns.is_empty() {

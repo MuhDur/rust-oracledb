@@ -53,10 +53,7 @@ impl SodaOperation {
         let mut clauses: Vec<String> = Vec::new();
 
         if let Some(key) = &self.key {
-            clauses.push(key_predicate(meta, &mut binds, key));
-            if let Some(version) = &self.version {
-                clauses.push(version_predicate(meta, &mut binds, version)?);
-            }
+            clauses.push(key_predicate(meta, &mut binds, key)?);
         } else if let Some(keys) = &self.keys {
             if keys.is_empty() {
                 // No keys -> match nothing.
@@ -64,7 +61,7 @@ impl SodaOperation {
             } else {
                 let mut placeholders = Vec::new();
                 for k in keys {
-                    placeholders.push(key_bind_placeholder(meta, &mut binds, k));
+                    placeholders.push(key_bind_placeholder(meta, &mut binds, k)?);
                 }
                 clauses.push(format!(
                     "{} IN ({})",
@@ -77,6 +74,13 @@ impl SodaOperation {
                 .map_err(|e| SodaError::Qbe(format!("invalid filter JSON: {e}")))?;
             let frag = qbe::qbe_to_where_clause(&value, &quote_ident(&meta.content_column))?;
             clauses.push(frag);
+        }
+
+        // Version is an additional optimistic-lock predicate, not part of the
+        // single-key selector. Silently dropping it can widen a remove from one
+        // requested version to every primary-selector match (or even 1=1).
+        if let Some(version) = &self.version {
+            clauses.push(version_predicate(meta, &mut binds, version)?);
         }
 
         if clauses.is_empty() {
@@ -265,9 +269,17 @@ fn timestamp_iso(col: &str) -> String {
 }
 
 /// Build a key equality predicate, pushing the bind for the key value.
-fn key_predicate(meta: &SodaCollectionMetadata, binds: &mut Vec<BindValue>, key: &str) -> String {
-    let placeholder = key_bind_placeholder(meta, binds, key);
-    format!("{} = {}", quote_ident(&meta.key_column), placeholder)
+fn key_predicate(
+    meta: &SodaCollectionMetadata,
+    binds: &mut Vec<BindValue>,
+    key: &str,
+) -> Result<String> {
+    let placeholder = key_bind_placeholder(meta, binds, key)?;
+    Ok(format!(
+        "{} = {}",
+        quote_ident(&meta.key_column),
+        placeholder
+    ))
 }
 
 /// Push a bind for a key value and return the SQL placeholder expression.
@@ -282,31 +294,46 @@ fn key_bind_placeholder(
     meta: &SodaCollectionMetadata,
     binds: &mut Vec<BindValue>,
     key: &str,
-) -> String {
+) -> Result<String> {
     let n = binds.len() + 1;
     if meta.key_sql_type.eq_ignore_ascii_case("RAW") {
-        binds.push(BindValue::Raw(hex_decode(key)));
+        binds.push(BindValue::Raw(hex_decode(key)?));
     } else {
         binds.push(BindValue::Text(key.to_string()));
     }
-    format!(":{n}")
+    Ok(format!(":{n}"))
 }
 
-/// Decode a hex string into bytes. Invalid pairs are skipped defensively (the
-/// key always originates from `RAWTOHEX`, so it is well-formed in practice).
-pub(crate) fn hex_decode(s: &str) -> Vec<u8> {
+/// Decode a public RAW key/version identifier without changing its identity.
+/// Invalid pairs and odd trailing nibbles must be rejected: silently skipping
+/// either could make a malformed caller-supplied identifier alias valid bytes.
+pub(crate) fn hex_decode(s: &str) -> Result<Vec<u8>> {
     let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        let hi = (bytes[i] as char).to_digit(16);
-        let lo = (bytes[i + 1] as char).to_digit(16);
-        if let (Some(h), Some(l)) = (hi, lo) {
-            out.push((h * 16 + l) as u8);
-        }
-        i += 2;
+    if bytes.is_empty() || !bytes.len().is_multiple_of(2) {
+        return Err(invalid_hex_identifier());
     }
-    out
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let hi = hex_nibble(pair[0]).ok_or_else(invalid_hex_identifier)?;
+        let lo = hex_nibble(pair[1]).ok_or_else(invalid_hex_identifier)?;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn invalid_hex_identifier() -> SodaError {
+    SodaError::InvalidArgument(
+        "native RAW key/version must contain an even number of hexadecimal digits".to_string(),
+    )
 }
 
 /// Build a version equality predicate.
@@ -322,7 +349,7 @@ fn version_predicate(
     let n = binds.len() + 1;
     if matches!(meta.version_method, super::metadata::VersionMethod::None) && meta.native {
         // ETAG RAW: bind the decoded bytes (see key_bind_placeholder).
-        binds.push(BindValue::Raw(hex_decode(version)));
+        binds.push(BindValue::Raw(hex_decode(version)?));
     } else {
         binds.push(BindValue::Text(version.to_string()));
     }
@@ -417,6 +444,72 @@ mod tests {
         assert_eq!(layout.key_idx, 0);
         assert_eq!(layout.content_idx, 1);
         assert_eq!(layout.version_idx, Some(2));
+    }
+
+    #[test]
+    fn invalid_native_hex_cannot_alias_a_valid_raw_key() {
+        let valid = SodaOperation {
+            key: Some("AABB".into()),
+            ..Default::default()
+        };
+        let (_, valid_binds, _) = valid
+            .build_select_sql(&native_meta())
+            .expect("valid hexadecimal key");
+        assert_eq!(valid_binds, vec![BindValue::Raw(vec![0xaa, 0xbb])]);
+
+        for invalid in ["AAzzBB", "AAB"] {
+            let op = SodaOperation {
+                key: Some(invalid.to_string()),
+                ..Default::default()
+            };
+            let err = op
+                .build_select_sql(&native_meta())
+                .expect_err("invalid RAW key must fail");
+            assert!(matches!(err, SodaError::InvalidArgument(_)), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn raw_identifier_decoder_is_strict_and_case_insensitive() {
+        assert_eq!(
+            hex_decode("aAbB").expect("mixed-case hex"),
+            vec![0xaa, 0xbb]
+        );
+        for invalid in ["", "AAzzBB", "AAB", "é"] {
+            let err = hex_decode(invalid).expect_err("malformed hex must fail");
+            assert!(matches!(err, SodaError::InvalidArgument(_)), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn every_native_filter_identifier_is_validated() {
+        let invalid_keys = SodaOperation {
+            keys: Some(vec!["AABB".into(), "CCzzDD".into()]),
+            ..Default::default()
+        };
+        assert!(matches!(
+            invalid_keys.build_select_sql(&native_meta()),
+            Err(SodaError::InvalidArgument(_))
+        ));
+
+        let invalid_version = SodaOperation {
+            key: Some("AABB".into()),
+            version: Some("not-hex".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            invalid_version.build_delete_sql(&native_meta()),
+            Err(SodaError::InvalidArgument(_))
+        ));
+
+        let legacy = SodaOperation {
+            key: Some("AAzzBB".into()),
+            ..Default::default()
+        };
+        let (_, binds, _) = legacy
+            .build_select_sql(&legacy_meta())
+            .expect("legacy text keys remain opaque");
+        assert_eq!(binds, vec![BindValue::Text("AAzzBB".to_string())]);
     }
 
     #[test]
@@ -517,7 +610,81 @@ mod tests {
         };
         let (sql, binds, _) = op.build_select_sql(&legacy_meta()).expect("build select");
         assert!(sql.contains("\"VERSION\" = :2"), "{sql}");
-        assert_eq!(binds.len(), 2);
+        assert_eq!(
+            binds,
+            vec![
+                BindValue::Text("uuid-key".to_string()),
+                BindValue::Text("v1".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn version_predicate_is_never_silently_dropped() {
+        let filtered = SodaOperation {
+            filter: Some(r#"{"age":{"$gt":18}}"#.into()),
+            version: Some("version-1".into()),
+            ..Default::default()
+        };
+        let (filtered_sql, filtered_binds) = filtered
+            .build_delete_sql(&legacy_meta())
+            .expect("filter plus version");
+        assert!(filtered_sql.contains("JSON_EXISTS"), "{filtered_sql}");
+        assert!(filtered_sql.contains("\"VERSION\" = :1"), "{filtered_sql}");
+        assert_eq!(
+            filtered_binds,
+            vec![BindValue::Text("version-1".to_string())]
+        );
+
+        let version_only = SodaOperation {
+            version: Some("version-2".into()),
+            ..Default::default()
+        };
+        let (version_sql, version_binds) = version_only
+            .build_delete_sql(&legacy_meta())
+            .expect("version-only predicate");
+        assert!(!version_sql.contains("1=1"), "{version_sql}");
+        assert!(version_sql.contains("\"VERSION\" = :1"), "{version_sql}");
+        assert_eq!(
+            version_binds,
+            vec![BindValue::Text("version-2".to_string())]
+        );
+
+        let keyed = SodaOperation {
+            keys: Some(vec!["key-1".into(), "key-2".into()]),
+            version: Some("version-3".into()),
+            ..Default::default()
+        };
+        let (keyed_sql, keyed_binds) = keyed
+            .build_delete_sql(&legacy_meta())
+            .expect("keys plus version");
+        assert!(keyed_sql.contains("\"ID\" IN (:1, :2)"), "{keyed_sql}");
+        assert!(keyed_sql.contains("\"VERSION\" = :3"), "{keyed_sql}");
+        assert_eq!(
+            keyed_binds,
+            vec![
+                BindValue::Text("key-1".to_string()),
+                BindValue::Text("key-2".to_string()),
+                BindValue::Text("version-3".to_string())
+            ]
+        );
+
+        let mut no_version_meta = legacy_meta();
+        no_version_meta.version_column = None;
+        let err = version_only
+            .build_delete_sql(&no_version_meta)
+            .expect_err("requested version requires a version column");
+        assert!(matches!(err, SodaError::NotSupported(_)), "{err:?}");
+
+        let invalid_native = SodaOperation {
+            filter: Some(r#"{"name":"Ada"}"#.into()),
+            version: Some("not-hex".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            invalid_native.build_delete_sql(&native_meta()),
+            Err(SodaError::InvalidArgument(_))
+        ));
     }
 
     #[test]

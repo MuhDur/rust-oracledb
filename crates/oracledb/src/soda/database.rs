@@ -1,11 +1,11 @@
 //! Entry point for SODA: create / open / list / drop collections.
 
 use asupersync::Cx;
-use oracledb_protocol::thin::{BindValue, QueryValue};
+use oracledb_protocol::thin::{BindValue, QueryResult, QueryValue};
 
 use crate::Connection;
 
-use super::collection::{execute_with_binds_raw, SodaCollection};
+use super::collection::{execute_with_binds_raw, finish_cursor_operation, SodaCollection};
 use super::error::{Result, SodaError};
 use super::metadata::parse_metadata;
 
@@ -73,6 +73,9 @@ impl SodaDatabase {
                    FROM USER_SODA_COLLECTIONS WHERE URI_NAME = :1";
         let binds = vec![BindValue::Text(name.to_string())];
         let result = execute_with_binds_raw(conn, cx, sql, 2, &binds).await?;
+        // The descriptor is consumed in this method, so no caller-owned cursor
+        // survives the return. Release before local JSON/metadata decoding.
+        conn.release_cursor(result.cursor_id);
         let Some(cell) = result.cell(0, 0) else {
             return Ok(None);
         };
@@ -104,7 +107,9 @@ impl SodaDatabase {
         if limit > 0 {
             sql.push_str(&format!(" FETCH FIRST {limit} ROWS ONLY"));
         }
-        let result = execute_with_binds_raw(conn, cx, &sql, limit.max(100), &binds).await?;
+        let array_size = limit.max(100);
+        let result = execute_with_binds_raw(conn, cx, &sql, array_size, &binds).await?;
+        let result = collect_owned_query_result(conn, cx, array_size, result).await?;
         let mut names = Vec::with_capacity(result.rows.len());
         for row in &result.rows {
             if let Some(name) = row
@@ -147,4 +152,38 @@ impl SodaDatabase {
             .unwrap_or(false);
         Ok(dropped)
     }
+}
+
+/// Consume every page of an internally-owned query result, then return its
+/// statement to the cache. Unlike the public streaming cursor, callers of this
+/// helper expose only owned values and cannot transfer cursor ownership.
+pub(super) async fn collect_owned_query_result(
+    conn: &mut Connection,
+    cx: &Cx,
+    array_size: u32,
+    mut result: QueryResult,
+) -> Result<QueryResult> {
+    let cursor_id = result.cursor_id;
+    let columns = result.columns.clone();
+    let mut previous_row = result.rows.last().cloned();
+    while cursor_id != 0 && result.more_rows {
+        // A cancellation observed here proves the continuation operation never
+        // started, so the still-valid statement can be released to the cache.
+        // Once FETCH starts, failures retire it fail-closed.
+        if let Err(err) = crate::observe_cancellation_between_round_trips(cx) {
+            conn.release_cursor(cursor_id);
+            return Err(SodaError::Driver(err));
+        }
+        let fetched = conn
+            .fetch_rows_with_columns(cx, cursor_id, array_size, &columns, previous_row.as_deref())
+            .await;
+        let fetched = finish_cursor_operation(conn, cursor_id, fetched)?;
+        result.more_rows = fetched.more_rows;
+        if let Some(last) = fetched.rows.last() {
+            previous_row = Some(last.clone());
+        }
+        result.rows.extend(fetched.rows);
+    }
+    conn.release_cursor(cursor_id);
+    Ok(result)
 }
