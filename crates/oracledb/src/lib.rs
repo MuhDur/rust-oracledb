@@ -2516,6 +2516,46 @@ pub struct Connection {
     capture_guard: Option<transport::CaptureGuard>,
 }
 
+/// Owns the lifecycle of the open query cursor used by
+/// [`Connection::for_each_row_ref`]. The borrowed-row path deliberately keeps a
+/// speculative response in flight while it runs the user's callback, so every
+/// post-execute early return -- including cancellation by dropping the method
+/// future -- must retire the cursor locally. Wire recovery remains the
+/// transport's job: the next request drains any stranded response before it
+/// sends this guard's queued close-cursor piggyback.
+struct BorrowedStreamCursorGuard<'conn> {
+    connection: &'conn mut Connection,
+    cursor_id: u32,
+}
+
+impl<'conn> BorrowedStreamCursorGuard<'conn> {
+    fn new(connection: &'conn mut Connection, cursor_id: u32) -> Self {
+        Self {
+            connection,
+            cursor_id,
+        }
+    }
+
+    fn connection(&mut self) -> &mut Connection {
+        self.connection
+    }
+
+    /// The cursor reached normal end-of-data, so it remains valid for statement
+    /// cache reuse. Disarm the fail-closed drop path after normal release.
+    fn release(mut self) {
+        self.connection.release_cursor(self.cursor_id);
+        self.cursor_id = 0;
+    }
+}
+
+impl Drop for BorrowedStreamCursorGuard<'_> {
+    fn drop(&mut self) {
+        if self.cursor_id != 0 {
+            self.connection.close_cursor(self.cursor_id);
+        }
+    }
+}
+
 /// Mirrors the reference `_SessionlessData` (impl/thin/connection.pyx): the
 /// pending or active sessionless transaction tracked on the connection.
 #[derive(Clone, Debug)]
@@ -5539,8 +5579,9 @@ impl Connection {
             )
             .await?;
         let cursor_id = first.cursor_id;
+        let mut cursor = BorrowedStreamCursorGuard::new(self, cursor_id);
         if cursor_id != 0 && columns_have_lob_prefetch_fields(&first.columns) {
-            self.lob_prefetch_cursors.insert(cursor_id);
+            cursor.connection().lob_prefetch_cursors.insert(cursor_id);
         }
 
         // Emit the first (owned) batch's rows as borrowed refs over owned values.
@@ -5585,7 +5626,10 @@ impl Connection {
 
         // Prime the pipeline: request the first paged batch ahead of decoding.
         if more_rows && cursor_id != 0 {
-            self.fetch_rows_request(cx, cursor_id, arraysize).await?;
+            cursor
+                .connection()
+                .fetch_rows_request(cx, cursor_id, arraysize)
+                .await?;
             #[cfg(feature = "tracing")]
             {
                 // One page is now outstanding on the wire (look-ahead depth 1).
@@ -5595,7 +5639,8 @@ impl Connection {
 
         while more_rows && cursor_id != 0 {
             // Read + decode the page whose request is already in flight.
-            let result = self
+            let result = cursor
+                .connection()
                 .fetch_rows_ref_response(cx, cursor_id, previous_row.as_deref())
                 .await?;
             let next_more = result.more_rows;
@@ -5605,7 +5650,10 @@ impl Connection {
             // The request needs no data from `result`, so `result`'s buffer stays
             // alive and untouched across this send.
             if next_more {
-                self.fetch_rows_request(cx, cursor_id, arraysize).await?;
+                cursor
+                    .connection()
+                    .fetch_rows_request(cx, cursor_id, arraysize)
+                    .await?;
             }
 
             // Snapshot ONLY the last row of the page as the next page's
@@ -5649,7 +5697,7 @@ impl Connection {
             _stream_span,
             db.prefetch_inflight_max = prefetch_inflight_max
         );
-        self.release_cursor(cursor_id);
+        cursor.release();
         Ok(())
     }
 
@@ -12137,6 +12185,66 @@ mod tests {
         bytes
     }
 
+    /// The committed single-row execute fixture ends with ORA-01403, which
+    /// marks the cursor exhausted. Rewrite only that terminal error number and
+    /// omit its message to model the same decoded row/metadata with an open
+    /// cursor whose continuation must be fetched.
+    fn synthetic_open_cursor_execute_response_payload() -> Vec<u8> {
+        const TERMINAL_NO_DATA_PREFIX: &[u8] = &[
+            0x02, 0x05, 0x7b, // error number: ub4(1403)
+            0x01, 0x01, // row count: ub8(1)
+            0x01, 0x03, // SQL type: ub4(3)
+            0x00, // server checksum: ub4(0)
+            0x19, // ORA-01403 message length
+        ];
+
+        let mut response = synthetic_pipeline_execute_response_payload();
+        let terminal = response
+            .windows(TERMINAL_NO_DATA_PREFIX.len())
+            .rposition(|window| window == TERMINAL_NO_DATA_PREFIX)
+            .expect("synthetic response must contain its terminal ORA-01403");
+        response[terminal + 1] = 0;
+        response[terminal + 2] = 0;
+        response.truncate(terminal + 8);
+        response.push(TNS_MSG_TYPE_END_OF_RESPONSE);
+
+        let decoded = sequential_op_decode(&response);
+        assert_ne!(decoded.cursor_id, 0, "fixture must retain its cursor id");
+        assert!(decoded.more_rows, "fixture must leave the cursor open");
+        assert_eq!(decoded.rows.len(), 1, "fixture must retain its first row");
+        response
+    }
+
+    /// One borrowed NUMBER continuation row with no terminal ORA-01403. The
+    /// parser therefore reports `more_rows = true`, allowing tests to prove the
+    /// speculative request-before-callback ordering without a live database.
+    fn synthetic_open_borrowed_fetch_response(value: &str) -> Vec<u8> {
+        use oracledb_protocol::thin::{
+            encode_number_text, TNS_MSG_TYPE_ROW_DATA, TNS_MSG_TYPE_ROW_HEADER,
+        };
+
+        let number = encode_number_text(value).expect("synthetic NUMBER encodes");
+        let number_len = u8::try_from(number.len()).expect("NUMBER uses short TTC bytes");
+        let mut response = vec![
+            TNS_MSG_TYPE_ROW_HEADER,
+            0, // row-header flags
+            1,
+            1, // ub2(num requests = 1)
+            1,
+            1, // ub4(iteration = 1)
+            1,
+            1, // ub4(num iterations = 1)
+            0, // ub2(buffer length = 0)
+            0, // ub4(bit-vector bytes = 0)
+            0, // ub4(rxhrid length = 0)
+            TNS_MSG_TYPE_ROW_DATA,
+            number_len,
+        ];
+        response.extend_from_slice(&number);
+        response.push(TNS_MSG_TYPE_END_OF_RESPONSE);
+        response
+    }
+
     /// Reference decode of one op's response through the *same* public decoder
     /// the sequential execute path invokes (default caps/limits, matching the
     /// loopback connection) — the "sequential" side of the byte-identity check.
@@ -12155,13 +12263,27 @@ mod tests {
     /// Read one whole Large32-framed TNS packet (header + body) from a blocking
     /// std socket, returning the packet-type byte. Post-connect every packet on
     /// the wire is a Large32 DATA packet.
-    fn read_one_wire_packet(socket: &mut std::net::TcpStream) -> u8 {
+    fn read_one_wire_packet_bytes(socket: &mut std::net::TcpStream) -> (u8, Vec<u8>) {
         let mut header = [0u8; 8];
         socket.read_exact(&mut header).expect("read packet header");
         let declared = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
         let mut body = vec![0u8; declared - header.len()];
         socket.read_exact(&mut body).expect("read packet body");
-        header[4]
+        (header[4], body)
+    }
+
+    fn read_one_wire_packet(socket: &mut std::net::TcpStream) -> u8 {
+        read_one_wire_packet_bytes(socket).0
+    }
+
+    fn read_one_wire_data_payload(socket: &mut std::net::TcpStream) -> Vec<u8> {
+        let (packet_type, body) = read_one_wire_packet_bytes(socket);
+        assert_eq!(
+            packet_type, TNS_PACKET_TYPE_DATA,
+            "expected a DATA request after recovery"
+        );
+        assert!(body.len() >= 2, "DATA packet must contain its flags");
+        body[2..].to_vec()
     }
 
     /// Drive an `n`-statement pipeline over a loopback socket whose server side
@@ -14238,6 +14360,634 @@ mod tests {
                 connection.core.recovery.phase(),
                 SessionRecoveryPhase::Ready
             );
+            Ok::<_, Error>(())
+        })?;
+
+        server.join().expect("server thread joins");
+        Ok(())
+    }
+
+    fn assert_borrowed_stream_cursor_retired(
+        connection: &Connection,
+        cursor_id: u32,
+        expected_phase: SessionRecoveryPhase,
+    ) {
+        assert_eq!(connection.core.recovery.phase(), expected_phase);
+        assert!(!connection.in_use_cursors.contains(&cursor_id));
+        assert!(!connection.copied_cursors.contains(&cursor_id));
+        assert!(
+            connection
+                .statement_cache
+                .iter()
+                .all(|entry| entry.cursor_id != cursor_id),
+            "failed borrowed stream must evict its cached cursor"
+        );
+        assert!(!connection.cursor_columns.contains_key(&cursor_id));
+        assert!(!connection.lob_prefetch_cursors.contains(&cursor_id));
+        assert_eq!(
+            connection
+                .cursors_to_close
+                .iter()
+                .filter(|queued| **queued == cursor_id)
+                .count(),
+            1,
+            "failed borrowed stream must queue exactly one cursor close"
+        );
+    }
+
+    fn expected_next_close_piggyback(connection: &Connection, cursor_id: u32) -> Vec<u8> {
+        let mut seq_num = connection.ttc_seq_num;
+        let close_seq = next_ttc_sequence(&mut seq_num);
+        oracledb_protocol::thin::build_close_cursors_piggyback(
+            &[cursor_id],
+            close_seq,
+            connection.capabilities.ttc_field_version,
+        )
+    }
+
+    fn serve_borrowed_stream_break_drain(
+        socket: &mut std::net::TcpStream,
+        stranded_response: &[u8],
+    ) {
+        use std::io::Write as _;
+        const TRAILING_CANCEL_ERROR: &[u8] = &[0x04, 0x01, 0x0d];
+
+        assert_eq!(
+            read_marker_type(socket),
+            TNS_MARKER_TYPE_BREAK,
+            "reuse must BREAK before sending a request or cursor-close piggyback"
+        );
+        socket
+            .write_all(&data_packet(stranded_response, true))
+            .expect("write stranded borrowed response");
+        socket
+            .write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))
+            .expect("write break acknowledgement");
+        assert_eq!(
+            read_marker_type(socket),
+            TNS_MARKER_TYPE_RESET,
+            "drain must RESET before the reuse request"
+        );
+        socket
+            .write_all(&marker_packet(TNS_MARKER_TYPE_RESET))
+            .expect("write reset confirmation");
+        socket
+            .write_all(&data_packet(TRAILING_CANCEL_ERROR, true))
+            .expect("write trailing cancel response");
+    }
+
+    #[test]
+    fn borrowed_stream_first_page_callback_error_retires_cursor() -> Result<()> {
+        const SQL: &str = "select value from borrowed_callback_failure";
+        let response = synthetic_pipeline_execute_response_payload();
+        let expected = sequential_op_decode(&response);
+        let cursor_id = expected.cursor_id;
+        assert_ne!(cursor_id, 0, "fixture must open a query cursor");
+        assert!(
+            !expected.rows.is_empty(),
+            "fixture must invoke the first-page callback"
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            let _execute = read_one_wire_packet(&mut socket);
+            let response_packet = data_packet(&response, true);
+            socket.write_all(&response_packet)?;
+            socket.flush()?;
+
+            // The retry must parse a fresh statement after the failed stream
+            // evicted its cached cursor. Its request also carries the deferred
+            // close piggyback for the abandoned cursor.
+            let _retry = read_one_wire_packet(&mut socket);
+            socket.write_all(&response_packet)?;
+            socket.flush()?;
+            Ok(())
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+
+            let err = connection
+                .for_each_row_ref(&cx, SQL, 2, |_row| {
+                    Err(Error::Runtime("stop borrowed callback".to_string()))
+                })
+                .await
+                .expect_err("callback failure must be surfaced");
+            assert!(matches!(err, Error::Runtime(message) if message == "stop borrowed callback"));
+            assert!(!connection.in_use_cursors.contains(&cursor_id));
+            assert!(
+                connection
+                    .statement_cache
+                    .iter()
+                    .all(|entry| entry.cursor_id != cursor_id),
+                "failed borrowed stream must not leave its cursor reusable"
+            );
+            assert!(!connection.cursor_columns.contains_key(&cursor_id));
+            assert_eq!(
+                connection
+                    .cursors_to_close
+                    .iter()
+                    .filter(|queued| **queued == cursor_id)
+                    .count(),
+                1,
+                "failed borrowed stream must queue one cursor close"
+            );
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready,
+                "a first-page callback error has no stranded response"
+            );
+
+            let mut retried_rows = 0usize;
+            connection
+                .for_each_row_ref(&cx, SQL, 2, |_row| {
+                    retried_rows += 1;
+                    Ok(())
+                })
+                .await?;
+            assert_eq!(retried_rows, expected.rows.len());
+            assert!(
+                connection
+                    .statement_cache
+                    .iter()
+                    .any(|entry| entry.cursor_id == cursor_id),
+                "a successful retry must return its fresh cursor to the cache"
+            );
+            assert!(!connection.in_use_cursors.contains(&cursor_id));
+            assert!(!connection.copied_cursors.contains(&cursor_id));
+            assert!(
+                !connection.cursors_to_close.contains(&cursor_id),
+                "the retry request must consume the abandoned cursor's close piggyback"
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        server.join().expect("server thread joins")?;
+        Ok(())
+    }
+
+    #[test]
+    fn borrowed_stream_paged_callback_error_drains_before_close_and_reuse() -> Result<()> {
+        const SQL: &str = "select value from paged_borrowed_callback_failure";
+        const FRESH_SQL: &str = "select 7 + 5 as value from dual";
+
+        let execute_response = synthetic_open_cursor_execute_response_payload();
+        let first = sequential_op_decode(&execute_response);
+        let cursor_id = first.cursor_id;
+        let continuation = synthetic_open_borrowed_fetch_response("13");
+        let parsed_continuation = parse_query_response_borrowed_with_limits(
+            &continuation,
+            ClientCapabilities::default(),
+            &first.columns,
+            first.rows.last().map(Vec::as_slice),
+            ProtocolLimits::DEFAULT,
+        )
+        .expect("synthetic continuation must decode through the borrowed parser");
+        assert_eq!(parsed_continuation.batch.row_count(), 1);
+        assert!(parsed_continuation.more_rows);
+        drop(parsed_continuation);
+
+        let (close_tx, close_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let stranded = continuation.clone();
+        let server = thread::spawn(move || {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+
+            let _execute = read_one_wire_data_payload(&mut socket);
+            socket
+                .write_all(&data_packet(&execute_response, true))
+                .expect("write open-cursor execute response");
+            let _first_fetch = read_one_wire_data_payload(&mut socket);
+            socket
+                .write_all(&data_packet(&continuation, true))
+                .expect("write first continuation page");
+
+            // `for_each_row_ref` must send this speculative request before it
+            // invokes the page callback that fails.
+            let _speculative_fetch = read_one_wire_data_payload(&mut socket);
+            serve_borrowed_stream_break_drain(&mut socket, &stranded);
+
+            let reuse = read_one_wire_data_payload(&mut socket);
+            let expected_close = close_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("client provides expected close piggyback");
+            assert!(
+                reuse.starts_with(&expected_close),
+                "cursor close must be deduplicated and prepended only after BREAK/RESET drain"
+            );
+            socket
+                .write_all(&data_packet(
+                    &synthetic_pipeline_execute_response_payload(),
+                    true,
+                ))
+                .expect("write fresh reuse response");
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            let mut rows_seen = 0usize;
+
+            let err = connection
+                .for_each_row_ref(&cx, SQL, 2, |_row| {
+                    rows_seen += 1;
+                    if rows_seen == 2 {
+                        Err(Error::Runtime("stop paged callback".into()))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .await
+                .expect_err("paged callback failure must be surfaced");
+            assert!(matches!(err, Error::Runtime(message) if message == "stop paged callback"));
+            assert_eq!(
+                rows_seen, 2,
+                "failure must occur in the fetched-page callback, after speculative send"
+            );
+            assert_borrowed_stream_cursor_retired(
+                &connection,
+                cursor_id,
+                SessionRecoveryPhase::InFlight,
+            );
+            connection.close_cursor(cursor_id);
+            assert_borrowed_stream_cursor_retired(
+                &connection,
+                cursor_id,
+                SessionRecoveryPhase::InFlight,
+            );
+
+            close_tx
+                .send(expected_next_close_piggyback(&connection, cursor_id))
+                .expect("server is waiting for close proof");
+            let fresh = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await?;
+            assert_eq!(
+                fresh,
+                sequential_op_decode(&synthetic_pipeline_execute_response_payload()),
+                "same connection must decode its own response after drain"
+            );
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready
+            );
+            assert!(!connection.cursors_to_close.contains(&cursor_id));
+            connection.release_cursor(fresh.cursor_id);
+            Ok::<_, Error>(())
+        })?;
+
+        server.join().expect("server thread joins");
+        Ok(())
+    }
+
+    fn exercise_borrowed_stream_fetch_decode_failure(malformed: Vec<u8>) -> Result<()> {
+        const SQL: &str = "select value from malformed_borrowed_fetch";
+        const FRESH_SQL: &str = "select 7 + 5 as value from dual";
+
+        let execute_response = synthetic_open_cursor_execute_response_payload();
+        let cursor_id = sequential_op_decode(&execute_response).cursor_id;
+        let (close_tx, close_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+
+            let _execute = read_one_wire_data_payload(&mut socket);
+            socket
+                .write_all(&data_packet(&execute_response, true))
+                .expect("write open-cursor execute response");
+            let _fetch = read_one_wire_data_payload(&mut socket);
+            socket
+                .write_all(&data_packet(&malformed, true))
+                .expect("write malformed fetch response");
+
+            // The malformed response was fully framed and consumed, so there
+            // must be no BREAK. The very next packet is the close+reuse DATA.
+            let reuse = read_one_wire_data_payload(&mut socket);
+            let expected_close = close_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("client provides expected close piggyback");
+            assert!(reuse.starts_with(&expected_close));
+            socket
+                .write_all(&data_packet(
+                    &synthetic_pipeline_execute_response_payload(),
+                    true,
+                ))
+                .expect("write fresh reuse response");
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            let mut rows_seen = 0usize;
+
+            let err = connection
+                .for_each_row_ref(&cx, SQL, 2, |_row| {
+                    rows_seen += 1;
+                    Ok(())
+                })
+                .await
+                .expect_err("malformed continuation must fail decoding");
+            assert!(matches!(err, Error::Protocol(_)));
+            assert_eq!(rows_seen, 1, "only the execute page may reach the callback");
+            assert_borrowed_stream_cursor_retired(
+                &connection,
+                cursor_id,
+                SessionRecoveryPhase::Ready,
+            );
+            connection.close_cursor(cursor_id);
+            assert_borrowed_stream_cursor_retired(
+                &connection,
+                cursor_id,
+                SessionRecoveryPhase::Ready,
+            );
+
+            close_tx
+                .send(expected_next_close_piggyback(&connection, cursor_id))
+                .expect("server is waiting for close proof");
+            let fresh = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await?;
+            assert_eq!(
+                fresh,
+                sequential_op_decode(&synthetic_pipeline_execute_response_payload())
+            );
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready
+            );
+            assert!(!connection.cursors_to_close.contains(&cursor_id));
+            connection.release_cursor(fresh.cursor_id);
+            Ok::<_, Error>(())
+        })?;
+
+        server.join().expect("server thread joins");
+        Ok(())
+    }
+
+    #[test]
+    fn borrowed_stream_malformed_and_truncated_fetches_retire_before_reuse() -> Result<()> {
+        exercise_borrowed_stream_fetch_decode_failure(vec![0xff])?;
+        exercise_borrowed_stream_fetch_decode_failure(vec![
+            oracledb_protocol::thin::TNS_MSG_TYPE_ROW_HEADER,
+        ])
+    }
+
+    #[test]
+    fn borrowed_stream_fetch_eof_retires_cursor() -> Result<()> {
+        const SQL: &str = "select value from eof_borrowed_fetch";
+        let execute_response = synthetic_open_cursor_execute_response_payload();
+        let cursor_id = sequential_op_decode(&execute_response).cursor_id;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            let _execute = read_one_wire_data_payload(&mut socket);
+            socket
+                .write_all(&data_packet(&execute_response, true))
+                .expect("write open-cursor execute response");
+            let _fetch = read_one_wire_data_payload(&mut socket);
+            socket
+                .shutdown(std::net::Shutdown::Both)
+                .expect("close during fetch response");
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            let err = connection
+                .for_each_row_ref(&cx, SQL, 2, |_row| Ok(()))
+                .await
+                .expect_err("EOF during continuation fetch must fail");
+            assert!(matches!(err, Error::Io(_) | Error::ConnectionClosed(_)));
+            assert_borrowed_stream_cursor_retired(
+                &connection,
+                cursor_id,
+                SessionRecoveryPhase::BreakSent,
+            );
+            connection.close_cursor(cursor_id);
+            assert_borrowed_stream_cursor_retired(
+                &connection,
+                cursor_id,
+                SessionRecoveryPhase::BreakSent,
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        server.join().expect("server thread joins");
+        Ok(())
+    }
+
+    #[test]
+    fn borrowed_stream_cancel_before_fetch_request_retires_without_wire_write() -> Result<()> {
+        const SQL: &str = "select value from pre_request_borrowed_cancel";
+        let execute_response = synthetic_open_cursor_execute_response_payload();
+        let cursor_id = sequential_op_decode(&execute_response).cursor_id;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<Option<u8>> {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_millis(500)))?;
+            let _execute = read_one_wire_data_payload(&mut socket);
+            socket.write_all(&data_packet(&execute_response, true))?;
+            socket.flush()?;
+
+            let mut byte = [0u8; 1];
+            match socket.read(&mut byte) {
+                Ok(0) => Ok(None),
+                Ok(_) => Ok(Some(byte[0])),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    Ok(None)
+                }
+                Err(err) => Err(err),
+            }
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            let err = connection
+                .for_each_row_ref(&cx, SQL, 2, |_row| {
+                    cx.cancel_fast(asupersync::CancelKind::User);
+                    Ok(())
+                })
+                .await
+                .expect_err("cancel checkpoint must stop before FETCH write");
+            assert!(matches!(err, Error::Cancelled));
+            assert_eq!(
+                connection.ttc_seq_num, 1,
+                "cancel-before-request must not allocate a FETCH sequence"
+            );
+            assert_borrowed_stream_cursor_retired(
+                &connection,
+                cursor_id,
+                SessionRecoveryPhase::Ready,
+            );
+            connection.close_cursor(cursor_id);
+            assert_borrowed_stream_cursor_retired(
+                &connection,
+                cursor_id,
+                SessionRecoveryPhase::Ready,
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        let received = server.join().expect("server thread joins")?;
+        assert_eq!(received, None, "cancel-before-request must write no FETCH");
+        Ok(())
+    }
+
+    #[test]
+    fn borrowed_stream_drop_after_fetch_request_drains_before_close_and_reuse() -> Result<()> {
+        const SQL: &str = "select value from post_request_borrowed_cancel";
+        const FRESH_SQL: &str = "select 7 + 5 as value from dual";
+        let execute_response = synthetic_open_cursor_execute_response_payload();
+        let cursor_id = sequential_op_decode(&execute_response).cursor_id;
+        let stranded = synthetic_open_borrowed_fetch_response("14");
+        let (execute_ready_tx, execute_ready_rx) = std::sync::mpsc::channel();
+        let (fetch_seen_tx, fetch_seen_rx) = std::sync::mpsc::channel();
+        let (close_tx, close_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            let _execute = read_one_wire_data_payload(&mut socket);
+            socket
+                .write_all(&data_packet(&execute_response, true))
+                .expect("write open-cursor execute response");
+            socket.flush().expect("flush execute response");
+            execute_ready_tx
+                .send(())
+                .expect("client waits for execute response");
+            let _fetch = read_one_wire_data_payload(&mut socket);
+            fetch_seen_tx
+                .send(())
+                .expect("client waits for FETCH write");
+
+            serve_borrowed_stream_break_drain(&mut socket, &stranded);
+            let reuse = read_one_wire_data_payload(&mut socket);
+            let expected_close = close_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("client provides expected close piggyback");
+            assert!(reuse.starts_with(&expected_close));
+            socket
+                .write_all(&data_packet(
+                    &synthetic_pipeline_execute_response_payload(),
+                    true,
+                ))
+                .expect("write fresh reuse response");
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            let mut rows_seen = 0usize;
+
+            {
+                let mut fetch = pin!(connection.for_each_row_ref(&cx, SQL, 2, |_row| {
+                    rows_seen += 1;
+                    Ok(())
+                }));
+                let first_poll = poll_fn(|task_cx| Poll::Ready(fetch.as_mut().poll(task_cx))).await;
+                assert!(matches!(first_poll, Poll::Pending));
+                execute_ready_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("server wrote execute response");
+
+                let deadline = Instant::now() + Duration::from_secs(2);
+                loop {
+                    match fetch_seen_rx.try_recv() {
+                        Ok(()) => break,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            panic!("server exited before seeing FETCH")
+                        }
+                    }
+                    assert!(Instant::now() < deadline, "FETCH request was never sent");
+                    let polled = poll_fn(|task_cx| Poll::Ready(fetch.as_mut().poll(task_cx))).await;
+                    assert!(matches!(polled, Poll::Pending));
+                    thread::yield_now();
+                }
+            }
+
+            assert_eq!(
+                rows_seen, 1,
+                "execute page callback must run before FETCH wait"
+            );
+            assert_borrowed_stream_cursor_retired(
+                &connection,
+                cursor_id,
+                SessionRecoveryPhase::BreakSent,
+            );
+            connection.close_cursor(cursor_id);
+            assert_borrowed_stream_cursor_retired(
+                &connection,
+                cursor_id,
+                SessionRecoveryPhase::BreakSent,
+            );
+
+            close_tx
+                .send(expected_next_close_piggyback(&connection, cursor_id))
+                .expect("server is waiting for close proof");
+            let fresh = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await?;
+            assert_eq!(
+                fresh,
+                sequential_op_decode(&synthetic_pipeline_execute_response_payload())
+            );
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready
+            );
+            assert!(!connection.cursors_to_close.contains(&cursor_id));
+            connection.release_cursor(fresh.cursor_id);
             Ok::<_, Error>(())
         })?;
 
