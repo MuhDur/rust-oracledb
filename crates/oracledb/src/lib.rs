@@ -3789,8 +3789,7 @@ impl Connection {
         let capabilities = self.capabilities;
         let limits = self.protocol_limits;
         let response = self
-            .core
-            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+            .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 response_complete(&parse_tpc_txn_switch_response_with_limits(
                     bytes,
                     capabilities,
@@ -3875,8 +3874,7 @@ impl Connection {
         let capabilities = self.capabilities;
         let limits = self.protocol_limits;
         let response = self
-            .core
-            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+            .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 response_complete(&parse_tpc_txn_switch_response_with_limits(
                     bytes,
                     capabilities,
@@ -3925,8 +3923,7 @@ impl Connection {
         let capabilities = self.capabilities;
         let limits = self.protocol_limits;
         let response = self
-            .core
-            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+            .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 response_complete(&parse_tpc_switch_response_with_limits(
                     bytes,
                     capabilities,
@@ -3970,8 +3967,7 @@ impl Connection {
         let capabilities = self.capabilities;
         let limits = self.protocol_limits;
         let response = self
-            .core
-            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+            .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 response_complete(&parse_tpc_change_state_response_with_limits(
                     bytes,
                     capabilities,
@@ -12216,7 +12212,7 @@ mod tests {
         payload
     }
 
-    fn serve_dropped_cqn_response_recovery(
+    fn serve_dropped_response_recovery(
         listener: TcpListener,
         expected_request: Vec<u8>,
         stranded_response: Vec<u8>,
@@ -12231,25 +12227,25 @@ mod tests {
         assert_eq!(
             read_one_wire_data_payload(&mut socket),
             expected_request,
-            "CQN request must preserve its exact FUNC 125 payload"
+            "request must preserve its exact payload"
         );
         request_seen
             .send(())
-            .expect("client waits for CQN request proof");
+            .expect("client waits for request proof");
 
         let (next_packet_type, next_body) = read_one_wire_packet_bytes(&mut socket);
         if next_packet_type == TNS_PACKET_TYPE_MARKER {
             assert_eq!(
                 next_body,
                 vec![1, 0, TNS_MARKER_TYPE_BREAK],
-                "reuse must BREAK the stranded CQN response before its request"
+                "reuse must BREAK the stranded response before its request"
             );
             socket.write_all(&data_packet(&stranded_response, true))?;
             socket.write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))?;
             assert_eq!(
                 read_marker_type(&mut socket),
                 TNS_MARKER_TYPE_RESET,
-                "CQN response drain must complete the RESET handshake"
+                "response drain must complete the RESET handshake"
             );
             socket.write_all(&marker_packet(TNS_MARKER_TYPE_RESET))?;
             socket.write_all(&data_packet(TRAILING_CANCEL_ERROR, true))?;
@@ -12257,7 +12253,7 @@ mod tests {
             assert_eq!(
                 read_one_wire_packet(&mut socket),
                 TNS_PACKET_TYPE_DATA,
-                "fresh execute follows the completed CQN drain"
+                "fresh execute follows the completed response drain"
             );
             socket.write_all(&data_packet(
                 &synthetic_pipeline_execute_response_payload(),
@@ -15834,7 +15830,7 @@ mod tests {
         let addr = listener.local_addr()?;
         let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
         let server = thread::spawn(move || {
-            serve_dropped_cqn_response_recovery(
+            serve_dropped_response_recovery(
                 listener,
                 expected_request,
                 stranded_response,
@@ -15917,7 +15913,7 @@ mod tests {
         let addr = listener.local_addr()?;
         let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
         let server = thread::spawn(move || {
-            serve_dropped_cqn_response_recovery(
+            serve_dropped_response_recovery(
                 listener,
                 expected_request,
                 vec![TNS_MSG_TYPE_END_OF_RESPONSE],
@@ -16112,6 +16108,375 @@ mod tests {
         })?;
 
         server.join().expect("successful CQN server joins")?;
+        Ok(())
+    }
+
+    #[test]
+    fn dropped_sessionless_begin_mid_response_drains_before_connection_reuse() -> Result<()> {
+        const FRESH_SQL: &str = "select value from sessionless_begin_reuse_fixture";
+        const TRANSACTION_ID: &[u8] = b"qa-sessionless-begin";
+
+        let expected_request = build_tpc_txn_switch_payload_with_seq(
+            1,
+            0,
+            TNS_TPC_TXN_START,
+            TPC_TXN_FLAGS_NEW | TPC_TXN_FLAGS_SESSIONLESS,
+            30,
+            Some(TRANSACTION_ID),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            serve_dropped_response_recovery(
+                listener,
+                expected_request,
+                vec![TNS_MSG_TYPE_END_OF_RESPONSE],
+                request_seen_tx,
+            )
+        });
+
+        let runtime = build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+
+            {
+                let mut begin =
+                    pin!(connection.begin_sessionless_transaction(&cx, TRANSACTION_ID, 30, false,));
+                let first = poll_fn(|task_cx| Poll::Ready(begin.as_mut().poll(task_cx))).await;
+                assert!(
+                    matches!(first, Poll::Pending),
+                    "sessionless begin must be waiting for its response before drop"
+                );
+                request_seen_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("server observed sessionless begin request");
+            }
+
+            let phase_after_drop = connection.core.recovery.phase();
+            let reused = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await;
+            Ok::<_, Error>((phase_after_drop, reused, connection.core.recovery.phase()))
+        });
+
+        let recovered = server.join().expect("sessionless begin server joins")?;
+        let (phase_after_drop, reused, final_phase) = outcome?;
+        let reused =
+            reused.expect("fresh execute must not decode the stranded sessionless response");
+        assert_eq!(
+            reused,
+            // ubs:ignore — decodes an Oracle TTC test fixture, not a JWT.
+            sequential_op_decode(&synthetic_pipeline_execute_response_payload()),
+            "reuse must decode its own response byte-identically"
+        );
+        assert!(recovered, "reuse must take the BREAK/drain branch");
+        assert_eq!(phase_after_drop, SessionRecoveryPhase::BreakSent);
+        assert_eq!(final_phase, SessionRecoveryPhase::Ready);
+        Ok(())
+    }
+
+    #[test]
+    fn dropped_sessionless_suspend_mid_response_drains_before_connection_reuse() -> Result<()> {
+        const FRESH_SQL: &str = "select value from sessionless_suspend_reuse_fixture";
+        const TRANSACTION_ID: &[u8] = b"qa-sessionless-suspend";
+
+        let expected_request = build_tpc_txn_switch_payload_with_seq(
+            1,
+            0,
+            TNS_TPC_TXN_DETACH,
+            TPC_TXN_FLAGS_SESSIONLESS,
+            0,
+            None,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            serve_dropped_response_recovery(
+                listener,
+                expected_request,
+                vec![TNS_MSG_TYPE_END_OF_RESPONSE],
+                request_seen_tx,
+            )
+        });
+
+        let runtime = build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            connection.sessionless_data = Some(SessionlessData {
+                transaction_id: TRANSACTION_ID.to_vec(),
+                timeout: 30,
+                operation: TNS_TPC_TXN_START,
+                flags: TPC_TXN_FLAGS_NEW,
+                piggyback_pending: false,
+                started_on_server: false,
+            });
+
+            {
+                let mut suspend = pin!(connection.suspend_sessionless_transaction(&cx));
+                let first = poll_fn(|task_cx| Poll::Ready(suspend.as_mut().poll(task_cx))).await;
+                assert!(
+                    matches!(first, Poll::Pending),
+                    "sessionless suspend must be waiting for its response before drop"
+                );
+                request_seen_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("server observed sessionless suspend request");
+            }
+
+            let phase_after_drop = connection.core.recovery.phase();
+            let reused = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await;
+            Ok::<_, Error>((phase_after_drop, reused, connection.core.recovery.phase()))
+        });
+
+        let recovered = server.join().expect("sessionless suspend server joins")?;
+        let (phase_after_drop, reused, final_phase) = outcome?;
+        let reused =
+            reused.expect("fresh execute must not decode the stranded sessionless response");
+        assert_eq!(
+            reused,
+            // ubs:ignore — decodes an Oracle TTC test fixture, not a JWT.
+            sequential_op_decode(&synthetic_pipeline_execute_response_payload()),
+            "reuse must decode its own response byte-identically"
+        );
+        assert!(recovered, "reuse must take the BREAK/drain branch");
+        assert_eq!(phase_after_drop, SessionRecoveryPhase::BreakSent);
+        assert_eq!(final_phase, SessionRecoveryPhase::Ready);
+        Ok(())
+    }
+
+    #[test]
+    fn dropped_tpc_begin_mid_response_drains_before_connection_reuse() -> Result<()> {
+        const FRESH_SQL: &str = "select value from tpc_begin_reuse_fixture";
+        const GTID: &[u8] = b"qa-tpc-begin";
+        const BQUAL: &[u8] = b"branch";
+
+        let xid = TpcXid {
+            format_id: 4400,
+            global_transaction_id: GTID,
+            branch_qualifier: BQUAL,
+        };
+        let expected_request = build_tpc_switch_payload_with_seq_and_version(
+            1,
+            TNS_TPC_TXN_START,
+            TPC_TXN_FLAGS_NEW,
+            0,
+            Some(&xid),
+            None,
+            ClientCapabilities::default().ttc_field_version,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            serve_dropped_response_recovery(
+                listener,
+                expected_request,
+                vec![TNS_MSG_TYPE_END_OF_RESPONSE],
+                request_seen_tx,
+            )
+        });
+
+        let runtime = build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+
+            {
+                let mut begin =
+                    pin!(connection.tpc_begin(&cx, 4400, GTID, BQUAL, TPC_TXN_FLAGS_NEW, 0,));
+                let first = poll_fn(|task_cx| Poll::Ready(begin.as_mut().poll(task_cx))).await;
+                assert!(
+                    matches!(first, Poll::Pending),
+                    "TPC begin must be waiting for its response before drop"
+                );
+                request_seen_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("server observed TPC begin request");
+            }
+
+            let phase_after_drop = connection.core.recovery.phase();
+            let reused = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await;
+            Ok::<_, Error>((phase_after_drop, reused, connection.core.recovery.phase()))
+        });
+
+        let recovered = server.join().expect("TPC begin server joins")?;
+        let (phase_after_drop, reused, final_phase) = outcome?;
+        let reused =
+            reused.expect("fresh execute must not decode the stranded TPC switch response");
+        assert_eq!(
+            reused,
+            // ubs:ignore — decodes an Oracle TTC test fixture, not a JWT.
+            sequential_op_decode(&synthetic_pipeline_execute_response_payload()),
+            "reuse must decode its own response byte-identically"
+        );
+        assert!(recovered, "reuse must take the BREAK/drain branch");
+        assert_eq!(phase_after_drop, SessionRecoveryPhase::BreakSent);
+        assert_eq!(final_phase, SessionRecoveryPhase::Ready);
+        Ok(())
+    }
+
+    #[test]
+    fn dropped_tpc_commit_mid_response_drains_before_connection_reuse() -> Result<()> {
+        const FRESH_SQL: &str = "select value from tpc_commit_reuse_fixture";
+        const GTID: &[u8] = b"qa-tpc-commit";
+        const BQUAL: &[u8] = b"branch";
+
+        let xid = TpcXid {
+            format_id: 4400,
+            global_transaction_id: GTID,
+            branch_qualifier: BQUAL,
+        };
+        let expected_request = build_tpc_change_state_payload_with_seq_and_version(
+            1,
+            TNS_TPC_TXN_COMMIT,
+            TNS_TPC_TXN_STATE_READ_ONLY,
+            0,
+            Some(&xid),
+            None,
+            ClientCapabilities::default().ttc_field_version,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            serve_dropped_response_recovery(
+                listener,
+                expected_request,
+                vec![TNS_MSG_TYPE_END_OF_RESPONSE],
+                request_seen_tx,
+            )
+        });
+
+        let runtime = build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+
+            {
+                let mut commit = pin!(connection.tpc_commit(&cx, Some((4400, GTID, BQUAL)), true,));
+                let first = poll_fn(|task_cx| Poll::Ready(commit.as_mut().poll(task_cx))).await;
+                assert!(
+                    matches!(first, Poll::Pending),
+                    "TPC commit must be waiting for its response before drop"
+                );
+                request_seen_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("server observed TPC commit request");
+            }
+
+            let phase_after_drop = connection.core.recovery.phase();
+            let reused = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await;
+            Ok::<_, Error>((phase_after_drop, reused, connection.core.recovery.phase()))
+        });
+
+        let recovered = server.join().expect("TPC commit server joins")?;
+        let (phase_after_drop, reused, final_phase) = outcome?;
+        let reused = reused.expect("fresh execute must not decode the stranded TPC response");
+        assert_eq!(
+            reused,
+            // ubs:ignore — decodes an Oracle TTC test fixture, not a JWT.
+            sequential_op_decode(&synthetic_pipeline_execute_response_payload()),
+            "reuse must decode its own response byte-identically"
+        );
+        assert!(recovered, "reuse must take the BREAK/drain branch");
+        assert_eq!(phase_after_drop, SessionRecoveryPhase::BreakSent);
+        assert_eq!(final_phase, SessionRecoveryPhase::Ready);
+        Ok(())
+    }
+
+    #[test]
+    fn successful_tpc_round_trips_disarm_recovery() -> Result<()> {
+        const GTID: &[u8] = b"qa-tpc-success";
+        const BQUAL: &[u8] = b"branch";
+
+        let xid = TpcXid {
+            format_id: 4400,
+            global_transaction_id: GTID,
+            branch_qualifier: BQUAL,
+        };
+        let expected_begin = build_tpc_switch_payload_with_seq_and_version(
+            1,
+            TNS_TPC_TXN_START,
+            TPC_TXN_FLAGS_NEW,
+            0,
+            Some(&xid),
+            None,
+            ClientCapabilities::default().ttc_field_version,
+        );
+        let expected_commit = build_tpc_change_state_payload_with_seq_and_version(
+            2,
+            TNS_TPC_TXN_COMMIT,
+            TNS_TPC_TXN_STATE_READ_ONLY,
+            0,
+            Some(&xid),
+            Some(&[]),
+            ClientCapabilities::default().ttc_field_version,
+        );
+        let mut commit_response = oracledb_protocol::wire::TtcWriter::new();
+        commit_response.write_u8(oracledb_protocol::thin::TNS_MSG_TYPE_PARAMETER);
+        commit_response.write_ub4(TNS_TPC_TXN_STATE_READ_ONLY);
+        commit_response.write_u8(TNS_MSG_TYPE_END_OF_RESPONSE);
+        let commit_response = commit_response.into_bytes();
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+
+            assert_eq!(read_one_wire_data_payload(&mut socket), expected_begin);
+            socket.write_all(&data_packet(&[TNS_MSG_TYPE_END_OF_RESPONSE], true))?;
+            socket.flush()?;
+
+            assert_eq!(read_one_wire_data_payload(&mut socket), expected_commit);
+            socket.write_all(&data_packet(&commit_response, true))?;
+            socket.flush()
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+
+            connection
+                .tpc_begin(&cx, 4400, GTID, BQUAL, TPC_TXN_FLAGS_NEW, 0)
+                .await?;
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready
+            );
+            connection
+                .tpc_commit(&cx, Some((4400, GTID, BQUAL)), true)
+                .await?;
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        server.join().expect("successful TPC server joins")?;
         Ok(())
     }
 
