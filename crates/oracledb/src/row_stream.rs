@@ -52,7 +52,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
 
 use asupersync::Cx;
 use futures_core::Stream;
@@ -123,8 +122,9 @@ pub struct OwnedRowStream {
     cursor_id: u32,
     /// Rows-per-fetch for continuation pages.
     arraysize: u32,
-    /// Per-fetch timeout carried from the [`Query`]; applied fresh to each page.
-    timeout: Option<Duration>,
+    /// One absolute deadline for the whole logical query, shared by the first
+    /// execute and every continuation page.
+    deadline: QueryDeadline,
     /// Whether the server has more rows beyond the current page.
     more_rows: bool,
     /// Duplicate-column continuation seed: the last row of the most recent
@@ -145,7 +145,7 @@ impl OwnedRowStream {
         connection: Option<Connection>,
         cx: Cx,
         arraysize: u32,
-        timeout: Option<Duration>,
+        deadline: QueryDeadline,
         result: QueryResult,
     ) -> Self {
         let cursor_id = result.cursor_id;
@@ -161,7 +161,7 @@ impl OwnedRowStream {
             cursor,
             cursor_id,
             arraysize,
-            timeout,
+            deadline,
             more_rows,
             previous_row,
             state: OwnedRowStreamState::Buffered(batch),
@@ -243,8 +243,8 @@ impl OwnedRowStream {
 /// Build the `'static` in-flight fetch future that owns the connection for one
 /// continuation page and returns it (plus the page or the error) when done.
 ///
-/// A fresh [`QueryDeadline`] is derived per page from the captured `Cx` and the
-/// query timeout; a timed-out fetch drains the wire with the same
+/// The query's one absolute [`QueryDeadline`] is reused for every page; a
+/// timed-out fetch drains the wire with the same
 /// `recover_from_call_timeout` machinery [`Rows::next_batch`](crate::Rows) uses,
 /// so the returned connection is left clean (or marked dead) rather than desynced.
 fn build_fetch_future(
@@ -252,12 +252,11 @@ fn build_fetch_future(
     cx: Cx,
     cursor_id: u32,
     arraysize: u32,
-    timeout: Option<Duration>,
+    deadline: QueryDeadline,
     columns: Arc<[ColumnMetadata]>,
     previous_row: Option<OwnedRow>,
 ) -> FetchFuture {
     Box::pin(async move {
-        let deadline = QueryDeadline::new(&cx, timeout);
         let outcome = match deadline
             .run(connection.fetch_rows_with_columns(
                 &cx,
@@ -318,7 +317,7 @@ impl Stream for OwnedRowStream {
                         this.cx.clone(),
                         this.cursor_id,
                         this.arraysize,
-                        this.timeout,
+                        this.deadline,
                         Arc::clone(&this.columns),
                         this.previous_row.clone(),
                     );
@@ -492,7 +491,7 @@ impl Connection {
             Some(connection),
             cx.clone(),
             arraysize.get(),
-            timeout,
+            deadline,
             result,
         ))
     }
@@ -513,11 +512,20 @@ impl Connection {
 
 #[cfg(test)]
 mod tests {
-    use std::pin::pin;
+    use std::future::poll_fn;
+    use std::io::{Read, Write};
+    use std::pin::{pin, Pin};
     use std::task::{Context, Poll, Waker};
+    use std::thread;
+    use std::time::Duration;
 
+    use asupersync::net::TcpStream;
     use asupersync::Cx;
-    use oracledb_protocol::thin::{ColumnMetadata, QueryResult, QueryValue};
+    use oracledb_protocol::thin::{
+        ColumnMetadata, QueryResult, QueryValue, TNS_DATA_FLAGS_END_OF_RESPONSE,
+        TNS_PACKET_TYPE_DATA,
+    };
+    use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 
     use super::*;
 
@@ -558,6 +566,131 @@ mod tests {
         out
     }
 
+    fn offline_stream(cx: Cx, result: QueryResult) -> OwnedRowStream {
+        let deadline = QueryDeadline::new(&cx, None);
+        OwnedRowStream::from_first_page(None, cx, 100, deadline, result)
+    }
+
+    fn read_packet(socket: &mut std::net::TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
+        let mut header = [0u8; 8];
+        socket.read_exact(&mut header)?;
+        let declared = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let mut body = vec![0u8; declared - header.len()];
+        socket.read_exact(&mut body)?;
+        Ok((header[4], body))
+    }
+
+    fn data_packet(message: &[u8]) -> Vec<u8> {
+        encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(TNS_DATA_FLAGS_END_OF_RESPONSE),
+            message,
+            PacketLengthWidth::Large32,
+        )
+        .expect("test DATA packet encodes")
+    }
+
+    fn marker_packet(marker_type: u8) -> Vec<u8> {
+        encode_packet(
+            crate::TNS_PACKET_TYPE_MARKER,
+            0,
+            None,
+            &[1, 0, marker_type],
+            PacketLengthWidth::Large32,
+        )
+        .expect("test MARKER packet encodes")
+    }
+
+    #[test]
+    fn continuation_fetch_does_not_rearm_the_query_timeout() -> Result<()> {
+        const QUERY_TIMEOUT: Duration = Duration::from_millis(40);
+        const INFLIGHT_BODY: &[u8] = &[0xd1, 0xa1, 0xb1];
+        const CANCEL_ERROR: &[u8] = &[0x04, 0x01, 0x0d];
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<bool> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_millis(500)))?;
+
+            let (first_type, first_body) = match read_packet(&mut socket) {
+                Ok(packet) => packet,
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::UnexpectedEof
+                            | std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return Ok(false);
+                }
+                Err(err) => return Err(err),
+            };
+            let saw_fetch = first_type == TNS_PACKET_TYPE_DATA;
+            let break_body = if saw_fetch {
+                let (packet_type, body) = read_packet(&mut socket)?;
+                assert_eq!(packet_type, crate::TNS_PACKET_TYPE_MARKER);
+                body
+            } else {
+                assert_eq!(first_type, crate::TNS_PACKET_TYPE_MARKER);
+                first_body
+            };
+            assert_eq!(break_body, [1, 0, crate::TNS_MARKER_TYPE_BREAK]);
+
+            socket.write_all(&data_packet(INFLIGHT_BODY))?;
+            socket.write_all(&marker_packet(crate::TNS_MARKER_TYPE_BREAK))?;
+            let (reset_type, reset_body) = read_packet(&mut socket)?;
+            assert_eq!(reset_type, crate::TNS_PACKET_TYPE_MARKER);
+            assert_eq!(reset_body, [1, 0, crate::TNS_MARKER_TYPE_RESET]);
+            socket.write_all(&marker_packet(crate::TNS_MARKER_TYPE_RESET))?;
+            socket.write_all(&data_packet(CANCEL_ERROR))?;
+            socket.flush()?;
+            Ok(saw_fetch)
+        });
+
+        let runtime = crate::build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs an ambient Cx");
+            let socket = TcpStream::connect(addr).await?;
+            let (read, write) = crate::transport::plain_split(socket);
+            let connection = crate::tests::loopback_connection(read, write);
+            let result = QueryResult {
+                columns: cols(&["A"]),
+                rows: vec![text_row(&["first"])],
+                cursor_id: 42,
+                more_rows: true,
+                ..QueryResult::default()
+            };
+            let deadline = QueryDeadline::new(&cx, Some(QUERY_TIMEOUT));
+            let mut stream =
+                OwnedRowStream::from_first_page(Some(connection), cx, 1, deadline, result);
+
+            let first = poll_fn(|task_cx| Pin::new(&mut stream).poll_next(task_cx)).await;
+            assert!(matches!(first, Some(Ok(_))), "first page must be buffered");
+
+            // Let the one logical query timeout expire before asking for page 2.
+            // A continuation must observe that original absolute deadline; it
+            // must not get a fresh QUERY_TIMEOUT window of its own.
+            thread::sleep(QUERY_TIMEOUT + Duration::from_millis(30));
+            let second = poll_fn(|task_cx| Pin::new(&mut stream).poll_next(task_cx)).await;
+            assert!(
+                matches!(second, Some(Err(Error::CallTimeout(40)))),
+                "expired logical query must fail immediately, got {second:?}"
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        let saw_fetch = server.join().expect("server thread joins")?;
+        assert!(
+            !saw_fetch,
+            "page 2 was sent after the original query timeout had elapsed; \
+             the continuation incorrectly received a fresh timeout window"
+        );
+        Ok(())
+    }
+
     #[test]
     fn buffered_rows_yield_in_order_then_terminate() {
         with_cx(|cx| {
@@ -568,7 +701,7 @@ mod tests {
                 more_rows: false,
                 ..QueryResult::default()
             };
-            let mut stream = OwnedRowStream::from_first_page(None, cx, 100, None, result);
+            let mut stream = offline_stream(cx, result);
 
             assert_eq!(stream.columns().len(), 2);
             let drained = drain_buffered(&mut stream);
@@ -591,7 +724,7 @@ mod tests {
                 more_rows: false,
                 ..QueryResult::default()
             };
-            let mut stream = OwnedRowStream::from_first_page(None, cx, 100, None, result);
+            let mut stream = offline_stream(cx, result);
             assert!(drain_buffered(&mut stream).is_empty());
             assert!(matches!(stream.state, OwnedRowStreamState::Done));
         });
@@ -607,7 +740,7 @@ mod tests {
                 more_rows: true,
                 ..QueryResult::default()
             };
-            let stream = OwnedRowStream::from_first_page(None, cx, 100, None, result);
+            let stream = offline_stream(cx, result);
             // Seed is the LAST row of the first page, independent of the buffer.
             assert_eq!(stream.previous_row, Some(text_row(&["2", "y"])));
         });
@@ -623,7 +756,7 @@ mod tests {
                 more_rows: true,
                 ..QueryResult::default()
             };
-            let mut stream = OwnedRowStream::from_first_page(None, cx, 100, None, first);
+            let mut stream = offline_stream(cx, first);
             assert_eq!(stream.previous_row, Some(text_row(&["seed"])));
 
             // An empty continuation page (still more rows) must NOT clobber the
@@ -664,7 +797,7 @@ mod tests {
                 more_rows: true,
                 ..QueryResult::default()
             };
-            let mut stream = OwnedRowStream::from_first_page(None, cx, 100, None, first);
+            let mut stream = offline_stream(cx, first);
             assert_eq!(stream.cursor_id, 7);
 
             // A mid-paging DESCRIBE re-shapes the cursor: new id + wider columns.
@@ -692,7 +825,7 @@ mod tests {
                 ..QueryResult::default()
             };
             // connection: None models a stream whose in-flight fetch was dropped.
-            let stream = OwnedRowStream::from_first_page(None, cx, 100, None, result);
+            let stream = offline_stream(cx, result);
             let err = stream.into_connection().unwrap_err();
             assert!(matches!(err, Error::ConnectionClosed(_)));
         });
@@ -711,7 +844,7 @@ mod tests {
                 more_rows: true,
                 ..QueryResult::default()
             };
-            let mut stream = OwnedRowStream::from_first_page(None, cx, 100, None, result);
+            let mut stream = offline_stream(cx, result);
             let mut stream = pin!(&mut stream);
             let mut task_cx = Context::from_waker(Waker::noop());
 

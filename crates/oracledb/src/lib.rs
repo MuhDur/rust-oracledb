@@ -11249,7 +11249,7 @@ mod tests {
             .expect("test identity should be valid")
     }
 
-    fn loopback_connection(
+    pub(crate) fn loopback_connection(
         read: transport::OracleReadHalf,
         write: transport::OracleWriteHalf,
     ) -> Connection {
