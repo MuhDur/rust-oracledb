@@ -5,7 +5,137 @@ is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows the SemVer contract described in
 [`docs/adr/0002-semver-contract.md`](docs/adr/0002-semver-contract.md).
 
+Scope window: canonical release entries from 0.3.0 through 0.8.2. The
+0.7.4–0.8.2 spine was reconstructed from git tags, GitHub Releases, tag
+ranges, release-matrix artifacts, and the checked-in API/provenance ledgers.
+
+## Version Timeline
+
+| Version | Released | Release role |
+| --- | --- | --- |
+| [0.8.2](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.2) | 2026-07-08 | K10 owned-row stream, timer correction, and quality campaigns |
+| [0.8.1](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.1) | 2026-07-08 | Wallet/session accessors and opt-in support capture |
+| [0.8.0](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.0) | 2026-07-07 | Breaking single-path consolidation plus additive routine/telemetry work |
+| [0.7.4](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.7.4) | 2026-07-07 | Clean security/provenance patch superseding 0.7.3 |
+
+## Representative commits
+
+- [0.8.0 single-path consolidation](https://github.com/MuhDur/rust-oracledb/commit/7627a1e50241f29523069cf47288f9ac651ff7bc)
+- [0.8.1 additive introspection APIs](https://github.com/MuhDur/rust-oracledb/commit/e3c4b69333ae790cf12f6ea6f4df70633bf17f9f)
+- [0.8.1 support capture](https://github.com/MuhDur/rust-oracledb/commit/899123075b7ae21eb779e19ab0a5be765b82ecfd)
+- [0.8.2 runtime timer correction](https://github.com/MuhDur/rust-oracledb/commit/9059165a34b43921f44d56c6a2c12009f2fb23db)
+- [0.8.2 K10 owning row stream](https://github.com/MuhDur/rust-oracledb/commit/06244bfa4c8aab2efb62bfdbd8793dc1e089bd02)
+
 ## [Unreleased]
+
+### Fixed
+
+- **One logical deadline for owning row streams.** Continuation pages now reuse
+  the deadline captured for the initial query instead of receiving a fresh
+  timeout budget per page. See [0708550](https://github.com/MuhDur/rust-oracledb/commit/0708550).
+- **No idle BREAK for work that never started.** Deadline handling now
+  distinguishes expiry before the database future is polled from an in-flight
+  timeout, preserving a reusable idle connection and structured cancellation.
+  See [b16d42d](https://github.com/MuhDur/rust-oracledb/commit/b16d42d).
+- **Fail-closed support-capture redaction.** Stateful scrubbing covers auth
+  markers and secret values split across transport frames, including long
+  suffixes, before a cassette can be written. See
+  [6ad3631](https://github.com/MuhDur/rust-oracledb/commit/6ad3631).
+- **LOB reads advance by Oracle-reported progress.** `LobReader` validates and
+  adopts the returned amount and locator rather than skipping units after a
+  short read or retaining a stale locator. See
+  [6a9f669](https://github.com/MuhDur/rust-oracledb/commit/6a9f669).
+- **Failed query cursors are retired before connection reuse.** Continuation,
+  scroll, and define/fetch error paths now evict stale cache and registry state,
+  deduplicate close piggybacks, and preserve normal release only when an
+  operation is proven not to have started. See
+  [02eef5e](https://github.com/MuhDur/rust-oracledb/commit/02eef5e).
+
+## [0.8.2](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.2) - 2026-07-08
+
+### Added
+
+- **K10 owning row stream.** `OwnedRowStream` implements
+  `futures_core::Stream<Item = Result<Vec<Option<QueryValue>>>>`, consumes a
+  `Connection`, and returns it after draining or through `into_connection`.
+  `Connection::into_row_stream` and `into_query_stream` provide row-by-row pull
+  without holding `&mut Connection` across yields. The implementation preserves
+  duplicate-column continuation state, define-fetch behavior, successful
+  drain/early-stop cursor release, and eager-query result parity. See the
+  [implementation commit](https://github.com/MuhDur/rust-oracledb/commit/06244bfa4c8aab2efb62bfdbd8793dc1e089bd02)
+  and the updated [design record](docs/design/k10-row-stream.md).
+- **Decode and concurrency quality campaigns.** A typed-decode fuzz target,
+  metamorphic tests for the differentiator paths, mutation-focused decoder
+  tests, a deterministic performance-regression gate, and a nightly
+  ThreadSanitizer lane were added. The documented decode mutation score reached
+  90.8% (376 caught, 38 missed, excluding 17 unviable mutants).
+
+### Changed
+
+- **Accurate sub-250 ms runtime timers.** The pinned `asupersync` runtime moved
+  from 0.3.4 to 0.3.5, removing the timer floor that stretched short deadlines,
+  sleeps, and retry backoffs toward 250 ms. Workspace pins, provenance, and the
+  SBOM were regenerated in the
+  [0.8.2 release commit](https://github.com/MuhDur/rust-oracledb/commit/9059165a34b43921f44d56c6a2c12009f2fb23db).
+
+### Fixed
+
+- **K10 builds under the tracing feature.** The internal continuation-fetch
+  future no longer requires `Send`; tracing holds a non-`Send` entered-span
+  guard across an await, while the stream is intentionally driven on one
+  asupersync lane. Default, tracing, and all-feature builds were verified before
+  the release tag. See the
+  [fix](https://github.com/MuhDur/rust-oracledb/commit/07f12efdea8f4b056efdf0a404a8d2db4e9fe959).
+
+## [0.8.1](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.1) - 2026-07-08
+
+### Added
+
+- **Wallet and negotiated-session introspection.** New additive APIs expose
+  certificate validity metadata, the selected wallet file/resolution,
+  negotiated TNS protocol version, and whether fast authentication was used.
+  Wallet reporting and actual wallet loading share one resolver so their
+  decisions cannot drift. See the
+  [accessor implementation](https://github.com/MuhDur/rust-oracledb/commit/e3c4b69333ae790cf12f6ea6f4df70633bf17f9f).
+- **Opt-in support capture.** With the `cassette` feature,
+  `ORACLEDB_CAPTURE=<path>` records a session for offline replay. Authentication
+  material is scrubbed and a final secret scan refuses the artifact rather than
+  writing a known-secret capture. See the
+  [K6 capture implementation](https://github.com/MuhDur/rust-oracledb/commit/899123075b7ae21eb779e19ab0a5be765b82ecfd).
+
+## [0.8.0](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.0) - 2026-07-07
+
+### Changed
+
+- **Single canonical public paths (breaking).** The redundant
+  `oracledb::shape_cache::*` and `oracledb::lob_stream::*` module paths were
+  removed. Their crate-root exports (`StatementShapeCache`, `ColumnShape`,
+  `ShapeObservation`, `LobReader`, `LobWriter`, and `ClobReader`) remain the
+  supported paths. This completed the consolidation deferred from 0.7.4. See
+  the [0.8.0 consolidation](https://github.com/MuhDur/rust-oracledb/commit/7627a1e50241f29523069cf47288f9ac651ff7bc).
+
+### Added
+
+- **Real routine `IN OUT` binds.** `BindValue::InOut` and
+  `RoutineCall::arg_in_out` preserve the input value, size the output buffer,
+  and decode the server-returned value through the existing IO-vector path.
+- **Operator-facing differentiator telemetry.** Feature-gated spans report only
+  counts, booleans, and enum-like outcomes for row streaming, batch errors,
+  statement-shape cache events, and LOB streaming; adversarial tests pin the
+  no-SQL/no-bind/no-row/no-secret contract.
+- **Stronger release evidence.** Native single-resource-manager TPC coverage and
+  decoded-assert cassette replay for AQ and direct-path operations were added.
+
+## [0.7.4](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.7.4) - 2026-07-07
+
+### Fixed
+
+- **Clean patch superseding 0.7.3.** The lockfile and SBOM moved to
+  `crossbeam-epoch` 0.9.20 for RUSTSEC-2026-0204, and the public-API baselines,
+  API ledger, and provenance artifacts were regenerated. The 0.7.3 public API
+  remained unchanged; its temporary dual-path exception was documented for the
+  subsequent 0.8.0 removal. See the
+  [release commit](https://github.com/MuhDur/rust-oracledb/commit/f3e218527290676c5b55b1db0106502b151cea41).
 
 ## [0.7.3] - 2026-07-07
 

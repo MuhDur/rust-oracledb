@@ -43,6 +43,23 @@ version_count="$(printf '%s\n' "$versions" | sed '/^$/d' | wc -l | tr -d ' ')"
 }
 version="$versions"
 
+# Release documentation must advance with the workspace version. Fail closed
+# when either source is absent/unreadable, require a real version heading (not a
+# narrative substring), and require the K10 record to identify the exact current
+# workspace version positively rather than trying to enumerate every stale
+# wording that authors might use.
+changelog="CHANGELOG.md"
+k10_record="docs/design/k10-row-stream.md"
+[ -f "$changelog" ] && [ -r "$changelog" ] ||
+  fail "$changelog is missing or unreadable"
+[ -f "$k10_record" ] && [ -r "$k10_record" ] ||
+  fail "$k10_record is missing or unreadable"
+version_re="${version//./\\.}"
+grep -Eq "^## \\[$version_re\\](\\([^)]*\\))?( - [0-9]{4}-[0-9]{2}-[0-9]{2})?$" "$changelog" ||
+  fail "$changelog has no release heading for workspace version $version"
+grep -Eq "^Status: implemented in workspace version $version_re;" "$k10_record" ||
+  fail "$k10_record does not positively identify workspace version $version as implemented"
+
 # The three crates that actually get published, in dependency order.
 expected_packages=(
   oracledb-protocol
