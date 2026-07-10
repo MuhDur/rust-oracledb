@@ -409,16 +409,64 @@ mod cassette_seam {
         "PRIVATE_KEY",
     ];
 
-    /// Fail-closed refuse gate: return every secret field name that still
-    /// appears (case-insensitively) in `bytes`. A non-empty result means the
-    /// artifact MUST NOT be persisted.
-    #[must_use]
-    pub(crate) fn scan_for_secret_fields(bytes: &[u8]) -> Vec<&'static str> {
-        let haystack = String::from_utf8_lossy(bytes).to_ascii_uppercase();
+    fn contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
+        !needle.is_empty()
+            && needle.len() <= haystack.len()
+            && haystack
+                .windows(needle.len())
+                .any(|window| window.eq_ignore_ascii_case(needle))
+    }
+
+    fn scan_frame_secret_fields(frames: &[Frame]) -> Vec<&'static str> {
+        let mut found = vec![false; SECRET_FIELD_NAMES.len()];
+        let mut run_start = 0usize;
+
+        while run_start < frames.len() {
+            let direction = frames[run_start].direction;
+            let mut run_end = run_start + 1;
+            while run_end < frames.len() && frames[run_end].direction == direction {
+                run_end += 1;
+            }
+
+            // A transport write/read may be split at any byte boundary. Search
+            // one contiguous same-direction transfer run so a field name split
+            // across recorder frames is still visible to the refuse gate.
+            let mut run = Vec::new();
+            for frame in &frames[run_start..run_end] {
+                run.extend_from_slice(&frame.bytes);
+            }
+            for (index, field) in SECRET_FIELD_NAMES.iter().enumerate() {
+                if contains_ascii_case_insensitive(&run, field.as_bytes()) {
+                    found[index] = true;
+                }
+            }
+
+            run_start = run_end;
+        }
+
         SECRET_FIELD_NAMES
             .iter()
             .copied()
-            .filter(|field| haystack.contains(field))
+            .zip(found)
+            .filter_map(|(field, is_present)| is_present.then_some(field))
+            .collect()
+    }
+
+    /// Fail-closed refuse gate: return every secret field name that still
+    /// appears (case-insensitively) in `bytes`. Cassette payloads are searched
+    /// across contiguous same-direction recorder frames, so a transport split
+    /// cannot hide a marker behind the next frame header. A non-empty result
+    /// means the artifact MUST NOT be persisted.
+    #[must_use]
+    pub(crate) fn scan_for_secret_fields(bytes: &[u8]) -> Vec<&'static str> {
+        if let Ok(frames) = cassette::decode_all(bytes) {
+            return scan_frame_secret_fields(&frames);
+        }
+
+        SECRET_FIELD_NAMES
+            .iter()
+            .copied()
+            .filter(|field| contains_ascii_case_insensitive(bytes, field.as_bytes()))
             .collect()
     }
 
@@ -428,59 +476,69 @@ mod cassette_seam {
     /// secret-free on its own merit — the refuse gate enforces that fail-closed.
     const AUTH_PHASE_FRAME_LIMIT: usize = 32;
 
-    /// Bytes overwritten forward from each secret marker: the label itself plus
-    /// a generous window over the value that follows it on the wire.
-    const AUTH_REDACT_WINDOW: usize = 512;
-
     /// Deterministic redaction fill byte (`0xEE` is not valid UTF-8 leading, so
     /// a redacted region cannot be mistaken for readable field text).
     const REDACTION_BYTE: u8 = 0xEE;
 
-    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-        if needle.is_empty() || needle.len() > haystack.len() {
-            return None;
-        }
-        haystack.windows(needle.len()).position(|w| w == needle)
+    fn first_secret_marker_before(bytes: &[u8], end: usize) -> Option<usize> {
+        SECRET_FIELD_NAMES
+            .iter()
+            .filter_map(|name| {
+                bytes
+                    .windows(name.len())
+                    .position(|window| window.eq_ignore_ascii_case(name.as_bytes()))
+            })
+            .filter(|position| *position < end)
+            .min()
     }
 
-    /// Overwrite every secret-marker occurrence in `bytes` (and the value window
-    /// that follows it) with [`REDACTION_BYTE`], in place and length-preserving
-    /// so the surrounding TNS packet framing is untouched. Returns whether any
-    /// redaction was made.
-    fn redact_secret_windows(bytes: &mut [u8]) -> bool {
-        // Uppercase a copy to locate markers case-insensitively, then redact the
-        // matching byte ranges in the live buffer.
-        let upper = bytes.to_ascii_uppercase();
-        let mut hit = false;
-        for name in SECRET_FIELD_NAMES {
-            let needle = name.as_bytes();
-            let mut from = 0usize;
-            while let Some(pos) = find_subslice(&upper[from..], needle) {
-                let start = from + pos;
-                let end = start.saturating_add(AUTH_REDACT_WINDOW).min(bytes.len());
-                for byte in &mut bytes[start..end] {
-                    *byte = REDACTION_BYTE;
-                }
-                hit = true;
-                from = start + needle.len();
-                if from >= upper.len() {
-                    break;
-                }
-            }
-        }
-        hit
-    }
-
-    /// Scrub the auth-phase frames in place: within the leading auth window,
-    /// overwrite each secret marker and its trailing value window. Returns the
-    /// number of frames in which at least one redaction was made.
+    /// Scrub the auth phase in place. Recorder frames are arbitrary transport
+    /// chunks, so inspect each contiguous same-direction run as one byte stream.
+    /// Once a secret marker begins inside the leading auth window, redact from
+    /// that marker through the END of the run. This is deliberately fail-closed:
+    /// token/password lengths need not be guessed, and a marker or value split
+    /// across recorder frames cannot leave an unlabelled secret suffix behind.
+    /// Returns the number of frames in which at least one byte was redacted.
     fn scrub_auth_frames(frames: &mut [Frame]) -> usize {
         let mut redacted = 0usize;
-        for frame in frames.iter_mut().take(AUTH_PHASE_FRAME_LIMIT) {
-            if redact_secret_windows(&mut frame.bytes) {
-                redacted += 1;
+        let auth_frame_count = frames.len().min(AUTH_PHASE_FRAME_LIMIT);
+        let mut run_start = 0usize;
+
+        while run_start < auth_frame_count {
+            let direction = frames[run_start].direction;
+            let mut run_end = run_start + 1;
+            while run_end < frames.len() && frames[run_end].direction == direction {
+                run_end += 1;
             }
+
+            let mut run = Vec::new();
+            let mut auth_run_byte_len = 0usize;
+            for (offset, frame) in frames[run_start..run_end].iter().enumerate() {
+                run.extend_from_slice(&frame.bytes);
+                if run_start + offset < auth_frame_count {
+                    auth_run_byte_len += frame.bytes.len();
+                }
+            }
+
+            if let Some(mut marker_offset) = first_secret_marker_before(&run, auth_run_byte_len) {
+                for frame in &mut frames[run_start..run_end] {
+                    if marker_offset >= frame.bytes.len() {
+                        marker_offset -= frame.bytes.len();
+                        continue;
+                    }
+
+                    let frame_tail = &mut frame.bytes[marker_offset..];
+                    if !frame_tail.is_empty() {
+                        frame_tail.fill(REDACTION_BYTE);
+                        redacted += 1;
+                    }
+                    marker_offset = 0;
+                }
+            }
+
+            run_start = run_end;
         }
+
         redacted
     }
 
@@ -489,7 +547,7 @@ mod cassette_seam {
     pub struct CassetteCaptureReport {
         /// Total frames in the captured session.
         pub frame_count: usize,
-        /// Frames in which at least one auth-phase secret window was redacted.
+        /// Frames in which at least one auth-phase byte was redacted.
         pub redacted_frames: usize,
         /// Size in bytes of the persisted (scrubbed) cassette.
         pub byte_len: usize,
@@ -762,6 +820,148 @@ mod cassette_seam {
         }
 
         #[test]
+        fn long_auth_token_is_scrubbed_without_leaving_a_suffix() {
+            let leaked_suffix = b"token-tail-that-must-not-survive";
+            let mut auth = b"AUTH_TOKEN=".to_vec();
+            auth.extend(std::iter::repeat_n(b'x', 64 * 1024));
+            auth.extend_from_slice(leaked_suffix);
+            let bytes = cassette_of(&[(Direction::ClientToServer, auth)]);
+
+            let (scrubbed, _) = scrub_and_gate(&bytes).expect("long token must be scrubbed");
+            assert!(
+                !contains(&scrubbed, leaked_suffix),
+                "a long token suffix leaked"
+            );
+        }
+
+        #[test]
+        fn long_auth_password_is_scrubbed_without_leaving_a_suffix() {
+            let leaked_suffix = b"password-tail-that-must-not-survive";
+            let mut auth = b"AUTH_PASSWORD=".to_vec();
+            auth.extend(std::iter::repeat_n(b'p', 4096));
+            auth.extend_from_slice(leaked_suffix);
+            let bytes = cassette_of(&[(Direction::ClientToServer, auth)]);
+
+            let (scrubbed, _) = scrub_and_gate(&bytes).expect("long password must be scrubbed");
+            assert!(
+                !contains(&scrubbed, leaked_suffix),
+                "a long password suffix leaked"
+            );
+        }
+
+        #[test]
+        fn auth_marker_and_value_split_across_frames_are_scrubbed() {
+            let leaked_value = b"split-token-value-that-must-not-survive";
+            let bytes = cassette_of(&[
+                (Direction::ClientToServer, b"AUTH_TOKEN=".to_vec()),
+                (Direction::ClientToServer, leaked_value.to_vec()),
+                (Direction::ServerToClient, b"AUTH response".to_vec()),
+            ]);
+
+            let (scrubbed, _) = scrub_and_gate(&bytes).expect("split token must be scrubbed");
+            assert!(
+                !contains(&scrubbed, leaked_value),
+                "a token value in the next transport frame leaked"
+            );
+            assert!(
+                contains(&scrubbed, b"AUTH response"),
+                "redaction must stop at the direction change"
+            );
+        }
+
+        #[test]
+        fn auth_marker_split_across_frames_is_scrubbed() {
+            let leaked_value = b"split-marker-token-that-must-not-survive";
+            let bytes = cassette_of(&[
+                (Direction::ClientToServer, b"AUTH_TO".to_vec()),
+                (
+                    Direction::ClientToServer,
+                    [b"KEN=".as_slice(), leaked_value].concat(),
+                ),
+                (Direction::ServerToClient, b"AUTH response".to_vec()),
+            ]);
+
+            let (scrubbed, _) = scrub_and_gate(&bytes).expect("split marker must be scrubbed");
+            assert!(
+                !contains(&scrubbed, leaked_value),
+                "a token whose marker crosses a transport frame leaked"
+            );
+            assert!(
+                contains(&scrubbed, b"AUTH response"),
+                "redaction must stop at the direction change"
+            );
+        }
+
+        #[test]
+        fn auth_token_is_scrubbed_at_every_transport_split_point() {
+            let leaked_value = b"every-split-token-value-must-disappear";
+            let logical = [b"AUTH_TOKEN=".as_slice(), leaked_value].concat();
+
+            for split in 1..logical.len() {
+                let bytes = cassette_of(&[
+                    (Direction::ClientToServer, logical[..split].to_vec()),
+                    (Direction::ClientToServer, logical[split..].to_vec()),
+                    (Direction::ServerToClient, b"AUTH response".to_vec()),
+                ]);
+                let (scrubbed, _) = scrub_and_gate(&bytes)
+                    .unwrap_or_else(|err| panic!("split {split} must scrub cleanly: {err}"));
+                assert!(
+                    !contains(&scrubbed, leaked_value),
+                    "token value leaked when the transport split at byte {split}"
+                );
+                assert!(
+                    scan_for_secret_fields(&scrubbed).is_empty(),
+                    "secret marker survived when the transport split at byte {split}"
+                );
+                assert!(
+                    contains(&scrubbed, b"AUTH response"),
+                    "opposite-direction response was over-redacted at split {split}"
+                );
+            }
+        }
+
+        #[test]
+        fn secret_scanner_does_not_join_bytes_across_direction_changes() {
+            let bytes = cassette_of(&[
+                (Direction::ClientToServer, b"AUTH_TO".to_vec()),
+                (
+                    Direction::ServerToClient,
+                    b"KEN=not-one-wire-field".to_vec(),
+                ),
+            ]);
+
+            assert!(
+                scan_for_secret_fields(&bytes).is_empty(),
+                "opposite directions cannot form one secret field"
+            );
+        }
+
+        #[test]
+        fn split_secret_marker_beyond_auth_window_is_refused() {
+            let mut frames: Vec<(Direction, Vec<u8>)> = (0..AUTH_PHASE_FRAME_LIMIT + 3)
+                .map(|i| {
+                    let direction = if i % 2 == 0 {
+                        Direction::ClientToServer
+                    } else {
+                        Direction::ServerToClient
+                    };
+                    (direction, format!("benign-frame-{i}").into_bytes())
+                })
+                .collect();
+            frames[AUTH_PHASE_FRAME_LIMIT + 1] = (Direction::ClientToServer, b"AUTH_TO".to_vec());
+            frames[AUTH_PHASE_FRAME_LIMIT + 2] =
+                (Direction::ClientToServer, b"KEN=post-auth-secret".to_vec());
+            let bytes = cassette_of(&frames);
+
+            match scrub_and_gate(&bytes) {
+                Err(CassetteCaptureError::SecretLeak { fields }) => {
+                    assert!(fields.contains(&"AUTH_TOKEN"), "gate must name the leak");
+                }
+                other => panic!("split post-auth marker must be REFUSED, got {other:?}"),
+            }
+        }
+
+        #[test]
         fn plant_secret_beyond_auth_window_is_refused() {
             // Belt-and-suspenders: a secret that the auth-phase scrubber does NOT
             // reach (planted well past the auth window, as if leaked into user
@@ -851,7 +1051,11 @@ mod cassette_seam {
         }
 
         fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-            find_subslice(haystack, needle).is_some()
+            !needle.is_empty()
+                && needle.len() <= haystack.len()
+                && haystack
+                    .windows(needle.len())
+                    .any(|window| window == needle)
         }
     }
 
