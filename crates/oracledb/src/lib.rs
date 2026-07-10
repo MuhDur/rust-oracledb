@@ -3377,8 +3377,7 @@ impl Connection {
         // the same terminal-message rule the connect-phase reads use.
         let limits = self.protocol_limits;
         let response = self
-            .core
-            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+            .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 classic_connect_response_is_complete(bytes, limits).unwrap_or(true)
             })
             .await?;
@@ -15470,6 +15469,255 @@ mod tests {
         assert!(
             !server.join().expect("pre-cancel commit server joins")?,
             "pre-cancelled COMMIT must not write any wire bytes"
+        );
+        assert_eq!(phase, SessionRecoveryPhase::Ready);
+        assert_eq!(sequence_after, sequence_before);
+        Ok(())
+    }
+
+    #[test]
+    fn dropped_change_password_mid_response_drains_before_connection_reuse() -> Result<()> {
+        const STRANDED_BODY: &[u8] = &[TNS_MSG_TYPE_END_OF_RESPONSE];
+        const TRAILING_CANCEL_ERROR: &[u8] = &[0x04, 0x01, 0x0d];
+        const FRESH_SQL: &str = "select value from change_password_reuse_fixture";
+        const OLD_PASSWORD: &str = "old-change-password-proof";
+        const NEW_PASSWORD: &str = "new-change-password-proof";
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let (change_seen_tx, change_seen_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || -> std::io::Result<bool> {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+            let (packet_type, body) = read_one_wire_packet_bytes(&mut socket);
+            assert_eq!(
+                packet_type, TNS_PACKET_TYPE_DATA,
+                "password change must send a DATA request"
+            );
+            assert!(
+                !body
+                    .windows(OLD_PASSWORD.len())
+                    .any(|window| window == OLD_PASSWORD.as_bytes()),
+                "password-change request must not expose the old password"
+            );
+            assert!(
+                !body
+                    .windows(NEW_PASSWORD.len())
+                    .any(|window| window == NEW_PASSWORD.as_bytes()),
+                "password-change request must not expose the new password"
+            );
+            change_seen_tx
+                .send(())
+                .expect("client waits for password-change request proof");
+
+            let (next_packet_type, next_body) = read_one_wire_packet_bytes(&mut socket);
+            if next_packet_type == TNS_PACKET_TYPE_MARKER {
+                assert_eq!(
+                    next_body,
+                    vec![1, 0, TNS_MARKER_TYPE_BREAK],
+                    "reuse must BREAK the stranded password change before its request"
+                );
+                socket.write_all(&data_packet(STRANDED_BODY, true))?;
+                socket.write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))?;
+                assert_eq!(
+                    read_marker_type(&mut socket),
+                    TNS_MARKER_TYPE_RESET,
+                    "password-change drain must complete the RESET handshake"
+                );
+                socket.write_all(&marker_packet(TNS_MARKER_TYPE_RESET))?;
+                socket.write_all(&data_packet(TRAILING_CANCEL_ERROR, true))?;
+
+                assert_eq!(
+                    read_one_wire_packet(&mut socket),
+                    TNS_PACKET_TYPE_DATA,
+                    "fresh execute follows the completed drain"
+                );
+                socket.write_all(&data_packet(
+                    &synthetic_pipeline_execute_response_payload(),
+                    true,
+                ))?;
+                socket.flush()?;
+                Ok(true)
+            } else {
+                assert_eq!(
+                    next_packet_type, TNS_PACKET_TYPE_DATA,
+                    "without recovery the next operation is sent directly"
+                );
+                socket.write_all(&data_packet(STRANDED_BODY, true))?;
+                socket.write_all(&data_packet(
+                    &synthetic_pipeline_execute_response_payload(),
+                    true,
+                ))?;
+                socket.flush()?;
+                Ok(false)
+            }
+        });
+
+        let runtime = build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            connection.combo_key = vec![0x11; 32];
+
+            {
+                let mut change_password =
+                    pin!(connection.change_password(&cx, OLD_PASSWORD, NEW_PASSWORD,));
+                let first =
+                    poll_fn(|task_cx| Poll::Ready(change_password.as_mut().poll(task_cx))).await;
+                assert!(
+                    matches!(first, Poll::Pending),
+                    "password change must be waiting for its response before drop"
+                );
+                change_seen_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("server observed password-change request");
+            }
+
+            let phase_after_drop = connection.core.recovery.phase();
+            let reused = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await;
+            Ok::<_, Error>((phase_after_drop, reused, connection.core.recovery.phase()))
+        });
+
+        let recovered = server.join().expect("password-change server joins")?;
+        let (phase_after_drop, reused, final_phase) = outcome?;
+        let reused = reused.expect("fresh execute must not decode the stranded password change");
+        assert_eq!(
+            reused,
+            sequential_op_decode(&synthetic_pipeline_execute_response_payload()),
+            "reuse must decode its own response byte-identically"
+        );
+        assert!(recovered, "reuse must take the BREAK/drain branch");
+        assert_eq!(phase_after_drop, SessionRecoveryPhase::BreakSent);
+        assert_eq!(final_phase, SessionRecoveryPhase::Ready);
+        Ok(())
+    }
+
+    #[test]
+    fn successful_change_password_disarms_recovery_before_reuse() -> Result<()> {
+        const FRESH_SQL: &str = "select value from change_password_success_fixture";
+        let execute_response = synthetic_pipeline_execute_response_payload();
+        let server_execute_response = execute_response.clone();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+
+            assert_eq!(
+                read_one_wire_packet(&mut socket),
+                TNS_PACKET_TYPE_DATA,
+                "password change must send a DATA request"
+            );
+            socket.write_all(&data_packet(&[TNS_MSG_TYPE_END_OF_RESPONSE], true))?;
+            socket.flush()?;
+
+            assert_eq!(
+                read_one_wire_packet(&mut socket),
+                TNS_PACKET_TYPE_DATA,
+                "a successful password change must not cause a spurious BREAK on reuse"
+            );
+            socket.write_all(&data_packet(&server_execute_response, true))?;
+            socket.flush()
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            connection.combo_key = vec![0x11; 32];
+
+            connection
+                .change_password(
+                    &cx,
+                    "old-change-password-proof",
+                    "new-change-password-proof",
+                )
+                .await?;
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready,
+                "a completed password-change response must disarm its guard"
+            );
+
+            let reused = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await?;
+            assert_eq!(reused, sequential_op_decode(&execute_response));
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        server
+            .join()
+            .expect("successful password-change server joins")?;
+        Ok(())
+    }
+
+    #[test]
+    fn precancelled_change_password_writes_nothing_and_keeps_wire_ready() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<bool> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_millis(300)))?;
+            let mut byte = [0u8; 1];
+            match socket.read(&mut byte) {
+                Ok(0) => Ok(false),
+                Ok(_) => Ok(true),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    Ok(false)
+                }
+                Err(err) => Err(err),
+            }
+        });
+
+        let runtime = build_io_runtime()?;
+        let (phase, sequence_before, sequence_after) = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            let sequence_before = connection.ttc_seq_num;
+            cx.cancel_fast(CancelKind::User);
+
+            let err = connection
+                .change_password(
+                    &cx,
+                    "old-change-password-proof",
+                    "new-change-password-proof",
+                )
+                .await
+                .expect_err("pending cancellation stops before PASSWORD CHANGE");
+            assert!(matches!(err, Error::Cancelled), "{err:?}");
+            Ok::<_, Error>((
+                connection.core.recovery.phase(),
+                sequence_before,
+                connection.ttc_seq_num,
+            ))
+        })?;
+
+        assert!(
+            !server
+                .join()
+                .expect("pre-cancel password-change server joins")?,
+            "pre-cancelled PASSWORD CHANGE must not write any wire bytes"
         );
         assert_eq!(phase, SessionRecoveryPhase::Ready);
         assert_eq!(sequence_after, sequence_before);
