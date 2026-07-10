@@ -267,15 +267,16 @@ fn build_fetch_future(
             ))
             .await
         {
-            Ok(result) => result,
+            Ok(result) => connection.close_cursor_on_error(cursor_id, result),
             Err(DeadlineExpiry::BeforeStart) => {
                 connection.release_cursor(cursor_id);
                 connection.reject_before_operation_start(&cx, deadline.timeout_ms())
             }
             Err(DeadlineExpiry::InFlight) => {
-                connection
+                let recovered = connection
                     .recover_from_call_timeout(&cx, deadline.timeout_ms())
-                    .await
+                    .await;
+                connection.close_cursor_on_error(cursor_id, recovered)
             }
         };
         (connection, outcome)
@@ -478,15 +479,17 @@ impl Connection {
                 ))
                 .await
             {
-                Ok(result) => result?,
+                Ok(result) => connection.close_cursor_on_error(cursor_id, result)?,
                 Err(DeadlineExpiry::BeforeStart) => {
                     connection.release_cursor(cursor_id);
                     return connection.reject_before_operation_start(cx, deadline.timeout_ms());
                 }
                 Err(DeadlineExpiry::InFlight) => {
-                    return connection
+                    let recovered = connection
                         .recover_from_call_timeout(cx, deadline.timeout_ms())
-                        .await
+                        .await;
+                    connection.close_cursor(cursor_id);
+                    return recovered;
                 }
             };
             result.rows = fetched.rows;
@@ -615,6 +618,7 @@ mod tests {
 
     #[test]
     fn continuation_fetch_does_not_rearm_the_query_timeout() -> Result<()> {
+        const SQL: &str = "select value from drvqa_cursor_cleanup";
         const QUERY_TIMEOUT: Duration = Duration::from_millis(40);
         const INFLIGHT_BODY: &[u8] = &[0xd1, 0xa1, 0xb1];
         const CANCEL_ERROR: &[u8] = &[0x04, 0x01, 0x0d];
@@ -667,6 +671,7 @@ mod tests {
             let socket = TcpStream::connect(addr).await?;
             let (read, write) = crate::transport::plain_split(socket);
             let mut connection = crate::tests::loopback_connection(read, write);
+            connection.statement_cache_put(SQL, 42, Vec::new());
             connection.in_use_cursors.insert(42);
             let result = QueryResult {
                 columns: cols(&["A"]),
@@ -700,6 +705,21 @@ mod tests {
                     .contains(&42),
                 "before-start expiry must release the cursor without wire recovery"
             );
+            let connection = stream
+                .connection
+                .as_ref()
+                .expect("connection is returned after the failed fetch");
+            assert!(
+                connection
+                    .statement_cache
+                    .iter()
+                    .any(|entry| entry.sql == SQL && entry.cursor_id == 42),
+                "a fetch proven not to start must leave the valid cached cursor reusable"
+            );
+            assert!(
+                connection.cursors_to_close.is_empty(),
+                "a fetch proven not to start must not queue the valid cursor for close"
+            );
             Ok::<_, Error>(())
         })?;
 
@@ -709,6 +729,219 @@ mod tests {
             "page 2 was sent after the original query timeout had elapsed; \
              the continuation incorrectly received a fresh timeout window"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn continuation_fetch_error_retires_every_cursor_registry_before_connection_reuse() -> Result<()>
+    {
+        const SQL: &str = "select value from drvqa_cursor_cleanup";
+        const CURSOR_ID: u32 = 42;
+        const COPIED_CURSOR_ID: u32 = 43;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (socket, _) = listener.accept()?;
+            drop(socket);
+            Ok(())
+        });
+
+        let runtime = crate::build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs an ambient Cx");
+            let socket = TcpStream::connect(addr).await?;
+            let (read, write) = crate::transport::plain_split(socket);
+            let mut connection = crate::tests::loopback_connection(read, write);
+            connection.statement_cache_put(SQL, CURSOR_ID, Vec::new());
+            connection.in_use_cursors.insert(CURSOR_ID);
+            connection.cursor_columns.insert(CURSOR_ID, cols(&["A"]));
+            connection.lob_prefetch_cursors.insert(CURSOR_ID);
+
+            let first = QueryResult {
+                columns: cols(&["A"]),
+                rows: Vec::new(),
+                cursor_id: CURSOR_ID,
+                more_rows: true,
+                ..QueryResult::default()
+            };
+            let deadline = QueryDeadline::new(&cx, None);
+            let mut stream =
+                OwnedRowStream::from_first_page(Some(connection), cx.clone(), 1, deadline, first);
+
+            let connection = stream
+                .connection
+                .take()
+                .expect("stream starts with its connection");
+            stream.state = OwnedRowStreamState::Fetching(build_fetch_future(
+                connection,
+                cx,
+                CURSOR_ID,
+                1,
+                deadline,
+                Arc::clone(&stream.columns),
+                None,
+            ));
+
+            let failed = poll_fn(|task_cx| Pin::new(&mut stream).poll_next(task_cx)).await;
+            assert!(
+                matches!(failed, Some(Err(_))),
+                "peer EOF must fail the fetch"
+            );
+            assert!(
+                poll_fn(|task_cx| Pin::new(&mut stream).poll_next(task_cx))
+                    .await
+                    .is_none(),
+                "a failed stream must surface exactly one error and then terminate"
+            );
+
+            let connection = stream.into_connection()?;
+            assert!(
+                !connection.in_use_cursors.contains(&CURSOR_ID),
+                "failed cursor must not remain marked in use"
+            );
+            assert!(
+                !connection.cursor_columns.contains_key(&CURSOR_ID),
+                "failed cursor metadata must be forgotten"
+            );
+            assert!(
+                !connection.lob_prefetch_cursors.contains(&CURSOR_ID),
+                "failed cursor LOB-prefetch state must be forgotten"
+            );
+            assert!(
+                connection
+                    .statement_cache
+                    .iter()
+                    .all(|entry| entry.cursor_id != CURSOR_ID),
+                "failed cursor must not remain reusable through the statement cache"
+            );
+            assert_eq!(
+                connection
+                    .cursors_to_close
+                    .iter()
+                    .filter(|cursor_id| **cursor_id == CURSOR_ID)
+                    .count(),
+                1,
+                "failed cursor must be queued for close exactly once"
+            );
+
+            // A copied cursor is deliberately absent from the statement cache,
+            // but it has the same close-on-error lifecycle and must not linger
+            // in the copied/in-use registries. Repeating cleanup is idempotent.
+            let mut connection = connection;
+            connection.in_use_cursors.insert(COPIED_CURSOR_ID);
+            connection.copied_cursors.insert(COPIED_CURSOR_ID);
+            connection
+                .cursor_columns
+                .insert(COPIED_CURSOR_ID, cols(&["A"]));
+            connection.lob_prefetch_cursors.insert(COPIED_CURSOR_ID);
+            for _ in 0..2 {
+                let failed: Result<()> = connection.close_cursor_on_error(
+                    COPIED_CURSOR_ID,
+                    Err(Error::Runtime(
+                        "synthetic copied-cursor failure".to_string(),
+                    )),
+                );
+                assert!(failed.is_err());
+            }
+            assert!(!connection.in_use_cursors.contains(&COPIED_CURSOR_ID));
+            assert!(!connection.copied_cursors.contains(&COPIED_CURSOR_ID));
+            assert!(!connection.cursor_columns.contains_key(&COPIED_CURSOR_ID));
+            assert!(!connection.lob_prefetch_cursors.contains(&COPIED_CURSOR_ID));
+            assert_eq!(
+                connection
+                    .cursors_to_close
+                    .iter()
+                    .filter(|cursor_id| **cursor_id == COPIED_CURSOR_ID)
+                    .count(),
+                1,
+                "repeated error cleanup must not queue duplicate cursor closes"
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        server.join().expect("server thread joins")?;
+        Ok(())
+    }
+
+    #[test]
+    fn inflight_continuation_timeout_closes_cursor_after_wire_recovery() -> Result<()> {
+        const SQL: &str = "select value from drvqa_cursor_timeout";
+        const CURSOR_ID: u32 = 84;
+        const QUERY_TIMEOUT: Duration = Duration::from_millis(40);
+        const INFLIGHT_BODY: &[u8] = &[0xd1, 0xa1, 0xb1];
+        const CANCEL_ERROR: &[u8] = &[0x04, 0x01, 0x0d];
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+
+            let (fetch_type, _) = read_packet(&mut socket)?;
+            assert_eq!(fetch_type, TNS_PACKET_TYPE_DATA, "page 2 must start");
+            let (break_type, break_body) = read_packet(&mut socket)?;
+            assert_eq!(break_type, crate::TNS_PACKET_TYPE_MARKER);
+            assert_eq!(break_body, [1, 0, crate::TNS_MARKER_TYPE_BREAK]);
+
+            socket.write_all(&data_packet(INFLIGHT_BODY))?;
+            socket.write_all(&marker_packet(crate::TNS_MARKER_TYPE_BREAK))?;
+            let (reset_type, reset_body) = read_packet(&mut socket)?;
+            assert_eq!(reset_type, crate::TNS_PACKET_TYPE_MARKER);
+            assert_eq!(reset_body, [1, 0, crate::TNS_MARKER_TYPE_RESET]);
+            socket.write_all(&marker_packet(crate::TNS_MARKER_TYPE_RESET))?;
+            socket.write_all(&data_packet(CANCEL_ERROR))?;
+            socket.flush()?;
+            Ok(())
+        });
+
+        let runtime = crate::build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs an ambient Cx");
+            let socket = TcpStream::connect(addr).await?;
+            let (read, write) = crate::transport::plain_split(socket);
+            let mut connection = crate::tests::loopback_connection(read, write);
+            connection.statement_cache_put(SQL, CURSOR_ID, Vec::new());
+            connection.in_use_cursors.insert(CURSOR_ID);
+
+            let first = QueryResult {
+                columns: cols(&["A"]),
+                rows: Vec::new(),
+                cursor_id: CURSOR_ID,
+                more_rows: true,
+                ..QueryResult::default()
+            };
+            let deadline = QueryDeadline::new(&cx, Some(QUERY_TIMEOUT));
+            let mut stream =
+                OwnedRowStream::from_first_page(Some(connection), cx, 1, deadline, first);
+
+            let failed = poll_fn(|task_cx| Pin::new(&mut stream).poll_next(task_cx)).await;
+            assert!(
+                matches!(failed, Some(Err(Error::CallTimeout(40)))),
+                "in-flight page must recover and surface CallTimeout, got {failed:?}"
+            );
+            let connection = stream.into_connection()?;
+            assert!(!connection.in_use_cursors.contains(&CURSOR_ID));
+            assert!(
+                connection
+                    .statement_cache
+                    .iter()
+                    .all(|entry| entry.cursor_id != CURSOR_ID),
+                "recovered in-flight timeout must evict the uncertain cached cursor"
+            );
+            assert_eq!(
+                connection
+                    .cursors_to_close
+                    .iter()
+                    .filter(|cursor_id| **cursor_id == CURSOR_ID)
+                    .count(),
+                1,
+                "recovered in-flight timeout must queue exactly one close"
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        server.join().expect("server thread joins")?;
         Ok(())
     }
 

@@ -4228,9 +4228,10 @@ impl Connection {
         }
         let cursor_id = result.cursor_id;
         let columns = result.columns.clone();
-        let fetched = self
+        let fetched_result = self
             .define_and_fetch_rows_with_columns(cx, cursor_id, prefetch_rows.max(1), &columns, None)
-            .await?;
+            .await;
+        let fetched = self.close_cursor_on_error(cursor_id, fetched_result)?;
         result.rows = fetched.rows;
         result.more_rows = fetched.more_rows;
         if !fetched.columns.is_empty() {
@@ -4287,9 +4288,10 @@ impl Connection {
         }
         let cursor_id = result.cursor_id;
         let columns = result.columns.clone();
-        let fetched = self
+        let fetched_result = self
             .define_and_fetch_rows_with_columns(cx, cursor_id, prefetch_rows.max(1), &columns, None)
-            .await?;
+            .await;
+        let fetched = self.close_cursor_on_error(cursor_id, fetched_result)?;
         result.rows = fetched.rows;
         result.more_rows = fetched.more_rows;
         if !fetched.columns.is_empty() {
@@ -4446,15 +4448,17 @@ impl Connection {
                 ))
                 .await
             {
-                Ok(result) => result?,
+                Ok(result) => self.close_cursor_on_error(cursor_id, result)?,
                 Err(DeadlineExpiry::BeforeStart) => {
                     self.release_cursor(cursor_id);
                     return self.reject_before_operation_start(cx, deadline.timeout_ms());
                 }
                 Err(DeadlineExpiry::InFlight) => {
-                    return self
+                    let recovered = self
                         .recover_from_call_timeout(cx, deadline.timeout_ms())
-                        .await
+                        .await;
+                    self.close_cursor(cursor_id);
+                    return recovered;
                 }
             };
             result.rows = fetched.rows;
@@ -7105,7 +7109,7 @@ impl Connection {
             if any_adjusted && result.cursor_id != 0 {
                 observe_cancellation_between_round_trips(cx)?;
                 let cursor_id = result.cursor_id;
-                let mut redefined = self
+                let redefined_result = self
                     .define_and_fetch_rows_with_columns(
                         cx,
                         cursor_id,
@@ -7113,7 +7117,8 @@ impl Connection {
                         &adjusted,
                         None,
                     )
-                    .await?;
+                    .await;
+                let mut redefined = self.close_cursor_on_error(cursor_id, redefined_result)?;
                 if redefined.columns.is_empty() {
                     redefined.columns = adjusted;
                 }
@@ -7238,19 +7243,37 @@ impl Connection {
         }
     }
 
+    /// Apply the fail-closed lifecycle rule for an operation on an already-open
+    /// cursor: a successful result keeps ownership unchanged, while an error
+    /// retires the cursor because its server-side validity is no longer proven.
+    /// Callers that prove an operation never started must use `release_cursor`
+    /// directly instead, preserving a valid cached cursor for reuse.
+    pub(crate) fn close_cursor_on_error<T>(
+        &mut self,
+        cursor_id: u32,
+        result: Result<T>,
+    ) -> Result<T> {
+        if result.is_err() {
+            self.close_cursor(cursor_id);
+        }
+        result
+    }
+
     /// Queue an open server cursor to be closed on the next round trip
     /// (reference `_add_cursor_to_close`). Unlike [`Self::release_cursor`],
     /// which returns a cached cursor to the statement cache for reuse, this
     /// drops the cursor entirely: its id is sent in the close-cursors piggyback
-    /// that rides the next execute, and its retained describe metadata is
-    /// forgotten. Use this for a non-cached cursor (for example one opened by
-    /// [`Self::execute_raw`]) once its result is fully consumed, to
-    /// keep a long-lived connection from accumulating open cursors. A cursor id
-    /// of `0` is ignored.
+    /// that rides the next execute, any statement-cache entry pointing at the
+    /// id is evicted, and its retained describe metadata is forgotten. Use this
+    /// for a non-cached cursor (for example one opened by [`Self::execute_raw`])
+    /// once its result is fully consumed, or for any cursor whose validity was
+    /// lost after a failed operation. A cursor id of `0` is ignored.
     pub fn close_cursor(&mut self, cursor_id: u32) {
         if cursor_id == 0 {
             return;
         }
+        self.statement_cache
+            .retain(|entry| entry.cursor_id != cursor_id);
         self.in_use_cursors.remove(&cursor_id);
         self.copied_cursors.remove(&cursor_id);
         self.cursor_columns.remove(&cursor_id);

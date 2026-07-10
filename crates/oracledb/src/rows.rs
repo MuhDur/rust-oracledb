@@ -437,7 +437,7 @@ impl Rows<'_> {
             ))
             .await
         {
-            Ok(result) => result?,
+            Ok(result) => self.close_cursor_on_error(result)?,
             Err(DeadlineExpiry::BeforeStart) => {
                 self.release_cursor();
                 return self
@@ -445,11 +445,12 @@ impl Rows<'_> {
                     .reject_before_operation_start(cx, self.deadline.timeout_ms());
             }
             Err(DeadlineExpiry::InFlight) => {
-                self.release_cursor();
-                return self
+                let recovered = self
                     .connection
                     .recover_from_call_timeout(cx, self.deadline.timeout_ms())
                     .await;
+                self.close_cursor();
+                return recovered;
             }
         };
         self.apply_result(result);
@@ -559,7 +560,7 @@ impl Rows<'_> {
             ))
             .await
         {
-            Ok(result) => result?,
+            Ok(result) => self.close_cursor_on_error(result)?,
             Err(DeadlineExpiry::BeforeStart) => {
                 self.release_cursor();
                 return self
@@ -567,11 +568,12 @@ impl Rows<'_> {
                     .reject_before_operation_start(cx, self.deadline.timeout_ms());
             }
             Err(DeadlineExpiry::InFlight) => {
-                self.release_cursor();
-                return self
+                let recovered = self
                     .connection
                     .recover_from_call_timeout(cx, self.deadline.timeout_ms())
                     .await;
+                self.close_cursor();
+                return recovered;
             }
         };
         self.apply_result(result);
@@ -609,6 +611,22 @@ impl Rows<'_> {
         self.connection.release_cursor(self.cursor_id);
         self.cursor_id = 0;
         self.more_rows = false;
+    }
+
+    fn close_cursor(&mut self) {
+        if self.cursor_id == 0 {
+            return;
+        }
+        self.connection.close_cursor(self.cursor_id);
+        self.cursor_id = 0;
+        self.more_rows = false;
+    }
+
+    fn close_cursor_on_error<T>(&mut self, result: Result<T>) -> Result<T> {
+        if result.is_err() {
+            self.close_cursor();
+        }
+        result
     }
 }
 

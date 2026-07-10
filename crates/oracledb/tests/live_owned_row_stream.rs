@@ -227,8 +227,52 @@ fn midstream_error_propagates_then_stream_terminates() {
             "stream is terminal after a mid-stream error"
         );
 
-        // The connection came back with the error; it is recoverable.
-        let conn = stream.into_connection().expect("recover after error");
+        // The connection came back with the error; it is recoverable and the
+        // failed cursor's stale cache/registry state cannot poison the next SQL.
+        let mut conn = stream.into_connection().expect("recover after error");
+        let answer: i64 = conn
+            .query_one(&cx, "select 42 from dual", ())
+            .await
+            .expect("connection remains reusable after a continuation error")
+            .get(0)
+            .expect("fresh query returns its value");
+        assert_eq!(answer, 42);
+        conn.close(&cx).await.expect("close");
+    });
+}
+
+#[test]
+#[ignore = "requires local Oracle listener from scripts/container.sh up"]
+fn materialized_lob_define_failure_leaves_connection_reusable() {
+    block_on_live(async {
+        let cx = Cx::current().expect("block_on installs an ambient Cx");
+        let mut conn = Connection::connect(&cx, live_options())
+            .await
+            .expect("connect");
+
+        // A CLOB projection is describe-only on the initial execute and is
+        // materialized by query_with's follow-up DEFINE/FETCH. The expression
+        // raises while Oracle produces that row, exercising the bootstrap's
+        // error lifecycle rather than a successfully returned Rows facade.
+        let sql = "select to_clob(case when :1 = 1 then to_char(1/0) else '42' end) \
+                   as payload from dual";
+        let err = conn
+            .query(&cx, sql, (1_i64,))
+            .await
+            .expect_err("materialized CLOB expression must raise ORA-01476");
+        assert_eq!(
+            err.ora_code(),
+            Some(1476),
+            "DEFINE/FETCH failure must surface the server error, got {err:?}"
+        );
+
+        // Re-execute the identical cached SQL with a non-failing bind. A stale
+        // in-use/cached cursor from the failed DEFINE/FETCH must not poison it.
+        let rows = conn
+            .query_all(&cx, sql, (0_i64,))
+            .await
+            .expect("same SQL reparses cleanly after failed DEFINE/FETCH");
+        assert_eq!(rows.len(), 1);
         conn.close(&cx).await.expect("close");
     });
 }
