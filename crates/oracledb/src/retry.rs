@@ -19,9 +19,12 @@
 //! operation the caller has *proven* idempotent (a `SELECT`, or a DML the caller
 //! vouches for) is ever replayed. When in doubt, we surface, we do not retry.
 
+use crate::recovery::observe_cancellation_between_round_trips;
 use crate::{Error, Result, RetryHint};
 use asupersync::{time, Cx};
-use std::future::Future;
+use std::future::{poll_fn, Future};
+use std::pin::pin;
+use std::task::Poll;
 use std::time::Duration;
 
 /// Whether an operation may be safely re-executed after a transient failure.
@@ -167,12 +170,27 @@ impl RetryPolicy {
     }
 }
 
-/// Sleep for `backoff`, unless it is zero or the context is already cancelled.
-async fn backoff_sleep(cx: &Cx, backoff: Duration) {
-    if backoff.is_zero() || cx.cancel_reason().is_some() {
-        return;
+/// Sleep for `backoff` while continuing to observe caller cancellation.
+///
+/// A retry is a new operation boundary: cancellation must win before another
+/// attempt or reconnect starts. Polling the checkpoint beside the timer also
+/// lets a runtime cancellation wake the task instead of waiting out the whole
+/// backoff first.
+async fn backoff_sleep(cx: &Cx, backoff: Duration) -> Result<()> {
+    observe_cancellation_between_round_trips(cx)?;
+    if backoff.is_zero() {
+        return Ok(());
     }
-    time::sleep(time::wall_now(), backoff).await;
+
+    let mut sleep = pin!(time::sleep(time::wall_now(), backoff));
+    poll_fn(|task_cx| {
+        if let Err(err) = observe_cancellation_between_round_trips(cx) {
+            return Poll::Ready(Err(err));
+        }
+        sleep.as_mut().poll(task_cx).map(Ok)
+    })
+    .await?;
+    observe_cancellation_between_round_trips(cx)
 }
 
 /// Run an idempotency-gated retry loop on a **single** connection.
@@ -263,6 +281,9 @@ where
 {
     let mut attempts_made: u32 = 0;
     loop {
+        // Do not start even the first attempt when the caller is already
+        // cancelled. Every later retry returns through this same checkpoint.
+        observe_cancellation_between_round_trips(cx)?;
         match op().await {
             Ok(value) => return Ok(value),
             Err(err) => {
@@ -270,10 +291,10 @@ where
                 match policy.decide(&err, idempotency, attempts_made) {
                     RetryAction::Surface => return Err(err),
                     RetryAction::RetrySameConnection { backoff } => {
-                        backoff_sleep(cx, backoff).await;
+                        backoff_sleep(cx, backoff).await?;
                     }
                     RetryAction::ReconnectThenRetry { backoff } => {
-                        backoff_sleep(cx, backoff).await;
+                        backoff_sleep(cx, backoff).await?;
                         match hook.reconnect().await {
                             // Reconnected: retry on the fresh connection.
                             Ok(true) => {}
@@ -294,6 +315,7 @@ where
 mod tests {
     use super::*;
     use asupersync::runtime::{reactor, RuntimeBuilder};
+    use asupersync::types::CancelKind;
     use std::cell::Cell;
 
     // --- error synthesis (mirrors the crate's other test helpers) ------------
@@ -520,6 +542,78 @@ mod tests {
             .await;
             assert_eq!(out.unwrap(), 42);
             assert_eq!(op.calls(), 2, "one retry after the transient failure");
+        });
+    }
+
+    #[test]
+    fn pre_cancelled_context_does_not_start_operation() {
+        block_on(async {
+            let cx = Cx::current().expect("cx");
+            cx.cancel_fast(CancelKind::User);
+            let calls = Cell::new(0usize);
+
+            let out = run_with_retry(&cx, &instant_policy(3), Idempotency::Idempotent, || async {
+                calls.set(calls.get() + 1);
+                Ok::<_, Error>(42)
+            })
+            .await;
+
+            assert!(matches!(out, Err(Error::Cancelled)), "got {out:?}");
+            assert_eq!(calls.get(), 0, "cancelled work must not start");
+        });
+    }
+
+    #[test]
+    fn cancellation_after_failure_stops_before_retry() {
+        block_on(async {
+            let cx = Cx::current().expect("cx");
+            let calls = Cell::new(0usize);
+
+            let out = run_with_retry(&cx, &instant_policy(3), Idempotency::Idempotent, || async {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    cx.cancel_fast(CancelKind::User);
+                    Err(transient())
+                } else {
+                    Ok(42)
+                }
+            })
+            .await;
+
+            assert!(matches!(out, Err(Error::Cancelled)), "got {out:?}");
+            assert_eq!(calls.get(), 1, "cancellation must suppress the retry");
+        });
+    }
+
+    #[test]
+    fn shutdown_cancellation_stops_before_reconnect() {
+        block_on(async {
+            let cx = Cx::current().expect("cx");
+            let calls = Cell::new(0usize);
+            let reconnects = Cell::new(0usize);
+
+            let out = run_with_retry_reconnecting(
+                &cx,
+                &instant_policy(3),
+                Idempotency::Idempotent,
+                || async {
+                    calls.set(calls.get() + 1);
+                    cx.cancel_fast(CancelKind::Shutdown);
+                    Err::<u64, _>(connection_lost())
+                },
+                || async {
+                    reconnects.set(reconnects.get() + 1);
+                    Ok(())
+                },
+            )
+            .await;
+
+            assert!(
+                matches!(out, Err(Error::ConnectionClosed(_))),
+                "got {out:?}"
+            );
+            assert_eq!(calls.get(), 1, "cancelled operation must not retry");
+            assert_eq!(reconnects.get(), 0, "shutdown must not reconnect");
         });
     }
 
