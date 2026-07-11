@@ -111,6 +111,23 @@ pub enum BindError {
         expected: usize,
         actual: usize,
     },
+    /// Execute-many bind rows disagree on a column's type. Array DML binds a
+    /// single type per column: the first row that supplies a typed (non-`NULL`)
+    /// value at a position establishes that position's bind type, and the wire
+    /// metadata writer types every row's value under it. A later row whose value
+    /// is an incompatible type cannot ride the same bind — the server would
+    /// coerce it under the established type and raise a cryptic `ORA-01722` /
+    /// `ORA-01858`. Caught up front here, mirroring the reference `DPY-2006`.
+    BatchColumnTypeMismatch {
+        /// Zero-based index of the offending row.
+        row_index: usize,
+        /// Zero-based bind position (column) whose type disagrees.
+        column_index: usize,
+        /// Public Oracle db-type name established by the first typed row.
+        expected: &'static str,
+        /// Public Oracle db-type name supplied by the offending row.
+        actual: &'static str,
+    },
 }
 
 impl std::fmt::Display for BindError {
@@ -134,6 +151,17 @@ impl std::fmt::Display for BindError {
             } => write!(
                 f,
                 "batch row {row_index} has {actual} bind values; expected {expected}"
+            ),
+            BindError::BatchColumnTypeMismatch {
+                row_index,
+                column_index,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "batch row {row_index} binds {actual} at position {column_index}, but an \
+                 earlier row established {expected} there; every row must supply the same \
+                 type for a given bind"
             ),
         }
     }
@@ -1545,6 +1573,104 @@ fn bind_shape_validation_enabled(sql: &str) -> bool {
     !sql::statement_is_ddl(sql)
 }
 
+/// First-execute bind TYPE validation for array DML / execute-many.
+///
+/// Array DML binds a single type per column. The wire metadata writer
+/// (`write_bind_metadata_for_rows`) types each position from the FIRST row that
+/// supplies a typed (non-`NULL`) value and writes *every* row's value under that
+/// one type; a later row whose value is an incompatible type is silently dropped
+/// from that inference and then serialized under the wrong type, so the server
+/// raises a cryptic `ORA-01722`/`ORA-01858` instead of a clear client error.
+///
+/// This checks the same per-column rule the writer relies on and surfaces a
+/// precise [`BindError::BatchColumnTypeMismatch`] up front — the reference's
+/// `DPY-2006`. Two [`BindValue`]s are considered the same bind type when they
+/// fold to the same wire type family (CHAR/VARCHAR/LONG are interchangeable, as
+/// are RAW/LONG_RAW — [`crate::bind_type_family`], the same fold the writer's
+/// `bind_metadata_types_are_compatible` uses) *and* share a character-set form.
+///
+/// An untyped `BindValue::Null` is a wildcard: it carries no type and
+/// null-converts to any parsed type server-side, so it neither establishes a
+/// column's type nor conflicts with it. `bind_value_type_info` returns `None`
+/// for exactly `BindValue::Null`, mirroring the writer's own skip, so the two
+/// stay in lockstep. A single-row execute (or fewer) can never conflict with
+/// itself and is accepted without inspection.
+pub(crate) fn validate_bind_rows_types(bind_rows: &[Vec<BindValue>]) -> Result<(), BindError> {
+    use oracledb_protocol::thin::{bind_value_type_info, public_dbtype_name_from_bind};
+
+    let Some(first_row) = bind_rows.first() else {
+        return Ok(());
+    };
+    if bind_rows.len() < 2 {
+        return Ok(());
+    }
+    for column_index in 0..first_row.len() {
+        // (family, csfrm, public type name) of the first typed value in the column.
+        let mut established: Option<(u8, u8, &'static str)> = None;
+        for (row_index, row) in bind_rows.iter().enumerate() {
+            let Some(value) = row.get(column_index) else {
+                // Ragged rows are rejected earlier by `validate_bind_rows_shape`.
+                continue;
+            };
+            let Some(info) = bind_value_type_info(value) else {
+                continue; // untyped NULL wildcard
+            };
+            let family = crate::bind_type_family(info.ora_type_num);
+            match established {
+                None => {
+                    established = Some((family, info.csfrm, public_dbtype_name_from_bind(value)));
+                }
+                Some((established_family, established_csfrm, expected)) => {
+                    if family != established_family || info.csfrm != established_csfrm {
+                        return Err(BindError::BatchColumnTypeMismatch {
+                            row_index,
+                            column_index,
+                            expected,
+                            actual: public_dbtype_name_from_bind(value),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The number of positional bind values a `statement` declares, counted with the
+/// driver's real SQL tokenizer — placeholders inside string/quoted literals,
+/// `--`/`/* */` comments and `q'…'` quoted strings are ignored, and a repeated
+/// placeholder in plain SQL counts once per occurrence (PL/SQL coalesces
+/// duplicates), exactly as execution binds them.
+///
+/// This is the same count [`crate::Connection::execute`] validates against
+/// before the wire round trip; expose it so a caller (a workbench, a linter, an
+/// MCP tool) can pre-flight a `(sql, values)` pair with no database connection
+/// and catch a mismatch as an [`enum@crate::Error`] instead of a cryptic
+/// `ORA-01008`/`ORA-01745`.
+pub fn declared_bind_count(statement: &str) -> Result<usize, BindError> {
+    Ok(sql::bind_names_per_occurrence(statement)?.len())
+}
+
+/// Pre-flight the positional bind COUNT for `statement` against the number of
+/// values a caller intends to supply, with no database round trip. Returns
+/// [`BindError::PositionalCountMismatch`] when they differ. This is precisely the
+/// check [`crate::Connection::execute`] runs for positional binds, hoisted so it
+/// can be run early (e.g. in a test or before building the bind vector). DDL,
+/// which the driver never bind-count-validates, always passes.
+pub fn check_positional_binds(statement: &str, supplied: usize) -> Result<(), BindError> {
+    validate_positional_bind_count(statement, supplied)
+}
+
+/// Pre-flight execute-many bind rows without a database round trip: the
+/// structural shape (rectangular rows — [`BindError::BatchRowWidthMismatch`])
+/// *and* first-execute per-column type consistency
+/// ([`BindError::BatchColumnTypeMismatch`]). This mirrors the validation
+/// [`crate::Connection::execute_many`] performs at execute time.
+pub fn check_bind_rows(statement: &str, bind_rows: &[Vec<BindValue>]) -> Result<(), BindError> {
+    validate_bind_rows_shape(statement, bind_rows)?;
+    validate_bind_rows_types(bind_rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1880,6 +2006,252 @@ mod tests {
         // rows; the wire bind count is zero. This must be accepted.
         validate_bind_rows_shape("select :v from dual", &[])
             .expect("a no-bind execute / parse-only describe is valid");
+    }
+
+    // ------------------------------------------------------------------
+    // Bind-COUNT check via the real tokenizer (declared_bind_count /
+    // check_positional_binds)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn declared_bind_count_uses_real_tokenizer_ignoring_literals_and_comments() {
+        // Placeholders inside a string literal, a `--` comment, a `/* */`
+        // comment and a q-string are NOT binds; the two real ones are.
+        let sql = "select :a /* :not_a_bind */, ':also_not', \
+                   q'[:nope]' from dual where x = :b -- :tail";
+        assert_eq!(declared_bind_count(sql).expect("tokenizes"), 2);
+
+        // Plain SQL counts a repeated positional placeholder once PER
+        // occurrence (execution binds each occurrence its own value).
+        assert_eq!(
+            declared_bind_count("insert into t values (:1, :1, :2)").expect("tokenizes"),
+            3
+        );
+        // A named bind repeated in plain SQL likewise counts per occurrence.
+        assert_eq!(
+            declared_bind_count("select :v, :v from dual").expect("tokenizes"),
+            2
+        );
+        // PL/SQL coalesces duplicate placeholders into a single bind.
+        assert_eq!(
+            declared_bind_count("begin proc(:x, :x, :y); end;").expect("tokenizes"),
+            2
+        );
+        // No binds at all.
+        assert_eq!(
+            declared_bind_count("select 1 from dual").expect("tokenizes"),
+            0
+        );
+    }
+
+    #[test]
+    fn declared_bind_count_propagates_tokenizer_error() {
+        let err = declared_bind_count("select ':unterminated from dual").unwrap_err();
+        assert_eq!(err, BindError::Sql(sql::SqlError::MissingEndingSingleQuote));
+    }
+
+    #[test]
+    fn check_positional_binds_catches_mismatch_and_passes_correct() {
+        // Too few.
+        assert_eq!(
+            check_positional_binds("select :1 + :2 from dual", 1).unwrap_err(),
+            BindError::PositionalCountMismatch {
+                expected: 2,
+                actual: 1
+            }
+        );
+        // Too many.
+        assert_eq!(
+            check_positional_binds("select :1 from dual", 3).unwrap_err(),
+            BindError::PositionalCountMismatch {
+                expected: 1,
+                actual: 3
+            }
+        );
+        // Exactly right — including the per-occurrence rule for a repeated bind.
+        check_positional_binds("insert into t values (:1, :2)", 2).expect("matching count passes");
+        check_positional_binds("select :v, :v from dual", 2)
+            .expect("repeated plain-SQL placeholder consumes one value per occurrence");
+        // DDL is never bind-count-validated (mirrors execution).
+        check_positional_binds("create table t (id number)", 5)
+            .expect("DDL is exempt from bind-count validation");
+    }
+
+    // ------------------------------------------------------------------
+    // First-execute TYPE validation (validate_bind_rows_types / check_bind_rows)
+    // ------------------------------------------------------------------
+
+    fn text(value: &str) -> BindValue {
+        BindValue::Text(value.into())
+    }
+    fn number(value: &str) -> BindValue {
+        BindValue::Number(value.into())
+    }
+
+    #[test]
+    fn type_validation_accepts_homogeneous_columns() {
+        // Column 0 all NUMBER, column 1 all VARCHAR: every row agrees.
+        let rows = vec![
+            vec![number("1"), text("a")],
+            vec![number("2"), text("bb")],
+            vec![number("3"), text("ccc")],
+        ];
+        check_bind_rows("insert into t values (:1, :2)", &rows)
+            .expect("consistent per-column types are accepted");
+    }
+
+    #[test]
+    fn type_validation_catches_column_type_mismatch() {
+        // Column 0: row 0 NUMBER, row 1 VARCHAR -> the batch cannot bind one
+        // type for the column.
+        let rows = vec![vec![number("1")], vec![text("oops")]];
+        let err = validate_bind_rows_types(&rows).unwrap_err();
+        assert_eq!(
+            err,
+            BindError::BatchColumnTypeMismatch {
+                row_index: 1,
+                column_index: 0,
+                expected: "DB_TYPE_NUMBER",
+                actual: "DB_TYPE_VARCHAR",
+            }
+        );
+    }
+
+    #[test]
+    fn type_validation_reports_the_offending_row_and_column() {
+        // Rows 0 and 1 agree on both columns; row 2 flips column 1 to NUMBER.
+        let rows = vec![
+            vec![number("1"), text("a")],
+            vec![number("2"), text("b")],
+            vec![number("3"), number("4")],
+        ];
+        let err = validate_bind_rows_types(&rows).unwrap_err();
+        assert_eq!(
+            err,
+            BindError::BatchColumnTypeMismatch {
+                row_index: 2,
+                column_index: 1,
+                expected: "DB_TYPE_VARCHAR",
+                actual: "DB_TYPE_NUMBER",
+            }
+        );
+    }
+
+    #[test]
+    fn type_validation_treats_untyped_null_as_a_wildcard() {
+        // An untyped NULL neither establishes nor conflicts with a column type,
+        // exactly as the wire writer skips it.
+        let rows = vec![
+            vec![BindValue::Null, text("a")],
+            vec![number("2"), BindValue::Null],
+            vec![number("3"), text("c")],
+        ];
+        check_bind_rows("insert into t values (:1, :2)", &rows)
+            .expect("untyped NULLs ride any column type");
+    }
+
+    #[test]
+    fn type_validation_establishes_type_from_first_typed_row() {
+        // Column 0 is NULL until row 2 (NUMBER); a later VARCHAR still conflicts
+        // with the established NUMBER even though the first row was NULL.
+        let rows = vec![
+            vec![BindValue::Null],
+            vec![BindValue::Null],
+            vec![number("7")],
+            vec![text("x")],
+        ];
+        let err = validate_bind_rows_types(&rows).unwrap_err();
+        assert_eq!(
+            err,
+            BindError::BatchColumnTypeMismatch {
+                row_index: 3,
+                column_index: 0,
+                expected: "DB_TYPE_NUMBER",
+                actual: "DB_TYPE_VARCHAR",
+            }
+        );
+    }
+
+    #[test]
+    fn type_validation_folds_char_varchar_and_raw_families() {
+        use oracledb_protocol::thin::{CS_FORM_IMPLICIT, ORA_TYPE_NUM_CHAR, ORA_TYPE_NUM_LONG_RAW};
+        // CHAR (via a typed null) and VARCHAR fold to one family: compatible.
+        let char_then_varchar = vec![
+            vec![BindValue::TypedNull {
+                ora_type_num: ORA_TYPE_NUM_CHAR,
+                csfrm: CS_FORM_IMPLICIT,
+                buffer_size: 10,
+            }],
+            vec![text("hello")],
+        ];
+        validate_bind_rows_types(&char_then_varchar)
+            .expect("CHAR and VARCHAR share a wire type family");
+
+        // RAW and LONG_RAW fold to one family: compatible.
+        let raw_then_long_raw = vec![
+            vec![BindValue::Raw(vec![1, 2, 3])],
+            vec![BindValue::TypedNull {
+                ora_type_num: ORA_TYPE_NUM_LONG_RAW,
+                csfrm: 0,
+                buffer_size: 10,
+            }],
+        ];
+        validate_bind_rows_types(&raw_then_long_raw)
+            .expect("RAW and LONG_RAW share a wire type family");
+    }
+
+    #[test]
+    fn type_validation_rejects_charset_form_mismatch_within_a_family() {
+        use oracledb_protocol::thin::{CS_FORM_NCHAR, ORA_TYPE_NUM_VARCHAR};
+        // Same VARCHAR family but different character-set form (NVARCHAR vs
+        // VARCHAR): the wire writer treats these as incompatible, so we do too.
+        let rows = vec![
+            vec![text("implicit")],
+            vec![BindValue::TypedNull {
+                ora_type_num: ORA_TYPE_NUM_VARCHAR,
+                csfrm: CS_FORM_NCHAR,
+                buffer_size: 10,
+            }],
+        ];
+        let err = validate_bind_rows_types(&rows).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                BindError::BatchColumnTypeMismatch {
+                    row_index: 1,
+                    column_index: 0,
+                    ..
+                }
+            ),
+            "charset-form mismatch must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn type_validation_passes_single_and_empty_rows() {
+        // A single row can never conflict with itself.
+        check_bind_rows(
+            "insert into t values (:1, :2)",
+            &[vec![number("1"), text("a")]],
+        )
+        .expect("a single row is always type-consistent");
+        // No rows at all (parse-only / no-bind execute).
+        check_bind_rows("insert into t values (:1)", &[]).expect("no rows to validate");
+    }
+
+    #[test]
+    fn check_bind_rows_reports_width_before_type() {
+        // A ragged batch is a structural error surfaced ahead of any type check.
+        let rows = vec![vec![number("1"), text("a")], vec![number("2")]];
+        let err = check_bind_rows("insert into t values (:1, :2)", &rows).unwrap_err();
+        assert_eq!(
+            err,
+            BindError::BatchRowWidthMismatch {
+                row_index: 1,
+                expected: 2,
+                actual: 1
+            }
+        );
     }
 
     #[test]

@@ -390,8 +390,8 @@ pub use shape_cache::{ColumnShape, ShapeObservation, StatementShapeCache};
 pub use lob_stream::{ClobReader, LobReader, LobWriter};
 
 pub use sql_convert::{
-    BindError, ConversionError, FromRow, FromSql, IntoBinds, Params, QueryResultExt, ToSql,
-    TypedRow,
+    check_bind_rows, check_positional_binds, declared_bind_count, BindError, ConversionError,
+    FromRow, FromSql, IntoBinds, Params, QueryResultExt, ToSql, TypedRow,
 };
 
 /// Derive a [`FromRow`] implementation that maps a query row into a struct with
@@ -4754,6 +4754,12 @@ impl Connection {
         // array-DML rows — see `validate_bind_rows_shape`.
         if !exec_options.scroll_operation() && !exec_options.parse_only() {
             crate::sql_convert::validate_bind_rows_shape(sql, bind_rows)?;
+            // First-execute type validation: array DML binds one type per column,
+            // so a batch row whose value type disagrees with the type the first
+            // typed row established would be silently coerced by the server into a
+            // cryptic ORA error. Reject it up front with a precise typed error
+            // (reference DPY-2006). A single-row execute always passes.
+            crate::sql_convert::validate_bind_rows_types(bind_rows)?;
         }
         // If a prior cancellable round trip was dropped mid-read, break + drain
         // the stranded call before issuing this execute (Scope cancel-on-drop).
