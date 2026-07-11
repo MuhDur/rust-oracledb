@@ -6668,8 +6668,7 @@ impl Connection {
         let capabilities = self.capabilities;
         let limits = self.protocol_limits;
         let response = self
-            .core
-            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+            .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 response_complete(
                     &oracledb_protocol::dpl::parse_direct_path_prepare_response_with_limits(
                         bytes,
@@ -6711,8 +6710,7 @@ impl Connection {
         let capabilities = self.capabilities;
         let limits = self.protocol_limits;
         let response = self
-            .core
-            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+            .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 response_complete(
                     &oracledb_protocol::dpl::parse_direct_path_simple_response_with_limits(
                         bytes,
@@ -6751,8 +6749,7 @@ impl Connection {
         let capabilities = self.capabilities;
         let limits = self.protocol_limits;
         let response = self
-            .core
-            .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+            .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 response_complete(
                     &oracledb_protocol::dpl::parse_direct_path_simple_response_with_limits(
                         bytes,
@@ -12189,6 +12186,43 @@ mod tests {
         payload.into_bytes()
     }
 
+    fn synthetic_direct_path_prepare_response_payload(cursor_id: u16) -> Vec<u8> {
+        let mut payload = oracledb_protocol::wire::TtcWriter::new();
+        payload.write_u8(oracledb_protocol::thin::TNS_MSG_TYPE_PARAMETER);
+        payload.write_ub4(0); // column metadata count
+        payload.write_ub2(0); // parameter count
+        payload.write_ub2(4); // output value count; cursor id is index 3
+        payload.write_ub4(0);
+        payload.write_ub4(0);
+        payload.write_ub4(0);
+        payload.write_ub4(u32::from(cursor_id));
+        payload.write_u8(TNS_MSG_TYPE_END_OF_RESPONSE);
+        let payload = payload.into_bytes();
+
+        let decoded = oracledb_protocol::dpl::parse_direct_path_prepare_response(
+            &payload,
+            ClientCapabilities::default(),
+        )
+        .expect("synthetic direct path prepare response decodes");
+        assert_eq!(decoded.cursor_id, cursor_id);
+        assert!(decoded.column_metadata.is_empty());
+        payload
+    }
+
+    fn synthetic_direct_path_simple_response_payload() -> Vec<u8> {
+        let mut payload = oracledb_protocol::wire::TtcWriter::new();
+        payload.write_u8(oracledb_protocol::thin::TNS_MSG_TYPE_PARAMETER);
+        payload.write_ub2(0); // output value count
+        payload.write_u8(TNS_MSG_TYPE_END_OF_RESPONSE);
+        let payload = payload.into_bytes();
+        oracledb_protocol::dpl::parse_direct_path_simple_response(
+            &payload,
+            ClientCapabilities::default(),
+        )
+        .expect("synthetic direct path simple response decodes");
+        payload
+    }
+
     fn synthetic_subscribe_register_response_payload() -> Vec<u8> {
         // Real thin CQN register response captured by the protocol golden at
         // `thin::subscr::tests::subscribe_response_decodes_registration_and_client_id`.
@@ -16477,6 +16511,380 @@ mod tests {
         })?;
 
         server.join().expect("successful TPC server joins")?;
+        Ok(())
+    }
+
+    #[test]
+    fn dropped_direct_path_prepare_mid_response_drains_before_connection_reuse() -> Result<()> {
+        const FRESH_SQL: &str = "select value from dpl_prepare_reuse_fixture";
+        const CURSOR_ID: u16 = 73;
+
+        let column_names = Vec::<String>::new();
+        let expected_request =
+            oracledb_protocol::dpl::build_direct_path_prepare_payload_with_version(
+                "QA",
+                "DPL_DROP",
+                &column_names,
+                1,
+                ClientCapabilities::default().ttc_field_version,
+            )?;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            serve_dropped_response_recovery(
+                listener,
+                expected_request,
+                synthetic_direct_path_prepare_response_payload(CURSOR_ID),
+                request_seen_tx,
+            )
+        });
+
+        let runtime = build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+
+            {
+                let mut prepare =
+                    pin!(connection.direct_path_prepare(&cx, "QA", "DPL_DROP", &column_names,));
+                let first = poll_fn(|task_cx| Poll::Ready(prepare.as_mut().poll(task_cx))).await;
+                assert!(
+                    matches!(first, Poll::Pending),
+                    "direct path prepare must await its response before drop"
+                );
+                request_seen_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("server observed direct path prepare request");
+            }
+
+            let phase_after_drop = connection.core.recovery.phase();
+            let reused = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await;
+            Ok::<_, Error>((phase_after_drop, reused, connection.core.recovery.phase()))
+        });
+
+        let recovered = server.join().expect("direct path prepare server joins")?;
+        let (phase_after_drop, reused, final_phase) = outcome?;
+        let reused = reused.expect("fresh execute must not decode the stranded DPL response");
+        assert_eq!(
+            reused,
+            // ubs:ignore — decodes an Oracle TTC test fixture, not a JWT.
+            sequential_op_decode(&synthetic_pipeline_execute_response_payload()),
+            "reuse must decode its own response byte-identically"
+        );
+        assert!(recovered, "reuse must take the BREAK/drain branch");
+        assert_eq!(phase_after_drop, SessionRecoveryPhase::BreakSent);
+        assert_eq!(final_phase, SessionRecoveryPhase::Ready);
+        Ok(())
+    }
+
+    #[test]
+    fn dropped_direct_path_load_stream_mid_response_drains_before_connection_reuse() -> Result<()> {
+        const FRESH_SQL: &str = "select value from dpl_stream_reuse_fixture";
+        const CURSOR_ID: u16 = 73;
+
+        let stream = oracledb_protocol::dpl::encode_direct_path_rows(&[], &[], 1)?;
+        let expected_request =
+            oracledb_protocol::dpl::build_direct_path_load_stream_payload_with_version(
+                CURSOR_ID,
+                &stream,
+                1,
+                ClientCapabilities::default().ttc_field_version,
+            )?;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            serve_dropped_response_recovery(
+                listener,
+                expected_request,
+                synthetic_direct_path_simple_response_payload(),
+                request_seen_tx,
+            )
+        });
+
+        let runtime = build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream_socket = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream_socket);
+            let mut connection = loopback_connection(read, write);
+
+            {
+                let mut load = pin!(connection.direct_path_load_stream(&cx, CURSOR_ID, &stream));
+                let first = poll_fn(|task_cx| Poll::Ready(load.as_mut().poll(task_cx))).await;
+                assert!(
+                    matches!(first, Poll::Pending),
+                    "direct path load stream must await its response before drop"
+                );
+                request_seen_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("server observed direct path load stream request");
+            }
+
+            let phase_after_drop = connection.core.recovery.phase();
+            let reused = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await;
+            Ok::<_, Error>((phase_after_drop, reused, connection.core.recovery.phase()))
+        });
+
+        let recovered = server.join().expect("direct path load server joins")?;
+        let (phase_after_drop, reused, final_phase) = outcome?;
+        let reused = reused.expect("fresh execute must not decode the stranded DPL response");
+        assert_eq!(
+            reused,
+            // ubs:ignore — decodes an Oracle TTC test fixture, not a JWT.
+            sequential_op_decode(&synthetic_pipeline_execute_response_payload()),
+            "reuse must decode its own response byte-identically"
+        );
+        assert!(recovered, "reuse must take the BREAK/drain branch");
+        assert_eq!(phase_after_drop, SessionRecoveryPhase::BreakSent);
+        assert_eq!(final_phase, SessionRecoveryPhase::Ready);
+        Ok(())
+    }
+
+    #[test]
+    fn dropped_direct_path_op_mid_response_drains_before_connection_reuse() -> Result<()> {
+        const FRESH_SQL: &str = "select value from dpl_op_reuse_fixture";
+        const CURSOR_ID: u16 = 73;
+
+        let expected_request = oracledb_protocol::dpl::build_direct_path_op_payload_with_version(
+            CURSOR_ID,
+            oracledb_protocol::dpl::TNS_DP_OP_FINISH,
+            1,
+            ClientCapabilities::default().ttc_field_version,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            serve_dropped_response_recovery(
+                listener,
+                expected_request,
+                synthetic_direct_path_simple_response_payload(),
+                request_seen_tx,
+            )
+        });
+
+        let runtime = build_io_runtime()?;
+        let outcome = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+
+            {
+                let mut op = pin!(connection.direct_path_op(
+                    &cx,
+                    CURSOR_ID,
+                    oracledb_protocol::dpl::TNS_DP_OP_FINISH,
+                ));
+                let first = poll_fn(|task_cx| Poll::Ready(op.as_mut().poll(task_cx))).await;
+                assert!(
+                    matches!(first, Poll::Pending),
+                    "direct path op must await its response before drop"
+                );
+                request_seen_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("server observed direct path op request");
+            }
+
+            let phase_after_drop = connection.core.recovery.phase();
+            let reused = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await;
+            Ok::<_, Error>((phase_after_drop, reused, connection.core.recovery.phase()))
+        });
+
+        let recovered = server.join().expect("direct path op server joins")?;
+        let (phase_after_drop, reused, final_phase) = outcome?;
+        let reused = reused.expect("fresh execute must not decode the stranded DPL response");
+        assert_eq!(
+            reused,
+            // ubs:ignore — decodes an Oracle TTC test fixture, not a JWT.
+            sequential_op_decode(&synthetic_pipeline_execute_response_payload()),
+            "reuse must decode its own response byte-identically"
+        );
+        assert!(recovered, "reuse must take the BREAK/drain branch");
+        assert_eq!(phase_after_drop, SessionRecoveryPhase::BreakSent);
+        assert_eq!(final_phase, SessionRecoveryPhase::Ready);
+        Ok(())
+    }
+
+    #[test]
+    fn successful_direct_path_round_trips_disarm_recovery_before_reuse() -> Result<()> {
+        const FRESH_SQL: &str = "select value from dpl_success_fixture";
+        const CURSOR_ID: u16 = 73;
+
+        let column_names = Vec::<String>::new();
+        let stream = oracledb_protocol::dpl::encode_direct_path_rows(&[], &[], 1)?;
+        let field_version = ClientCapabilities::default().ttc_field_version;
+        let expected_prepare =
+            oracledb_protocol::dpl::build_direct_path_prepare_payload_with_version(
+                "QA",
+                "DPL_SUCCESS",
+                &column_names,
+                1,
+                field_version,
+            )?;
+        let expected_load =
+            oracledb_protocol::dpl::build_direct_path_load_stream_payload_with_version(
+                CURSOR_ID,
+                &stream,
+                2,
+                field_version,
+            )?;
+        let expected_op = oracledb_protocol::dpl::build_direct_path_op_payload_with_version(
+            CURSOR_ID,
+            oracledb_protocol::dpl::TNS_DP_OP_FINISH,
+            3,
+            field_version,
+        );
+        let execute_response = synthetic_pipeline_execute_response_payload();
+        let server_execute_response = execute_response.clone();
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+
+            assert_eq!(read_one_wire_data_payload(&mut socket), expected_prepare);
+            socket.write_all(&data_packet(
+                &synthetic_direct_path_prepare_response_payload(CURSOR_ID),
+                true,
+            ))?;
+            socket.flush()?;
+
+            assert_eq!(read_one_wire_data_payload(&mut socket), expected_load);
+            socket.write_all(&data_packet(
+                &synthetic_direct_path_simple_response_payload(),
+                true,
+            ))?;
+            socket.flush()?;
+
+            assert_eq!(read_one_wire_data_payload(&mut socket), expected_op);
+            socket.write_all(&data_packet(
+                &synthetic_direct_path_simple_response_payload(),
+                true,
+            ))?;
+            socket.flush()?;
+
+            assert_eq!(
+                read_one_wire_packet(&mut socket),
+                TNS_PACKET_TYPE_DATA,
+                "reuse after DPL op must not send a spurious BREAK"
+            );
+            socket.write_all(&data_packet(&server_execute_response, true))?;
+            socket.flush()
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let socket = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(socket);
+            let mut connection = loopback_connection(read, write);
+
+            let prepared = connection
+                .direct_path_prepare(&cx, "QA", "DPL_SUCCESS", &column_names)
+                .await?;
+            assert_eq!(prepared.cursor_id, CURSOR_ID);
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready
+            );
+
+            connection
+                .direct_path_load_stream(&cx, CURSOR_ID, &stream)
+                .await?;
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready
+            );
+
+            connection
+                .direct_path_op(&cx, CURSOR_ID, oracledb_protocol::dpl::TNS_DP_OP_FINISH)
+                .await?;
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready
+            );
+
+            let reused = connection
+                .execute_raw(&cx, FRESH_SQL, 2, &[], ExecuteOptions::default(), None)
+                .await?;
+            assert_eq!(reused, sequential_op_decode(&execute_response));
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        server
+            .join()
+            .expect("successful direct path server joins")?;
+        Ok(())
+    }
+
+    #[test]
+    fn precancelled_direct_path_prepare_writes_nothing_and_keeps_wire_ready() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<bool> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_millis(300)))?;
+            let mut byte = [0u8; 1];
+            match socket.read(&mut byte) {
+                Ok(0) => Ok(false),
+                Ok(_) => Ok(true),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    Ok(false)
+                }
+                Err(err) => Err(err),
+            }
+        });
+
+        let runtime = build_io_runtime()?;
+        let (phase, sequence_before, sequence_after) = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            let sequence_before = connection.ttc_seq_num;
+            cx.cancel_fast(CancelKind::User);
+
+            let err = connection
+                .direct_path_prepare(&cx, "QA", "DPL_PRE_CANCEL", &[])
+                .await
+                .expect_err("pending cancellation stops before DPL PREPARE");
+            assert!(matches!(err, Error::Cancelled), "{err:?}");
+            Ok::<_, Error>((
+                connection.core.recovery.phase(),
+                sequence_before,
+                connection.ttc_seq_num,
+            ))
+        })?;
+
+        assert!(
+            !server
+                .join()
+                .expect("pre-cancel direct path server joins")?,
+            "pre-cancelled DPL PREPARE must not write any wire bytes"
+        );
+        assert_eq!(phase, SessionRecoveryPhase::Ready);
+        assert_eq!(sequence_after, sequence_before);
         Ok(())
     }
 
