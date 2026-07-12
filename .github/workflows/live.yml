@@ -71,6 +71,8 @@ jobs:
           set -euo pipefail
           eval "$(scripts/container.sh env)"
           test "$PYO_TEST_MAIN_USER" != "$PYO_TEST_MAIN_PASSWORD"
+          test "$PYO_TEST_SYSTEM_USER" = system
+          test -n "$PYO_TEST_SYSTEM_PASSWORD"
 
       - name: Driver live tests (serial, ignored)
         run: |

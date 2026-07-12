@@ -42,6 +42,8 @@ case "${1:-}" in
     printf 'export PYO_TEST_CONNECT_STRING=localhost:%s/FREEPDB1\n' "$HOST_PORT"
     printf 'export PYO_TEST_ADMIN_USER=system\n'
     printf 'export PYO_TEST_ADMIN_PASSWORD=%q\n' "$ORACLE_PASSWORD"
+    printf 'export PYO_TEST_SYSTEM_USER=system\n'
+    printf 'export PYO_TEST_SYSTEM_PASSWORD=%q\n' "$ORACLE_PASSWORD"
     printf 'export PYO_TEST_MAIN_USER=%q\n' "$MAIN_USER"
     printf 'export PYO_TEST_MAIN_PASSWORD=%q\n' "$MAIN_PASSWORD"
     printf 'export PYO_TEST_PROXY_USER=%q\n' "$PROXY_USER"
