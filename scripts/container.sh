@@ -48,6 +48,11 @@ case "${1:-}" in
     printf 'export PYO_TEST_MAIN_PASSWORD=%q\n' "$MAIN_PASSWORD"
     printf 'export PYO_TEST_PROXY_USER=%q\n' "$PROXY_USER"
     printf 'export PYO_TEST_PROXY_PASSWORD=%q\n' "$PROXY_PASSWORD"
+    printf 'export FAILOVER_HOST=localhost\n'
+    printf 'export FAILOVER_PORT=%q\n' "$HOST_PORT"
+    printf 'export FAILOVER_SERVICE=FREEPDB1\n'
+    printf 'export FAILOVER_USER=%q\n' "$MAIN_USER"
+    printf 'export FAILOVER_PASSWORD=%q\n' "$MAIN_PASSWORD"
     ;;
   stop)
     docker stop "$CONTAINER_NAME" >/dev/null

@@ -73,6 +73,9 @@ jobs:
           test "$PYO_TEST_MAIN_USER" != "$PYO_TEST_MAIN_PASSWORD"
           test "$PYO_TEST_SYSTEM_USER" = system
           test -n "$PYO_TEST_SYSTEM_PASSWORD"
+          test "$FAILOVER_PORT" = "$ORACLEDB_HOST_PORT"
+          test "$FAILOVER_USER" = "$PYO_TEST_MAIN_USER"
+          test "$FAILOVER_PASSWORD" = "$PYO_TEST_MAIN_PASSWORD"
 
       - name: Driver live tests (serial, ignored)
         run: |
