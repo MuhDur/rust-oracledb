@@ -380,7 +380,8 @@ fn load_wallet(dir: &std::path::Path, password: Option<&str>) -> Result<WalletCo
 /// Which wallet file in a wallet directory supplied the resolved TLS identity.
 ///
 /// The precedence order the driver applies (mirroring python-oracledb) is
-/// `ewallet.pem` → `ewallet.p12` → `cwallet.sso`; see [`load_wallet`].
+/// `ewallet.pem` → `ewallet.p12` → `cwallet.sso`; this is the same order used
+/// by the driver's internal wallet loader.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WalletFile {
     /// `ewallet.pem` (PEM trust anchors + optional client identity).
@@ -412,9 +413,9 @@ impl WalletFile {
 /// [`resolve_wallet`] returns this so a caller (e.g. a server doctor) can report
 /// exactly which wallet file won — and whether resolution fell through the
 /// precedence chain to the auto-login wallet — instead of re-deriving the
-/// driver's precedence by hand and risking drift. It is the *same* decision
-/// [`load_wallet`] makes internally (both go through the one resolver), just
-/// without the parsed key material.
+/// driver's precedence by hand and risking drift. It is the *same* decision the
+/// internal wallet loader makes (both go through the one resolver), just without
+/// the parsed key material.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WalletResolution {
     /// The wallet file that supplied the resolved identity.
@@ -439,8 +440,8 @@ pub struct WalletResolution {
 /// Resolve which wallet file in `dir` wins the precedence chain and report the
 /// [`WalletResolution`] outcome, without exposing the parsed key material.
 ///
-/// This is the public, drift-free accessor for the precedence [`load_wallet`]
-/// applies internally. Both go through the same resolver, so the reported
+/// This is the public, drift-free accessor for the precedence the internal
+/// wallet loader applies. Both go through the same resolver, so the reported
 /// decision cannot drift from the one the connection actually uses. Resolution
 /// must genuinely read and parse the wallet files (that is the only way to know
 /// whether a primary is usable and whether a fallthrough occurred); the parsed
@@ -448,7 +449,7 @@ pub struct WalletResolution {
 /// Offline — no connection or network I/O is involved.
 ///
 /// # Errors
-/// Returns the same typed [`Error::Wallet`] `load_wallet` would surface when no
+/// Returns the same typed [`Error::Wallet`] the internal loader would surface when no
 /// usable wallet is found. When the primary is present but unusable and there is
 /// no auto-login `cwallet.sso` to fall through to, the primary's original typed
 /// error is preserved verbatim (it never mentions the fallthrough).

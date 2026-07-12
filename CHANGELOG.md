@@ -5,7 +5,7 @@ is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows the SemVer contract described in
 [`docs/adr/0002-semver-contract.md`](docs/adr/0002-semver-contract.md).
 
-Scope window: canonical release entries from 0.3.0 through 0.8.2. The
+Scope window: canonical release entries from 0.3.0 through 0.8.3. The
 0.7.4–0.8.2 spine was reconstructed from git tags, GitHub Releases, tag
 ranges, release-matrix artifacts, and the checked-in API/provenance ledgers.
 
@@ -27,6 +27,8 @@ ranges, release-matrix artifacts, and the checked-in API/provenance ledgers.
 - [0.8.2 K10 owning row stream](https://github.com/MuhDur/rust-oracledb/commit/06244bfa4c8aab2efb62bfdbd8793dc1e089bd02)
 
 ## [Unreleased]
+
+## [0.8.3](https://github.com/MuhDur/rust-oracledb/compare/v0.8.2...v0.8.3) - 2026-07-12
 
 ### Fixed
 
@@ -50,6 +52,40 @@ ranges, release-matrix artifacts, and the checked-in API/provenance ledgers.
   deduplicate close piggybacks, and preserve normal release only when an
   operation is proven not to have started. See
   [02eef5e](https://github.com/MuhDur/rust-oracledb/commit/02eef5e).
+- **Abandoned borrowed streams cannot poison a reused connection.** Dropping a
+  borrowed query stream now retires its cursor ownership instead of leaving a
+  live server cursor behind. See
+  [2bff86b](https://github.com/MuhDur/rust-oracledb/commit/2bff86b).
+- **SODA query ownership and pagination are complete and fail closed.**
+  One-shot operations release their query ownership, failed SODA queries retire
+  their cursors, collection-name discovery fetches every page, terminal empty
+  define fetches are not decoded as rows, raw identifiers are validated, and
+  requested document-version predicates are preserved. See
+  [7ce1124](https://github.com/MuhDur/rust-oracledb/commit/7ce1124),
+  [9deb2f8](https://github.com/MuhDur/rust-oracledb/commit/9deb2f8),
+  [e05057b](https://github.com/MuhDur/rust-oracledb/commit/e05057b),
+  [cd31646](https://github.com/MuhDur/rust-oracledb/commit/cd31646),
+  [f2cf86e](https://github.com/MuhDur/rust-oracledb/commit/f2cf86e), and
+  [e2e5b40](https://github.com/MuhDur/rust-oracledb/commit/e2e5b40).
+- **Cancellation drains every abandoned server response before reuse.** Define
+  fetches, plain functions, LOB, AQ, password-change, CQN, TPC, and Direct Path
+  operations now use the same recovery discipline, preventing a late response
+  from being mistaken for the next operation's reply. See
+  [f0938d0](https://github.com/MuhDur/rust-oracledb/commit/f0938d0),
+  [99c24e4](https://github.com/MuhDur/rust-oracledb/commit/99c24e4),
+  [ac8668d](https://github.com/MuhDur/rust-oracledb/commit/ac8668d),
+  [24db0a4](https://github.com/MuhDur/rust-oracledb/commit/24db0a4),
+  [cef60b0](https://github.com/MuhDur/rust-oracledb/commit/cef60b0),
+  [cfd30d8](https://github.com/MuhDur/rust-oracledb/commit/cfd30d8),
+  [92c45e3](https://github.com/MuhDur/rust-oracledb/commit/92c45e3), and
+  [105fb65](https://github.com/MuhDur/rust-oracledb/commit/105fb65).
+- **Retry loops stop immediately after cancellation.** A cancelled operation is
+  no longer eligible for another attempt or backoff cycle. See
+  [2cd419e](https://github.com/MuhDur/rust-oracledb/commit/2cd419e).
+- **Bind shape and type errors fail before the first round trip.** Execute now
+  preflights declared bind counts and rejects inconsistent first-execute batch
+  column types without touching Oracle. See
+  [0fc86a3](https://github.com/MuhDur/rust-oracledb/commit/0fc86a3).
 
 ## [0.8.2](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.2) - 2026-07-08
 

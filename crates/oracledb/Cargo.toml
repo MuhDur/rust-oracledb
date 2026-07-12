@@ -79,8 +79,8 @@ chrono = { version = "0.4", optional = true, default-features = false, features 
 # deny.toml's allow-list and the registry is already permitted, so no deny.toml
 # change is required.
 futures-core = { version = "0.3", default-features = false }
-oracledb-derive = { path = "../oracledb-derive", version = "0.8.2", optional = true }
-oracledb-protocol = { path = "../oracledb-protocol", version = "0.8.2" }
+oracledb-derive = { path = "../oracledb-derive", version = "0.8.3", optional = true }
+oracledb-protocol = { path = "../oracledb-protocol", version = "0.8.3" }
 rust_decimal = { version = "1", optional = true, default-features = false, features = ["std"] }
 rustls.workspace = true
 rustls-pki-types.workspace = true

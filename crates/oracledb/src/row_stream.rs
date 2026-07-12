@@ -100,8 +100,8 @@ enum OwnedRowStreamState {
 /// when drained. Constructed with [`Connection::into_row_stream`] /
 /// [`Connection::into_query_stream`].
 ///
-/// See the [module docs](self) for the owning-connection design and a usage
-/// example.
+/// See the module-level documentation above for the owning-connection design
+/// and a usage example.
 #[must_use = "an OwnedRowStream holds the connection until drained or recovered with into_connection()"]
 pub struct OwnedRowStream {
     /// `Some` whenever a fetch future does not currently own the connection.

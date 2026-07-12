@@ -8,7 +8,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.8.2"
+version = "0.8.3"
 edition = "2021"
 # No `rust-version`: this driver requires NIGHTLY Rust (asupersync uses
 # `#![feature(try_trait_v2)]`). See `rust-toolchain.toml`; there is no stable MSRV.

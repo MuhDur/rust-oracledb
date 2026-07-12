@@ -1645,7 +1645,7 @@ pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T
 
 /// Failure classes a [`TokenSource`] may report.
 ///
-/// Every variant is **fully redacted**: neither [`Debug`] nor [`Display`]
+/// Every variant is **fully redacted**: neither [`Debug`] nor [`std::fmt::Display`]
 /// reveals any inner detail. The variants carry no payload by construction, so a
 /// token, a signed assertion, or a raw provider response can never leak through
 /// a token-source failure into logs, error chains, or panic output. A provider
