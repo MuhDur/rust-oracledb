@@ -92,7 +92,7 @@ lane_fields() {
                           "gvenzl/oracle-free:23-slim" \
                           "${ORACLEDB_HOST_PORT:-1522}" "FREEPDB1" \
                           "${PYO_TEST_MAIN_USER:-pythontest}" \
-                          "${PYO_TEST_MAIN_PASSWORD:-pythontest}" ;;
+                          "${PYO_TEST_MAIN_PASSWORD:-testpw}" ;;
     *) printf 'unknown lane: %s (xe11|xe18|xe21|free23)\n' "$1" >&2; return 2 ;;
   esac
 }

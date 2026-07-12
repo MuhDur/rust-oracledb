@@ -13,10 +13,15 @@ set -euo pipefail
 CONTAINER_NAME="${ORACLEDB_CONTAINER_NAME:-rust-oracledb-free}"
 ORACLE_PASSWORD="${ORACLE_PASSWORD:-OracledbTest#2026}"
 MAIN_USER="${PYO_TEST_MAIN_USER:-pythontest}"
-MAIN_PASSWORD="${PYO_TEST_MAIN_PASSWORD:-pythontest}"
+MAIN_PASSWORD="${PYO_TEST_MAIN_PASSWORD:-testpw}"
 PROXY_USER="${PYO_TEST_PROXY_USER:-pythontestproxy}"
-PROXY_PASSWORD="${PYO_TEST_PROXY_PASSWORD:-pythontestproxy}"
+PROXY_PASSWORD="${PYO_TEST_PROXY_PASSWORD:-proxypw}"
 PDB="${ORACLEDB_PDB:-FREEPDB1}"
+
+if [ "$MAIN_USER" = "$MAIN_PASSWORD" ]; then
+  echo "bootstrap-live-schema: PYO_TEST_MAIN_PASSWORD must differ from PYO_TEST_MAIN_USER so connect-trace secret checks are meaningful" >&2
+  exit 2
+fi
 
 docker exec -i "$CONTAINER_NAME" \
   sqlplus -S -L "sys/${ORACLE_PASSWORD}@localhost:1521/${PDB} as sysdba" <<SQL

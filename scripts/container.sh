@@ -6,9 +6,9 @@ IMAGE="${ORACLEDB_IMAGE:-gvenzl/oracle-free:23-slim}"
 ORACLE_PASSWORD="${ORACLE_PASSWORD:-OracledbTest#2026}"
 HOST_PORT="${ORACLEDB_HOST_PORT:-1522}"
 MAIN_USER="${PYO_TEST_MAIN_USER:-pythontest}"
-MAIN_PASSWORD="${PYO_TEST_MAIN_PASSWORD:-pythontest}"
+MAIN_PASSWORD="${PYO_TEST_MAIN_PASSWORD:-testpw}"
 PROXY_USER="${PYO_TEST_PROXY_USER:-pythontestproxy}"
-PROXY_PASSWORD="${PYO_TEST_PROXY_PASSWORD:-pythontestproxy}"
+PROXY_PASSWORD="${PYO_TEST_PROXY_PASSWORD:-proxypw}"
 
 usage() {
   printf 'usage: %s up|health|env|stop\n' "$0" >&2
@@ -34,6 +34,10 @@ case "${1:-}" in
     docker logs "$CONTAINER_NAME" 2>&1 | grep -F 'DATABASE IS READY TO USE'
     ;;
   env)
+    if [ "$MAIN_USER" = "$MAIN_PASSWORD" ]; then
+      echo "container env: PYO_TEST_MAIN_PASSWORD must differ from PYO_TEST_MAIN_USER so connect-trace secret checks are meaningful" >&2
+      exit 2
+    fi
     printf 'export PYO_TEST_DRIVER_MODE=thin\n'
     printf 'export PYO_TEST_CONNECT_STRING=localhost:%s/FREEPDB1\n' "$HOST_PORT"
     printf 'export PYO_TEST_ADMIN_USER=system\n'

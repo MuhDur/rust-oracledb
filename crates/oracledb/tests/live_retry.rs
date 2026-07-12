@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! PYO_TEST_CONNECT_STRING=localhost:1522/FREEPDB1 \
-//! PYO_TEST_MAIN_USER=pythontest PYO_TEST_MAIN_PASSWORD=pythontest \
+//! PYO_TEST_MAIN_USER=pythontest PYO_TEST_MAIN_PASSWORD=testpw \
 //! PYO_TEST_SYSTEM_USER=system PYO_TEST_SYSTEM_PASSWORD=... \
 //!   cargo test -p oracledb --test live_retry -- --ignored --nocapture
 //! ```

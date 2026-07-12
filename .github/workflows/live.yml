@@ -66,6 +66,12 @@ jobs:
       - name: Bootstrap test schema (pythontest user + grants)
         run: bash scripts/bootstrap_live_schema.sh
 
+      - name: Verify connect-trace credentials are distinguishable
+        run: |
+          set -euo pipefail
+          eval "$(scripts/container.sh env)"
+          test "$PYO_TEST_MAIN_USER" != "$PYO_TEST_MAIN_PASSWORD"
+
       - name: Driver live tests (serial, ignored)
         run: |
           set -uo pipefail

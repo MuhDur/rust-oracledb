@@ -8,7 +8,7 @@
 //! never rendered, and using one over plain TCP fails with a precise typed error.
 //!
 //! Live guard run: PYO_TEST_CONNECT_STRING=localhost:1522/FREEPDB1 \
-//!   PYO_TEST_MAIN_USER=pythontest PYO_TEST_MAIN_PASSWORD=pythontest \
+//!   PYO_TEST_MAIN_USER=pythontest PYO_TEST_MAIN_PASSWORD=testpw \
 //!   cargo test -p oracledb --test access_token -- --ignored --nocapture
 use oracledb::protocol::ClientIdentity;
 use oracledb::{
