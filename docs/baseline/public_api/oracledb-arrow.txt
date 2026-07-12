@@ -621,6 +621,11 @@ impl<'a> core::fmt::Debug for oracledb::BatchRows<'a>
 pub fn oracledb::BatchRows<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<'a> core::marker::StructuralPartialEq for oracledb::BatchRows<'a>
 #[non_exhaustive] pub enum oracledb::BindError
+pub oracledb::BindError::BatchColumnTypeMismatch
+pub oracledb::BindError::BatchColumnTypeMismatch::actual: &'static str
+pub oracledb::BindError::BatchColumnTypeMismatch::column_index: usize
+pub oracledb::BindError::BatchColumnTypeMismatch::expected: &'static str
+pub oracledb::BindError::BatchColumnTypeMismatch::row_index: usize
 pub oracledb::BindError::BatchRowWidthMismatch
 pub oracledb::BindError::BatchRowWidthMismatch::actual: usize
 pub oracledb::BindError::BatchRowWidthMismatch::expected: usize
@@ -1719,6 +1724,9 @@ pub fn core::option::Option<T>::to_sql(&self) -> oracledb_protocol::thin::types:
 pub trait oracledb::TokenSource: core::marker::Send + core::marker::Sync
 pub fn oracledb::TokenSource::get_token(&self) -> oracledb::BoxFuture<'_, core::result::Result<alloc::string::String, oracledb::TokenSourceError>>
 pub fn oracledb::bind_rows_need_iterative_plsql(&str, &[alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>]) -> bool
+pub fn oracledb::check_bind_rows(&str, &[alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>]) -> core::result::Result<(), oracledb::BindError>
+pub fn oracledb::check_positional_binds(&str, usize) -> core::result::Result<(), oracledb::BindError>
+pub fn oracledb::declared_bind_count(&str) -> core::result::Result<usize, oracledb::BindError>
 pub fn oracledb::decode_object(&oracledb_protocol::thin::types::ObjectValue, &oracledb::ObjectType) -> oracledb::Result<oracledb::DecodedObject>
 pub fn oracledb::fetch_profile_arm(bool)
 pub fn oracledb::fetch_profile_read_decode_ns() -> (u64, u64)
