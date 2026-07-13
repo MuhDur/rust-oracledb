@@ -703,6 +703,71 @@ mod tests {
     }
 
     #[test]
+    fn dbobject_attr_precision_scale_timestamp_and_interval() {
+        // TIMESTAMP family: fractional-seconds scale defaults to 6, precision to
+        // 0 (upstream 6cfd00aa642e). Explicit data-dictionary values propagate.
+        for name in [
+            "TIMESTAMP",
+            "TIMESTAMP WITH TIME ZONE",
+            "TIMESTAMP WITH LOCAL TIME ZONE",
+        ] {
+            assert_eq!(
+                dbobject_attr_precision_scale(name, None, None),
+                (0, 6),
+                "{name} defaults"
+            );
+            assert_eq!(
+                dbobject_attr_precision_scale(name, Some(0), Some(9)),
+                (0, 9),
+                "{name} explicit scale"
+            );
+        }
+
+        // INTERVAL DAY TO SECOND: leading-field precision default 2, fractional
+        // seconds scale default 6.
+        assert_eq!(
+            dbobject_attr_precision_scale("INTERVAL DAY TO SECOND", None, None),
+            (2, 6)
+        );
+        assert_eq!(
+            dbobject_attr_precision_scale("INTERVAL DAY TO SECOND", Some(4), Some(3)),
+            (4, 3)
+        );
+
+        // INTERVAL YEAR TO MONTH: leading-field precision default 2, scale 0.
+        assert_eq!(
+            dbobject_attr_precision_scale("INTERVAL YEAR TO MONTH", None, None),
+            (2, 0)
+        );
+        assert_eq!(
+            dbobject_attr_precision_scale("INTERVAL YEAR TO MONTH", Some(5), None),
+            (5, 0)
+        );
+
+        // Case-insensitive matching (describe may return mixed case).
+        assert_eq!(
+            dbobject_attr_precision_scale("timestamp with time zone", None, None),
+            (0, 6)
+        );
+
+        // Genuinely-unknown types still fall through to (0, 0).
+        assert_eq!(
+            dbobject_attr_precision_scale("SOME_ADT", None, None),
+            (0, 0)
+        );
+
+        // NUMBER-family arms remain unchanged.
+        assert_eq!(
+            dbobject_attr_precision_scale("NUMBER", None, Some(0)),
+            (38, 0)
+        );
+        assert_eq!(
+            dbobject_attr_precision_scale("REAL", None, None),
+            (63, -127)
+        );
+    }
+
+    #[test]
     fn bind_templates_are_protocol_owned() {
         assert_eq!(
             bind_template_from_type_name("DB_TYPE_NCLOB", 0),

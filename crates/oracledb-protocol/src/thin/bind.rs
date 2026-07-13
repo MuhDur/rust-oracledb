@@ -671,6 +671,15 @@ pub fn dbobject_attr_precision_scale(
         "INTEGER" | "SMALLINT" => (precision.unwrap_or(38), scale.unwrap_or(0)),
         "REAL" => (precision.unwrap_or(63), scale.unwrap_or(-127)),
         "DOUBLE PRECISION" | "FLOAT" => (precision.unwrap_or(126), scale.unwrap_or(-127)),
+        // Timestamp/interval attributes also carry precision/scale in the data
+        // dictionary (leading-field precision + fractional-seconds scale).
+        // Propagate them with upstream's defaults instead of discarding them
+        // (reference impl commit 6cfd00aa642e).
+        "TIMESTAMP" | "TIMESTAMP WITH TIME ZONE" | "TIMESTAMP WITH LOCAL TIME ZONE" => {
+            (precision.unwrap_or(0), scale.unwrap_or(6))
+        }
+        "INTERVAL DAY TO SECOND" => (precision.unwrap_or(2), scale.unwrap_or(6)),
+        "INTERVAL YEAR TO MONTH" => (precision.unwrap_or(2), scale.unwrap_or(0)),
         _ => (0, 0),
     }
 }
