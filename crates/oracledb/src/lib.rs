@@ -10551,11 +10551,261 @@ fn bind_shape_is_compatible(cached: &[BindShapeSlot], new: &[BindShapeSlot]) -> 
         })
 }
 
+/// Returns whether Oracle will execute `sql` on its row-producing path.
+///
+/// A leading `WITH` does not determine that by itself: Oracle permits a CTE
+/// list before `SELECT` and before DML. Walk each complete CTE definition, then
+/// inspect the first statement keyword after the list. Syntax we cannot
+/// confidently walk stays on the non-query path.
 fn statement_is_query(sql: &str) -> bool {
-    sql.trim_start()
-        .split(|ch: char| !ch.is_ascii_alphabetic())
-        .next()
-        .is_some_and(|keyword| keyword.eq_ignore_ascii_case("select"))
+    let mut cursor = SqlStatementCursor::new(sql);
+    match cursor.next_keyword() {
+        Some(keyword) if keyword.eq_ignore_ascii_case("select") => true,
+        Some(keyword) if keyword.eq_ignore_ascii_case("with") => cursor
+            .cte_statement_keyword()
+            .is_some_and(|keyword| keyword.eq_ignore_ascii_case("select")),
+        _ => false,
+    }
+}
+
+/// A deliberately narrow SQL cursor for query-path selection. It understands
+/// comments, quoted strings/identifiers, balanced parentheses, and the CTE
+/// grammar prefix; it is not a general SQL parser.
+struct SqlStatementCursor<'a> {
+    bytes: &'a [u8],
+    index: usize,
+}
+
+impl<'a> SqlStatementCursor<'a> {
+    fn new(sql: &'a str) -> Self {
+        Self {
+            bytes: sql.as_bytes(),
+            index: 0,
+        }
+    }
+
+    fn next_keyword(&mut self) -> Option<&'a str> {
+        self.skip_trivia();
+        let start = self.index;
+        while self
+            .bytes
+            .get(self.index)
+            .is_some_and(u8::is_ascii_alphabetic)
+        {
+            self.index += 1;
+        }
+        (start != self.index)
+            .then(|| std::str::from_utf8(&self.bytes[start..self.index]).ok())
+            .flatten()
+    }
+
+    /// Return the statement keyword after one or more conventional CTEs.
+    ///
+    /// This accepts only `name [(columns)] AS (subquery)` definitions. A
+    /// `WITH FUNCTION` or malformed `WITH` is intentionally not interpreted
+    /// as a query, because treating it as one could route a non-query through
+    /// the fetch path.
+    fn cte_statement_keyword(&mut self) -> Option<&'a str> {
+        loop {
+            if !self.consume_identifier() {
+                return None;
+            }
+            self.skip_trivia();
+            if self.peek() == Some(b'(') && !self.consume_parentheses() {
+                return None;
+            }
+            if !self.consume_keyword("as") || !self.consume_parentheses() {
+                return None;
+            }
+            self.skip_trivia();
+            if self.peek() == Some(b',') {
+                self.index += 1;
+                continue;
+            }
+            return self.next_keyword();
+        }
+    }
+
+    fn consume_keyword(&mut self, expected: &str) -> bool {
+        self.next_keyword()
+            .is_some_and(|keyword| keyword.eq_ignore_ascii_case(expected))
+    }
+
+    fn consume_identifier(&mut self) -> bool {
+        self.skip_trivia();
+        if self.peek() == Some(b'\"') {
+            return self.consume_quoted_identifier();
+        }
+        let start = self.index;
+        if !self.peek().is_some_and(|byte| byte.is_ascii_alphabetic()) {
+            return false;
+        }
+        while self
+            .bytes
+            .get(self.index)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'#'))
+        {
+            self.index += 1;
+        }
+        start != self.index
+    }
+
+    fn consume_parentheses(&mut self) -> bool {
+        self.skip_trivia();
+        if self.peek() != Some(b'(') {
+            return false;
+        }
+        let mut depth = 0_u32;
+        while let Some(byte) = self.peek() {
+            match byte {
+                b'\'' => {
+                    if !self.consume_single_quoted() {
+                        return false;
+                    }
+                }
+                b'\"' => {
+                    if !self.consume_quoted_identifier() {
+                        return false;
+                    }
+                }
+                b'q' | b'Q' if self.bytes.get(self.index + 1) == Some(&b'\'') => {
+                    if !self.consume_q_quoted() {
+                        return false;
+                    }
+                }
+                b'-' if self.bytes.get(self.index + 1) == Some(&b'-') => {
+                    self.skip_line_comment();
+                }
+                b'/' if self.bytes.get(self.index + 1) == Some(&b'*') => {
+                    if !self.skip_block_comment() {
+                        return false;
+                    }
+                }
+                b'(' => {
+                    depth += 1;
+                    self.index += 1;
+                }
+                b')' => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                    self.index += 1;
+                    if depth == 0 {
+                        return true;
+                    }
+                }
+                _ => self.index += 1,
+            }
+        }
+        false
+    }
+
+    fn skip_trivia(&mut self) {
+        loop {
+            while self.peek().is_some_and(|byte| byte.is_ascii_whitespace()) {
+                self.index += 1;
+            }
+            match (self.peek(), self.bytes.get(self.index + 1)) {
+                (Some(b'-'), Some(b'-')) => self.skip_line_comment(),
+                (Some(b'/'), Some(b'*')) => {
+                    if !self.skip_block_comment() {
+                        return;
+                    }
+                }
+                _ => return,
+            }
+        }
+    }
+
+    fn consume_single_quoted(&mut self) -> bool {
+        debug_assert_eq!(self.peek(), Some(b'\''));
+        self.index += 1;
+        while let Some(byte) = self.peek() {
+            self.index += 1;
+            if byte == b'\'' {
+                if self.peek() == Some(b'\'') {
+                    self.index += 1;
+                } else {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn consume_quoted_identifier(&mut self) -> bool {
+        debug_assert_eq!(self.peek(), Some(b'\"'));
+        self.index += 1;
+        while let Some(byte) = self.peek() {
+            self.index += 1;
+            if byte == b'\"' {
+                if self.peek() == Some(b'\"') {
+                    self.index += 1;
+                } else {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn consume_q_quoted(&mut self) -> bool {
+        debug_assert!(matches!(self.peek(), Some(b'q' | b'Q')));
+        let Some(&opening) = self.bytes.get(self.index + 2) else {
+            return false;
+        };
+        let closing = match opening {
+            b'[' => b']',
+            b'{' => b'}',
+            b'(' => b')',
+            b'<' => b'>',
+            other => other,
+        };
+        self.index += 3;
+        while self.index + 1 < self.bytes.len() {
+            if self.bytes[self.index] == closing && self.bytes[self.index + 1] == b'\'' {
+                self.index += 2;
+                return true;
+            }
+            self.index += 1;
+        }
+        false
+    }
+
+    fn skip_line_comment(&mut self) {
+        debug_assert_eq!(
+            self.bytes.get(self.index..self.index + 2),
+            Some(b"--".as_slice())
+        );
+        self.index += 2;
+        while self
+            .peek()
+            .is_some_and(|byte| !matches!(byte, b'\n' | b'\r'))
+        {
+            self.index += 1;
+        }
+    }
+
+    fn skip_block_comment(&mut self) -> bool {
+        debug_assert_eq!(
+            self.bytes.get(self.index..self.index + 2),
+            Some(b"/*".as_slice())
+        );
+        self.index += 2;
+        while self.index + 1 < self.bytes.len() {
+            if self.bytes[self.index] == b'*' && self.bytes[self.index + 1] == b'/' {
+                self.index += 2;
+                return true;
+            }
+            self.index += 1;
+        }
+        false
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.index).copied()
+    }
 }
 
 /// True when any column needs a client-side define to stream its value:
@@ -10651,6 +10901,66 @@ mod tests {
     use std::task::{Poll, Waker};
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn statement_is_query_recognizes_select_after_cte_list() {
+        for sql in [
+            "WITH x AS (SELECT 1 AS id FROM dual) SELECT id FROM x",
+            concat!(
+                "WITH first_cte AS (SELECT 1 AS id FROM dual), ",
+                "second_cte AS (SELECT id + 1 AS id FROM first_cte) ",
+                "SELECT id FROM second_cte"
+            ),
+            concat!(
+                "WITH outer_cte AS (",
+                "WITH inner_cte AS (SELECT q'[)]' AS marker FROM dual) ",
+                "SELECT marker FROM inner_cte",
+                ") SELECT marker FROM outer_cte"
+            ),
+        ] {
+            assert!(
+                statement_is_query(sql),
+                "CTE SELECT must use query path: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn statement_is_query_rejects_cte_prefixed_dml_and_plsql() {
+        for sql in [
+            "WITH x AS (SELECT 1 AS id FROM dual) INSERT INTO cte_target (id) SELECT id FROM x",
+            "WITH x AS (SELECT 1 AS id FROM dual) UPDATE cte_target SET id = id + 1",
+            "WITH x AS (SELECT 1 AS id FROM dual) DELETE FROM cte_target WHERE id IN (SELECT id FROM x)",
+            concat!(
+                "WITH x AS (SELECT 1 AS id FROM dual) ",
+                "MERGE INTO cte_target target USING x ON (target.id = x.id) ",
+                "WHEN MATCHED THEN UPDATE SET target.id = x.id"
+            ),
+            concat!(
+                "WITH FUNCTION answer RETURN NUMBER IS BEGIN RETURN 42; END; ",
+                "SELECT answer FROM dual"
+            ),
+        ] {
+            assert!(
+                !statement_is_query(sql),
+                "only SELECT after a conventional CTE list may use query path: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn statement_is_query_skips_leading_whitespace_and_comments() {
+        for sql in [
+            " \n\t-- leading line comment\nWITH x AS (SELECT 1 FROM dual) SELECT * FROM x",
+            "/* leading block comment */ WITH x AS (SELECT 1 FROM dual) SELECT * FROM x",
+            "/* leading block comment */\nSELECT 1 FROM dual",
+        ] {
+            assert!(
+                statement_is_query(sql),
+                "comments must not hide a query: {sql}"
+            );
+        }
+    }
 
     // ---- bead rust-oracledb-clvm: DSN transport params (F1) + failover (F2) ----
 
