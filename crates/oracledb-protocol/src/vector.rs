@@ -149,6 +149,7 @@ pub fn decode_vector_with_limits(data: &[u8], limits: ProtocolLimits) -> Result<
             indices.push(read_u32be(&mut reader)?);
         }
         let values = decode_values(&mut reader, u32::from(num_sparse), format)?;
+        ensure_vector_image_fully_consumed(&reader)?;
         return Ok(Vector::Sparse {
             num_dimensions,
             indices,
@@ -158,10 +159,25 @@ pub fn decode_vector_with_limits(data: &[u8], limits: ProtocolLimits) -> Result<
 
     // dense binary format encodes the bit-count; values are bytes
     if format == VECTOR_FORMAT_BINARY {
+        if num_elements % 8 != 0 {
+            return Err(ProtocolError::TtcDecode(
+                "vector: binary dimension count is not byte-aligned",
+            ));
+        }
         num_elements /= 8;
     }
     let values = decode_values(&mut reader, num_elements, format)?;
+    ensure_vector_image_fully_consumed(&reader)?;
     Ok(Vector::Dense(values))
+}
+
+fn ensure_vector_image_fully_consumed(reader: &TtcReader<'_>) -> Result<()> {
+    if reader.remaining() == 0 {
+        return Ok(());
+    }
+    Err(ProtocolError::TtcDecode(
+        "vector: trailing bytes after image payload",
+    ))
 }
 
 fn decode_values(reader: &mut TtcReader<'_>, count: u32, format: u8) -> Result<VectorValues> {
@@ -666,6 +682,33 @@ mod tests {
         let num_elements = u32::from_be_bytes([image[5], image[6], image[7], image[8]]);
         assert_eq!(num_elements, 16);
         assert_eq!(image[1], TNS_VECTOR_VERSION_WITH_BINARY);
+    }
+
+    #[test]
+    fn binary_dense_rejects_non_byte_aligned_bit_count() {
+        let mut image = encode_vector(&Vector::Dense(VectorValues::Binary(vec![0xA5, 0x3C])));
+        image[5..9].copy_from_slice(&9_u32.to_be_bytes());
+        image.truncate(18); // 17-byte header + one payload byte
+
+        let err = decode_vector(&image).expect_err("9-bit binary vector must fail closed");
+        assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn decode_vector_rejects_trailing_image_bytes() {
+        let mut dense = encode_vector(&Vector::Dense(VectorValues::Float32(vec![1.0, 2.0])));
+        dense.push(0xAA);
+        let err = decode_vector(&dense).expect_err("dense image tail must fail closed");
+        assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
+
+        let mut sparse = encode_vector(&Vector::Sparse {
+            num_dimensions: 8,
+            indices: vec![1, 4],
+            values: VectorValues::Int8(vec![7, 9]),
+        });
+        sparse.extend_from_slice(&[0xAA, 0xBB]);
+        let err = decode_vector(&sparse).expect_err("sparse image tail must fail closed");
+        assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
     }
 
     // -- Golden: images captured from the real python-oracledb 4.0.1 driver
