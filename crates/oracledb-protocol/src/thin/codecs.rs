@@ -82,6 +82,11 @@ pub(crate) fn encode_oracle_timestamp_tz_with_offset(
             "invalid TIMESTAMP WITH TIME ZONE fraction",
         ));
     }
+    if !valid_tz_offset_minutes(offset_minutes) {
+        return Err(ProtocolError::TtcDecode(
+            "invalid TIMESTAMP WITH TIME ZONE offset",
+        ));
+    }
     let offset_hours = offset_minutes / 60;
     let offset_minute_part = offset_minutes % 60;
     let encoded_hour = offset_hours + i32::from(TZ_HOUR_OFFSET);
@@ -100,33 +105,66 @@ pub(crate) fn encode_oracle_timestamp_tz_with_offset(
 }
 
 pub fn decode_datetime_value(bytes: &[u8]) -> Result<QueryValue> {
-    if bytes.len() < ORA_TYPE_SIZE_DATE as usize {
-        return Err(ProtocolError::TtcDecode("DATE value too short"));
+    if !matches!(
+        bytes.len(),
+        len if len == ORA_TYPE_SIZE_DATE as usize
+            || len == ORA_TYPE_SIZE_TIMESTAMP as usize
+            || len == ORA_TYPE_SIZE_TIMESTAMP_TZ as usize
+    ) {
+        return Err(ProtocolError::TtcDecode("invalid DATE/TIMESTAMP length"));
     }
     let year = (i32::from(bytes[0]) - 100) * 100 + i32::from(bytes[1]) - 100;
+    if !(1..=9999).contains(&year) {
+        return Err(ProtocolError::TtcDecode("invalid DATE year"));
+    }
     let month = bytes[2];
+    if !(1..=12).contains(&month) {
+        return Err(ProtocolError::TtcDecode("invalid DATE month"));
+    }
     let day = bytes[3];
-    let hour = bytes[4].saturating_sub(1);
-    let minute = bytes[5].saturating_sub(1);
-    let second = bytes[6].saturating_sub(1);
+    if !(1..=31).contains(&day) {
+        return Err(ProtocolError::TtcDecode("invalid DATE day"));
+    }
+    let hour = decode_offset_time_byte(bytes[4], 23, "hour")?;
+    let minute = decode_offset_time_byte(bytes[5], 59, "minute")?;
+    let second = decode_offset_time_byte(bytes[6], 59, "second")?;
     let nanosecond = if bytes.len() >= ORA_TYPE_SIZE_TIMESTAMP as usize {
-        u32::from_be_bytes(
+        let value = u32::from_be_bytes(
             bytes[7..11]
                 .try_into()
                 .map_err(|_| ProtocolError::TtcDecode("invalid TIMESTAMP fraction"))?,
-        )
+        );
+        if value > 999_999_999 {
+            return Err(ProtocolError::TtcDecode("invalid TIMESTAMP fraction"));
+        }
+        value
     } else {
         0
     };
-    if bytes.len() >= ORA_TYPE_SIZE_TIMESTAMP_TZ as usize && bytes[11] != 0 && bytes[12] != 0 {
+    if bytes.len() == ORA_TYPE_SIZE_TIMESTAMP_TZ as usize {
+        if bytes[11] == 0 || bytes[12] == 0 {
+            return Err(ProtocolError::TtcDecode(
+                "invalid TIMESTAMP WITH TIME ZONE offset",
+            ));
+        }
         if bytes[11] & TNS_HAS_REGION_ID != 0 {
             return Err(ProtocolError::UnsupportedFeature(
                 "named TIMESTAMP WITH TIME ZONE region",
             ));
         }
+        if !(1..(TZ_MINUTE_OFFSET * 2)).contains(&bytes[12]) {
+            return Err(ProtocolError::TtcDecode(
+                "invalid TIMESTAMP WITH TIME ZONE offset minute",
+            ));
+        }
         let offset_minutes = (i32::from(bytes[11]) - i32::from(TZ_HOUR_OFFSET)) * 60
             + i32::from(bytes[12])
             - i32::from(TZ_MINUTE_OFFSET);
+        if !valid_tz_offset_minutes(offset_minutes) {
+            return Err(ProtocolError::TtcDecode(
+                "invalid TIMESTAMP WITH TIME ZONE offset",
+            ));
+        }
         return Ok(QueryValue::TimestampTz {
             year,
             month,
@@ -147,6 +185,28 @@ pub fn decode_datetime_value(bytes: &[u8]) -> Result<QueryValue> {
         second,
         nanosecond,
     })
+}
+
+fn valid_tz_offset_minutes(offset_minutes: i32) -> bool {
+    (-1439..=1439).contains(&offset_minutes)
+}
+
+fn decode_offset_time_byte(byte: u8, max: u8, field: &'static str) -> Result<u8> {
+    let Some(value) = byte.checked_sub(1) else {
+        return Err(ProtocolError::TtcDecode(match field {
+            "hour" => "invalid DATE hour",
+            "minute" => "invalid DATE minute",
+            _ => "invalid DATE second",
+        }));
+    };
+    if value > max {
+        return Err(ProtocolError::TtcDecode(match field {
+            "hour" => "invalid DATE hour",
+            "minute" => "invalid DATE minute",
+            _ => "invalid DATE second",
+        }));
+    }
+    Ok(value)
 }
 
 pub(crate) fn adjust_datetime_by_minutes(
@@ -824,6 +884,82 @@ mod tests {
         let wire = encode_interval_ds(-2, -(3 * 3600 + 4 * 60 + 5), -123_456_789)
             .expect("encode negative interval");
         assert!(decode_interval_ds(&wire[..10]).is_err());
+    }
+
+    #[test]
+    fn datetime_decode_rejects_malformed_wire_fields() {
+        let valid_date = encode_oracle_date(2026, 7, 13, 12, 34, 56).expect("valid date");
+        for (index, value, label) in [
+            (0, 99, "year"),
+            (2, 0, "month zero"),
+            (2, 13, "month high"),
+            (3, 0, "day zero"),
+            (3, 32, "day high"),
+            (4, 0, "hour zero"),
+            (4, 25, "hour high"),
+            (5, 0, "minute zero"),
+            (5, 61, "minute high"),
+            (6, 0, "second zero"),
+            (6, 61, "second high"),
+        ] {
+            let mut malformed = valid_date;
+            malformed[index] = value;
+            assert!(
+                decode_datetime_value(&malformed).is_err(),
+                "{label} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn timestamp_decode_rejects_invalid_length_and_fraction() {
+        let timestamp =
+            encode_oracle_timestamp(2026, 7, 13, 12, 34, 56, 123_456_789).expect("timestamp");
+        for len in [6, 8, 10, 12, 14] {
+            let mut malformed = timestamp.clone();
+            malformed.resize(len, 0);
+            assert!(
+                decode_datetime_value(&malformed).is_err(),
+                "length {len} must fail closed"
+            );
+        }
+
+        let mut malformed = timestamp;
+        malformed[7..11].copy_from_slice(&1_000_000_000_u32.to_be_bytes());
+        assert!(
+            decode_datetime_value(&malformed).is_err(),
+            "nanosecond above Oracle range must fail closed"
+        );
+    }
+
+    #[test]
+    fn timestamp_tz_decode_rejects_missing_or_malformed_offset_bytes() {
+        let valid = encode_oracle_timestamp_tz_with_offset(2026, 7, 13, 12, 34, 56, 0, -330)
+            .expect("timestamp with time zone");
+        for (hour_byte, minute_byte, label) in [
+            (0, valid[12], "missing offset hour"),
+            (valid[11], 0, "missing offset minute"),
+            (0, 0, "missing full offset"),
+            (valid[11], TZ_MINUTE_OFFSET * 2, "invalid offset minute"),
+            (TZ_HOUR_OFFSET + 24, TZ_MINUTE_OFFSET, "invalid +24h offset"),
+            (127, TZ_MINUTE_OFFSET, "absurd offset hour"),
+        ] {
+            let mut malformed = valid.clone();
+            malformed[11] = hour_byte;
+            malformed[12] = minute_byte;
+            assert!(
+                decode_datetime_value(&malformed).is_err(),
+                "{label} must fail closed"
+            );
+        }
+
+        for offset_minutes in [-1440, 1440, 6420] {
+            assert!(
+                encode_oracle_timestamp_tz_with_offset(2026, 7, 13, 12, 34, 56, 0, offset_minutes,)
+                    .is_err(),
+                "outbound offset {offset_minutes} must fail closed"
+            );
+        }
     }
 
     #[test]
