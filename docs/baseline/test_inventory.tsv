@@ -6,13 +6,13 @@ crates/oracledb-protocol/src/net/cassette.rs	8
 crates/oracledb-protocol/src/net/connectstring/mod.rs	30
 crates/oracledb-protocol/src/net/connectstring/tnsnames.rs	15
 crates/oracledb-protocol/src/net/mod.rs	7
-crates/oracledb-protocol/src/oson.rs	14
+crates/oracledb-protocol/src/oson.rs	16
 crates/oracledb-protocol/src/packet/mod.rs	5
 crates/oracledb-protocol/src/sql.rs	20
 crates/oracledb-protocol/src/thin/aq.rs	14
 crates/oracledb-protocol/src/thin/auth.rs	3
 crates/oracledb-protocol/src/thin/bind.rs	3
-crates/oracledb-protocol/src/thin/codecs.rs	6
+crates/oracledb-protocol/src/thin/codecs.rs	9
 crates/oracledb-protocol/src/thin/connect.rs	2
 crates/oracledb-protocol/src/thin/dbobject.rs	11
 crates/oracledb-protocol/src/thin/errors.rs	1
@@ -29,7 +29,7 @@ crates/oracledb-protocol/src/tls/pfx.rs	1
 crates/oracledb-protocol/src/tls/sni.rs	6
 crates/oracledb-protocol/src/tls/sso.rs	3
 crates/oracledb-protocol/src/tls/wallet.rs	9
-crates/oracledb-protocol/src/vector.rs	14
+crates/oracledb-protocol/src/vector.rs	16
 crates/oracledb-protocol/src/wire.rs	18
 crates/oracledb-protocol/tests/_numi128_decode_allocs.rs	0
 crates/oracledb-protocol/tests/borrowed_alloc_count.rs	1

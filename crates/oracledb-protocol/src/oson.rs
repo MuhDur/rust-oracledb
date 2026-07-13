@@ -680,20 +680,21 @@ pub fn decode_oson_with_limits(data: &[u8], limits: ProtocolLimits) -> Result<Os
 
     // Scalar fast-path: a small header then a single node.
     if primary_flags & TNS_JSON_FLAG_IS_SCALAR != 0 {
-        if primary_flags & TNS_JSON_FLAG_TREE_SEG_UINT32 != 0 {
-            reader.skip(4)?;
+        let tree_seg_size = if primary_flags & TNS_JSON_FLAG_TREE_SEG_UINT32 != 0 {
+            reader.read_u32be()? as usize
         } else {
-            reader.skip(2)?;
-        }
+            usize::from(reader.read_u16be()?)
+        };
+        let tree_seg_pos = reader.pos;
+        validate_tree_segment_extent(data.len(), tree_seg_pos, tree_seg_size)?;
         let mut decoder = OsonDecoder {
             reader,
             field_names: Vec::new(),
             field_id_length: 1,
-            tree_seg_pos: 0,
+            tree_seg_pos,
             relative_offsets,
             depth: 0,
         };
-        decoder.tree_seg_pos = decoder.reader.pos;
         return decoder.decode_node();
     }
 
@@ -731,7 +732,7 @@ pub fn decode_oson_with_limits(data: &[u8], limits: ProtocolLimits) -> Result<Os
     }
 
     // Tree segment size.
-    let _tree_seg_size = if primary_flags & TNS_JSON_FLAG_TREE_SEG_UINT32 != 0 {
+    let tree_seg_size = if primary_flags & TNS_JSON_FLAG_TREE_SEG_UINT32 != 0 {
         reader.read_u32be()? as usize
     } else {
         usize::from(reader.read_u16be()?)
@@ -782,8 +783,31 @@ pub fn decode_oson_with_limits(data: &[u8], limits: ProtocolLimits) -> Result<Os
         decoder.field_names.extend(names);
     }
 
-    decoder.tree_seg_pos = decoder.reader.pos;
+    let tree_seg_pos = decoder.reader.pos;
+    validate_tree_segment_extent(data.len(), tree_seg_pos, tree_seg_size)?;
+    decoder.tree_seg_pos = tree_seg_pos;
     decoder.decode_node()
+}
+
+fn validate_tree_segment_extent(
+    image_len: usize,
+    tree_seg_pos: usize,
+    tree_seg_size: usize,
+) -> Result<()> {
+    let tree_end = tree_seg_pos
+        .checked_add(tree_seg_size)
+        .ok_or(ProtocolError::OsonInvalid("tree segment length overflow"))?;
+    if tree_end > image_len {
+        return Err(ProtocolError::OsonInvalid(
+            "tree segment extends past end of OSON image",
+        ));
+    }
+    if tree_end != image_len {
+        return Err(ProtocolError::OsonInvalid(
+            "bytes after declared OSON tree segment",
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1621,6 +1645,32 @@ mod tests {
             ),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn decode_oson_rejects_trailing_bytes_after_declared_tree() {
+        for value in [num("1"), obj(&[("a", num("1"))])] {
+            let mut encoded = encode_oson(&value, false).expect("encode OSON fixture");
+            encoded.push(0);
+
+            let err = decode_oson(&encoded)
+                .expect_err("OSON image with bytes after declared tree must fail closed");
+            assert!(matches!(err, ProtocolError::OsonInvalid(_)), "got {err:?}");
+        }
+    }
+
+    #[test]
+    fn decode_oson_rejects_tree_size_smaller_than_image() {
+        let mut encoded = encode_oson(&s("abc"), false).expect("encode scalar OSON fixture");
+        // Header layout for scalar OSON is magic/version/flags/tree_len/tree.
+        // Shrinking the declared tree length must not let the decoder read past
+        // the segment boundary and silently accept the full remaining image.
+        encoded[6] = 0;
+        encoded[7] = 1;
+
+        let err = decode_oson(&encoded)
+            .expect_err("OSON image with underdeclared tree size must fail closed");
+        assert!(matches!(err, ProtocolError::OsonInvalid(_)), "got {err:?}");
     }
 
     #[test]
