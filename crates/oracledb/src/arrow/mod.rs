@@ -19,6 +19,7 @@ use oracledb_protocol::thin::{ColumnMetadata, QueryValue};
 
 mod builders;
 mod direct_path;
+mod ipc;
 mod schema;
 
 pub use builders::{
@@ -26,6 +27,7 @@ pub use builders::{
     decimal128_to_string,
 };
 pub use direct_path::record_batch_to_direct_path_rows;
+pub use ipc::record_batch_to_ipc;
 pub use schema::{
     arrow_define_columns, arrow_schema_for_columns, arrow_type_name, check_convert_from_arrow,
     db_type_name, vector_arrow_type, vector_fixed_size_list_type,

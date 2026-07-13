@@ -97,6 +97,7 @@ pub fn oracledb::arrow::check_convert_from_arrow(&arrow_schema::datatype::DataTy
 pub fn oracledb::arrow::db_type_name(&oracledb_protocol::thin::types::ColumnMetadata) -> alloc::string::String
 pub fn oracledb::arrow::decimal128_to_string(i128, i8) -> alloc::string::String
 pub fn oracledb::arrow::record_batch_to_direct_path_rows(&arrow_array::record_batch::RecordBatch, &[oracledb_protocol::thin::types::ColumnMetadata]) -> core::result::Result<alloc::vec::Vec<alloc::vec::Vec<oracledb_protocol::dpl::DirectPathColumnValue>>, oracledb::arrow::ArrowConversionError>
+pub fn oracledb::arrow::record_batch_to_ipc(&arrow_array::record_batch::RecordBatch) -> core::result::Result<alloc::vec::Vec<u8>, oracledb::arrow::ArrowConversionError>
 pub fn oracledb::arrow::vector_arrow_type(oracledb::arrow::VectorFormat, bool) -> arrow_schema::datatype::DataType
 pub fn oracledb::arrow::vector_fixed_size_list_type(oracledb::arrow::VectorFormat, i32) -> arrow_schema::datatype::DataType
 pub mod oracledb::pool

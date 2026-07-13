@@ -11,29 +11,31 @@ oracledb	crates/oracledb/src/arrow/builders.rs	168	pub(super) fn decimal128_from
 oracledb	crates/oracledb/src/arrow/builders.rs	29	pub fn build_record_batch(
 oracledb	crates/oracledb/src/arrow/builders.rs	40	pub fn build_record_batch_with_schema(
 oracledb	crates/oracledb/src/arrow/direct_path.rs	27	pub fn record_batch_to_direct_path_rows(
-oracledb	crates/oracledb/src/arrow/mod.rs	106	pub struct ArrowFetchOptions {
-oracledb	crates/oracledb/src/arrow/mod.rs	126	pub fn new() -> Self {
-oracledb	crates/oracledb/src/arrow/mod.rs	130	pub fn fetch_decimals(&self) -> bool {
-oracledb	crates/oracledb/src/arrow/mod.rs	135	pub fn with_fetch_decimals(mut self, enabled: bool) -> Self {
-oracledb	crates/oracledb/src/arrow/mod.rs	140	pub fn requested_schema(&self) -> Option<&SchemaRef> {
-oracledb	crates/oracledb/src/arrow/mod.rs	145	pub fn with_requested_schema(mut self, schema: SchemaRef) -> Self {
-oracledb	crates/oracledb/src/arrow/mod.rs	150	pub fn vector_fixed_size_list(&self) -> bool {
-oracledb	crates/oracledb/src/arrow/mod.rs	158	pub fn with_vector_fixed_size_list(mut self, enabled: bool) -> Self {
-oracledb	crates/oracledb/src/arrow/mod.rs	166	pub enum VectorFormat {
-oracledb	crates/oracledb/src/arrow/mod.rs	183	pub struct RecordBatchFetch {
-oracledb	crates/oracledb/src/arrow/mod.rs	195	pub fn schema(&self) -> SchemaRef {
-oracledb	crates/oracledb/src/arrow/mod.rs	200	pub async fn next_batch(
-oracledb	crates/oracledb/src/arrow/mod.rs	247	pub async fn fetch_all_record_batch(
-oracledb	crates/oracledb/src/arrow/mod.rs	24	pub use builders::{
-oracledb	crates/oracledb/src/arrow/mod.rs	28	pub use direct_path::record_batch_to_direct_path_rows;
-oracledb	crates/oracledb/src/arrow/mod.rs	29	pub use schema::{
-oracledb	crates/oracledb/src/arrow/mod.rs	304	pub async fn fetch_all_record_batch_columnar(
-oracledb	crates/oracledb/src/arrow/mod.rs	387	pub async fn fetch_record_batches(
-oracledb	crates/oracledb/src/arrow/mod.rs	424	pub fn fetch_all_record_batch(
-oracledb	crates/oracledb/src/arrow/mod.rs	42	pub enum ArrowConversionError {
-oracledb	crates/oracledb/src/arrow/mod.rs	441	pub fn fetch_all_record_batch_columnar(
-oracledb	crates/oracledb/src/arrow/mod.rs	454	pub fn fetch_record_batches(
-oracledb	crates/oracledb/src/arrow/mod.rs	467	pub fn next_record_batch(
+oracledb	crates/oracledb/src/arrow/ipc.rs	13	pub fn record_batch_to_ipc(batch: &RecordBatch) -> Result<Vec<u8>> {
+oracledb	crates/oracledb/src/arrow/mod.rs	108	pub struct ArrowFetchOptions {
+oracledb	crates/oracledb/src/arrow/mod.rs	128	pub fn new() -> Self {
+oracledb	crates/oracledb/src/arrow/mod.rs	132	pub fn fetch_decimals(&self) -> bool {
+oracledb	crates/oracledb/src/arrow/mod.rs	137	pub fn with_fetch_decimals(mut self, enabled: bool) -> Self {
+oracledb	crates/oracledb/src/arrow/mod.rs	142	pub fn requested_schema(&self) -> Option<&SchemaRef> {
+oracledb	crates/oracledb/src/arrow/mod.rs	147	pub fn with_requested_schema(mut self, schema: SchemaRef) -> Self {
+oracledb	crates/oracledb/src/arrow/mod.rs	152	pub fn vector_fixed_size_list(&self) -> bool {
+oracledb	crates/oracledb/src/arrow/mod.rs	160	pub fn with_vector_fixed_size_list(mut self, enabled: bool) -> Self {
+oracledb	crates/oracledb/src/arrow/mod.rs	168	pub enum VectorFormat {
+oracledb	crates/oracledb/src/arrow/mod.rs	185	pub struct RecordBatchFetch {
+oracledb	crates/oracledb/src/arrow/mod.rs	197	pub fn schema(&self) -> SchemaRef {
+oracledb	crates/oracledb/src/arrow/mod.rs	202	pub async fn next_batch(
+oracledb	crates/oracledb/src/arrow/mod.rs	249	pub async fn fetch_all_record_batch(
+oracledb	crates/oracledb/src/arrow/mod.rs	25	pub use builders::{
+oracledb	crates/oracledb/src/arrow/mod.rs	29	pub use direct_path::record_batch_to_direct_path_rows;
+oracledb	crates/oracledb/src/arrow/mod.rs	306	pub async fn fetch_all_record_batch_columnar(
+oracledb	crates/oracledb/src/arrow/mod.rs	30	pub use ipc::record_batch_to_ipc;
+oracledb	crates/oracledb/src/arrow/mod.rs	31	pub use schema::{
+oracledb	crates/oracledb/src/arrow/mod.rs	389	pub async fn fetch_record_batches(
+oracledb	crates/oracledb/src/arrow/mod.rs	426	pub fn fetch_all_record_batch(
+oracledb	crates/oracledb/src/arrow/mod.rs	443	pub fn fetch_all_record_batch_columnar(
+oracledb	crates/oracledb/src/arrow/mod.rs	44	pub enum ArrowConversionError {
+oracledb	crates/oracledb/src/arrow/mod.rs	456	pub fn fetch_record_batches(
+oracledb	crates/oracledb/src/arrow/mod.rs	469	pub fn next_record_batch(
 oracledb	crates/oracledb/src/arrow/schema.rs	106	pub fn db_type_name(column: &ColumnMetadata) -> String {
 oracledb	crates/oracledb/src/arrow/schema.rs	142	pub fn arrow_type_name(data_type: &DataType) -> String {
 oracledb	crates/oracledb/src/arrow/schema.rs	18	pub(super) const ORA_TYPE_NUM_VECTOR: u8 = 127;
