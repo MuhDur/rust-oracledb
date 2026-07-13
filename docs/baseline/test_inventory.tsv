@@ -9,7 +9,7 @@ crates/oracledb-protocol/src/net/mod.rs	7
 crates/oracledb-protocol/src/oson.rs	16
 crates/oracledb-protocol/src/packet/mod.rs	5
 crates/oracledb-protocol/src/sql.rs	20
-crates/oracledb-protocol/src/thin/aq.rs	14
+crates/oracledb-protocol/src/thin/aq.rs	18
 crates/oracledb-protocol/src/thin/auth.rs	3
 crates/oracledb-protocol/src/thin/bind.rs	3
 crates/oracledb-protocol/src/thin/codecs.rs	9

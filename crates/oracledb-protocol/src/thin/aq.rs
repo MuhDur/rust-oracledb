@@ -1015,6 +1015,11 @@ fn process_payload(
         let image = reader
             .read_bytes()?
             .ok_or(ProtocolError::TtcDecode("AQ object payload missing"))?;
+        if image.len() != image_length as usize {
+            return Err(ProtocolError::TtcDecode(
+                "AQ object payload length differs from declared image length",
+            ));
+        }
         return Ok(Some(AqDeqPayload::Object(image)));
     }
     // RAW / JSON branch.
@@ -1027,11 +1032,18 @@ fn process_payload(
     let _flags = reader.read_ub2()?;
     if image_length > 0 {
         // reference: payload = read_bytes()[4:image_length]
+        if image_length < 4 {
+            return Err(ProtocolError::TtcDecode(
+                "AQ payload image shorter than header",
+            ));
+        }
         let raw = reader
             .read_bytes()?
             .ok_or(ProtocolError::TtcDecode("AQ payload missing"))?;
-        if raw.len() < image_length {
-            return Err(ProtocolError::TtcDecode("AQ payload shorter than declared"));
+        if raw.len() != image_length {
+            return Err(ProtocolError::TtcDecode(
+                "AQ payload length differs from declared image length",
+            ));
         }
         let end = image_length;
         let start = 4.min(end);
@@ -1147,6 +1159,26 @@ mod tests {
         writer.into_bytes()
     }
 
+    fn deq_response_with_object_image(image_length: u32, object_image: &[u8]) -> Vec<u8> {
+        let mut writer = TtcWriter::new();
+        writer.write_u8(TNS_MSG_TYPE_PARAMETER);
+        writer.write_ub4(1);
+        write_msg_props(&mut writer, &AqMsgProps::default(), FV).expect("write message props");
+        writer.write_ub4(0); // recipients
+        writer.write_ub4(0); // TOID
+        writer.write_ub4(0); // OID
+        writer.write_ub4(0); // snapshot
+        writer.write_ub2(0); // version
+        writer.write_ub4(image_length);
+        writer.write_ub2(0); // flags
+        writer
+            .write_bytes_with_length(object_image)
+            .expect("write object image field");
+        writer.write_raw(&[0u8; TNS_AQ_MESSAGE_ID_LENGTH]);
+        writer.write_u8(TNS_MSG_TYPE_END_OF_RESPONSE);
+        writer.into_bytes()
+    }
+
     #[test]
     fn raw_dequeue_rejects_declared_image_length_shortfall() {
         let response = deq_response_with_raw_image(8, &[0, 0, 0, 0, b'A', b'B']);
@@ -1164,6 +1196,22 @@ mod tests {
     }
 
     #[test]
+    fn raw_dequeue_rejects_nonzero_image_length_below_header() {
+        let response = deq_response_with_raw_image(3, &[0, 0, 0]);
+        let err = parse_aq_deq_response(&response, caps(), &AqPayloadKind::Raw)
+            .expect_err("nonzero RAW image shorter than header must fail");
+        assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn raw_dequeue_rejects_declared_image_length_trailing_bytes() {
+        let response = deq_response_with_raw_image(6, &[0, 0, 0, 0, b'A', b'B', b'X']);
+        let err = parse_aq_deq_response(&response, caps(), &AqPayloadKind::Raw)
+            .expect_err("trailing RAW image bytes must fail");
+        assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
+    }
+
+    #[test]
     fn raw_dequeue_accepts_exact_declared_image_length() {
         let response = deq_response_with_raw_image(6, &[0, 0, 0, 0, b'A', b'B']);
         let res = parse_aq_deq_response(&response, caps(), &AqPayloadKind::Raw)
@@ -1171,6 +1219,26 @@ mod tests {
         let message = res.message.expect("message present");
         match message.payload {
             Some(AqDeqPayload::Raw(payload)) => assert_eq!(payload, vec![b'A', b'B']),
+            other => panic!("unexpected payload {other:?}"),
+        }
+    }
+
+    #[test]
+    fn object_dequeue_rejects_declared_image_length_mismatch() {
+        let response = deq_response_with_object_image(2, b"ABC");
+        let err = parse_aq_deq_response(&response, caps(), &AqPayloadKind::Object)
+            .expect_err("mismatched object image length must fail");
+        assert!(matches!(err, ProtocolError::TtcDecode(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn object_dequeue_accepts_exact_declared_image_length() {
+        let response = deq_response_with_object_image(3, b"ABC");
+        let res = parse_aq_deq_response(&response, caps(), &AqPayloadKind::Object)
+            .expect("exact object image should parse");
+        let message = res.message.expect("message present");
+        match message.payload {
+            Some(AqDeqPayload::Object(payload)) => assert_eq!(payload, b"ABC"),
             other => panic!("unexpected payload {other:?}"),
         }
     }
