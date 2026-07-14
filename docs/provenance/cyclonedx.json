@@ -165,8 +165,34 @@
           }
         }
       ],
+      "name": "arrow-ipc",
+      "purl": "pkg:cargo/arrow-ipc@59.0.0",
+      "type": "library",
+      "version": "59.0.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache-2.0"
+          }
+        }
+      ],
       "name": "arrow-schema",
       "purl": "pkg:cargo/arrow-schema@59.0.0",
+      "type": "library",
+      "version": "59.0.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "arrow-select",
+      "purl": "pkg:cargo/arrow-select@59.0.0",
       "type": "library",
       "version": "59.0.0"
     },
@@ -1066,6 +1092,19 @@
       "purl": "pkg:cargo/flagset@0.4.7",
       "type": "library",
       "version": "0.4.7"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache-2.0"
+          }
+        }
+      ],
+      "name": "flatbuffers",
+      "purl": "pkg:cargo/flatbuffers@25.12.19",
+      "type": "library",
+      "version": "25.12.19"
     },
     {
       "licenses": [
