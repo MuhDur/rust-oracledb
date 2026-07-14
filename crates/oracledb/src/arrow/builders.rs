@@ -226,7 +226,16 @@ struct EpochParts {
     nanos: u32,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Arrow epoch for a datetime's WALL-CLOCK components (tz-naive), reconciled
+/// with upstream python-oracledb #596 (714178610379). A TIMESTAMP WITH TIME
+/// ZONE / LOCAL TIME ZONE column fetched into a tz-naive Arrow `Timestamp` is
+/// emitted at its wall-clock time, NOT UTC-normalized: an Arrow `Timestamp(_,
+/// None)` field carries no zone, so the wall-clock value is the semantically
+/// correct content and it matches the reference's DataFrame values (test_8035/
+/// test_8036). Our 0.5.1 build subtracted the offset (UTC-normalized) here,
+/// which diverged from the reference and mislabeled UTC data as tz-naive; that
+/// divergence is retired. The offset-preserving instant is still available via
+/// the row (non-Arrow) fetch path (`DateTime<FixedOffset>`).
 fn epoch_parts_from_components(
     year: i32,
     month: u8,
@@ -235,12 +244,10 @@ fn epoch_parts_from_components(
     minute: u8,
     second: u8,
     nanosecond: u32,
-    offset_minutes: i32,
 ) -> EpochParts {
     let days = days_from_civil(year, month, day);
-    let seconds = days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60
-        - i64::from(offset_minutes) * 60
-        + i64::from(second);
+    let seconds =
+        days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second);
     EpochParts {
         seconds,
         nanos: nanosecond,
@@ -265,8 +272,10 @@ fn epoch_parts(column: &ColumnMetadata, value: &QueryValue) -> Result<EpochParts
             *minute,
             *second,
             *nanosecond,
-            0,
         )),
+        // TSTZ: the offset is intentionally NOT applied — the tz-naive Arrow
+        // value is the wall-clock time (upstream #596). See
+        // `epoch_parts_from_components`.
         QueryValue::TimestampTz {
             year,
             month,
@@ -275,7 +284,7 @@ fn epoch_parts(column: &ColumnMetadata, value: &QueryValue) -> Result<EpochParts
             minute,
             second,
             nanosecond,
-            offset_minutes,
+            offset_minutes: _,
         } => Ok(epoch_parts_from_components(
             *year,
             *month,
@@ -284,7 +293,6 @@ fn epoch_parts(column: &ColumnMetadata, value: &QueryValue) -> Result<EpochParts
             *minute,
             *second,
             *nanosecond,
-            *offset_minutes,
         )),
         _ => Err(invalid_value(column, "expected a datetime value")),
     }
@@ -1057,8 +1065,9 @@ fn epoch_parts_ref(column: &ColumnMetadata, value: &QueryValueRef<'_>) -> Result
             second,
             nanosecond,
         } => Ok(epoch_parts_from_components(
-            year, month, day, hour, minute, second, nanosecond, 0,
+            year, month, day, hour, minute, second, nanosecond,
         )),
+        // TSTZ: wall-clock, offset not applied (upstream #596).
         QueryValueRef::TimestampTz {
             year,
             month,
@@ -1067,16 +1076,9 @@ fn epoch_parts_ref(column: &ColumnMetadata, value: &QueryValueRef<'_>) -> Result
             minute,
             second,
             nanosecond,
-            offset_minutes,
+            offset_minutes: _,
         } => Ok(epoch_parts_from_components(
-            year,
-            month,
-            day,
-            hour,
-            minute,
-            second,
-            nanosecond,
-            offset_minutes,
+            year, month, day, hour, minute, second, nanosecond,
         )),
         QueryValueRef::Owned(owned) => epoch_parts(column, owned),
         _ => Err(invalid_value(column, "expected a datetime value")),

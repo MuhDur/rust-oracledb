@@ -770,7 +770,14 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_tz_maps_to_arrow_epoch_once() {
+    fn timestamp_tz_maps_to_arrow_wall_clock() {
+        // Upstream python-oracledb #596 (714178610379): a TIMESTAMP WITH TIME
+        // ZONE fetched into a tz-naive Arrow `Timestamp` is emitted at its
+        // WALL-CLOCK time, NOT UTC-normalized. For 2024-01-02 03:04:05.123456789
+        // -05:30 the Arrow value is the wall clock 03:04:05.123456789 (the -05:30
+        // offset is dropped), matching the reference DataFrame values. Our 0.5.1
+        // build UTC-normalized this (1_704_184_445_123_456_789); that divergence
+        // is retired here.
         let columns = vec![column("TSTZ", ORA_TYPE_NUM_TIMESTAMP_TZ, 0, 9)];
         let rows = vec![vec![timestamp_tz(2024, 1, 2, 3, 4, 5, 123_456_789, -330)]];
         let batch =
@@ -779,12 +786,40 @@ mod tests {
             batch.schema().field(0).data_type(),
             &DataType::Timestamp(TimeUnit::Nanosecond, None)
         );
+        // Wall clock 2024-01-02T03:04:05Z = 1_704_164_645 s; + .123456789.
         assert_eq!(
             batch
                 .column(0)
                 .as_primitive::<TimestampNanosecondType>()
                 .value(0),
-            1_704_184_445_123_456_789
+            1_704_164_645_123_456_789
+        );
+    }
+
+    #[test]
+    fn timestamp_tz_arrow_wall_clock_independent_of_offset() {
+        // The Arrow (tz-naive) value depends ONLY on the wall-clock components,
+        // never on the zone offset: the same wall clock with different offsets
+        // produces the same Arrow epoch (#596 wall-clock semantics). A positive
+        // and a negative offset both collapse to the wall-clock instant.
+        let columns = vec![column("TSTZ", ORA_TYPE_NUM_TIMESTAMP_TZ, 0, 6)];
+        let rows = vec![
+            vec![timestamp_tz(2024, 6, 1, 12, 0, 0, 500_000_000, 600)],
+            vec![timestamp_tz(2024, 6, 1, 12, 0, 0, 500_000_000, -480)],
+            vec![timestamp_tz(2024, 6, 1, 12, 0, 0, 500_000_000, 0)],
+        ];
+        let batch =
+            build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
+        let col = batch.column(0).as_primitive::<TimestampMicrosecondType>();
+        assert_eq!(
+            col.value(0),
+            col.value(1),
+            "offset must not shift the value"
+        );
+        assert_eq!(
+            col.value(1),
+            col.value(2),
+            "offset must not shift the value"
         );
     }
 
