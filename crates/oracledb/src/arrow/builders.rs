@@ -1076,6 +1076,12 @@ enum ColumnBuilder {
     TimestampNano(Vec<Option<i64>>),
     Date32(Date32Builder),
     Date64(Date64Builder),
+    /// Dense fixed-dimension VECTOR fast path (bead rust-oracledb-0mk): every
+    /// row's `dim` element values stream contiguously into the child value
+    /// buffer, so the columnar path handles VECTOR directly instead of falling
+    /// back to the row-materialize path. Carries the fixed `dim` for the
+    /// per-row length check and for null padding.
+    VectorFixedSizeList(VectorFixedSizeListBuilder, i32),
 }
 
 impl ColumnBuilder {
@@ -1127,7 +1133,15 @@ impl ColumnBuilder {
             }
             DataType::Date32 => ColumnBuilder::Date32(Date32Builder::with_capacity(capacity)),
             DataType::Date64 => ColumnBuilder::Date64(Date64Builder::with_capacity(capacity)),
-            // List / Struct (VECTOR) and anything else: not columnar-handled.
+            // Dense fixed-dimension VECTOR (bead rust-oracledb-0mk): handled
+            // directly in the columnar path. `for_item` returns `None` for a
+            // non-vector element type, so the caller falls back to the row path.
+            DataType::FixedSizeList(item, dim) => ColumnBuilder::VectorFixedSizeList(
+                VectorFixedSizeListBuilder::for_item(item.data_type(), *dim).ok()?,
+                *dim,
+            ),
+            // List / Struct (flexible-dim / sparse VECTOR) and anything else:
+            // not columnar-handled; the caller row-materializes those.
             _ => return None,
         })
     }
@@ -1307,6 +1321,23 @@ impl ColumnBuilder {
                     b.append_value(millis);
                 }
             },
+            ColumnBuilder::VectorFixedSizeList(b, dim) => match cell {
+                None => b.append_null(*dim),
+                // VECTOR is a cold, non-borrowable type: the borrowed decoder
+                // parks it in the owned arena and yields `Owned(&Vector)` (both
+                // the first execute page and every fetch page arrive this way),
+                // so match the owned `QueryValue::Vector`.
+                Some(QueryValueRef::Owned(QueryValue::Vector(vector))) => match vector.as_ref() {
+                    Vector::Dense(values) => b.push(column, values, *dim)?,
+                    // A sparse vector cannot reach a FixedSizeList column (the
+                    // schema only maps dense fixed-dim vectors here) but reject
+                    // it fail-closed rather than mis-shaping the buffer.
+                    Vector::Sparse { .. } => {
+                        return Err(ArrowConversionError::SparseVectorNotAllowed)
+                    }
+                },
+                Some(_) => return Err(invalid_value(column, "expected a vector value")),
+            },
         }
         Ok(())
     }
@@ -1345,6 +1376,7 @@ impl ColumnBuilder {
             }
             ColumnBuilder::Date32(mut b) => Arc::new(b.finish()),
             ColumnBuilder::Date64(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::VectorFixedSizeList(mut b, _) => b.finish(),
         }
     }
 }
@@ -1370,16 +1402,21 @@ fn push_timestamp_ref(
     Ok(())
 }
 
-/// Whether the columnar path can handle every column of this schema. VECTOR
-/// (List/Struct) columns fall back to the row-materialize path so the cold,
-/// rarely-fetched vector types keep their fully-tested converter.
+/// Whether the columnar path can handle every column of this schema.
+///
+/// Dense fixed-dimension VECTOR columns map to `FixedSizeList` and ARE handled
+/// directly by the columnar path (bead rust-oracledb-0mk): each row's `dim`
+/// element values stream contiguously into the child buffer, avoiding the
+/// row-materialize transpose that is fatal for large embedding result sets.
+///
+/// Flexible-dimension (`List`) and sparse (`Struct`) VECTOR columns still fall
+/// back to the row-materialize path so those cold, rarely-fetched shapes keep
+/// their fully-tested converter.
 pub(super) fn columnar_supported(schema: &Schema) -> bool {
-    schema.fields().iter().all(|f| {
-        !matches!(
-            f.data_type(),
-            DataType::List(_) | DataType::FixedSizeList(_, _) | DataType::Struct(_)
-        )
-    })
+    schema
+        .fields()
+        .iter()
+        .all(|f| !matches!(f.data_type(), DataType::List(_) | DataType::Struct(_)))
 }
 
 /// Accumulating columnar batch builder: holds one [`ColumnBuilder`] per column
@@ -1505,4 +1542,134 @@ pub fn build_record_batch_columnar(
     )?;
     builder.append_borrowed(batch)?;
     builder.finish()
+}
+
+#[cfg(test)]
+mod columnar_vector_tests {
+    //! Bead rust-oracledb-0mk: the columnar fast path decodes a dense fixed-
+    //! dimension VECTOR column DIRECTLY into a contiguous `FixedSizeList` child
+    //! buffer instead of falling back to the row-materialize path. These tests
+    //! prove the columnar output is byte-identical to the row path (which is the
+    //! fully-tested a4-0mk `FixedSizeListBuilder`) over the same rows, including
+    //! NULL vectors and a mixed scalar+vector schema.
+    use super::*;
+    use oracledb_protocol::thin::OracleNumber;
+    use oracledb_protocol::vector::{VECTOR_FORMAT_FLOAT32, VECTOR_FORMAT_INT8};
+
+    fn vector_column(name: &str, vector_format: u8, dim: u32) -> ColumnMetadata {
+        ColumnMetadata::new(name, 127)
+            .with_csfrm(1)
+            .with_vector_format(vector_format)
+            .with_vector_flags(0)
+            .with_vector_dimensions(Some(dim))
+    }
+
+    /// Run the SAME owned rows through the row path (`build_record_batch`) and
+    /// the columnar path (`ColumnarBatchBuilder::append_owned` -> `finish`) and
+    /// assert the two `RecordBatch`es are equal cell-for-cell.
+    fn assert_columnar_equals_row(
+        columns: &[ColumnMetadata],
+        rows: &[Vec<Option<QueryValue>>],
+        options: &ArrowFetchOptions,
+    ) -> RecordBatch {
+        let row_batch = build_record_batch(columns, rows, options).expect("row batch");
+
+        let schema = Arc::new(arrow_schema_for_columns(columns, options).expect("schema"));
+        assert!(
+            columnar_supported(&schema),
+            "fixed-size-list vector schema must be columnar-supported"
+        );
+        let mut builder = ColumnarBatchBuilder::new(schema, columns.to_vec(), rows.len().max(1))
+            .expect("builder");
+        builder.append_owned(rows).expect("append_owned");
+        let columnar_batch = builder.finish().expect("columnar batch");
+
+        assert_eq!(
+            row_batch, columnar_batch,
+            "columnar VECTOR batch must equal the row path cell-for-cell"
+        );
+        columnar_batch
+    }
+
+    #[test]
+    fn columnar_float32_fixed_size_vector_equals_row_path() {
+        use arrow_array::{cast::AsArray, types::Float32Type, Array, FixedSizeListArray};
+
+        let columns = vec![vector_column("V", VECTOR_FORMAT_FLOAT32, 3)];
+        let rows = vec![
+            vec![Some(QueryValue::Vector(Box::new(Vector::Dense(
+                VectorValues::Float32(vec![1.0, 2.0, 3.0]),
+            ))))],
+            vec![None],
+            vec![Some(QueryValue::Vector(Box::new(Vector::Dense(
+                VectorValues::Float32(vec![4.0, 5.0, 6.0]),
+            ))))],
+        ];
+        let options = ArrowFetchOptions::new().with_vector_fixed_size_list(true);
+        let batch = assert_columnar_equals_row(&columns, &rows, &options);
+
+        // The whole point of 0mk: one contiguous N*dim child buffer.
+        let fsl = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .expect("fixed size list array");
+        assert_eq!(fsl.len(), 3);
+        assert!(fsl.is_null(1));
+        let child = fsl.values().as_primitive::<Float32Type>();
+        // 3 rows * dim 3 = 9 contiguous elements (the null row still occupies its
+        // dim slots so the child buffer stays row-synced).
+        assert_eq!(child.len(), 9);
+        assert_eq!(
+            fsl.value(0).as_primitive::<Float32Type>().values(),
+            &[1.0, 2.0, 3.0]
+        );
+        assert_eq!(
+            fsl.value(2).as_primitive::<Float32Type>().values(),
+            &[4.0, 5.0, 6.0]
+        );
+    }
+
+    #[test]
+    fn columnar_int8_fixed_size_vector_equals_row_path() {
+        let columns = vec![vector_column("V", VECTOR_FORMAT_INT8, 4)];
+        let rows = vec![
+            vec![Some(QueryValue::Vector(Box::new(Vector::Dense(
+                VectorValues::Int8(vec![-1, 0, 7, 127]),
+            ))))],
+            vec![Some(QueryValue::Vector(Box::new(Vector::Dense(
+                VectorValues::Int8(vec![-128, 1, 2, 3]),
+            ))))],
+        ];
+        let options = ArrowFetchOptions::new().with_vector_fixed_size_list(true);
+        assert_columnar_equals_row(&columns, &rows, &options);
+    }
+
+    #[test]
+    fn columnar_mixed_scalar_and_vector_equals_row_path() {
+        // A NUMBER column beside a fixed-dim VECTOR column: the columnar path must
+        // handle the whole schema (not bail to the row path) and stay row-synced.
+        let columns = vec![
+            ColumnMetadata::new("ID", 2)
+                .with_csfrm(1)
+                .with_precision(9)
+                .with_scale(0)
+                .with_buffer_size(22),
+            vector_column("V", VECTOR_FORMAT_FLOAT32, 2),
+        ];
+        let rows = vec![
+            vec![
+                Some(QueryValue::Number(OracleNumber::from_canonical_text("10"))),
+                Some(QueryValue::Vector(Box::new(Vector::Dense(
+                    VectorValues::Float32(vec![0.5, 1.5]),
+                )))),
+            ],
+            vec![
+                Some(QueryValue::Number(OracleNumber::from_canonical_text("20"))),
+                None,
+            ],
+        ];
+        let options = ArrowFetchOptions::new().with_vector_fixed_size_list(true);
+        assert_columnar_equals_row(&columns, &rows, &options);
+    }
 }

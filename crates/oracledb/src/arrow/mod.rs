@@ -299,10 +299,11 @@ impl crate::Connection {
     ///
     /// The produced batch is byte-identical to
     /// [`fetch_all_record_batch`](Self::fetch_all_record_batch) (the row path);
-    /// see the `arrow_columnar_equals_row_path` differential test. When the
-    /// result contains a VECTOR (List/Struct) column the columnar builders do not
-    /// apply, so this transparently falls back to the row path for that query —
-    /// callers always get the same `RecordBatch` either way.
+    /// see the `arrow_columnar_equals_row_path` differential test. Dense fixed-
+    /// dimension VECTOR columns (mapped to `FixedSizeList`) decode DIRECTLY into a
+    /// contiguous child buffer on this path (bead rust-oracledb-0mk). Only
+    /// flexible-dimension (`List`) or sparse (`Struct`) VECTOR columns fall back
+    /// to the row path — callers always get the same `RecordBatch` either way.
     pub async fn fetch_all_record_batch_columnar(
         &mut self,
         cx: &asupersync::Cx,
@@ -331,11 +332,11 @@ impl crate::Connection {
         let cursor_id = result.cursor_id;
         let schema = Arc::new(arrow_schema_for_columns(&columns, options)?);
 
-        // VECTOR (List/Struct) columns are not columnar-handled — fall back to
-        // the fully-tested row path for the whole query so the result is
-        // identical. This keeps the columnar path scalar-only (NUMBER / VARCHAR /
-        // RAW / BOOLEAN / DATE / TIMESTAMP / NULL) and lets the cold vector types
-        // keep their existing converter (bead 0mk is tracked separately).
+        // Dense fixed-dimension VECTOR columns (FixedSizeList) ARE columnar-
+        // handled (bead rust-oracledb-0mk): they stream straight into a
+        // contiguous child buffer. Only flexible-dimension (List) or sparse
+        // (Struct) VECTOR columns are not columnar-handled and fall back to the
+        // fully-tested row path for the whole query so the result is identical.
         if !columnar_supported(&schema) {
             let mut rows = std::mem::take(&mut result.rows);
             let mut more_rows = result.more_rows;
