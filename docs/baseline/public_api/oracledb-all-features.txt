@@ -105,6 +105,7 @@ pub mod oracledb::pool
 pub oracledb::pool::PoolError::Backend(alloc::string::String)
 pub oracledb::pool::PoolError::Cancelled(alloc::string::String)
 pub oracledb::pool::PoolError::Closed
+pub oracledb::pool::PoolError::ConnectionNotAcquired
 pub oracledb::pool::PoolError::HasBusyConnections
 pub oracledb::pool::PoolError::Internal(alloc::string::String)
 pub oracledb::pool::PoolError::NoConnectionAvailable

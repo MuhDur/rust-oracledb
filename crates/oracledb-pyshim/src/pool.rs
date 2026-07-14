@@ -222,6 +222,9 @@ fn pool_error_to_pyerr(err: PoolError) -> PyErr {
         PoolError::HasBusyConnections => {
             raise_oracledb_driver_error("ERR_POOL_HAS_BUSY_CONNECTIONS")
         }
+        // Double-release / releasing a connection not checked out (upstream
+        // 4b5aeb23d602): the reference raises DPY-1001 / ERR_NOT_CONNECTED.
+        PoolError::ConnectionNotAcquired => raise_oracledb_driver_error("ERR_NOT_CONNECTED"),
         PoolError::Backend(message) => runtime_error(message),
         PoolError::Cancelled(message) => PyRuntimeError::new_err(message),
         PoolError::Internal(message) => PyRuntimeError::new_err(message),
@@ -399,8 +402,17 @@ impl ShimPool {
         let guard = self.guards.lock().map_err(runtime_error)?.remove(id);
         if let Some(guard) = guard {
             guard.release().map_err(pool_error_to_pyerr)
-        } else {
+        } else if in_del {
+            // GC / `__del__` cleanup: a connection whose guard is already gone
+            // was released earlier; never raise on the finalizer path.
             Ok(())
+        } else {
+            // Explicit double-release (or releasing a connection already dropped
+            // from the pool): the guard was consumed by the first release. The
+            // reference raises DPY-1001 (ERR_NOT_CONNECTED) via its verify-
+            // connected guard (upstream 4b5aeb23d602); match it instead of the
+            // former silent no-op.
+            Err(raise_oracledb_driver_error("ERR_NOT_CONNECTED"))
         }
     }
 

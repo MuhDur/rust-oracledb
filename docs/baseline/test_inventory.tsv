@@ -18,7 +18,7 @@ crates/oracledb-protocol/src/thin/dbobject.rs	11
 crates/oracledb-protocol/src/thin/errors.rs	1
 crates/oracledb-protocol/src/thin/execute.rs	4
 crates/oracledb-protocol/src/thin/fetch.rs	35
-crates/oracledb-protocol/src/thin/mod.rs	31
+crates/oracledb-protocol/src/thin/mod.rs	32
 crates/oracledb-protocol/src/thin/number.rs	7
 crates/oracledb-protocol/src/thin/proptests.rs	24
 crates/oracledb-protocol/src/thin/sessionless.rs	6
@@ -50,13 +50,14 @@ crates/oracledb-protocol/tests/sessionless_golden.rs	2
 crates/oracledb-protocol/tests/tls_wallet.rs	26
 crates/oracledb-protocol/tests/tpc_golden.rs	3
 crates/oracledb-pyshim/src/dbobject.rs	3
+crates/oracledb/src/arrow/builders.rs	7
 crates/oracledb/src/arrow/ipc.rs	1
-crates/oracledb/src/arrow/mod.rs	38
+crates/oracledb/src/arrow/mod.rs	39
 crates/oracledb/src/cursor_logic.rs	14
-crates/oracledb/src/lib.rs	134
+crates/oracledb/src/lib.rs	137
 crates/oracledb/src/lob_stream.rs	8
 crates/oracledb/src/obs.rs	6
-crates/oracledb/src/pool.rs	32
+crates/oracledb/src/pool.rs	33
 crates/oracledb/src/recovery.rs	1
 crates/oracledb/src/request.rs	11
 crates/oracledb/src/retry.rs	18
@@ -75,7 +76,7 @@ crates/oracledb/src/transport.rs	23
 crates/oracledb/src/version_cassettes.rs	12
 crates/oracledb/tests/access_token.rs	5
 crates/oracledb/tests/arrow_columnar_alloc.rs	1
-crates/oracledb/tests/arrow_columnar_diff.rs	7
+crates/oracledb/tests/arrow_columnar_diff.rs	9
 crates/oracledb/tests/arrow_golden.rs	2
 crates/oracledb/tests/asupersync_spike.rs	1
 crates/oracledb/tests/cancel_then_reuse.rs	1
@@ -86,7 +87,7 @@ crates/oracledb/tests/derive_trybuild.rs	1
 crates/oracledb/tests/differentiator_metamorphic.rs	7
 crates/oracledb/tests/e2e_live.rs	7
 crates/oracledb/tests/from_row_derive.rs	10
-crates/oracledb/tests/integration_arrow.rs	2
+crates/oracledb/tests/integration_arrow.rs	3
 crates/oracledb/tests/integration_library.rs	13
 crates/oracledb/tests/live_borrowed_fetch.rs	2
 crates/oracledb/tests/live_connect.rs	1
@@ -98,6 +99,7 @@ crates/oracledb/tests/live_error_classification.rs	5
 crates/oracledb/tests/live_lob_stream.rs	2
 crates/oracledb/tests/live_named_bind_timeout.rs	2
 crates/oracledb/tests/live_object_decode.rs	2
+crates/oracledb/tests/live_object_precision_scale.rs	1
 crates/oracledb/tests/live_owned_row_stream.rs	7
 crates/oracledb/tests/live_ref_cursor.rs	3
 crates/oracledb/tests/live_retry.rs	1

@@ -55,6 +55,12 @@ pub enum PoolError {
     NoConnectionAvailable,
     /// Pool has busy connections and close was not forced (DPY-1005).
     HasBusyConnections,
+    /// A connection was returned/released to the pool but is not currently
+    /// checked out (a double-release, or a connection that was already dropped).
+    /// The reference raises DPY-1001 / `ERR_NOT_CONNECTED` here via its
+    /// verify-connected guard; we surface a typed error instead of the former
+    /// silent `Ok(())` no-op so caller programming errors are not hidden.
+    ConnectionNotAcquired,
     /// A backend operation (typically connection creation) failed. The
     /// message is the backend's error display, re-raised on the acquiring
     /// thread just like the reference re-raises background exceptions.
@@ -74,6 +80,9 @@ impl std::fmt::Display for PoolError {
             }
             PoolError::HasBusyConnections => {
                 write!(f, "connection pool has busy connections")
+            }
+            PoolError::ConnectionNotAcquired => {
+                write!(f, "connection is not currently acquired from this pool")
             }
             PoolError::Backend(message) => write!(f, "{message}"),
             PoolError::Cancelled(message) => write!(f, "pool acquire cancelled: {message}"),
@@ -1590,7 +1599,13 @@ impl<B: PoolBackend> PoolEngine<B> {
             return Ok(());
         }
         let Some(position) = state.busy.iter().position(|conn| conn.id == conn_id) else {
-            return Ok(());
+            // The connection is not currently checked out: a double-release, or a
+            // connection already dropped/returned. The reference raises DPY-1001
+            // here; return a typed error instead of the former silent no-op so a
+            // caller programming error is surfaced, not hidden. (The best-effort
+            // Drop path in `drain_drop_returns` keeps its silent skip — a queued
+            // return for an already-returned conn is expected cleanup, not a bug.)
+            return Err(PoolError::ConnectionNotAcquired);
         };
         let conn = state.busy.remove(position);
         let is_open = inner.backend.connection_is_open(&conn.conn);
@@ -3087,6 +3102,51 @@ mod tests {
         engine.return_connection(second).unwrap();
         engine.close(false).unwrap();
         assert_eq!(backend.closed.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn double_release_returns_typed_error_and_leaves_pool_intact() {
+        // Upstream #596-adjacent (#4b5aeb23d602): a double-release must surface a
+        // typed error (reference DPY-1001 / ERR_NOT_CONNECTED), NOT a silent Ok,
+        // and must not corrupt pool state.
+        let backend = Arc::new(FakeBackend::new());
+        let engine = PoolEngine::start(
+            Arc::clone(&backend),
+            test_config(1, 2, 1, POOL_GETMODE_WAIT),
+        )
+        .unwrap();
+        wait_for_open_count(&engine, 1);
+
+        let conn = engine.acquire(AcquireOptions::default()).unwrap();
+        assert_eq!(engine.busy_count().unwrap(), 1);
+
+        // First release succeeds.
+        engine.return_connection(conn).unwrap();
+        assert_eq!(engine.busy_count().unwrap(), 0);
+
+        // Second release of the SAME id is a typed error, not Ok.
+        let err = engine
+            .return_connection(conn)
+            .expect_err("double release must be a typed error");
+        assert!(
+            matches!(err, PoolError::ConnectionNotAcquired),
+            "expected ConnectionNotAcquired, got {err:?}"
+        );
+
+        // Releasing a never-acquired id is likewise a typed error.
+        let never = conn.wrapping_add(9999);
+        assert!(matches!(
+            engine.return_connection(never),
+            Err(PoolError::ConnectionNotAcquired)
+        ));
+
+        // State is intact: the connection is back in the idle set and re-acquire
+        // returns it (LIFO), then a normal release + close still balances.
+        assert_eq!(engine.busy_count().unwrap(), 0);
+        let reacquired = engine.acquire(AcquireOptions::default()).unwrap();
+        assert_eq!(reacquired, conn, "the returned conn is still reusable");
+        engine.return_connection(reacquired).unwrap();
+        engine.close(false).unwrap();
     }
 
     #[test]
