@@ -656,6 +656,7 @@ fn loopback_for_replay(
         serial_num: 0,
         server_version: None,
         server_version_tuple: None,
+        db_unique_name: None,
         capabilities,
         ttc_seq_num,
         sdu,
