@@ -1906,3 +1906,49 @@ mod interval_arrow_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod columnar_null_by_describe_tests {
+    //! Bead rust-oracledb-upstream-sync-2026-07-13-etib.5 (upstream #597): a
+    //! column that is NULL by describe (e.g. `SELECT null`) must append one Arrow
+    //! null PER ROW on the columnar path so columns stay row-synced. This lib
+    //! test (which runs in CI's offline `cargo hack test --lib` feature matrix)
+    //! guards the append-null path directly; a wire-level and a live variant live
+    //! in tests/arrow_columnar_diff.rs.
+    use super::*;
+    use arrow_array::Array;
+
+    #[test]
+    fn columnar_all_null_columns_stay_row_synced() {
+        // Two VARCHAR2 columns (how a bare NULL literal describes) with every
+        // cell NULL, over several rows.
+        let columns = vec![
+            ColumnMetadata::new("C1", 1).with_csfrm(1),
+            ColumnMetadata::new("C2", 1).with_csfrm(1),
+        ];
+        let rows: Vec<Vec<Option<QueryValue>>> = (0..3).map(|_| vec![None, None]).collect();
+        let options = ArrowFetchOptions::default();
+
+        let row_batch = build_record_batch(&columns, &rows, &options).expect("row batch");
+        let schema = Arc::new(arrow_schema_for_columns(&columns, &options).expect("schema"));
+        assert!(
+            columnar_supported(&schema),
+            "null VARCHAR schema is columnar"
+        );
+        let mut builder =
+            ColumnarBatchBuilder::new(schema, columns.clone(), rows.len()).expect("builder");
+        builder.append_owned(&rows).expect("append_owned");
+        let columnar_batch = builder.finish().expect("columnar batch");
+
+        assert_eq!(
+            row_batch, columnar_batch,
+            "columnar must equal row for all-null"
+        );
+        assert_eq!(columnar_batch.num_rows(), 3);
+        for c in 0..columnar_batch.num_columns() {
+            let column = columnar_batch.column(c);
+            assert_eq!(column.len(), 3, "column {c} length equals row count");
+            assert_eq!(column.null_count(), 3, "column {c} entirely null");
+        }
+    }
+}

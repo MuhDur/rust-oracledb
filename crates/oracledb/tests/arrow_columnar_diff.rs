@@ -151,6 +151,71 @@ fn columnar_fetch_decimals_byte_identical_to_row_path() {
     );
 }
 
+/// Build a frame of `num_rows` rows where every one of `num_cols` VARCHAR2
+/// columns is SQL NULL (zero-length wire field). The columns describe with
+/// buffer_size 0, mimicking a "null by describe" column such as `SELECT null`.
+fn build_all_null_frame(num_rows: usize, num_cols: usize) -> (Vec<u8>, Vec<ColumnMetadata>) {
+    let columns: Vec<ColumnMetadata> = (0..num_cols)
+        .map(|i| col(&format!("C{}", i + 1), ORA_TYPE_NUM_VARCHAR, 0, 0, 0))
+        .collect();
+    let mut w = TtcWriter::new();
+    for _ in 0..num_rows {
+        w.write_u8(TNS_MSG_TYPE_ROW_DATA);
+        for _ in 0..num_cols {
+            // Zero-length is the SQL NULL marker (null by describe).
+            w.write_bytes_with_length(&[]).unwrap();
+        }
+    }
+    w.write_u8(TNS_MSG_TYPE_END_OF_RESPONSE);
+    (w.into_bytes(), columns)
+}
+
+/// Regression for upstream python-oracledb #597 (ac575331fe3b): fetching a
+/// column that is NULL by describe into Arrow must append one Arrow null PER ROW
+/// on the columnar fast path, so every column keeps the same length and the
+/// batch never desyncs (upstream segfaulted here). Exercises the exact upstream
+/// repro shape `SELECT null as c1, null as c2 FROM dual CONNECT BY LEVEL <= 3`
+/// (3 rows of (None, None)) plus a single-null-column and a wider case.
+#[test]
+fn columnar_all_null_described_columns_stay_row_synced() {
+    use arrow_array::Array;
+
+    for (num_rows, num_cols) in [(3usize, 2usize), (5, 1), (1, 3), (0, 2)] {
+        let (payload, columns) = build_all_null_frame(num_rows, num_cols);
+        let caps = ClientCapabilities::default();
+        let options = ArrowFetchOptions::default();
+
+        let owned = parse_fetch_response_with_context(&payload, caps, &columns, None).unwrap();
+        assert_eq!(owned.rows.len(), num_rows);
+        let row_batch = build_record_batch(&columns, &owned.rows, &options).expect("row batch");
+
+        let borrowed = parse_query_response_borrowed(&payload, caps, &columns, None).unwrap();
+        assert_eq!(borrowed.batch.row_count(), num_rows);
+        let schema = Arc::new(arrow_schema_for_columns(&columns, &options).expect("schema"));
+        let columnar_batch =
+            build_record_batch_columnar(schema, &columns, &borrowed.batch).expect("columnar batch");
+
+        assert_eq!(
+            row_batch, columnar_batch,
+            "columnar must equal row for {num_cols} all-null column(s) x {num_rows} rows"
+        );
+        assert_eq!(columnar_batch.num_rows(), num_rows);
+        for c in 0..num_cols {
+            let column = columnar_batch.column(c);
+            assert_eq!(
+                column.len(),
+                num_rows,
+                "column {c} length must equal row count"
+            );
+            assert_eq!(
+                column.null_count(),
+                num_rows,
+                "column {c} must be entirely null"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // LIVE differential: same query through both real fetch paths against the
 // container. Self-skips cleanly when PYO_TEST_* is not configured.
@@ -239,6 +304,41 @@ mod live {
     #[test]
     fn live_columnar_equals_row_path_fetch_decimals() {
         run_diff(&ArrowFetchOptions::new().with_fetch_decimals(true));
+    }
+
+    /// The exact upstream #597 repro (ac575331fe3b): both fetch paths must
+    /// produce a 3-row batch of two all-null columns with equal lengths and no
+    /// desync/panic.
+    #[test]
+    fn live_null_by_describe_columns_stay_row_synced() {
+        use arrow_array::Array;
+
+        let Some(opts) = connect_options() else {
+            eprintln!("skipped live null-by-describe: PYO_TEST_* not configured");
+            return;
+        };
+        let mut conn = BlockingConnection::connect(opts).expect("connect");
+        let sql = "select null as c1, null as c2 from dual connect by level <= 3";
+        let options = ArrowFetchOptions::default();
+
+        let row_batch = BlockingConnection::fetch_all_record_batch(&mut conn, sql, 100, &options)
+            .expect("row-path null fetch");
+        let columnar_batch =
+            BlockingConnection::fetch_all_record_batch_columnar(&mut conn, sql, 100, &options)
+                .expect("columnar null fetch");
+
+        assert_eq!(row_batch.num_rows(), 3);
+        assert_eq!(
+            row_batch, columnar_batch,
+            "columnar must equal row for null-by-describe"
+        );
+        for c in 0..columnar_batch.num_columns() {
+            let column = columnar_batch.column(c);
+            assert_eq!(column.len(), 3, "column {c} length");
+            assert_eq!(column.null_count(), 3, "column {c} all-null");
+        }
+
+        BlockingConnection::close(conn).expect("close");
     }
 }
 
