@@ -302,6 +302,7 @@ pub fn oracledb::Connection::close_cursor(&mut self, u32)
 pub async fn oracledb::Connection::commit(&mut self, &asupersync::cx::cx::Cx) -> oracledb::Result<()>
 pub async fn oracledb::Connection::connect(&asupersync::cx::cx::Cx, oracledb::ConnectOptions) -> oracledb::Result<Self>
 pub async fn oracledb::Connection::create_temp_lob(&mut self, &asupersync::cx::cx::Cx, u8, u8) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
+pub fn oracledb::Connection::db_unique_name(&self) -> &str
 pub async fn oracledb::Connection::define_and_fetch_rows_with_columns(&mut self, &asupersync::cx::cx::Cx, u32, u32, &[oracledb_protocol::thin::types::ColumnMetadata], core::option::Option<&[core::option::Option<oracledb_protocol::thin::types::QueryValue>]>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
 pub async fn oracledb::Connection::describe_object_type(&mut self, &asupersync::cx::cx::Cx, &str, &str) -> oracledb::Result<oracledb::ObjectType>
 pub fn oracledb::Connection::descriptor(&self) -> &oracledb_protocol::net::EasyConnect
@@ -325,12 +326,15 @@ pub async fn oracledb::Connection::fetch_rows_with_columns(&mut self, &asupersyn
 pub async fn oracledb::Connection::for_each_row_ref<F>(&mut self, &asupersync::cx::cx::Cx, &str, u32, F) -> oracledb::Result<()> where F: core::ops::function::FnMut(&[core::option::Option<oracledb_protocol::thin::types::QueryValueRef<'_>>]) -> oracledb::Result<()>
 pub async fn oracledb::Connection::free_temp_lobs(&mut self, &asupersync::cx::cx::Cx, &[alloc::vec::Vec<u8>]) -> oracledb::Result<()>
 pub async fn oracledb::Connection::free_temp_lobs_with_timeout(&mut self, &asupersync::cx::cx::Cx, &[alloc::vec::Vec<u8>], core::option::Option<u32>) -> oracledb::Result<()>
+pub fn oracledb::Connection::host(&self) -> &str
 pub fn oracledb::Connection::identity(&self) -> &oracledb_protocol::ClientIdentity
 pub fn oracledb::Connection::is_dead(&self) -> bool
 pub async fn oracledb::Connection::notify_register(&mut self, &asupersync::cx::cx::Cx, &[u8]) -> oracledb::Result<()>
 pub async fn oracledb::Connection::ping(&mut self, &asupersync::cx::cx::Cx) -> oracledb::Result<()>
 pub async fn oracledb::Connection::ping_with_timeout(&mut self, &asupersync::cx::cx::Cx, u32) -> oracledb::Result<()>
+pub fn oracledb::Connection::port(&self) -> u16
 pub fn oracledb::Connection::prepare_sessionless_suspend_on_success(&mut self) -> oracledb::Result<()>
+pub fn oracledb::Connection::protocol(&self) -> oracledb_protocol::net::Protocol
 pub fn oracledb::Connection::protocol_version(&self) -> u16
 pub async fn oracledb::Connection::query<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::Rows<'_>>
 pub async fn oracledb::Connection::query_all<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<alloc::vec::Vec<oracledb::Row>>
@@ -1260,6 +1264,7 @@ pub fn oracledb::Connection::close_cursor(&mut self, u32)
 pub async fn oracledb::Connection::commit(&mut self, &asupersync::cx::cx::Cx) -> oracledb::Result<()>
 pub async fn oracledb::Connection::connect(&asupersync::cx::cx::Cx, oracledb::ConnectOptions) -> oracledb::Result<Self>
 pub async fn oracledb::Connection::create_temp_lob(&mut self, &asupersync::cx::cx::Cx, u8, u8) -> oracledb::Result<oracledb_protocol::thin::types::LobReadResult>
+pub fn oracledb::Connection::db_unique_name(&self) -> &str
 pub async fn oracledb::Connection::define_and_fetch_rows_with_columns(&mut self, &asupersync::cx::cx::Cx, u32, u32, &[oracledb_protocol::thin::types::ColumnMetadata], core::option::Option<&[core::option::Option<oracledb_protocol::thin::types::QueryValue>]>) -> oracledb::Result<oracledb_protocol::thin::types::QueryResult>
 pub async fn oracledb::Connection::describe_object_type(&mut self, &asupersync::cx::cx::Cx, &str, &str) -> oracledb::Result<oracledb::ObjectType>
 pub fn oracledb::Connection::descriptor(&self) -> &oracledb_protocol::net::EasyConnect
@@ -1283,12 +1288,15 @@ pub async fn oracledb::Connection::fetch_rows_with_columns(&mut self, &asupersyn
 pub async fn oracledb::Connection::for_each_row_ref<F>(&mut self, &asupersync::cx::cx::Cx, &str, u32, F) -> oracledb::Result<()> where F: core::ops::function::FnMut(&[core::option::Option<oracledb_protocol::thin::types::QueryValueRef<'_>>]) -> oracledb::Result<()>
 pub async fn oracledb::Connection::free_temp_lobs(&mut self, &asupersync::cx::cx::Cx, &[alloc::vec::Vec<u8>]) -> oracledb::Result<()>
 pub async fn oracledb::Connection::free_temp_lobs_with_timeout(&mut self, &asupersync::cx::cx::Cx, &[alloc::vec::Vec<u8>], core::option::Option<u32>) -> oracledb::Result<()>
+pub fn oracledb::Connection::host(&self) -> &str
 pub fn oracledb::Connection::identity(&self) -> &oracledb_protocol::ClientIdentity
 pub fn oracledb::Connection::is_dead(&self) -> bool
 pub async fn oracledb::Connection::notify_register(&mut self, &asupersync::cx::cx::Cx, &[u8]) -> oracledb::Result<()>
 pub async fn oracledb::Connection::ping(&mut self, &asupersync::cx::cx::Cx) -> oracledb::Result<()>
 pub async fn oracledb::Connection::ping_with_timeout(&mut self, &asupersync::cx::cx::Cx, u32) -> oracledb::Result<()>
+pub fn oracledb::Connection::port(&self) -> u16
 pub fn oracledb::Connection::prepare_sessionless_suspend_on_success(&mut self) -> oracledb::Result<()>
+pub fn oracledb::Connection::protocol(&self) -> oracledb_protocol::net::Protocol
 pub fn oracledb::Connection::protocol_version(&self) -> u16
 pub async fn oracledb::Connection::query<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<oracledb::Rows<'_>>
 pub async fn oracledb::Connection::query_all<'p>(&mut self, &asupersync::cx::cx::Cx, &str, impl core::convert::Into<oracledb::Params<'p>>) -> oracledb::Result<alloc::vec::Vec<oracledb::Row>>

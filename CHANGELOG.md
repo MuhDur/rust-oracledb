@@ -28,9 +28,40 @@ ranges, release-matrix artifacts, and the checked-in API/provenance ledgers.
 
 ## [Unreleased]
 
-## [0.8.3](https://github.com/MuhDur/rust-oracledb/compare/v0.8.2...v0.8.3) - 2026-07-12
+## [0.8.3](https://github.com/MuhDur/rust-oracledb/compare/v0.8.2...v0.8.3) - 2026-07-14
+
+### Added
+
+- **Arrow interval support.** `INTERVAL DAY TO SECOND` and `INTERVAL YEAR TO
+  MONTH` columns now map to the Arrow `MonthDayNano` interval on both the row and
+  columnar `fetch_df` paths (previously an unsupported-type error), matching
+  python-oracledb's DataFrame conversion. See
+  [e0be7e8](https://github.com/MuhDur/rust-oracledb/commit/e0be7e8).
+- **Columnar VECTOR fast path.** Dense, fixed-dimension `VECTOR` columns decode
+  directly into a contiguous Arrow `FixedSizeList` child buffer on the columnar
+  path — no per-row `QueryValue` materialisation — the 23ai/RAG bulk-embedding
+  path where python-oracledb returns one GIL-bound list per row. See
+  [238dc27](https://github.com/MuhDur/rust-oracledb/commit/238dc27).
+- **Connection endpoint accessors.** `Connection::host()`, `port()`, and
+  `protocol()` expose the connected endpoint, and `db_unique_name()` returns
+  `SYS_CONTEXT('USERENV','DB_UNIQUE_NAME')` (parsed from the AUTH phase-two
+  `AUTH_SC_REAL_DBUNIQUE_NAME` field). Additive.
 
 ### Fixed
+
+- **TIMESTAMP WITH TIME ZONE Arrow values are wall-clock.** A TSTZ column
+  fetched into a tz-naive Arrow `Timestamp` is now emitted at its wall-clock time
+  instead of being UTC-normalised, matching python-oracledb (an Arrow
+  `Timestamp(_, None)` carries no zone). See
+  [eee7599](https://github.com/MuhDur/rust-oracledb/commit/eee7599).
+- **DbObject TIMESTAMP/INTERVAL attribute precision and scale.** Object-type
+  attribute describe now reports the data-dictionary precision/scale for
+  TIMESTAMP / TSTZ / TSLTZ / INTERVAL types instead of `(0, 0)`. See
+  [66750d2](https://github.com/MuhDur/rust-oracledb/commit/66750d2).
+- **Pool double-release is a typed error.** Releasing a connection that is not
+  checked out returns `PoolError::ConnectionNotAcquired` (surfaced as DPY-1001
+  through the Python shim) instead of a silent `Ok`. See
+  [e29a611](https://github.com/MuhDur/rust-oracledb/commit/e29a611).
 
 - **One logical deadline for owning row streams.** Continuation pages now reuse
   the deadline captured for the initial query instead of receiving a fresh

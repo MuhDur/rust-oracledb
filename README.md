@@ -263,11 +263,14 @@ cell. Measured on a 5000-row × 4-column batch with an allocation counter:
 
 With the `arrow` feature, `fetch_all_record_batch_columnar` decodes a fetched
 batch directly into per-column Arrow builders — NUMBER → `Decimal128` (straight
-from the inline i128 coefficient + scale), VARCHAR/RAW → offset buffers, dates →
-Arrow temporal, NULLs → a `NullBuffer` — skipping per-row `QueryValue`
-materialisation and the transpose pass entirely. Verified byte-identical to the
-row path (synthetic + a live 12 000-row mixed-type fetch). On a 5000 × 10
-analytics batch:
+from the inline i128 coefficient + scale), VARCHAR/RAW → offset buffers, dates
+and `TIMESTAMP`/`TIMESTAMP WITH TIME ZONE` → Arrow temporal (tz-naive
+wall-clock), `INTERVAL DAY TO SECOND`/`YEAR TO MONTH` → the Arrow `MonthDayNano`
+interval, dense fixed-dimension `VECTOR` → a contiguous `FixedSizeList` child
+buffer, NULLs → a `NullBuffer` — skipping per-row `QueryValue` materialisation
+and the transpose pass entirely. Verified byte-identical to the row path
+(synthetic + a live 12 000-row mixed-type fetch). On a 5000 × 10 analytics
+batch:
 
 | | row → `RecordBatch` | columnar |
 |---|---|---|
