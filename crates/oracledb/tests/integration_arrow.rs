@@ -12,8 +12,8 @@
 #![cfg(feature = "arrow")]
 
 use arrow_array::cast::AsArray;
-use arrow_array::types::{Float32Type, Float64Type, Int64Type};
-use arrow_schema::DataType;
+use arrow_array::types::{Float32Type, Float64Type, Int64Type, IntervalMonthDayNanoType};
+use arrow_schema::{DataType, IntervalUnit};
 use oracledb::arrow::ArrowFetchOptions;
 use oracledb::{BlockingConnection, ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;
@@ -110,6 +110,97 @@ fn fetch_record_batch_from_live_query() {
         let _ = BlockingConnection::execute_raw(
             conn,
             "drop table rust_itest_arrow purge",
+            1,
+            &[],
+            oracledb::protocol::thin::ExecuteOptions::default(),
+            None,
+        );
+    });
+}
+
+/// INTERVAL DAY TO SECOND / YEAR TO MONTH columns fetched into Arrow must map to
+/// the `MonthDayNano` interval with the correct months/days/nanoseconds, and the
+/// columnar fast path must agree with the row path
+/// (bead rust-oracledb-upstream-sync-2026-07-13-etib.6).
+#[test]
+fn fetch_record_batch_interval_columns() {
+    with_connection("fetch_record_batch_interval_columns", |conn| {
+        let _ = BlockingConnection::execute_raw(
+            conn,
+            "drop table rust_itest_arrow_intvl purge",
+            1,
+            &[],
+            oracledb::protocol::thin::ExecuteOptions::default(),
+            None,
+        );
+        BlockingConnection::execute_raw(
+            conn,
+            "create table rust_itest_arrow_intvl (\
+               ds interval day(2) to second(6), \
+               ym interval year(4) to month)",
+            1,
+            &[],
+            oracledb::protocol::thin::ExecuteOptions::default(),
+            None,
+        )
+        .expect("create interval table");
+        BlockingConnection::execute_raw(
+            conn,
+            "insert into rust_itest_arrow_intvl values (\
+               interval '5 02:34:56.123456' day(2) to second(6), \
+               interval '3-7' year(4) to month)",
+            1,
+            &[],
+            oracledb::protocol::thin::ExecuteOptions::default(),
+            None,
+        )
+        .expect("insert interval row");
+        BlockingConnection::commit(conn).expect("commit");
+
+        let sql = "select ds, ym from rust_itest_arrow_intvl";
+        let options = ArrowFetchOptions::default();
+        let batch = BlockingConnection::fetch_all_record_batch(conn, sql, 100, &options)
+            .expect("interval arrow fetch");
+
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(
+            batch.schema().field(0).data_type(),
+            &DataType::Interval(IntervalUnit::MonthDayNano)
+        );
+        assert_eq!(
+            batch.schema().field(1).data_type(),
+            &DataType::Interval(IntervalUnit::MonthDayNano)
+        );
+
+        let ds = batch
+            .column(0)
+            .as_primitive::<IntervalMonthDayNanoType>()
+            .value(0);
+        assert_eq!(ds.months, 0);
+        assert_eq!(ds.days, 5);
+        // (2*3600 + 34*60 + 56) s = 9296 s; + 0.123456 s = 123_456_000 ns.
+        assert_eq!(ds.nanoseconds, 9296 * 1_000_000_000 + 123_456_000);
+
+        let ym = batch
+            .column(1)
+            .as_primitive::<IntervalMonthDayNanoType>()
+            .value(0);
+        assert_eq!(ym.months, 3 * 12 + 7);
+        assert_eq!(ym.days, 0);
+        assert_eq!(ym.nanoseconds, 0);
+
+        // The columnar fast path must agree with the row path cell-for-cell.
+        let columnar =
+            BlockingConnection::fetch_all_record_batch_columnar(conn, sql, 100, &options)
+                .expect("interval columnar fetch");
+        assert_eq!(
+            batch, columnar,
+            "columnar interval batch must equal row path"
+        );
+
+        let _ = BlockingConnection::execute_raw(
+            conn,
+            "drop table rust_itest_arrow_intvl purge",
             1,
             &[],
             oracledb::protocol::thin::ExecuteOptions::default(),

@@ -439,8 +439,9 @@ impl crate::BlockingConnection {
 
     /// Synchronous columnar `fetch_df_all` (bead wf7). Byte-identical to
     /// [`fetch_all_record_batch`](Self::fetch_all_record_batch) but decodes
-    /// straight into per-column Arrow builders (no row materialization). Falls
-    /// back to the row path transparently for VECTOR columns.
+    /// straight into per-column Arrow builders (no row materialization). Dense
+    /// fixed-dimension VECTOR columns decode directly here; only flexible-dim
+    /// (List) or sparse (Struct) VECTOR columns fall back to the row path.
     pub fn fetch_all_record_batch_columnar(
         connection: &mut crate::Connection,
         sql: &str,
@@ -812,7 +813,9 @@ mod tests {
 
     #[test]
     fn unsupported_types_raise_dpy_3030() {
-        for (name, ora_type) in [("CUR", 102u8), ("OBJ", 109), ("J", 119), ("IYM", 182)] {
+        // Note: INTERVAL DS/YM (183/182) are now supported (etib.6) and are no
+        // longer in this list; JSON/Cursor/Object stay unsupported.
+        for (name, ora_type) in [("CUR", 102u8), ("OBJ", 109), ("J", 119)] {
             let columns = vec![column(name, ora_type, 0, 0)];
             let err = build_record_batch(&columns, &[], &ArrowFetchOptions::default())
                 .expect_err("unsupported type must error");

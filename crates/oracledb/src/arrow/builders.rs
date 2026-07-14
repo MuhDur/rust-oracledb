@@ -3,16 +3,17 @@ use std::sync::Arc;
 use arrow_array::builder::{
     BinaryBuilder, BooleanBuilder, Date32Builder, Date64Builder, Decimal128Builder,
     FixedSizeBinaryBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder, Int16Builder,
-    Int32Builder, Int64Builder, Int8Builder, LargeBinaryBuilder, LargeStringBuilder, ListBuilder,
-    StringBuilder, UInt16Builder, UInt32Builder, UInt64Builder, UInt8Builder,
+    Int32Builder, Int64Builder, Int8Builder, IntervalMonthDayNanoBuilder, LargeBinaryBuilder,
+    LargeStringBuilder, ListBuilder, StringBuilder, UInt16Builder, UInt32Builder, UInt64Builder,
+    UInt8Builder,
 };
 use arrow_array::types::{
     ArrowTimestampType, TimestampMicrosecondType, TimestampMillisecondType,
     TimestampNanosecondType, TimestampSecondType,
 };
 use arrow_array::{ArrayRef, PrimitiveArray, RecordBatch, StructArray};
-use arrow_buffer::NullBuffer;
-use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef, TimeUnit};
+use arrow_buffer::{IntervalMonthDayNano, NullBuffer};
+use arrow_schema::{DataType, Field, Fields, IntervalUnit, Schema, SchemaRef, TimeUnit};
 
 use oracledb_protocol::thin::{BorrowedRowBatch, ColumnMetadata, QueryValue, QueryValueRef};
 use oracledb_protocol::vector::{Vector, VectorValues};
@@ -404,6 +405,44 @@ fn build_timestamp_column<'a, T: ArrowTimestampType>(
     Ok(Arc::new(PrimitiveArray::<T>::from_iter(values)) as ArrayRef)
 }
 
+/// INTERVAL DAY TO SECOND -> Arrow `MonthDayNano` interval (converters.pyx
+/// `convert_interval_ds_to_arrow`): `months = 0`, `days` as-is, and the whole
+/// sub-day part folded into `nanoseconds`. `fseconds` is already a nanosecond
+/// count (see `decode_interval_ds` in the protocol crate), so it is added
+/// directly. The sub-day components are bounded (hours 0-23, minutes/seconds
+/// 0-59), so the `i64` nanosecond total never overflows.
+fn interval_ds_month_day_nano(
+    days: i32,
+    hours: i32,
+    minutes: i32,
+    seconds: i32,
+    fseconds: i32,
+) -> IntervalMonthDayNano {
+    let total_seconds = i64::from(hours) * 3600 + i64::from(minutes) * 60 + i64::from(seconds);
+    let nanoseconds = total_seconds * 1_000_000_000 + i64::from(fseconds);
+    IntervalMonthDayNano::new(0, days, nanoseconds)
+}
+
+/// INTERVAL YEAR TO MONTH -> Arrow `MonthDayNano` interval (converters.pyx
+/// `convert_interval_ym_to_arrow`): a total month count, no days/nanoseconds.
+/// Fails closed if `years * 12 + months` exceeds the Arrow `i32` month field
+/// rather than silently wrapping (only reachable with an `INTERVAL YEAR(9)`
+/// extreme; normal intervals are well within range).
+fn interval_ym_month_day_nano(
+    column: &ColumnMetadata,
+    years: i32,
+    months: i32,
+) -> Result<IntervalMonthDayNano> {
+    let total = i64::from(years) * 12 + i64::from(months);
+    let total = i32::try_from(total).map_err(|_| {
+        invalid_value(
+            column,
+            "INTERVAL YEAR TO MONTH exceeds the Arrow month range",
+        )
+    })?;
+    Ok(IntervalMonthDayNano::new(total, 0, 0))
+}
+
 fn build_column_array<'a>(
     data_type: &DataType,
     column: &ColumnMetadata,
@@ -618,6 +657,28 @@ fn build_column_array<'a>(
                             .map_err(|_| invalid_value(column, "date out of range for date64"))?;
                         builder.append_value(millis);
                     }
+                }
+            }
+            Ok(Arc::new(builder.finish()))
+        }
+        DataType::Interval(IntervalUnit::MonthDayNano) => {
+            let mut builder = IntervalMonthDayNanoBuilder::with_capacity(capacity);
+            for cell in cells {
+                match cell {
+                    None => builder.append_null(),
+                    Some(QueryValue::IntervalDS {
+                        days,
+                        hours,
+                        minutes,
+                        seconds,
+                        fseconds,
+                    }) => builder.append_value(interval_ds_month_day_nano(
+                        *days, *hours, *minutes, *seconds, *fseconds,
+                    )),
+                    Some(QueryValue::IntervalYM { years, months }) => {
+                        builder.append_value(interval_ym_month_day_nano(column, *years, *months)?)
+                    }
+                    Some(_) => return Err(invalid_value(column, "expected an interval value")),
                 }
             }
             Ok(Arc::new(builder.finish()))
@@ -1076,6 +1137,9 @@ enum ColumnBuilder {
     TimestampNano(Vec<Option<i64>>),
     Date32(Date32Builder),
     Date64(Date64Builder),
+    /// INTERVAL DAY TO SECOND / YEAR TO MONTH -> Arrow `MonthDayNano` interval
+    /// (bead rust-oracledb-upstream-sync-2026-07-13-etib.6).
+    IntervalMonthDayNano(IntervalMonthDayNanoBuilder),
     /// Dense fixed-dimension VECTOR fast path (bead rust-oracledb-0mk): every
     /// row's `dim` element values stream contiguously into the child value
     /// buffer, so the columnar path handles VECTOR directly instead of falling
@@ -1133,6 +1197,9 @@ impl ColumnBuilder {
             }
             DataType::Date32 => ColumnBuilder::Date32(Date32Builder::with_capacity(capacity)),
             DataType::Date64 => ColumnBuilder::Date64(Date64Builder::with_capacity(capacity)),
+            DataType::Interval(IntervalUnit::MonthDayNano) => ColumnBuilder::IntervalMonthDayNano(
+                IntervalMonthDayNanoBuilder::with_capacity(capacity),
+            ),
             // Dense fixed-dimension VECTOR (bead rust-oracledb-0mk): handled
             // directly in the columnar path. `for_item` returns `None` for a
             // non-vector element type, so the caller falls back to the row path.
@@ -1321,6 +1388,37 @@ impl ColumnBuilder {
                     b.append_value(millis);
                 }
             },
+            ColumnBuilder::IntervalMonthDayNano(b) => match cell {
+                None => b.append_null(),
+                // INTERVAL is a borrowable scalar: the borrowed decoder yields
+                // it as a `QueryValueRef::IntervalDS/YM` on fetch pages, and the
+                // first execute page arrives wrapped as `Owned(&Vector::…)`.
+                Some(QueryValueRef::IntervalDS {
+                    days,
+                    hours,
+                    minutes,
+                    seconds,
+                    fseconds,
+                }) => b.append_value(interval_ds_month_day_nano(
+                    days, hours, minutes, seconds, fseconds,
+                )),
+                Some(QueryValueRef::IntervalYM { years, months }) => {
+                    b.append_value(interval_ym_month_day_nano(column, years, months)?)
+                }
+                Some(QueryValueRef::Owned(QueryValue::IntervalDS {
+                    days,
+                    hours,
+                    minutes,
+                    seconds,
+                    fseconds,
+                })) => b.append_value(interval_ds_month_day_nano(
+                    *days, *hours, *minutes, *seconds, *fseconds,
+                )),
+                Some(QueryValueRef::Owned(QueryValue::IntervalYM { years, months })) => {
+                    b.append_value(interval_ym_month_day_nano(column, *years, *months)?)
+                }
+                Some(_) => return Err(invalid_value(column, "expected an interval value")),
+            },
             ColumnBuilder::VectorFixedSizeList(b, dim) => match cell {
                 None => b.append_null(*dim),
                 // VECTOR is a cold, non-borrowable type: the borrowed decoder
@@ -1376,6 +1474,7 @@ impl ColumnBuilder {
             }
             ColumnBuilder::Date32(mut b) => Arc::new(b.finish()),
             ColumnBuilder::Date64(mut b) => Arc::new(b.finish()),
+            ColumnBuilder::IntervalMonthDayNano(mut b) => Arc::new(b.finish()),
             ColumnBuilder::VectorFixedSizeList(mut b, _) => b.finish(),
         }
     }
@@ -1671,5 +1770,139 @@ mod columnar_vector_tests {
         ];
         let options = ArrowFetchOptions::new().with_vector_fixed_size_list(true);
         assert_columnar_equals_row(&columns, &rows, &options);
+    }
+}
+
+#[cfg(test)]
+mod interval_arrow_tests {
+    //! Bead rust-oracledb-upstream-sync-2026-07-13-etib.6: INTERVAL DAY TO
+    //! SECOND / YEAR TO MONTH map to the Arrow `MonthDayNano` interval
+    //! (converters.pyx `convert_interval_ds_to_arrow` /
+    //! `convert_interval_ym_to_arrow`). These tests pin the exact month/day/
+    //! nanosecond arithmetic and prove the columnar path is byte-identical to
+    //! the row path over intervals + nulls.
+    use super::*;
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::IntervalMonthDayNanoType;
+    use arrow_array::Array;
+
+    const ORA_TYPE_NUM_INTERVAL_YM: u8 = 182;
+    const ORA_TYPE_NUM_INTERVAL_DS: u8 = 183;
+
+    fn interval_column(name: &str, ora_type_num: u8) -> ColumnMetadata {
+        ColumnMetadata::new(name, ora_type_num).with_csfrm(1)
+    }
+
+    #[test]
+    fn interval_ds_maps_to_month_day_nano() {
+        // INTERVAL '2 03:04:05.000000006' DAY TO SECOND(9): fseconds is already a
+        // nanosecond count in our decoder, so nanos =
+        //   (3*3600 + 4*60 + 5) * 1e9 + 6 = 11045 * 1e9 + 6.
+        let columns = vec![interval_column("V", ORA_TYPE_NUM_INTERVAL_DS)];
+        let rows = vec![
+            vec![Some(QueryValue::IntervalDS {
+                days: 2,
+                hours: 3,
+                minutes: 4,
+                seconds: 5,
+                fseconds: 6,
+            })],
+            vec![None],
+        ];
+        let batch =
+            build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
+        assert_eq!(
+            batch.schema().field(0).data_type(),
+            &DataType::Interval(IntervalUnit::MonthDayNano)
+        );
+        let arr = batch.column(0).as_primitive::<IntervalMonthDayNanoType>();
+        assert_eq!(arr.len(), 2);
+        assert!(arr.is_null(1));
+        let v = arr.value(0);
+        assert_eq!(v.months, 0);
+        assert_eq!(v.days, 2);
+        assert_eq!(v.nanoseconds, 11_045 * 1_000_000_000 + 6);
+    }
+
+    #[test]
+    fn interval_ym_maps_to_month_day_nano() {
+        // INTERVAL '1-2' YEAR TO MONTH -> 1*12 + 2 = 14 months, no days/nanos.
+        let columns = vec![interval_column("V", ORA_TYPE_NUM_INTERVAL_YM)];
+        let rows = vec![
+            vec![Some(QueryValue::IntervalYM {
+                years: 1,
+                months: 2,
+            })],
+            vec![Some(QueryValue::IntervalYM {
+                years: -3,
+                months: 0,
+            })],
+        ];
+        let batch =
+            build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
+        let arr = batch.column(0).as_primitive::<IntervalMonthDayNanoType>();
+        assert_eq!(arr.value(0).months, 14);
+        assert_eq!(arr.value(0).days, 0);
+        assert_eq!(arr.value(0).nanoseconds, 0);
+        assert_eq!(arr.value(1).months, -36);
+    }
+
+    #[test]
+    fn columnar_interval_equals_row_path() {
+        // Mixed INTERVAL DS / YM / NULL through both paths: the columnar builder
+        // must produce a batch byte-identical to the row path.
+        let columns = vec![
+            interval_column("DS", ORA_TYPE_NUM_INTERVAL_DS),
+            interval_column("YM", ORA_TYPE_NUM_INTERVAL_YM),
+        ];
+        let rows = vec![
+            vec![
+                Some(QueryValue::IntervalDS {
+                    days: 5,
+                    hours: 2,
+                    minutes: 34,
+                    seconds: 56,
+                    fseconds: 123_456_000,
+                }),
+                Some(QueryValue::IntervalYM {
+                    years: 3,
+                    months: 7,
+                }),
+            ],
+            vec![
+                None,
+                Some(QueryValue::IntervalYM {
+                    years: 0,
+                    months: 11,
+                }),
+            ],
+            vec![
+                Some(QueryValue::IntervalDS {
+                    days: -1,
+                    hours: -2,
+                    minutes: -3,
+                    seconds: -4,
+                    fseconds: -5,
+                }),
+                None,
+            ],
+        ];
+        let options = ArrowFetchOptions::default();
+
+        let row_batch = build_record_batch(&columns, &rows, &options).expect("row batch");
+        let schema = Arc::new(arrow_schema_for_columns(&columns, &options).expect("schema"));
+        assert!(
+            columnar_supported(&schema),
+            "interval schema must be columnar-supported"
+        );
+        let mut builder =
+            ColumnarBatchBuilder::new(schema, columns.clone(), rows.len()).expect("builder");
+        builder.append_owned(&rows).expect("append_owned");
+        let columnar_batch = builder.finish().expect("columnar batch");
+
+        assert_eq!(
+            row_batch, columnar_batch,
+            "columnar interval batch must equal the row path cell-for-cell"
+        );
     }
 }

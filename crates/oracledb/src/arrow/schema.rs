@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use arrow_schema::{DataType, Field, Schema, TimeUnit};
+use arrow_schema::{DataType, Field, IntervalUnit, Schema, TimeUnit};
 
 use oracledb_protocol::thin::{
     ColumnMetadata, CS_FORM_NCHAR, ORA_TYPE_NUM_BINARY_DOUBLE, ORA_TYPE_NUM_BINARY_FLOAT,
@@ -164,6 +164,9 @@ pub fn arrow_type_name(data_type: &DataType) -> String {
         DataType::Date32 => "date32".to_string(),
         DataType::Date64 => "date64".to_string(),
         DataType::Timestamp(_, _) => "timestamp".to_string(),
+        DataType::Interval(IntervalUnit::MonthDayNano) => "interval_month_day_nano".to_string(),
+        DataType::Interval(IntervalUnit::DayTime) => "interval_day_time".to_string(),
+        DataType::Interval(IntervalUnit::YearMonth) => "interval_months".to_string(),
         DataType::List(_) => "list".to_string(),
         DataType::FixedSizeList(_, _) => "fixed_size_list".to_string(),
         DataType::Struct(_) => "struct".to_string(),
@@ -227,6 +230,13 @@ fn default_arrow_type(column: &ColumnMetadata, options: &ArrowFetchOptions) -> R
             Ok(DataType::Timestamp(unit, None))
         }
         ORA_TYPE_NUM_VECTOR => vector_data_type(column, options),
+        // INTERVAL DAY TO SECOND / YEAR TO MONTH both map to the Arrow
+        // MonthDayNano interval (metadata.pyx `_create_arrow_schema`:
+        // `NANOARROW_TYPE_INTERVAL_MONTH_DAY_NANO`). DS carries days + a
+        // sub-day nanosecond count; YM carries a total month count.
+        ORA_TYPE_NUM_INTERVAL_DS | ORA_TYPE_NUM_INTERVAL_YM => {
+            Ok(DataType::Interval(IntervalUnit::MonthDayNano))
+        }
         _ => Err(ArrowConversionError::UnsupportedDataType {
             db_type_name: db_type_name(column),
         }),
@@ -269,6 +279,9 @@ fn check_convert_to_arrow(column: &ColumnMetadata, requested: &DataType) -> Resu
         }
         ORA_TYPE_NUM_VARCHAR | ORA_TYPE_NUM_CHAR | ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_CLOB => {
             matches!(requested, DataType::Utf8 | DataType::LargeUtf8)
+        }
+        ORA_TYPE_NUM_INTERVAL_DS | ORA_TYPE_NUM_INTERVAL_YM => {
+            matches!(requested, DataType::Interval(IntervalUnit::MonthDayNano))
         }
         _ => false,
     };
