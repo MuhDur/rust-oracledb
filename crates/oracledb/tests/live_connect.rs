@@ -76,3 +76,70 @@ fn live_connect_ping_and_close() {
             .expect("Rust thin logoff should round-trip");
     });
 }
+
+/// etib.7 + etib.8: the host()/port()/protocol() accessors expose the connected
+/// endpoint, and db_unique_name() equals SYS_CONTEXT('USERENV','DB_UNIQUE_NAME').
+#[test]
+#[ignore = "requires local Oracle listener from scripts/container.sh up"]
+fn live_endpoint_and_db_unique_name_accessors() {
+    let reactor = reactor::create_reactor().expect("native reactor should build for live I/O");
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .expect("current-thread Asupersync runtime should build");
+
+    runtime.block_on(async {
+        let cx = Cx::current().expect("Runtime::block_on should install an ambient Cx");
+        let identity = ClientIdentity::new(
+            "rust-oracledb",
+            "rusthost",
+            "rustuser",
+            "rustterm",
+            "rust-oracledb thn : 0.0.0",
+        )
+        .expect("test identity should be valid");
+        let options = ConnectOptions::new(
+            common::live_conn_string_or(common::FREE23_CONNECT_STRING),
+            common::live_user_or(common::FREE23_USER),
+            std::env::var("PYO_TEST_MAIN_PASSWORD")
+                .expect("PYO_TEST_MAIN_PASSWORD must be set for ignored live test"),
+            identity,
+        );
+        let mut conn = Connection::connect(&cx, options)
+            .await
+            .expect("Rust thin connection should authenticate");
+
+        // host()/port()/protocol() reflect the resolved (connected) descriptor.
+        assert_eq!(conn.host(), conn.descriptor().host);
+        assert_eq!(conn.port(), conn.descriptor().port);
+        assert_eq!(conn.protocol(), conn.descriptor().protocol);
+        assert!(!conn.host().is_empty(), "host must be populated");
+        assert!(conn.port() > 0, "port must be populated");
+
+        // db_unique_name() == SYS_CONTEXT('USERENV','DB_UNIQUE_NAME').
+        let result = conn
+            .execute_raw(
+                &cx,
+                "select sys_context('USERENV','DB_UNIQUE_NAME') from dual",
+                2,
+                &[],
+                oracledb::protocol::thin::ExecuteOptions::default(),
+                None,
+            )
+            .await
+            .expect("query DB_UNIQUE_NAME");
+        let expected = match &result.rows[0][0] {
+            Some(QueryValue::Text(value)) => value.clone(),
+            other => panic!("expected DB_UNIQUE_NAME text, got {other:?}"),
+        };
+        assert_eq!(
+            conn.db_unique_name(),
+            expected,
+            "db_unique_name() must equal SYS_CONTEXT('USERENV','DB_UNIQUE_NAME')"
+        );
+
+        conn.close(&cx)
+            .await
+            .expect("Rust thin logoff should round-trip");
+    });
+}

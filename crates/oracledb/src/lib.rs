@@ -2408,6 +2408,10 @@ pub struct Connection {
     serial_num: u16,
     server_version: Option<String>,
     server_version_tuple: Option<(u8, u8, u8, u8, u8)>,
+    /// `SYS_CONTEXT('USERENV','DB_UNIQUE_NAME')` from the AUTH phase-two session
+    /// data key `AUTH_SC_REAL_DBUNIQUE_NAME` (reference `db_unique_name`,
+    /// upstream 16a57f1cbd58). `None` when the server did not send the key.
+    db_unique_name: Option<String>,
     capabilities: ClientCapabilities,
     ttc_seq_num: u8,
     sdu: usize,
@@ -3180,6 +3184,7 @@ impl Connection {
                 &format!("sid={session_id} serial={serial_num}"),
             );
             let server_version = auth_two.session_data.get("AUTH_VERSION_STRING").cloned();
+            let db_unique_name = parse_db_unique_name(&auth_two.session_data);
             let server_version_tuple = auth_two
                 .session_data
                 .get("AUTH_VERSION_NO")
@@ -3208,6 +3213,7 @@ impl Connection {
                 serial_num,
                 server_version,
                 server_version_tuple,
+                db_unique_name,
                 capabilities,
                 ttc_seq_num,
                 sdu,
@@ -3248,6 +3254,24 @@ impl Connection {
         &self.descriptor
     }
 
+    /// Host of the connected endpoint (reference thin-mode `connection.host`,
+    /// upstream da4ec2d2526a). This is the address the session actually
+    /// connected to, as captured in the resolved descriptor.
+    pub fn host(&self) -> &str {
+        &self.descriptor.host
+    }
+
+    /// Port of the connected endpoint (reference `connection.port`).
+    pub fn port(&self) -> u16 {
+        self.descriptor.port
+    }
+
+    /// Transport protocol (TCP / TCPS) of the connected endpoint (reference
+    /// `connection.protocol`).
+    pub fn protocol(&self) -> NetProtocol {
+        self.descriptor.protocol
+    }
+
     /// The [`ClientIdentity`] this session was opened with (the values the
     /// database recorded in `v$session`).
     pub fn identity(&self) -> &ClientIdentity {
@@ -3267,6 +3291,14 @@ impl Connection {
     /// Server version banner, if the server reported one.
     pub fn server_version(&self) -> Option<&str> {
         self.server_version.as_deref()
+    }
+
+    /// The database unique name (`SYS_CONTEXT('USERENV','DB_UNIQUE_NAME')`),
+    /// parsed from the AUTH phase-two `AUTH_SC_REAL_DBUNIQUE_NAME` field
+    /// (reference thin-mode `connection.db_unique_name`, upstream 16a57f1cbd58).
+    /// Empty when the server did not send it.
+    pub fn db_unique_name(&self) -> &str {
+        self.db_unique_name.as_deref().unwrap_or("")
     }
 
     /// Database version 5-tuple decoded from `AUTH_VERSION_NO`
@@ -10406,6 +10438,14 @@ fn parse_session_u16(
         .map_err(|_| Error::MissingSessionField(key))
 }
 
+/// Extract `db_unique_name` from the AUTH phase-two session data: the value of
+/// `AUTH_SC_REAL_DBUNIQUE_NAME` ONLY (reference 16a57f1cbd58). This key is
+/// DISTINCT from `AUTH_SC_DBUNIQUE_NAME` (which upstream maps to `db_name`), so
+/// there is deliberately no fallback. `None` when the key is absent.
+fn parse_db_unique_name(data: &std::collections::BTreeMap<String, String>) -> Option<String> {
+    data.get("AUTH_SC_REAL_DBUNIQUE_NAME").cloned()
+}
+
 fn next_ttc_sequence(seq_num: &mut u8) -> u8 {
     *seq_num = seq_num.wrapping_add(1);
     if *seq_num == 0 {
@@ -11585,6 +11625,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn db_unique_name_reads_real_key_not_confused_with_dbunique_name() {
+        // etib.8: db_unique_name comes from AUTH_SC_REAL_DBUNIQUE_NAME ONLY. It
+        // must NOT be confused with AUTH_SC_DBUNIQUE_NAME (which upstream maps to
+        // db_name), and there is no fallback to it.
+        let mut data = BTreeMap::new();
+        data.insert(
+            "AUTH_SC_REAL_DBUNIQUE_NAME".to_string(),
+            "MYCDB_UNIQUE".to_string(),
+        );
+        data.insert(
+            "AUTH_SC_DBUNIQUE_NAME".to_string(),
+            "MYCDB_SHOULD_NOT_WIN".to_string(),
+        );
+        assert_eq!(parse_db_unique_name(&data).as_deref(), Some("MYCDB_UNIQUE"));
+
+        // Only the non-REAL key present -> None (no fallback).
+        let mut only_non_real = BTreeMap::new();
+        only_non_real.insert("AUTH_SC_DBUNIQUE_NAME".to_string(), "MYCDB".to_string());
+        assert_eq!(parse_db_unique_name(&only_non_real), None);
+
+        // Missing entirely -> None.
+        assert_eq!(parse_db_unique_name(&BTreeMap::new()), None);
+    }
+
     // Character column of the first `needle` in `line` (chars, not bytes — the
     // caret aligns by display column, so multibyte chars must be counted as 1).
     fn char_col(line: &str, needle: char) -> usize {
@@ -11663,6 +11728,7 @@ mod tests {
             serial_num: 0,
             server_version: None,
             server_version_tuple: None,
+            db_unique_name: None,
             capabilities: ClientCapabilities::default(),
             protocol_limits: ProtocolLimits::DEFAULT,
             ttc_seq_num: 0,
@@ -12438,6 +12504,44 @@ mod tests {
         conn.supports_fast_auth = true;
         assert_eq!(conn.protocol_version(), 319);
         assert!(conn.supports_fast_auth());
+
+        drop(conn);
+        server.join().expect("server thread joins");
+    }
+
+    #[test]
+    fn host_port_protocol_accessors_report_connected_descriptor() {
+        // etib.7: host()/port()/protocol() expose the connected endpoint from the
+        // resolved descriptor. Build a loopback connection, plant a known
+        // descriptor, and assert each getter returns its own field (the distinct
+        // types &str/u16/Protocol guarantee they cannot be transposed).
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (_socket, _) = listener.accept().expect("accept test client");
+        });
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let mut conn = runtime.block_on(async {
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (read, write) = transport::plain_split(stream);
+            loopback_connection(read, write)
+        });
+
+        conn.descriptor = EasyConnect {
+            host: "db.example.com".to_string(),
+            port: 2484,
+            service_name: "FREEPDB1".to_string(),
+            protocol: NetProtocol::Tcps,
+        };
+
+        assert_eq!(conn.host(), "db.example.com");
+        assert_eq!(conn.port(), 2484);
+        assert_eq!(conn.protocol(), NetProtocol::Tcps);
+        // The getters agree with the descriptor they delegate to.
+        assert_eq!(conn.host(), conn.descriptor().host);
+        assert_eq!(conn.port(), conn.descriptor().port);
+        assert_eq!(conn.protocol(), conn.descriptor().protocol);
 
         drop(conn);
         server.join().expect("server thread joins");
