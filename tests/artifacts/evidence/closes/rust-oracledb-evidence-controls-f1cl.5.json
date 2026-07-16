@@ -1,0 +1,61 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-16T13:05:00Z",
+  "bead_id": "rust-oracledb-evidence-controls-f1cl.5",
+  "scope": {
+    "summary": "Read-only audit of bead close evidence, plus a close template, consuming bead-close-evidence/v1.",
+    "in_scope": [
+      "scripts/audit_bead_closes.py (audit + --template + --strict)",
+      "scripts/check_bead_close_evidence.sh",
+      "docs/BEAD_CLOSE_EVIDENCE.md",
+      "tests/artifacts/evidence/closes/ (the first three close documents, all the author's own)"
+    ],
+    "out_of_scope": [
+      "Retrofitting evidence onto the 334 pre-contract closes: the audit reports coverage rather than failing them.",
+      "Rewriting other agents' historical close reasons, including the 70 that carry an unreferenced live claim.",
+      "Wiring the audit into a CI workflow: no workflow YAML was changed.",
+      "Verifying that a cited CI job is green: that needs the network, and ci_taxonomy.py --status already owns it."
+    ]
+  },
+  "source": {
+    "sha": "7c76d9f707703b3cdaa3090c1af0fe76a58c843a",
+    "tree_clean": true,
+    "branch": "master"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/check_bead_close_evidence.sh",
+        "kind": "cli",
+        "trace": "Read-only audit over all 337 closed beads: 0 hard, 70 advisory. Exits non-zero only on hard findings."
+      },
+      {
+        "name": "scripts/audit_bead_closes.py --template <bead-id>",
+        "kind": "cli",
+        "trace": "Prints a close-evidence skeleton prefilled with HEAD and the real tree-clean state; used to produce the three documents in tests/artifacts/evidence/closes/."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "readiness.basis is scoped-test, so this close cannot claim ready: the Required graph (clippy, workspace test) was NOT run. The diff contains zero Rust and the shared checkout held another pane's in-flight Rust edits, so a workspace run would have reported on their tree rather than this change.",
+    "source.tree_clean asserts that every file this close claims is committed at source.sha, verified with `git status --porcelain -- <scope.in_scope>`; it is not a claim that the shared working directory was pristine. See docs/BEAD_CLOSE_EVIDENCE.md.",
+    "The advisory tier is heuristic text-scanning over close reasons and is deliberately not gating: CITED_SHA_UNRESOLVABLE has a known legitimate trigger (etib.2 cites the upstream python-oracledb commit 6cfd00aa642e, which will never resolve in this repository).",
+    "Coverage is 3 of 337 closed beads. The audit does not fail on unevidenced closes by default, so it cannot force the backlog down; --strict exists for when it can.",
+    "The audit checks that a cited proof exists on disk and that its SHA matches source.sha, but does not open it to confirm it is itself green. A red required-proof would still satisfy PROOF_ARTIFACT_ABSENT."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "rust-oracledb-evidence-controls-f1cl.2",
+    "rust-oracledb-evidence-controls-f1cl.6"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
