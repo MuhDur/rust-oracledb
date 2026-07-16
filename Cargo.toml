@@ -10,8 +10,8 @@ resolver = "2"
 [workspace.package]
 version = "0.8.3"
 edition = "2021"
-# No `rust-version`: this driver requires NIGHTLY Rust (asupersync uses
-# `#![feature(try_trait_v2)]`). See `rust-toolchain.toml`; there is no stable MSRV.
+# No `rust-version`: asupersync's default `nightly-outcome-try` feature enables
+# `#![feature(try_trait_v2)]`. See `rust-toolchain.toml`; there is no stable MSRV.
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/MuhDur/rust-oracledb"
 homepage = "https://github.com/MuhDur/rust-oracledb"
@@ -51,7 +51,7 @@ arrow-schema = "59.0.0"
 # Exact pin: asupersync is the single load-bearing async-runtime dependency and
 # its `tls` feature pins the rustls/ring graph, so a 0.3.x point release could
 # silently re-shape the runtime. Bump deliberately, not via the caret floor.
-asupersync = "=0.3.5"
+asupersync = "=0.3.9"
 hex = "0.4"
 md-5 = "0.10"
 pbkdf2 = "0.12"

@@ -33,11 +33,11 @@ publishing as a gated, deliberate, operator-authorized step, never an incidental
   `edition = "2021"`.
 - **NIGHTLY Rust is required** — pinned to **`nightly-2026-05-11`** in
   `rust-toolchain.toml` (components `rustfmt`, `clippy`). There is **no stable
-  MSRV**: the async runtime **asupersync** (pinned `=0.3.5`) is built with
-  `#![feature(try_trait_v2)]` / `try_trait_v2_residual`, so a stable toolchain
-  fails with `E0554` before any of this crate's code is reached. Bump the pin in
-  lockstep with asupersync upgrades (and the matching `dtolnay/rust-toolchain`
-  pins under `.github/workflows/`).
+  MSRV**: asupersync's default `nightly-outcome-try` feature (pinned `=0.3.9`)
+  enables `#![feature(try_trait_v2)]` / `try_trait_v2_residual`, so a stable
+  toolchain fails with `E0554` before any of this crate's code is reached. Bump
+  the pin in lockstep with asupersync upgrades (and the matching
+  `dtolnay/rust-toolchain` pins under `.github/workflows/`).
 - The whole workspace forbids `unsafe`: `unsafe_code = "forbid"` in
   `[workspace.lints.rust]`, and `oracledb-protocol` / `oracledb` are each
   `#![forbid(unsafe_code)]`. The **only** `unsafe` is one audited Arrow C-Data
@@ -80,8 +80,9 @@ These are the reasons this project exists — never regress them:
   thick path would re-introduce the native dependency the project exists to
   avoid. The driver links **no native Oracle library**.
 - **Nightly + asupersync stay.** asupersync is the single load-bearing
-  async-runtime dependency, pinned exactly (`=0.3.5`) because its `tls` feature
-  fixes the rustls/ring graph; bump it deliberately, never via a caret floor.
+  async-runtime dependency, pinned exactly (`=0.3.9`) because its `tls` feature
+  fixes the rustls/ring graph; its default `nightly-outcome-try` feature keeps
+  the release graph on nightly. Bump it deliberately, never via a caret floor.
 - **Fail-closed decode.** Every untrusted input path (wire decoder, TLS/wallet
   readers, connect-string parser) returns a structured error on hostile or
   malformed input — never a panic, OOM, or stack overflow. The

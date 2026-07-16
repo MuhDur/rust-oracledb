@@ -8764,15 +8764,18 @@ struct IncomingPacket {
     payload: Vec<u8>,
 }
 
-async fn lock_write<'a, W>(
+async fn lock_write<W>(
     cx: &Cx,
-    write: &'a Arc<AsyncMutex<W>>,
-) -> Result<asupersync::sync::MutexGuard<'a, W>>
+    write: &Arc<AsyncMutex<W>>,
+) -> Result<asupersync::sync::OwnedMutexGuard<W>>
 where
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    write
-        .lock(cx)
+    // asupersync 0.3.9 makes borrowed mutex guards !Send because their
+    // thread-local lock-order state must be released on the acquiring thread.
+    // A write may await I/O, so retain the connection's Send future contract
+    // with an Arc-backed owned guard while preserving write serialization.
+    asupersync::sync::OwnedMutexGuard::lock(Arc::clone(write), cx)
         .await
         .map_err(|err| Error::Runtime(err.to_string()))
 }
@@ -8841,11 +8844,11 @@ where
 
 fn lock_write_for_recovery<W>(
     write: &Arc<AsyncMutex<W>>,
-) -> Result<asupersync::sync::MutexGuard<'_, W>>
+) -> Result<asupersync::sync::OwnedMutexGuard<W>>
 where
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    write.try_lock().map_err(|err| match err {
+    asupersync::sync::OwnedMutexGuard::try_lock(Arc::clone(write)).map_err(|err| match err {
         asupersync::sync::TryLockError::Locked => Error::ConnectionClosed(
             "write lock unavailable while recovering from cancellation".into(),
         ),
