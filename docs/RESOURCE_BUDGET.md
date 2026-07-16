@@ -21,10 +21,10 @@ scripts/check_resource_budget.sh                              # prove it is enfo
 
 | profile | memory | tasks | for |
 |---|---:|---:|---|
-| `build` | 16G | 512 | `cargo build` / `check` / `clippy` |
-| `test` | 16G | 512 | `cargo test` |
-| `mutants` | 8G | 256 | cargo-mutants — the incident profile, deliberately tightest |
-| `live` | 8G | 256 | live / container-backed suites |
+| `build` | 16G | 8192 | `cargo build` / `check` / `clippy` |
+| `test` | 16G | 8192 | `cargo test` |
+| `mutants` | 12G | 8192 | cargo-mutants — measured cold baseline needs headroom |
+| `live` | 8G | 4096 | live / container-backed suites |
 
 ## Mechanism: a cgroup scope, not `ulimit`
 
@@ -107,7 +107,7 @@ perfectly. `cap + 8` reaches the cap and triggers denials while leaving the
 reporter alive: 5 consecutive runs, `peak=16` every time. A gate that flakes is a
 gate that gets muted.
 
-Current result, on a `TasksMax=16` scope with 60 forks attempted:
+Current result, on a `TasksMax=16` scope with 24 forks attempted:
 
 ```
 peak was 16 — the budget was never exceeded
@@ -123,8 +123,8 @@ shell still forks afterwards — containment held: the budget fails the RUN, not
 ```json
 {
   "isolated_target_dir": "/home/durakovic/.cache/oracledb-budget-runs/mutants-123/target",
-  "memory_max_bytes": 8589934592,
-  "pid_task_max": 256
+  "memory_max_bytes": 12884901888,
+  "pid_task_max": 8192
 }
 ```
 

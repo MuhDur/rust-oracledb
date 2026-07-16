@@ -33,15 +33,15 @@ read -r got_tasks got_mem < <(
     bash -c 'cg=/sys/fs/cgroup$(awk -F: "/^0::/{print \$3}" /proc/self/cgroup); \
              echo "$(cat "$cg/pids.max") $(cat "$cg/memory.max")"' 2>/dev/null
 )
-if [ "$got_tasks" = "256" ]; then
-  ok "mutants profile: kernel reports pids.max=256"
+if [ "$got_tasks" = "8192" ]; then
+  ok "mutants profile: kernel reports pids.max=8192 (measured: cargo-mutants peaks at 5850)"
 else
-  bad "mutants profile: kernel reports pids.max=$got_tasks, expected 256"
+  bad "mutants profile: kernel reports pids.max=$got_tasks, expected 8192"
 fi
-if [ "$got_mem" = "$((8 * 1024 * 1024 * 1024))" ]; then
-  ok "mutants profile: kernel reports memory.max=8G"
+if [ "$got_mem" = "$((12 * 1024 * 1024 * 1024))" ]; then
+  ok "mutants profile: kernel reports memory.max=12G"
 else
-  bad "mutants profile: kernel reports memory.max=$got_mem, expected 8589934592"
+  bad "mutants profile: kernel reports memory.max=$got_mem, expected 12884901888"
 fi
 
 echo
@@ -64,25 +64,35 @@ echo "=== 2. bounded fanout CANNOT exceed the task budget ==="
 #   measuring -- a SIGCHLD interrupts a retrying fork and bash aborts with
 #   "fork: Interrupted system call" before it can print anything. cap+8 reliably
 #   reaches the cap and triggers denials while leaving the reporter alive.
-fanout_out="$(
-  systemd-run --user --scope --quiet --collect -p TasksMax=16 -- bash -c '
-    cgpath=$(awk -F: "/^0::/{print \$3}" /proc/self/cgroup)
-    cg=/sys/fs/cgroup$cgpath
-    for ((i=0;i<24;i++)); do sleep 2 & done
-    read -r maxv < "$cg/pids.max"
-    read -r peak < "$cg/pids.peak"
-    denied=0
-    while read -r k v; do [ "$k" = "max" ] && denied=$v; done < "$cg/pids.events"
-    echo "max=$maxv peak=$peak denied=$denied"
-  ' 2>/dev/null
-)" || true
+#   Retry a few times. The reporting shell lives inside the cgroup it is
+#   measuring, so under heavy load (another agent mid-build) it can still lose a
+#   race and print nothing. Observed once, on a busy box. A gate that goes red
+#   because the machine was busy gets muted, so distinguish "no answer, ask
+#   again" from "the wrong answer", and only the second one fails.
+fanout_out=""
+for _attempt in 1 2 3; do
+  fanout_out="$(
+    systemd-run --user --scope --quiet --collect -p TasksMax=16 -- bash -c '
+      cgpath=$(awk -F: "/^0::/{print \$3}" /proc/self/cgroup)
+      cg=/sys/fs/cgroup$cgpath
+      for ((i=0;i<24;i++)); do sleep 2 & done
+      read -r maxv < "$cg/pids.max"
+      read -r peak < "$cg/pids.peak"
+      denied=0
+      while read -r k v; do [ "$k" = "max" ] && denied=$v; done < "$cg/pids.events"
+      echo "max=$maxv peak=$peak denied=$denied"
+    ' 2>/dev/null
+  )" || true
+  [[ "$fanout_out" == *peak=* ]] && break
+  sleep 2
+done
 
 f_max="$(sed -n 's/.*max=\([0-9]*\) peak.*/\1/p' <<<"$fanout_out")"
 f_peak="$(sed -n 's/.*peak=\([0-9]*\).*/\1/p' <<<"$fanout_out")"
 f_denied="$(sed -n 's/.*denied=\([0-9]*\).*/\1/p' <<<"$fanout_out")"
 
 if [ -n "${f_peak:-}" ] && [ -n "${f_max:-}" ] && [ "$f_peak" -le "$f_max" ]; then
-  ok "60 forks attempted under TasksMax=$f_max: peak was $f_peak — the budget was never exceeded"
+  ok "24 forks attempted under TasksMax=$f_max: peak was $f_peak — the budget was never exceeded"
 else
   bad "fanout exceeded its budget (peak=${f_peak:-?} max=${f_max:-?}) — NOT enforced"
 fi
@@ -103,18 +113,19 @@ fi
 
 echo
 echo "=== 4. tmpfs target dir is REFUSED (2026-07-16, as a check not a paragraph) ==="
-tmp_probe="$(mktemp -d -p /tmp resource-budget-probe.XXXXXX)"
-if [ "$(stat -f -c %T "$tmp_probe")" != "tmpfs" ]; then
+tmpfs_run_id="resource-budget-tmpfs-probe-$$"
+tmpfs_probe="/tmp/$tmpfs_run_id"
+if [ "$(stat -f -c %T /tmp)" != "tmpfs" ]; then
   echo "  SKIP  /tmp is not tmpfs on this host; cannot exercise the guard" >&2
 else
-  if ORACLEDB_BUDGET_BASE="$tmp_probe" "$BUDGET" --profile build --emit-budget >/dev/null 2>&1; then
+  if ORACLEDB_BUDGET_BASE=/tmp "$BUDGET" --profile build --run-id "$tmpfs_run_id" --emit-budget >/dev/null 2>&1; then
     bad "a tmpfs target dir was ACCEPTED; the guard does not work"
+  elif [ -e "$tmpfs_probe" ]; then
+    bad "tmpfs refusal materialized $tmpfs_probe; the negative-control probe leaked"
   else
-    ok "tmpfs target dir refused (exit 78)"
+    ok "tmpfs target dir refused (exit 78) without materializing its target"
   fi
 fi
-rmdir "$tmp_probe/build-"* 2>/dev/null || true
-rmdir "$tmp_probe" 2>/dev/null || true
 
 echo
 echo "=== 5. emitted budget satisfies the resource_budget contract ==="
