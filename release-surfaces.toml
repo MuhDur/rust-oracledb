@@ -1,0 +1,81 @@
+[manifest]
+version = 1
+description = "Current release and runtime version surfaces for rust-oracledb."
+generate_command = "python3 scripts/release_surface_manifest.py --write"
+check_command = "python3 scripts/release_surface_manifest.py --check"
+
+[[canonical]]
+name = "workspace_version"
+path = "Cargo.toml"
+toml_key = "workspace.package.version"
+
+[[canonical]]
+name = "runtime_version"
+path = "Cargo.toml"
+toml_key = "workspace.dependencies.asupersync"
+strip_prefix = "="
+
+[[surface]]
+name = "agent_workspace_version"
+source = "workspace_version"
+path = "AGENTS.md"
+pattern = "workspace version \\*\\*(?P<value>[0-9]+\\.[0-9]+\\.[0-9]+)\\*\\*"
+replacement = "workspace version **{workspace_version}**"
+match_count = 1
+
+[[surface]]
+name = "publishing_latest_release"
+source = "workspace_version"
+path = "docs/PUBLISHING.md"
+pattern = "\\| Latest published release \\| \\*\\*(?P<value>[0-9]+\\.[0-9]+\\.[0-9]+)\\*\\* \\|"
+replacement = "| Latest published release | **{workspace_version}** |"
+match_count = 1
+
+[[surface]]
+name = "ground_truth_runtime"
+source = "runtime_version"
+path = "docs/GROUND_TRUTH.md"
+pattern = "\\*\\*asupersync (?P<value>[0-9]+\\.[0-9]+\\.[0-9]+)\\*\\*"
+replacement = "**asupersync {runtime_version}**"
+match_count = 1
+
+[[relationship]]
+name = "workspace package inheritance"
+kind = "toml_workspace_version"
+paths = [
+  "crates/oracledb-protocol/Cargo.toml",
+  "crates/oracledb/Cargo.toml",
+  "crates/oracledb-derive/Cargo.toml",
+  "crates/oracledb-pyshim/Cargo.toml",
+]
+
+[[relationship]]
+name = "published driver dependency pins"
+kind = "toml_dependency_versions"
+path = "crates/oracledb/Cargo.toml"
+source = "workspace_version"
+dependencies = ["oracledb-protocol", "oracledb-derive"]
+
+[[relationship]]
+name = "lockfile package versions"
+kind = "lock_package_versions"
+path = "Cargo.lock"
+source = "workspace_version"
+packages = ["oracledb-protocol", "oracledb", "oracledb-derive"]
+
+[[intentional_non_lockstep]]
+name = "nightly toolchain"
+canonical_path = "rust-toolchain.toml"
+independent_from = "workspace_version"
+rationale = "The nightly pin follows asupersync language-feature compatibility, not crate semver."
+
+[[intentional_non_lockstep]]
+name = "external runtime"
+canonical_path = "Cargo.toml"
+independent_from = "workspace_version"
+rationale = "asupersync is exactly pinned for runtime compatibility and changes only through a deliberate dependency update."
+
+[[numeric_scan]]
+name = "publishing current-release surface"
+path = "docs/PUBLISHING.md"
+allowed_versions = ["0.0.0", "0.1.0", "0.1.1", "{workspace_version}", "{runtime_version}"]
