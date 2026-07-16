@@ -30,7 +30,7 @@ aes = "0.8"
 rustls = { version = "0.23.39", default-features = false, features = ["std", "tls12", "ring"] }
 rustls-pemfile = "2.2"
 rustls-pki-types = "1.14.1"
-# Sans-I/O ASN.1 + symmetric crypto for the experimental cwallet.sso reader.
+# Sans-I/O ASN.1 + symmetric crypto for the cwallet.sso reader.
 cbc = "0.1"
 des = "0.8"
 der = { version = "0.7", features = ["oid"] }

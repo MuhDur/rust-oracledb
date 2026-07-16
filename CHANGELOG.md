@@ -14,6 +14,7 @@ artifacts, and the checked-in API/provenance ledgers.
 
 | Version | Released | Release role |
 | --- | --- | --- |
+| [0.8.3](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.3) | 2026-07-14 | Arrow interoperability, endpoint APIs, and recovery hardening |
 | [0.8.2](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.2) | 2026-07-08 | K10 owned-row stream, timer correction, and quality campaigns |
 | [0.8.1](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.1) | 2026-07-08 | Wallet/session accessors and opt-in support capture |
 | [0.8.0](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.0) | 2026-07-07 | Breaking single-path consolidation plus additive routine/telemetry work |

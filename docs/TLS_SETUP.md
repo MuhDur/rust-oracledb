@@ -335,7 +335,7 @@ The tests that consume them:
 
 | Test file | What it proves |
 |---|---|
-| `crates/oracledb-protocol/tests/tls_wallet.rs` | `ewallet.pem` parse (cert+key, verify-only), SNI string format, DN accept/reject, SAN/wildcard match, wallet-dir precedence, and **end-to-end `cwallet.sso` parse** for both unencrypted-keyBag and PBES2-shrouded-key wallets (`--features experimental`). |
+| `crates/oracledb-protocol/tests/tls_wallet.rs` | `ewallet.pem` parse (cert+key, verify-only), SNI string format, DN accept/reject, SAN/wildcard match, wallet-dir precedence, and **end-to-end `cwallet.sso` parse** for both unencrypted-keyBag and PBES2-shrouded-key wallets. |
 | `crates/oracledb/tests/tls_handshake.rs` | A **real rustls handshake** against a blocking rustls server presenting the CA-signed leaf: handshake succeeds with a CA wallet + SAN name match, **rejects** on a DN/name mismatch, **accepts** an explicit matching `ssl_server_cert_dn`, and **data round-trips** through the `OracleReadHalf`/`OracleWriteHalf` transport. |
 
 These run as part of `cargo test --workspace`. The end-to-end Oracle-server TCPS

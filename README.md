@@ -538,7 +538,7 @@ matrix is defined in [docs/SUPPORT.md](docs/SUPPORT.md).
 | `tracing` | | feature-gated OpenTelemetry-style spans (zero-cost off) |
 | `cassette` | | `.tns-cassette` transport record/replay seam |
 | `soda` | | **experimental** thin-mode SODA |
-| `experimental` | | the `cwallet.sso` SSO auto-login wallet reader |
+| `experimental` | | legacy compatibility no-op; wallet readers are always available |
 
 ---
 
@@ -663,7 +663,7 @@ failure byte-identically.
 | Build fails with `error[E0658]` / `feature(try_trait_v2)` | building on **stable** Rust | this crate requires nightly — `rustup override set nightly` (the exact pinned toolchain is in [docs/TOOLCHAIN.md](docs/TOOLCHAIN.md)) |
 | `ConversionError` "unexpected NULL" while mapping a row | a `NULL` column mapped to a non-`Option` field | make the field `Option<T>` (NULL → `None`); a non-`Option` NULL is a deliberate hard error, not a silent default |
 | async `.into_typed()` won't compile / "expected `&Cx`" | async `into_typed` takes `&cx` and is awaited | call `rows.into_typed::<T>(&cx).await?`; the blocking facade's `into_typed()` takes no `cx` |
-| TLS/TCPS handshake fails (cert / server-DN) | wallet path, DN match, or SNI | see [docs/TLS_SETUP.md](docs/TLS_SETUP.md); a `cwallet.sso` auto-login wallet needs `--features experimental` |
+| TLS/TCPS handshake fails (cert / server-DN) | wallet path, DN match, or SNI | see [docs/TLS_SETUP.md](docs/TLS_SETUP.md); `cwallet.sso` auto-login wallets are supported without a feature flag |
 | a connect string is rejected as malformed | a typo in a TNS descriptor / EZConnect-Plus token | the error carries a **byte-offset caret** pointing at the offending token — read it; full grammar in [docs/CONNECT_STRINGS.md](docs/CONNECT_STRINGS.md) |
 
 ### Capturing a connect/handshake trace
@@ -758,7 +758,7 @@ python-oracledb thin's, which targets 12.1+ servers.
 in a per-thread runtime, so no async is visible to the caller.
 
 **TLS to Autonomous Database?** The TCPS client path is implemented; you supply a
-wallet (`ewallet.pem`, or `cwallet.sso` with `--features experimental`). See
+wallet (`ewallet.pem` or `cwallet.sso`). See
 [docs/TLS_SETUP.md](docs/TLS_SETUP.md) for the limitations.
 
 ---

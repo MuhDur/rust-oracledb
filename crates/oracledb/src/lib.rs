@@ -223,7 +223,7 @@ const TNS_DATA_PACKET_OVERHEAD: usize = 10;
 
 pub use oracledb_protocol as protocol;
 
-/// The version of this driver crate, e.g. `"0.7.3"`.
+/// The version of this driver crate, supplied by Cargo at build time.
 ///
 /// Consumers that wrap the driver (for example `oraclemcp-db`'s `doctor`) must
 /// report the *driver's* real version, not their own: `env!("CARGO_PKG_VERSION")`

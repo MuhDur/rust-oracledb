@@ -99,7 +99,7 @@ visible runtime. The async API is identical minus the blocking wrapper.
 | `soda` | no | experimental thin-mode SODA |
 | `tracing` | no | OpenTelemetry-style spans (zero-cost when off) |
 | `cassette` | no | `.tns-cassette` record / replay transport seam |
-| `experimental` | no | experimental `cwallet.sso` reader |
+| `experimental` | no | legacy compatibility no-op; wallet readers are always available |
 
 ## Documentation and source
 

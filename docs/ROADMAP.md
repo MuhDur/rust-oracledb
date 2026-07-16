@@ -1,9 +1,15 @@
 # rust-oracledb — Forward Roadmap (post-Wave-2)
 
-Authoritative forward plan for reaching the goal: a real, certified pure-Rust port of
-python-oracledb thin mode. Companion to `docs/GROUND_TRUTH.md` (current state) and
-`PLAN_TO_PORT_PYTHON_ORACLEDB_THIN_TO_RUST.md` (the milestone contract). Beads: epic
-`rust-oracledb-j0o`; wave beads listed per section.
+> **Historical planning snapshot (2026-06).** This plan predates the 0.7.x–0.8.4
+> implementation work and is preserved for provenance, not active release guidance.
+> For current support see [SUPPORT.md](SUPPORT.md); for release state see
+> [CHANGELOG.md](../CHANGELOG.md) and [PUBLISHING.md](PUBLISHING.md).
+
+Historical forward plan for reaching the goal: a real, certified pure-Rust port
+of python-oracledb thin mode. Companion to `docs/GROUND_TRUTH.md` (the
+contemporaneous state snapshot) and `PLAN_TO_PORT_PYTHON_ORACLEDB_THIN_TO_RUST.md`
+(the milestone contract). Beads: epic `rust-oracledb-j0o`; wave beads listed per
+section.
 
 ## Two finish lines (do not conflate)
 

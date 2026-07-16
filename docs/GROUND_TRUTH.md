@@ -1,13 +1,14 @@
 # Ground Truth — rust-oracledb
 
-> **CURRENT STATUS (release qualification): SUITE GREEN.** The python-oracledb thin
-> differential currently records 2578 collected tests: 2462 passed, 116 skipped,
-> 0 regressions / missing tests against Oracle 23ai Free. Adversarially verified
-> real (no fake parity) — see `docs/FAKE_PARITY_AUDIT.md`,
-> `docs/PARITY_SKIPS.md`, and `docs/qualification/1.0.0-rc.1/SUMMARY.md`.
-> Forward plan in `docs/ROADMAP.md` (Waves 4-6: structural, TLS/wallet, gauntlet).
-> Journey this session: ~38% -> 91% (Wave 2) -> 100% of baseline (Wave 3).
-> `thin.rs` de-monolithized into `thin/` (12 modules). Below is the historical detail.
+> **HISTORICAL QUALIFICATION SNAPSHOT (2026-06-11).** This document records the
+> release-qualification state at that date, not current release capability. Its
+> recorded differential evidence is 2,578 collected tests: 2,462 passed, 116
+> skipped, and zero regressions / missing tests against Oracle 23ai Free. See
+> [FAKE_PARITY_AUDIT.md](FAKE_PARITY_AUDIT.md),
+> [PARITY_SKIPS.md](PARITY_SKIPS.md), and
+> [qualification/1.0.0-rc.1/SUMMARY.md](qualification/1.0.0-rc.1/SUMMARY.md).
+> For current support and release state, use [SUPPORT.md](SUPPORT.md),
+> [CHANGELOG.md](../CHANGELOG.md), and [PUBLISHING.md](PUBLISHING.md).
 
 ---
 
