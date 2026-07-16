@@ -459,10 +459,8 @@ pub mod prelude {
     };
 }
 
-#[cfg(test)]
-use recovery::cancel_disposition;
 use recovery::{
-    classify_recovery_result, decode_server_version_number,
+    cancel_disposition, classify_recovery_result, decode_server_version_number,
     observe_cancellation_between_round_trips, post_sync_protocol_error_disposition,
     protocol_error_is_session_dead, protocol_error_kind, protocol_error_offset,
     protocol_error_ora_code, run_recovery_without_current_cx,
@@ -5089,6 +5087,38 @@ impl Connection {
         }
     }
 
+    /// Convert Asupersync's transport-level signal for a context cancelled
+    /// while a socket read was pending into the driver's public cancellation
+    /// error. The [`CancelDrainGuard`] deliberately remains armed on this path:
+    /// the request is already on the wire, so the next connection owner must
+    /// break and drain it before reusing the session.
+    ///
+    /// A real OS `Interrupted` error is left untouched. Asupersync uses that
+    /// same `io::ErrorKind` for cancellation-aware TCP reads, so require the
+    /// passed `Cx` to be observably cancelled before translating it.
+    fn in_flight_read_cancellation_error(&mut self, cx: &Cx, err: &Error) -> Option<Error> {
+        let Error::Io(io_error) = err else {
+            return None;
+        };
+        if io_error.kind() != std::io::ErrorKind::Interrupted || cx.checkpoint().is_ok() {
+            return None;
+        }
+
+        let timeout_ms = cx
+            .budget()
+            .remaining_time(time::wall_now())
+            .map(duration_to_millis_saturating)
+            .unwrap_or(0);
+        let disposition = cancel_disposition(cx.cancel_reason());
+        if disposition == CancelDisposition::Close {
+            // Shutdown/resource-loss cancellation is not reusable even though
+            // the guard would otherwise schedule a deferred drain.
+            self.core.recovery.mark_dead();
+            self.dead = true;
+        }
+        Some(disposition.into_error(timeout_ms))
+    }
+
     /// Read one TTC response under a `CancelDrainGuard`: if THIS read future is
     /// dropped mid-flight (the fetch was cancelled / raced), the guard moves the
     /// recovery phase to `BreakSent` so the next operation breaks + drains the
@@ -5105,10 +5135,19 @@ impl Connection {
         // prove it across the guard's lifetime).
         let recovery = Arc::clone(&self.core.recovery);
         let mut guard = CancelDrainGuard::arm(recovery)?;
-        let response = self
+        let response = match self
             .core
             .read_data_response_probed(cx, classic, probe)
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                if let Some(cancelled) = self.in_flight_read_cancellation_error(cx, &err) {
+                    return Err(cancelled);
+                }
+                return Err(err);
+            }
+        };
         guard.disarm();
         Ok(response)
     }
@@ -5121,7 +5160,15 @@ impl Connection {
     async fn read_pipeline_response_cancellable(&mut self, cx: &Cx) -> Result<DataResponse> {
         let recovery = Arc::clone(&self.core.recovery);
         let mut guard = CancelDrainGuard::arm(recovery)?;
-        let response = self.core.read_data_response_boundary(cx, true).await?;
+        let response = match self.core.read_data_response_boundary(cx, true).await {
+            Ok(response) => response,
+            Err(err) => {
+                if let Some(cancelled) = self.in_flight_read_cancellation_error(cx, &err) {
+                    return Err(cancelled);
+                }
+                return Err(err);
+            }
+        };
         guard.disarm();
         Ok(response)
     }
@@ -5138,10 +5185,19 @@ impl Connection {
     ) -> Result<Vec<u8>> {
         let recovery = Arc::clone(&self.core.recovery);
         let mut guard = CancelDrainGuard::arm(recovery)?;
-        let response = self
+        let response = match self
             .core
             .read_data_response_flushing_out_binds_probed(cx, self.sdu, classic, probe)
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                if let Some(cancelled) = self.in_flight_read_cancellation_error(cx, &err) {
+                    return Err(cancelled);
+                }
+                return Err(err);
+            }
+        };
         guard.disarm();
         Ok(response)
     }
@@ -14984,6 +15040,79 @@ mod tests {
             .join()
             .expect("server thread joins")
             .map_err(Error::Io)?;
+        Ok(())
+    }
+
+    #[test]
+    fn in_flight_context_cancel_does_not_leak_interrupted_io() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (cx_tx, cx_rx) = std::sync::mpsc::channel::<Cx>();
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            assert_eq!(
+                read_one_wire_packet(&mut socket),
+                TNS_PACKET_TYPE_DATA,
+                "COMMIT request must reach the server before cancellation"
+            );
+            request_seen_tx
+                .send(())
+                .expect("client cancellation task is alive");
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+            Ok(())
+        });
+
+        let runtime = build_io_runtime()?;
+        let canceller = thread::spawn(move || -> Result<()> {
+            let cancel_cx = cx_rx
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|_| Error::Runtime("COMMIT task never exposed its Cx".into()))?;
+            request_seen_rx
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|_| Error::Runtime("server never observed COMMIT request".into()))?;
+            cancel_cx.cancel_fast(CancelKind::User);
+            Ok(())
+        });
+        // A spawned task is essential: the Asupersync scheduler installs its
+        // cancellation waker for task Cx values, matching normal async-driver
+        // use rather than `Runtime::block_on`'s top-level harness context.
+        let task = runtime.handle().spawn(async move {
+            let cx = test_cx()?;
+            cx_tx
+                .send(cx.clone())
+                .map_err(|_| Error::Runtime("cancellation test coordinator exited".into()))?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+
+            let err = connection
+                .commit(&cx)
+                .await
+                .expect_err("the cancelled in-flight COMMIT must not complete");
+            Ok::<_, Error>((err, connection.core.recovery.phase()))
+        });
+        let (err, phase) = runtime.block_on(task)?;
+        canceller.join().expect("cancellation thread joins")?;
+
+        let _ = release_tx.send(());
+        server
+            .join()
+            .expect("server thread joins")
+            .map_err(Error::Io)?;
+
+        assert!(
+            matches!(&err, Error::Cancelled),
+            "a mid-read user cancellation must surface the typed Error::Cancelled, not {err:?}"
+        );
+        assert_eq!(err.kind(), ErrorKind::Cancel);
+        assert_eq!(
+            phase,
+            SessionRecoveryPhase::BreakSent,
+            "the cancelled in-flight response must be reclaimed before a later request"
+        );
         Ok(())
     }
 
