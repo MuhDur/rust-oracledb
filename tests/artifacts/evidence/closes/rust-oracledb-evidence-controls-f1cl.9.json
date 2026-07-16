@@ -1,0 +1,66 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-16T13:20:00Z",
+  "bead_id": "rust-oracledb-evidence-controls-f1cl.9",
+  "scope": {
+    "summary": "A reusable wrapper that runs any heavy command under an enforced budget: isolated per-run target dir, MemoryMax, and TasksMax, emitting the resource_budget block the evidence contract requires.",
+    "in_scope": [
+      "scripts/resource_budget.sh (profiles build/test/mutants/live, --emit-budget, fail-closed tmpfs guard)",
+      "scripts/check_resource_budget.sh (bounded-fanout enforcement proof)",
+      "docs/RESOURCE_BUDGET.md"
+    ],
+    "out_of_scope": [
+      "Changing /tmp/cargo-target: it is a bind mount onto ext4, already fixed by the operator under 56rf, and was not touched.",
+      "Making existing callers adopt the wrapper: version_matrix.sh, the live suite and CI still invoke cargo directly. This bead ships the harness; adopting it in each caller is not done.",
+      "Enforcing the budget in GitHub Actions: hosted runners have no systemd user session, so the wrapper refuses there rather than pretending. Local and self-hosted runs only.",
+      "The build-slot policy (56rf) and cargo jobs=4 throttle: both already applied, and neither is this wrapper's job."
+    ]
+  },
+  "source": {
+    "sha": "fb6a430aa005531c0c8123a3ea4f39c33848bd33",
+    "tree_clean": true,
+    "branch": "master"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/resource_budget.sh --profile build -- cargo check -p oracledb-derive",
+        "kind": "cli",
+        "trace": "Real cargo run under the budget: completed in 2.54s with CARGO_TARGET_DIR propagated into the cgroup scope, cold isolated target dir, sccache-backed."
+      },
+      {
+        "name": "scripts/check_resource_budget.sh",
+        "kind": "cli",
+        "trace": "7/7 checks. Kernel reports pids.max=256/memory.max=8G; 24 forks under TasksMax=16 give pids.peak=16 and pids.events max>0; tmpfs dir refused with exit 78; emitted budget satisfies the contract. 5 consecutive runs green."
+      },
+      {
+        "name": "scripts/resource_budget.sh --profile mutants --emit-budget",
+        "kind": "cli",
+        "trace": "Emits the resource_budget block consumed by required-proof/v1 and mutation-result/v1; validated field-by-field in check 5."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "readiness.basis is scoped-test, so this close cannot claim ready: the Required graph (clippy, workspace test) was NOT run. The diff contains zero Rust and the shared checkout holds other panes' in-flight Rust, so a workspace run would report on their tree rather than this change.",
+    "source.tree_clean asserts that every file this close claims is committed at source.sha, verified with `git status --porcelain -- <scope.in_scope>`; it is not a claim that the shared working directory was pristine. See docs/BEAD_CLOSE_EVIDENCE.md.",
+    "Enforcement depends on systemd-run and a cgroup v2 user session. The wrapper refuses to run rather than running unbounded when systemd-run is absent, so on a host without it the harness gives no protection and says so.",
+    "The bounded-fanout proof exercises TasksMax at 16 with a moderate overshoot. It proves the kernel denies forks at the cap; it does not prove the specific 512/256 task numbers are the right budgets for real workloads, which are judgement calls that should be revisited if a legitimate run is refused.",
+    "MemoryMax is applied but not adversarially proven here: no test deliberately exceeds the memory cap, so the memory half rests on the kernel reporting memory.max correctly (check 1) rather than on an observed OOM-kill.",
+    "The harness is available but not yet wired into any caller, so nothing is protected by it until callers adopt it."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "rust-oracledb-evidence-controls-f1cl.2",
+    "rust-oracledb-evidence-controls-f1cl.7"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
