@@ -244,9 +244,9 @@
         }
       ],
       "name": "asupersync",
-      "purl": "pkg:cargo/asupersync@0.3.5",
+      "purl": "pkg:cargo/asupersync@0.3.9",
       "type": "library",
-      "version": "0.3.5"
+      "version": "0.3.9"
     },
     {
       "licenses": [
@@ -257,9 +257,9 @@
         }
       ],
       "name": "asupersync-macros",
-      "purl": "pkg:cargo/asupersync-macros@0.3.5",
+      "purl": "pkg:cargo/asupersync-macros@0.3.9",
       "type": "library",
-      "version": "0.3.5"
+      "version": "0.3.9"
     },
     {
       "licenses": [
@@ -1141,9 +1141,9 @@
         }
       ],
       "name": "franken-decision",
-      "purl": "pkg:cargo/franken-decision@0.3.5",
+      "purl": "pkg:cargo/franken-decision@0.3.9",
       "type": "library",
-      "version": "0.3.5"
+      "version": "0.3.9"
     },
     {
       "licenses": [
@@ -1154,9 +1154,9 @@
         }
       ],
       "name": "franken-evidence",
-      "purl": "pkg:cargo/franken-evidence@0.3.5",
+      "purl": "pkg:cargo/franken-evidence@0.3.9",
       "type": "library",
-      "version": "0.3.5"
+      "version": "0.3.9"
     },
     {
       "licenses": [
@@ -1167,9 +1167,9 @@
         }
       ],
       "name": "franken-kernel",
-      "purl": "pkg:cargo/franken-kernel@0.3.5",
+      "purl": "pkg:cargo/franken-kernel@0.3.9",
       "type": "library",
-      "version": "0.3.5"
+      "version": "0.3.9"
     },
     {
       "licenses": [
@@ -1947,9 +1947,9 @@
         }
       ],
       "name": "oracledb-derive",
-      "purl": "pkg:cargo/oracledb-derive@0.8.3",
+      "purl": "pkg:cargo/oracledb-derive@0.8.4",
       "type": "library",
-      "version": "0.8.3"
+      "version": "0.8.4"
     },
     {
       "licenses": [
@@ -1960,9 +1960,9 @@
         }
       ],
       "name": "oracledb-protocol",
-      "purl": "pkg:cargo/oracledb-protocol@0.8.3",
+      "purl": "pkg:cargo/oracledb-protocol@0.8.4",
       "type": "library",
-      "version": "0.8.3"
+      "version": "0.8.4"
     },
     {
       "licenses": [
@@ -3168,6 +3168,19 @@
           }
         }
       ],
+      "name": "unicode-normalization",
+      "purl": "pkg:cargo/unicode-normalization@0.1.25",
+      "type": "library",
+      "version": "0.1.25"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
       "name": "unicode-xid",
       "purl": "pkg:cargo/unicode-xid@0.2.6",
       "type": "library",
@@ -3481,19 +3494,6 @@
         }
       ],
       "name": "windows-core",
-      "purl": "pkg:cargo/windows-core@0.57.0",
-      "type": "library",
-      "version": "0.57.0"
-    },
-    {
-      "licenses": [
-        {
-          "license": {
-            "name": "MIT OR Apache-2.0"
-          }
-        }
-      ],
-      "name": "windows-core",
       "purl": "pkg:cargo/windows-core@0.62.2",
       "type": "library",
       "version": "0.62.2"
@@ -3520,35 +3520,9 @@
         }
       ],
       "name": "windows-implement",
-      "purl": "pkg:cargo/windows-implement@0.57.0",
-      "type": "library",
-      "version": "0.57.0"
-    },
-    {
-      "licenses": [
-        {
-          "license": {
-            "name": "MIT OR Apache-2.0"
-          }
-        }
-      ],
-      "name": "windows-implement",
       "purl": "pkg:cargo/windows-implement@0.60.2",
       "type": "library",
       "version": "0.60.2"
-    },
-    {
-      "licenses": [
-        {
-          "license": {
-            "name": "MIT OR Apache-2.0"
-          }
-        }
-      ],
-      "name": "windows-interface",
-      "purl": "pkg:cargo/windows-interface@0.57.0",
-      "type": "library",
-      "version": "0.57.0"
     },
     {
       "licenses": [
@@ -3588,19 +3562,6 @@
       "purl": "pkg:cargo/windows-numerics@0.3.1",
       "type": "library",
       "version": "0.3.1"
-    },
-    {
-      "licenses": [
-        {
-          "license": {
-            "name": "MIT OR Apache-2.0"
-          }
-        }
-      ],
-      "name": "windows-result",
-      "purl": "pkg:cargo/windows-result@0.1.2",
-      "type": "library",
-      "version": "0.1.2"
     },
     {
       "licenses": [
@@ -4016,9 +3977,9 @@
         }
       ],
       "name": "oracledb",
-      "purl": "pkg:cargo/oracledb@0.8.3",
+      "purl": "pkg:cargo/oracledb@0.8.4",
       "type": "library",
-      "version": "0.8.3"
+      "version": "0.8.4"
     }
   },
   "specVersion": "1.5",
