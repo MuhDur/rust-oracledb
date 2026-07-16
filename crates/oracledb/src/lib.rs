@@ -8765,7 +8765,7 @@ async fn lock_write<W>(
 where
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
-    // asupersync 0.3.9 makes borrowed mutex guards !Send because their
+    // Borrowed mutex guards have been !Send since asupersync 0.3.5 because their
     // thread-local lock-order state must be released on the acquiring thread.
     // A write may await I/O, so retain the connection's Send future contract
     // with an Arc-backed owned guard while preserving write serialization.
