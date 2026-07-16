@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import re
 import subprocess
@@ -275,6 +276,16 @@ def validate_command_coverage(commands: list[dict[str, object]], plan: list[dict
                 )
 
 
+def command_graph_commitment(plan: list[dict[str, object]]) -> dict[str, object]:
+    """Commit the exact command IDs the validator must see in the proof."""
+    command_ids = sorted(expected_command_records(plan))
+    canonical = json.dumps(command_ids, ensure_ascii=False, separators=(",", ":"))
+    return {
+        "command_ids": command_ids,
+        "sha256": hashlib.sha256(canonical.encode()).hexdigest(),
+    }
+
+
 def required_verdict(commands: list[dict[str, object]]) -> str:
     """A Required skip or failure is never promoted to a passing proof."""
 
@@ -363,6 +374,7 @@ def run_required(plan: list[dict[str, object]], sha: str, output: Path, run_id: 
             "runner": "scripts/verify_required_local.py",
         },
         "resource_budget": emitted_budget(run_id),
+        "command_graph": command_graph_commitment(plan),
         "commands": commands,
         "verdict": verdict,
     }
@@ -432,6 +444,9 @@ def self_test() -> None:
         },
     ]
     validate_command_coverage(passing_commands, test_plan)
+    graph = command_graph_commitment(test_plan)
+    assert graph["command_ids"] == ["format", "live-matrix", "test-workspace"]
+    assert re.fullmatch(r"[0-9a-f]{64}", str(graph["sha256"]))
     assert required_verdict(passing_commands) == "pass"
 
     for records, expected_error in (

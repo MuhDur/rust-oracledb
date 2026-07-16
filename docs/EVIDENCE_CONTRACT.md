@@ -60,6 +60,8 @@ yields the same code.
 | `E_TREE_DIRTY` | Evidence was produced from a tree with uncommitted changes, so it describes code at no commit. |
 | `E_STALE_SHA` | A command, proof, or CI status is recorded against a different SHA than the document is for. |
 | `E_UNFINISHED` | Something claims an outcome but recorded no end time or completed exit status, so its completion cannot be verified. |
+| `E_COMMAND_GRAPH_MISMATCH` | Required-proof command records differ from the committed canonical Required graph. |
+| `E_COMMAND_GRAPH_HASH_MISMATCH` | The Required graph's SHA-256 commitment does not match its canonical command-ID list. |
 | `E_SKIP_WITHOUT_REASON` | A skip carries no machine-readable reason, making it indistinguishable from a gap. |
 | `E_SKIPPED_AS_PASS` | A required command was skipped and the proof still declares pass. |
 | `E_VERDICT_MISMATCH` | The declared verdict is not what the records derive. |
@@ -113,6 +115,12 @@ unfinished command must be **representable** so it can be **named**.
 command legitimately has no end time — it never ran — so `E_UNFINISHED` exempts
 skips. What it must carry is a machine-readable reason. An advisory skip does
 not gate; a required skip means the proof cannot pass.
+
+**A verdict is for the whole graph.** `required-proof/v1` carries a sorted
+command-ID witness and a SHA-256 commitment derived from the producer's
+effective Required graph. The validator rejects any missing, duplicate, or
+extra command record before it derives the verdict, so a green subset cannot
+be presented as evidence for the graph it omitted.
 
 **`release-candidate-proof.verdict` is `const: "pass"`.** The document exists
 only for a candidate that passed, so a failing one is a contradiction rather than

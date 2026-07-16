@@ -17,6 +17,10 @@
     "memory_max_bytes": 17179869184,
     "pid_task_max": 384
   },
+  "command_graph": {
+    "command_ids": ["clippy", "fmt", "live-matrix", "test-workspace"],
+    "sha256": "42a4720eb2963bfa7070ef744aaae71368ded78f1ca59e3f32596fed49438f52"
+  },
   "commands": [
     {
       "id": "fmt",

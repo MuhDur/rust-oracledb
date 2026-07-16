@@ -14,6 +14,11 @@ duplicate, or altered Required command record is rejected. The DB-free contract
 test also executes the shared invalid fixtures for stale SHA, an unfinished
 command, and a skipped Required command presented as a pass.
 
+The proof also carries the complete, sorted command-ID witness and its SHA-256
+commitment. `validate_evidence.py` requires the records to match that witness
+exactly, so a proof cannot omit a Required command and still call a subset pass
+a graph pass.
+
 ## Run it honestly
 
 The proof requires a clean tree. In this shared checkout that normally means a

@@ -13,6 +13,10 @@
     "memory_max_bytes": 17179869184,
     "pid_task_max": 384
   },
+  "command_graph": {
+    "command_ids": ["fmt", "test-workspace"],
+    "sha256": "9ba71618ca3f39272a965f58475bed1110d3a9da08802ce19af8ff3793c9a46a"
+  },
   "commands": [
     {
       "id": "fmt",

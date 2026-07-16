@@ -7,6 +7,24 @@ RUNNER="$ROOT/scripts/verify_required_local.sh"
 
 "$RUNNER" --self-test
 "$ROOT/scripts/check_evidence_contract.sh"
+python3 - <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+root = Path.cwd()
+spec = importlib.util.spec_from_file_location("verify_required_local", root / "scripts/verify_required_local.py")
+assert spec and spec.loader
+runner = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = runner
+spec.loader.exec_module(runner)
+plan = runner.effective_plan()
+graph = runner.command_graph_commitment(plan)
+assert graph["command_ids"] == sorted(graph["command_ids"])
+assert len(graph["command_ids"]) == len(set(graph["command_ids"]))
+assert len(graph["sha256"]) == 64
+print("verify-required-local: command graph commitment is canonical")
+PY
 "$RUNNER" --plan | python3 -c '
 import json
 import sys

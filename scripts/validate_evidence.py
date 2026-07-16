@@ -26,6 +26,7 @@ that says "yes" the day the network is down.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -270,10 +271,50 @@ def _tree_clean(doc: dict, out: list) -> None:
         )
 
 
+def _command_graph_sha256(command_ids: list[str]) -> str:
+    """Return the v1 commitment for a canonical required command-ID list."""
+    canonical = json.dumps(command_ids, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def _semantic_required_proof(doc: dict) -> list:
     out: list = []
     _tree_clean(doc, out)
     source_sha = doc["source"]["sha"]
+
+    # The runner derives this exact ID list from the effective Required graph.
+    # Keep it as an independently committed witness: otherwise a document can
+    # omit a failed command and still derive a passing verdict from its subset.
+    graph = doc["command_graph"]
+    committed_ids = graph["command_ids"]
+    if committed_ids != sorted(set(committed_ids)):
+        out.append(
+            Finding(
+                "E_COMMAND_GRAPH_MISMATCH",
+                "/command_graph/command_ids",
+                "command graph IDs must be unique and sorted for a canonical commitment",
+            )
+        )
+        return out
+    if graph["sha256"] != _command_graph_sha256(committed_ids):
+        out.append(
+            Finding(
+                "E_COMMAND_GRAPH_HASH_MISMATCH",
+                "/command_graph/sha256",
+                "command graph hash does not match its canonical command-ID list",
+            )
+        )
+        return out
+    recorded_ids = sorted(cmd["id"] for cmd in doc["commands"])
+    if recorded_ids != committed_ids:
+        out.append(
+            Finding(
+                "E_COMMAND_GRAPH_MISMATCH",
+                "/commands",
+                "command records do not exactly match the committed Required graph",
+            )
+        )
+        return out
 
     saw_required_fail = False
     saw_required_skip = False

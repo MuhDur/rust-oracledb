@@ -13,6 +13,10 @@
     "memory_max_bytes": 17179869184,
     "pid_task_max": 384
   },
+  "command_graph": {
+    "command_ids": ["fmt"],
+    "sha256": "13ed74f948897d0054782450b03bf5b320527637fd6c51edcd68f49ad88c4be5"
+  },
   "commands": [
     {
       "id": "fmt",
