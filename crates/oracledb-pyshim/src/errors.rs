@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use oracledb::protocol::thin::QueryResult;
 use oracledb::protocol::ServerErrorDetails;
 use oracledb::Connection as RustConnection;
-use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError};
+use pyo3::exceptions::{PyNotImplementedError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -54,6 +54,10 @@ pub(crate) fn runtime_error(err: impl std::fmt::Display) -> PyErr {
     match message.as_str() {
         "connection is closed" => return raise_oracledb_driver_error("ERR_NOT_CONNECTED"),
         "TTC decode failed: truncated DML RETURNING value" => return raise_column_truncated(),
+        // Oracle can materialize BCE dates, but Python's datetime range starts
+        // at year 1. Keep the reference driver's ValueError boundary instead
+        // of exposing the internal TTC decoder as a generic RuntimeError.
+        "TTC decode failed: invalid DATE year" => return PyValueError::new_err(message),
         "TTC decode failed: NUMBER bind out of range" => {
             return raise_oracledb_driver_error("ERR_ORACLE_NUMBER_NO_REPR");
         }
