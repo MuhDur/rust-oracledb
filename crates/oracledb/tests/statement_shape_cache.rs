@@ -13,7 +13,9 @@ use std::sync::Arc;
 
 use oracledb::protocol::thin::{ColumnMetadata, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_VARCHAR};
 use oracledb::protocol::ClientIdentity;
-use oracledb::{ColumnShape, ConnectOptions, StatementShapeCache};
+use oracledb::{BlockingConnection, ColumnShape, ConnectOptions, Connection, StatementShapeCache};
+
+mod common;
 
 fn col(name: &str, ty: u8, precision: i8, scale: i8, max_size: u32) -> ColumnMetadata {
     ColumnMetadata::new(name, ty)
@@ -117,4 +119,101 @@ fn self_heal_is_downward_only_and_generation_is_monotonic() {
     let (_, shape) = shared.current(sql).unwrap();
     assert_eq!(shape, ColumnShape::from_columns(&shape_v1()));
     assert_eq!(shape.len(), 2, "no phantom unioned columns");
+}
+
+fn query_one_text(connection: &mut Connection, sql: &str) -> oracledb::Result<String> {
+    BlockingConnection::query(connection, sql, ())?
+        .one()?
+        .get(0)
+}
+
+/// Live regression/assessment for c23g.11. It intentionally orders the work
+/// so that connection A retains the pre-DDL metadata, connection B observes the
+/// post-DDL shape and heals the shared cache, and only then does A reuse the
+/// identical SQL. A stale per-connection shape would truncate or reject the
+/// widened value returned by A's final query.
+#[test]
+#[ignore = "requires a gvenzl Oracle lane with PYO_TEST_* configured"]
+fn live_cross_connection_ddl_widening_does_not_serve_a_stale_shape() {
+    let Some(creds) = common::live_creds_opt() else {
+        eprintln!("skipped: PYO_TEST_* not set");
+        return;
+    };
+
+    let shared = Arc::new(StatementShapeCache::new());
+    let identity_a =
+        ClientIdentity::new("shape-cache-a", "host", "user", "term", "rust").expect("identity A");
+    let identity_b =
+        ClientIdentity::new("shape-cache-b", "host", "user", "term", "rust").expect("identity B");
+    let options_a = ConnectOptions::new(
+        creds.connect_string.clone(),
+        creds.user.clone(),
+        creds.password.clone(),
+        identity_a,
+    )
+    .with_shared_statement_shape_cache(Arc::clone(&shared));
+    let options_b =
+        ConnectOptions::new(creds.connect_string, creds.user, creds.password, identity_b)
+            .with_shared_statement_shape_cache(Arc::clone(&shared));
+    let mut a = BlockingConnection::connect(options_a).expect("connect A");
+    let mut b = BlockingConnection::connect(options_b).expect("connect B");
+    let server_version = a.server_version().unwrap_or("unknown").to_string();
+    let server_version_tuple = a.server_version_tuple();
+    let table = format!("RUST_SHAPE_CACHE_DDL_{}", std::process::id());
+    let sql = format!("select payload from {table} where id = 1");
+    let short_value = "before-ddl";
+    let widened_value = "after-ddl payload is longer than the original varchar2(12) shape";
+
+    let _ = BlockingConnection::execute(&mut b, &format!("drop table {table} purge"), ());
+    let outcome = (|| -> oracledb::Result<()> {
+        BlockingConnection::execute(
+            &mut b,
+            &format!("create table {table} (id number primary key, payload varchar2(12))"),
+            (),
+        )?;
+        BlockingConnection::execute(
+            &mut b,
+            &format!("insert into {table} (id, payload) values (1, :1)"),
+            (short_value,),
+        )?;
+        BlockingConnection::commit(&mut b)?;
+
+        assert_eq!(query_one_text(&mut a, &sql)?, short_value);
+        assert_eq!(shared.current(&sql).expect("initial shape").0, 1);
+
+        BlockingConnection::execute(
+            &mut b,
+            &format!("alter table {table} modify (payload varchar2(4000))"),
+            (),
+        )?;
+        BlockingConnection::execute(
+            &mut b,
+            &format!("update {table} set payload = :1 where id = 1"),
+            (widened_value,),
+        )?;
+        BlockingConnection::commit(&mut b)?;
+
+        // B describes the widened column first, causing the shared cache to
+        // self-heal while A still retains the old per-connection metadata.
+        assert_eq!(query_one_text(&mut b, &sql)?, widened_value);
+        let (generation, shape) = shared.current(&sql).expect("widened shape");
+        assert_eq!(generation, 2, "DDL must advance the shared generation");
+        assert_eq!(shape.len(), 1);
+
+        // The stale-sensitive assertion: A must receive the entire widened
+        // value after B performed the cross-connection self-heal.
+        assert_eq!(query_one_text(&mut a, &sql)?, widened_value);
+        eprintln!(
+            "shape-cache DDL assessment: server_version={server_version} version_tuple={server_version_tuple:?} scenario=varchar2(12)->varchar2(4000) generation={generation} result=fresh"
+        );
+        Ok(())
+    })();
+    let cleanup = BlockingConnection::execute(&mut b, &format!("drop table {table} purge"), ());
+    let close_a = BlockingConnection::close(a);
+    let close_b = BlockingConnection::close(b);
+
+    outcome.expect("DDL scenario must not serve a stale shape");
+    cleanup.expect("drop assessment table");
+    close_a.expect("close A");
+    close_b.expect("close B");
 }
