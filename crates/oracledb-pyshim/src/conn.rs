@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use asupersync::Cx;
 use oracledb::protocol::thin::{
-    dbobject_attr_max_size, dbobject_attr_precision_scale, dbobject_rowtype_attr_max_size,
+    dbobject_attr_max_size, dbobject_attr_public_precision_scale, dbobject_rowtype_attr_max_size,
     public_dbtype_name_from_oracle_type_name, BindValue, QueryValue, CS_FORM_IMPLICIT,
     CS_FORM_NCHAR, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_CURSOR, ORA_TYPE_NUM_NUMBER,
     ORA_TYPE_NUM_RAW,
@@ -477,7 +477,7 @@ impl ThinConnImpl {
                     .and_then(query_value_to_string)
                     .unwrap_or_else(|| schema.to_ascii_uppercase());
                 let dbtype_name = public_dbtype_name_from_oracle_type_name(&attr_type_name);
-                let (precision, scale) = dbobject_attr_precision_scale(
+                let (precision, scale) = dbobject_attr_public_precision_scale(
                     &attr_type_name,
                     row.get(3).and_then(query_value_to_i8),
                     row.get(4).and_then(query_value_to_i8),
@@ -535,7 +535,7 @@ impl ThinConnImpl {
                     .and_then(query_value_to_string)
                     .unwrap_or_else(|| "VARCHAR2".to_string());
                 let dbtype_name = public_dbtype_name_from_oracle_type_name(&attr_type_name);
-                let (precision, scale) = dbobject_attr_precision_scale(
+                let (precision, scale) = dbobject_attr_public_precision_scale(
                     &attr_type_name,
                     row.get(5).and_then(query_value_to_i8),
                     row.get(6).and_then(query_value_to_i8),
@@ -600,7 +600,7 @@ impl ThinConnImpl {
                     .and_then(query_value_to_string)
                     .unwrap_or_else(|| schema.to_ascii_uppercase());
                 let dbtype_name = public_dbtype_name_from_oracle_type_name(&data_type);
-                let (precision, scale) = dbobject_attr_precision_scale(
+                let (precision, scale) = dbobject_attr_public_precision_scale(
                     &data_type,
                     row.get(3).and_then(query_value_to_i8),
                     row.get(4).and_then(query_value_to_i8),
@@ -670,7 +670,7 @@ impl ThinConnImpl {
             .and_then(query_value_to_string)
             .unwrap_or_else(|| "VARCHAR2".to_string());
         let dbtype_name = public_dbtype_name_from_oracle_type_name(&elem_type_name);
-        let (precision, scale) = dbobject_attr_precision_scale(
+        let (precision, scale) = dbobject_attr_public_precision_scale(
             &elem_type_name,
             row.get(3).and_then(query_value_to_i8),
             row.get(4).and_then(query_value_to_i8),
@@ -723,7 +723,7 @@ impl ThinConnImpl {
             .and_then(query_value_to_string)
             .unwrap_or_else(|| "VARCHAR2".to_string());
         let dbtype_name = public_dbtype_name_from_oracle_type_name(&elem_type_name);
-        let (precision, scale) = dbobject_attr_precision_scale(
+        let (precision, scale) = dbobject_attr_public_precision_scale(
             &elem_type_name,
             row.get(4).and_then(query_value_to_i8),
             row.get(5).and_then(query_value_to_i8),

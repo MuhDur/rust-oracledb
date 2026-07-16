@@ -605,17 +605,130 @@ pub fn check_fetch_conversion(
     }
 }
 
-pub fn public_dbtype_name_from_oracle_type_name(type_name: &str) -> &'static str {
-    let upper = type_name.to_ascii_uppercase();
-    if upper.starts_with("TIMESTAMP") {
-        if upper.contains("LOCAL TIME ZONE") || upper.contains("LOCAL TZ") {
-            return "DB_TYPE_TIMESTAMP_LTZ";
-        }
-        if upper.contains("TIME ZONE") || upper.contains("WITH TZ") {
-            return "DB_TYPE_TIMESTAMP_TZ";
-        }
-        return "DB_TYPE_TIMESTAMP";
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BuiltinDescriptorFamily {
+    Timestamp,
+    TimestampTz,
+    TimestampLtz,
+    IntervalDs,
+    IntervalYm,
+}
+
+/// Recognizes only built-in descriptor names returned by Oracle's type catalog.
+///
+/// `ALL_TYPE_ATTRS` returns the short `WITH TZ` and `WITH LOCAL TZ` spellings on
+/// the 23ai release lane. PL/SQL metadata can spell the base type as
+/// `TIMESTAMP(6)`. Fold ASCII case and whitespace, but do not use a prefix
+/// match: an arbitrary ADT called `TIMESTAMP_AUDIT` must remain an ADT.
+fn builtin_descriptor_family(type_name: &str) -> Option<BuiltinDescriptorFamily> {
+    if let Some(timestamp_suffix) = timestamp_descriptor_suffix(type_name) {
+        let mut words = timestamp_suffix.split_ascii_whitespace();
+        let second = words.next();
+        return match second {
+            None => Some(BuiltinDescriptorFamily::Timestamp),
+            Some(with) if with.eq_ignore_ascii_case("WITH") => match words.next() {
+                Some(tz) if tz.eq_ignore_ascii_case("TZ") && words.next().is_none() => {
+                    Some(BuiltinDescriptorFamily::TimestampTz)
+                }
+                Some(time) if time.eq_ignore_ascii_case("TIME") => (words
+                    .next()
+                    .is_some_and(|zone| zone.eq_ignore_ascii_case("ZONE"))
+                    && words.next().is_none())
+                .then_some(BuiltinDescriptorFamily::TimestampTz),
+                Some(local) if local.eq_ignore_ascii_case("LOCAL") => match words.next() {
+                    Some(tz) if tz.eq_ignore_ascii_case("TZ") && words.next().is_none() => {
+                        Some(BuiltinDescriptorFamily::TimestampLtz)
+                    }
+                    Some(time) if time.eq_ignore_ascii_case("TIME") => (words
+                        .next()
+                        .is_some_and(|zone| zone.eq_ignore_ascii_case("ZONE"))
+                        && words.next().is_none())
+                    .then_some(BuiltinDescriptorFamily::TimestampLtz),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        };
     }
+
+    let mut words = type_name.split_ascii_whitespace();
+    let first = words.next()?;
+    if first.eq_ignore_ascii_case("INTERVAL") {
+        return match (words.next(), words.next(), words.next(), words.next()) {
+            (Some(day), Some(to), Some(second), None)
+                if day.eq_ignore_ascii_case("DAY")
+                    && to.eq_ignore_ascii_case("TO")
+                    && second.eq_ignore_ascii_case("SECOND") =>
+            {
+                Some(BuiltinDescriptorFamily::IntervalDs)
+            }
+            (Some(year), Some(to), Some(month), None)
+                if year.eq_ignore_ascii_case("YEAR")
+                    && to.eq_ignore_ascii_case("TO")
+                    && month.eq_ignore_ascii_case("MONTH") =>
+            {
+                Some(BuiltinDescriptorFamily::IntervalYm)
+            }
+            _ => None,
+        };
+    }
+
+    None
+}
+
+/// Returns the words after a strict `TIMESTAMP` base type, accepting at most
+/// one Oracle fractional-seconds precision suffix (`(0)` through `(9)`).
+fn timestamp_descriptor_suffix(type_name: &str) -> Option<&str> {
+    let type_name = type_name.trim_matches(|ch: char| ch.is_ascii_whitespace());
+    let (timestamp, mut suffix) = type_name
+        .get(.."TIMESTAMP".len())
+        .zip(type_name.get("TIMESTAMP".len()..))?;
+    if !timestamp.eq_ignore_ascii_case("TIMESTAMP") {
+        return None;
+    }
+
+    let has_word_separator = suffix
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_whitespace());
+    suffix = suffix.trim_start_matches(|ch: char| ch.is_ascii_whitespace());
+    if suffix.is_empty() {
+        return Some("");
+    }
+    if !suffix.starts_with('(') {
+        return has_word_separator.then_some(suffix);
+    }
+    suffix = &suffix[1..];
+    suffix = suffix.trim_start_matches(|ch: char| ch.is_ascii_whitespace());
+    let precision = *suffix.as_bytes().first()?;
+    if !precision.is_ascii_digit() {
+        return None;
+    }
+    suffix = suffix[1..].trim_start_matches(|ch: char| ch.is_ascii_whitespace());
+    suffix = suffix.strip_prefix(')')?;
+    if suffix.is_empty() {
+        return Some("");
+    }
+    suffix
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+        .then(|| suffix.trim_matches(|ch: char| ch.is_ascii_whitespace()))
+}
+
+pub fn public_dbtype_name_from_oracle_type_name(type_name: &str) -> &'static str {
+    if let Some(family) = builtin_descriptor_family(type_name) {
+        return match family {
+            BuiltinDescriptorFamily::Timestamp => "DB_TYPE_TIMESTAMP",
+            BuiltinDescriptorFamily::TimestampTz => "DB_TYPE_TIMESTAMP_TZ",
+            BuiltinDescriptorFamily::TimestampLtz => "DB_TYPE_TIMESTAMP_LTZ",
+            BuiltinDescriptorFamily::IntervalDs => "DB_TYPE_INTERVAL_DS",
+            BuiltinDescriptorFamily::IntervalYm => "DB_TYPE_INTERVAL_YM",
+        };
+    }
+
+    let upper = type_name.to_ascii_uppercase();
     match upper.as_str() {
         "CHAR" => "DB_TYPE_CHAR",
         "NCHAR" => "DB_TYPE_NCHAR",
@@ -623,9 +736,6 @@ pub fn public_dbtype_name_from_oracle_type_name(type_name: &str) -> &'static str
         "NVARCHAR2" | "NVARCHAR" => "DB_TYPE_NVARCHAR",
         "RAW" => "DB_TYPE_RAW",
         "DATE" => "DB_TYPE_DATE",
-        "TIMESTAMP" => "DB_TYPE_TIMESTAMP",
-        "TIMESTAMP WITH TIME ZONE" | "TIMESTAMP WITH TZ" => "DB_TYPE_TIMESTAMP_TZ",
-        "TIMESTAMP WITH LOCAL TIME ZONE" | "TIMESTAMP WITH LOCAL TZ" => "DB_TYPE_TIMESTAMP_LTZ",
         "CLOB" => "DB_TYPE_CLOB",
         "NCLOB" => "DB_TYPE_NCLOB",
         "BLOB" => "DB_TYPE_BLOB",
@@ -650,8 +760,6 @@ pub fn public_dbtype_name_from_oracle_type_name(type_name: &str) -> &'static str
         "BFILE" => "DB_TYPE_BFILE",
         "JSON" => "DB_TYPE_JSON",
         "VECTOR" => "DB_TYPE_VECTOR",
-        "INTERVAL DAY TO SECOND" => "DB_TYPE_INTERVAL_DS",
-        "INTERVAL YEAR TO MONTH" => "DB_TYPE_INTERVAL_YM",
         // An unknown name IS a nested object type (mirrors reference
         // _create_attr only calling get_type_for_info when type_owner is set).
         _ => "DB_TYPE_OBJECT",
@@ -663,6 +771,16 @@ pub fn dbobject_attr_precision_scale(
     precision: Option<i8>,
     scale: Option<i8>,
 ) -> (i8, i8) {
+    if let Some(family) = builtin_descriptor_family(type_name) {
+        return match family {
+            BuiltinDescriptorFamily::Timestamp
+            | BuiltinDescriptorFamily::TimestampTz
+            | BuiltinDescriptorFamily::TimestampLtz => (precision.unwrap_or(0), scale.unwrap_or(6)),
+            BuiltinDescriptorFamily::IntervalDs => (precision.unwrap_or(2), scale.unwrap_or(6)),
+            BuiltinDescriptorFamily::IntervalYm => (precision.unwrap_or(2), scale.unwrap_or(0)),
+        };
+    }
+
     match type_name.to_ascii_uppercase().as_str() {
         "NUMBER" => (
             precision.unwrap_or(if scale == Some(0) { 38 } else { 0 }),
@@ -671,16 +789,33 @@ pub fn dbobject_attr_precision_scale(
         "INTEGER" | "SMALLINT" => (precision.unwrap_or(38), scale.unwrap_or(0)),
         "REAL" => (precision.unwrap_or(63), scale.unwrap_or(-127)),
         "DOUBLE PRECISION" | "FLOAT" => (precision.unwrap_or(126), scale.unwrap_or(-127)),
-        // Timestamp/interval attributes also carry precision/scale in the data
-        // dictionary (leading-field precision + fractional-seconds scale).
-        // Propagate them with upstream's defaults instead of discarding them
-        // (reference impl commit 6cfd00aa642e).
-        "TIMESTAMP" | "TIMESTAMP WITH TIME ZONE" | "TIMESTAMP WITH LOCAL TIME ZONE" => {
-            (precision.unwrap_or(0), scale.unwrap_or(6))
-        }
-        "INTERVAL DAY TO SECOND" => (precision.unwrap_or(2), scale.unwrap_or(6)),
-        "INTERVAL YEAR TO MONTH" => (precision.unwrap_or(2), scale.unwrap_or(0)),
+        // The other built-in dictionary types intentionally retain (0, 0):
+        // character/raw/LOB, DATE, binary float/double, PL/SQL scalar, LONG,
+        // ROWID, BFILE, JSON, and VECTOR attributes do not use this helper's
+        // precision/scale defaults. `other_builtin_descriptor_types_keep_zero`
+        // enumerates that invariant; unknown names remain true ADTs.
         _ => (0, 0),
+    }
+}
+
+/// Projects descriptor precision/scale into python-oracledb's public
+/// `DbObjectAttr` contract.
+///
+/// Oracle supplies temporal descriptor defaults (for example, `(0, 6)` for a
+/// bare `TIMESTAMP`), and [`dbobject_attr_precision_scale`] preserves those raw
+/// values. The Python public API exposes precision and scale only for numeric
+/// attributes, so its temporal attributes must remain `(0, 0)` internally in
+/// order for the wrapper to present `None` for both fields.
+pub fn dbobject_attr_public_precision_scale(
+    type_name: &str,
+    precision: Option<i8>,
+    scale: Option<i8>,
+) -> (i8, i8) {
+    let precision_scale = dbobject_attr_precision_scale(type_name, precision, scale);
+    if builtin_descriptor_family(type_name).is_some() {
+        (0, 0)
+    } else {
+        precision_scale
     }
 }
 
@@ -1158,13 +1293,177 @@ pub(crate) fn encode_text_value(value: &str, csfrm: u8) -> Vec<u8> {
 }
 
 #[cfg(test)]
-mod in_out_bind_tests {
+mod bind_tests {
     use super::*;
+
+    const ORACLE_23AI_DESCRIPTOR_FIXTURE: &str =
+        include_str!("../../tests/golden/oracle_23ai_all_type_attrs_tstz.txt");
 
     fn written_bytes(value: &BindValue, csfrm: u8) -> Vec<u8> {
         let mut writer = TtcWriter::new();
         write_bind_value(&mut writer, value, csfrm).expect("write bind value");
         writer.into_bytes()
+    }
+
+    #[test]
+    fn captured_23ai_descriptor_fixture_normalizes_precision_scale() {
+        let mut captured_rows = 0;
+        for line in ORACLE_23AI_DESCRIPTOR_FIXTURE
+            .lines()
+            .filter(|line| line.starts_with("ATTR|"))
+        {
+            captured_rows += 1;
+            let fields: Vec<_> = line.split('|').collect();
+            assert_eq!(fields.len(), 8, "fixture row shape: {line}");
+            assert_eq!(fields[1], "SYS", "fixture owner: {line}");
+            assert_eq!(fields[2], "C23G_TSTZ_TYPE", "fixture type: {line}");
+
+            let precision = (fields[6] != "NULL")
+                .then(|| fields[6].parse::<i8>().expect("fixture precision is an i8"));
+            let scale = (fields[7] != "NULL")
+                .then(|| fields[7].parse::<i8>().expect("fixture scale is an i8"));
+            let (expected_dbtype, expected_precision_scale) = match fields[4] {
+                "TS_DEFAULT" => ("DB_TYPE_TIMESTAMP", (0, 6)),
+                "TS_3" => ("DB_TYPE_TIMESTAMP", (0, 3)),
+                "TSTZ_DEFAULT" => ("DB_TYPE_TIMESTAMP_TZ", (0, 6)),
+                "TSTZ_3" => ("DB_TYPE_TIMESTAMP_TZ", (0, 3)),
+                "TSLTZ_DEFAULT" => ("DB_TYPE_TIMESTAMP_LTZ", (0, 6)),
+                "TSLTZ_3" => ("DB_TYPE_TIMESTAMP_LTZ", (0, 3)),
+                "IDS_DEFAULT" => ("DB_TYPE_INTERVAL_DS", (2, 6)),
+                "IDS_9_3" => ("DB_TYPE_INTERVAL_DS", (9, 3)),
+                "IYM_DEFAULT" => ("DB_TYPE_INTERVAL_YM", (2, 0)),
+                "IYM_9" => ("DB_TYPE_INTERVAL_YM", (9, 0)),
+                name => panic!("unexpected captured attribute {name}"),
+            };
+
+            assert_eq!(
+                public_dbtype_name_from_oracle_type_name(fields[5]),
+                expected_dbtype,
+                "captured raw type name: {line}"
+            );
+            assert_eq!(
+                dbobject_attr_precision_scale(fields[5], precision, scale),
+                expected_precision_scale,
+                "captured raw precision/scale: {line}"
+            );
+        }
+        assert_eq!(captured_rows, 10, "captured descriptor row count");
+    }
+
+    #[test]
+    fn descriptor_normalizer_folds_only_builtin_grammar() {
+        assert_eq!(
+            builtin_descriptor_family(" \ttImEsTaMp  WITH\nLOCAL\tTZ  "),
+            Some(BuiltinDescriptorFamily::TimestampLtz)
+        );
+        assert_eq!(
+            builtin_descriptor_family(" timestamp ( 6 ) with time zone "),
+            Some(BuiltinDescriptorFamily::TimestampTz)
+        );
+        assert_eq!(
+            public_dbtype_name_from_oracle_type_name("TIMESTAMP(6)"),
+            "DB_TYPE_TIMESTAMP"
+        );
+        assert_eq!(
+            builtin_descriptor_family("INTERVAL  YEAR\tTO MONTH"),
+            Some(BuiltinDescriptorFamily::IntervalYm)
+        );
+        for name in [
+            "TIMESTAMP_AUDIT",
+            "TIMESTAMP(10)",
+            "TIMESTAMP(6)WITH TZ",
+            "TIMESTAMP WITH TZ EXTRA",
+            "INTERVAL DAY TO SECOND EXTRA",
+        ] {
+            assert_eq!(builtin_descriptor_family(name), None, "{name}");
+            assert_eq!(
+                public_dbtype_name_from_oracle_type_name(name),
+                "DB_TYPE_OBJECT",
+                "{name} remains an ADT"
+            );
+            assert_eq!(dbobject_attr_precision_scale(name, None, None), (0, 0));
+        }
+    }
+
+    #[test]
+    fn public_metadata_hides_temporal_descriptor_defaults() {
+        for name in [
+            "TIMESTAMP",
+            "TIMESTAMP(6)",
+            "TIMESTAMP WITH TZ",
+            "TIMESTAMP WITH LOCAL TZ",
+            "INTERVAL DAY TO SECOND",
+            "INTERVAL YEAR TO MONTH",
+        ] {
+            assert_ne!(
+                dbobject_attr_precision_scale(name, None, None),
+                (0, 0),
+                "raw descriptor metadata for {name}"
+            );
+            assert_eq!(
+                dbobject_attr_public_precision_scale(name, None, None),
+                (0, 0),
+                "DbObjectAttr exposes None precision/scale for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn number_descriptor_precision_scale_is_unchanged() {
+        assert_eq!(
+            dbobject_attr_precision_scale("NUMBER", None, None),
+            (0, -127),
+            "unconstrained NUMBER keeps its existing defaults"
+        );
+        assert_eq!(
+            dbobject_attr_precision_scale("NUMBER", None, Some(0)),
+            (38, 0),
+            "scale-zero NUMBER keeps its existing precision default"
+        );
+        assert_eq!(
+            dbobject_attr_precision_scale("NUMBER", Some(9), Some(3)),
+            (9, 3),
+            "explicit NUMBER metadata is preserved"
+        );
+    }
+
+    #[test]
+    fn other_builtin_descriptor_types_keep_zero_precision_scale() {
+        for name in [
+            "CHAR",
+            "NCHAR",
+            "VARCHAR2",
+            "VARCHAR",
+            "NVARCHAR2",
+            "NVARCHAR",
+            "RAW",
+            "DATE",
+            "CLOB",
+            "NCLOB",
+            "BLOB",
+            "XMLTYPE",
+            "BINARY_FLOAT",
+            "BINARY_DOUBLE",
+            "BOOLEAN",
+            "PL/SQL BOOLEAN",
+            "BINARY_INTEGER",
+            "PLS_INTEGER",
+            "PL/SQL BINARY INTEGER",
+            "PL/SQL PLS INTEGER",
+            "LONG",
+            "LONG RAW",
+            "ROWID",
+            "UROWID",
+            "BFILE",
+            "JSON",
+            "VECTOR",
+        ] {
+            assert_eq!(
+                dbobject_attr_precision_scale(name, Some(9), Some(3)),
+                (0, 0),
+                "{name} intentionally has no precision/scale default"
+            );
+        }
     }
 
     // An IN OUT NUMBER bind sends its input value (not a null indicator) and its
