@@ -1,21 +1,28 @@
-# Ground Truth — rust-oracledb
+# Archived Ground Truth — 2026-06
 
-> **HISTORICAL QUALIFICATION SNAPSHOT (2026-06-11).** This document records the
-> release-qualification state at that date, not current release capability. Its
-> recorded differential evidence is 2,578 collected tests: 2,462 passed, 116
+> **Historical qualification snapshot (2026-06-11).** This document preserves
+> the recorded June 2026 evidence and must not be read as a current release
+> claim. Its differential evidence is 2,578 collected tests: 2,462 passed, 116
 > skipped, and zero regressions / missing tests against Oracle 23ai Free. See
 > [FAKE_PARITY_AUDIT.md](FAKE_PARITY_AUDIT.md),
 > [PARITY_SKIPS.md](PARITY_SKIPS.md), and
 > [qualification/1.0.0-rc.1/SUMMARY.md](qualification/1.0.0-rc.1/SUMMARY.md).
-> For current support and release state, use [SUPPORT.md](SUPPORT.md),
-> [CHANGELOG.md](../CHANGELOG.md), and [PUBLISHING.md](PUBLISHING.md).
+>
+> **Current status (2026-07-16).** The workspace has a prepared, unpublished
+> 0.8.4 candidate. TCPS and wallet support are implemented and tested; the
+> 2,462 / 2,578 result above is historical qualification evidence, not a fresh
+> candidate run. See [CURRENT_ROADMAP.md](CURRENT_ROADMAP.md) for the current
+> plan, [SUPPORT.md](SUPPORT.md) for support boundaries, and
+> [PUBLISHING.md](PUBLISHING.md) and [CHANGELOG.md](../CHANGELOG.md) for release
+> state.
 
 ---
 
 Recorded 2026-06-11 (~18:00Z) at HEAD `978491a` ("Fix async executemany parity gaps"), branch
 `master`. Every claim cites its evidence source or is marked UNVERIFIED. Where evidence batches
-disagree, the newer per-module JSON wins. Update this file whenever the recorded state changes
-materially (re-baseline completion, wave merges, milestone gates).
+disagree, the newer per-module JSON wins within this snapshot. Do not re-baseline this archive;
+record new release evidence in [RELEASE_CERTIFICATION.md](RELEASE_CERTIFICATION.md) and update
+[CURRENT_ROADMAP.md](CURRENT_ROADMAP.md) when its status changes.
 
 ## 1. Identity and goal
 
@@ -25,13 +32,13 @@ python-oracledb baseline manifest on the same local Oracle Free container. Autho
 [PLAN_TO_PORT_PYTHON_ORACLEDB_THIN_TO_RUST.md](../PLAN_TO_PORT_PYTHON_ORACLEDB_THIN_TO_RUST.md)
 (milestones M0-M6, claim contract, fake-parity guard); intent draft in `plan.md`.
 
-## 2. Headline status
+## 2. Archived June headline status
 
 | Metric | Value | Evidence |
 |---|---|---|
 | Baseline (real python-oracledb v4.0.1 thin) | 2,236 passed / 24 skipped / 2,260 total | `harness/.baseline/baseline.json` (2026-06-10) |
 | Rust shim, freshest-evidence composite (per-module best, mixed vintage) | 1,026 passed / 916 failed / 291 skipped across 71 of 72 modules (2,233 tests) | computed from per-module JSONs listed in §5 |
-| Pass rate of executed tests (composite) | 1,026 / 1,942 = **52.8%** | same; stale modules undercount HEAD (see below) |
+| Pass rate of executed tests (archived composite) | 1,026 / 1,942 = **52.8%** | same; stale modules undercount the June 2026 HEAD (see below) |
 | Pass rate on modules with at-HEAD evidence only (17:29Z run + focused runs) | 472 / 631 = **74.8%** | `parts-rust-20260611T172927Z-3160370/` + focused JSONs |
 | Modules fully green (with passing tests) | **24 of 72** | §5 table |
 | Modules zero-fail but all-skip (false greens, see debt item 2) | 13 | §5 table |

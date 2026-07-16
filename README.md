@@ -38,11 +38,11 @@ TNS/TTC protocol itself, so an application using it compiles to a single static
 binary, decodes the wire in parallel across cores (no GIL), fails closed against
 hostile input (fuzzed), and maps rows into compile-checked Rust types.
 
-**Verified against the reference's own tests.** rust-oracledb implements the
-Oracle TNS/TTC protocol faithfully enough to pass python-oracledb's **own**
-thin-mode pytest suite — the very suite the reference driver runs against itself —
-in thin mode against Oracle Database 23ai Free. Every claim in this README is
-backed by that evidence:
+**Verified against the reference's own tests.** The recorded qualification run
+showed that rust-oracledb implements the Oracle TNS/TTC protocol faithfully
+enough to pass python-oracledb's **own** thin-mode pytest suite — the very suite
+the reference driver runs against itself — in thin mode against Oracle Database
+23ai Free. Its results are:
 
 | | result | evidence |
 |---|---|---|
@@ -50,6 +50,10 @@ backed by that evidence:
 | Skipped (identical node IDs to the reference thin driver) | **116** | every skip proven legitimate — see below |
 | Skips that hide a Rust-engine defect | **0** | Rust passes all 303 non-skip tests in the skip-bearing modules |
 | Regressions vs the recorded baseline | **0** | [docs/RELEASE_CERTIFICATION.md](docs/RELEASE_CERTIFICATION.md) |
+
+These are historical qualification results, not a claim that a fresh 0.8.4
+candidate run has already completed. The exact release-SHA evidence required for
+the candidate is tracked in [docs/CURRENT_ROADMAP.md](docs/CURRENT_ROADMAP.md).
 
 Every one of the 116 skips is forced by the thin-mode contract, not by a
 shortcoming in this engine: 88 are `requires thick mode` (the reference thin
@@ -399,8 +403,11 @@ across thousands of generated values. See [docs/FUZZING.md](docs/FUZZING.md).
 
 ## Installation
 
-`rust-oracledb` requires **nightly Rust** (its async runtime, asupersync, is built
-with `#![feature(try_trait_v2)]`) and is published on crates.io as
+`rust-oracledb` requires the pinned **nightly Rust** toolchain because its
+async-runtime dependency, `asupersync`, currently uses
+`#![feature(try_trait_v2)]` and `#![feature(try_trait_v2_residual)]`. This is a
+build-time requirement; it does not add an Oracle client or compiler to the
+runtime artifact. The crate is published on crates.io as
 [`oracledb`](https://crates.io/crates/oracledb). The active pin and re-pin
 procedure are documented in [docs/TOOLCHAIN.md](docs/TOOLCHAIN.md):
 

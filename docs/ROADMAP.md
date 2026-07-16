@@ -1,9 +1,15 @@
-# rust-oracledb — Forward Roadmap (post-Wave-2)
+# Archived Roadmap — 2026-06 (post-Wave-2)
 
-> **Historical planning snapshot (2026-06).** This plan predates the 0.7.x–0.8.4
-> implementation work and is preserved for provenance, not active release guidance.
-> For current support see [SUPPORT.md](SUPPORT.md); for release state see
-> [CHANGELOG.md](../CHANGELOG.md) and [PUBLISHING.md](PUBLISHING.md).
+> **Historical planning record.** This plan predates the 0.7.x–0.8.4
+> implementation work. Its Wave and status claims apply only to the June 2026
+> snapshot; they are not current feature or release guidance.
+>
+> **Current status (2026-07-16).** The workspace has a prepared, unpublished
+> 0.8.4 candidate. TCPS and wallet support are implemented and tested; the
+> 2,462 / 2,578 parity result is historical qualification evidence, not a fresh
+> candidate run. See [CURRENT_ROADMAP.md](CURRENT_ROADMAP.md) for the current
+> plan, [SUPPORT.md](SUPPORT.md) for support boundaries, and
+> [PUBLISHING.md](PUBLISHING.md) for release state.
 
 Historical forward plan for reaching the goal: a real, certified pure-Rust port
 of python-oracledb thin mode. Companion to `docs/GROUND_TRUTH.md` (the
@@ -26,10 +32,10 @@ The suite running against a **non-TLS** local container means TLS/wallet is **no
 for finish line 1 — but it is the headline differentiator and milestone M3, so it is in scope
 for finish line 2.
 
-## Status snapshot (after Wave 1 + pipeline merge — verified)
+## Status snapshot (archived June 2026; after Wave 1 + pipeline merge — verified)
 
 - Large majority of the 72 in-scope modules at/near baseline. Pipelining 49/49.
-- **Untouched:** TLS/rustls (M3) — driver is plain TCP; wallet readers (ewallet.pem/cwallet.sso)
+- **At this snapshot only — untouched:** TLS/rustls (M3) — driver is plain TCP; wallet readers (ewallet.pem/cwallet.sso)
   — none; fuzzing/benches (M6) — none; DIVERGENCES/claim-contract/fake-parity artifacts — none.
 - **Structural debt:** pyshim 12.5k LOC (still hosts SQL/bind/type driver logic; ~12 `d49:`
   markers); protocol `thin.rs` re-grown to 5.4k LOC (monolith again after intervals/vector/dpl).
