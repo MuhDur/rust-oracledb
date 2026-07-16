@@ -22,4 +22,4 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   exit 2
 fi
 
-exec "$PYTHON_BIN" "$ROOT/scripts/validate_evidence.py" --check-fixtures
+exec "$PYTHON_BIN" "$ROOT/scripts/validate_evidence.py" --check-fixtures "$@"

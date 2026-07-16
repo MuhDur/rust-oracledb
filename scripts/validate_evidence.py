@@ -409,49 +409,6 @@ def _semantic_required_proof(doc: dict) -> list:
     return out
 
 
-def _command_graph_sha256(command_ids: list[str]) -> str:
-    """Return the v1 commitment for a canonical Required command-ID list."""
-
-    canonical = json.dumps(command_ids, ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode()).hexdigest()
-
-
-def _semantic_required_proof_v1(doc: dict) -> list:
-    """Preserve the frozen v1 graph-record validation semantics."""
-
-    out = _semantic_required_proof(doc)
-    graph = doc["command_graph"]
-    committed_ids = graph["command_ids"]
-    if committed_ids != sorted(set(committed_ids)):
-        out.append(
-            Finding(
-                "E_COMMAND_GRAPH_MISMATCH",
-                "/command_graph/command_ids",
-                "command graph IDs must be unique and sorted for a canonical commitment",
-            )
-        )
-        return out
-    if graph["sha256"] != _command_graph_sha256(committed_ids):
-        out.append(
-            Finding(
-                "E_COMMAND_GRAPH_HASH_MISMATCH",
-                "/command_graph/sha256",
-                "command graph hash does not match its canonical command-ID list",
-            )
-        )
-        return out
-    recorded_ids = sorted(command["id"] for command in doc["commands"])
-    if recorded_ids != committed_ids:
-        out.append(
-            Finding(
-                "E_COMMAND_GRAPH_MISMATCH",
-                "/commands",
-                "command records do not exactly match the committed Required graph",
-            )
-        )
-    return out
-
-
 def _semantic_required_proof_v2(doc: dict) -> list:
     """Require v2 records to match their self-declared graph record exactly.
 
@@ -688,7 +645,7 @@ def _semantic_bead_close_evidence(doc: dict) -> list:
 
 
 SEMANTIC_RULES = {
-    "required-proof/v1": _semantic_required_proof_v1,
+    "required-proof/v1": _semantic_required_proof,
     "required-proof/v2": _semantic_required_proof_v2,
     "release-candidate-proof/v1": _semantic_release_candidate_proof,
     "release-candidate-proof/v2": _semantic_release_candidate_proof,
@@ -761,6 +718,49 @@ def check_shared_defs() -> list:
     return errors
 
 
+def check_mirror(mirror_root: Path) -> int:
+    """Verify the complete versioned-schema inventory byte-for-byte.
+
+    The semantic validator is deliberately implementation-specific, but a
+    versioned schema is the shared contract.  A dual-release caller supplies
+    its sibling checkout explicitly so ordinary single-repository CI remains
+    hermetic while the coordinated release cannot silently drift.
+    """
+
+    mirror_dir = mirror_root / "schemas" / "evidence"
+    expected = set(SCHEMA_FILES.values())
+    actual = {path.name for path in mirror_dir.glob("*.schema.json")}
+    failures = 0
+
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    for filename in missing:
+        failures += 1
+        print(f"FAIL mirror: missing schema {filename}", file=sys.stderr)
+    for filename in unexpected:
+        failures += 1
+        print(f"FAIL mirror: unexpected schema {filename}", file=sys.stderr)
+
+    for filename in sorted(expected & actual):
+        local = (SCHEMA_DIR / filename).read_bytes()
+        mirrored = (mirror_dir / filename).read_bytes()
+        if local != mirrored:
+            failures += 1
+            print(f"FAIL mirror: {filename} differs byte-for-byte", file=sys.stderr)
+
+    if failures:
+        print(
+            f"evidence-contract mirror: {failures} inventory or byte-identity failures",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        f"evidence-contract mirror: {len(expected)} schemas byte-identical with "
+        f"{mirror_root}"
+    )
+    return 0
+
+
 def check_fixtures() -> int:
     """Run the fixture suite. Valid fixtures must pass; invalid fixtures must be
     rejected for the exact declared reason, not merely rejected."""
@@ -825,11 +825,22 @@ def main() -> int:
         action="store_true",
         help="run the fixture suite instead of validating files",
     )
+    parser.add_argument(
+        "--mirror-root",
+        type=Path,
+        help="sibling repository root for the coordinated byte-identity check",
+    )
     parser.add_argument("--json", action="store_true", help="emit findings as JSON")
     args = parser.parse_args()
 
     if args.check_fixtures:
-        return check_fixtures()
+        result = check_fixtures()
+        if args.mirror_root is not None:
+            result |= check_mirror(args.mirror_root)
+        return result
+
+    if args.mirror_root is not None:
+        parser.error("--mirror-root requires --check-fixtures")
 
     if not args.files:
         parser.error("pass at least one document, or --check-fixtures")

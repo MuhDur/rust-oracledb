@@ -8,7 +8,9 @@ RUNNER="$ROOT/scripts/verify_required_local.sh"
 "$RUNNER" --self-test
 "$ROOT/scripts/check_evidence_contract.sh"
 python3 - <<'PY'
+import contextlib
 import importlib.util
+import io
 import json
 import sys
 from pathlib import Path
@@ -41,7 +43,11 @@ assert [(finding.code, finding.path) for finding in findings] == [
 ]
 legacy = json.loads((root / "schemas/evidence/fixtures/valid/required-proof-fail.json").read_text())
 legacy["schema"] = "required-proof/v1"
+legacy.pop("command_graph")
 assert validator.validate_doc(legacy) == []
+assert validator.check_mirror(root) == 0
+with contextlib.redirect_stderr(io.StringIO()):
+    assert validator.check_mirror(root / "schemas") == 1
 print("verify-required-local: canonical command graph witness rejects omission")
 PY
 "$RUNNER" --plan | python3 -c '

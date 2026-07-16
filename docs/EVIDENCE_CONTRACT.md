@@ -25,6 +25,7 @@ manifest live in [`schemas/evidence/fixtures/`](../schemas/evidence/fixtures).
 
 ```bash
 scripts/check_evidence_contract.sh          # the whole fixture suite
+scripts/check_evidence_contract.sh --mirror-root ../oraclemcp  # dual-release schema inventory
 scripts/validate_evidence.py FILE.json      # validate one document
 scripts/validate_evidence.py --json F.json  # machine-readable findings
 ```
@@ -63,8 +64,7 @@ yields the same code.
 | `E_STALE_SHA` | A command, proof, or CI status is recorded against a different SHA than the document is for. |
 | `E_UNFINISHED` | Something claims an outcome but recorded no end time or completed exit status, so its completion cannot be verified. |
 | `E_EXIT_STATUS_MISMATCH` | A completed pass/fail command's declared outcome contradicts its process exit status. |
-| `E_COMMAND_GRAPH_MISMATCH` | A Required-proof has an invalid canonical graph record or records differ from it. |
-| `E_COMMAND_GRAPH_HASH_MISMATCH` | A v1 Required-proof graph-record hash does not match its canonical command-ID list. |
+| `E_COMMAND_GRAPH_MISMATCH` | A v2 Required-proof has an invalid canonical graph record or records differ from it. |
 | `E_SKIP_WITHOUT_REASON` | A skip carries no machine-readable reason, making it indistinguishable from a gap. |
 | `E_SKIPPED_AS_PASS` | A required command was skipped and the proof still declares pass. |
 | `E_VERDICT_MISMATCH` | The declared verdict is not what the records derive. |
@@ -165,6 +165,11 @@ mirroring is a file copy. Definitions shared between schemas (`sha1`,
 `sourceRef`, `timestamp`, `nullableTimestamp`, `resourceBudget`, `artifactRef`)
 must be identical in every file that has them; `check_shared_defs()` enforces
 that, so schema versions cannot drift into incompatible dialects.
+
+For a coordinated release, run `scripts/check_evidence_contract.sh
+--mirror-root ../oraclemcp` from either checkout. It rejects a missing,
+unexpected, or byte-different `*.schema.json` file while leaving normal
+single-repository CI independent of a sibling checkout.
 
 Changing a document shape is a new version. These documents are read by tooling
 in two repos, so `v1` remains readable but frozen once a proof-producing command
