@@ -56,6 +56,22 @@ publishing as a gated, deliberate, operator-authorized step, never an incidental
   toolchain and a live database; it is exercised by the conformance harness, not
   plain `cargo test`.
 
+### Build-resource discipline
+
+- **Do not touch `/tmp/cargo-target`.** It is a managed target directory backed
+  by the root disk after the 2026-07-16 tmpfs exhaustion incident; never delete,
+  recreate, replace, or redirect it.
+- Iterate with scoped commands only: `cargo check -p <crate>` and
+  `cargo test -p <crate> [testname]`. Do not compile the whole workspace merely
+  to validate a single crate.
+- `~/.cargo/config.toml` caps Cargo at four jobs. Never override that cap with
+  `-j` or `--jobs`.
+- Before every workspace-wide compile (`cargo build`, `cargo test`, or
+  `cargo clippy --workspace`) and before a full commit gate, acquire an MCP
+  Agent Mail build slot for this repository. At most two slots may be active;
+  wait and retry when unavailable, and release the slot immediately when the
+  build finishes.
+
 ## Thin-mode invariants (do not weaken)
 
 These are the reasons this project exists — never regress them:
