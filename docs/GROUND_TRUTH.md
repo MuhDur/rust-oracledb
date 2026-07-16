@@ -85,7 +85,7 @@ Cargo workspace, three crates. Workspace lints: `unsafe_code = "forbid"`; clippy
 | Crate | LOC (src, HEAD) | Role |
 |---|---|---|
 | `crates/oracledb-protocol` | 6,360 total: `thin.rs` 4,559; `sql.rs` 727; `wire.rs` 474; `crypto.rs` 214; `lib.rs` 142; `packet/mod.rs` 131; `net/mod.rs` 71; `capabilities.rs` 42 | sans-I/O TNS/TTC core: packet framing, auth crypto (11g SHA1 + 12c PBKDF2 verifiers), TTC message encode/decode, SQL parser, EZConnect parsing. No I/O deps (RustCrypto, serde, thiserror only) |
-| `crates/oracledb` | 1,640 (single `lib.rs`) | async driver: `Connection` with `&Cx`-first `pub async fn` API (connect/ping/commit/rollback/execute/fetch/LOB ops/cancel/close) on **asupersync 0.3.4** (no tokio), plus a `BlockingConnection` facade (lib.rs:942-1253) |
+| `crates/oracledb` | 1,640 (single `lib.rs`) | async driver: `Connection` with `&Cx`-first `pub async fn` API (connect/ping/commit/rollback/execute/fetch/LOB ops/cancel/close) on **asupersync 0.3.5** (no tokio), plus a `BlockingConnection` facade (lib.rs:942-1253) |
 | `crates/oracledb-pyshim` | 9,512 (single `lib.rs`) | PyO3 0.28 cdylib (abi3-py310, experimental-async) masquerading as `oracledb.thin_impl`: `ThinConnImpl`/`AsyncThinConnImpl`, cursors, vars, LOBs, DbObjects, pool stubs |
 
 Async-native vs facade: async connect/close/execute/fetch and async LOB ops run on driver futures

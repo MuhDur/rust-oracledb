@@ -9,8 +9,7 @@ for the publish order, the version, what ships, and the post-publish checklist.
 | field | value |
 |---|---|
 | Initial public release | **0.1.0** |
-| Latest published release | **0.8.2** |
-| Prepared release | **0.8.3** |
+| Latest published release | **0.8.3** |
 | Source | `[workspace.package].version` in the root `Cargo.toml` |
 
 `0.1.0` (not `0.0.0`, which crates.io treats as a placeholder, and not a
