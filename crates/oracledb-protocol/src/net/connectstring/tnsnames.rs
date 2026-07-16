@@ -1,6 +1,15 @@
 use crate::{ProtocolError, Result};
-use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+/// Maximum number of nested `IFILE` edges accepted from one `tnsnames.ora`
+/// graph. This is deliberately separate from descriptor nesting: every edge
+/// otherwise adds a Rust stack frame and a new filesystem read.
+const MAX_IFILE_DEPTH: usize = 32;
+/// Maximum aggregate source bytes read from the primary `tnsnames.ora` and all
+/// of its `IFILE` descendants. A normal configuration is tiny; this bound keeps
+/// hostile include graphs from accumulating unbounded parser allocations.
+const MAX_TNSNAMES_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 
 /// A fully resolved set of tnsnames.ora entries.
 #[derive(Debug, Default)]
@@ -15,14 +24,29 @@ pub struct TnsnamesReader {
 impl TnsnamesReader {
     /// Reads `tnsnames.ora` from `config_dir`, following `IFILE` includes.
     pub fn read(config_dir: &Path) -> Result<Self> {
+        Self::read_with_limits(config_dir, MAX_IFILE_DEPTH, MAX_TNSNAMES_TOTAL_BYTES)
+    }
+
+    fn read_with_limits(
+        config_dir: &Path,
+        max_ifile_depth: usize,
+        max_total_bytes: usize,
+    ) -> Result<Self> {
         let primary = config_dir.join("tnsnames.ora");
         let mut reader = TnsnamesReader {
             entries: Vec::new(),
             file_name: primary.clone(),
         };
         let mut in_progress: Vec<PathBuf> = Vec::new();
-        let mut seen: HashSet<PathBuf> = HashSet::new();
-        reader.read_file(&primary, &mut in_progress, &mut seen)?;
+        let mut total_bytes = 0usize;
+        reader.read_file(
+            &primary,
+            &mut in_progress,
+            0,
+            max_ifile_depth,
+            max_total_bytes,
+            &mut total_bytes,
+        )?;
         Ok(reader)
     }
 
@@ -62,8 +86,16 @@ impl TnsnamesReader {
         &mut self,
         path: &Path,
         in_progress: &mut Vec<PathBuf>,
-        seen: &mut HashSet<PathBuf>,
+        ifile_depth: usize,
+        max_ifile_depth: usize,
+        max_total_bytes: usize,
+        total_bytes: &mut usize,
     ) -> Result<()> {
+        if ifile_depth > max_ifile_depth {
+            return Err(ProtocolError::InvalidConnectDescriptor(format!(
+                "tnsnames.ora IFILE nesting exceeds maximum depth {max_ifile_depth}"
+            )));
+        }
         let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         if in_progress.contains(&canonical) {
             let including = in_progress
@@ -75,14 +107,18 @@ impl TnsnamesReader {
                 path.display()
             )));
         }
-        let contents = std::fs::read_to_string(path).map_err(|_| {
+        let remaining_bytes = max_total_bytes.checked_sub(*total_bytes).ok_or_else(|| {
             ProtocolError::InvalidConnectDescriptor(format!(
-                "file '{}' is missing or unreadable",
-                path.display()
+                "tnsnames.ora input exceeds maximum aggregate size {max_total_bytes} bytes"
+            ))
+        })?;
+        let contents = read_file_limited(path, remaining_bytes, max_total_bytes)?;
+        *total_bytes = total_bytes.checked_add(contents.len()).ok_or_else(|| {
+            ProtocolError::InvalidConnectDescriptor(format!(
+                "tnsnames.ora input exceeds maximum aggregate size {max_total_bytes} bytes"
             ))
         })?;
         in_progress.push(canonical.clone());
-        seen.insert(canonical);
 
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         // Collect entries first to avoid borrow conflicts during IFILE
@@ -99,7 +135,19 @@ impl TnsnamesReader {
                 } else {
                     dir.join(&inc)
                 };
-                self.read_file(&inc_path, in_progress, seen)?;
+                let child_depth = ifile_depth.checked_add(1).ok_or_else(|| {
+                    ProtocolError::InvalidConnectDescriptor(
+                        "tnsnames.ora IFILE nesting depth overflow".to_string(),
+                    )
+                })?;
+                self.read_file(
+                    &inc_path,
+                    in_progress,
+                    child_depth,
+                    max_ifile_depth,
+                    max_total_bytes,
+                    total_bytes,
+                )?;
             } else {
                 // The key may be a comma-separated alias list spanning
                 // multiple lines; split, take the last line of each, upper.
@@ -115,6 +163,38 @@ impl TnsnamesReader {
         in_progress.pop();
         Ok(())
     }
+}
+
+/// Read at most the remaining aggregate budget plus one byte. Using the stream
+/// rather than file metadata keeps the resource limit intact for special files
+/// and metadata races.
+fn read_file_limited(
+    path: &Path,
+    remaining_bytes: usize,
+    max_total_bytes: usize,
+) -> Result<String> {
+    let file = std::fs::File::open(path).map_err(|_| unreadable_file(path))?;
+    let read_limit = u64::try_from(remaining_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut reader = file.take(read_limit);
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|_| unreadable_file(path))?;
+    if bytes.len() > remaining_bytes {
+        return Err(ProtocolError::InvalidConnectDescriptor(format!(
+            "tnsnames.ora input exceeds maximum aggregate size {max_total_bytes} bytes"
+        )));
+    }
+    String::from_utf8(bytes).map_err(|_| unreadable_file(path))
+}
+
+fn unreadable_file(path: &Path) -> ProtocolError {
+    ProtocolError::InvalidConnectDescriptor(format!(
+        "file '{}' is missing or unreadable",
+        path.display()
+    ))
 }
 
 /// Parses a tnsnames.ora file into a list of `(key, value)` pairs, where the
@@ -280,7 +360,7 @@ impl FileParser<'_> {
 mod tests {
     use crate::net::connectstring::parse;
 
-    use super::TnsnamesReader;
+    use super::{TnsnamesReader, MAX_IFILE_DEPTH};
     use std::io::Write;
 
     /// Writes `contents` to `<dir>/<name>` and returns nothing.
@@ -479,6 +559,38 @@ mod tests {
         write_file(&dir, "tnsnames.ora", "IFILE = missing.ora\n");
         let err = TnsnamesReader::read(&dir).unwrap_err();
         assert!(format!("{err}").contains("missing or unreadable"));
+    }
+
+    #[test]
+    fn ifile_nesting_limit_returns_a_structured_error() {
+        let dir = temp_dir();
+        write_file(&dir, "tnsnames.ora", "IFILE = depth_1.ora\n");
+        for depth in 1..=MAX_IFILE_DEPTH {
+            write_file(
+                &dir,
+                &format!("depth_{depth}.ora"),
+                &format!("IFILE = depth_{}.ora\n", depth + 1),
+            );
+        }
+
+        let err = TnsnamesReader::read(&dir).unwrap_err();
+        assert!(
+            format!("{err}").contains("IFILE nesting exceeds"),
+            "deep acyclic IFILE chain must fail closed, got: {err}"
+        );
+    }
+
+    #[test]
+    fn ifile_total_size_limit_counts_included_files() {
+        let dir = temp_dir();
+        write_file(&dir, "tnsnames.ora", "IFILE = include.ora\n");
+        write_file(&dir, "include.ora", "alias = host:1521/service\n");
+
+        let err = TnsnamesReader::read_with_limits(&dir, MAX_IFILE_DEPTH, 32).unwrap_err();
+        assert!(
+            format!("{err}").contains("maximum aggregate size"),
+            "aggregate primary + include bytes must be capped, got: {err}"
+        );
     }
 
     // bead rust-oracledb-uf8: a deeply-nested descriptor must return a clean
