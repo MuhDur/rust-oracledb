@@ -61,13 +61,13 @@ done
 # recording each verdict (keep going on failure so the artifact shows the
 # complete picture).
 declare -A verdict
-overall=pass
+overall=PASS
 for lane in "${GATE_LANES[@]}"; do
   if bash scripts/version_matrix.sh full "$lane"; then
-    verdict[$lane]=pass
+    verdict[$lane]=PASS
   else
-    verdict[$lane]=fail
-    overall=fail
+    verdict[$lane]=FAIL
+    overall=FAIL
   fi
 done
 
@@ -96,7 +96,7 @@ for lane in "${GATE_LANES[@]}"; do
   printf 'release-matrix-gate: %-7s %s\n' "$lane" "${verdict[$lane]}"
 done
 
-if [ "$overall" != "pass" ]; then
+if [ "$overall" != "PASS" ]; then
   echo "release-matrix-gate: FAILED — a release cannot ship from this SHA" >&2
   exit 1
 fi

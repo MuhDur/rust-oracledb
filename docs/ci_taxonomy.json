@@ -77,6 +77,18 @@
       "path_filtered": false
     },
     {
+      "check_name": "evidence control contracts",
+      "tier": "required",
+      "workflow": "CI",
+      "workflow_file": "ci.yml",
+      "job_id": "evidence-controls",
+      "triggers": [
+        "pull_request",
+        "push"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "fuzz targets compile/smoke (nightly)",
       "tier": "advisory",
       "workflow": "CI",
@@ -333,6 +345,7 @@
         "cargo doc (builds)",
         "cargo test",
         "clippy (-D warnings)",
+        "evidence control contracts",
         "fuzz targets compile/smoke (nightly)",
         "musl size gate smoke",
         "release metadata sync",
@@ -438,6 +451,7 @@
       "cargo doc (builds)",
       "cargo test",
       "clippy (-D warnings)",
+      "evidence control contracts",
       "free23 full suite",
       "release metadata sync",
       "required / quality (required/required)",

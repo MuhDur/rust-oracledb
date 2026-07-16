@@ -144,12 +144,12 @@ if [ -n "$tag" ]; then
     fail "$matrix_results does not record SHA $gate_sha"
   [ "$(jq -r '.dirty' "$matrix_results")" = "false" ] ||
     fail "$matrix_results was recorded on a dirty worktree — rerun scripts/release_matrix_gate.sh on the clean release commit"
-  [ "$(jq -r '.overall' "$matrix_results")" = "pass" ] ||
+  [ "$(jq -r '.overall' "$matrix_results")" = "PASS" ] ||
     fail "$matrix_results is not all-green — a release cannot ship without every matrix lane passing"
   # Four server generations plus the local OCI TCPS lane (A5.2 / bead
   # iec3.1.26): every lane in the committed artifact must be green.
   for lane in xe11 xe18 xe21 free23 octcps; do
-    [ "$(jq -r --arg l "$lane" '.lanes[$l]' "$matrix_results")" = "pass" ] ||
+    [ "$(jq -r --arg l "$lane" '.lanes[$l]' "$matrix_results")" = "PASS" ] ||
       fail "$matrix_results: lane '$lane' did not pass"
   done
   echo "release-preflight: version-matrix gate OK ($matrix_results)"

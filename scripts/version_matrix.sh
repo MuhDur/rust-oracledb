@@ -63,6 +63,16 @@
 # shellcheck disable=SC2329
 set -euo pipefail
 
+# Local matrix management relies on Docker, while hosted CI provisions the
+# Oracle service directly. Check the local capability explicitly instead of
+# allowing a missing PATH entry to look like a skipped lane.
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    printf 'version-matrix: required command unavailable: %s\n' "$1" >&2
+    return 127
+  fi
+}
+
 ORACLE_PASSWORD="${ORACLE_PASSWORD:-OracledbTest#2026}"
 APP_USER="${ORACLEDB_MATRIX_APP_USER:-testuser}"
 APP_USER_PASSWORD="${ORACLEDB_MATRIX_APP_PASSWORD:-testpw}"
@@ -160,14 +170,14 @@ lane_smoke() {
     # Below-floor lane: PASS means the driver cleanly refused the server.
     if cargo run -q --features "$MATRIX_FULL_FEATURES" --example matrix_full -- --expect-version-refusal \
         "localhost:$port/$service" "$user" "$password"; then
-      printf '%-7s SMOKE GREEN (structured refusal verified)\n' "$lane"
+      printf '%-7s SMOKE PASS (structured refusal verified)\n' "$lane"
     else
       printf '%-7s SMOKE FAILED (refusal missing or malformed)\n' "$lane"
       return 1
     fi
   elif cargo run -q --example smoke -- \
       "localhost:$port/$service" "$user" "$password"; then
-    printf '%-7s SMOKE GREEN\n' "$lane"
+    printf '%-7s SMOKE PASS\n' "$lane"
   else
     printf '%-7s SMOKE FAILED\n' "$lane"
     return 1
@@ -201,7 +211,7 @@ lane_tcps() {
   # encrypted keys, ewallet.p12/3DES, cwallet.sso).
   if ! cargo test -q -p oracledb-protocol --test tls_wallet; then ok=0; fi
   if [ "$ok" -eq 1 ]; then
-    printf '%-7s FULL GREEN\n' octcps
+    printf '%-7s FULL PASS\n' octcps
   else
     printf '%-7s FULL FAILED\n' octcps
     return 1
@@ -225,7 +235,7 @@ lane_full() {
   fi
   if cargo run -q --features "$MATRIX_FULL_FEATURES" --example matrix_full -- "${refusal_flag[@]}" \
       "localhost:$port/$service" "$user" "$password"; then
-    printf '%-7s FULL GREEN\n' "$lane"
+    printf '%-7s FULL PASS\n' "$lane"
   else
     printf '%-7s FULL FAILED\n' "$lane"
     return 1
@@ -262,7 +272,7 @@ lane_truth() {
   fi
   if "$python" scripts/statement_ground_truth.py --diff \
       "$out_dir/rust.json" "$out_dir/python.json"; then
-    printf '%-7s TRUTH GREEN (field-by-field identical)\n' "$lane"
+    printf '%-7s TRUTH PASS (field-by-field identical)\n' "$lane"
   else
     printf '%-7s TRUTH FAILED (ground-truth mismatch; artifacts in %s)\n' "$lane" "$out_dir"
     return 1
@@ -276,7 +286,7 @@ lane_truth() {
 # it (1) bootstraps that lane's own fixture schema (vx6_* object types, the
 # E_TEST edition, proxy user, grants) via scripts/bootstrap_live_schema.sh, then
 # (2) RUNS every live integration suite under crates/oracledb/tests against it,
-# capturing a per-suite x per-lane GREEN / FAIL / SKIP verdict. xe11 stays a
+# capturing a per-suite x per-lane PASS / SKIP / FAIL verdict. xe11 stays a
 # connect-refusal assertion only (below the protocol floor). A suite may be
 # SKIP (non-green but accepted) ONLY through suite_skip_reason() below, after
 # its focused capability probe passes. That keeps a server limitation typed,
@@ -377,7 +387,7 @@ run_versions() {
   while read -r l; do lanes_run+=("$l"); done < <(lanes_for "$lane_arg")
 
   declare -A cell cellnote cellreason
-  local overall=pass lane suite logf summ reason
+  local overall=PASS lane suite logf summ reason
 
   for lane in "${lanes_run[@]}"; do
     if lane_expects_refusal "$lane"; then
@@ -388,13 +398,13 @@ run_versions() {
       if cargo run -q --features "$MATRIX_FULL_FEATURES" --example matrix_full -- --expect-version-refusal \
           "localhost:$port/$service" "$user" "$password" \
           > "$log_dir/$lane-REFUSAL.log" 2>&1; then
-        cell[$lane:REFUSAL]=GREEN
+        cell[$lane:REFUSAL]=PASS
         cellnote[$lane:REFUSAL]="structured UnsupportedVersion refusal verified"
-        printf '%-7s %-28s GREEN\n' "$lane" REFUSAL
+        printf '%-7s %-28s PASS\n' "$lane" REFUSAL
       else
         cell[$lane:REFUSAL]=FAIL
         cellnote[$lane:REFUSAL]="refusal missing or malformed"
-        overall=fail
+        overall=FAIL
         printf '%-7s %-28s FAIL\n' "$lane" REFUSAL
       fi
       continue
@@ -403,7 +413,7 @@ run_versions() {
     eval "$(lane_env "$lane")"
     if ! lane_bootstrap "$lane" > "$log_dir/$lane-BOOTSTRAP.log" 2>&1; then
       printf '%-7s BOOTSTRAP FAILED (see %s)\n' "$lane" "$log_dir/$lane-BOOTSTRAP.log" >&2
-      overall=fail
+      overall=FAIL
       for suite in "${suites[@]}"; do
         cell[$lane:$suite]=FAIL
         cellnote[$lane:$suite]="fixture bootstrap failed"
@@ -424,20 +434,20 @@ run_versions() {
         else
           cell[$lane:$suite]=FAIL
           cellnote[$lane:$suite]="typed skip probe failed: $(grep -hE '^test result:|panicked|error\[|error:' "$logf" | tail -3 | tr '\n' ' ')"
-          overall=fail
+          overall=FAIL
           printf '%-7s %-28s FAIL    %s (log: %s)\n' "$lane" "$suite" \
             "${cellnote[$lane:$suite]}" "$logf"
         fi
       elif cargo test -q -p oracledb --features "$LIVE_SUITE_FEATURES" \
           --test "$suite" -- --include-ignored > "$logf" 2>&1; then
         summ="$(grep -hE '^test result:' "$logf" | tail -1)"
-        cell[$lane:$suite]=GREEN
+        cell[$lane:$suite]=PASS
         cellnote[$lane:$suite]="${summ:-ok}"
-        printf '%-7s %-28s GREEN   %s\n' "$lane" "$suite" "${summ:-}"
+        printf '%-7s %-28s PASS    %s\n' "$lane" "$suite" "${summ:-}"
       else
         cell[$lane:$suite]=FAIL
         cellnote[$lane:$suite]="$(grep -hE '^test result:|panicked|error\[|error:' "$logf" | tail -3 | tr '\n' ' ')"
-        overall=fail
+        overall=FAIL
         printf '%-7s %-28s FAIL    %s (log: %s)\n' "$lane" "$suite" \
           "${cellnote[$lane:$suite]}" "$logf"
       fi
@@ -478,7 +488,7 @@ run_versions() {
   printf 'versions: wrote %s (overall=%s)\n' "$out" "$overall"
   printf 'versions: per-suite logs in %s\n' "$log_dir"
 
-  [ "$overall" = pass ]
+  [ "$overall" = PASS ]
 }
 
 cmd="${1:-}"
@@ -486,6 +496,8 @@ lane_arg="${2:-all}"
 rc=0
 case "$cmd" in
   versions)
+    require_command cargo
+    require_command docker
     run_versions "$lane_arg" || rc=1
     ;;
   tcps)
@@ -493,11 +505,17 @@ case "$cmd" in
     lane_tcps || rc=1
     ;;
   up|health|env|smoke|full|truth)
+    case "$cmd" in
+      up|health) require_command docker ;;
+      smoke|full|truth) require_command cargo ;;
+      env) : ;;
+    esac
     while read -r lane; do
       "lane_$cmd" "$lane" || rc=1
     done < <(lanes_for "$lane_arg")
     ;;
   stop)
+    require_command docker
     while read -r lane; do
       { read -r name; } < <(lane_fields "$lane")
       docker stop "$name" >/dev/null && printf '%-7s stopped: %s\n' "$lane" "$name"

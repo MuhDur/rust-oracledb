@@ -1,0 +1,187 @@
+{
+  "schema": "entry-trace/v1",
+  "tri_state": {
+    "outcomes": ["PASS", "SKIP", "FAIL"],
+    "required_skip": "FAIL",
+    "skip_reason_pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+  },
+  "script_inventory": [
+    {"path": "scripts/audit_bead_closes.py", "kind": "entry_point", "trace": "bead-close-audit"},
+    {"path": "scripts/bootstrap_live_schema.sh", "kind": "helper", "excluded_reason": "invoked-by-version-matrix-fixture-bootstrap"},
+    {"path": "scripts/check_api_ledger.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/check_async_blocking_coverage.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/check_bead_close_evidence.sh", "kind": "entry_point", "trace": "bead-close-audit"},
+    {"path": "scripts/check_ci_taxonomy.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/check_entry_trace_contract.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/check_evidence_contract.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/check_musl_size.sh", "kind": "entry_point", "trace": "release-qualification"},
+    {"path": "scripts/check_perf_regression.sh", "kind": "entry_point", "trace": "soak-quality"},
+    {"path": "scripts/check_release_surface_versions.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/check_resource_budget.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/check_single_path.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/check_standalone_package.sh", "kind": "entry_point", "trace": "release-qualification"},
+    {"path": "scripts/check_trace_secret_exclusion.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/ci_taxonomy.py", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/compare_pytest_json.py", "kind": "helper", "excluded_reason": "called-by-parity-report-tools"},
+    {"path": "scripts/conformance_matrix.sh", "kind": "entry_point", "trace": "conformance-live"},
+    {"path": "scripts/container.sh", "kind": "helper", "excluded_reason": "environment-export-helper-for-live-runners"},
+    {"path": "scripts/extract_reference_gates.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/fake_parity_scan.py", "kind": "entry_point", "trace": "parity-rigor"},
+    {"path": "scripts/gen_async_blocking_coverage.py", "kind": "helper", "excluded_reason": "generator-consumed-by-async-coverage-gate"},
+    {"path": "scripts/gen_baseline.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/gen_sbom.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/gen_test_wallets.sh", "kind": "helper", "excluded_reason": "fixture-generator-not-a-gate"},
+    {"path": "scripts/merge_pytest_json.py", "kind": "helper", "excluded_reason": "called-by-parity-report-tools"},
+    {"path": "scripts/parity_rigor.sh", "kind": "entry_point", "trace": "parity-rigor"},
+    {"path": "scripts/pin-reference.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/prepare-local-oracle.py", "kind": "entry_point", "trace": "local-oracle-provision"},
+    {"path": "scripts/publish_crates.sh", "kind": "entry_point", "trace": "tag-release"},
+    {"path": "scripts/release_matrix_gate.sh", "kind": "entry_point", "trace": "release-matrix"},
+    {"path": "scripts/release_preflight.sh", "kind": "entry_point", "trace": "tag-release"},
+    {"path": "scripts/release_surface_manifest.py", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/resource_budget.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/secret_scan.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/select_tests.py", "kind": "helper", "excluded_reason": "called-by-parity-runners"},
+    {"path": "scripts/setup-python-env.sh", "kind": "entry_point", "trace": "conformance-live"},
+    {"path": "scripts/smoke-static.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/statement_ground_truth.py", "kind": "entry_point", "trace": "version-matrix-live"},
+    {"path": "scripts/test_release_preflight_pins.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/tsan_campaign.sh", "kind": "entry_point", "trace": "tsan-campaign"},
+    {"path": "scripts/validate_evidence.py", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/version_matrix.sh", "kind": "entry_point", "trace": "version-matrix-live"}
+  ],
+  "traces": [
+    {
+      "id": "required-quality",
+      "tier": "required",
+      "runner": "scripts/check_entry_trace_contract.sh",
+      "skip_policy": "fail",
+      "dispatch": [
+        {"path": ".github/workflows/ci.yml", "marker": "bash scripts/check_entry_trace_contract.sh"},
+        {"path": ".github/workflows/_quality.yml", "marker": "bash scripts/check_entry_trace_contract.sh"}
+      ],
+      "result": {"path": "scripts/check_entry_trace_contract.sh", "markers": ["entry-trace: OK", "sys.exit(1)"]},
+      "capabilities": []
+    },
+    {
+      "id": "version-matrix-live",
+      "tier": "nightly-live",
+      "runner": "scripts/version_matrix.sh",
+      "skip_policy": "typed-skip-reason",
+      "dispatch": [
+        {"path": ".github/workflows/version-matrix.yml", "marker": "bash scripts/version_matrix.sh full ${{ matrix.lane.name }}"}
+      ],
+      "result": {"path": "scripts/version_matrix.sh", "markers": ["suite_skip_reason", "run_typed_skip_probe", "cell[$lane:$suite]=PASS", "cell[$lane:$suite]=SKIP", "cell[$lane:$suite]=FAIL", "\"verdict\": \"%s\""]},
+      "capabilities": [
+        {"name": "oracle-service", "provisioner": ".github/workflows/version-matrix.yml", "marker": "services:"},
+        {"name": "gvenzl-image", "provisioner": ".github/workflows/version-matrix.yml", "marker": "gvenzl/oracle-free:23-slim"},
+        {"name": "local-docker", "provisioner": "scripts/version_matrix.sh", "marker": "require_command docker"}
+      ]
+    },
+    {
+      "id": "release-matrix",
+      "tier": "release",
+      "runner": "scripts/release_matrix_gate.sh",
+      "skip_policy": "fail",
+      "dispatch": [
+        {"path": "scripts/release_preflight.sh", "marker": "scripts/release_matrix_gate.sh"}
+      ],
+      "result": {"path": "scripts/release_matrix_gate.sh", "markers": ["GATE_LANES=", "verdict[$lane]=PASS", "verdict[$lane]=FAIL", "\"overall\": \"%s\""]},
+      "capabilities": [
+        {"name": "local-oracle-lanes", "provisioner": "scripts/release_matrix_gate.sh", "marker": "bash scripts/version_matrix.sh up all"}
+      ]
+    },
+    {
+      "id": "tag-release",
+      "tier": "release",
+      "runner": "scripts/release_preflight.sh",
+      "skip_policy": "fail",
+      "dispatch": [
+        {"path": ".github/workflows/release.yml", "marker": "bash scripts/release_preflight.sh"}
+      ],
+      "result": {"path": "scripts/release_preflight.sh", "markers": ["= \"PASS\"", "lane '$lane' did not pass"]},
+      "capabilities": []
+    },
+    {
+      "id": "conformance-live",
+      "tier": "on-demand-live",
+      "runner": "scripts/conformance_matrix.sh",
+      "skip_policy": "fail",
+      "dispatch": [
+        {"path": "scripts/conformance_matrix.sh", "marker": "harness/run.sh rust"}
+      ],
+      "result": {"path": "scripts/conformance_matrix.sh", "markers": ["\"PASS\" if summary[\"pass\"] else \"FAIL\"", "CELL_RESULT"]},
+      "capabilities": [
+        {"name": "local-oracle", "provisioner": "scripts/container.sh", "marker": "PYO_TEST_CONNECT_STRING"}
+      ]
+    },
+    {
+      "id": "parity-rigor",
+      "tier": "on-demand-live",
+      "runner": "scripts/parity_rigor.sh",
+      "skip_policy": "fail",
+      "dispatch": [
+        {"path": "scripts/parity_rigor.sh", "marker": "run_baseline"}
+      ],
+      "result": {"path": "scripts/parity_rigor.sh", "markers": ["RESULT: DRCP-through-Rust OK", "RESULT: DRCP connect FAILED"]},
+      "capabilities": [
+        {"name": "local-oracle", "provisioner": "scripts/parity_rigor.sh", "marker": "CONTAINER_NAME="}
+      ]
+    },
+    {
+      "id": "tsan-campaign",
+      "tier": "scheduled",
+      "runner": "scripts/tsan_campaign.sh",
+      "skip_policy": "fail",
+      "dispatch": [
+        {"path": ".github/workflows/tsan.yml", "marker": "bash scripts/tsan_campaign.sh"}
+      ],
+      "result": {"path": "scripts/tsan_campaign.sh", "markers": ["exit 1", "PASS"]},
+      "capabilities": []
+    },
+    {
+      "id": "release-qualification",
+      "tier": "release-qualification",
+      "runner": "scripts/check_standalone_package.sh",
+      "skip_policy": "fail",
+      "dispatch": [
+        {"path": ".github/workflows/_quality.yml", "marker": "bash scripts/check_standalone_package.sh"}
+      ],
+      "result": {"path": "scripts/check_standalone_package.sh", "markers": ["cargo package", "exit 1"]},
+      "capabilities": []
+    },
+    {
+      "id": "soak-quality",
+      "tier": "scheduled",
+      "runner": "scripts/check_perf_regression.sh",
+      "skip_policy": "fail",
+      "dispatch": [
+        {"path": ".github/workflows/_quality.yml", "marker": "bash scripts/check_perf_regression.sh"}
+      ],
+      "result": {"path": "scripts/check_perf_regression.sh", "markers": ["perf-regression: OK", "perf-regression: FAILED"]},
+      "capabilities": []
+    },
+    {
+      "id": "bead-close-audit",
+      "tier": "operator",
+      "runner": "scripts/audit_bead_closes.py",
+      "skip_policy": "fail",
+      "dispatch": [
+        {"path": "scripts/audit_bead_closes.py", "marker": "argparse"}
+      ],
+      "result": {"path": "scripts/audit_bead_closes.py", "markers": ["sys.exit", "audit"]},
+      "capabilities": []
+    },
+    {
+      "id": "local-oracle-provision",
+      "tier": "operator",
+      "runner": "scripts/prepare-local-oracle.py",
+      "skip_policy": "fail",
+      "dispatch": [
+        {"path": "scripts/prepare-local-oracle.py", "marker": "def main()"}
+      ],
+      "result": {"path": "scripts/prepare-local-oracle.py", "markers": ["raise SystemExit", "Oracle preparation failed"]},
+      "capabilities": []
+    }
+  ]
+}

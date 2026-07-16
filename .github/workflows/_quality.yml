@@ -109,6 +109,15 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Verify checked entry traces and release/evidence contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/check_evidence_contract.sh
+          bash scripts/check_entry_trace_contract.sh --self-test
+          bash scripts/check_release_surface_versions.sh
+          bash scripts/check_ci_taxonomy.sh
+
       - name: Format
         run: cargo fmt --all -- --check
 
