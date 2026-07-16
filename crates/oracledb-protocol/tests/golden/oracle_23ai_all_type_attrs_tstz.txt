@@ -1,0 +1,28 @@
+# Live ALL_TYPE_ATTRS capture for the built-in timestamp and interval family.
+#
+# Captured 2026-07-16 from the running `rust-oracledb-free` Docker container.
+# `v$instance.version_full`: 23.26.1.0.0
+# `v$version` banner: Oracle AI Database 26ai Free Release 23.26.1.0.0 -
+# Develop, Learn, and Run for Free
+#
+# The container is the release lane named 23ai. Its current server branding is
+# recorded above verbatim so this fixture does not imply a different server.
+#
+# Query shape:
+#   SELECT owner, type_name, attr_no, attr_name, attr_type_name, precision, scale
+#   FROM all_type_attrs
+#   WHERE type_name = 'C23G_TSTZ_TYPE'
+#   ORDER BY owner, attr_no;
+#
+# Raw rows use: ATTR|owner|type_name|attr_no|attr_name|attr_type_name|precision|scale
+# NULL is Oracle's data-dictionary NULL, not a zero substituted by the driver.
+ATTR|SYS|C23G_TSTZ_TYPE|1|TS_DEFAULT|TIMESTAMP|NULL|6
+ATTR|SYS|C23G_TSTZ_TYPE|2|TS_3|TIMESTAMP|NULL|3
+ATTR|SYS|C23G_TSTZ_TYPE|3|TSTZ_DEFAULT|TIMESTAMP WITH TZ|NULL|6
+ATTR|SYS|C23G_TSTZ_TYPE|4|TSTZ_3|TIMESTAMP WITH TZ|NULL|3
+ATTR|SYS|C23G_TSTZ_TYPE|5|TSLTZ_DEFAULT|TIMESTAMP WITH LOCAL TZ|NULL|6
+ATTR|SYS|C23G_TSTZ_TYPE|6|TSLTZ_3|TIMESTAMP WITH LOCAL TZ|NULL|3
+ATTR|SYS|C23G_TSTZ_TYPE|7|IDS_DEFAULT|INTERVAL DAY TO SECOND|2|6
+ATTR|SYS|C23G_TSTZ_TYPE|8|IDS_9_3|INTERVAL DAY TO SECOND|9|3
+ATTR|SYS|C23G_TSTZ_TYPE|9|IYM_DEFAULT|INTERVAL YEAR TO MONTH|2|NULL
+ATTR|SYS|C23G_TSTZ_TYPE|10|IYM_9|INTERVAL YEAR TO MONTH|9|NULL
