@@ -218,7 +218,7 @@ max_total_time_seconds = 5
 [[targets]]
 name = "dbobject_scalars"
 owner = "protocol/dbobject"
-parser_entry = "crates/oracledb-protocol/src/lib.rs:287 fuzz_dbobject_scalars; crates/oracledb-protocol/src/thin/dbobject.rs:393 decode_dbobject_text"
+parser_entry = "crates/oracledb-protocol/src/lib.rs:287 fuzz_dbobject_scalars; crates/oracledb-protocol/src/thin/dbobject.rs:393 decode_dbobject_text; crates/oracledb-protocol/src/thin/bind.rs:623 builtin_descriptor_family"
 risk_tier = "required"
 corpus_dir = "corpus/dbobject_scalars"
 dictionary = ""

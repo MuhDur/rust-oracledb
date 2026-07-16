@@ -295,8 +295,8 @@ pub mod fuzz_api {
 
     /// Fuzz DbObject scalar/image-adjacent decoders that are not all reachable
     /// through one public parser boundary. This includes text, XMLTYPE, BFILE
-    /// locator names, LOB text decoding, binary float/double, and the
-    /// crate-private BINARY_INTEGER text parser.
+    /// locator names, LOB text decoding, binary float/double, the crate-private
+    /// BINARY_INTEGER text parser, and the temporal descriptor normalizer.
     pub fn fuzz_dbobject_scalars(data: &[u8]) {
         let (selector, payload) = data.split_first().map_or((0u8, data), |(v, r)| (*v, r));
         let dbtype_name = match selector & 0x03 {
@@ -320,6 +320,19 @@ pub mod fuzz_api {
         let _ = crate::thin::decode_dbobject_binary_double(payload);
         if let Ok(text) = core::str::from_utf8(payload) {
             let _ = crate::thin::parse_binary_integer_u32(text);
+        }
+
+        // DbObject attribute type names arrive from server metadata as bounded,
+        // UTF-8-validated strings. The normalizer is deliberately not a decoder
+        // (unknown names are valid nested ADTs), so it has no Result to discard;
+        // this direct arbitrary-name drive pins its no-panic / bounded-allocation
+        // contract alongside the decoder targets that reject malformed TTC text.
+        if let Ok(type_name) = core::str::from_utf8(data) {
+            let precision = (selector & 0x10 != 0).then_some((selector & 0x0f) as i8);
+            let scale = (selector & 0x20 != 0).then_some(((selector >> 2) & 0x0f) as i8);
+            let _ = crate::thin::public_dbtype_name_from_oracle_type_name(type_name);
+            let _ = crate::thin::dbobject_attr_precision_scale(type_name, precision, scale);
+            let _ = crate::thin::dbobject_attr_public_precision_scale(type_name, precision, scale);
         }
     }
 

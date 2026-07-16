@@ -37,7 +37,7 @@ deep is unreachable by byte-level mutation alone (see its row below).
 | 12 | `auth_response` | `thin::parse_auth_response` | FAST_AUTH response dictionaries, verifier fields, capabilities, and session data |
 | 13 | `accept_payload` | `thin::parse_accept_payload` | Listener ACCEPT payload framing and negotiated flags |
 | 14 | `dbobject_image` | `thin::decode_object_value` / DbObject image reader | DbObject/collection image lengths, prefixes, and value payloads |
-| 15 | `dbobject_scalars` | DbObject scalar decoders | Object attribute scalar conversion boundaries |
+| 15 | `dbobject_scalars` | DbObject scalar decoders + temporal descriptor normalizer | Object attribute scalar conversion boundaries and bounded UTF-8 `TIMESTAMP`/`TIMESTAMP WITH [LOCAL] TZ` classification |
 | 16 | `lob_responses` | LOB response parsers | LOB read/write/trim/free/create response shapes |
 | 17 | `sessionless_tpc` | sessionless transaction/TPC parsers | Sessionless transaction piggybacks and TPC state responses |
 | 18 | `oac_record` | OAC record parser | Oracle access/control records used in notifications and auth-adjacent payloads |
@@ -51,6 +51,31 @@ The shim is compiled only under `--cfg fuzzing` (which `cargo-fuzz` sets
 automatically), so it never widens the crate's normal public API. The
 `cfg(fuzzing)` flag is registered in the workspace `[workspace.lints.rust]`
 `check-cfg` so the `-D warnings` clippy gate stays quiet for the normal build.
+
+### 0.8.4 release: new untrusted-input coverage audit
+
+The 0.8.4 release changed three surfaces that were reviewed against the fuzz
+harness. The audit adds no duplicate target: only the temporal normalizer lacked
+a direct drive, so it was added to the existing size-guarded `dbobject_scalars`
+target under `#[cfg(fuzzing)]`. Its corpus includes a 23ai `TIMESTAMP WITH TZ`
+name, a whitespace/precision boundary spelling, and a prefix-collision ADT.
+
+| Release surface | Coverage | Fail-closed boundary |
+|---|---|---|
+| TSTZ/TSLTZ descriptor normalizer | `dbobject_scalars` drives `public_dbtype_name_from_oracle_type_name`, raw/public precision-scale normalization, and the three temporal seeds. | It receives only bounded UTF-8 text after TTC decoding. It is a classifier, not a decoder: malformed names safely fall through as ADTs, while malformed TTC text is rejected by the existing bounded decoder targets. |
+| GH-14 `EXPIRE_TIME` and transport-timeout syntax | Existing structure-aware `connect_string` target already emits `EXPIRE_TIME`, `TRANSPORT_CONNECT_TIMEOUT`, duration atoms, raw strings, and malformed descriptor tails through `net::connectstring::parse`. | `parse_uint` / `parse_duration` return typed parse errors; bounded grammar recursion rejects malformed input rather than hanging or overflowing. |
+| asupersync 0.3.9 / BCE DATE mapping | Existing `scalar_codecs` target drives raw DATE/TIMESTAMP decoding. The subsequent `runtime_error` mapping consumes a fixed internal error message and introduces no new byte or string parser. | Invalid DATE bytes remain a protocol decode error; the PyO3 boundary maps the established `invalid DATE year` error to `ValueError` without reparsing attacker input. |
+
+On the pinned `nightly-2026-05-11`, the audit ran ASan for 20 seconds against
+`dbobject_scalars` and 12 seconds each against `connect_string` and
+`scalar_codecs`, all with the 2 GiB RSS/malloc cap and zero crash artifacts.
+Miri also passed `descriptor_normalizer_folds_only_builtin_grammar`. This
+toolchain cannot run UBSan: `cargo-fuzz 0.13.1` exposes no `undefined`
+sanitizer and `rustc -Zsanitizer=undefined` rejects that value. The fuzz profile
+still enables debug assertions and overflow checks. A future sanitizer upgrade
+must add a real UBSan run before claiming one; a sanitizer crash would be
+minimized with `cargo fuzz tmin` and converted to a regression test before this
+release could proceed.
 
 ### Target #10: the connect-string parser (structure-aware)
 
@@ -95,9 +120,10 @@ Type-check every target without running:
 cargo +nightly fuzz check
 ```
 
-Run one target for a bounded session (ASan + UBSan are on by default; the fuzz
-profile additionally enables `overflow-checks` + `debug-assertions` so
-arithmetic-overflow panics are caught):
+Run one target for a bounded session (ASan is on by default; the fuzz profile
+additionally enables `overflow-checks` + `debug-assertions` so arithmetic-
+overflow panics are caught). The pinned toolchain has no UBSan mode; see the
+0.8.4 audit above for the exact limitation and Miri complement:
 
 ```bash
 cargo +nightly fuzz run <target> -- -max_total_time=120 -rss_limit_mb=2048 -timeout=10
@@ -274,7 +300,7 @@ the out-bind bound to a raw `Vec::with_capacity(count)` makes the test attempt a
 
 After the original four DoS fixes, each then-existing target was re-run for a
 bounded 120 s libFuzzer session (`-max_total_time=120 -rss_limit_mb=2048
--timeout=10`, ASan + UBSan + overflow-checks). This historical run covered the
+-timeout=10`, ASan + overflow-checks). This historical run covered the
 first seven targets and had **zero surviving crashes**:
 
 | Target | Executions (120 s) | exec/s | Coverage (edges / features) | Crashes |
@@ -298,7 +324,7 @@ Done 86977255 runs in 121 second(s)        # packet_framing, 0 crashes
 ### `connect_string` (fuzz-harden lane, bead 5dd)
 
 The structure-aware connect-string target was run for a bounded **180 s**
-session (`-max_total_time=180 -rss_limit_mb=2048 -timeout=10`, ASan + UBSan +
+session (`-max_total_time=180 -rss_limit_mb=2048 -timeout=10`, ASan +
 overflow-checks):
 
 | Target | Executions | exec/s | Coverage (edges / features) | Crashes |
