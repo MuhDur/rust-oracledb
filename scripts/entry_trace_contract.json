@@ -46,8 +46,11 @@
     {"path": "scripts/smoke-static.sh", "kind": "entry_point", "trace": "required-quality"},
     {"path": "scripts/statement_ground_truth.py", "kind": "entry_point", "trace": "version-matrix-live"},
     {"path": "scripts/test_release_preflight_pins.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/test_verify_release_exact_sha.sh", "kind": "helper", "excluded_reason": "contract-test-for-exact-sha-release-proof"},
     {"path": "scripts/tsan_campaign.sh", "kind": "entry_point", "trace": "tsan-campaign"},
     {"path": "scripts/validate_evidence.py", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/verify_release_exact_sha.py", "kind": "helper", "excluded_reason": "invoked-by-exact-sha-release-shell-entrypoint"},
+    {"path": "scripts/verify_release_exact_sha.sh", "kind": "entry_point", "trace": "tag-release"},
     {"path": "scripts/version_matrix.sh", "kind": "entry_point", "trace": "version-matrix-live"}
   ],
   "traces": [
@@ -84,7 +87,7 @@
       "runner": "scripts/release_matrix_gate.sh",
       "skip_policy": "fail",
       "dispatch": [
-        {"path": "scripts/release_preflight.sh", "marker": "scripts/release_matrix_gate.sh"}
+        {"path": ".github/workflows/release-qualification.yml", "marker": "bash scripts/release_matrix_gate.sh"}
       ],
       "result": {"path": "scripts/release_matrix_gate.sh", "markers": ["GATE_LANES=", "verdict[$lane]=PASS", "verdict[$lane]=FAIL", "\"overall\": \"%s\""]},
       "capabilities": [
@@ -94,12 +97,12 @@
     {
       "id": "tag-release",
       "tier": "release",
-      "runner": "scripts/release_preflight.sh",
+      "runner": "scripts/verify_release_exact_sha.sh",
       "skip_policy": "fail",
       "dispatch": [
-        {"path": ".github/workflows/release.yml", "marker": "bash scripts/release_preflight.sh"}
+        {"path": ".github/workflows/release.yml", "marker": "bash scripts/verify_release_exact_sha.sh"}
       ],
-      "result": {"path": "scripts/release_preflight.sh", "markers": ["= \"PASS\"", "lane '$lane' did not pass"]},
+      "result": {"path": "scripts/verify_release_exact_sha.py", "markers": ["E_ARTIFACT_SHA_MISMATCH", "E_REQUIRED_CI_NOT_GREEN", "release-candidate-proof: wrote"]},
       "capabilities": []
     },
     {

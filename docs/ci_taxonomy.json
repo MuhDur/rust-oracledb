@@ -149,6 +149,28 @@
       "path_filtered": false
     },
     {
+      "check_name": "emit exact required proof",
+      "tier": "manual",
+      "workflow": "Release Qualification",
+      "workflow_file": "release-qualification.yml",
+      "job_id": "emit-required-proof",
+      "triggers": [
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "emit exact version-matrix evidence",
+      "tier": "manual",
+      "workflow": "Release Qualification",
+      "workflow_file": "release-qualification.yml",
+      "job_id": "emit-version-matrix",
+      "triggers": [
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "release-qualification / quality (release-qualification/release)",
       "tier": "manual",
       "workflow": "Release Qualification",
@@ -368,6 +390,8 @@
         "workflow_dispatch"
       ],
       "jobs": [
+        "emit exact required proof",
+        "emit exact version-matrix evidence",
         "release-qualification / quality (release-qualification/release)",
         "report release qualification failure"
       ]
@@ -437,6 +461,8 @@
       "musl size gate smoke"
     ],
     "manual": [
+      "emit exact required proof",
+      "emit exact version-matrix evidence",
       "release-qualification / quality (release-qualification/release)",
       "report release qualification failure"
     ],

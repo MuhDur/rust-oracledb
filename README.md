@@ -632,12 +632,15 @@ inverted — the lane passes when the driver *refuses* the server with the
 structured `UnsupportedVersion` error naming the floor (python-oracledb
 DPY-3010 parity), never a hang or a misleading decode error.
 
-**A release cannot ship without a green full-matrix run recorded for the
-release SHA.** Run `scripts/release_matrix_gate.sh` on the commit you intend
-to tag; it runs `version_matrix.sh full` for every lane and writes
-`tests/artifacts/version_matrix/results-<sha>.json`. Commit that file —
-`scripts/release_preflight.sh` (executed by the tag-driven release workflow)
-rejects any tag whose HEAD has no committed, all-green artifact. CI also runs
+**A release cannot ship without a green full-matrix run for the exact release
+SHA.** Dispatch the manual **Release Qualification** workflow for the commit
+you intend to tag. Its matrix-evidence job runs
+`scripts/release_matrix_gate.sh` for every lane and uploads the immutable
+`results-<sha>.json` artifact; its companion job uploads the exact Required
+proof. The tag-driven release workflow downloads both artifacts outside its
+clean checkout and verifies them against the tag SHA before any publish job can
+start. This avoids the self-reference of committing a result file into the
+tree it purports to prove, and rejects parent artifacts outright. CI also runs
 the full matrix on every push to `main` touching `crates/**` plus nightly
 (`.github/workflows/version-matrix.yml`, gvenzl service containers).
 

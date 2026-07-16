@@ -23,9 +23,9 @@ name: Version matrix (live, multi-generation)
 # 23ai nightly). A 23ai-only smoke per PR was considered and rejected on the
 # same grounds — the container bootstrap dominates, and every merge to main
 # gets the full matrix here immediately, so a regression cannot age more than
-# one merge. Release tags are additionally gated by release_preflight.sh,
-# which requires a committed all-green release_matrix_gate.sh artifact for the
-# exact release SHA.
+# one merge. Release tags additionally consume immutable exact-SHA matrix
+# evidence emitted by the manual Release Qualification workflow; the tag gate
+# rejects a parent result instead of committing one into the candidate tree.
 
 on:
   push:

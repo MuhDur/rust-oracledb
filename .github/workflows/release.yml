@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -49,6 +50,53 @@ jobs:
           RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           RELEASE_REQUIRE_MAIN: ${{ startsWith(github.ref, 'refs/tags/') }}
         run: bash scripts/release_preflight.sh
+
+      # A committed matrix JSON cannot prove the commit that contains it: the
+      # write changes that commit's SHA.  The manual qualification workflow
+      # therefore uploads immutable exact-SHA artifacts, which are downloaded
+      # outside this clean checkout and validated before any publish job exists.
+      - name: Validate exact-SHA release evidence
+        id: exact-evidence
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_sha="$(git rev-parse HEAD)"
+          required_proof=""
+          matrix_artifact=""
+          for run_id in $(gh run list --workflow release-qualification.yml --status success --limit 100 --json databaseId --jq '.[].databaseId'); do
+            evidence_dir="$RUNNER_TEMP/release-evidence/$run_id"
+            if ! gh run download "$run_id" -n "release-required-proof-$candidate_sha" -D "$evidence_dir/required"; then
+              continue
+            fi
+            if ! gh run download "$run_id" -n "release-version-matrix-$candidate_sha" -D "$evidence_dir/matrix"; then
+              continue
+            fi
+            required_proof="$(find "$evidence_dir/required" -type f -name "required-proof-$candidate_sha.json" -print -quit)"
+            matrix_artifact="$(find "$evidence_dir/matrix" -type f -name "results-$candidate_sha.json" -print -quit)"
+            if [[ -n "$required_proof" && -n "$matrix_artifact" ]]; then
+              break
+            fi
+          done
+          [[ -n "$required_proof" && -n "$matrix_artifact" ]] || {
+            echo "missing successful release-qualification evidence for exact SHA $candidate_sha" >&2
+            exit 1
+          }
+          candidate_proof="$RUNNER_TEMP/release-candidate-proof-$candidate_sha.json"
+          bash scripts/verify_release_exact_sha.sh --tag "$RELEASE_TAG" --sha "$candidate_sha" --allow-existing-tag \
+            --required-proof "$required_proof" --matrix-artifact "$matrix_artifact" --output "$candidate_proof"
+          test -s "$candidate_proof"
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+          echo "candidate_proof=$candidate_proof" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
+        with:
+          name: release-candidate-proof-${{ steps.exact-evidence.outputs.candidate_sha }}
+          path: ${{ steps.exact-evidence.outputs.candidate_proof }}
+          if-no-files-found: error
 
       # The PyO3 pyshim (publish=false) needs a Python toolchain + live DB and is
       # excluded from these gates. clippy is --no-deps (not --all-targets): the

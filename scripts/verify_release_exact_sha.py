@@ -141,6 +141,22 @@ def require_absent_tag(runner: CommandRunner, tag: str) -> None:
         fail_if_error(result, "E_GIT", f"could not inspect tag {tag!r}")
 
 
+def require_tag_at_candidate(runner: CommandRunner, tag: str, sha: str) -> None:
+    """Accept a tag-triggered invocation only when the tag resolves to `sha`."""
+
+    if not TAG_RE.fullmatch(tag):
+        raise ReleaseValidationError("E_TAG_FORMAT", f"tag {tag!r} is not a supported vX.Y.Z tag")
+    resolved = fail_if_error(
+        runner.run(["git", "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}"]),
+        "E_TAG_MISSING",
+        f"could not resolve existing tag {tag!r}",
+    )
+    if resolved != sha:
+        raise ReleaseValidationError(
+            "E_TAG_SHA_MISMATCH", f"tag {tag!r} resolves to {resolved!r}, not candidate {sha}"
+        )
+
+
 def workspace_version(root: Path) -> str:
     try:
         cargo = tomllib.loads((root / "Cargo.toml").read_text())
@@ -194,8 +210,8 @@ def validate_required_proof(
         raise ReleaseValidationError("E_STALE_SHA", f"required proof {path} does not describe candidate {sha}")
 
 
-def matrix_artifact(root: Path, sha: str) -> tuple[Path, dict]:
-    path = root / "tests" / "artifacts" / "version_matrix" / f"results-{sha}.json"
+def matrix_artifact(root: Path, sha: str, supplied: Path | None = None) -> tuple[Path, dict]:
+    path = supplied or root / "tests" / "artifacts" / "version_matrix" / f"results-{sha}.json"
     return path, load_json(path, "E_MISSING_LIVE_ARTIFACT", "missing exact-SHA live version-matrix artifact")
 
 
@@ -281,26 +297,43 @@ def default_output(root: Path, sha: str) -> Path:
     return root / "tests" / "artifacts" / "evidence" / "release-candidate" / f"release-candidate-proof-{sha}.json"
 
 
-def resolve_repo_path(root: Path, supplied: Path) -> Path:
-    path = supplied if supplied.is_absolute() else root / supplied
+def resolve_path(root: Path, supplied: Path) -> Path:
+    """Resolve a CLI path without forcing ephemeral CI evidence into the tree."""
+
+    return supplied if supplied.is_absolute() else root / supplied
+
+
+def evidence_label(root: Path, path: Path) -> str:
+    """Keep proof paths useful without embedding runner-specific absolute paths."""
+
     try:
-        path.relative_to(root)
-    except ValueError as error:
-        raise ReleaseValidationError("E_OUTPUT_PATH", f"path {path} must stay within the repository") from error
-    return path
+        return str(path.relative_to(root))
+    except ValueError:
+        return f"external/{path.name}"
 
 
-def build_proof(root: Path, tag: str, sha: str, required_path: Path, runner: CommandRunner) -> dict:
+def build_proof(
+    root: Path,
+    tag: str,
+    sha: str,
+    required_path: Path,
+    matrix_input: Path | None,
+    allow_existing_tag: bool,
+    runner: CommandRunner,
+) -> dict:
     require_clean_tree(runner)
     require_exact_candidate(runner, sha)
     require_main_ancestry(runner, sha)
-    require_absent_tag(runner, tag)
+    if allow_existing_tag:
+        require_tag_at_candidate(runner, tag, sha)
+    else:
+        require_absent_tag(runner, tag)
     version = workspace_version(root)
     require_tag_version(tag, version)
 
     required = load_json(required_path, "E_MISSING_REQUIRED_PROOF", "missing exact-SHA required proof")
     validate_required_proof(required, sha, required_path)
-    matrix_path, matrix = matrix_artifact(root, sha)
+    matrix_path, matrix = matrix_artifact(root, sha, matrix_input)
     validate_matrix_artifact(matrix, sha, matrix_path)
     jobs = validate_ci_status(ci_status(runner, sha), sha)
 
@@ -312,12 +345,12 @@ def build_proof(root: Path, tag: str, sha: str, required_path: Path, runner: Com
         "source": {"sha": sha, "tree_clean": True, "branch": "main"},
         "required_proof": {
             "schema": "required-proof/v2",
-            "path": str(required_path.relative_to(root)),
+            "path": evidence_label(root, required_path),
             "sha": sha,
         },
         "required_ci": {"sha": sha, "jobs": jobs},
         "artifacts": [
-            {"kind": "version-matrix", "path": str(matrix_path.relative_to(root)), "sha": sha}
+            {"kind": "version-matrix", "path": evidence_label(root, matrix_path), "sha": sha}
         ],
         "verdict": "pass",
     }
@@ -325,6 +358,40 @@ def build_proof(root: Path, tag: str, sha: str, required_path: Path, runner: Com
     if findings:
         raise ReleaseValidationError("E_PROOF_INVALID", f"generated proof violates its contract: {findings[0]}")
     return proof
+
+
+def validate_tag_workflow_contract(release_workflow: str, preflight: str) -> None:
+    """Prove the tag workflow cannot bypass exact external evidence.
+
+    Qualification evidence is intentionally downloaded outside the checkout: a
+    JSON artifact written into the candidate tree would change the candidate
+    SHA it claims to prove.  These sentinels keep the release workflow wired to
+    the same fail-closed verifier rather than silently falling back to the old
+    committed-parent-artifact convention.
+    """
+
+    required = (
+        "name: Validate exact-SHA release evidence",
+        "gh run list --workflow release-qualification.yml --status success",
+        'candidate_sha="$(git rev-parse HEAD)"',
+        '"release-required-proof-$candidate_sha"',
+        '"release-version-matrix-$candidate_sha"',
+        "bash scripts/verify_release_exact_sha.sh --tag \"$RELEASE_TAG\" --sha \"$candidate_sha\" --allow-existing-tag",
+        "--required-proof \"$required_proof\"",
+        "--matrix-artifact \"$matrix_artifact\"",
+        "--output \"$candidate_proof\"",
+    )
+    missing = [marker for marker in required if marker not in release_workflow]
+    if missing:
+        raise ReleaseValidationError(
+            "E_RELEASE_TAG_GATE_MISSING",
+            "release workflow does not require exact external evidence: " + ", ".join(missing),
+        )
+    if "HEAD^" in preflight or "parent matrix artifact" in preflight:
+        raise ReleaseValidationError(
+            "E_RELEASE_TAG_GATE_MISSING",
+            "release preflight still permits a parent matrix artifact instead of the exact-SHA proof",
+        )
 
 
 def assert_rejected(action, code: str) -> None:
@@ -442,6 +509,12 @@ def self_test() -> None:
     tagged = dict(responses)
     tagged[("git", "show-ref", "--verify", "--quiet", f"refs/tags/{tag}")] = CommandResult(0)
     assert_rejected(lambda: require_absent_tag(FakeRunner(tagged), tag), "E_TAG_EXISTS")
+    tagged_at_candidate = dict(responses)
+    tagged_at_candidate[("git", "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}") ] = CommandResult(0, f"{sha}\n")
+    require_tag_at_candidate(FakeRunner(tagged_at_candidate), tag, sha)
+    tagged_at_parent = dict(tagged_at_candidate)
+    tagged_at_parent[("git", "rev-parse", "--verify", f"refs/tags/{tag}^{{commit}}") ] = CommandResult(0, f"{parent}\n")
+    assert_rejected(lambda: require_tag_at_candidate(FakeRunner(tagged_at_parent), tag, sha), "E_TAG_SHA_MISMATCH")
     assert_rejected(lambda: require_tag_version("v0.0.0", version), "E_TAG_VERSION_MISMATCH")
     assert_rejected(
         lambda: validate_ci_status({**green_report, "ci_green": False, "required_not_green": ["required / quality"]}, sha),
@@ -464,6 +537,15 @@ def self_test() -> None:
         lambda: validate_matrix_artifact({**green_matrix, "probes": {}}, sha, Path("matrix.json")),
         "E_LIVE_ARTIFACT_NOT_GREEN",
     )
+    release_workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text()
+    preflight = (ROOT / "scripts" / "release_preflight.sh").read_text()
+    validate_tag_workflow_contract(release_workflow, preflight)
+    assert_rejected(
+        lambda: validate_tag_workflow_contract(
+            release_workflow.replace("--matrix-artifact \"$matrix_artifact\"", "", 1), preflight
+        ),
+        "E_RELEASE_TAG_GATE_MISSING",
+    )
     print("verify-release-exact-sha: self-test OK")
 
 
@@ -472,7 +554,13 @@ def main() -> int:
     parser.add_argument("--tag", help="candidate tag vX.Y.Z; this command never creates it")
     parser.add_argument("--sha", help="full 40-character candidate commit SHA")
     parser.add_argument("--required-proof", type=Path, help="exact-SHA required-proof/v2 path")
-    parser.add_argument("--output", type=Path, help="where to write release-candidate-proof/v2")
+    parser.add_argument("--matrix-artifact", type=Path, help="exact-SHA version-matrix result path")
+    parser.add_argument("--output", type=Path, help="where to write release-candidate-proof/v2 (may be outside the checkout)")
+    parser.add_argument(
+        "--allow-existing-tag",
+        action="store_true",
+        help="require the existing tag to resolve exactly to --sha (for tag-triggered release gates)",
+    )
     parser.add_argument("--self-test", action="store_true", help="run deterministic offline negative controls")
     args = parser.parse_args()
 
@@ -483,17 +571,26 @@ def main() -> int:
         parser.error("--tag and --sha are both required unless --self-test is used")
 
     try:
-        required_path = resolve_repo_path(ROOT, args.required_proof or default_required_proof(ROOT, args.sha))
-        output = resolve_repo_path(ROOT, args.output or default_output(ROOT, args.sha))
+        required_path = resolve_path(ROOT, args.required_proof or default_required_proof(ROOT, args.sha))
+        matrix_input = args.matrix_artifact and resolve_path(ROOT, args.matrix_artifact)
+        output = resolve_path(ROOT, args.output or default_output(ROOT, args.sha))
         if output.exists():
             raise ReleaseValidationError("E_OUTPUT_EXISTS", f"refusing to overwrite existing proof {output}")
-        proof = build_proof(ROOT, args.tag, args.sha, required_path, SubprocessRunner(ROOT))
+        proof = build_proof(
+            ROOT,
+            args.tag,
+            args.sha,
+            required_path,
+            matrix_input,
+            args.allow_existing_tag,
+            SubprocessRunner(ROOT),
+        )
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(proof, indent=2) + "\n")
     except ReleaseValidationError as error:
         print(f"release-candidate-proof: {error.code}: {error}", file=sys.stderr)
         return 1
-    print(f"release-candidate-proof: wrote {output.relative_to(ROOT)} for {args.tag} at {args.sha}")
+    print(f"release-candidate-proof: wrote {evidence_label(ROOT, output)} for {args.tag} at {args.sha}")
     return 0
 
 

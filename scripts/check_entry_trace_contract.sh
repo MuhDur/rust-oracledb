@@ -146,9 +146,9 @@ def check(document: dict, *, source_root: Path) -> list[str]:
     )
     _require_source_markers(
         errors,
-        source_root / "scripts/release_preflight.sh",
-        "release preflight PASS-only lanes",
-        ['= "PASS"', "lane '$lane' did not pass"],
+        source_root / "scripts/verify_release_exact_sha.py",
+        "release exact-SHA PASS-only evidence",
+        ["MATRIX_LANES", "E_ARTIFACT_SHA_MISMATCH", "E_REQUIRED_CI_NOT_GREEN"],
     )
     return errors
 

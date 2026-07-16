@@ -57,7 +57,7 @@ k10_record="docs/design/k10-row-stream.md"
 version_re="${version//./\\.}"
 grep -Eq "^## \\[$version_re\\](\\([^)]*\\))?( - [0-9]{4}-[0-9]{2}-[0-9]{2})?$" "$changelog" ||
   fail "$changelog has no release heading for workspace version $version"
-grep -Eq "^Status: implemented in workspace version $version_re;" "$k10_record" ||
+grep -Eq "^Status: implemented in (prepared )?workspace version $version_re;" "$k10_record" ||
   fail "$k10_record does not positively identify workspace version $version as implemented"
 
 # The three crates that actually get published, in dependency order.
@@ -111,50 +111,11 @@ if [ -n "$tag" ]; then
   [ "$tag" = "v$version" ] ||
     fail "tag '$tag' does not match workspace version '$version' (expected v$version)"
 
-  # Live version-matrix gate (bead rust-oracledb-pre23ai-connect-z47u.5): a
-  # release cannot ship without a committed, all-green FULL matrix run for the
-  # exact release SHA. The 0.5.x line shipped a connect path that could not
-  # reach any pre-23ai server because only 23ai was ever live-tested; this
-  # check makes pre-23ai coverage (xe11 refusal + xe18 + xe21 + free23)
-  # structurally unskippable. Produce the artifact with
-  # scripts/release_matrix_gate.sh and commit it before tagging.
-  need git
-  head_sha="$(git rev-parse HEAD)"
-  # The verdict file cannot record the SHA of the commit that contains it
-  # (writing the file changes the SHA). The gate therefore runs on the
-  # release-prep commit and the verdict lands in an immediately following
-  # commit that touches ONLY the artifact directory; tagging that artifact
-  # commit is equivalent to tagging the tested tree. Accept HEAD's own
-  # verdict, or the first parent's verdict when HEAD-vs-parent differs only
-  # inside tests/artifacts/version_matrix/.
-  gate_sha="$head_sha"
-  matrix_results="tests/artifacts/version_matrix/results-$head_sha.json"
-  if [ ! -f "$matrix_results" ]; then
-    parent_sha="$(git rev-parse HEAD^ 2>/dev/null || true)"
-    if [ -n "$parent_sha" ] &&
-       [ -f "tests/artifacts/version_matrix/results-$parent_sha.json" ] &&
-       [ -z "$(git diff --name-only "HEAD^..HEAD" -- . ':!tests/artifacts/version_matrix')" ]; then
-      gate_sha="$parent_sha"
-      matrix_results="tests/artifacts/version_matrix/results-$parent_sha.json"
-    fi
-  fi
-  [ -f "$matrix_results" ] ||
-    fail "missing live version-matrix results for release SHA $head_sha — run scripts/release_matrix_gate.sh on this commit and commit $matrix_results"
-  [ "$(jq -r '.sha' "$matrix_results")" = "$gate_sha" ] ||
-    fail "$matrix_results does not record SHA $gate_sha"
-  [ "$(jq -r '.dirty' "$matrix_results")" = "false" ] ||
-    fail "$matrix_results was recorded on a dirty worktree — rerun scripts/release_matrix_gate.sh on the clean release commit"
-  [ "$(jq -r '.overall' "$matrix_results")" = "PASS" ] ||
-    fail "$matrix_results is not all-green — a release cannot ship without every matrix lane passing"
-  # Four server generations plus the local OCI TCPS lane (A5.2 / bead
-  # iec3.1.26): every lane in the committed artifact must be green.
-  for lane in xe11 xe18 xe21 free23 octcps; do
-    [ "$(jq -r --arg l "$lane" '.lanes[$l]' "$matrix_results")" = "PASS" ] ||
-      fail "$matrix_results: lane '$lane' did not pass"
-  done
-  [ "$(jq -r '.probes.free23_tstz_descriptor' "$matrix_results")" = "PASS" ] ||
-    fail "$matrix_results: required free23 TSTZ descriptor probe did not pass"
-  echo "release-preflight: version-matrix gate OK ($matrix_results)"
+  # Exact-SHA Required and matrix evidence is produced by the manual
+  # release-qualification workflow and consumed in release.yml.  It is kept
+  # outside the commit: committing a result changes the SHA it claims to prove.
+  # The tag workflow runs verify_release_exact_sha.py after this metadata check;
+  # unlike the retired local convention, it never substitutes a parent artifact.
 fi
 
 # On a real tag build, require the tagged commit to be contained in origin/main

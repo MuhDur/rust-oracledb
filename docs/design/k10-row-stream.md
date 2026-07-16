@@ -1,6 +1,6 @@
 # K10 Owned Row Stream Design and Delivery Record
 
-Status: implemented in workspace version 0.8.3; public since
+Status: implemented in prepared workspace version 0.8.4; public since
 [v0.8.2](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.2).
 
 The public API landed in

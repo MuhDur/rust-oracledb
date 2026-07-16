@@ -10,6 +10,12 @@ on:
 
 permissions:
   contents: read
+  actions: write
+
+env:
+  CARGO_PUBLIC_API_VERSION: "0.52.0"
+  CARGO_HACK_VERSION: "0.6.45"
+  CARGO_SEMVER_CHECKS_VERSION: "0.48.0"
 
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.candidate_sha }}
@@ -22,6 +28,69 @@ jobs:
       profile: release-qualification
       budget: release
       candidate_sha: ${{ inputs.candidate_sha }}
+
+  emit-required-proof:
+    name: emit exact required proof
+    needs: release-qualification
+    if: ${{ needs.release-qualification.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha }}
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: nightly-2026-05-11
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - uses: taiki-e/install-action@6385177bd1684e175e09301c9ee3ae18c14a367e # cargo-deny
+      - name: Assert exact candidate checkout
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+      - name: Re-run Required graph and emit proof
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: >-
+          bash scripts/verify_required_local.sh
+          --run-id "release-qualification-$CANDIDATE_SHA"
+          --output "$RUNNER_TEMP/required-proof-$CANDIDATE_SHA.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-required-proof-${{ inputs.candidate_sha }}
+          path: ${{ runner.temp }}/required-proof-${{ inputs.candidate_sha }}.json
+          if-no-files-found: error
+
+  emit-version-matrix:
+    name: emit exact version-matrix evidence
+    needs: release-qualification
+    if: ${{ needs.release-qualification.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha }}
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: nightly-2026-05-11
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      - name: Assert exact candidate checkout
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+      - name: Run complete live matrix and record exact evidence
+        run: bash scripts/release_matrix_gate.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-version-matrix-${{ inputs.candidate_sha }}
+          path: tests/artifacts/version_matrix/results-${{ inputs.candidate_sha }}.json
+          if-no-files-found: error
 
   report-release-qualification-failure:
     name: report release qualification failure

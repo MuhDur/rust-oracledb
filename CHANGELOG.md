@@ -5,9 +5,10 @@ is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows the SemVer contract described in
 [`docs/adr/0002-semver-contract.md`](docs/adr/0002-semver-contract.md).
 
-Scope window: canonical release entries from 0.3.0 through 0.8.3. The
-0.7.4–0.8.2 spine was reconstructed from git tags, GitHub Releases, tag
-ranges, release-matrix artifacts, and the checked-in API/provenance ledgers.
+Scope window: canonical published release entries from 0.3.0 through 0.8.3,
+plus the prepared (not published) 0.8.4 candidate. The 0.7.4–0.8.2 spine was
+reconstructed from git tags, GitHub Releases, tag ranges, release-matrix
+artifacts, and the checked-in API/provenance ledgers.
 
 ## Version Timeline
 
@@ -27,6 +28,24 @@ ranges, release-matrix artifacts, and the checked-in API/provenance ledgers.
 - [0.8.2 K10 owning row stream](https://github.com/MuhDur/rust-oracledb/commit/06244bfa4c8aab2efb62bfdbd8793dc1e089bd02)
 
 ## [Unreleased]
+
+## [0.8.4]
+
+> Prepared release candidate; not published to crates.io or tagged.
+
+### Fixed
+
+- **23ai TSTZ object metadata.** `TIMESTAMP WITH TIME ZONE` and `TIMESTAMP
+  WITH LOCAL TIME ZONE` DbObject descriptors now retain their real
+  precision/scale through the thin wire decoder, with a captured 23ai fixture
+  and live regression gate.
+- **Exact-SHA tag qualification.** A release tag must consume immutable,
+  exact-SHA Required and live-matrix evidence from the qualification workflow;
+  a parent artifact is never substituted for the tagged candidate.
+
+### Changed
+
+- **Runtime update.** The async runtime is now pinned to `asupersync` 0.3.9.
 
 ## [0.8.3](https://github.com/MuhDur/rust-oracledb/compare/v0.8.2...v0.8.3) - 2026-07-14
 

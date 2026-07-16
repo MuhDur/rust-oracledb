@@ -6,13 +6,16 @@
 # rustls TCPS + wallet suites over the C1 synthetic fixtures.
 #
 # A release CANNOT ship without a green record from this script for the exact
-# release SHA: scripts/release_preflight.sh (which runs in the tag-driven
-# release workflow) refuses any tag whose HEAD has no committed, all-green
-# matrix-results artifact. Workflow:
+# release SHA. It runs in the manual Release Qualification workflow, which
+# uploads the result as an immutable GitHub Actions artifact. The tag workflow
+# downloads that artifact outside its clean checkout and verifies it with
+# scripts/verify_release_exact_sha.py. It is deliberately not committed: adding
+# a result file would change the SHA that the result claims to prove. Workflow:
 #
-#   1. scripts/release_matrix_gate.sh          # on the commit you intend to tag
-#   2. git add tests/artifacts/version_matrix/ # commit the results file
-#   3. tag vX.Y.Z on that history               # preflight verifies HEAD's file
+#   1. Dispatch Release Qualification for the exact commit you intend to tag.
+#   2. Its matrix-evidence job runs this script and uploads the result.
+#   3. Push vX.Y.Z on that same commit; release.yml verifies the artifact before
+#      any publish job can start.
 #
 # The artifact records per-lane pass/fail, the required free23 TSTZ descriptor
 # probe, the SHA it ran on, and whether the worktree was dirty (a dirty run is
@@ -112,4 +115,4 @@ if [ "$overall" != "PASS" ]; then
   echo "release-matrix-gate: FAILED — a release cannot ship from this SHA" >&2
   exit 1
 fi
-echo "release-matrix-gate: OK — commit $out so release preflight can verify it"
+echo "release-matrix-gate: OK — upload $out as exact-SHA qualification evidence"
