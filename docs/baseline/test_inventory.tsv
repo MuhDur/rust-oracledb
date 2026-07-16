@@ -54,7 +54,7 @@ crates/oracledb/src/arrow/builders.rs	7
 crates/oracledb/src/arrow/ipc.rs	1
 crates/oracledb/src/arrow/mod.rs	39
 crates/oracledb/src/cursor_logic.rs	14
-crates/oracledb/src/lib.rs	135
+crates/oracledb/src/lib.rs	136
 crates/oracledb/src/lob_stream.rs	8
 crates/oracledb/src/obs.rs	6
 crates/oracledb/src/pool.rs	33
@@ -62,7 +62,7 @@ crates/oracledb/src/recovery.rs	1
 crates/oracledb/src/request.rs	11
 crates/oracledb/src/retry.rs	18
 crates/oracledb/src/routine.rs	11
-crates/oracledb/src/row_stream.rs	10
+crates/oracledb/src/row_stream.rs	11
 crates/oracledb/src/rows.rs	10
 crates/oracledb/src/shape_cache.rs	10
 crates/oracledb/src/soda/collection.rs	16

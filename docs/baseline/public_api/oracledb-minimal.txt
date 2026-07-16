@@ -1314,7 +1314,7 @@ pub struct oracledb::OwnedRowStream
 impl oracledb::OwnedRowStream
 pub fn oracledb::OwnedRowStream::columns(&self) -> &[oracledb_protocol::thin::types::ColumnMetadata]
 pub fn oracledb::OwnedRowStream::cursor(&self) -> core::option::Option<&oracledb::Cursor>
-pub fn oracledb::OwnedRowStream::into_connection(self) -> oracledb::Result<oracledb::Connection>
+pub async fn oracledb::OwnedRowStream::into_connection(self) -> oracledb::Result<oracledb::Connection>
 impl core::fmt::Debug for oracledb::OwnedRowStream
 pub fn oracledb::OwnedRowStream::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::ops::drop::Drop for oracledb::OwnedRowStream
