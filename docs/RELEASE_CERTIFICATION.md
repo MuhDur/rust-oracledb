@@ -6,6 +6,45 @@
 > missing tests (see `docs/qualification/1.0.0-rc.1/SUMMARY.md` and
 > `docs/PARITY_SKIPS.md`).
 
+## 0.8.3 evidence reconciliation (2026-07-16)
+
+`v0.8.3` resolves to commit `5d9697b6ceeda181542b582bc9ec13df285f7886`.
+That commit records the final matrix artifact; its parent,
+`2b0ac62e6889df30c70a32b1e257c4d6e84a68bd`, is the clean source SHA that
+`tests/artifacts/version_matrix/results-2b0ac62e6889df30c70a32b1e257c4d6e84a68bd.json`
+actually tested. The artifact records `version_matrix.sh full` as **PASS** for
+exactly five lanes: `xe11`, `xe18`, `xe21`, `free23`, and `octcps`. It does
+not record a per-test count, so it is evidence of those five matrix outcomes,
+not evidence that a full reference-parity run was repeated at 0.8.3.
+
+The only recorded full reference-parity count remains the historical
+qualification at `b4a0cd3e77e3d7ed9cd875ba8002968860c9954a`: **2,578
+collected, 2,462 passed, 116 skipped, 0 regressions and 0 missing tests**.
+All 116 skips are explicitly enumerated in `docs/PARITY_SKIPS.md`; the
+recorded Rust-engine cross-check for the skip-bearing modules is 303 passed,
+116 skipped, and 0 failed. Do not represent these counts as a fresh 0.8.3
+reference run, and do not replace the documented skips with an uncounted or
+implicit skip set.
+
+The 0.8.3 tag also has a material negative result: GitHub Actions run
+`29393481428` (`Live (database) tests`, head `5d9697b6…`) failed its serial,
+ignored live-test step at
+`crates/oracledb/tests/live_object_precision_scale.rs:97`. That is the TSTZ
+descriptor assertion in the test added for upstream commit `6cfd00aa642e`:
+the live describe path returned `(0, 0)` where the test requires `(0, 6)`.
+The current focused reproduction against the reused free23 listener has the
+same result: **0 passed, 1 failed, 0 ignored**.
+Accordingly, the earlier close of `rust-oracledb-upstream-sync-2026-07-13-etib.2`
+is a false close: its unit/compile evidence does not establish a green live
+TSTZ path. The defect is tracked for the next patch train as
+`rust-oracledb-driver-next-release-c23g.1` through `.4`; none of those beads
+may cite 0.8.3 as a passing TSTZ regression result.
+
+`rust-oracledb-szuv` was left in progress although 0.8.3 is already tagged.
+Its historical qualification claim is limited to the recorded release and
+matrix evidence above; it must be closed as historical release bookkeeping,
+not as proof that the post-tag TSTZ live test passed.
+
 **Date:** 2026-06-13 · **Reference pinned:** python-oracledb v4.0.1 (thin mode) ·
 **Subject:** rust-oracledb @ master `1fe571a` · **Database under test:** Oracle 23ai Free (gvenzl/oracle-free), local container.
 
