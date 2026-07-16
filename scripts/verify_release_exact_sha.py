@@ -217,6 +217,12 @@ def validate_matrix_artifact(artifact: dict, sha: str, path: Path) -> None:
             raise ReleaseValidationError(
                 "E_LIVE_ARTIFACT_NOT_GREEN", f"matrix artifact {path} lane {lane!r} is not PASS"
             )
+    probes = artifact.get("probes")
+    if not isinstance(probes, dict) or probes.get("free23_tstz_descriptor") != "PASS":
+        raise ReleaseValidationError(
+            "E_LIVE_ARTIFACT_NOT_GREEN",
+            f"matrix artifact {path} free23 TSTZ descriptor probe is not PASS",
+        )
 
 
 def ci_status(runner: CommandRunner, sha: str) -> dict:
@@ -401,7 +407,13 @@ def self_test() -> None:
         "E_REQUIRED_PROOF_INVALID",
     )
 
-    green_matrix = {"sha": sha, "dirty": False, "overall": "PASS", "lanes": {lane: "PASS" for lane in MATRIX_LANES}}
+    green_matrix = {
+        "sha": sha,
+        "dirty": False,
+        "overall": "PASS",
+        "lanes": {lane: "PASS" for lane in MATRIX_LANES},
+        "probes": {"free23_tstz_descriptor": "PASS"},
+    }
     validate_matrix_artifact(green_matrix, sha, Path("matrix.json"))
     generated = {
         "schema": "release-candidate-proof/v2",
@@ -448,6 +460,10 @@ def self_test() -> None:
     )
     assert_rejected(lambda: validate_matrix_artifact({**green_matrix, "sha": parent}, sha, Path("matrix.json")), "E_ARTIFACT_SHA_MISMATCH")
     assert_rejected(lambda: validate_matrix_artifact({**green_matrix, "lanes": {}}, sha, Path("matrix.json")), "E_LIVE_ARTIFACT_NOT_GREEN")
+    assert_rejected(
+        lambda: validate_matrix_artifact({**green_matrix, "probes": {}}, sha, Path("matrix.json")),
+        "E_LIVE_ARTIFACT_NOT_GREEN",
+    )
     print("verify-release-exact-sha: self-test OK")
 
 
