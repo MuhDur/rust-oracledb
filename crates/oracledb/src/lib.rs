@@ -5113,6 +5113,19 @@ impl Connection {
         Ok(response)
     }
 
+    /// Read one END_OF_RESPONSE-delimited pipeline response with the same
+    /// cancel-on-drop bookkeeping as every ordinary request response. Pipeline
+    /// writes are followed by multiple response boundaries; a stalled boundary
+    /// must therefore arm recovery before the inactivity timeout reaches the
+    /// caller, or the next request could consume a stranded pipeline response.
+    async fn read_pipeline_response_cancellable(&mut self, cx: &Cx) -> Result<DataResponse> {
+        let recovery = Arc::clone(&self.core.recovery);
+        let mut guard = CancelDrainGuard::arm(recovery)?;
+        let response = self.core.read_data_response_boundary(cx, true).await?;
+        guard.disarm();
+        Ok(response)
+    }
+
     /// [`Self::read_response_cancellable`] for the bind/execute path, which reads
     /// via [`read_data_response_flushing_out_binds`] (it answers FLUSH_OUT_BINDS
     /// requests). Same cancel-on-drop semantics: a dropped execute future arms
@@ -7557,7 +7570,13 @@ impl Connection {
             .await?;
         let mut responses = Vec::with_capacity(requests.len() + 1);
         for _ in 0..=requests.len() {
-            let response = self.core.read_data_response_boundary(cx, true).await?;
+            let response = match self.read_pipeline_response_cancellable(cx).await {
+                Ok(response) => response,
+                Err(Error::CallTimeout(timeout_ms)) => {
+                    return self.recover_from_call_timeout(cx, timeout_ms).await;
+                }
+                Err(err) => return Err(err),
+            };
             trace_query_bytes("PIPELINE response", &response.payload);
             responses.push(response.payload);
         }
@@ -12959,6 +12978,108 @@ mod tests {
                 "concurrent pipelined op {index} matches the sequential decode"
             );
         }
+    }
+
+    #[test]
+    fn pipeline_inactivity_timeout_breaks_and_drains_before_reuse() -> Result<()> {
+        // GH#14: an opt-in read-inactivity timeout must use the same
+        // BREAK→drain recovery as every other CallTimeout. Pipelining writes
+        // both the operation and end-pipeline packets before its first read, so
+        // this loopback refuses to answer until the client BREAKs the stranded
+        // response; only then will it accept a follow-up query on the same
+        // connection.
+        const TRAILING_CANCEL_ERROR: &[u8] = &[0x04, 0x01, 0x0d];
+        const TIMEOUT: Duration = Duration::from_millis(100);
+
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            use std::io::Write as _;
+
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+
+            for _ in 0..2 {
+                assert_eq!(
+                    read_one_wire_packet(&mut socket),
+                    TNS_PACKET_TYPE_DATA,
+                    "pipeline must send its operation and end-pipeline packets before reading"
+                );
+            }
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_BREAK,
+                "inactivity timeout must BREAK the stranded pipeline response"
+            );
+            socket.write_all(&data_packet(b"stranded pipeline response", true))?;
+            socket.write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))?;
+            assert_eq!(
+                read_marker_type(&mut socket),
+                TNS_MARKER_TYPE_RESET,
+                "pipeline drain must complete the RESET handshake"
+            );
+            socket.write_all(&marker_packet(TNS_MARKER_TYPE_RESET))?;
+            socket.write_all(&data_packet(TRAILING_CANCEL_ERROR, true))?;
+
+            assert_eq!(
+                read_one_wire_packet(&mut socket),
+                TNS_PACKET_TYPE_DATA,
+                "only a cleanly recovered connection may issue the follow-up query"
+            );
+            socket.write_all(&data_packet(
+                &synthetic_pipeline_execute_response_payload(),
+                true,
+            ))?;
+            socket.flush()?;
+            Ok(())
+        });
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            connection.core.set_inactivity_timeout(Some(TIMEOUT));
+
+            let err = connection
+                .run_pipeline(&cx, &[PipelineRequest::Commit], false)
+                .await
+                .expect_err("silent pipeline response must hit the inactivity timeout");
+            assert!(
+                matches!(err, Error::CallTimeout(ms) if ms == 100),
+                "expected the configured inactivity timeout, got {err:?}"
+            );
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready,
+                "CallTimeout must return only after BREAK-and-drain leaves the wire clean"
+            );
+
+            let reused = connection
+                .execute_raw(
+                    &cx,
+                    "select value from pipeline_timeout_reuse_fixture",
+                    2,
+                    &[],
+                    ExecuteOptions::default(),
+                    None,
+                )
+                .await?;
+            assert_eq!(
+                reused,
+                sequential_op_decode(&synthetic_pipeline_execute_response_payload()),
+                "the follow-up query must not consume a stranded pipeline response"
+            );
+            assert_eq!(
+                connection.core.recovery.phase(),
+                SessionRecoveryPhase::Ready
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        server.join().expect("pipeline timeout server joins")?;
+        Ok(())
     }
 
     #[test]
