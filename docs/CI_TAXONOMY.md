@@ -40,7 +40,9 @@ without being classified, and a required job cannot quietly become advisory.
 | `manual` | only `workflow_dispatch` | no |
 
 Current: 11 required, 2 advisory, 6 scheduled, 4 release, 2 manual (25 jobs).
-The authoritative list is [`ci_taxonomy.json`](ci_taxonomy.json).
+The authoritative list is [`ci_taxonomy.json`](ci_taxonomy.json). `workflows` and
+`groups` in that file are **derived views** over `jobs[]`, which stays the single
+place a tier is recorded, so a view cannot disagree with it.
 
 ## The rule
 
@@ -49,7 +51,10 @@ The authoritative list is [`ci_taxonomy.json`](ci_taxonomy.json).
 - Non-terminal is not success. A required job still `in_progress` is not green.
 - `skipped` and `neutral` are not success.
 - **Absent is not success** — see below.
-- Advisory failures are reported in `advisory_failures` and never affect `green`.
+- Advisory jobs are reported in `advisory_not_green` and never affect `ci_green`.
+  The set is "not green" rather than "failures" on purpose: an advisory job that
+  is hung or queued has not failed, but it has not passed either, and calling the
+  set "failures" would quietly drop it.
 
 ## Absence, and why it fails closed
 
@@ -62,10 +67,15 @@ because the two mean very different things:
 - **`required_missing_unexpected`** — nothing filtered it. It should have run and
   did not. This is the alarming one.
 
-Both leave `green: false`. That is deliberate: absence is not success, and this
+Both leave `ci_green: false`. That is deliberate: absence is not success, and this
 repo's own release rule already says a release cannot ship without its evidence
 recorded **at the release SHA** (AGENTS.md). A path filter explains why a job did
 not run; it does not conjure evidence that it passed.
+
+This matters more than it sounds. A report that only iterates the check-runs that
+*exist* finds "0 required not-green" on a docs-only commit and calls it green —
+while four required version-matrix lanes never ran at all. Modelling absence is
+what stops the overclaim.
 
 An `unknown_jobs` entry — a check-run the taxonomy has never heard of — also
 forces non-green, because an unclassified job is one nobody decided about.
@@ -95,6 +105,19 @@ does not fail loudly; it reports "missing" forever, which is worse.
 SHA must be classified. It is one-directional on purpose — a derived job with no
 check-run is legitimate (a filter or schedule), but a check-run the taxonomy has
 never heard of means the deriver is wrong or a job is unclassified.
+
+## Cross-repo shape
+
+`ci-taxonomy/v1` is mirrored with the sibling `oraclemcp` repo (`yg4x.8`). The
+*content* is necessarily per-repo — different workflows — but the **shape and
+semantics are shared**: `schema`, `jobs[]` (with `tier`), the derived `workflows`
+and `groups` views, and the report keys `ci_green`, `required_not_green`,
+`advisory_not_green`, `required_missing_path_filtered`,
+`required_missing_unexpected`, `unknown_jobs`.
+
+`schema` (not `schema_version`) matches the discriminator every schema in
+[EVIDENCE_CONTRACT.md](EVIDENCE_CONTRACT.md) already uses, so the whole contract
+family spells the same concept one way; the value carries the version.
 
 ## Relationship to the evidence contract
 
