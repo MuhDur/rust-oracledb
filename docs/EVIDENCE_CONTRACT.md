@@ -62,6 +62,7 @@ yields the same code.
 | `E_TREE_DIRTY` | Evidence was produced from a tree with uncommitted changes, so it describes code at no commit. |
 | `E_STALE_SHA` | A command, proof, or CI status is recorded against a different SHA than the document is for. |
 | `E_UNFINISHED` | Something claims an outcome but recorded no end time or completed exit status, so its completion cannot be verified. |
+| `E_EXIT_STATUS_MISMATCH` | A completed pass/fail command's declared outcome contradicts its process exit status. |
 | `E_COMMAND_GRAPH_MISMATCH` | A Required-proof has an invalid canonical graph record or records differ from it. |
 | `E_COMMAND_GRAPH_HASH_MISMATCH` | A v1 Required-proof graph-record hash does not match its canonical command-ID list. |
 | `E_SKIP_WITHOUT_REASON` | A skip carries no machine-readable reason, making it indistinguishable from a gap. |

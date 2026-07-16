@@ -373,6 +373,15 @@ def _semantic_required_proof(doc: dict) -> list:
                     "verified",
                 )
             )
+        elif (cmd["outcome"] == "pass") != (cmd["exit_code"] == 0):
+            out.append(
+                Finding(
+                    "E_EXIT_STATUS_MISMATCH",
+                    f"{path}/exit_code",
+                    f"command {cmd['id']!r} reports outcome {cmd['outcome']!r} but "
+                    f"exit status {cmd['exit_code']}; only exit status 0 can be pass",
+                )
+            )
 
         if required and cmd["outcome"] == "fail":
             saw_required_fail = True

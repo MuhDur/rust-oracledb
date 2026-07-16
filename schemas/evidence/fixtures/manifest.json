@@ -49,6 +49,18 @@
       "covers": "A completed pass with no process status. A pass/fail record must name the exit status that produced its outcome."
     },
     {
+      "file": "pass-nonzero-exit-code.json",
+      "expect_code": "E_EXIT_STATUS_MISMATCH",
+      "expect_path": "/commands/0/exit_code",
+      "covers": "A required command claiming pass after exit status 1. A forged outcome cannot turn a failed process into green evidence."
+    },
+    {
+      "file": "fail-zero-exit-code.json",
+      "expect_code": "E_EXIT_STATUS_MISMATCH",
+      "expect_path": "/commands/0/exit_code",
+      "covers": "A required command claiming failure after exit status 0. Outcome and status must agree in both directions."
+    },
+    {
       "file": "missing-required-command.json",
       "expect_code": "E_COMMAND_GRAPH_MISMATCH",
       "expect_path": "/commands",
