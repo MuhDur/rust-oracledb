@@ -3,7 +3,7 @@
 
 The release workflow is deliberately tag-driven.  This command is its
 read-only counterpart: it checks a clean, exact commit already reachable from
-``origin/main`` and emits a ``release-candidate-proof/v1`` only when the
+``origin/main`` and emits a ``release-candidate-proof/v2`` only when the
 candidate's local proof, CI check-runs, and live version-matrix artifact all
 refer to that same commit.  It never creates a tag, modifies a ref, pushes, or
 publishes.
@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Protocol
 
 from validate_evidence import validate_doc
+from verify_required_local import ContractError as RequiredGraphError
+from verify_required_local import effective_plan, validate_command_coverage
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -166,15 +168,24 @@ def load_json(path: Path, code: str, description: str) -> dict:
     return value
 
 
-def validate_required_proof(proof: dict, sha: str, path: Path) -> None:
+def validate_required_proof(
+    proof: dict, sha: str, path: Path, required_plan: list[dict[str, object]] | None = None
+) -> None:
     findings = validate_doc(proof)
     if findings:
         raise ReleaseValidationError(
             "E_REQUIRED_PROOF_INVALID",
             f"required proof {path} is invalid: {findings[0]}",
         )
-    if proof.get("schema") != "required-proof/v1":
-        raise ReleaseValidationError("E_REQUIRED_PROOF_INVALID", f"{path} is not required-proof/v1")
+    if proof.get("schema") != "required-proof/v2":
+        raise ReleaseValidationError("E_REQUIRED_PROOF_INVALID", f"{path} is not required-proof/v2")
+    try:
+        validate_command_coverage(proof["commands"], required_plan or effective_plan())
+    except RequiredGraphError as error:
+        raise ReleaseValidationError(
+            "E_REQUIRED_PROOF_INVALID",
+            f"required proof {path} does not match the candidate Required graph: {error}",
+        ) from error
     if proof.get("verdict") != "pass":
         raise ReleaseValidationError("E_REQUIRED_PROOF_NOT_GREEN", f"{path} does not record a passing Required graph")
     source = proof.get("source")
@@ -287,13 +298,13 @@ def build_proof(root: Path, tag: str, sha: str, required_path: Path, runner: Com
     jobs = validate_ci_status(ci_status(runner, sha), sha)
 
     proof = {
-        "schema": "release-candidate-proof/v1",
+        "schema": "release-candidate-proof/v2",
         "repo": root.name,
         "generated_at": utc_now(),
         "candidate": {"tag": tag, "version": version},
         "source": {"sha": sha, "tree_clean": True, "branch": "main"},
         "required_proof": {
-            "schema": "required-proof/v1",
+            "schema": "required-proof/v2",
             "path": str(required_path.relative_to(root)),
             "sha": sha,
         },
@@ -357,17 +368,39 @@ def self_test() -> None:
     required["source"]["sha"] = sha
     for command in required["commands"]:
         command["sha"] = sha
-    validate_required_proof(required, sha, Path("required-proof.json"))
+    fixture_plan = [
+        {"classification": "required-command", "name": command["id"], "argv": command["argv"]}
+        for command in required["commands"]
+        if command["tier"] == "required"
+    ]
+    validate_required_proof(required, sha, Path("required-proof.json"), fixture_plan)
+    missing_required = json.loads(json.dumps(required))
+    missing_required["commands"] = missing_required["commands"][1:]
+    assert_rejected(
+        lambda: validate_required_proof(
+            missing_required, sha, Path("missing-required-proof.json"), fixture_plan
+        ),
+        "E_REQUIRED_PROOF_INVALID",
+    )
+    altered_required = json.loads(json.dumps(required))
+    altered_required["commands"][0]["argv"] = ["cargo", "fmt"]
+    assert not validate_doc(altered_required)
+    assert_rejected(
+        lambda: validate_required_proof(
+            altered_required, sha, Path("altered-required-proof.json"), fixture_plan
+        ),
+        "E_REQUIRED_PROOF_INVALID",
+    )
 
     green_matrix = {"sha": sha, "dirty": False, "overall": "PASS", "lanes": {lane: "PASS" for lane in MATRIX_LANES}}
     validate_matrix_artifact(green_matrix, sha, Path("matrix.json"))
     generated = {
-        "schema": "release-candidate-proof/v1",
+        "schema": "release-candidate-proof/v2",
         "repo": ROOT.name,
         "generated_at": "2026-07-16T00:00:00Z",
         "candidate": {"tag": tag, "version": version},
         "source": {"sha": sha, "tree_clean": True, "branch": "main"},
-        "required_proof": {"schema": "required-proof/v1", "path": "required-proof.json", "sha": sha},
+        "required_proof": {"schema": "required-proof/v2", "path": "required-proof.json", "sha": sha},
         "required_ci": {"sha": sha, "jobs": green_jobs},
         "artifacts": [{"kind": "version-matrix", "path": "matrix.json", "sha": sha}],
         "verdict": "pass",
@@ -413,8 +446,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--tag", help="candidate tag vX.Y.Z; this command never creates it")
     parser.add_argument("--sha", help="full 40-character candidate commit SHA")
-    parser.add_argument("--required-proof", type=Path, help="exact-SHA required-proof/v1 path")
-    parser.add_argument("--output", type=Path, help="where to write release-candidate-proof/v1")
+    parser.add_argument("--required-proof", type=Path, help="exact-SHA required-proof/v2 path")
+    parser.add_argument("--output", type=Path, help="where to write release-candidate-proof/v2")
     parser.add_argument("--self-test", action="store_true", help="run deterministic offline negative controls")
     args = parser.parse_args()
 

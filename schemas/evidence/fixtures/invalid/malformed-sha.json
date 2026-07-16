@@ -1,5 +1,5 @@
 {
-  "schema": "required-proof/v1",
+  "schema": "required-proof/v2",
   "repo": "rust-oracledb",
   "generated_at": "2026-07-16T12:10:00Z",
   "source": {

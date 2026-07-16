@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the local Required graph and emit a self-validating required-proof/v1.
+"""Run the local Required graph and emit a self-validating required-proof/v2.
 
 The graph is derived from `.github/workflows/_quality.yml`, not copied here.
 Every workflow step and condition must be classified below.  An unfamiliar step,
@@ -277,7 +277,8 @@ def validate_command_coverage(commands: list[dict[str, object]], plan: list[dict
 
 
 def command_graph_commitment(plan: list[dict[str, object]]) -> dict[str, object]:
-    """Commit the exact command IDs the validator must see in the proof."""
+    """Commit the exact command IDs the independent validator must see."""
+
     command_ids = sorted(expected_command_records(plan))
     canonical = json.dumps(command_ids, ensure_ascii=False, separators=(",", ":"))
     return {
@@ -363,7 +364,7 @@ def run_required(plan: list[dict[str, object]], sha: str, output: Path, run_id: 
     validate_command_coverage(commands, plan)
     verdict = required_verdict(commands)
     proof = {
-        "schema": "required-proof/v1",
+        "schema": "required-proof/v2",
         "repo": "rust-oracledb",
         "generated_at": utc_now(),
         "source": source_ref(sha, command_output(["git", "branch", "--show-current"])),

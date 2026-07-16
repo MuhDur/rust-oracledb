@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# cross-repo-evidence-contract-v1 gate (bead f1cl.1).
+# Versioned cross-repo-evidence-contract gate (bead f1cl.1).
 #
-# Validates every fixture under schemas/evidence/fixtures against the four
+# Validates every fixture under schemas/evidence/fixtures against the versioned
 # evidence schemas, offline and with no database, network or third-party
 # package. Valid fixtures must be accepted; each invalid fixture must be
 # rejected for the exact rule it declares in the manifest, and for nothing else.

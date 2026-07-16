@@ -1,25 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:cross-repo-evidence-contract:v1:required-proof",
-  "title": "required-proof/v1",
-  "description": "Evidence that a repository's Required command graph was run to completion against one exact, clean tree. Produced by the repo's verify-required-local command. This document never asserts that CI is green and never authorises a release; it asserts only what ran locally, on what SHA, under what resource budget, and with what outcome.",
-  "x-evidence-contract": "cross-repo-evidence-contract-v1",
+  "$id": "urn:cross-repo-evidence-contract:v2:required-proof",
+  "title": "required-proof/v2",
+  "description": "Evidence that a repository's Required command graph was run to completion against one exact, clean tree. v2 adds a canonical command-graph witness so an independent consumer can reject a passing subset of the Required graph.",
+  "x-evidence-contract": "cross-repo-evidence-contract-v2",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema",
-    "repo",
-    "generated_at",
-    "source",
-    "tool_versions",
-    "resource_budget",
-    "commands",
-    "verdict"
-  ],
+  "required": ["schema", "repo", "generated_at", "source", "tool_versions", "resource_budget", "command_graph", "commands", "verdict"],
   "properties": {
     "schema": {
-      "description": "Contract discriminator. Consumers must reject any document whose schema they do not implement rather than best-effort parse it (E_UNSUPPORTED_SCHEMA).",
-      "const": "required-proof/v1"
+      "description": "Contract discriminator. Consumers must reject documents whose schema they do not implement rather than best-effort parse them.",
+      "const": "required-proof/v2"
     },
     "repo": {
       "description": "Repository this evidence was produced in. The repo name lives in the payload, never in the schema, so the schema file stays byte-identical across repos.",
@@ -29,12 +20,26 @@
     "generated_at": { "$ref": "#/$defs/timestamp" },
     "source": { "$ref": "#/$defs/sourceRef" },
     "tool_versions": {
-      "description": "Resolved versions of every tool the graph depended on (e.g. rustc, cargo, cargo-deny). Declared, not ambient: a proof that cannot name its toolchain cannot be reproduced.",
+      "description": "Resolved versions of every tool the graph depended on (e.g. rustc, cargo, cargo-deny).",
       "type": "object",
       "minProperties": 1,
       "additionalProperties": { "type": "string", "minLength": 1 }
     },
     "resource_budget": { "$ref": "#/$defs/resourceBudget" },
+    "command_graph": {
+      "description": "Canonical sorted Required command IDs plus the SHA-256 of their compact JSON representation. Consumers require records to match this witness exactly so an omitted gate cannot be hidden behind a passing verdict.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_ids", "sha256"],
+      "properties": {
+        "command_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
     "commands": {
       "description": "One record per command in the Required graph. An empty list is rejected: a proof with no commands is not a proof.",
       "type": "array",

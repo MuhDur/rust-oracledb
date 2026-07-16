@@ -1,6 +1,6 @@
-# cross-repo-evidence-contract-v1
+# Cross-repo evidence contract
 
-Four versioned JSON schemas that define what counts as *evidence* in this repo
+Six versioned JSON schemas that define what counts as *evidence* in this repo
 and in the sibling `oraclemcp` repo. They exist because of a specific, repeated
 failure: work was closed, and releases were cut, on claims that nothing could
 check — a rate with no counts behind it, a green that was really a skip, an
@@ -11,8 +11,10 @@ not evidence.** Every field below exists because some claim escaped once.
 
 | schema | answers |
 |---|---|
-| `required-proof/v1` | Did this repo's Required command graph actually run, on exactly this tree, to completion? |
-| `release-candidate-proof/v1` | Does a candidate tag at an exact SHA satisfy every release precondition? |
+| `required-proof/v1` | Legacy local Required proof shape, accepted for historical evidence. |
+| `required-proof/v2` | Did this repo's complete Required command graph actually run, on exactly this tree, to completion? |
+| `release-candidate-proof/v1` | Legacy exact-SHA candidate proof shape, accepted for historical evidence. |
+| `release-candidate-proof/v2` | Does a candidate tag at an exact SHA satisfy every release precondition using a graph-witnessed Required proof? |
 | `mutation-result/v1` | Did a mutation run measure what it claims, and can its rate be recomputed? |
 | `bead-close-evidence/v1` | Is what this bead closes on actually backed by artifacts at this SHA? |
 
@@ -34,7 +36,7 @@ exists to catch.
 
 ## Two layers, and why
 
-**Structural** — the four `.schema.json` files (JSON Schema draft 2020-12).
+**Structural** — the versioned `.schema.json` files (JSON Schema draft 2020-12).
 This is the cross-repo contract, mirrored byte-for-byte.
 
 **Semantic** — cross-field invariants, reported as stable rule codes.
@@ -60,8 +62,7 @@ yields the same code.
 | `E_TREE_DIRTY` | Evidence was produced from a tree with uncommitted changes, so it describes code at no commit. |
 | `E_STALE_SHA` | A command, proof, or CI status is recorded against a different SHA than the document is for. |
 | `E_UNFINISHED` | Something claims an outcome but recorded no end time or completed exit status, so its completion cannot be verified. |
-| `E_COMMAND_GRAPH_MISMATCH` | Required-proof command records differ from the committed canonical Required graph. |
-| `E_COMMAND_GRAPH_HASH_MISMATCH` | The Required graph's SHA-256 commitment does not match its canonical command-ID list. |
+| `E_COMMAND_GRAPH_MISMATCH` | A v2 Required-proof has an invalid canonical graph witness or records differ from it. |
 | `E_SKIP_WITHOUT_REASON` | A skip carries no machine-readable reason, making it indistinguishable from a gap. |
 | `E_SKIPPED_AS_PASS` | A required command was skipped and the proof still declares pass. |
 | `E_VERDICT_MISMATCH` | The declared verdict is not what the records derive. |
@@ -116,11 +117,14 @@ command legitimately has no end time — it never ran — so `E_UNFINISHED` exem
 skips. What it must carry is a machine-readable reason. An advisory skip does
 not gate; a required skip means the proof cannot pass.
 
-**A verdict is for the whole graph.** `required-proof/v1` carries a sorted
-command-ID witness and a SHA-256 commitment derived from the producer's
-effective Required graph. The validator rejects any missing, duplicate, or
-extra command record before it derives the verdict, so a green subset cannot
-be presented as evidence for the graph it omitted.
+**A verdict is for the whole graph.** `required-proof/v2` carries the sorted
+command-ID witness and the SHA-256 of its compact JSON representation. The
+offline validator rejects malformed witnesses and missing, duplicate, or extra
+records with `E_COMMAND_GRAPH_MISMATCH`. The exact-SHA release consumer then
+derives the effective Required plan from the candidate's audited
+`.github/workflows/_quality.yml` and checks IDs, tiers, and argv against that
+plan. A green subset therefore cannot become release evidence by rewriting its
+own graph witness.
 
 **`release-candidate-proof.verdict` is `const: "pass"`.** The document exists
 only for a candidate that passed, so a failing one is a contradiction rather than
@@ -143,11 +147,11 @@ different claims, and only the second detects a rule going dead.
 
 ## Mirroring with oraclemcp
 
-The four `.schema.json` files are **byte-identical** across both repos. Two
+Each versioned `.schema.json` file is **byte-identical** across both repos. Two
 consequences follow, and both are deliberate departures from `oraclemcp`'s
 existing `schemas/` conventions:
 
-- **`$id` is repo-neutral**: `urn:cross-repo-evidence-contract:v1:<name>`. A
+- **`$id` is repo-neutral**: `urn:cross-repo-evidence-contract:vN:<name>`. A
   repo-scoped `$id` (`https://github.com/MuhDur/oraclemcp/...`) would make byte
   identity impossible by construction.
 - **Extension keys carry no repo prefix**: `x-evidence-contract`, not
@@ -158,11 +162,12 @@ Each schema is **self-contained** — local `$defs`, no cross-file `$ref` — so
 mirroring is a file copy. Definitions shared between schemas (`sha1`,
 `sourceRef`, `timestamp`, `nullableTimestamp`, `resourceBudget`, `artifactRef`)
 must be identical in every file that has them; `check_shared_defs()` enforces
-that, so four schemas cannot drift into four dialects.
+that, so schema versions cannot drift into incompatible dialects.
 
-Changing any of this is a **v2**. These documents are read by tooling in two
-repos, so `v1` is frozen once a proof-producing command depends on it: add a new
-version rather than widen this one.
+Changing a document shape is a new version. These documents are read by tooling
+in two repos, so `v1` remains readable but frozen once a proof-producing command
+depends on it. `required-proof/v2` and `release-candidate-proof/v2` add the
+graph witness without widening their v1 predecessors.
 
 ## Consumers
 
@@ -170,8 +175,8 @@ These beads import this contract rather than inventing their own shape:
 
 | bead | uses |
 |---|---|
-| `f1cl.2` required-local-json-proof | emits `required-proof/v1` |
-| `f1cl.3` verify-release-exact-sha | emits `release-candidate-proof/v1` |
+| `f1cl.2` required-local-json-proof | emits `required-proof/v2` |
+| `f1cl.3` verify-release-exact-sha | emits `release-candidate-proof/v2` |
 | `f1cl.4` release-surface-manifest | `E_STALE_SHA` / surface drift |
 | `f1cl.5` bead-close-evidence-audit | emits + audits `bead-close-evidence/v1` |
 | `f1cl.6` entry-trace-tristate-e2e | the `pass`/`skip`+reason/`fail` tri-state; `integration_evidence.entry_points` |

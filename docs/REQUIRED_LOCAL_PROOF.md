@@ -2,7 +2,7 @@
 
 `scripts/verify_required_local.sh` is the local counterpart to the effective
 `required` profile in `.github/workflows/_quality.yml`. It emits
-`required-proof/v1`: an exact SHA, tool versions, enforced resource budget, and
+`required-proof/v2`: an exact SHA, tool versions, enforced resource budget, and
 one outcome record for every effective Required command. It never claims that
 GitHub CI is green and it never tags, pushes, publishes, or creates a release.
 
@@ -14,10 +14,12 @@ duplicate, or altered Required command record is rejected. The DB-free contract
 test also executes the shared invalid fixtures for stale SHA, an unfinished
 command, and a skipped Required command presented as a pass.
 
-The proof also carries the complete, sorted command-ID witness and its SHA-256
-commitment. `validate_evidence.py` requires the records to match that witness
-exactly, so a proof cannot omit a Required command and still call a subset pass
-a graph pass.
+The producer writes a sorted command-ID witness with its SHA-256 commitment.
+`validate_evidence.py` requires every record to match that witness exactly, so a
+missing, duplicate, or extra command is `E_COMMAND_GRAPH_MISMATCH`. The
+exact-SHA release consumer additionally derives the candidate's Required plan
+from the audited workflow and checks IDs, tiers, and argv before accepting a
+passing proof.
 
 ## Run it honestly
 
@@ -26,7 +28,6 @@ detached clean worktree at the exact SHA being proved. Running a workspace graph
 against another pane's uncommitted code and recording `HEAD` would be false
 evidence, so the runner exits 78 before it starts in that state.
 
-Before the workspace commands, acquire the repository's Agent Mail build slot.
 Then run:
 
 ```bash
@@ -39,7 +40,7 @@ PID/task ceilings. Its output is written to
 `tests/artifacts/evidence/required/required-proof-<sha>.json` and immediately
 checked by `scripts/validate_evidence.py`.
 
-Required commands that cannot run are records with `outcome: "skip"`; the v1
+Required commands that cannot run are records with `outcome: "skip"`; the v2
 semantic validator treats that as a failing proof. The advisory live matrix is
 recorded separately as a typed skip (`not-run-by-required-local`), never rounded
 up to a pass.

@@ -3,7 +3,7 @@
 `scripts/verify_release_exact_sha.sh --tag vX.Y.Z --sha <40-lowercase-hex>`
 is a read-only check for a prospective release. It never creates a tag, changes
 a ref, pushes, publishes a crate, or creates a GitHub release. Its success
-output is `release-candidate-proof/v1`, a validation record rather than release
+output is `release-candidate-proof/v2`, a validation record rather than release
 authorization.
 
 The command fails closed unless all of these describe the same exact candidate:
@@ -11,7 +11,9 @@ The command fails closed unless all of these describe the same exact candidate:
 - the worktree is clean, checked out at `--sha`, and that commit is contained in
   the locally available `origin/main`;
 - the candidate tag is well formed, absent, and matches the workspace version;
-- the required-local proof is a valid passing `required-proof/v1` for `--sha`;
+- the required-local proof is a valid passing `required-proof/v2` for `--sha`,
+  with every record matching its graph witness and the candidate's independently
+  derived Required graph;
 - `scripts/ci_taxonomy.py --status <sha>` reports every required check-run as
   `completed` / `success`, with no missing or unknown checks; and
 - `tests/artifacts/version_matrix/results-<sha>.json` is a clean, all-PASS live
@@ -20,7 +22,7 @@ The command fails closed unless all of these describe the same exact candidate:
 
 The artifact rule is intentionally stricter than the legacy tag preflight:
 **a parent matrix artifact is rejected**, even if its commit changed only the
-artifact directory. `release-candidate-proof/v1` requires `artifacts[].sha` to
+artifact directory. `release-candidate-proof/v2` requires `artifacts[].sha` to
 equal `source.sha`; accepting the parent would turn an exact-candidate claim
 into an inference. Until the matrix evidence producer can supply an artifact
 for the exact candidate, this validator correctly produces no proof.

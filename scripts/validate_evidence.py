@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Offline validator for cross-repo-evidence-contract-v1 documents.
+"""Offline validator for versioned cross-repo evidence-contract documents.
 
 The contract has two layers, and both are load-bearing:
 
-  structural  the four schemas/evidence/*.schema.json files (draft 2020-12).
+  structural  the versioned schemas/evidence/*.schema.json files (draft 2020-12).
               These are the cross-repo contract and are mirrored byte-for-byte
               between rust-oracledb and oraclemcp.
 
@@ -33,7 +33,7 @@ import re
 import sys
 from pathlib import Path
 
-CONTRACT = "cross-repo-evidence-contract-v1"
+CONTRACT = "cross-repo-evidence-contract"
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_DIR = ROOT / "schemas" / "evidence"
@@ -42,13 +42,15 @@ FIXTURE_DIR = SCHEMA_DIR / "fixtures"
 # Document `schema` discriminator -> schema file.
 SCHEMA_FILES = {
     "required-proof/v1": "required-proof-v1.schema.json",
+    "required-proof/v2": "required-proof-v2.schema.json",
     "release-candidate-proof/v1": "release-candidate-proof-v1.schema.json",
+    "release-candidate-proof/v2": "release-candidate-proof-v2.schema.json",
     "mutation-result/v1": "mutation-result-v1.schema.json",
     "bead-close-evidence/v1": "bead-close-evidence-v1.schema.json",
 }
 
 # $defs that appear in more than one schema must be identical everywhere, or the
-# four schemas drift into four dialects. Enforced by check_shared_defs().
+# schema versions drift into incompatible dialects. Enforced by check_shared_defs().
 SHARED_DEFS = (
     "sha1",
     "sourceRef",
@@ -271,50 +273,51 @@ def _tree_clean(doc: dict, out: list) -> None:
         )
 
 
-def _command_graph_sha256(command_ids: list[str]) -> str:
-    """Return the v1 commitment for a canonical required command-ID list."""
-    canonical = json.dumps(command_ids, ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode()).hexdigest()
+def _required_graph_finding(doc: dict, expected: dict[str, dict[str, object] | None]) -> Finding | None:
+    """Check records against a repository-derived Required graph witness."""
+    actual: dict[str, dict] = {}
+    for command in doc["commands"]:
+        identifier = command["id"]
+        if identifier in actual:
+            return Finding(
+                "E_COMMAND_GRAPH_MISMATCH",
+                "/commands",
+                f"duplicate command record {identifier!r} cannot witness the Required graph",
+            )
+        actual[identifier] = command
+
+    missing = sorted(set(expected) - set(actual))
+    unexpected = sorted(set(actual) - set(expected))
+    if missing or unexpected:
+        detail = []
+        if missing:
+            detail.append(f"missing {', '.join(missing)}")
+        if unexpected:
+            detail.append(f"unexpected {', '.join(unexpected)}")
+        return Finding(
+            "E_COMMAND_GRAPH_MISMATCH",
+            "/commands",
+            "command records do not exactly match the Required graph (" + "; ".join(detail) + ")",
+        )
+
+    for identifier, expected_record in expected.items():
+        if expected_record is None:
+            continue
+        actual_record = actual[identifier]
+        for field in ("tier", "argv"):
+            if actual_record[field] != expected_record[field]:
+                return Finding(
+                    "E_COMMAND_GRAPH_MISMATCH",
+                    "/commands",
+                    f"{identifier}: recorded {field} differs from the Required graph witness",
+                )
+    return None
 
 
 def _semantic_required_proof(doc: dict) -> list:
     out: list = []
     _tree_clean(doc, out)
     source_sha = doc["source"]["sha"]
-
-    # The runner derives this exact ID list from the effective Required graph.
-    # Keep it as an independently committed witness: otherwise a document can
-    # omit a failed command and still derive a passing verdict from its subset.
-    graph = doc["command_graph"]
-    committed_ids = graph["command_ids"]
-    if committed_ids != sorted(set(committed_ids)):
-        out.append(
-            Finding(
-                "E_COMMAND_GRAPH_MISMATCH",
-                "/command_graph/command_ids",
-                "command graph IDs must be unique and sorted for a canonical commitment",
-            )
-        )
-        return out
-    if graph["sha256"] != _command_graph_sha256(committed_ids):
-        out.append(
-            Finding(
-                "E_COMMAND_GRAPH_HASH_MISMATCH",
-                "/command_graph/sha256",
-                "command graph hash does not match its canonical command-ID list",
-            )
-        )
-        return out
-    recorded_ids = sorted(cmd["id"] for cmd in doc["commands"])
-    if recorded_ids != committed_ids:
-        out.append(
-            Finding(
-                "E_COMMAND_GRAPH_MISMATCH",
-                "/commands",
-                "command records do not exactly match the committed Required graph",
-            )
-        )
-        return out
 
     saw_required_fail = False
     saw_required_skip = False
@@ -394,6 +397,39 @@ def _semantic_required_proof(doc: dict) -> list:
                     f"derive {derived!r}",
                 )
             )
+    return out
+
+
+def _semantic_required_proof_v2(doc: dict) -> list:
+    """Require v2 records to exactly match their committed Required graph."""
+
+    out = _semantic_required_proof(doc)
+    graph = doc["command_graph"]
+    command_ids = graph["command_ids"]
+    canonical_ids = sorted(set(command_ids))
+    if command_ids != canonical_ids:
+        out.append(
+            Finding(
+                "E_COMMAND_GRAPH_MISMATCH",
+                "/command_graph/command_ids",
+                "command IDs must be unique and lexicographically sorted before hashing",
+            )
+        )
+        return out
+    canonical = json.dumps(command_ids, ensure_ascii=False, separators=(",", ":"))
+    expected_hash = hashlib.sha256(canonical.encode()).hexdigest()
+    if graph["sha256"] != expected_hash:
+        out.append(
+            Finding(
+                "E_COMMAND_GRAPH_MISMATCH",
+                "/command_graph/sha256",
+                "command graph SHA-256 does not match its canonical command IDs",
+            )
+        )
+        return out
+    graph_finding = _required_graph_finding(doc, {identifier: None for identifier in command_ids})
+    if graph_finding is not None:
+        out.append(graph_finding)
     return out
 
 
@@ -596,7 +632,9 @@ def _semantic_bead_close_evidence(doc: dict) -> list:
 
 SEMANTIC_RULES = {
     "required-proof/v1": _semantic_required_proof,
+    "required-proof/v2": _semantic_required_proof_v2,
     "release-candidate-proof/v1": _semantic_release_candidate_proof,
+    "release-candidate-proof/v2": _semantic_release_candidate_proof,
     "mutation-result/v1": _semantic_mutation_result,
     "bead-close-evidence/v1": _semantic_bead_close_evidence,
 }
@@ -658,8 +696,8 @@ def check_shared_defs() -> list:
                 if canonical != expected:
                     errors.append(
                         f"$defs/{def_name} differs between {origin} and {filename}; "
-                        "shared definitions must be identical or the four schemas "
-                        "drift into four dialects"
+                        "shared definitions must be identical or schema versions "
+                        "drift into incompatible dialects"
                     )
             else:
                 seen[def_name] = (filename, canonical)

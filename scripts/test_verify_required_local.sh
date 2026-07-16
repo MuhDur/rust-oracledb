@@ -9,6 +9,7 @@ RUNNER="$ROOT/scripts/verify_required_local.sh"
 "$ROOT/scripts/check_evidence_contract.sh"
 python3 - <<'PY'
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -23,7 +24,26 @@ graph = runner.command_graph_commitment(plan)
 assert graph["command_ids"] == sorted(graph["command_ids"])
 assert len(graph["command_ids"]) == len(set(graph["command_ids"]))
 assert len(graph["sha256"]) == 64
-print("verify-required-local: command graph commitment is canonical")
+
+validator_spec = importlib.util.spec_from_file_location("validate_evidence", root / "scripts/validate_evidence.py")
+assert validator_spec and validator_spec.loader
+validator = importlib.util.module_from_spec(validator_spec)
+sys.modules[validator_spec.name] = validator
+validator_spec.loader.exec_module(validator)
+missing = json.loads((root / "schemas/evidence/fixtures/invalid/missing-required-command.json").read_text())
+findings = validator.validate_doc(missing)
+assert [(finding.code, finding.path) for finding in findings] == [("E_COMMAND_GRAPH_MISMATCH", "/commands")]
+bad_hash = json.loads((root / "schemas/evidence/fixtures/valid/required-proof-pass.json").read_text())
+bad_hash["command_graph"]["sha256"] = "0" * 64
+findings = validator.validate_doc(bad_hash)
+assert [(finding.code, finding.path) for finding in findings] == [
+    ("E_COMMAND_GRAPH_MISMATCH", "/command_graph/sha256")
+]
+legacy = json.loads((root / "schemas/evidence/fixtures/valid/required-proof-fail.json").read_text())
+legacy["schema"] = "required-proof/v1"
+legacy.pop("command_graph")
+assert validator.validate_doc(legacy) == []
+print("verify-required-local: canonical command graph witness rejects omission")
 PY
 "$RUNNER" --plan | python3 -c '
 import json
