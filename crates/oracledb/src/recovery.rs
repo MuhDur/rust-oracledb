@@ -13,7 +13,8 @@ use oracledb_protocol::wire::ProtocolLimits;
 
 use crate::{
     break_and_drain_wire_unbounded_with_limits, drain_cancel_wire_unbounded_with_limits,
-    duration_to_millis_saturating, Error, ErrorKind, Result,
+    duration_to_millis_saturating, send_marker_recovery, Error, ErrorKind, Result,
+    TNS_MARKER_TYPE_BREAK,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -76,6 +77,38 @@ where
             }
         }
     }
+}
+
+/// Sends a request-only BREAK without inheriting the cancelled operation Cx.
+/// The owner still holds the read half in its in-flight future and drains the
+/// cancel response after that future gives it back.
+pub(crate) fn send_break_without_current_cx<W>(
+    write: &Arc<AsyncMutex<W>>,
+    recovery_timeout: Duration,
+) -> Result<()>
+where
+    W: AsyncWrite + std::fmt::Debug + Send + Unpin + 'static,
+{
+    let write = Arc::clone(write);
+    let thread = std::thread::Builder::new()
+        .name("oracledb-recovery-break".to_string())
+        .spawn(move || {
+            block_on_recovery_deadline(
+                send_marker_recovery(&write, TNS_MARKER_TYPE_BREAK),
+                recovery_timeout,
+            )
+            .unwrap_or_else(|| {
+                Err(Error::ConnectionClosed(
+                    "timed out sending break marker while recovering a cancelled operation".into(),
+                ))
+            })
+        })
+        .map_err(|err| {
+            Error::ConnectionClosed(format!("failed to start recovery break thread: {err}"))
+        })?;
+    thread
+        .join()
+        .map_err(|_| Error::ConnectionClosed("recovery break thread panicked".to_string()))?
 }
 
 pub(crate) fn classify_recovery_result(

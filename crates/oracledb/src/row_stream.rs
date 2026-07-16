@@ -216,7 +216,11 @@ impl OwnedRowStream {
                 // server to stop it. The future then returns the connection after
                 // consuming its current response; the remaining BREAK/RESET
                 // exchange is drained below before reuse.
-                cancel_handle.cancel(&self.cx).await?;
+                // This path can be entered because the query's captured Cx
+                // has already been cancelled. The BREAK itself must not
+                // inherit that cancellation: it is recovery work needed to
+                // return a clean connection, not another query operation.
+                cancel_handle.cancel_for_recovery()?;
                 let (mut connection, _) = future.await;
                 connection.drain_cancel_response().await?;
                 connection
@@ -585,7 +589,7 @@ mod tests {
     use std::time::Duration;
 
     use asupersync::net::TcpStream;
-    use asupersync::Cx;
+    use asupersync::{CancelKind, Cx};
     use oracledb_protocol::thin::{
         ColumnMetadata, QueryResult, QueryValue, TNS_DATA_FLAGS_END_OF_RESPONSE,
         TNS_PACKET_TYPE_DATA,
@@ -1085,6 +1089,80 @@ mod tests {
             assert_eq!(
                 response, FRESH_BODY,
                 "the reclaimed connection reads only its own fresh response"
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        server.join().expect("server thread joins")?;
+        Ok(())
+    }
+
+    #[test]
+    fn inflight_continuation_reclaims_after_stream_context_is_cancelled() -> Result<()> {
+        const CURSOR_ID: u32 = 86;
+        const INFLIGHT_BODY: &[u8] = &[0xd2, 0xa2, 0xb2];
+        const CANCEL_ERROR: &[u8] = &[0x04, 0x01, 0x0d];
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let (fetch_seen_tx, fetch_seen_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+
+            let (fetch_type, _) = read_packet(&mut socket)?;
+            assert_eq!(fetch_type, TNS_PACKET_TYPE_DATA, "page 2 must start");
+            fetch_seen_tx.send(()).expect("client waits for the fetch");
+
+            let (break_type, break_body) = read_packet(&mut socket)?;
+            assert_eq!(break_type, crate::TNS_PACKET_TYPE_MARKER);
+            assert_eq!(break_body, [1, 0, crate::TNS_MARKER_TYPE_BREAK]);
+            socket.write_all(&data_packet(INFLIGHT_BODY))?;
+            socket.write_all(&marker_packet(crate::TNS_MARKER_TYPE_BREAK))?;
+            let (reset_type, reset_body) = read_packet(&mut socket)?;
+            assert_eq!(reset_type, crate::TNS_PACKET_TYPE_MARKER);
+            assert_eq!(reset_body, [1, 0, crate::TNS_MARKER_TYPE_RESET]);
+            socket.write_all(&marker_packet(crate::TNS_MARKER_TYPE_RESET))?;
+            socket.write_all(&data_packet(CANCEL_ERROR))?;
+
+            socket.flush()?;
+            Ok(())
+        });
+
+        let runtime = crate::build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs an ambient Cx");
+            let socket = TcpStream::connect(addr).await?;
+            let (read, write) = crate::transport::plain_split(socket);
+            let mut connection = crate::tests::loopback_connection(read, write);
+            connection.in_use_cursors.insert(CURSOR_ID);
+            let first = QueryResult {
+                columns: cols(&["A"]),
+                rows: Vec::new(),
+                cursor_id: CURSOR_ID,
+                more_rows: true,
+                ..QueryResult::default()
+            };
+            let deadline = QueryDeadline::new(&cx, None);
+            let mut stream =
+                OwnedRowStream::from_first_page(Some(connection), cx.clone(), 1, deadline, first);
+
+            let mut task_cx = Context::from_waker(Waker::noop());
+            assert!(matches!(
+                Pin::new(&mut stream).poll_next(&mut task_cx),
+                Poll::Pending
+            ));
+            fetch_seen_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("the server observed the in-flight continuation");
+
+            cx.cancel_fast(CancelKind::User);
+            let connection = stream.into_connection().await?;
+            assert!(!connection.in_use_cursors.contains(&CURSOR_ID));
+            assert_eq!(
+                connection.core.recovery.phase(),
+                crate::SessionRecoveryPhase::Ready,
+                "reclamation must leave the wire clean even when the stream Cx is cancelled"
             );
             Ok::<_, Error>(())
         })?;

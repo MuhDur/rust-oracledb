@@ -7775,6 +7775,31 @@ impl CancelHandle {
         }
     }
 
+    /// Send the request-only BREAK needed by a local recovery path without
+    /// consulting the operation context.
+    ///
+    /// A caller can arrive here precisely because that context has already
+    /// been cancelled. Recovery must still get the server to stop the
+    /// in-flight operation before its owner can drain the multi-packet cancel
+    /// response and safely hand the connection back. A recovery thread owns
+    /// the bounded marker write so async I/O cannot observe the caller's
+    /// cancelled ambient context.
+    pub(crate) fn cancel_for_recovery(&mut self) -> Result<()> {
+        if !self.should_send_break_request()? {
+            return Ok(());
+        }
+        match crate::recovery::send_break_without_current_cx(
+            &self.write,
+            BREAK_DRAIN_RECOVERY_TIMEOUT,
+        ) {
+            Ok(()) => self.recovery.mark_break_sent(),
+            Err(err) => {
+                self.recovery.mark_dead();
+                Err(err)
+            }
+        }
+    }
+
     fn should_send_break_request(&self) -> Result<bool> {
         match self.recovery.phase() {
             SessionRecoveryPhase::Dead => {
@@ -8852,7 +8877,10 @@ where
     })
 }
 
-async fn send_marker_recovery<W>(write: &Arc<AsyncMutex<W>>, marker_type: u8) -> Result<()>
+pub(crate) async fn send_marker_recovery<W>(
+    write: &Arc<AsyncMutex<W>>,
+    marker_type: u8,
+) -> Result<()>
 where
     W: AsyncWrite + std::fmt::Debug + Unpin,
 {
