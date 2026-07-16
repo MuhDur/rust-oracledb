@@ -1,0 +1,63 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-16T12:55:00Z",
+  "bead_id": "rust-oracledb-evidence-controls-f1cl.1",
+  "scope": {
+    "summary": "Author cross-repo-evidence-contract-v1: four versioned JSON evidence schemas, negative fixtures, and an offline stdlib-only validator.",
+    "in_scope": [
+      "schemas/evidence/required-proof-v1.schema.json",
+      "schemas/evidence/release-candidate-proof-v1.schema.json",
+      "schemas/evidence/mutation-result-v1.schema.json",
+      "schemas/evidence/bead-close-evidence-v1.schema.json",
+      "schemas/evidence/fixtures/** (5 valid, 14 invalid, manifest)",
+      "scripts/validate_evidence.py, scripts/check_evidence_contract.sh",
+      "docs/EVIDENCE_CONTRACT.md"
+    ],
+    "out_of_scope": [
+      "Producing real proofs: the commands that emit these documents are f1cl.2, f1cl.3 and f1cl.7.",
+      "Wiring scripts/check_evidence_contract.sh into a CI workflow: no workflow YAML was changed.",
+      "Enforcing which changes must have an entry point (f1cl.6 owns the tri-state) and branch policy (f1cl.3), both left as declared seams."
+    ]
+  },
+  "source": {
+    "sha": "065402eebf42edae0f2584524f669503a482e3d0",
+    "tree_clean": true,
+    "branch": "master"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/check_evidence_contract.sh",
+        "kind": "cli",
+        "trace": "Runs the 19-fixture suite; exits non-zero when any rule stops firing or a shared $def drifts. Verified exit 0 with output, and each of the 14 negative fixtures asserted on exact code AND path."
+      },
+      {
+        "name": "scripts/validate_evidence.py FILE.json",
+        "kind": "cli",
+        "trace": "Validates a single document; --json emits findings for machine consumers."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "readiness.basis is scoped-test, so this close cannot claim ready: the Required graph (clippy, workspace test) was NOT run. The diff contains zero Rust and the shared checkout held another pane's in-flight Rust edits, so a workspace run would have reported on their tree rather than this change. No green is claimed for it.",
+    "No required-proof/v1 document is referenced because no producer exists yet; f1cl.2 builds it. Until then nothing in this repo can honestly claim readiness.basis=required-proof.",
+    "The semantic layer is re-implemented per repo; only the schema files and rule codes are shared, so the two implementations can drift in message text (the codes are the contract, not the messages).",
+    "The structural validator implements the subset of draft 2020-12 these schemas use, not the whole specification. Mitigated by a differential check against the reference jsonschema implementation, which is an oracle and not a runtime dependency."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "rust-oracledb-evidence-controls-f1cl.2",
+    "rust-oracledb-evidence-controls-f1cl.3",
+    "rust-oracledb-evidence-controls-f1cl.7"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-16T12:55:00Z",
+  "bead_id": "rust-oracledb-evidence-controls-f1cl.8",
+  "scope": {
+    "summary": "Derive a checked machine-readable CI job taxonomy (required/advisory/scheduled/release/manual) from the workflow YAML, and classify a SHA's check-runs without ever calling CI green while a required job is not a completed success.",
+    "in_scope": [
+      "scripts/ci_taxonomy.py (--list, --write, --check, --status, --verify-names)",
+      "scripts/check_ci_taxonomy.sh",
+      "docs/ci_taxonomy.json (25 jobs: 11 required, 2 advisory, 6 scheduled, 4 release, 2 manual)",
+      "docs/CI_TAXONOMY.md",
+      "Cross-repo shape reconciliation with the oraclemcp mirror (yg4x.8)"
+    ],
+    "out_of_scope": [
+      "Wiring the drift gate into a CI workflow: no workflow YAML was changed, only read.",
+      "Emitting release-candidate-proof/v1 from --status output; f1cl.3 consumes this shape and owns that.",
+      "Branch-protection configuration on GitHub: the taxonomy describes what the YAML says gates, and does not reconcile it against branch-protection settings."
+    ]
+  },
+  "source": {
+    "sha": "d159a0eb09353e837c26a933a3c57b1340dd776d",
+    "tree_clean": true,
+    "branch": "master"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/check_ci_taxonomy.sh",
+        "kind": "cli",
+        "trace": "Offline drift gate: exits non-zero when a job appears, disappears, or changes tier. Negative control detected 4/4 planted drift scenarios, including a required job gaining continue-on-error."
+      },
+      {
+        "name": "scripts/ci_taxonomy.py --status <SHA>",
+        "kind": "cli",
+        "trace": "Classifies live check-runs; at ea7a3c6 returned ci_green=false attributing 4 path-filtered version-matrix lanes, exit 1 with empty stderr and valid JSON on stdout."
+      },
+      {
+        "name": "scripts/ci_taxonomy.py --verify-names <SHA>",
+        "kind": "cli",
+        "trace": "Asserts every real check-run is classified; all 9 real check-runs at ea7a3c6 matched, 0 unknown. This is what proves the YAML derivation matches what GitHub actually publishes."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "readiness.basis is scoped-test, so this close cannot claim ready: the Required graph (clippy, workspace test) was NOT run. The diff contains zero Rust and the shared checkout held another pane's in-flight Rust edits. Only cargo fmt -p oracledb --check was run, deliberately scoped rather than --all so it would not reformat another pane's WIP.",
+    "source.tree_clean asserts that every file this close claims is committed at source.sha, verified with `git status --porcelain -- <scope.in_scope>`. It is NOT a claim that the whole working directory was pristine: this is a shared checkout and it carried other panes' uncommitted Rust at the time. See docs/BEAD_CLOSE_EVIDENCE.md; a required-proof, whose commands actually execute against the working tree, uses the stricter whole-tree reading and none is referenced here.",
+    "--status and --verify-names query the GitHub check-runs API and therefore need network and gh auth; only --list/--write/--check are offline. The drift gate that runs in CI is the offline one.",
+    "Tiers are derived from workflow triggers and continue-on-error, not from GitHub branch-protection settings. A job the YAML says is required but that branch protection does not enforce would not be flagged.",
+    "--verify-names is one-directional: an unknown check-run fails, but a derived job with no check-run is accepted, because a path filter or schedule legitimately means it never ran."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "rust-oracledb-evidence-controls-f1cl.3"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
