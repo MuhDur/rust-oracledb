@@ -438,20 +438,20 @@ fn soda_truncate_and_index_and_names() {
 /// on 18c, 21c and 23ai alike; `ALL_VIEWS` misses it on every lane because it is
 /// a synonym, not a view. The `JSON_SERIALIZE` function is what actually differs.)
 ///
-/// Rather than silently `#[ignore]`-skipping SODA on old servers, this test
-/// makes the gate an **active, documented assertion** that runs on every lane
-/// and proves the capability boundary from both sides:
+/// Rather than silently skipping SODA on old servers, this test makes the
+/// typed `pre-21c-soda-unsupported` result an **active, documented assertion**
+/// that runs on every lane and proves the capability boundary from both sides:
 ///
 ///   * `< 21c` (the xe18 lane): assert a direct `JSON_SERIALIZE` probe fails AND
 ///     that `create_collection` fails with ORA-00904 (`"JSON_SERIALIZE":
-///     invalid identifier`). The capability is proven missing — an honest,
-///     evidence-backed XFAIL, never a quiet skip.
+///     invalid identifier`). The capability is proven missing before the
+///     matrix records its explicit `SKIP` reason — never a quiet skip.
 ///   * `>= 21c` (xe21 / free23): assert the `JSON_SERIALIZE` probe succeeds AND
 ///     that `create_collection` succeeds, then clean up.
 ///
 /// This mirrors the `xe18:live_soda` gate reason in
-/// `scripts/version_matrix.sh` (`suite_gate_reason`) but asserts it in-process
-/// so the gate cannot rot into a silent pass. Run with the lane env set:
+/// `scripts/version_matrix.sh` (`suite_skip_reason`) but asserts it in-process
+/// so the typed skip cannot rot into a silent pass. Run with the lane env set:
 ///
 /// ```text
 /// cargo test -p oracledb --features soda --test live_soda \
@@ -484,7 +484,7 @@ fn soda_gated_on_pre21c_with_proof() {
                 .await;
 
             if major < 21 {
-                // GATE branch: SODA genuinely unavailable — prove it, don't skip.
+                // Typed-SKIP branch: SODA is unavailable — prove it first.
                 let probe_err = probe.expect_err("JSON_SERIALIZE must not resolve on pre-21c");
                 let err = create.expect_err("SODA create must fail on pre-21c");
                 let SodaError::Driver(driver_err) = &err else {
@@ -497,9 +497,9 @@ fn soda_gated_on_pre21c_with_proof() {
                      (JSON_SERIALIZE invalid identifier); got: {driver_err:?}"
                 );
                 eprintln!(
-                    "[soda-gate] version={major}c GATED: JSON_SERIALIZE absent \
+                    "[soda-gate] version={major}c SKIP reason=pre-21c-soda-unsupported: \
                      (probe -> {:?}), create_collection -> ORA-00904 \
-                     (documented XFAIL, not skipped)",
+                     (active capability proof passed)",
                     probe_err.ora_code()
                 );
             } else {

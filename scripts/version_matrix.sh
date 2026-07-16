@@ -276,10 +276,11 @@ lane_truth() {
 # it (1) bootstraps that lane's own fixture schema (vx6_* object types, the
 # E_TEST edition, proxy user, grants) via scripts/bootstrap_live_schema.sh, then
 # (2) RUNS every live integration suite under crates/oracledb/tests against it,
-# capturing a per-suite x per-lane GREEN / FAIL / GATED verdict. xe11 stays a
+# capturing a per-suite x per-lane GREEN / FAIL / SKIP verdict. xe11 stays a
 # connect-refusal assertion only (below the protocol floor). A suite may be
-# GATED (non-green but accepted) ONLY through suite_gate_reason() below, which
-# requires a documented, evidence-backed reason — never a silent skip.
+# SKIP (non-green but accepted) ONLY through suite_skip_reason() below, after
+# its focused capability probe passes. That keeps a server limitation typed,
+# documented, and evidenced — never a silent skip.
 
 # Features needed so every cfg(feature = "…")-gated live test COMPILES IN and
 # actually runs (arrow/soda suites, rust_decimal/chrono/uuid/serde_json typed
@@ -307,26 +308,42 @@ lane_system_password() {
   esac
 }
 
-# Gate registry. A cell (lane:suite) is accepted as non-green ONLY when this
-# returns 0 with a one-line reason on stdout — the reason MUST cite hard proof
-# (an ORA-error / catalog absence) of a feature the server genuinely lacks. No
-# entry => a red cell is an OPEN BUG, not a quiet pass. Kept in lockstep with
-# docs/VERSION_MATRIX.md.
-suite_gate_reason() {
+# Typed-skip registry. A cell (lane:suite) is accepted as non-green ONLY when
+# this returns 0 with a stable reason code AND its focused capability probe
+# passes below. No entry => a red cell is an OPEN BUG, not a quiet pass. Kept
+# in lockstep with docs/VERSION_MATRIX.md.
+suite_skip_reason() {
   local lane="$1" suite="$2"
   case "$lane:$suite" in
-    # SODA on Oracle 18c: the driver's SODA path uses the JSON_SERIALIZE SQL
-    # function (21c+) and the USER_SODA_COLLECTIONS catalog view, neither of
-    # which exists on 18c. PROOF: live_soda fails with `ORA-00904:
-    # "JSON_SERIALIZE": invalid identifier` at collection create, and
-    # `select count(*) from all_views where view_name='USER_SODA_COLLECTIONS'`
-    # returns 0 on this 18c. Green on xe21 (21c) and free23 (23ai). Full
-    # pre-21c SODA support is tracked in bead rust-oracledb-soda-pre21c.
+    # SODA on Oracle 18c: the driver's write path requires the 21c+
+    # JSON_SERIALIZE SQL function. The focused live_soda probe must establish
+    # both its absence and create_collection -> ORA-00904 before the suite is
+    # typed SKIP. Green on xe21 (21c) and free23 (23ai). Full pre-21c support
+    # is tracked in bead rust-oracledb-soda-pre21c.
     xe18:live_soda)
-      echo "SODA requires JSON_SERIALIZE + USER_SODA_COLLECTIONS (21c+); absent on 18c (ORA-00904)"
+      echo "pre-21c-soda-unsupported"
       return 0
       ;;
     *) return 1 ;;
+  esac
+}
+
+# Run the non-silent proof required for a typed skip. Keep each proof explicit:
+# a generic full-suite invocation would turn an unavailable server capability
+# into an opaque failure, while a bare skip would provide no evidence at all.
+run_typed_skip_probe() {
+  local lane="$1" suite="$2" logf="$3"
+  case "$lane:$suite" in
+    xe18:live_soda)
+      cargo test -q -p oracledb --features "$LIVE_SUITE_FEATURES" \
+        --test live_soda soda_gated_on_pre21c_with_proof -- --ignored \
+        > "$logf" 2>&1
+      ;;
+    *)
+      printf 'no capability probe registered for typed skip %s:%s\n' \
+        "$lane" "$suite" > "$logf"
+      return 1
+      ;;
   esac
 }
 
@@ -359,7 +376,7 @@ run_versions() {
   while read -r s; do suites+=("$s"); done < <(discover_live_suites)
   while read -r l; do lanes_run+=("$l"); done < <(lanes_for "$lane_arg")
 
-  declare -A cell cellnote
+  declare -A cell cellnote cellreason
   local overall=pass lane suite logf summ reason
 
   for lane in "${lanes_run[@]}"; do
@@ -396,16 +413,27 @@ run_versions() {
 
     for suite in "${suites[@]}"; do
       logf="$log_dir/$lane-$suite.log"
-      if cargo test -q -p oracledb --features "$LIVE_SUITE_FEATURES" \
+      if reason="$(suite_skip_reason "$lane" "$suite")"; then
+        if run_typed_skip_probe "$lane" "$suite" "$logf"; then
+          summ="$(grep -hE '^test result:' "$logf" | tail -1)"
+          cell[$lane:$suite]=SKIP
+          cellreason[$lane:$suite]="$reason"
+          cellnote[$lane:$suite]="${summ:-active capability probe passed}"
+          printf '%-7s %-28s SKIP    %s (%s)\n' "$lane" "$suite" \
+            "$reason" "${summ:-active capability probe passed}"
+        else
+          cell[$lane:$suite]=FAIL
+          cellnote[$lane:$suite]="typed skip probe failed: $(grep -hE '^test result:|panicked|error\[|error:' "$logf" | tail -3 | tr '\n' ' ')"
+          overall=fail
+          printf '%-7s %-28s FAIL    %s (log: %s)\n' "$lane" "$suite" \
+            "${cellnote[$lane:$suite]}" "$logf"
+        fi
+      elif cargo test -q -p oracledb --features "$LIVE_SUITE_FEATURES" \
           --test "$suite" -- --include-ignored > "$logf" 2>&1; then
         summ="$(grep -hE '^test result:' "$logf" | tail -1)"
         cell[$lane:$suite]=GREEN
         cellnote[$lane:$suite]="${summ:-ok}"
         printf '%-7s %-28s GREEN   %s\n' "$lane" "$suite" "${summ:-}"
-      elif reason="$(suite_gate_reason "$lane" "$suite")"; then
-        cell[$lane:$suite]=GATED
-        cellnote[$lane:$suite]="$reason"
-        printf '%-7s %-28s GATED   %s\n' "$lane" "$suite" "$reason"
       else
         cell[$lane:$suite]=FAIL
         cellnote[$lane:$suite]="$(grep -hE '^test result:|panicked|error\[|error:' "$logf" | tail -3 | tr '\n' ' ')"
@@ -433,9 +461,16 @@ run_versions() {
         case "$key" in "$lane:"*) ;; *) continue ;; esac
         [ "$first" -eq 1 ] || printf ',\n'
         first=0
-        printf '    {"lane": "%s", "suite": "%s", "verdict": "%s", "note": "%s"}' \
-          "$lane" "${key#*:}" "${cell[$key]}" \
-          "$(printf '%s' "${cellnote[$key]}" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+        if [ -n "${cellreason[$key]:-}" ]; then
+          printf '    {"lane": "%s", "suite": "%s", "verdict": "%s", "reason": "%s", "note": "%s"}' \
+            "$lane" "${key#*:}" "${cell[$key]}" \
+            "$(printf '%s' "${cellreason[$key]}" | sed 's/\\/\\\\/g; s/"/\\"/g')" \
+            "$(printf '%s' "${cellnote[$key]}" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+        else
+          printf '    {"lane": "%s", "suite": "%s", "verdict": "%s", "note": "%s"}' \
+            "$lane" "${key#*:}" "${cell[$key]}" \
+            "$(printf '%s' "${cellnote[$key]}" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+        fi
       done
     done
     printf '\n  ]\n}\n'

@@ -4,7 +4,7 @@
 not just the newest one. This document records the honest per-suite ×
 per-version result of the live test suites, and it is kept in lockstep with the
 gate registry in [`scripts/version_matrix.sh`](../scripts/version_matrix.sh)
-(`suite_gate_reason`).
+(`suite_skip_reason`).
 
 ## Why this exists
 
@@ -63,8 +63,13 @@ proven by the green result matrix below, not assumed.
 
 ## Result matrix
 
-Legend: **✓** green · **gate** proven server-feature boundary (see reason) ·
-**OPEN** unresolved failure (tracked bug, not gated, not claimed green).
+Legend: **✓** green · **SKIP** typed, proven server-feature limitation (with a
+stable reason code) · **OPEN** unresolved failure (tracked bug, not claimed
+green).
+
+A `SKIP` is never rendered as a passing suite result. The matrix accepts one
+only after its named live capability probe passes and preserves the distinct
+reason code in its JSON artifact.
 
 | Suite | 18c | 21c | 23ai |
 |-------|-----|-----|------|
@@ -82,7 +87,7 @@ Legend: **✓** green · **gate** proven server-feature boundary (see reason) ·
 | pipeline_live | gate¹ | ✓ | ✓ |
 | live_dpl_arrow | ✓² | ✓² | ✓ |
 | e2e_live | ✓ (CQN gate⁴) | ✓ | ✓ |
-| live_soda | gate³ | ✓ | ✓ |
+| live_soda | SKIP³ (`pre-21c-soda-unsupported`) | ✓ | ✓ |
 
 ## Notes
 
@@ -97,13 +102,16 @@ Legend: **✓** green · **gate** proven server-feature boundary (see reason) ·
    misparsed it (`ORA-03147: missing mandatory TTC field`). Fixed by gating the
    token on the negotiated ttc field version (bead `rust-oracledb-dpl23`).
 
-3. **live_soda on 18c — gated with proof (`rust-oracledb-soda-pre21c`).** The
-   driver's SODA path uses `JSON_SERIALIZE` (a 21c+ SQL function) and the
-   `USER_SODA_COLLECTIONS` catalog view, neither present on 18c. Proof:
-   `ORA-00904: "JSON_SERIALIZE": invalid identifier` at collection create, and
-   `USER_SODA_COLLECTIONS` absent. Full pre-21c SODA support (the older SODA
-   SQL path) is a real, explicitly-bounded feature gap — tracked, not deferred
-   silently.
+3. **live_soda on 18c — typed SKIP with proof
+   (`pre-21c-soda-unsupported`; `rust-oracledb-soda-pre21c`).** The driver's
+   SODA write path requires `JSON_SERIALIZE`, a 21c+ SQL function. Before
+   emitting the `SKIP` cell, the matrix runs
+   `soda_gated_on_pre21c_with_proof`, which verifies that the direct probe
+   fails and `create_collection` returns `ORA-00904: "JSON_SERIALIZE": invalid
+   identifier`. `USER_SODA_COLLECTIONS` is a public synonym that is selectable
+   on 18c, so it is deliberately not used as a capability signal. Full pre-21c
+   SODA support (the older SODA SQL path) is a real, explicitly-bounded feature
+   gap — tracked, not deferred silently.
 
 4. **CQN on pre-21c — gated with proof (`rust-oracledb-cqn18c`).** Change
    notification is a **thin-mode extension beyond python-oracledb thin
@@ -123,6 +131,7 @@ Legend: **✓** green · **gate** proven server-feature boundary (see reason) ·
 
 ## Open items
 
-None. Every suite is green or gated with cited proof across all lanes. The two
-gated boundaries (SODA pre-21c, CQN pre-21c) are tracked as explicit
-feature-scope beads, not silent skips.
+None. Every suite is green, has an explicit typed limitation with cited proof,
+or has a documented in-test capability gate. The SODA pre-21c limitation and
+the CQN pre-21c boundary are tracked as explicit feature-scope beads, not
+silent skips.
