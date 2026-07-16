@@ -43,6 +43,18 @@
       "covers": "A command claiming outcome pass that never recorded an end. It cannot have passed; it never finished."
     },
     {
+      "file": "null-exit-code.json",
+      "expect_code": "E_UNFINISHED",
+      "expect_path": "/commands/0/exit_code",
+      "covers": "A completed pass with no process status. A pass/fail record must name the exit status that produced its outcome."
+    },
+    {
+      "file": "nan-rate.json",
+      "expect_code": "E_SCHEMA",
+      "expect_path": "/rate",
+      "covers": "Python accepts bare NaN while decoding JSON, but evidence rates must be finite before numeric bounds or arithmetic can be trusted."
+    },
+    {
       "file": "arithmetic-mismatch.json",
       "expect_code": "E_RATE_MISMATCH",
       "expect_path": "/rate",

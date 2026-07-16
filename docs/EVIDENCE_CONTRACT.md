@@ -59,7 +59,7 @@ yields the same code.
 | `E_UNSUPPORTED_SCHEMA` | The document declares no schema, or one this contract does not define. |
 | `E_TREE_DIRTY` | Evidence was produced from a tree with uncommitted changes, so it describes code at no commit. |
 | `E_STALE_SHA` | A command, proof, or CI status is recorded against a different SHA than the document is for. |
-| `E_UNFINISHED` | Something claims an outcome but recorded no end time, so it never ran to completion. |
+| `E_UNFINISHED` | Something claims an outcome but recorded no end time or completed exit status, so its completion cannot be verified. |
 | `E_SKIP_WITHOUT_REASON` | A skip carries no machine-readable reason, making it indistinguishable from a gap. |
 | `E_SKIPPED_AS_PASS` | A required command was skipped and the proof still declares pass. |
 | `E_VERDICT_MISMATCH` | The declared verdict is not what the records derive. |
@@ -102,8 +102,9 @@ exists because that did not work.
 
 ## Design decisions worth knowing
 
-**Nullable, then rejected.** `ended_at` and `known_defects[].bead_id` are
-nullable in the schema and rejected by a named semantic rule. Forbidding null
+**Nullable, then rejected.** `ended_at`, a completed command's `exit_code`, and
+`known_defects[].bead_id` are nullable in the schema and rejected by a named
+semantic rule where null would make a claim unverifiable. Forbidding null
 structurally would also work, but it yields "expected string, got null". The
 contract would rather say *"this command reports pass but never finished"*. An
 unfinished command must be **representable** so it can be **named**.

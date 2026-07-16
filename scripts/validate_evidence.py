@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -111,9 +112,17 @@ def _type_ok(instance, name: str) -> bool:
             return False
         if isinstance(instance, int):
             return True
-        return isinstance(instance, float) and instance.is_integer()
+        return (
+            isinstance(instance, float)
+            and math.isfinite(instance)
+            and instance.is_integer()
+        )
     if name == "number":
-        return isinstance(instance, (int, float)) and not isinstance(instance, bool)
+        return (
+            isinstance(instance, (int, float))
+            and not isinstance(instance, bool)
+            and (not isinstance(instance, float) or math.isfinite(instance))
+        )
     raise ValueError(f"unsupported type keyword: {name}")
 
 
@@ -305,6 +314,19 @@ def _semantic_required_proof(doc: dict) -> list:
                     f"{path}/ended_at",
                     f"command {cmd['id']!r} reports outcome {cmd['outcome']!r} but has "
                     "no end time, so it never ran to completion",
+                )
+            )
+        elif cmd["exit_code"] is None:
+            # `exit_code` is nullable only so interrupted commands can be
+            # represented. A pass/fail record that has an end time must name
+            # the process status that produced its outcome.
+            out.append(
+                Finding(
+                    "E_UNFINISHED",
+                    f"{path}/exit_code",
+                    f"command {cmd['id']!r} reports outcome {cmd['outcome']!r} and "
+                    "an end time but no exit status, so its completion cannot be "
+                    "verified",
                 )
             )
 
