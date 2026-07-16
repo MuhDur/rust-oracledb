@@ -1,0 +1,101 @@
+{
+  "schema": "mutation-result/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-16T15:20:16Z",
+  "source": {
+    "sha": "56ff4b8d2caf93078fe11d7cc71aa80b506aa8ef",
+    "tree_clean": true,
+    "branch": "master"
+  },
+  "scope": {
+    "claim": "scoped",
+    "description": "Sensitivity of the TLS SNI builder's test suite. Scoped to one file; says nothing about the rest of the workspace.",
+    "targets": [
+      "crates/oracledb-protocol/src/tls/tls_sni.rs"
+    ]
+  },
+  "started_at": "2026-07-16T13:19:09.531020479Z",
+  "ended_at": "2026-07-16T13:20:16.726150087Z",
+  "resource_budget": {
+    "isolated_target_dir": "/home/durakovic/.cache/oracledb-budget-runs/f1cl7/target",
+    "memory_max_bytes": 12884901888,
+    "pid_task_max": 8192
+  },
+  "shards": [
+    {
+      "id": "shard-1of1",
+      "status": "complete"
+    }
+  ],
+  "counts": {
+    "caught": 5,
+    "missed": 0,
+    "timeout": 0,
+    "unviable": 0
+  },
+  "denominator": "caught+missed",
+  "rate": 1.0,
+  "survivors": [],
+  "kills": [
+    {
+      "mutant_id": "sni.rs:36:5:String::new()",
+      "location": "crates/oracledb-protocol/src/tls/sni.rs:36",
+      "mutant_fails_test": {
+        "test": "tls::sni::tests::sni_basic_service_only",
+        "outcome": "fail"
+      },
+      "head_passes_test": {
+        "test": "tls::sni::tests::sni_basic_service_only",
+        "outcome": "pass"
+      }
+    },
+    {
+      "mutant_id": "sni.rs:36:5:\"xyzzy\".into()",
+      "location": "crates/oracledb-protocol/src/tls/sni.rs:36",
+      "mutant_fails_test": {
+        "test": "tls::sni::tests::sni_basic_service_only",
+        "outcome": "fail"
+      },
+      "head_passes_test": {
+        "test": "tls::sni::tests::sni_basic_service_only",
+        "outcome": "pass"
+      }
+    },
+    {
+      "mutant_id": "sni.rs:37:21:true",
+      "location": "crates/oracledb-protocol/src/tls/sni.rs:37",
+      "mutant_fails_test": {
+        "test": "tls::sni::tests::sni_empty_server_type_is_omitted",
+        "outcome": "fail"
+      },
+      "head_passes_test": {
+        "test": "tls::sni::tests::sni_empty_server_type_is_omitted",
+        "outcome": "pass"
+      }
+    },
+    {
+      "mutant_id": "sni.rs:37:21:false",
+      "location": "crates/oracledb-protocol/src/tls/sni.rs:37",
+      "mutant_fails_test": {
+        "test": "tls::sni::tests::sni_with_emon_server_type",
+        "outcome": "fail"
+      },
+      "head_passes_test": {
+        "test": "tls::sni::tests::sni_with_emon_server_type",
+        "outcome": "pass"
+      }
+    },
+    {
+      "mutant_id": "sni.rs:37:21:",
+      "location": "crates/oracledb-protocol/src/tls/sni.rs:37",
+      "mutant_fails_test": {
+        "test": "tls::sni::tests::sni_empty_server_type_is_omitted",
+        "outcome": "fail"
+      },
+      "head_passes_test": {
+        "test": "tls::sni::tests::sni_empty_server_type_is_omitted",
+        "outcome": "pass"
+      }
+    }
+  ]
+}

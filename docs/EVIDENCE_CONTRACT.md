@@ -75,6 +75,8 @@ yields the same code.
 | `E_SHARD_INCOMPLETE` | A shard did not finish, so the population was never fully evaluated. |
 | `E_SURVIVOR_COUNT_MISMATCH` | Fewer survivor records than survivors claimed: a count, not a taxonomy. |
 | `E_MISSING_WITNESS` | Fewer witnessed kills than kills claimed. |
+| `E_DUPLICATE_MUTANT` | A mutant ID repeats within killed or surviving records, inflating the claimed population. |
+| `E_MUTANT_POPULATION_OVERLAP` | A mutant ID is recorded as both killed and surviving. |
 | `E_LIVE_CLAIM_WITHOUT_ARTIFACT` | A live claim points at no artifact. |
 | `E_DEFECT_WITHOUT_BEAD` | A defect known at close time has no bead tracking it. |
 | `E_SCOPED_TEST_CANNOT_MARK_READY` | A `ready` claim rests on a scoped test. |
@@ -141,6 +143,11 @@ number, and an undeclared denominator is how a rate becomes unfalsifiable.
 **Both kill witnesses are required.** A kill records that the mutant *failed* a
 named test **and** that the same test *passes* on unmutated HEAD. Without the
 second witness, a permanently-red test would "kill" every mutant it touched.
+
+**Mutant populations are sets, not tallies.** Each `mutant_id` may occur once
+in `kills` or once in `survivors`, never twice and never in both. Repeating a
+witnessed kill must not inflate `counts.caught`, and a mutant cannot be both a
+successful detection and an unclassified survivor.
 
 **Every negative fixture produces exactly one finding.** Each is a valid document
 with one defect planted in it. Demanding a single finding proves the rule fires

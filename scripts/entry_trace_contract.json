@@ -32,6 +32,7 @@
     {"path": "scripts/gen_sbom.sh", "kind": "entry_point", "trace": "required-quality"},
     {"path": "scripts/gen_test_wallets.sh", "kind": "helper", "excluded_reason": "fixture-generator-not-a-gate"},
     {"path": "scripts/merge_pytest_json.py", "kind": "helper", "excluded_reason": "called-by-parity-report-tools"},
+    {"path": "scripts/mutation_gate.py", "kind": "entry_point", "trace": "mutation-evidence"},
     {"path": "scripts/parity_rigor.sh", "kind": "entry_point", "trace": "parity-rigor"},
     {"path": "scripts/pin-reference.sh", "kind": "entry_point", "trace": "required-quality"},
     {"path": "scripts/prepare-local-oracle.py", "kind": "entry_point", "trace": "local-oracle-provision"},
@@ -64,6 +65,17 @@
         {"path": ".github/workflows/_quality.yml", "marker": "bash scripts/check_entry_trace_contract.sh"}
       ],
       "result": {"path": "scripts/check_entry_trace_contract.sh", "markers": ["entry-trace: OK", "sys.exit(1)"]},
+      "capabilities": []
+    },
+    {
+      "id": "mutation-evidence",
+      "tier": "operator",
+      "runner": "scripts/mutation_gate.py",
+      "skip_policy": "fail",
+      "dispatch": [
+        {"path": "scripts/mutation_gate.py", "marker": "--check"}
+      ],
+      "result": {"path": "scripts/mutation_gate.py", "markers": ["mutation-gate:", "REFUSING"]},
       "capabilities": []
     },
     {
