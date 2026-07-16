@@ -152,6 +152,8 @@ if [ -n "$tag" ]; then
     [ "$(jq -r --arg l "$lane" '.lanes[$l]' "$matrix_results")" = "PASS" ] ||
       fail "$matrix_results: lane '$lane' did not pass"
   done
+  [ "$(jq -r '.probes.free23_tstz_descriptor' "$matrix_results")" = "PASS" ] ||
+    fail "$matrix_results: required free23 TSTZ descriptor probe did not pass"
   echo "release-preflight: version-matrix gate OK ($matrix_results)"
 fi
 

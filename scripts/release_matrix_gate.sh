@@ -14,9 +14,10 @@
 #   2. git add tests/artifacts/version_matrix/ # commit the results file
 #   3. tag vX.Y.Z on that history               # preflight verifies HEAD's file
 #
-# The artifact records per-lane pass/fail, the SHA it ran on, and whether the
-# worktree was dirty (a dirty run is recorded but REJECTED by preflight — the
-# gate must run on exactly the tree being released).
+# The artifact records per-lane pass/fail, the required free23 TSTZ descriptor
+# probe, the SHA it ran on, and whether the worktree was dirty (a dirty run is
+# recorded but REJECTED by preflight — the gate must run on exactly the tree
+# being released).
 #
 # usage: scripts/release_matrix_gate.sh
 #   env: ORACLEDB_MATRIX_BOOT_TIMEOUT_SECS (default 600) — container boot wait
@@ -60,13 +61,22 @@ done
 # Run the full suite per lane (container generations + the OCI TCPS lane),
 # recording each verdict (keep going on failure so the artifact shows the
 # complete picture).
-declare -A verdict
+declare -A verdict probe
 overall=PASS
 for lane in "${GATE_LANES[@]}"; do
   if bash scripts/version_matrix.sh full "$lane"; then
     verdict[$lane]=PASS
+    # `lane_full free23` runs the ignored ALL_TYPE_ATTRS descriptor probe
+    # after matrix_full and fails the lane if it fails. Record it separately
+    # so preflight can reject an artifact that predates this release gate.
+    if [ "$lane" = "free23" ]; then
+      probe[free23_tstz_descriptor]=PASS
+    fi
   else
     verdict[$lane]=FAIL
+    if [ "$lane" = "free23" ]; then
+      probe[free23_tstz_descriptor]=FAIL
+    fi
     overall=FAIL
   fi
 done
@@ -87,6 +97,8 @@ out="$OUT_DIR/results-$sha.json"
     printf '    "%s": "%s"%s\n' "$lane" "${verdict[$lane]}" "$sep"
   done
   printf '  },\n'
+  printf '  "probes": {"free23_tstz_descriptor": "%s"},\n' \
+    "${probe[free23_tstz_descriptor]:-FAIL}"
   printf '  "overall": "%s"\n' "$overall"
   printf '}\n'
 } >"$out"

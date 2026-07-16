@@ -37,8 +37,9 @@
 #           VECTOR->FixedSizeList (23ai gate), LOB streaming, the idempotency-
 #           gated retry executor, and thin SODA (21c gate). Built with
 #           --features "$MATRIX_FULL_FEATURES" (soda,arrow). xe11:
-#           structured-refusal assertion. This is the standing release gate
-#           (see scripts/release_matrix_gate.sh).
+#           structured-refusal assertion. The free23 lane also runs the
+#           ignored ALL_TYPE_ATTRS TSTZ descriptor probe. This is the standing
+#           release gate (see scripts/release_matrix_gate.sh).
 #   truth   statement-suite ground-truth differential (bead
 #           rust-oracledb-rwoh): runs the IDENTICAL statement corpus through
 #           the Rust driver (examples/statement_ground_truth.rs) AND
@@ -218,6 +219,20 @@ lane_tcps() {
   fi
 }
 
+# Exact-SHA release evidence for c23g.2's timestamp descriptor normalization.
+# This needs the real 23ai dictionary's short `WITH TZ` / `WITH LOCAL TZ`
+# spellings, so it belongs only in the free23 live lane, not an offline codec
+# test or a pre-23ai lane. Keep the test credentials lane-derived: the hosted
+# matrix uses testuser while the reused local free23 listener defaults to
+# pythontest.
+run_free23_tstz_descriptor_probe() {
+  local port="$1" service="$2" user="$3" password="$4"
+  PYO_TEST_CONNECT_STRING="localhost:$port/$service" \
+  PYO_TEST_MAIN_USER="$user" \
+  PYO_TEST_MAIN_PASSWORD="$password" \
+    cargo test -q -p oracledb --test live_object_precision_scale -- --ignored
+}
+
 lane_full() {
   local lane="$1" name image port service user password
   # The OCI TCPS lane is not a container: it runs the local rustls TCPS + wallet
@@ -233,13 +248,21 @@ lane_full() {
   if lane_expects_refusal "$lane"; then
     refusal_flag=(--expect-version-refusal)
   fi
-  if cargo run -q --features "$MATRIX_FULL_FEATURES" --example matrix_full -- "${refusal_flag[@]}" \
+  if ! cargo run -q --features "$MATRIX_FULL_FEATURES" --example matrix_full -- "${refusal_flag[@]}" \
       "localhost:$port/$service" "$user" "$password"; then
-    printf '%-7s FULL PASS\n' "$lane"
-  else
     printf '%-7s FULL FAILED\n' "$lane"
     return 1
   fi
+
+  if [ "$lane" = "free23" ]; then
+    if ! run_free23_tstz_descriptor_probe "$port" "$service" "$user" "$password"; then
+      printf '%-7s TSTZ DESCRIPTOR FAILED\n' "$lane"
+      return 1
+    fi
+    printf '%-7s TSTZ DESCRIPTOR PASS\n' "$lane"
+  fi
+
+  printf '%-7s FULL PASS\n' "$lane"
 }
 
 # Ground-truth differential (rust vs python-oracledb) for one lane (bead
