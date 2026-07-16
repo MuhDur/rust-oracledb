@@ -48,8 +48,11 @@
     {"path": "scripts/statement_ground_truth.py", "kind": "entry_point", "trace": "version-matrix-live"},
     {"path": "scripts/test_release_preflight_pins.sh", "kind": "entry_point", "trace": "required-quality"},
     {"path": "scripts/test_verify_release_exact_sha.sh", "kind": "helper", "excluded_reason": "contract-test-for-exact-sha-release-proof"},
+    {"path": "scripts/test_verify_required_local.sh", "kind": "helper", "excluded_reason": "contract-test-for-required-local-proof"},
     {"path": "scripts/tsan_campaign.sh", "kind": "entry_point", "trace": "tsan-campaign"},
     {"path": "scripts/validate_evidence.py", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/verify_required_local.py", "kind": "helper", "excluded_reason": "invoked-by-required-local-shell-entrypoint"},
+    {"path": "scripts/verify_required_local.sh", "kind": "entry_point", "trace": "required-local-proof"},
     {"path": "scripts/verify_release_exact_sha.py", "kind": "helper", "excluded_reason": "invoked-by-exact-sha-release-shell-entrypoint"},
     {"path": "scripts/verify_release_exact_sha.sh", "kind": "entry_point", "trace": "tag-release"},
     {"path": "scripts/version_matrix.sh", "kind": "entry_point", "trace": "version-matrix-live"}
@@ -65,6 +68,17 @@
         {"path": ".github/workflows/_quality.yml", "marker": "bash scripts/check_entry_trace_contract.sh"}
       ],
       "result": {"path": "scripts/check_entry_trace_contract.sh", "markers": ["entry-trace: OK", "sys.exit(1)"]},
+      "capabilities": []
+    },
+    {
+      "id": "required-local-proof",
+      "tier": "operator",
+      "runner": "scripts/verify_required_local.sh",
+      "skip_policy": "fail",
+      "dispatch": [
+        {"path": "scripts/verify_required_local.sh", "marker": "python3"}
+      ],
+      "result": {"path": "scripts/verify_required_local.py", "markers": ["required-proof: wrote", "required-proof: REFUSING"]},
       "capabilities": []
     },
     {
