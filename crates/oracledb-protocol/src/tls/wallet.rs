@@ -23,7 +23,7 @@
 //! can hand them to rustls without this (sans-I/O) crate depending on the async
 //! TLS stack.
 
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
 /// File name of the PEM wallet (python-oracledb `PEM_WALLET_FILE_NAME`).
@@ -32,6 +32,13 @@ pub const PEM_WALLET_FILE_NAME: &str = "ewallet.pem";
 pub const P12_WALLET_FILE_NAME: &str = "ewallet.p12";
 /// File name of the SSO auto-login wallet.
 pub const SSO_WALLET_FILE_NAME: &str = "cwallet.sso";
+
+/// Largest wallet image accepted from disk or a caller-provided byte buffer.
+///
+/// Real PEM, PKCS#12, and SSO wallets are normally measured in KiB. Keeping
+/// this bound modest prevents a configured-but-hostile wallet file from making
+/// the driver allocate unbounded memory before its format parser can reject it.
+pub const MAX_WALLET_FILE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Errors raised while resolving or reading a wallet.
 #[derive(thiserror::Error)]
@@ -47,6 +54,9 @@ pub enum WalletError {
         #[source]
         source: std::io::Error,
     },
+    /// A wallet image exceeded the fail-closed resource limit before parsing.
+    #[error("wallet data exceeds maximum size of {maximum_bytes} bytes")]
+    TooLarge { maximum_bytes: usize },
     /// The PEM content could not be parsed.
     #[error("failed to parse wallet PEM: {0}")]
     Pem(String),
@@ -100,6 +110,10 @@ impl std::fmt::Debug for WalletError {
                 .debug_struct("Io")
                 .field("path", &redacted(path))
                 .field("source", source)
+                .finish(),
+            Self::TooLarge { maximum_bytes } => f
+                .debug_struct("TooLarge")
+                .field("maximum_bytes", maximum_bytes)
                 .finish(),
             Self::Pem(message) => f.debug_tuple("Pem").field(message).finish(),
             Self::NoCertificates => f.write_str("NoCertificates"),
@@ -318,6 +332,7 @@ pub fn parse_ewallet_pem(
     pem: &[u8],
     wallet_password: Option<&str>,
 ) -> Result<WalletContents, WalletError> {
+    ensure_wallet_size(pem.len())?;
     // Legacy OpenSSL PEM-level encryption scrambles the base64 payload of a
     // PKCS#1 block; rustls-pemfile would surface it as a garbage key. Reject it
     // up front with a typed remediation (fail closed).
@@ -413,6 +428,7 @@ pub fn parse_ewallet_p12(
     data: &[u8],
     wallet_password: Option<&str>,
 ) -> Result<WalletContents, WalletError> {
+    ensure_wallet_size(data.len())?;
     let Some(password) = wallet_password else {
         return Err(WalletError::PasswordRequired {
             format: P12_WALLET_FILE_NAME,
@@ -493,10 +509,7 @@ pub fn read_ewallet_pem(
     if !path.exists() {
         return Err(WalletError::FileMissing(path.display().to_string()));
     }
-    let bytes = std::fs::read(&path).map_err(|source| WalletError::Io {
-        path: path.display().to_string(),
-        source,
-    })?;
+    let bytes = read_wallet_file(&path)?;
     parse_ewallet_pem(&bytes, wallet_password)
 }
 
@@ -514,11 +527,55 @@ pub fn read_ewallet_p12(
     if !path.exists() {
         return Err(WalletError::FileMissing(path.display().to_string()));
     }
-    let bytes = std::fs::read(&path).map_err(|source| WalletError::Io {
+    let bytes = read_wallet_file(&path)?;
+    parse_ewallet_p12(&bytes, wallet_password)
+}
+
+/// Read one wallet file without allowing a configured path to allocate an
+/// unbounded buffer before parsing begins.
+///
+/// The stream is cut off at one byte above [`MAX_WALLET_FILE_BYTES`], so this
+/// remains bounded even if file metadata races, is unavailable, or lies.
+pub fn read_wallet_file(path: &Path) -> Result<Vec<u8>, WalletError> {
+    let file = std::fs::File::open(path).map_err(|source| WalletError::Io {
         path: path.display().to_string(),
         source,
     })?;
-    parse_ewallet_p12(&bytes, wallet_password)
+    match read_wallet_reader(file, MAX_WALLET_FILE_BYTES).map_err(|source| WalletError::Io {
+        path: path.display().to_string(),
+        source,
+    })? {
+        Some(bytes) => Ok(bytes),
+        None => Err(WalletError::TooLarge {
+            maximum_bytes: MAX_WALLET_FILE_BYTES,
+        }),
+    }
+}
+
+/// Read at most `maximum_bytes + 1` bytes, returning `None` when the source is
+/// oversized. Kept separate from filesystem I/O so the boundary is directly
+/// regression-tested without creating a temporary wallet file.
+fn read_wallet_reader<R: Read>(
+    reader: R,
+    maximum_bytes: usize,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let limit = u64::try_from(maximum_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut reader = reader.take(limit);
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes)?;
+    Ok((bytes.len() <= maximum_bytes).then_some(bytes))
+}
+
+/// Enforce the same limit for public in-memory parser entry points.
+pub(crate) fn ensure_wallet_size(size: usize) -> Result<(), WalletError> {
+    if size > MAX_WALLET_FILE_BYTES {
+        return Err(WalletError::TooLarge {
+            maximum_bytes: MAX_WALLET_FILE_BYTES,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -555,6 +612,19 @@ mod tests {
     fn parse_rejects_empty_pem() {
         let err = parse_ewallet_pem(b"", None).unwrap_err();
         assert!(matches!(err, WalletError::NoCertificates));
+    }
+
+    #[test]
+    fn bounded_wallet_reader_rejects_oversized_input() {
+        let bytes = read_wallet_reader(std::io::Cursor::new([0u8; 17]), 16)
+            .expect("in-memory reader is infallible");
+        assert!(bytes.is_none(), "one byte over the cap must be rejected");
+    }
+
+    #[test]
+    fn wallet_size_guard_rejects_before_parser_allocations() {
+        let err = ensure_wallet_size(MAX_WALLET_FILE_BYTES + 1).unwrap_err();
+        assert!(matches!(err, WalletError::TooLarge { .. }));
     }
 
     #[test]

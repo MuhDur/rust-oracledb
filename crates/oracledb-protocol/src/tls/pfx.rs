@@ -427,6 +427,10 @@ enum PrfHash {
 /// wallet-declared length even if a future caller forgets the cipher-size check
 /// in derive_pbes2 (defense-in-depth for bead rust-oracledb-exz).
 const MAX_PBKDF2_KEY_LEN: usize = 1024;
+/// Largest PBES2 PBKDF2 iteration count accepted from a wallet. Real Oracle
+/// wallets use roughly 2,048 iterations; this mirrors the legacy PKCS#12 work
+/// cap and prevents a hostile wallet from monopolizing CPU.
+const MAX_PBKDF2_ITERATIONS: u64 = 10_000_000;
 
 fn pbkdf2_derive(
     password: &[u8],
@@ -441,7 +445,13 @@ fn pbkdf2_derive(
             "PBKDF2 keyLength {key_len} exceeds maximum {MAX_PBKDF2_KEY_LEN}"
         )));
     }
-    let iters = u32::try_from(iterations).unwrap_or(u32::MAX);
+    if iterations == 0 || iterations > MAX_PBKDF2_ITERATIONS {
+        return Err(p12(format!(
+            "PBKDF2 iteration count {iterations} must be in 1..={MAX_PBKDF2_ITERATIONS}"
+        )));
+    }
+    let iters =
+        u32::try_from(iterations).map_err(|_| p12("PBKDF2 iteration count exceeds u32 range"))?;
     let mut out = vec![0u8; key_len];
     match prf {
         PrfHash::Sha1 => {
@@ -738,5 +748,14 @@ mod tests {
         // A real AES-256 key length still derives successfully.
         let ok = pbkdf2_derive(b"pw", b"saltsalt", 1000, 32, PrfHash::Sha256);
         assert!(ok.is_ok() && ok.unwrap().len() == 32);
+    }
+
+    #[test]
+    fn pbkdf2_rejects_hostile_iteration_counts_without_working_them() {
+        for iterations in [0, MAX_PBKDF2_ITERATIONS + 1, u64::MAX] {
+            let err = pbkdf2_derive(b"pw", b"saltsalt", iterations, 32, PrfHash::Sha256)
+                .expect_err("hostile PBKDF2 work factor must be rejected");
+            assert!(matches!(err, WalletError::Pkcs12(_)));
+        }
     }
 }

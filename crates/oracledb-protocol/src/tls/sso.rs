@@ -32,7 +32,7 @@
 //! Operators whose wallet hits an unsupported branch should convert it to
 //! `ewallet.pem` (fully supported, see [`super::wallet`]).
 
-use crate::tls::wallet::{WalletContents, WalletError};
+use crate::tls::wallet::{ensure_wallet_size, WalletContents, WalletError};
 
 /// Outer SSO container magic (`{0xA1, 0xF8, 0x4E}`), from go-ora.
 const SSO_MAGIC: [u8; 3] = [0xA1, 0xF8, 0x4E];
@@ -84,22 +84,27 @@ mod imp {
         let mut password: Vec<u8> = match num3 {
             6 => {
                 // 16-byte AES key follows, then the encrypted password.
-                if data.len() < index + 16 {
-                    return Err(WalletError::Sso("truncated SSO AES key".into()));
-                }
-                let key: [u8; 16] = data[index..index + 16]
+                let key_end = index
+                    .checked_add(16)
+                    .ok_or_else(|| WalletError::Sso("SSO AES key size overflow".into()))?;
+                let key: [u8; 16] = data
+                    .get(index..key_end)
+                    .ok_or_else(|| WalletError::Sso("truncated SSO AES key".into()))?
                     .try_into()
                     .map_err(|_| WalletError::Sso("bad AES key slice".into()))?;
-                index += 16;
+                index = key_end;
                 // passwordLen = size - 1 - 16 (go-ora v3).
                 let password_len = size
                     .checked_sub(1 + 16)
                     .ok_or_else(|| WalletError::Sso("invalid SSO size field".into()))?;
-                if data.len() < index + password_len {
-                    return Err(WalletError::Sso("truncated SSO password block".into()));
-                }
-                let mut buf = data[index..index + password_len].to_vec();
-                index += password_len;
+                let password_end = index
+                    .checked_add(password_len)
+                    .ok_or_else(|| WalletError::Sso("SSO password block size overflow".into()))?;
+                let mut buf = data
+                    .get(index..password_end)
+                    .ok_or_else(|| WalletError::Sso("truncated SSO password block".into()))?
+                    .to_vec();
+                index = password_end;
                 let dec = Aes128CbcDec::new(&key.into(), &SSO_AES_IV.into());
                 // The password block length is a multiple of the AES block; the
                 // go-ora reference does not strip padding here — the raw
@@ -198,6 +203,7 @@ mod imp {
 /// Returns [`WalletError::Sso`] for outer-container parse / unsupported-branch
 /// failures and [`WalletError::Pkcs12`] for inner PKCS#12 failures.
 pub fn parse_cwallet_sso(data: &[u8]) -> Result<WalletContents, WalletError> {
+    ensure_wallet_size(data.len())?;
     let (password, pkcs12_offset) = imp::decode_outer(data)?;
     imp::parse_pkcs12(&data[pkcs12_offset..], &password)
 }
@@ -224,6 +230,20 @@ mod tests {
         let mut data = SSO_MAGIC.to_vec();
         data.push(99);
         data.extend_from_slice(&[0u8; 16]);
+        let err = parse_cwallet_sso(&data).unwrap_err();
+        assert!(matches!(err, WalletError::Sso(_)));
+    }
+
+    #[test]
+    fn rejects_huge_declared_password_block_without_panicking() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&SSO_MAGIC);
+        data.push(b'6');
+        data.extend_from_slice(&6u32.to_be_bytes());
+        data.extend_from_slice(&u32::MAX.to_be_bytes());
+        data.push(6);
+        data.extend_from_slice(&[0u8; 16]);
+
         let err = parse_cwallet_sso(&data).unwrap_err();
         assert!(matches!(err, WalletError::Sso(_)));
     }

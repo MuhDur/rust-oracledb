@@ -471,8 +471,8 @@ fn resolve_wallet_inner(
     password: Option<&str>,
 ) -> Result<(WalletResolution, WalletContents), Error> {
     use oracledb_protocol::tls::wallet::{
-        p12_wallet_path, pem_wallet_path, read_ewallet_p12, read_ewallet_pem, sso_wallet_path,
-        WalletError,
+        p12_wallet_path, pem_wallet_path, read_ewallet_p12, read_ewallet_pem, read_wallet_file,
+        sso_wallet_path, WalletError,
     };
 
     // Read + parse the auto-login cwallet.sso if present. `Ok(None)` = no sso
@@ -483,10 +483,7 @@ fn resolve_wallet_inner(
         if !sso.exists() {
             return Ok(None);
         }
-        let bytes = std::fs::read(&sso).map_err(|source| WalletError::Io {
-            path: sso.display().to_string(),
-            source,
-        })?;
+        let bytes = read_wallet_file(&sso)?;
         oracledb_protocol::tls::sso::parse_cwallet_sso(&bytes).map(Some)
     };
 
