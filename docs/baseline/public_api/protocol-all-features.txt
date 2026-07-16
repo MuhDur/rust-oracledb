@@ -1504,6 +1504,7 @@ pub fn oracledb_protocol::thin::connect_data_fits_inline(&str) -> bool
 pub fn oracledb_protocol::thin::cursor_bind_template() -> oracledb_protocol::thin::BindValue
 pub fn oracledb_protocol::thin::dbobject_attr_max_size(&str, core::option::Option<u32>) -> u32
 pub fn oracledb_protocol::thin::dbobject_attr_precision_scale(&str, core::option::Option<i8>, core::option::Option<i8>) -> (i8, i8)
+pub fn oracledb_protocol::thin::dbobject_attr_public_precision_scale(&str, core::option::Option<i8>, core::option::Option<i8>) -> (i8, i8)
 pub fn oracledb_protocol::thin::dbobject_element_bind_type_info(&str, u32) -> oracledb_protocol::thin::BindTypeInfo
 pub fn oracledb_protocol::thin::dbobject_rowtype_attr_max_size(&str, core::option::Option<u32>, core::option::Option<u32>) -> u32
 pub fn oracledb_protocol::thin::decode_bfile_locator_name(&[u8]) -> core::option::Option<(alloc::string::String, alloc::string::String)>
