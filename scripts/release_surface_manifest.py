@@ -43,7 +43,12 @@ def read_toml(root: Path, relative_path: str) -> dict[str, Any]:
 def canonical_values(root: Path, manifest: dict[str, Any]) -> dict[str, str]:
     values: dict[str, str] = {}
     for entry in manifest.get("canonical", []):
-        value = get_key(read_toml(root, entry["path"]), entry["toml_key"])
+        if "value" in entry:
+            value = entry["value"]
+            if not isinstance(value, str):
+                raise SurfaceError(f"canonical {entry['name']} value is not a string")
+        else:
+            value = get_key(read_toml(root, entry["path"]), entry["toml_key"])
         prefix = entry.get("strip_prefix", "")
         if prefix:
             if not value.startswith(prefix):
@@ -158,7 +163,8 @@ def main() -> int:
 
     print(
         "release-surface-manifest: OK "
-        f"(workspace={values['workspace_version']}, runtime={values['runtime_version']})"
+        f"(workspace={values['workspace_version']}, published={values['published_version']}, "
+        f"runtime={values['runtime_version']})"
     )
     return 0
 

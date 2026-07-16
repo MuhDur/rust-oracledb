@@ -10,6 +10,10 @@ path = "Cargo.toml"
 toml_key = "workspace.package.version"
 
 [[canonical]]
+name = "published_version"
+value = "0.8.3"
+
+[[canonical]]
 name = "runtime_version"
 path = "Cargo.toml"
 toml_key = "workspace.dependencies.asupersync"
@@ -25,10 +29,18 @@ match_count = 1
 
 [[surface]]
 name = "publishing_latest_release"
-source = "workspace_version"
+source = "published_version"
 path = "docs/PUBLISHING.md"
 pattern = "\\| Latest published release \\| \\*\\*(?P<value>[0-9]+\\.[0-9]+\\.[0-9]+)\\*\\* \\|"
-replacement = "| Latest published release | **{workspace_version}** |"
+replacement = "| Latest published release | **{published_version}** |"
+match_count = 1
+
+[[surface]]
+name = "publishing_release_candidate"
+source = "workspace_version"
+path = "docs/PUBLISHING.md"
+pattern = "\\| Prepared release candidate \\| \\*\\*(?P<value>[0-9]+\\.[0-9]+\\.[0-9]+)\\*\\* \\(not published\\) \\|"
+replacement = "| Prepared release candidate | **{workspace_version}** (not published) |"
 match_count = 1
 
 [[surface]]
@@ -75,7 +87,13 @@ canonical_path = "Cargo.toml"
 independent_from = "workspace_version"
 rationale = "asupersync is exactly pinned for runtime compatibility and changes only through a deliberate dependency update."
 
+[[intentional_non_lockstep]]
+name = "latest published crate version"
+canonical_path = "release-surfaces.toml"
+independent_from = "workspace_version"
+rationale = "The latest crates.io version changes only after an explicitly authorized, verified publish; a prepared workspace candidate can be newer."
+
 [[numeric_scan]]
 name = "publishing current-release surface"
 path = "docs/PUBLISHING.md"
-allowed_versions = ["0.0.0", "0.1.0", "0.1.1", "{workspace_version}", "{runtime_version}"]
+allowed_versions = ["0.0.0", "0.1.0", "0.1.1", "{published_version}", "{workspace_version}", "{runtime_version}"]

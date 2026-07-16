@@ -9,15 +9,16 @@ for the publish order, the version, what ships, and the post-publish checklist.
 | field | value |
 |---|---|
 | Initial public release | **0.1.0** |
-| Latest published release | **0.8.4** |
-| Source | `[workspace.package].version` in the root `Cargo.toml` |
+| Latest published release | **0.8.3** |
+| Prepared release candidate | **0.8.4** (not published) |
+| Candidate source | `[workspace.package].version` in the root `Cargo.toml` |
 
 `0.1.0` (not `0.0.0`, which crates.io treats as a placeholder, and not a
 `-alpha` pre-release) is the deliberate first public cut: the driver passes the
 reference python-oracledb thin-mode test suite and is honestly usable, while the
 `0.x` major signals that the public API may still evolve before `1.0`.
 
-All workspace crates share this version via `version.workspace = true`.
+All workspace crates share the prepared candidate version via `version.workspace = true`.
 
 ## Crates and the publish dependency graph
 
