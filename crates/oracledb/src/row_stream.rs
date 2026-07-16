@@ -41,7 +41,7 @@
 //! }
 //!
 //! // The stream is drained; take the connection back for reuse.
-//! let conn = stream.into_connection()?;
+//! let conn = stream.into_connection().await?;
 //! conn.close(cx).await?;
 //! # Ok(())
 //! # }
@@ -59,14 +59,17 @@ use oracledb_protocol::thin::{ColumnMetadata, ExecuteOptions, QueryResult, Query
 
 use crate::request::{DeadlineExpiry, QueryDeadline};
 use crate::rows::first_cursor_from_result;
-use crate::{columns_require_define, Connection, Cursor, Error, Params, Query, Result};
+use crate::{
+    columns_require_define, CancelHandle, Connection, Cursor, Error, Params, Query, Result,
+};
 
 /// One owned query row: a value (or SQL `NULL`) per column, in column order.
 type OwnedRow = Vec<Option<QueryValue>>;
 
 /// The connection plus the outcome of one continuation fetch. The connection is
 /// always returned (whether the fetch succeeded or failed) so the stream can put
-/// it back; only a dropped in-flight future loses it (which poisons the stream).
+/// it back. [`OwnedRowStream::into_connection`] cancels and awaits an in-flight
+/// future before reclaiming that connection.
 type FetchOutcome = (Connection, Result<QueryResult>);
 
 /// Boxed, `'static` in-flight fetch future. `'static` because it owns
@@ -86,13 +89,19 @@ enum OwnedRowStreamState {
     /// Rows ready to yield from the current page (may be empty when a further
     /// fetch is required).
     Buffered(VecDeque<OwnedRow>),
-    /// A continuation fetch owns the connection until its page arrives.
-    Fetching(FetchFuture),
+    /// A continuation fetch owns the connection until its page arrives. The
+    /// paired handle can issue BREAK while the future is pending, allowing
+    /// [`OwnedRowStream::into_connection`] to recover the session instead of
+    /// dropping the socket.
+    Fetching {
+        future: FetchFuture,
+        cancel_handle: CancelHandle,
+    },
     /// The cursor is fully drained (or a fetch failed); the connection, if any,
     /// is back in [`OwnedRowStream::connection`].
     Done,
-    /// A fetch future was dropped while it owned the connection, or a fetch was
-    /// requested with no connection in hand. The connection cannot be recovered.
+    /// A fetch was requested with no connection in hand. This is unreachable
+    /// from the public constructor and retained only for offline test coverage.
     Poisoned,
 }
 
@@ -102,11 +111,11 @@ enum OwnedRowStreamState {
 ///
 /// See the module-level documentation above for the owning-connection design
 /// and a usage example.
-#[must_use = "an OwnedRowStream holds the connection until drained or recovered with into_connection()"]
+#[must_use = "an OwnedRowStream holds the connection until drained or recovered with into_connection().await"]
 pub struct OwnedRowStream {
     /// `Some` whenever a fetch future does not currently own the connection.
     /// `None` only while a fetch is in flight ([`OwnedRowStreamState::Fetching`])
-    /// or after that future was dropped ([`OwnedRowStreamState::Poisoned`]).
+    /// or in the offline-only [`OwnedRowStreamState::Poisoned`] guard state.
     connection: Option<Connection>,
     /// The `Cx` captured at construction, cloned into each continuation fetch.
     /// Its budget / deadline governs the whole stream, mirroring how one
@@ -179,27 +188,51 @@ impl OwnedRowStream {
         self.cursor.as_ref()
     }
 
-    /// Recover the owned [`Connection`], releasing the server cursor first.
+    /// Asynchronously recover the owned [`Connection`], releasing the server
+    /// cursor first.
     ///
     /// Works after a full drain and after an early stop while rows are still
-    /// buffered (no fetch in flight). Returns [`Error::ConnectionClosed`] if the
-    /// stream was **poisoned** — a continuation fetch future was dropped while it
-    /// owned the connection, so the connection cannot be handed back cleanly.
-    pub fn into_connection(mut self) -> Result<Connection> {
-        match self.connection.take() {
-            Some(mut connection) => {
-                if self.cursor_id != 0 {
-                    connection.release_cursor(self.cursor_id);
-                    self.cursor_id = 0;
-                }
-                Ok(connection)
+    /// buffered. If a continuation is pending, it sends one BREAK through the
+    /// retained [`CancelHandle`], awaits the fetch until it returns ownership,
+    /// and drains the complete cancel response before handing the clean
+    /// connection back. This is the cancellation-safe alternative to dropping
+    /// an in-flight stream, whose synchronous [`Drop`] implementation cannot
+    /// await the required wire drain.
+    pub async fn into_connection(mut self) -> Result<Connection> {
+        let state = std::mem::replace(&mut self.state, OwnedRowStreamState::Done);
+        let mut connection = match state {
+            OwnedRowStreamState::Buffered(_) | OwnedRowStreamState::Done => {
+                self.connection.take().ok_or_else(|| {
+                    Error::ConnectionClosed(
+                        "owned row stream has no connection to recover".to_string(),
+                    )
+                })?
             }
-            None => Err(Error::ConnectionClosed(
-                "owned row stream was poisoned by a dropped in-flight fetch; \
-                 the connection cannot be recovered"
-                    .to_string(),
-            )),
+            OwnedRowStreamState::Fetching {
+                future,
+                mut cancel_handle,
+            } => {
+                // The continuation future owns the connection, so first ask the
+                // server to stop it. The future then returns the connection after
+                // consuming its current response; the remaining BREAK/RESET
+                // exchange is drained below before reuse.
+                cancel_handle.cancel(&self.cx).await?;
+                let (mut connection, _) = future.await;
+                connection.drain_cancel_response().await?;
+                connection
+            }
+            OwnedRowStreamState::Poisoned => {
+                return Err(Error::ConnectionClosed(
+                    "owned row stream has no connection to recover".to_string(),
+                ));
+            }
+        };
+        if self.cursor_id != 0 {
+            connection.release_cursor(self.cursor_id);
+            self.cursor_id = 0;
         }
+        self.more_rows = false;
+        Ok(connection)
     }
 
     /// Release the open server cursor if the connection is in hand. A no-op once
@@ -317,6 +350,14 @@ impl Stream for OwnedRowStream {
                                 .to_string(),
                         ))));
                     };
+                    let cancel_handle = match connection.cancel_handle() {
+                        Ok(handle) => handle,
+                        Err(err) => {
+                            this.connection = Some(connection);
+                            this.state = OwnedRowStreamState::Done;
+                            return Poll::Ready(Some(Err(err)));
+                        }
+                    };
                     let future = build_fetch_future(
                         connection,
                         this.cx.clone(),
@@ -326,13 +367,22 @@ impl Stream for OwnedRowStream {
                         Arc::clone(&this.columns),
                         this.previous_row.clone(),
                     );
-                    this.state = OwnedRowStreamState::Fetching(future);
+                    this.state = OwnedRowStreamState::Fetching {
+                        future,
+                        cancel_handle,
+                    };
                     // Loop to poll the freshly-armed fetch future.
                 }
-                OwnedRowStreamState::Fetching(mut future) => {
+                OwnedRowStreamState::Fetching {
+                    mut future,
+                    cancel_handle,
+                } => {
                     match future.as_mut().poll(task_cx) {
                         Poll::Pending => {
-                            this.state = OwnedRowStreamState::Fetching(future);
+                            this.state = OwnedRowStreamState::Fetching {
+                                future,
+                                cancel_handle,
+                            };
                             return Poll::Pending;
                         }
                         Poll::Ready((connection, outcome)) => {
@@ -372,8 +422,9 @@ impl Stream for OwnedRowStream {
 impl Drop for OwnedRowStream {
     fn drop(&mut self) {
         // Idle drop: release the server cursor if we still hold the connection.
-        // If a fetch future owns the connection (Fetching state), the connection
-        // drops with the future, closing the socket — nothing to release here.
+        // A synchronous destructor cannot await BREAK + drain for Fetching;
+        // callers that need the session back must use `into_connection().await`
+        // before dropping the stream.
         self.release_cursor_if_open();
     }
 }
@@ -391,7 +442,7 @@ impl std::fmt::Debug for OwnedRowStream {
                     .field("columns", &self.columns.len())
                     .finish();
             }
-            OwnedRowStreamState::Fetching(_) => "Fetching",
+            OwnedRowStreamState::Fetching { .. } => "Fetching",
             OwnedRowStreamState::Done => "Done",
             OwnedRowStreamState::Poisoned => "Poisoned",
         };
@@ -773,15 +824,19 @@ mod tests {
                 .connection
                 .take()
                 .expect("stream starts with its connection");
-            stream.state = OwnedRowStreamState::Fetching(build_fetch_future(
-                connection,
-                cx,
-                CURSOR_ID,
-                1,
-                deadline,
-                Arc::clone(&stream.columns),
-                None,
-            ));
+            let cancel_handle = connection.cancel_handle()?;
+            stream.state = OwnedRowStreamState::Fetching {
+                future: build_fetch_future(
+                    connection,
+                    cx,
+                    CURSOR_ID,
+                    1,
+                    deadline,
+                    Arc::clone(&stream.columns),
+                    None,
+                ),
+                cancel_handle,
+            };
 
             let failed = poll_fn(|task_cx| Pin::new(&mut stream).poll_next(task_cx)).await;
             assert!(
@@ -795,7 +850,7 @@ mod tests {
                 "a failed stream must surface exactly one error and then terminate"
             );
 
-            let connection = stream.into_connection()?;
+            let connection = stream.into_connection().await?;
             assert!(
                 !connection.in_use_cursors.contains(&CURSOR_ID),
                 "failed cursor must not remain marked in use"
@@ -920,7 +975,7 @@ mod tests {
                 matches!(failed, Some(Err(Error::CallTimeout(40)))),
                 "in-flight page must recover and surface CallTimeout, got {failed:?}"
             );
-            let connection = stream.into_connection()?;
+            let connection = stream.into_connection().await?;
             assert!(!connection.in_use_cursors.contains(&CURSOR_ID));
             assert!(
                 connection
@@ -937,6 +992,99 @@ mod tests {
                     .count(),
                 1,
                 "recovered in-flight timeout must queue exactly one close"
+            );
+            Ok::<_, Error>(())
+        })?;
+
+        server.join().expect("server thread joins")?;
+        Ok(())
+    }
+
+    #[test]
+    fn inflight_continuation_into_connection_cancels_and_returns_a_clean_connection() -> Result<()>
+    {
+        const CURSOR_ID: u32 = 85;
+        const INFLIGHT_BODY: &[u8] = &[0xd1, 0xa1, 0xb1];
+        const CANCEL_ERROR: &[u8] = &[0x04, 0x01, 0x0d];
+        const FRESH_BODY: &[u8] = &[0x07, 0x05, 0x0c];
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let (fetch_seen_tx, fetch_seen_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+
+            let (fetch_type, _) = read_packet(&mut socket)?;
+            assert_eq!(fetch_type, TNS_PACKET_TYPE_DATA, "page 2 must start");
+            fetch_seen_tx
+                .send(())
+                .expect("client waits until the continuation is in flight");
+
+            let (break_type, break_body) = read_packet(&mut socket)?;
+            assert_eq!(break_type, crate::TNS_PACKET_TYPE_MARKER);
+            assert_eq!(break_body, [1, 0, crate::TNS_MARKER_TYPE_BREAK]);
+
+            // A pending fetch may have already received part of its own
+            // response when cancellation starts. It must never be interpreted
+            // as the next operation's response after reclamation.
+            socket.write_all(&data_packet(INFLIGHT_BODY))?;
+            socket.write_all(&marker_packet(crate::TNS_MARKER_TYPE_BREAK))?;
+            let (reset_type, reset_body) = read_packet(&mut socket)?;
+            assert_eq!(reset_type, crate::TNS_PACKET_TYPE_MARKER);
+            assert_eq!(reset_body, [1, 0, crate::TNS_MARKER_TYPE_RESET]);
+            socket.write_all(&marker_packet(crate::TNS_MARKER_TYPE_RESET))?;
+            socket.write_all(&data_packet(CANCEL_ERROR))?;
+            socket.flush()?;
+
+            let (fresh_type, _) = read_packet(&mut socket)?;
+            assert_eq!(
+                fresh_type, TNS_PACKET_TYPE_DATA,
+                "the reclaimed connection sends its new request only after the drain"
+            );
+            socket.write_all(&data_packet(FRESH_BODY))?;
+            socket.flush()?;
+            Ok(())
+        });
+
+        let runtime = crate::build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs an ambient Cx");
+            let socket = TcpStream::connect(addr).await?;
+            let (read, write) = crate::transport::plain_split(socket);
+            let mut connection = crate::tests::loopback_connection(read, write);
+            connection.in_use_cursors.insert(CURSOR_ID);
+            let first = QueryResult {
+                columns: cols(&["A"]),
+                rows: Vec::new(),
+                cursor_id: CURSOR_ID,
+                more_rows: true,
+                ..QueryResult::default()
+            };
+            let deadline = QueryDeadline::new(&cx, None);
+            let mut stream =
+                OwnedRowStream::from_first_page(Some(connection), cx.clone(), 1, deadline, first);
+
+            let mut task_cx = Context::from_waker(Waker::noop());
+            assert!(
+                matches!(Pin::new(&mut stream).poll_next(&mut task_cx), Poll::Pending),
+                "the continuation must be pending before reclamation"
+            );
+            fetch_seen_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("the server observed the in-flight continuation");
+
+            let mut connection = stream.into_connection().await?;
+            assert!(
+                !connection.in_use_cursors.contains(&CURSOR_ID),
+                "reclamation releases the abandoned cursor"
+            );
+            let sdu = connection.sdu;
+            connection.core.send_data_packet(&cx, b"fresh", sdu).await?;
+            let response = connection.core.read_data_response(&cx).await?;
+            assert_eq!(
+                response, FRESH_BODY,
+                "the reclaimed connection reads only its own fresh response"
             );
             Ok::<_, Error>(())
         })?;
@@ -1070,7 +1218,9 @@ mod tests {
 
     #[test]
     fn into_connection_on_poisoned_stream_errors() {
-        with_cx(|cx| {
+        let runtime = crate::build_io_runtime().expect("io runtime builds");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs an ambient Cx");
             let result = QueryResult {
                 columns: cols(&["A"]),
                 rows: vec![text_row(&["1"])],
@@ -1078,9 +1228,9 @@ mod tests {
                 more_rows: false,
                 ..QueryResult::default()
             };
-            // connection: None models a stream whose in-flight fetch was dropped.
+            // connection: None models the offline-only impossible state.
             let stream = offline_stream(cx, result);
-            let err = stream.into_connection().unwrap_err();
+            let err = stream.into_connection().await.unwrap_err();
             assert!(matches!(err, Error::ConnectionClosed(_)));
         });
     }

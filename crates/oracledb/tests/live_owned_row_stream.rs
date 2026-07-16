@@ -98,7 +98,7 @@ fn streamed_rows_match_eager_query_all() {
             .await
             .expect("into_query_stream");
         let streamed = collect_stream(&mut stream).await.expect("stream drains");
-        let conn = stream.into_connection().expect("recover connection");
+        let conn = stream.into_connection().await.expect("recover connection");
 
         assert_eq!(eager.len(), 2500, "eager path drains all rows");
         assert_eq!(
@@ -139,7 +139,7 @@ fn small_arraysize_multipage_matches_eager() {
         let query = Query::new(sql).arraysize(NonZeroU32::new(3).expect("nonzero"));
         let mut stream = conn.into_row_stream(&cx, query).await.expect("stream");
         let streamed = collect_stream(&mut stream).await.expect("drain");
-        let conn = stream.into_connection().expect("recover");
+        let conn = stream.into_connection().await.expect("recover");
 
         assert_eq!(streamed.len(), 1000);
         assert_eq!(streamed, eager, "multi-page stream equals eager");
@@ -165,7 +165,7 @@ fn empty_result_stream_yields_nothing_and_recovers() {
         assert!(rows.is_empty(), "empty result yields no rows");
 
         // The connection is recoverable and reusable after an empty stream.
-        let mut conn = stream.into_connection().expect("recover");
+        let mut conn = stream.into_connection().await.expect("recover");
         let n: i64 = conn
             .query_one(&cx, "select 42 from dual", ())
             .await
@@ -229,7 +229,7 @@ fn midstream_error_propagates_then_stream_terminates() {
 
         // The connection came back with the error; it is recoverable and the
         // failed cursor's stale cache/registry state cannot poison the next SQL.
-        let mut conn = stream.into_connection().expect("recover after error");
+        let mut conn = stream.into_connection().await.expect("recover after error");
         let answer: i64 = conn
             .query_one(&cx, "select 42 from dual", ())
             .await
@@ -304,7 +304,7 @@ fn early_stop_recovers_connection_for_reuse() {
         assert!(stream.cursor().is_none(), "no ref cursor for a plain query");
 
         // Recover the connection mid-stream (an open cursor is abandoned).
-        let mut conn = stream.into_connection().expect("recover mid-stream");
+        let mut conn = stream.into_connection().await.expect("recover mid-stream");
 
         // The recovered connection decodes a fresh query correctly.
         let rows: Vec<Vec<Option<QueryValue>>> = conn
