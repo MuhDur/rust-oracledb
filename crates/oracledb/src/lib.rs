@@ -113,6 +113,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::num::NonZeroU32;
 use std::process;
 use std::sync::Arc;
@@ -576,24 +577,22 @@ impl<T: WireTransport> ConnectionCore<T> {
     async fn read_packet(&mut self, width: PacketLengthWidth) -> Result<IncomingPacket> {
         let limits = self.protocol_limits;
         let inactivity = self.inactivity_timeout;
-        let result = apply_inactivity_timeout(
-            inactivity,
-            read_packet_with_limits(self.read_mut()?, width, limits),
-        )
-        .await;
-        self.note_post_sync_result(result)
+        let result = {
+            let mut read = InactivityRead::new(self.read_mut()?, inactivity);
+            read_packet_with_limits(&mut read, width, limits).await
+        };
+        self.note_post_sync_result(map_inactivity_timeout(result))
     }
 
     async fn read_data_response(&mut self, cx: &Cx) -> Result<Vec<u8>> {
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
         let inactivity = self.inactivity_timeout;
-        let result = apply_inactivity_timeout(
-            inactivity,
-            read_data_response_with_limits(self.read_mut()?, cx, &write, limits),
-        )
-        .await;
-        self.note_post_sync_result(result)
+        let result = {
+            let mut read = InactivityRead::new(self.read_mut()?, inactivity);
+            read_data_response_with_limits(&mut read, cx, &write, limits).await
+        };
+        self.note_post_sync_result(map_inactivity_timeout(result))
     }
 
     /// Reads one classic (pre-END_OF_RESPONSE) connect-phase response. Servers
@@ -605,12 +604,11 @@ impl<T: WireTransport> ConnectionCore<T> {
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
         let inactivity = self.inactivity_timeout;
-        let result = apply_inactivity_timeout(
-            inactivity,
-            read_classic_data_response_with_limits(self.read_mut()?, cx, &write, limits),
-        )
-        .await;
-        self.note_post_sync_result(result)
+        let result = {
+            let mut read = InactivityRead::new(self.read_mut()?, inactivity);
+            read_classic_data_response_with_limits(&mut read, cx, &write, limits).await
+        };
+        self.note_post_sync_result(map_inactivity_timeout(result))
     }
 
     /// Reads one TTC response, deciding completion the way the connected
@@ -636,18 +634,12 @@ impl<T: WireTransport> ConnectionCore<T> {
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
         let inactivity = self.inactivity_timeout;
-        let result = apply_inactivity_timeout(
-            inactivity,
-            read_classic_data_response_probed_with_limits(
-                self.read_mut()?,
-                cx,
-                &write,
-                &probe,
-                limits,
-            ),
-        )
-        .await;
-        self.note_post_sync_result(result)
+        let result = {
+            let mut read = InactivityRead::new(self.read_mut()?, inactivity);
+            read_classic_data_response_probed_with_limits(&mut read, cx, &write, &probe, limits)
+                .await
+        };
+        self.note_post_sync_result(map_inactivity_timeout(result))
     }
 
     /// [`read_data_response_probed`](Self::read_data_response_probed) for the
@@ -667,19 +659,14 @@ impl<T: WireTransport> ConnectionCore<T> {
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
         let inactivity = self.inactivity_timeout;
-        let result = apply_inactivity_timeout(
-            inactivity,
+        let result = {
+            let mut read = InactivityRead::new(self.read_mut()?, inactivity);
             read_classic_data_response_flushing_out_binds_probed_with_limits(
-                self.read_mut()?,
-                cx,
-                &write,
-                sdu,
-                &probe,
-                limits,
-            ),
-        )
-        .await;
-        self.note_post_sync_result(result)
+                &mut read, cx, &write, sdu, &probe, limits,
+            )
+            .await
+        };
+        self.note_post_sync_result(map_inactivity_timeout(result))
     }
 
     async fn read_data_response_boundary(
@@ -690,18 +677,12 @@ impl<T: WireTransport> ConnectionCore<T> {
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
         let inactivity = self.inactivity_timeout;
-        let result = apply_inactivity_timeout(
-            inactivity,
-            read_data_response_boundary_with_limits(
-                self.read_mut()?,
-                cx,
-                &write,
-                in_pipeline,
-                limits,
-            ),
-        )
-        .await;
-        self.note_post_sync_result(result)
+        let result = {
+            let mut read = InactivityRead::new(self.read_mut()?, inactivity);
+            read_data_response_boundary_with_limits(&mut read, cx, &write, in_pipeline, limits)
+                .await
+        };
+        self.note_post_sync_result(map_inactivity_timeout(result))
     }
 
     async fn read_data_response_flushing_out_binds(
@@ -712,18 +693,12 @@ impl<T: WireTransport> ConnectionCore<T> {
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
         let inactivity = self.inactivity_timeout;
-        let result = apply_inactivity_timeout(
-            inactivity,
-            read_data_response_flushing_out_binds_with_limits(
-                self.read_mut()?,
-                cx,
-                &write,
-                sdu,
-                limits,
-            ),
-        )
-        .await;
-        self.note_post_sync_result(result)
+        let result = {
+            let mut read = InactivityRead::new(self.read_mut()?, inactivity);
+            read_data_response_flushing_out_binds_with_limits(&mut read, cx, &write, sdu, limits)
+                .await
+        };
+        self.note_post_sync_result(map_inactivity_timeout(result))
     }
 
     fn note_post_sync_result<U>(&self, result: Result<U>) -> Result<U> {
@@ -9869,121 +9844,90 @@ fn keepalive_idle_from_expire_time(expire_time_minutes: u32) -> Option<Duration>
     (expire_time_minutes > 0).then(|| Duration::from_secs(u64::from(expire_time_minutes) * 60))
 }
 
-/// Applies the connection's optional read-inactivity deadline (GH#14) to a wire
-/// read future. `None` awaits unbounded (the prior behaviour); `Some(d)` fails
-/// the read with [`Error::CallTimeout`] if it does not complete within `d`, so a
-/// silent or half-open server cannot wedge a post-auth read forever. The
-/// deadline bounds a whole read operation (which may span several framing-layer
-/// `read_exact` calls), so every one of those reads is transitively bounded.
-async fn apply_inactivity_timeout<F, U>(timeout: Option<Duration>, fut: F) -> Result<U>
-where
-    F: std::future::Future<Output = Result<U>>,
-{
-    match timeout {
-        None => fut.await,
-        Some(deadline) => match time::timeout(time::wall_now(), deadline, fut).await {
-            Ok(result) => result,
-            Err(_) => Err(Error::CallTimeout(duration_to_millis_saturating(deadline))),
-        },
+/// Marker carried through `std::io::Error` only while a read has made no
+/// progress for its configured inactivity window.
+#[derive(Debug)]
+struct InactivityReadExpired(u32);
+
+impl std::fmt::Display for InactivityReadExpired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "read made no progress for {} ms", self.0)
     }
 }
 
-/// Deterministic, container-free coverage for the GH#14 connect/idle/keepalive
-/// timeouts (bead a4/A1.1). The marquee change — a per-read inactivity deadline
-/// and a keepalive interval derived from `EXPIRE_TIME` — is wired into every
-/// `ConnectionCore` read via [`apply_inactivity_timeout`] (each `read_*` method
-/// wraps its read future, so every framing-layer `read_exact` is transitively
-/// bounded, AC4) and into the CONNECT/ACCEPT phase via the `time::timeout`
-/// around the connect block. These tests pin the two behaviours the DoD calls
-/// out — the deadline FIRES on a silent peer instead of hanging (AC1), and a
-/// successful read RESETS the window (AC2) — plus the `EXPIRE_TIME` derivation,
-/// without a live server: a never-completing future stands in for a silent
-/// socket and a bounded sleep stands in for a slow-but-alive one.
-#[cfg(test)]
-mod inactivity_timeout_tests {
-    use super::*;
-    use std::time::Instant;
+impl std::error::Error for InactivityReadExpired {}
 
-    /// `EXPIRE_TIME=0` disables keepalive; a positive value derives an idle
-    /// interval of that many MINUTES before the first probe (GH#14, net.pyx).
-    #[test]
-    fn keepalive_idle_is_derived_from_expire_time_minutes() {
-        assert_eq!(keepalive_idle_from_expire_time(0), None);
-        assert_eq!(
-            keepalive_idle_from_expire_time(1),
-            Some(Duration::from_secs(60))
-        );
-        assert_eq!(
-            keepalive_idle_from_expire_time(30),
-            Some(Duration::from_secs(30 * 60))
-        );
+/// An [`AsyncRead`] adapter whose deadline resets whenever its inner reader
+/// supplies one or more bytes. This is intentionally below packet framing so a
+/// large, continuously advancing response is not treated as a stalled read.
+struct InactivityRead<'a, R> {
+    inner: &'a mut R,
+    timeout: Option<Duration>,
+    idle_sleep: Option<std::pin::Pin<Box<time::Sleep>>>,
+}
+
+impl<'a, R> InactivityRead<'a, R> {
+    fn new(inner: &'a mut R, timeout: Option<Duration>) -> Self {
+        Self {
+            inner,
+            timeout,
+            idle_sleep: None,
+        }
     }
+}
 
-    /// AC1: a silent peer must not wedge a read forever. With a deadline set, a
-    /// never-completing read fails with `CallTimeout` reporting the deadline (a
-    /// tiny stand-in for the 5 s the bead specifies) — the test terminating at
-    /// all is the proof it did not hang past the deadline.
-    #[test]
-    fn silent_read_trips_the_inactivity_deadline() {
-        let runtime = build_io_runtime().expect("io runtime");
-        runtime.block_on(async {
-            let deadline = Duration::from_millis(120);
-            let start = Instant::now();
-            let result: Result<()> =
-                apply_inactivity_timeout(Some(deadline), std::future::pending::<Result<()>>())
-                    .await;
-            let elapsed = start.elapsed();
-            match result {
-                Err(Error::CallTimeout(ms)) => {
-                    assert_eq!(ms, duration_to_millis_saturating(deadline));
+impl<R> AsyncRead for InactivityRead<'_, R>
+where
+    R: AsyncRead + Unpin,
+{
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffer: &mut asupersync::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let filled_before = buffer.filled().len();
+        match std::pin::Pin::new(&mut *this.inner).poll_read(context, buffer) {
+            std::task::Poll::Ready(Ok(())) => {
+                if buffer.filled().len() > filled_before {
+                    this.idle_sleep = None;
                 }
-                other => panic!("expected CallTimeout, got {other:?}"),
+                std::task::Poll::Ready(Ok(()))
             }
-            // Fired at ~the deadline, not far beyond it (generous ceiling so a
-            // loaded CI box stays green while still catching a real hang).
-            assert!(
-                elapsed < Duration::from_secs(5),
-                "inactivity deadline fired far too late: {elapsed:?}"
-            );
-        });
-    }
-
-    /// A read that completes within the deadline returns its value untouched;
-    /// `None` awaits unbounded (the pre-GH#14 behaviour is preserved).
-    #[test]
-    fn completing_read_is_not_disturbed() {
-        let runtime = build_io_runtime().expect("io runtime");
-        runtime.block_on(async {
-            let bounded: Result<u32> =
-                apply_inactivity_timeout(Some(Duration::from_secs(30)), async { Ok(42u32) }).await;
-            assert_eq!(bounded.expect("bounded read ok"), 42);
-
-            let unbounded: Result<u32> = apply_inactivity_timeout(None, async { Ok(7u32) }).await;
-            assert_eq!(unbounded.expect("unbounded read ok"), 7);
-        });
-    }
-
-    /// AC2: each read OPERATION gets a fresh deadline window, so a successful
-    /// read resets the inactivity clock. Two sequential reads that each finish
-    /// inside the deadline both succeed even though their combined time exceeds
-    /// a single deadline — a live peer answering keepalives is never wrongly
-    /// timed out.
-    #[test]
-    fn deadline_resets_per_read_operation() {
-        let runtime = build_io_runtime().expect("io runtime");
-        runtime.block_on(async {
-            let deadline = Duration::from_millis(200);
-            let op_delay = Duration::from_millis(130);
-            // Two ops of 130 ms = 260 ms total, past the 200 ms single-op window.
-            for _ in 0..2 {
-                let res: Result<()> = apply_inactivity_timeout(Some(deadline), async {
-                    time::sleep(time::wall_now(), op_delay).await;
-                    Ok(())
-                })
-                .await;
-                res.expect("each within-deadline read succeeds — the deadline resets per op");
+            std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(error)),
+            std::task::Poll::Pending => {
+                let Some(timeout) = this.timeout else {
+                    return std::task::Poll::Pending;
+                };
+                let sleep = this
+                    .idle_sleep
+                    .get_or_insert_with(|| Box::pin(time::sleep(time::wall_now(), timeout)));
+                if sleep.as_mut().poll(context).is_ready() {
+                    std::task::Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        InactivityReadExpired(duration_to_millis_saturating(timeout)),
+                    )))
+                } else {
+                    std::task::Poll::Pending
+                }
             }
-        });
+        }
+    }
+}
+
+fn map_inactivity_timeout<U>(result: Result<U>) -> Result<U> {
+    match result {
+        Err(Error::Io(error)) => {
+            let timeout = error
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<InactivityReadExpired>())
+                .map(|marker| marker.0);
+            match timeout {
+                Some(timeout) => Err(Error::CallTimeout(timeout)),
+                None => Err(Error::Io(error)),
+            }
+        }
+        other => other,
     }
 }
 
@@ -11123,6 +11067,46 @@ mod tests {
         }
     }
 
+    /// Emits one byte after each delay, modelling a slow large response that
+    /// is continuously making progress rather than a stalled peer.
+    struct ProgressRead {
+        bytes: VecDeque<u8>,
+        delay: Duration,
+        sleep: Option<std::pin::Pin<Box<time::Sleep>>>,
+    }
+
+    impl ProgressRead {
+        fn new(bytes: impl IntoIterator<Item = u8>, delay: Duration) -> Self {
+            Self {
+                bytes: bytes.into_iter().collect(),
+                delay,
+                sleep: None,
+            }
+        }
+    }
+
+    impl asupersync::io::AsyncRead for ProgressRead {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            context: &mut std::task::Context<'_>,
+            buffer: &mut asupersync::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.bytes.is_empty() {
+                return std::task::Poll::Ready(Ok(()));
+            }
+            let delay = self.delay;
+            let sleep = self
+                .sleep
+                .get_or_insert_with(|| Box::pin(time::sleep(time::wall_now(), delay)));
+            if sleep.as_mut().poll(context).is_pending() {
+                return std::task::Poll::Pending;
+            }
+            self.sleep = None;
+            buffer.put_slice(&[self.bytes.pop_front().expect("checked non-empty")]);
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
     /// GH#14 / AC1+AC4+AC5: with an inactivity deadline set, a post-auth framing
     /// read against a silent server fails at ~the deadline with `CallTimeout`
     /// instead of hanging. Deterministic via the `SilentRead` mock transport.
@@ -11130,17 +11114,17 @@ mod tests {
     fn a11_inactivity_deadline_fires_on_a_silent_server() {
         let runtime = build_io_runtime().expect("io runtime");
         let elapsed = runtime.block_on(async {
-            let mut reader = SilentRead;
+            let mut source = SilentRead;
+            let mut reader = InactivityRead::new(&mut source, Some(Duration::from_millis(200)));
             let started = std::time::Instant::now();
-            let result = apply_inactivity_timeout(
-                Some(Duration::from_millis(200)),
+            let result = map_inactivity_timeout(
                 read_packet_with_limits(
                     &mut reader,
                     PacketLengthWidth::Large32,
                     ProtocolLimits::DEFAULT,
-                ),
-            )
-            .await;
+                )
+                .await,
+            );
             let elapsed = started.elapsed();
             assert!(
                 matches!(result, Err(Error::CallTimeout(_))),
@@ -11160,22 +11144,39 @@ mod tests {
         );
     }
 
-    /// GH#14: `None` (the default) imposes no deadline — a read that completes
-    /// passes through unchanged, and a generous deadline does not disturb a fast
-    /// read. Guards against the wrapper regressing existing unbounded behaviour.
+    /// GH#14: continuous byte-level progress resets the idle timer. The full
+    /// packet takes longer than the configured duration but every individual
+    /// byte arrives sooner, so an operation deadline would fail this test while
+    /// a true inactivity deadline succeeds.
     #[test]
-    fn a11_inactivity_none_and_slack_pass_through() {
+    fn a11_inactivity_deadline_resets_after_every_read_progress() {
         let runtime = build_io_runtime().expect("io runtime");
         runtime.block_on(async {
-            let none: Result<u32> =
-                apply_inactivity_timeout(None, async { Ok::<u32, Error>(42) }).await;
-            assert_eq!(none.expect("None passes value through"), 42);
-            let slack: Result<u32> =
-                apply_inactivity_timeout(Some(Duration::from_secs(30)), async {
-                    Ok::<u32, Error>(7)
-                })
-                .await;
-            assert_eq!(slack.expect("fast op beats the deadline"), 7);
+            let packet = encode_packet(
+                TNS_PACKET_TYPE_DATA,
+                0,
+                None,
+                &[0x01, 0x02],
+                PacketLengthWidth::Large32,
+            )
+            .expect("packet");
+            let mut source = ProgressRead::new(packet, Duration::from_millis(35));
+            let mut reader = InactivityRead::new(&mut source, Some(Duration::from_millis(100)));
+            let started = std::time::Instant::now();
+            let packet = map_inactivity_timeout(
+                read_packet_with_limits(
+                    &mut reader,
+                    PacketLengthWidth::Large32,
+                    ProtocolLimits::DEFAULT,
+                )
+                .await,
+            )
+            .expect("each byte arrived before the idle deadline");
+            assert_eq!(packet.payload, vec![0x01, 0x02]);
+            assert!(
+                started.elapsed() > Duration::from_millis(250),
+                "the whole packet must outlast one 100 ms inactivity window"
+            );
         });
     }
 
