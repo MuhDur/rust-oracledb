@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import re
 import subprocess
@@ -376,6 +377,14 @@ def self_test() -> None:
     validate_required_proof(required, sha, Path("required-proof.json"), fixture_plan)
     missing_required = json.loads(json.dumps(required))
     missing_required["commands"] = missing_required["commands"][1:]
+    missing_ids = sorted(command["id"] for command in missing_required["commands"])
+    missing_required["command_graph"] = {
+        "command_ids": missing_ids,
+        "sha256": hashlib.sha256(
+            json.dumps(missing_ids, ensure_ascii=False, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+    assert not validate_doc(missing_required)
     assert_rejected(
         lambda: validate_required_proof(
             missing_required, sha, Path("missing-required-proof.json"), fixture_plan

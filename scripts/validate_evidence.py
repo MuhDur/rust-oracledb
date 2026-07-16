@@ -400,8 +400,56 @@ def _semantic_required_proof(doc: dict) -> list:
     return out
 
 
+def _command_graph_sha256(command_ids: list[str]) -> str:
+    """Return the v1 commitment for a canonical Required command-ID list."""
+
+    canonical = json.dumps(command_ids, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _semantic_required_proof_v1(doc: dict) -> list:
+    """Preserve the frozen v1 graph-record validation semantics."""
+
+    out = _semantic_required_proof(doc)
+    graph = doc["command_graph"]
+    committed_ids = graph["command_ids"]
+    if committed_ids != sorted(set(committed_ids)):
+        out.append(
+            Finding(
+                "E_COMMAND_GRAPH_MISMATCH",
+                "/command_graph/command_ids",
+                "command graph IDs must be unique and sorted for a canonical commitment",
+            )
+        )
+        return out
+    if graph["sha256"] != _command_graph_sha256(committed_ids):
+        out.append(
+            Finding(
+                "E_COMMAND_GRAPH_HASH_MISMATCH",
+                "/command_graph/sha256",
+                "command graph hash does not match its canonical command-ID list",
+            )
+        )
+        return out
+    recorded_ids = sorted(command["id"] for command in doc["commands"])
+    if recorded_ids != committed_ids:
+        out.append(
+            Finding(
+                "E_COMMAND_GRAPH_MISMATCH",
+                "/commands",
+                "command records do not exactly match the committed Required graph",
+            )
+        )
+    return out
+
+
 def _semantic_required_proof_v2(doc: dict) -> list:
-    """Require v2 records to exactly match their committed Required graph."""
+    """Require v2 records to match their self-declared graph record exactly.
+
+    The record catches malformed or internally inconsistent documents.  It is
+    deliberately not treated as an authenticity boundary: an exact-SHA release
+    consumer must compare these records with the candidate workflow it derives.
+    """
 
     out = _semantic_required_proof(doc)
     graph = doc["command_graph"]
@@ -631,7 +679,7 @@ def _semantic_bead_close_evidence(doc: dict) -> list:
 
 
 SEMANTIC_RULES = {
-    "required-proof/v1": _semantic_required_proof,
+    "required-proof/v1": _semantic_required_proof_v1,
     "required-proof/v2": _semantic_required_proof_v2,
     "release-candidate-proof/v1": _semantic_release_candidate_proof,
     "release-candidate-proof/v2": _semantic_release_candidate_proof,

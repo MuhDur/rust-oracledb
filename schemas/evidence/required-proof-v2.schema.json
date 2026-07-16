@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:cross-repo-evidence-contract:v2:required-proof",
   "title": "required-proof/v2",
-  "description": "Evidence that a repository's Required command graph was run to completion against one exact, clean tree. v2 adds a canonical command-graph witness so an independent consumer can reject a passing subset of the Required graph.",
+  "description": "Evidence that a repository's Required command graph was run to completion against one exact, clean tree. v2 adds a canonical command-graph record whose internal consistency is checked offline; the exact-SHA release consumer independently compares records with the candidate workflow.",
   "x-evidence-contract": "cross-repo-evidence-contract-v2",
   "type": "object",
   "additionalProperties": false,
@@ -27,7 +27,7 @@
     },
     "resource_budget": { "$ref": "#/$defs/resourceBudget" },
     "command_graph": {
-      "description": "Canonical sorted Required command IDs plus the SHA-256 of their compact JSON representation. Consumers require records to match this witness exactly so an omitted gate cannot be hidden behind a passing verdict.",
+      "description": "Canonical sorted Required command IDs plus the SHA-256 of their compact JSON representation. This is an internal-consistency checksum, not an authenticity claim; the exact-SHA release consumer independently derives and compares the candidate graph.",
       "type": "object",
       "additionalProperties": false,
       "required": ["command_ids", "sha256"],

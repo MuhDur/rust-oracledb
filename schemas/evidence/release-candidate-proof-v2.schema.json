@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:cross-repo-evidence-contract:v2:release-candidate-proof",
   "title": "release-candidate-proof/v2",
-  "description": "Evidence that a candidate tag at an exact SHA satisfies every release precondition. v2 requires the graph-witnessed required-proof/v2 document and is emitted only on success by verify-release-exact-sha.",
+  "description": "Evidence that a candidate tag at an exact SHA satisfies every release precondition. v2 requires required-proof/v2 records that verify against the candidate's independently derived Required graph, and is emitted only on success by verify-release-exact-sha.",
   "x-evidence-contract": "cross-repo-evidence-contract-v2",
   "type": "object",
   "additionalProperties": false,
@@ -38,7 +38,7 @@
     },
     "source": { "$ref": "#/$defs/sourceRef" },
     "required_proof": {
-      "description": "Reference to the graph-witnessed required-proof/v2 document backing this candidate. Its SHA must equal source.sha, so a release cannot inherit a proof from an earlier commit (E_STALE_SHA).",
+      "description": "Reference to the required-proof/v2 document backing this candidate. Its SHA must equal source.sha, and verify-release-exact-sha must compare its records against the candidate's workflow-derived Required graph, so a release cannot inherit or rewrite a proof from another commit (E_STALE_SHA).",
       "type": "object",
       "additionalProperties": false,
       "required": ["schema", "path", "sha"],

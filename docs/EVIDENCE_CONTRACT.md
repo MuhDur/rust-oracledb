@@ -14,7 +14,7 @@ not evidence.** Every field below exists because some claim escaped once.
 | `required-proof/v1` | Legacy local Required proof shape, accepted for historical evidence. |
 | `required-proof/v2` | Did this repo's complete Required command graph actually run, on exactly this tree, to completion? |
 | `release-candidate-proof/v1` | Legacy exact-SHA candidate proof shape, accepted for historical evidence. |
-| `release-candidate-proof/v2` | Does a candidate tag at an exact SHA satisfy every release precondition using a graph-witnessed Required proof? |
+| `release-candidate-proof/v2` | Does a candidate tag at an exact SHA satisfy every release precondition using a Required proof checked against its own workflow graph? |
 | `mutation-result/v1` | Did a mutation run measure what it claims, and can its rate be recomputed? |
 | `bead-close-evidence/v1` | Is what this bead closes on actually backed by artifacts at this SHA? |
 
@@ -62,7 +62,8 @@ yields the same code.
 | `E_TREE_DIRTY` | Evidence was produced from a tree with uncommitted changes, so it describes code at no commit. |
 | `E_STALE_SHA` | A command, proof, or CI status is recorded against a different SHA than the document is for. |
 | `E_UNFINISHED` | Something claims an outcome but recorded no end time or completed exit status, so its completion cannot be verified. |
-| `E_COMMAND_GRAPH_MISMATCH` | A v2 Required-proof has an invalid canonical graph witness or records differ from it. |
+| `E_COMMAND_GRAPH_MISMATCH` | A Required-proof has an invalid canonical graph record or records differ from it. |
+| `E_COMMAND_GRAPH_HASH_MISMATCH` | A v1 Required-proof graph-record hash does not match its canonical command-ID list. |
 | `E_SKIP_WITHOUT_REASON` | A skip carries no machine-readable reason, making it indistinguishable from a gap. |
 | `E_SKIPPED_AS_PASS` | A required command was skipped and the proof still declares pass. |
 | `E_VERDICT_MISMATCH` | The declared verdict is not what the records derive. |
@@ -117,14 +118,14 @@ command legitimately has no end time — it never ran — so `E_UNFINISHED` exem
 skips. What it must carry is a machine-readable reason. An advisory skip does
 not gate; a required skip means the proof cannot pass.
 
-**A verdict is for the whole graph.** `required-proof/v2` carries the sorted
-command-ID witness and the SHA-256 of its compact JSON representation. The
-offline validator rejects malformed witnesses and missing, duplicate, or extra
-records with `E_COMMAND_GRAPH_MISMATCH`. The exact-SHA release consumer then
-derives the effective Required plan from the candidate's audited
-`.github/workflows/_quality.yml` and checks IDs, tiers, and argv against that
-plan. A green subset therefore cannot become release evidence by rewriting its
-own graph witness.
+**A verdict is for the whole graph.** `required-proof/v2` carries a sorted
+command-ID record and the SHA-256 of its compact JSON representation. The
+offline validator rejects malformed records and missing, duplicate, or extra
+records with `E_COMMAND_GRAPH_MISMATCH`. That in-document checksum is not an
+authenticity boundary: the exact-SHA release consumer independently derives the
+effective Required plan from the candidate's audited `.github/workflows/_quality.yml`
+and compares IDs, tiers, and argv. A green subset therefore cannot become release
+evidence by rewriting its own graph record and checksum.
 
 **`release-candidate-proof.verdict` is `const: "pass"`.** The document exists
 only for a candidate that passed, so a failing one is a contradiction rather than
@@ -166,8 +167,9 @@ that, so schema versions cannot drift into incompatible dialects.
 
 Changing a document shape is a new version. These documents are read by tooling
 in two repos, so `v1` remains readable but frozen once a proof-producing command
-depends on it. `required-proof/v2` and `release-candidate-proof/v2` add the
-graph witness without widening their v1 predecessors.
+depends on it. `required-proof/v2` and `release-candidate-proof/v2` add an
+internally checked graph record and independent release-side comparison without
+widening their v1 predecessors.
 
 ## Consumers
 

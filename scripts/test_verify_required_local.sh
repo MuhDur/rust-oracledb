@@ -41,7 +41,6 @@ assert [(finding.code, finding.path) for finding in findings] == [
 ]
 legacy = json.loads((root / "schemas/evidence/fixtures/valid/required-proof-fail.json").read_text())
 legacy["schema"] = "required-proof/v1"
-legacy.pop("command_graph")
 assert validator.validate_doc(legacy) == []
 print("verify-required-local: canonical command graph witness rejects omission")
 PY

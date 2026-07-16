@@ -14,12 +14,12 @@ duplicate, or altered Required command record is rejected. The DB-free contract
 test also executes the shared invalid fixtures for stale SHA, an unfinished
 command, and a skipped Required command presented as a pass.
 
-The producer writes a sorted command-ID witness with its SHA-256 commitment.
-`validate_evidence.py` requires every record to match that witness exactly, so a
-missing, duplicate, or extra command is `E_COMMAND_GRAPH_MISMATCH`. The
-exact-SHA release consumer additionally derives the candidate's Required plan
-from the audited workflow and checks IDs, tiers, and argv before accepting a
-passing proof.
+The producer writes a sorted command-ID record with its SHA-256 checksum.
+`validate_evidence.py` requires every record to match that record exactly, so a
+missing, duplicate, or extra command is `E_COMMAND_GRAPH_MISMATCH`. The checksum
+is not an authenticity claim: the exact-SHA release consumer independently
+derives the candidate's Required plan from the audited workflow and checks IDs,
+tiers, and argv before accepting a passing proof.
 
 ## Run it honestly
 

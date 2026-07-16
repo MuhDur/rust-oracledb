@@ -12,8 +12,8 @@ The command fails closed unless all of these describe the same exact candidate:
   the locally available `origin/main`;
 - the candidate tag is well formed, absent, and matches the workspace version;
 - the required-local proof is a valid passing `required-proof/v2` for `--sha`,
-  with every record matching its graph witness and the candidate's independently
-  derived Required graph;
+  with every record matching its self-declared graph record and the candidate's
+  independently derived Required graph;
 - `scripts/ci_taxonomy.py --status <sha>` reports every required check-run as
   `completed` / `success`, with no missing or unknown checks; and
 - `tests/artifacts/version_matrix/results-<sha>.json` is a clean, all-PASS live
