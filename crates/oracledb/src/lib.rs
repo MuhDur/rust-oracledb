@@ -6045,22 +6045,16 @@ impl Connection {
         let capabilities = self.capabilities;
         let limits = self.protocol_limits;
         let response = self
-            .core
-            .read_data_response_flushing_out_binds_probed(
-                cx,
-                self.sdu,
-                !self.supports_end_of_response,
-                |bytes| {
-                    response_complete(&parse_query_response_with_binds_options_columns_and_limits(
-                        bytes,
-                        capabilities,
-                        &[],
-                        exec_options,
-                        &known_columns,
-                        limits,
-                    ))
-                },
-            )
+            .read_flushing_out_binds_cancellable(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_query_response_with_binds_options_columns_and_limits(
+                    bytes,
+                    capabilities,
+                    &[],
+                    exec_options,
+                    &known_columns,
+                    limits,
+                ))
+            })
             .await?;
         trace_query_bytes("SCROLL response", &response);
         let parsed = parse_query_response_with_binds_options_columns_and_limits(
@@ -15112,6 +15106,75 @@ mod tests {
             phase,
             SessionRecoveryPhase::BreakSent,
             "the cancelled in-flight response must be reclaimed before a later request"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn scroll_cursor_context_cancel_arms_recovery_and_is_typed() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (cx_tx, cx_rx) = std::sync::mpsc::channel::<Cx>();
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+            assert_eq!(
+                read_one_wire_packet(&mut socket),
+                TNS_PACKET_TYPE_DATA,
+                "SCROLL request must reach the server before cancellation"
+            );
+            request_seen_tx
+                .send(())
+                .expect("client cancellation task is alive");
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+            Ok(())
+        });
+
+        let runtime = build_io_runtime()?;
+        let canceller = thread::spawn(move || -> Result<()> {
+            let cancel_cx = cx_rx
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|_| Error::Runtime("SCROLL task never exposed its Cx".into()))?;
+            request_seen_rx
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|_| Error::Runtime("server never observed SCROLL request".into()))?;
+            cancel_cx.cancel_fast(CancelKind::User);
+            Ok(())
+        });
+        let task = runtime.handle().spawn(async move {
+            let cx = test_cx()?;
+            cx_tx
+                .send(cx.clone())
+                .map_err(|_| Error::Runtime("cancellation test coordinator exited".into()))?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+
+            let err = connection
+                .scroll_cursor(&cx, "select value from scroll_cancel_fixture", 42, 1, 0, 0)
+                .await
+                .expect_err("the cancelled in-flight SCROLL must not complete");
+            Ok::<_, Error>((err, connection.core.recovery.phase()))
+        });
+        let (err, phase) = runtime.block_on(task)?;
+        canceller.join().expect("cancellation thread joins")?;
+
+        let _ = release_tx.send(());
+        server
+            .join()
+            .expect("server thread joins")
+            .map_err(Error::Io)?;
+
+        assert!(
+            matches!(&err, Error::Cancelled),
+            "a mid-read SCROLL cancellation must surface Error::Cancelled, not {err:?}"
+        );
+        assert_eq!(
+            phase,
+            SessionRecoveryPhase::BreakSent,
+            "a cancelled SCROLL response must be reclaimed before a later request"
         );
         Ok(())
     }
