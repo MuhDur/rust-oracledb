@@ -1290,6 +1290,7 @@ fn c3_mock_iam_token_frames_auth_token_over_tcps_lane() {
         300_000_000,
         "cs",
         None,
+        None,
     )
     .expect("build fast-auth token payload");
 

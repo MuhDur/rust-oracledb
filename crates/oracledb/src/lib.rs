@@ -154,17 +154,17 @@ use oracledb_protocol::thin::{
     parse_query_response_with_binds_options_columns_and_limits,
     parse_tpc_txn_switch_response_with_limits, AuthResponse, BindValue, BorrowedFetchResult,
     ClientCapabilities, ColumnMetadata, CursorValue, ExecuteOptions, LobReadResult, QueryResult,
-    QueryValueRef, SessionlessTxnState, TpcChangeStateResponse, TpcSwitchResponse, TpcXid,
-    TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF,
-    TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS,
-    TNS_PACKET_FLAG_REDIRECT, TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT,
-    TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT, TNS_PACKET_TYPE_REFUSE, TNS_PACKET_TYPE_RESEND,
-    TNS_PIPELINE_MODE_ABORT_ON_ERROR, TNS_PIPELINE_MODE_CONTINUE_ON_ERROR, TNS_TPC_TXN_ABORT,
-    TNS_TPC_TXN_COMMIT, TNS_TPC_TXN_DETACH, TNS_TPC_TXN_POST_DETACH, TNS_TPC_TXN_PREPARE,
-    TNS_TPC_TXN_START, TNS_TPC_TXN_STATE_ABORTED, TNS_TPC_TXN_STATE_COMMITTED,
-    TNS_TPC_TXN_STATE_FORGOTTEN, TNS_TPC_TXN_STATE_PREPARE, TNS_TPC_TXN_STATE_READ_ONLY,
-    TNS_TPC_TXN_STATE_REQUIRES_COMMIT, TPC_TXN_FLAGS_NEW, TPC_TXN_FLAGS_RESUME,
-    TPC_TXN_FLAGS_SESSIONLESS,
+    QueryValueRef, SessionlessTxnState, TokenPop, TpcChangeStateResponse, TpcSwitchResponse,
+    TpcXid, TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST, TNS_FUNC_COMMIT,
+    TNS_FUNC_LOGOFF, TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE,
+    TNS_MSG_TYPE_FLUSH_OUT_BINDS, TNS_PACKET_FLAG_REDIRECT, TNS_PACKET_TYPE_ACCEPT,
+    TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_DATA, TNS_PACKET_TYPE_REDIRECT,
+    TNS_PACKET_TYPE_REFUSE, TNS_PACKET_TYPE_RESEND, TNS_PIPELINE_MODE_ABORT_ON_ERROR,
+    TNS_PIPELINE_MODE_CONTINUE_ON_ERROR, TNS_TPC_TXN_ABORT, TNS_TPC_TXN_COMMIT, TNS_TPC_TXN_DETACH,
+    TNS_TPC_TXN_POST_DETACH, TNS_TPC_TXN_PREPARE, TNS_TPC_TXN_START, TNS_TPC_TXN_STATE_ABORTED,
+    TNS_TPC_TXN_STATE_COMMITTED, TNS_TPC_TXN_STATE_FORGOTTEN, TNS_TPC_TXN_STATE_PREPARE,
+    TNS_TPC_TXN_STATE_READ_ONLY, TNS_TPC_TXN_STATE_REQUIRES_COMMIT, TPC_TXN_FLAGS_NEW,
+    TPC_TXN_FLAGS_RESUME, TPC_TXN_FLAGS_SESSIONLESS,
 };
 use oracledb_protocol::thin::{
     build_notify_payload_with_seq, build_subscribe_payload_with_seq,
@@ -319,6 +319,7 @@ pub mod arrow;
 /// is the three items re-exported at the crate root below, so there is exactly
 /// one public path per item (no `oracledb::cursor_logic::…` second path).
 mod cursor_logic;
+mod iam_pop;
 /// Feature-gated observability seam (bead rust-oracledb-lv6). Always compiled so
 /// the `obs_span!` / `obs_record!` macros resolve, but its `tracing`-touching
 /// items are themselves `#[cfg(feature = "tracing")]`, so the off-build pulls in
@@ -486,6 +487,9 @@ struct TokenAuthentication<'a> {
     version_num: u32,
     connect_string: &'a str,
     edition: Option<&'a str>,
+    /// OCI IAM database-token proof-of-possession (`AUTH_HEADER`/`AUTH_SIGNATURE`).
+    /// `None` for a plain OAuth2 bearer token.
+    pop: Option<TokenPop<'a>>,
 }
 
 #[derive(Debug)]
@@ -671,6 +675,7 @@ impl<T: WireTransport> ConnectionCore<T> {
             token_auth.version_num,
             token_auth.connect_string,
             token_auth.edition,
+            token_auth.pop,
         )?;
         trace_connect_step("send AUTH token (classic phase two)");
         self.send_data_packet(cx, &auth_payload, sdu).await?;
@@ -1300,6 +1305,16 @@ pub enum Error {
     /// never included in this error.
     #[error("DPY-3001: access token authentication requires a TLS (TCPS) connection")]
     AccessTokenRequiresTcps,
+    /// The OCI IAM database-token proof-of-possession private key could not be
+    /// used to sign the auth header: it was not a readable PKCS#8 RSA key, or
+    /// the RSA-PKCS1v15-SHA256 signing operation failed. The key material, the
+    /// token, and the signed header are never included in this error — only a
+    /// fixed diagnostic is surfaced.
+    #[error(
+        "OCI IAM database-token proof-of-possession signing failed: \
+         the bound private key is not a usable PKCS#8 RSA key"
+    )]
+    IamTokenProofOfPossession,
     /// A pluggable [`TokenSource`] failed to produce a database access token.
     /// The failure is a redacted [`TokenSourceError`] class; the token and any
     /// provider detail never appear in this error.
@@ -1429,6 +1444,7 @@ impl Error {
             Error::ArrowConversion(_) => ErrorKind::Conversion,
             Error::AccessTokenRequiresTcps
             | Error::UnsupportedAuthMode(_)
+            | Error::IamTokenProofOfPossession
             | Error::TokenSource(_) => ErrorKind::Authentication,
             Error::RedirectUnsupported
             | Error::InvalidRedirectData(_)
@@ -1681,6 +1697,34 @@ impl std::fmt::Debug for AccessToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Never render the token, regardless of formatter flags.
         f.write_str("AccessToken(")?;
+        f.write_str(REDACTED_SECRET)?;
+        f.write_str(")")
+    }
+}
+
+/// The RSA private key (PKCS#8 PEM) an OCI IAM database token is bound to, used
+/// to sign the proof-of-possession header. Like [`AccessToken`] its [`Debug`]
+/// is redacted so the key never leaks into logs, errors, or panics. Set it with
+/// [`ConnectOptions::with_access_token_and_key`].
+#[derive(Clone)]
+pub struct TokenPrivateKey(String);
+
+impl TokenPrivateKey {
+    /// Wrap a PKCS#8 private-key PEM. The value is never printed; see the docs.
+    pub fn new(pem: impl Into<String>) -> Self {
+        Self(pem.into())
+    }
+
+    /// The raw PEM, for signing only. Crate-internal so callers cannot route the
+    /// secret through `Display`/formatting.
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for TokenPrivateKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TokenPrivateKey(")?;
         f.write_str(REDACTED_SECRET)?;
         f.write_str(")")
     }
@@ -1981,6 +2025,15 @@ pub struct ConnectOptions {
     /// verifier is exchanged. Token auth requires a TLS/TCPS transport; see
     /// [`ConnectOptions::with_access_token`]. The token is redacted from `Debug`.
     access_token: Option<AccessToken>,
+    /// The RSA private key (PKCS#8 PEM) an OCI IAM **database** token is bound
+    /// to. When present (with an `access_token`), the driver performs the
+    /// token's proof-of-possession: it signs the auth header with this key and
+    /// sends `AUTH_HEADER`/`AUTH_SIGNATURE` so the server can verify possession
+    /// against the token's embedded public key. Required for OCI IAM database
+    /// tokens (`oci iam db-token get`); a plain OAuth2 bearer token needs none.
+    /// Redacted from `Debug`. Set with
+    /// [`ConnectOptions::with_access_token_and_key`].
+    access_token_private_key: Option<TokenPrivateKey>,
     /// Pluggable source of database access tokens (OCI IAM / OAuth2). When set
     /// and no static [`access_token`](Self::access_token) is present, the driver
     /// calls it once at connect to obtain the token (and again only on an auth
@@ -2039,6 +2092,7 @@ impl std::fmt::Debug for ConnectOptions {
             .field("ssl_server_cert_dn", &server_cert_dn)
             .field("use_sni", &self.use_sni)
             .field("access_token", &self.access_token)
+            .field("access_token_private_key", &self.access_token_private_key)
             .field(
                 "token_source",
                 &self.token_source.as_ref().map(|_| "<token source>"),
@@ -2085,6 +2139,7 @@ impl ConnectOptions {
             use_sni: false,
             edition: None,
             access_token: None,
+            access_token_private_key: None,
             token_source: None,
             statement_cache_size: STATEMENT_CACHE_SIZE,
             protocol_limits: ProtocolLimits::DEFAULT,
@@ -2180,6 +2235,29 @@ impl ConnectOptions {
     #[must_use]
     pub fn with_access_token(mut self, token: impl Into<String>) -> Self {
         self.access_token = Some(AccessToken::new(token));
+        self.auth_mode = AuthMode::IamToken;
+        self
+    }
+
+    /// Authenticate with an OCI IAM **database** token and its bound RSA private
+    /// key (`oci iam db-token get` writes the token and a PKCS#8 `oci_db_key.pem`).
+    ///
+    /// Unlike a plain OAuth2 bearer token, an OCI IAM database token is a
+    /// proof-of-possession credential: the token embeds a public key and the
+    /// database refuses the bearer token alone with `ORA-01017`. With the private
+    /// key set, the driver signs the auth header (RSA-PKCS1v15 + SHA-256) and
+    /// sends `AUTH_HEADER`/`AUTH_SIGNATURE`, which the server verifies against the
+    /// token's embedded public key. Like [`Self::with_access_token`] this selects
+    /// token auth and therefore **requires** a TLS/TCPS connection. Both the token
+    /// and the key are redacted from `Debug`.
+    #[must_use]
+    pub fn with_access_token_and_key(
+        mut self,
+        token: impl Into<String>,
+        private_key_pkcs8_pem: impl Into<String>,
+    ) -> Self {
+        self.access_token = Some(AccessToken::new(token));
+        self.access_token_private_key = Some(TokenPrivateKey::new(private_key_pkcs8_pem));
         self.auth_mode = AuthMode::IamToken;
         self
     }
@@ -3109,6 +3187,29 @@ impl Connection {
                 if !descriptor.protocol.is_tls() {
                     return Err(Error::AccessTokenRequiresTcps);
                 }
+                // OCI IAM *database* tokens are proof-of-possession: the token is
+                // bound to an RSA private key and the server refuses the bearer
+                // token alone with ORA-01017. When the caller supplied the key,
+                // sign the HTTP-Signatures header now and carry it as
+                // AUTH_HEADER/AUTH_SIGNATURE on whichever auth path is taken. A
+                // plain OAuth2 bearer token has no key and skips this. Computed
+                // once; the borrowed `TokenPop` feeds both fast-auth and classic.
+                let pop_material = match options.access_token_private_key.as_ref() {
+                    Some(key) => {
+                        let header = iam_pop::build_signing_header(
+                            &descriptor.service_name,
+                            &descriptor.host,
+                            descriptor.port,
+                            std::time::SystemTime::now(),
+                        );
+                        let signature = iam_pop::sign_signing_header(key.expose(), &header)?;
+                        Some((header, signature))
+                    }
+                    None => None,
+                };
+                let pop = pop_material
+                    .as_ref()
+                    .map(|(header, signature)| TokenPop { header, signature });
                 let (auth, capabilities) = if accept_info.supports_fast_auth {
                     // One combined fast-auth bundle carrying a phase-two
                     // `AUTH_TOKEN` message; no resend. The payload embeds the
@@ -3120,6 +3221,7 @@ impl Connection {
                         PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
                         &auth_connect_string,
                         options.edition.as_deref(),
+                        pop,
                     )?;
                     trace_connect_step("send AUTH token (fast-auth phase two)");
                     core.send_data_packet(cx, &auth_payload, sdu).await?;
@@ -3139,6 +3241,7 @@ impl Connection {
                             version_num: PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
                             connect_string: &auth_connect_string,
                             edition: options.edition.as_deref(),
+                            pop,
                         },
                         sdu,
                     )
@@ -14690,6 +14793,7 @@ mod tests {
             PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
             CONNECT_STRING,
             None,
+            None,
         )?;
         let expected_writes = [protocol_payload, data_types_payload, token_payload]
             .into_iter()
@@ -14741,6 +14845,7 @@ mod tests {
                         version_num: PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
                         connect_string: CONNECT_STRING,
                         edition: None,
+                        pop: None,
                     },
                     8192,
                 )

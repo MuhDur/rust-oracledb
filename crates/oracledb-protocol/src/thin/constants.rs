@@ -204,6 +204,11 @@ pub const TNS_PIPELINE_MODE_ABORT_ON_ERROR: u8 = 2;
 pub const TNS_AUTH_MODE_LOGON: u32 = 0x0000_0001;
 pub const TNS_AUTH_MODE_CHANGE_PASSWORD: u32 = 0x0000_0002;
 pub const TNS_AUTH_MODE_WITH_PASSWORD: u32 = 0x0000_0100;
+/// Set (alongside `LOGON`) when the token phase-two message carries an OCI IAM
+/// database-token proof-of-possession (`AUTH_HEADER` + `AUTH_SIGNATURE`), so the
+/// server verifies the RSA signature against the token's embedded public key
+/// (reference `impl/thin/constants.pxi` `TNS_AUTH_MODE_IAM_TOKEN`).
+pub const TNS_AUTH_MODE_IAM_TOKEN: u32 = 0x2000_0000;
 
 pub const TNS_VERIFIER_TYPE_11G_1: u32 = 0xb152;
 pub const TNS_VERIFIER_TYPE_11G_2: u32 = 0x1b25;

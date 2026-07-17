@@ -178,6 +178,7 @@ fn token_source_token_frames_as_auth_token() {
         300_000_000,
         "cs",
         None,
+        None,
     )
     .expect("build fast-auth token payload");
 

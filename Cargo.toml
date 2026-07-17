@@ -52,9 +52,22 @@ arrow-schema = "59.0.0"
 # its `tls` feature pins the rustls/ring graph, so a 0.3.x point release could
 # silently re-shape the runtime. Bump deliberately, not via the caret floor.
 asupersync = "=0.3.9"
+# base64 encodes the OCI IAM database-token proof-of-possession signature
+# (`AUTH_SIGNATURE`). Already resolved in the graph transitively; a direct edge
+# adds no new compiled crate. MIT OR Apache-2.0.
+base64 = "0.22"
 hex = "0.4"
+# httpdate formats the IMF-fixdate `date:` field of the IAM PoP signing header
+# (`Fri, 17 Jul 2026 07:00:00 GMT`) byte-exactly, matching the reference
+# `datetime.strftime("%a, %d %b %Y %H:%M:%S GMT")`. Tiny, no deps. MIT OR Apache-2.0.
+httpdate = "1.0"
 md-5 = "0.10"
 pbkdf2 = "0.12"
+# ring provides the RSA-PKCS1v15-SHA256 signing for OCI IAM database-token
+# proof-of-possession. Exact-pinned to the copy asupersync's `tls`/rustls graph
+# already resolves, so no new crypto backend enters the build. Signing only —
+# no unsafe on our side; the audited FFI stays inside ring, out of our crates.
+ring = "=0.17.14"
 # Property-based testing for the sans-io codecs (round-trip / metamorphic /
 # boundary suites in crates/oracledb-protocol). Dev-dependency only; gated
 # behind nothing — plain `cargo test`.

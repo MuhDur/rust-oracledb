@@ -24,6 +24,21 @@ pub fn append_auth_phase_one(
     Ok(())
 }
 
+/// OCI IAM database-token **proof-of-possession** material for the token
+/// phase-two message. `header` is the HTTP-Signatures signing string
+/// (`date: …\n(request-target): …\nhost: …`) and `signature` is its base64
+/// RSA-PKCS1v15-SHA256 signature under the token's bound private key. The two
+/// are written as `AUTH_HEADER` / `AUTH_SIGNATURE` and flip the auth mode to
+/// carry `TNS_AUTH_MODE_IAM_TOKEN` so the server verifies possession against the
+/// token's embedded public key (reference `messages/auth.pyx` `_write_message`,
+/// `impl/thin/crypto.pyx` `get_signature`). The crypto (key parse + signing)
+/// lives in the `oracledb` crate; this sans-I/O codec only frames the result.
+#[derive(Clone, Copy, Debug)]
+pub struct TokenPop<'a> {
+    pub header: &'a str,
+    pub signature: &'a str,
+}
+
 /// Appends the auth message for **token authentication** (OCI IAM database
 /// token / OAuth2) to the fast-auth bundle. Unlike password auth there is no
 /// verifier challenge: the reference sends auth phase TWO directly, carrying the
@@ -32,6 +47,12 @@ pub fn append_auth_phase_one(
 /// `_set_params`/`_write_message`, messages/fast_auth.pyx). Because this message
 /// lives inside the fast-auth bundle (ttc field version 19.1), the function code
 /// carries no `ub8` token-num — exactly like [`append_auth_phase_one`].
+///
+/// When `pop` is `Some`, the token is an OCI IAM database token bound to a
+/// private key: the auth mode gains `TNS_AUTH_MODE_IAM_TOKEN` and two extra
+/// pairs (`AUTH_HEADER`, `AUTH_SIGNATURE`) are written between `AUTH_ALTER_SESSION`
+/// and `AUTH_ORA_EDITION`, exactly matching the reference key/value order.
+#[allow(clippy::too_many_arguments)] // mirrors the reference message attribute set
 pub fn append_auth_phase_two_token(
     out: &mut Vec<u8>,
     user: &str,
@@ -40,19 +61,28 @@ pub fn append_auth_phase_two_token(
     version_num: u32,
     connect_string: &str,
     edition: Option<&str>,
+    pop: Option<TokenPop<'_>>,
 ) -> Result<()> {
     let mut writer = TtcWriter::new();
     writer.write_function_code(TNS_FUNC_AUTH_PHASE_TWO);
     // AUTH_TOKEN + the four mandatory session pairs, plus the optional
-    // AUTH_ORA_EDITION and AUTH_CONNECT_STRING.
+    // AUTH_HEADER/AUTH_SIGNATURE (IAM proof-of-possession), AUTH_ORA_EDITION and
+    // AUTH_CONNECT_STRING.
     let mut num_pairs = 5u32;
+    let auth_mode = if pop.is_some() {
+        // AUTH_HEADER + AUTH_SIGNATURE.
+        num_pairs += 2;
+        TNS_AUTH_MODE_LOGON | TNS_AUTH_MODE_IAM_TOKEN
+    } else {
+        TNS_AUTH_MODE_LOGON
+    };
     if edition.is_some() {
         num_pairs += 1;
     }
     if !connect_string.is_empty() {
         num_pairs += 1;
     }
-    write_auth_header(&mut writer, user, TNS_AUTH_MODE_LOGON, num_pairs)?;
+    write_auth_header(&mut writer, user, auth_mode, num_pairs)?;
     write_key_value(&mut writer, "AUTH_TOKEN", token, 0)?;
     write_key_value(&mut writer, "SESSION_CLIENT_CHARSET", "873", 0)?;
     write_key_value(&mut writer, "SESSION_CLIENT_DRIVER_NAME", driver_name, 0)?;
@@ -68,6 +98,13 @@ pub fn append_auth_phase_two_token(
         "ALTER SESSION SET TIME_ZONE='+00:00'\0",
         1,
     )?;
+    // IAM database-token proof-of-possession, in the reference's key/value order
+    // (after AUTH_ALTER_SESSION, before AUTH_ORA_EDITION): the server verifies
+    // AUTH_SIGNATURE over AUTH_HEADER using the public key embedded in the token.
+    if let Some(pop) = pop {
+        write_key_value(&mut writer, "AUTH_HEADER", pop.header, 0)?;
+        write_key_value(&mut writer, "AUTH_SIGNATURE", pop.signature, 0)?;
+    }
     // Edition-Based Redefinition applies to token auth too — the reference writes
     // AUTH_ORA_EDITION after AUTH_ALTER_SESSION on both auth paths (messages/auth.pyx
     // `_write_message`); omitting it here silently ran token sessions under the
@@ -488,6 +525,7 @@ mod token_auth_tests {
             300_000_000,
             "cs",
             None,
+            None,
         )
         .unwrap();
 
@@ -528,7 +566,7 @@ mod token_auth_tests {
     #[test]
     fn token_message_pair_count_without_connect_string() {
         let mut out = Vec::new();
-        append_auth_phase_two_token(&mut out, "u", "tok", "drv", 1, "", None).unwrap();
+        append_auth_phase_two_token(&mut out, "u", "tok", "drv", 1, "", None, None).unwrap();
         let mut pos = 4;
         let _user_len = read_ub4(&out, &mut pos);
         let _auth_mode = read_ub4(&out, &mut pos);
@@ -537,13 +575,58 @@ mod token_auth_tests {
         assert!(!contains(&out, b"AUTH_CONNECT_STRING"));
     }
 
+    /// An OCI IAM database-token proof-of-possession adds exactly two pairs
+    /// (`AUTH_HEADER`, `AUTH_SIGNATURE`), flips the auth mode to carry
+    /// `TNS_AUTH_MODE_IAM_TOKEN` alongside `LOGON`, and keeps `AUTH_TOKEN`. This
+    /// pins the wire framing against the reference `_write_message` order.
+    #[test]
+    fn token_message_carries_iam_proof_of_possession() {
+        let mut out = Vec::new();
+        append_auth_phase_two_token(
+            &mut out,
+            "OMCP_IAM",
+            "HEADER.PAYLOAD.SIG",
+            "drv",
+            1,
+            "",
+            None,
+            Some(TokenPop {
+                header: "date: Fri, 17 Jul 2026 07:00:00 GMT\n(request-target): svc\nhost: h:1522",
+                signature: "c2lnbmF0dXJl",
+            }),
+        )
+        .unwrap();
+        let mut pos = 4;
+        let _user_len = read_ub4(&out, &mut pos);
+        assert_eq!(
+            read_ub4(&out, &mut pos),
+            TNS_AUTH_MODE_LOGON | TNS_AUTH_MODE_IAM_TOKEN,
+            "IAM proof-of-possession sets the IAM_TOKEN mode bit alongside LOGON"
+        );
+        pos += 1; // authivl pointer
+        assert_eq!(
+            read_ub4(&out, &mut pos),
+            7,
+            "AUTH_TOKEN + 4 session pairs + AUTH_HEADER + AUTH_SIGNATURE"
+        );
+        assert!(contains(&out, b"AUTH_TOKEN"));
+        assert!(contains(&out, b"AUTH_HEADER"));
+        assert!(contains(&out, b"AUTH_SIGNATURE"));
+        assert!(
+            contains(&out, b"(request-target): svc"),
+            "header is sent verbatim"
+        );
+        assert!(contains(&out, b"c2lnbmF0dXJl"), "base64 signature is sent");
+    }
+
     /// Edition-Based Redefinition must reach the server on the token path too:
     /// `AUTH_ORA_EDITION` is written and counted, exactly as on the password path
     /// (regression guard for the 0.2.0 bug where token auth dropped the edition).
     #[test]
     fn token_message_carries_edition() {
         let mut out = Vec::new();
-        append_auth_phase_two_token(&mut out, "u", "tok", "drv", 1, "", Some("E_TEST")).unwrap();
+        append_auth_phase_two_token(&mut out, "u", "tok", "drv", 1, "", Some("E_TEST"), None)
+            .unwrap();
         let mut pos = 4;
         let _user_len = read_ub4(&out, &mut pos);
         let _auth_mode = read_ub4(&out, &mut pos);
@@ -558,7 +641,8 @@ mod token_auth_tests {
 
         // With both an edition and a connect string the count rises to 7.
         let mut out2 = Vec::new();
-        append_auth_phase_two_token(&mut out2, "u", "tok", "drv", 1, "cs", Some("E_TEST")).unwrap();
+        append_auth_phase_two_token(&mut out2, "u", "tok", "drv", 1, "cs", Some("E_TEST"), None)
+            .unwrap();
         let mut p = 4;
         let _ = read_ub4(&out2, &mut p);
         let _ = read_ub4(&out2, &mut p);

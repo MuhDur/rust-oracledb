@@ -71,6 +71,16 @@ arrow-schema = { workspace = true, optional = true }
 # asupersync's `tls` feature wraps rustls; we drive its sans-io ClientConnection
 # over the async TCP socket and supply our own Oracle ServerCertVerifier.
 asupersync = { workspace = true, features = ["tls"] }
+# OCI IAM database-token proof-of-possession (AUTH_HEADER/AUTH_SIGNATURE): parse
+# the token's bound PKCS#8 private key (rustls-pemfile), sign the HTTP-Signatures
+# header with RSA-PKCS1v15-SHA256 (ring), base64-encode (base64), and stamp the
+# IMF-fixdate `date:` field (httpdate). All four are already in the TLS graph;
+# ring's audited FFI stays quarantined inside ring, keeping our crates
+# `#![forbid(unsafe_code)]`.
+base64.workspace = true
+httpdate.workspace = true
+ring.workspace = true
+rustls-pemfile.workspace = true
 chrono = { version = "0.4", optional = true, default-features = false, features = ["std"] }
 # Trait-only `Stream` for the `OwnedRowStream` row-by-row streaming API (K10).
 # `default-features = false` keeps it to the `Stream`/`FusedStream` traits with
@@ -105,8 +115,8 @@ criterion = { version = "0.5", default-features = false, features = ["cargo_benc
 # (tests/value_bridge_properties.rs). Same version the protocol crate pins.
 proptest.workspace = true
 # TLS handshake integration test: a blocking rustls server stub + PEM loading.
-ring = "=0.17.14"
-rustls-pemfile.workspace = true
+# `ring` and `rustls-pemfile` are now first-class dependencies (IAM PoP signing),
+# so the test harness picks them up from `[dependencies]`.
 sha2.workspace = true
 # Span-capture subscriber for the feature-gated observability test
 # (tests/observability.rs, compiled only under `--features tracing`).

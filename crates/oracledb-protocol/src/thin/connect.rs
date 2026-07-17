@@ -182,6 +182,7 @@ pub fn build_fast_auth_token_payload(
     version_num: u32,
     connect_string: &str,
     edition: Option<&str>,
+    pop: Option<TokenPop<'_>>,
 ) -> Result<Vec<u8>> {
     let mut out = Vec::from_hex(FAST_AUTH_PREFIX_HEX)
         .map_err(|_| ProtocolError::TtcDecode("invalid static fast-auth prefix"))?;
@@ -193,6 +194,7 @@ pub fn build_fast_auth_token_payload(
         version_num,
         connect_string,
         edition,
+        pop,
     )?;
     Ok(out)
 }
@@ -210,6 +212,7 @@ pub fn build_auth_phase_two_token_payload(
     version_num: u32,
     connect_string: &str,
     edition: Option<&str>,
+    pop: Option<TokenPop<'_>>,
 ) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     append_auth_phase_two_token(
@@ -220,6 +223,7 @@ pub fn build_auth_phase_two_token_payload(
         version_num,
         connect_string,
         edition,
+        pop,
     )?;
     Ok(out)
 }
@@ -362,6 +366,7 @@ mod tests {
             4_000_000_000,
             "db.example.com/service",
             Some("MY_EDITION"),
+            None,
         )
         .expect("classic token payload");
         let fast = build_fast_auth_token_payload(
@@ -371,6 +376,7 @@ mod tests {
             4_000_000_000,
             "db.example.com/service",
             Some("MY_EDITION"),
+            None,
         )
         .expect("fast token payload");
         let prefix = Vec::from_hex(FAST_AUTH_PREFIX_HEX).expect("prefix decodes");
