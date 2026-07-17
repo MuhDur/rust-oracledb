@@ -34,12 +34,35 @@ artifacts, and the checked-in API/provenance ledgers.
 
 > Prepared release candidate; not published to crates.io or tagged.
 
+### Added
+
+- **OCI Autonomous Database (TCPS) connectivity.** Thin-mode connections to
+  Oracle Autonomous Database over TCPS: SNI from the service descriptor,
+  downloaded-wallet TLS material, and strict server-certificate-DN / host
+  matching for Autonomous Database service endpoints.
+- **OCI IAM database-token authentication with proof-of-possession.** An OCI IAM
+  database token (`oci iam db-token get`) is a proof-of-possession credential:
+  the driver now signs the auth header (RSA-PKCS1v15 + SHA-256) with the token's
+  bound private key and sends `AUTH_HEADER` / `AUTH_SIGNATURE` (setting
+  `TNS_AUTH_MODE_IAM_TOKEN`), so the database authenticates the token instead of
+  rejecting it with `ORA-01017`. Set the pair with
+  `ConnectOptions::with_access_token_and_key`; a plain OAuth2 bearer token still
+  uses `ConnectOptions::with_access_token`. Validated live against a real
+  Autonomous Database.
+
 ### Fixed
 
 - **23ai TSTZ object metadata.** `TIMESTAMP WITH TIME ZONE` and `TIMESTAMP
   WITH LOCAL TIME ZONE` DbObject descriptors now retain their real
   precision/scale through the thin wire decoder, with a captured 23ai fixture
   and live regression gate.
+- **Connection timeouts / keepalive (GH#14).** The thin connect path now honors
+  the parsed `EXPIRE_TIME` TCP keepalive and `TRANSPORT`/`TCP_CONNECT_TIMEOUT`,
+  and applies a read-inactivity timeout that resets on read progress, so a
+  half-open or idle connection can no longer hang forever.
+- **Hostile-input bounds.** Wallet readers and `tnsnames.ora` `IFILE` graphs are
+  bounded against malformed/adversarial input, returning structured errors
+  rather than unbounded work.
 - **Exact-SHA tag qualification.** A release tag must consume immutable,
   exact-SHA Required and live-matrix evidence from the qualification workflow;
   a parent artifact is never substituted for the tagged candidate.
