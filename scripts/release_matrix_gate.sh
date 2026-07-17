@@ -47,6 +47,17 @@ fi
 
 echo "release-matrix-gate: SHA=$sha dirty=$dirty lanes=${LANES[*]}"
 
+# The free23 lane's suite user defaults to the locally-bootstrapped `pythontest`
+# (scripts/version_matrix.sh lane_fields), but this gate provisions EVERY gvenzl
+# lane with APP_USER=testuser (version_matrix.sh lane_up boots `-e APP_USER`).
+# Connect free23 as that same provisioned user so the gate is self-consistent —
+# identical to the green "Version matrix" workflow, which sets exactly this. A
+# mismatch here is what surfaced as free23 ORA-01017 (the nonexistent pythontest
+# user). Honor an explicit override if the operator points the gate at a
+# differently-provisioned listener.
+export PYO_TEST_MAIN_USER="${PYO_TEST_MAIN_USER:-${ORACLEDB_MATRIX_APP_USER:-testuser}}"
+export PYO_TEST_MAIN_PASSWORD="${PYO_TEST_MAIN_PASSWORD:-${ORACLEDB_MATRIX_APP_PASSWORD:-testpw}}"
+
 # Bring every lane up and wait for readiness.
 bash scripts/version_matrix.sh up all
 deadline=$((SECONDS + BOOT_TIMEOUT))
