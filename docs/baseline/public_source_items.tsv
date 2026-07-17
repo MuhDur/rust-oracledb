@@ -69,7 +69,7 @@ oracledb	crates/oracledb/src/lib.rs	1173	pub enum ErrorKind {
 oracledb	crates/oracledb/src/lib.rs	1187	pub enum ConnectionDisposition {
 oracledb	crates/oracledb/src/lib.rs	1195	pub enum RetryHint {
 oracledb	crates/oracledb/src/lib.rs	1203	pub enum Error {
-oracledb	crates/oracledb/src/lib.rs	12072	pub(crate) fn loopback_connection(
+oracledb	crates/oracledb/src/lib.rs	12085	pub(crate) fn loopback_connection(
 oracledb	crates/oracledb/src/lib.rs	1353	pub type Result<T> = std::result::Result<T, Error>;
 oracledb	crates/oracledb/src/lib.rs	1355	pub(crate) fn duration_to_millis_saturating(duration: Duration) -> u32 {
 oracledb	crates/oracledb/src/lib.rs	1371	pub type Cursor = CursorValue;

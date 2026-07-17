@@ -9240,7 +9240,20 @@ where
         let packet = encode_packet(TNS_PACKET_TYPE_DATA, 0, Some(flags), chunk, width)?;
         stream.write_all(&packet).await?;
     }
-    stream.flush().await?;
+    // The full request payload is now written to the socket. A cancellation that
+    // lands on the trailing flush (asupersync's `poll_flush` also returns
+    // `Io(Interrupted,"cancelled")`) has NOT lost the request — the bytes are
+    // already on the wire, and flush is a formality on an already-buffered
+    // socket. Swallow that specific cancellation so the round-trip proceeds to
+    // its cancellation-aware read, which surfaces the typed `Error::Cancelled`
+    // and arms break-and-drain recovery. Without this, a cancel racing the flush
+    // leaked a raw `Io(Interrupted)` from the write path, bypassing the read-side
+    // cancellation typing entirely. Any other flush error still propagates.
+    match stream.flush().await {
+        Ok(()) => {}
+        Err(err) if is_asupersync_cancellation(&err) => {}
+        Err(err) => return Err(err.into()),
+    }
     Ok(())
 }
 
