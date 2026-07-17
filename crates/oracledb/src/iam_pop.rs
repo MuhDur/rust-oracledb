@@ -81,44 +81,21 @@ mod tests {
     use ring::signature::{UnparsedPublicKey, RSA_PKCS1_2048_8192_SHA256};
 
     // Throwaway 2048-bit RSA key in PKCS#8 PEM — test-only, never a real secret.
-    const TEST_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----
-MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCJNz1dQm25hdFI
-zWn5R6Saxc3hqbr7EhvuRb/CHULE3IvF2gtrPSRu7IoBNKMgATN3+NpZ4i5o9IaE
-WL4ohTQ90UNZ+VinEr4s4BA4yvyCGA120ExppVY7vjn0IgV6hQxyJjFsejMOKVP/
-Hdg+2MZ9JheIL9+rd2jb22Fc31mvB9M2lcQ638yOPd46EoMKOFxNkRshpJQxqcxc
-xGCxBqRk0oh58jRhd9RmWEiCon9vNf7vFblYwWlUeFz0LiWyCiS0ul8Bhr2H7fJS
-EebslJODbbpVZuyo/JCuVWbSL9/y50Hxtr7IC9h9IqHJVF6uPpR1H7mdk3I9Z+or
-snHmhUjDAgMBAAECggEAGh3zhh6wt9EqporCkvn58KOZrkwaFNO7kTyhZRcgsEuy
-JvR7m+vFVX+cPOKB8gOIgltRZC5S2xM/z0z81MWVzfZYtXVqVFKS9AOp0sWADlr5
-pRW8lZcstK5eZYNcO5e7aLawTY9szFM9c5+Am2WzUfrAG+HQ1tghk0dMXtr8PP4e
-7Lgw8eOYzjbcxTN4iKJw1n2hv4l1BqhItdP+tBFuuSKcFAkApf8Wi0HapDm/xVGp
-H6ia5sLC1gOFdNyF2ZG13rf84uje5paC9xMzrHh2cTWMOm2jpd0GXkkzyeWll1Br
-QMTtBgH3q79v5m+6SqNNsmZoUG0qevrlM9kTB7u/EQKBgQDAQuM7ql2vc7N63hpc
-CkepRhMJz97JqVckgz+xVZJ+IwczMqPExbqA4gBHScQmV9wLJ27GIFuwi2IbX7tE
-UW3CLCZu/uwpuE59RY/vfIrMMGItbm87DxT8wR8ZX8I7kh9PsK3FaKbutsjoVvNg
-2LyO4nkqaQSksz2+qAOCjMIeTwKBgQC2tKt7BJLODd1HkfroZ0XBlM1SRTAgzrrX
-gEVsVC+WYZ49ioQ7gFOfkSRKKHvB0SzqmYXQoc8NcjpDis2y/oV+OvbIbIwCmoWw
-nTrxVB/iIj4MObe+VeDsecKil/SRmcB242gpn3IYaH9+TZGdiLhmZ6yJkKId3M1H
-0giE3MNlTQKBgASlmThn9bu34C6oD5sJ5JGC0BL8ozXcke6f/Xobx16lGhdyseKf
-pNJYpAkVD1id5wOeAF9piM3LkKN4vN352d1Hk+Y64xpfCgadF82CBRjKUpUmhim3
-Q5qYUFgcqGUoMvmKG6kZzm8Wm+SBtYAxvNz3PFZ6E1KnwmZJSUxueoKhAoGBAJ/Y
-d0J8YNfnp1XrcKINYCkZv3yfzZiWZT8PGS3KhYvCwgfDfSb1gbPT7vT2cDfEgtCJ
-GlrKhfSUoEbhVE+qgC5M9gWpeeD5Qcef96aVXAOiw7g8cvYR+mPJrzBDU5Ri+NDK
-6iGoPtD987UTtjcmG3Z0c64zHLKVr/+K0Ss0XbrtAoGBAJ4A+sKjCjfM4574fcs8
-qTzgulyQDtTkwcEFPFMHpcolCvnFXq5V6TjPWRXjS4YMgxT4ZIItlv/X6ThYYrNh
-YV5j0feqtu1fAzZIvC6PCF6PjUiOkNwUrOHnx0JA/h/EW1CJ+OQ7stO6j83fYLtn
-Nnzn5qMd/x8VnIQxPX0ITP7L
------END PRIVATE KEY-----";
+    // Kept in the exempted `tests/fixtures/tls/` dir (secret_scan skips it there)
+    // and pulled in only under `#[cfg(test)]`, so it never ships in the packaged
+    // crate (`exclude = ["tests/"]`) and never trips the private-key heuristic on
+    // this source file.
+    const TEST_PKCS8_PEM: &str = include_str!("../tests/fixtures/tls/iam_pop_test_key_pkcs8.pem");
 
     #[test]
     fn header_matches_reference_format() {
         // 2026-07-17T07:00:00Z → the reference's IMF-fixdate `date:` field.
         let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_784_271_600);
-        let header = build_signing_header("svc.example.oraclecloud.com", "10.0.0.5", 1522, now);
+        let header = build_signing_header("adb.example.db.example.com", "10.0.0.5", 1522, now);
         assert_eq!(
             header,
             "date: Fri, 17 Jul 2026 07:00:00 GMT\n\
-             (request-target): svc.example.oraclecloud.com\n\
+             (request-target): adb.example.db.example.com\n\
              host: 10.0.0.5:1522"
         );
     }
@@ -152,9 +129,10 @@ Nnzn5qMd/x8VnIQxPX0ITP7L
 
     #[test]
     fn rejects_non_pkcs8_key_material_without_leaking() {
-        let err = sign_signing_header("-----BEGIN CERTIFICATE-----\nnope\n", "hdr").unwrap_err();
+        // Not a PKCS#8 PEM block — the reader finds no key item and fails closed.
+        let err = sign_signing_header("unusable-key-material-xyzzy\n", "hdr").unwrap_err();
         assert!(matches!(err, Error::IamTokenProofOfPossession));
-        // The fixed diagnostic must never echo the key material.
-        assert!(!format!("{err}").contains("nope"));
+        // The fixed diagnostic must never echo the supplied material.
+        assert!(!format!("{err}").contains("xyzzy"));
     }
 }

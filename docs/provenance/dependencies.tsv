@@ -110,6 +110,7 @@ hex	0.4.3	MIT OR Apache-2.0	registry+https://github.com/rust-lang/crates.io-inde
 hkdf	0.13.0	MIT OR Apache-2.0	registry+https://github.com/rust-lang/crates.io-index
 hmac	0.12.1	MIT OR Apache-2.0	registry+https://github.com/rust-lang/crates.io-index
 hmac	0.13.0	MIT OR Apache-2.0	registry+https://github.com/rust-lang/crates.io-index
+httpdate	1.0.3	MIT OR Apache-2.0	registry+https://github.com/rust-lang/crates.io-index
 hybrid-array	0.4.12	MIT OR Apache-2.0	registry+https://github.com/rust-lang/crates.io-index
 iana-time-zone	0.1.65	MIT OR Apache-2.0	registry+https://github.com/rust-lang/crates.io-index
 iana-time-zone-haiku	0.1.2	MIT OR Apache-2.0	registry+https://github.com/rust-lang/crates.io-index

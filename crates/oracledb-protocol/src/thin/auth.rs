@@ -48,12 +48,35 @@ pub struct TokenPop<'a> {
 /// lives inside the fast-auth bundle (ttc field version 19.1), the function code
 /// carries no `ub8` token-num — exactly like [`append_auth_phase_one`].
 ///
-/// When `pop` is `Some`, the token is an OCI IAM database token bound to a
-/// private key: the auth mode gains `TNS_AUTH_MODE_IAM_TOKEN` and two extra
-/// pairs (`AUTH_HEADER`, `AUTH_SIGNATURE`) are written between `AUTH_ALTER_SESSION`
-/// and `AUTH_ORA_EDITION`, exactly matching the reference key/value order.
-#[allow(clippy::too_many_arguments)] // mirrors the reference message attribute set
 pub fn append_auth_phase_two_token(
+    out: &mut Vec<u8>,
+    user: &str,
+    token: &str,
+    driver_name: &str,
+    version_num: u32,
+    connect_string: &str,
+    edition: Option<&str>,
+) -> Result<()> {
+    append_auth_phase_two_token_with_pop(
+        out,
+        user,
+        token,
+        driver_name,
+        version_num,
+        connect_string,
+        edition,
+        None,
+    )
+}
+
+/// [`append_auth_phase_two_token`] with an optional OCI IAM database-token
+/// proof-of-possession. When `pop` is `Some`, the token is bound to a private
+/// key: the auth mode gains `TNS_AUTH_MODE_IAM_TOKEN` and two extra pairs
+/// (`AUTH_HEADER`, `AUTH_SIGNATURE`) are written between `AUTH_ALTER_SESSION` and
+/// `AUTH_ORA_EDITION`, exactly matching the reference key/value order. `None` is
+/// identical to [`append_auth_phase_two_token`] (a plain OAuth2 bearer token).
+#[allow(clippy::too_many_arguments)] // mirrors the reference message attribute set
+pub fn append_auth_phase_two_token_with_pop(
     out: &mut Vec<u8>,
     user: &str,
     token: &str,
@@ -525,7 +548,6 @@ mod token_auth_tests {
             300_000_000,
             "cs",
             None,
-            None,
         )
         .unwrap();
 
@@ -566,7 +588,7 @@ mod token_auth_tests {
     #[test]
     fn token_message_pair_count_without_connect_string() {
         let mut out = Vec::new();
-        append_auth_phase_two_token(&mut out, "u", "tok", "drv", 1, "", None, None).unwrap();
+        append_auth_phase_two_token(&mut out, "u", "tok", "drv", 1, "", None).unwrap();
         let mut pos = 4;
         let _user_len = read_ub4(&out, &mut pos);
         let _auth_mode = read_ub4(&out, &mut pos);
@@ -582,7 +604,7 @@ mod token_auth_tests {
     #[test]
     fn token_message_carries_iam_proof_of_possession() {
         let mut out = Vec::new();
-        append_auth_phase_two_token(
+        append_auth_phase_two_token_with_pop(
             &mut out,
             "OMCP_IAM",
             "HEADER.PAYLOAD.SIG",
@@ -625,8 +647,7 @@ mod token_auth_tests {
     #[test]
     fn token_message_carries_edition() {
         let mut out = Vec::new();
-        append_auth_phase_two_token(&mut out, "u", "tok", "drv", 1, "", Some("E_TEST"), None)
-            .unwrap();
+        append_auth_phase_two_token(&mut out, "u", "tok", "drv", 1, "", Some("E_TEST")).unwrap();
         let mut pos = 4;
         let _user_len = read_ub4(&out, &mut pos);
         let _auth_mode = read_ub4(&out, &mut pos);
@@ -641,8 +662,7 @@ mod token_auth_tests {
 
         // With both an edition and a connect string the count rises to 7.
         let mut out2 = Vec::new();
-        append_auth_phase_two_token(&mut out2, "u", "tok", "drv", 1, "cs", Some("E_TEST"), None)
-            .unwrap();
+        append_auth_phase_two_token(&mut out2, "u", "tok", "drv", 1, "cs", Some("E_TEST")).unwrap();
         let mut p = 4;
         let _ = read_ub4(&out2, &mut p);
         let _ = read_ub4(&out2, &mut p);

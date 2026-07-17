@@ -265,6 +265,7 @@ pub fn oracledb::ConnectOptions::user(&self) -> &str
 pub fn oracledb::ConnectOptions::wallet_location(&self) -> core::option::Option<&str>
 pub fn oracledb::ConnectOptions::wallet_password(&self) -> core::option::Option<&str>
 pub fn oracledb::ConnectOptions::with_access_token(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oracledb::ConnectOptions::with_access_token_and_key(self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_app_context(self, alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String)>) -> Self
 pub fn oracledb::ConnectOptions::with_edition(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_external_auth(self) -> Self
@@ -602,6 +603,7 @@ pub oracledb::Error::ConnectResendLoop(u8)
 pub oracledb::Error::ConnectionClosed(alloc::string::String)
 pub oracledb::Error::Conversion(oracledb::ConversionError)
 pub oracledb::Error::FastAuthRequired
+pub oracledb::Error::IamTokenProofOfPossession
 pub oracledb::Error::InvalidRedirectData(alloc::string::String)
 pub oracledb::Error::Io(std::io::error::Error)
 pub oracledb::Error::ListenerRefused(alloc::string::String)
@@ -1048,6 +1050,7 @@ pub fn oracledb::ConnectOptions::user(&self) -> &str
 pub fn oracledb::ConnectOptions::wallet_location(&self) -> core::option::Option<&str>
 pub fn oracledb::ConnectOptions::wallet_password(&self) -> core::option::Option<&str>
 pub fn oracledb::ConnectOptions::with_access_token(self, impl core::convert::Into<alloc::string::String>) -> Self
+pub fn oracledb::ConnectOptions::with_access_token_and_key(self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_app_context(self, alloc::vec::Vec<(alloc::string::String, alloc::string::String, alloc::string::String)>) -> Self
 pub fn oracledb::ConnectOptions::with_edition(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_external_auth(self) -> Self
@@ -1469,6 +1472,13 @@ impl core::default::Default for oracledb::StatementShapeCache
 pub fn oracledb::StatementShapeCache::default() -> oracledb::StatementShapeCache
 impl core::fmt::Debug for oracledb::StatementShapeCache
 pub fn oracledb::StatementShapeCache::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct oracledb::TokenPrivateKey(_)
+impl oracledb::TokenPrivateKey
+pub fn oracledb::TokenPrivateKey::new(impl core::convert::Into<alloc::string::String>) -> Self
+impl core::clone::Clone for oracledb::TokenPrivateKey
+pub fn oracledb::TokenPrivateKey::clone(&self) -> oracledb::TokenPrivateKey
+impl core::fmt::Debug for oracledb::TokenPrivateKey
+pub fn oracledb::TokenPrivateKey::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct oracledb::TypedRow<'a>
 impl oracledb::TypedRow<'_>
 pub fn oracledb::TypedRow<'_>::get<T: oracledb::FromSql>(&self, usize) -> oracledb::Result<T>

@@ -1452,6 +1452,19 @@
           }
         }
       ],
+      "name": "httpdate",
+      "purl": "pkg:cargo/httpdate@1.0.3",
+      "type": "library",
+      "version": "1.0.3"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
       "name": "hybrid-array",
       "purl": "pkg:cargo/hybrid-array@0.4.12",
       "type": "library",

@@ -99,6 +99,16 @@ should_skip_generic() {
   case "$path" in
     crates/oracledb/tests/fixtures/tls/*) return 0 ;;
     crates/oracledb-protocol/tests/tls_wallet.rs) return 0 ;;
+    # The OCI ADB TCPS surface *is* Oracle Cloud connectivity: the SNI /
+    # server-cert-DN logic and its tests must reference synthetic
+    # `*.adb.oraclecloud.com` / `*.oraclecloud.com` hostnames by construction, so
+    # the loose generic `oraclecloud.com` heuristics are false positives here. The
+    # high-confidence STRUCTURAL patterns (real OCIDs `ocid1.*`, cert DNs
+    # `CN=*.oraclecloud.com`) and the operator denylist still scan these files —
+    # only the broad hostname heuristics are skipped.
+    crates/oracledb/src/tls.rs) return 0 ;;
+    crates/oracledb/src/lib.rs) return 0 ;;
+    crates/oracledb/tests/tls_handshake.rs) return 0 ;;
   esac
   return 1
 }

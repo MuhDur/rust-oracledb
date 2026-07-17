@@ -1199,6 +1199,14 @@ pub fn oracledb_protocol::thin::SubscribeResult::default() -> oracledb_protocol:
 impl core::fmt::Debug for oracledb_protocol::thin::SubscribeResult
 pub fn oracledb_protocol::thin::SubscribeResult::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oracledb_protocol::thin::SubscribeResult
+pub struct oracledb_protocol::thin::TokenPop<'a>
+pub oracledb_protocol::thin::TokenPop::header: &'a str
+pub oracledb_protocol::thin::TokenPop::signature: &'a str
+impl<'a> core::clone::Clone for oracledb_protocol::thin::TokenPop<'a>
+pub fn oracledb_protocol::thin::TokenPop<'a>::clone(&self) -> oracledb_protocol::thin::TokenPop<'a>
+impl<'a> core::fmt::Debug for oracledb_protocol::thin::TokenPop<'a>
+pub fn oracledb_protocol::thin::TokenPop<'a>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<'a> core::marker::Copy for oracledb_protocol::thin::TokenPop<'a>
 pub struct oracledb_protocol::thin::TpcChangeStateResponse
 pub oracledb_protocol::thin::TpcChangeStateResponse::state: u32
 pub oracledb_protocol::thin::TpcChangeStateResponse::txn_in_progress: bool
@@ -1285,6 +1293,7 @@ pub const oracledb_protocol::thin::TNS_AQ_MSG_BUFFERED: u16
 pub const oracledb_protocol::thin::TNS_AQ_MSG_PERSISTENT: u16
 pub const oracledb_protocol::thin::TNS_AQ_MSG_PERSISTENT_OR_BUFFERED: u16
 pub const oracledb_protocol::thin::TNS_AUTH_MODE_CHANGE_PASSWORD: u32
+pub const oracledb_protocol::thin::TNS_AUTH_MODE_IAM_TOKEN: u32
 pub const oracledb_protocol::thin::TNS_AUTH_MODE_LOGON: u32
 pub const oracledb_protocol::thin::TNS_AUTH_MODE_WITH_PASSWORD: u32
 pub const oracledb_protocol::thin::TNS_CCAP_FIELD_VERSION_12_1: u8
@@ -1395,6 +1404,7 @@ pub const oracledb_protocol::thin::TPC_TXN_FLAGS_SESSIONLESS: u32
 pub fn oracledb_protocol::thin::adjust_refetch_metadata(&oracledb_protocol::thin::ColumnMetadata, &mut oracledb_protocol::thin::ColumnMetadata) -> bool
 pub fn oracledb_protocol::thin::append_auth_phase_one(&mut alloc::vec::Vec<u8>, &str, &str, &str, &str, &str, u32) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::thin::append_auth_phase_two_token(&mut alloc::vec::Vec<u8>, &str, &str, &str, u32, &str, core::option::Option<&str>) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::thin::append_auth_phase_two_token_with_pop(&mut alloc::vec::Vec<u8>, &str, &str, &str, u32, &str, core::option::Option<&str>, core::option::Option<oracledb_protocol::thin::TokenPop<'_>>) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::thin::bind_template_from_type_name(&str, u32) -> oracledb_protocol::thin::BindValue
 pub fn oracledb_protocol::thin::bind_value_type_info(&oracledb_protocol::thin::BindValue) -> core::option::Option<oracledb_protocol::thin::BindTypeInfo>
 pub fn oracledb_protocol::thin::build_auth_phase_one_payload(&str, &str, &str, &str, &str, u32) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
@@ -1402,6 +1412,8 @@ pub fn oracledb_protocol::thin::build_auth_phase_two_payload(&str, &oracledb_pro
 pub fn oracledb_protocol::thin::build_auth_phase_two_payload_with_context_with_seq(&str, &oracledb_protocol::crypto::EncryptedPassword, &str, u32, &str, u8, &[(alloc::string::String, alloc::string::String, alloc::string::String)]) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_auth_phase_two_payload_with_proxy_with_seq(&str, &oracledb_protocol::crypto::EncryptedPassword, &str, u32, &str, u8, &[(alloc::string::String, alloc::string::String, alloc::string::String)], core::option::Option<&str>, core::option::Option<&str>, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_auth_phase_two_payload_with_seq(&str, &oracledb_protocol::crypto::EncryptedPassword, &str, u32, &str, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_auth_phase_two_token_payload(&str, &str, &str, u32, &str, core::option::Option<&str>) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_auth_phase_two_token_payload_with_pop(&str, &str, &str, u32, &str, core::option::Option<&str>, core::option::Option<oracledb_protocol::thin::TokenPop<'_>>) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_begin_pipeline_piggyback(u8, u64, u8) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::build_change_password_payload_with_seq(&str, &str, &str, u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_close_cursors_piggyback(&[u32], u8, u8) -> alloc::vec::Vec<u8>
@@ -1418,6 +1430,7 @@ pub fn oracledb_protocol::thin::build_execute_query_payload(&str, u32, u8) -> or
 pub fn oracledb_protocol::thin::build_execute_query_payload_with_seq(&str, u32, u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_fast_auth_phase_one_payload(&str, &str, &str, &str, &str, u32) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_fast_auth_token_payload(&str, &str, &str, u32, &str, core::option::Option<&str>) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_fast_auth_token_payload_with_pop(&str, &str, &str, u32, &str, core::option::Option<&str>, core::option::Option<oracledb_protocol::thin::TokenPop<'_>>) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_fetch_payload(u32, u32, u8) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::build_fetch_payload_with_seq(u32, u32, u8, u8) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::build_function_payload(u8, u8) -> alloc::vec::Vec<u8>
@@ -1562,6 +1575,8 @@ pub oracledb_protocol::tls::wallet::WalletError::Pem(alloc::string::String)
 pub oracledb_protocol::tls::wallet::WalletError::Pkcs12(alloc::string::String)
 pub oracledb_protocol::tls::wallet::WalletError::Sso(alloc::string::String)
 pub oracledb_protocol::tls::wallet::WalletError::SsoNotEnabled
+pub oracledb_protocol::tls::wallet::WalletError::TooLarge
+pub oracledb_protocol::tls::wallet::WalletError::TooLarge::maximum_bytes: usize
 pub oracledb_protocol::tls::wallet::WalletError::UnsupportedFormat
 pub oracledb_protocol::tls::wallet::WalletError::UnsupportedFormat::format: &'static str
 impl core::error::Error for oracledb_protocol::tls::wallet::WalletError
@@ -1597,6 +1612,7 @@ impl core::default::Default for oracledb_protocol::tls::wallet::WalletContents
 pub fn oracledb_protocol::tls::wallet::WalletContents::default() -> oracledb_protocol::tls::wallet::WalletContents
 impl core::fmt::Debug for oracledb_protocol::tls::wallet::WalletContents
 pub fn oracledb_protocol::tls::wallet::WalletContents::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub const oracledb_protocol::tls::wallet::MAX_WALLET_FILE_BYTES: usize
 pub const oracledb_protocol::tls::wallet::P12_WALLET_FILE_NAME: &str
 pub const oracledb_protocol::tls::wallet::PEM_WALLET_FILE_NAME: &str
 pub const oracledb_protocol::tls::wallet::SSO_WALLET_FILE_NAME: &str
@@ -1607,6 +1623,7 @@ pub fn oracledb_protocol::tls::wallet::parse_pem_certificates(&mut dyn std::io::
 pub fn oracledb_protocol::tls::wallet::pem_wallet_path(&std::path::Path) -> std::path::PathBuf
 pub fn oracledb_protocol::tls::wallet::read_ewallet_p12(&std::path::Path, core::option::Option<&str>) -> core::result::Result<oracledb_protocol::tls::wallet::WalletContents, oracledb_protocol::tls::wallet::WalletError>
 pub fn oracledb_protocol::tls::wallet::read_ewallet_pem(&std::path::Path, core::option::Option<&str>) -> core::result::Result<oracledb_protocol::tls::wallet::WalletContents, oracledb_protocol::tls::wallet::WalletError>
+pub fn oracledb_protocol::tls::wallet::read_wallet_file(&std::path::Path) -> core::result::Result<alloc::vec::Vec<u8>, oracledb_protocol::tls::wallet::WalletError>
 pub fn oracledb_protocol::tls::wallet::resolve_wallet_dir(core::option::Option<&str>, core::option::Option<&str>) -> core::option::Option<std::path::PathBuf>
 pub fn oracledb_protocol::tls::wallet::sso_wallet_path(&std::path::Path) -> std::path::PathBuf
 pub mod oracledb_protocol::vector
