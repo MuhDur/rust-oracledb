@@ -1356,6 +1356,17 @@ pub(crate) fn duration_to_millis_saturating(duration: Duration) -> u32 {
     duration.as_millis().min(u128::from(u32::MAX)) as u32
 }
 
+/// Whether an `io::Error` is Asupersync's own cancellation signal for a
+/// cancellation-aware read/connect: kind `Interrupted` with the exact payload
+/// `"cancelled"` (`asupersync::net::tcp::stream` poll paths, pinned `=0.3.9`).
+/// This marker is set at the instant the runtime observes the cancel, so it is
+/// a deterministic discriminator from a genuine OS `EINTR` (whose message is the
+/// OS text, not `"cancelled"`) and is not subject to the interrupt-vs-checkpoint
+/// visibility race a later `Cx::checkpoint()` on the reading thread can hit.
+fn is_asupersync_cancellation(io_error: &std::io::Error) -> bool {
+    io_error.kind() == std::io::ErrorKind::Interrupted && io_error.to_string() == "cancelled"
+}
+
 /// A REF CURSOR handle returned in a row or implicit result set.
 pub type Cursor = CursorValue;
 
@@ -5302,13 +5313,23 @@ impl Connection {
     /// break and drain it before reusing the session.
     ///
     /// A real OS `Interrupted` error is left untouched. Asupersync uses that
-    /// same `io::ErrorKind` for cancellation-aware TCP reads, so require the
-    /// passed `Cx` to be observably cancelled before translating it.
+    /// same `io::ErrorKind` for cancellation-aware TCP reads, but marks its own
+    /// cancellation with the exact payload `"cancelled"`
+    /// (`asupersync::net::tcp::stream` poll paths). That marker is set at the
+    /// instant asupersync observes the cancel, so it is the DETERMINISTIC signal:
+    /// keying off it (or an already-observable `cx.checkpoint()`) instead of the
+    /// checkpoint alone closes the interrupt-vs-checkpoint race where the read
+    /// future resolves before the cancel flag is visible to a *later*
+    /// `checkpoint()` on this thread — which otherwise mistyped a real
+    /// cancellation as a raw `Io(Interrupted)`. A genuine OS `EINTR` (a different
+    /// message, no pending cancel) is still left untouched.
     fn in_flight_read_cancellation_error(&mut self, cx: &Cx, err: &Error) -> Option<Error> {
         let Error::Io(io_error) = err else {
             return None;
         };
-        if io_error.kind() != std::io::ErrorKind::Interrupted || cx.checkpoint().is_ok() {
+        if io_error.kind() != std::io::ErrorKind::Interrupted
+            || !(is_asupersync_cancellation(io_error) || cx.checkpoint().is_err())
+        {
             return None;
         }
 
@@ -12559,6 +12580,34 @@ mod tests {
         assert_eq!(
             closed.retry_hint(),
             RetryHint::ReconnectThenRetryIfIdempotent
+        );
+    }
+
+    /// The interrupt-vs-checkpoint race fix: Asupersync marks a cancelled
+    /// in-flight read as `Interrupted` with the exact payload `"cancelled"`, and
+    /// the driver keys off that DETERMINISTIC marker so a real cancellation is
+    /// never mistyped as a raw `Io(Interrupted)` when a *later* `checkpoint()`
+    /// on the reading thread has not yet observed the cancel flag. A genuine OS
+    /// `EINTR` (any other message) is left untouched.
+    #[test]
+    fn asupersync_cancellation_marker_is_detected_deterministically() {
+        use std::io::{Error as IoError, ErrorKind};
+        assert!(
+            is_asupersync_cancellation(&IoError::new(ErrorKind::Interrupted, "cancelled")),
+            "the asupersync cancellation marker must be recognized regardless of checkpoint timing"
+        );
+        assert!(
+            !is_asupersync_cancellation(&IoError::new(
+                ErrorKind::Interrupted,
+                "Interrupted system call"
+            )),
+            "a real OS EINTR (different message) must NOT be treated as a cancellation"
+        );
+        // A raw OS EINTR carries the platform's strerror text, never "cancelled".
+        assert!(!is_asupersync_cancellation(&IoError::from_raw_os_error(4)));
+        assert!(
+            !is_asupersync_cancellation(&IoError::new(ErrorKind::WouldBlock, "cancelled")),
+            "only the Interrupted kind is the cancellation signal"
         );
     }
 

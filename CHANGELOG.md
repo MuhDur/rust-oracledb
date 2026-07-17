@@ -60,6 +60,10 @@ artifacts, and the checked-in API/provenance ledgers.
   the parsed `EXPIRE_TIME` TCP keepalive and `TRANSPORT`/`TCP_CONNECT_TIMEOUT`,
   and applies a read-inactivity timeout that resets on read progress, so a
   half-open or idle connection can no longer hang forever.
+- **Deterministic in-flight cancellation typing.** Cancelling a pending read no
+  longer races: a cancellation is always surfaced as the typed `Error::Cancelled`
+  (`ORA-01013`) instead of occasionally leaking a raw `Io(Interrupted)` when the
+  cancel flag had not yet propagated to a later checkpoint on the reading thread.
 - **Hostile-input bounds.** Wallet readers and `tnsnames.ora` `IFILE` graphs are
   bounded against malformed/adversarial input, returning structured errors
   rather than unbounded work.
