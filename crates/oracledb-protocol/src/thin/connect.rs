@@ -197,6 +197,33 @@ pub fn build_fast_auth_token_payload(
     Ok(out)
 }
 
+/// Builds the standalone classic-auth phase-two token message.
+///
+/// Unlike [`build_fast_auth_token_payload`], this does not prepend the
+/// fast-auth envelope. Pre-23ai servers receive protocol negotiation and data
+/// types as separate round trips, then this self-contained `AUTH_TOKEN`
+/// phase-two message.
+pub fn build_auth_phase_two_token_payload(
+    user: &str,
+    token: &str,
+    driver_name: &str,
+    version_num: u32,
+    connect_string: &str,
+    edition: Option<&str>,
+) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    append_auth_phase_two_token(
+        &mut out,
+        user,
+        token,
+        driver_name,
+        version_num,
+        connect_string,
+        edition,
+    )?;
+    Ok(out)
+}
+
 pub fn build_function_payload(function_code: u8, ttc_field_version: u8) -> Vec<u8> {
     build_function_payload_with_seq(function_code, 1, ttc_field_version)
 }
@@ -324,6 +351,38 @@ mod tests {
             &protocol[..]
         );
         assert_eq!(&full[FAST_AUTH_DATA_TYPES_MSG_START..], &data_types[..]);
+    }
+
+    #[test]
+    fn classic_token_payload_is_the_fast_auth_phase_two_suffix() {
+        let classic = build_auth_phase_two_token_payload(
+            "scott",
+            "token-secret",
+            "rust-oracledb",
+            4_000_000_000,
+            "db.example.com/service",
+            Some("MY_EDITION"),
+        )
+        .expect("classic token payload");
+        let fast = build_fast_auth_token_payload(
+            "scott",
+            "token-secret",
+            "rust-oracledb",
+            4_000_000_000,
+            "db.example.com/service",
+            Some("MY_EDITION"),
+        )
+        .expect("fast token payload");
+        let prefix = Vec::from_hex(FAST_AUTH_PREFIX_HEX).expect("prefix decodes");
+
+        assert_eq!(&fast[..prefix.len()], prefix.as_slice());
+        assert_eq!(&fast[prefix.len()..], classic.as_slice());
+        assert_eq!(classic[0], TNS_MSG_TYPE_FUNCTION);
+        assert_eq!(classic[1], TNS_FUNC_AUTH_PHASE_TWO);
+        assert_eq!(
+            classic[2], 1,
+            "standalone phase two is the first TTC function"
+        );
     }
 
     // ---- ACCEPT protocol-version gate boundary tests ----------------------

@@ -132,26 +132,26 @@ use oracledb_protocol::thin::aq::{
 };
 use oracledb_protocol::thin::{
     adjust_refetch_metadata, build_auth_phase_one_payload,
-    build_auth_phase_two_payload_with_proxy_with_seq, build_begin_pipeline_piggyback,
-    build_change_password_payload_with_seq, build_connect_packet_payload, build_data_types_payload,
-    build_define_fetch_payload_with_seq, build_end_pipeline_payload_with_seq,
-    build_execute_payload_with_bind_rows_and_options_with_seq, build_fast_auth_phase_one_payload,
-    build_fast_auth_token_payload, build_fetch_payload_with_seq, build_function_payload_with_seq,
-    build_function_payload_with_seq_and_token, build_lob_create_temp_payload_with_seq,
-    build_lob_free_temp_payload_with_seq, build_lob_read_payload_with_seq,
-    build_lob_trim_payload_with_seq, build_lob_write_payload_with_seq,
-    build_protocol_negotiation_payload, classic_connect_response_is_complete,
-    connect_data_fits_inline, parse_accept_payload, parse_auth_response_with_limits,
-    parse_define_fetch_response_borrowed_with_limits,
+    build_auth_phase_two_payload_with_proxy_with_seq, build_auth_phase_two_token_payload,
+    build_begin_pipeline_piggyback, build_change_password_payload_with_seq,
+    build_connect_packet_payload, build_data_types_payload, build_define_fetch_payload_with_seq,
+    build_end_pipeline_payload_with_seq, build_execute_payload_with_bind_rows_and_options_with_seq,
+    build_fast_auth_phase_one_payload, build_fast_auth_token_payload, build_fetch_payload_with_seq,
+    build_function_payload_with_seq, build_function_payload_with_seq_and_token,
+    build_lob_create_temp_payload_with_seq, build_lob_free_temp_payload_with_seq,
+    build_lob_read_payload_with_seq, build_lob_trim_payload_with_seq,
+    build_lob_write_payload_with_seq, build_protocol_negotiation_payload,
+    classic_connect_response_is_complete, connect_data_fits_inline, parse_accept_payload,
+    parse_auth_response_with_limits, parse_define_fetch_response_borrowed_with_limits,
     parse_define_fetch_response_with_context_and_limits,
     parse_fetch_response_with_context_and_limits, parse_lob_create_temp_response_with_limits,
     parse_lob_free_temp_response_with_limits, parse_lob_read_response_with_limits,
     parse_lob_trim_response_with_limits, parse_lob_write_response_with_limits,
     parse_plain_function_response_with_limits, parse_query_response_borrowed_with_limits,
     parse_query_response_with_binds_options_columns_and_limits,
-    parse_tpc_txn_switch_response_with_limits, BindValue, BorrowedFetchResult, ClientCapabilities,
-    ColumnMetadata, CursorValue, ExecuteOptions, LobReadResult, QueryResult, QueryValueRef,
-    SessionlessTxnState, TpcChangeStateResponse, TpcSwitchResponse, TpcXid,
+    parse_tpc_txn_switch_response_with_limits, AuthResponse, BindValue, BorrowedFetchResult,
+    ClientCapabilities, ColumnMetadata, CursorValue, ExecuteOptions, LobReadResult, QueryResult,
+    QueryValueRef, SessionlessTxnState, TpcChangeStateResponse, TpcSwitchResponse, TpcXid,
     TNS_DATA_FLAGS_BEGIN_PIPELINE, TNS_DATA_FLAGS_END_OF_REQUEST, TNS_FUNC_COMMIT, TNS_FUNC_LOGOFF,
     TNS_FUNC_PING, TNS_FUNC_ROLLBACK, TNS_MSG_TYPE_END_OF_RESPONSE, TNS_MSG_TYPE_FLUSH_OUT_BINDS,
     TNS_PACKET_FLAG_REDIRECT, TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT,
@@ -476,6 +476,15 @@ type DriverTransport = <DriverConnector as Connector>::Transport;
 type SharedWriteHalf<T = DriverTransport> = Arc<AsyncMutex<<T as WireTransport>::Write>>;
 type DriverCore = ConnectionCore<DriverTransport>;
 
+struct TokenAuthentication<'a> {
+    user: &'a str,
+    token: &'a str,
+    driver_name: &'a str,
+    version_num: u32,
+    connect_string: &'a str,
+    edition: Option<&'a str>,
+}
+
 #[derive(Debug)]
 struct ConnectionCore<T: WireTransport> {
     read: Option<T::Read>,
@@ -621,6 +630,56 @@ impl<T: WireTransport> ConnectionCore<T> {
             read_classic_data_response_with_limits(&mut read, cx, &write, limits).await
         };
         self.note_post_sync_result(map_inactivity_timeout(result))
+    }
+
+    /// Authenticates an OCI IAM/OAuth database token over the pre-23ai classic
+    /// connect sequence. The token payload is deliberately never passed to the
+    /// packet trace helper.
+    async fn authenticate_classic_token(
+        &mut self,
+        cx: &Cx,
+        token_auth: TokenAuthentication<'_>,
+        sdu: usize,
+    ) -> Result<(AuthResponse, ClientCapabilities)> {
+        let protocol_limits = self.protocol_limits;
+        // Mirror the password path's classic negotiation, then send the
+        // self-contained token phase-two payload (there is no password
+        // challenge/response).
+        let protocol_payload = build_protocol_negotiation_payload()?;
+        trace_connect_step("send protocol negotiation (classic token)");
+        self.send_data_packet(cx, &protocol_payload, sdu).await?;
+        trace_connect_step("read protocol negotiation");
+        let response = self.read_classic_data_response(cx).await?;
+        trace_connect_bytes("protocol negotiation response", &response);
+        let negotiated = parse_auth_response_with_limits(&response, protocol_limits)?;
+
+        let data_types_payload = build_data_types_payload()?;
+        trace_connect_step("send data types (classic token)");
+        self.send_data_packet(cx, &data_types_payload, sdu).await?;
+        trace_connect_step("read data types");
+        let response = self.read_classic_data_response(cx).await?;
+        trace_connect_bytes("data types response", &response);
+        parse_auth_response_with_limits(&response, protocol_limits)?;
+
+        let auth_payload = build_auth_phase_two_token_payload(
+            token_auth.user,
+            token_auth.token,
+            token_auth.driver_name,
+            token_auth.version_num,
+            token_auth.connect_string,
+            token_auth.edition,
+        )?;
+        trace_connect_step("send AUTH token (classic phase two)");
+        self.send_data_packet(cx, &auth_payload, sdu).await?;
+        trace_connect_step("read AUTH token response");
+        let response = self.read_classic_data_response(cx).await?;
+        trace_connect_bytes("AUTH token response", &response);
+        let auth = parse_auth_response_with_limits(&response, protocol_limits)?;
+        let capabilities = negotiated
+            .capabilities
+            .or(auth.capabilities)
+            .unwrap_or_default();
+        Ok((auth, capabilities))
     }
 
     /// Reads one TTC response, deciding completion the way the connected
@@ -3047,30 +3106,41 @@ impl Connection {
                 if !descriptor.protocol.is_tls() {
                     return Err(Error::AccessTokenRequiresTcps);
                 }
-                // Token auth is only wired through the combined fast-auth
-                // bundle; the servers that accept database tokens (23ai-era)
-                // all advertise fast auth.
-                if !accept_info.supports_fast_auth {
-                    return Err(Error::FastAuthRequired);
-                }
-                // One combined fast-auth bundle carrying a phase-two `AUTH_TOKEN`
-                // message; no resend. The payload (which embeds the token) is never
-                // passed to `trace_connect_bytes`, so the secret stays out of logs.
-                let auth_payload = build_fast_auth_token_payload(
-                    &options.user,
-                    token.expose(),
-                    &identity.driver_name,
-                    PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
-                    &auth_connect_string,
-                    options.edition.as_deref(),
-                )?;
-                trace_connect_step("send AUTH token (fast-auth phase two)");
-                core.send_data_packet(cx, &auth_payload, sdu).await?;
-                trace_connect_step("read AUTH token response");
-                let response = core.read_data_response(cx).await?;
-                trace_connect_bytes("AUTH token response", &response);
-                let auth = parse_auth_response_with_limits(&response, protocol_limits)?;
-                let capabilities = auth.capabilities.unwrap_or_default();
+                let (auth, capabilities) = if accept_info.supports_fast_auth {
+                    // One combined fast-auth bundle carrying a phase-two
+                    // `AUTH_TOKEN` message; no resend. The payload embeds the
+                    // token, so it is never passed to `trace_connect_bytes`.
+                    let auth_payload = build_fast_auth_token_payload(
+                        &options.user,
+                        token.expose(),
+                        &identity.driver_name,
+                        PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
+                        &auth_connect_string,
+                        options.edition.as_deref(),
+                    )?;
+                    trace_connect_step("send AUTH token (fast-auth phase two)");
+                    core.send_data_packet(cx, &auth_payload, sdu).await?;
+                    trace_connect_step("read AUTH token response");
+                    let response = core.read_data_response(cx).await?;
+                    trace_connect_bytes("AUTH token response", &response);
+                    let auth = parse_auth_response_with_limits(&response, protocol_limits)?;
+                    let capabilities = auth.capabilities.unwrap_or_default();
+                    (auth, capabilities)
+                } else {
+                    core.authenticate_classic_token(
+                        cx,
+                        TokenAuthentication {
+                            user: &options.user,
+                            token: token.expose(),
+                            driver_name: &identity.driver_name,
+                            version_num: PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
+                            connect_string: &auth_connect_string,
+                            edition: options.edition.as_deref(),
+                        },
+                        sdu,
+                    )
+                    .await?
+                };
                 // Token auth derives no shared password key: there is no combo key,
                 // hence no server-response MAC to verify and no change-password.
                 (auth, capabilities, Vec::new())
@@ -14600,6 +14670,92 @@ mod tests {
         assert!(
             state.is_consumed(),
             "scripted core must perform exactly the expected connect/execute/fetch I/O"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn classic_token_auth_negotiates_then_sends_phase_two_over_scripted_transport() -> Result<()> {
+        const USER: &str = "iam_user";
+        const TOKEN: &str = "not-a-real-iam-token";
+        const DRIVER_NAME: &str = "rust-oracledb";
+        const CONNECT_STRING: &str = "adb.example.oraclecloud.com/service";
+
+        let protocol_payload = build_protocol_negotiation_payload()?;
+        let data_types_payload = build_data_types_payload()?;
+        let token_payload = build_auth_phase_two_token_payload(
+            USER,
+            TOKEN,
+            DRIVER_NAME,
+            PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
+            CONNECT_STRING,
+            None,
+        )?;
+        let expected_writes = [protocol_payload, data_types_payload, token_payload]
+            .into_iter()
+            .map(|payload| {
+                encode_packet(
+                    TNS_PACKET_TYPE_DATA,
+                    0,
+                    Some(0),
+                    &payload,
+                    PacketLengthWidth::Large32,
+                )
+                .map_err(Error::from)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // A classic server completes each connect-phase response with STATUS,
+        // not the 23ai END_OF_RESPONSE data flag. This drives the exact
+        // classic reader selected for an ACCEPT without fast-auth.
+        let classic_status =
+            data_packet(&[oracledb_protocol::thin::TNS_MSG_TYPE_STATUS, 0, 0], false);
+        let script = Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+            vec![
+                ReadAction::bytes(classic_status.clone(), None),
+                ReadAction::bytes(classic_status.clone(), None),
+                ReadAction::bytes(classic_status, None),
+            ],
+            expected_writes
+                .into_iter()
+                .map(|packet| WriteAction::expect_bytes(packet, None))
+                .collect(),
+            ScriptedClock::default(),
+        )));
+        let mut core = ConnectionCore::<ScriptedTransport>::from_halves(
+            ScriptedRead::from_state(Arc::clone(&script)),
+            ScriptedWrite::from_state(Arc::clone(&script)),
+            "classic_token_auth_write",
+        );
+
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let (auth, capabilities) = core
+                .authenticate_classic_token(
+                    &cx,
+                    TokenAuthentication {
+                        user: USER,
+                        token: TOKEN,
+                        driver_name: DRIVER_NAME,
+                        version_num: PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
+                        connect_string: CONNECT_STRING,
+                        edition: None,
+                    },
+                    8192,
+                )
+                .await?;
+            assert!(auth.session_data.is_empty());
+            assert_eq!(capabilities, ClientCapabilities::default());
+            Ok::<_, Error>(())
+        })?;
+
+        assert!(
+            script
+                .lock()
+                .map_err(|_| Error::Runtime("scripted I/O state lock poisoned".into()))?
+                .is_consumed(),
+            "classic token auth must send protocol negotiation, data types, then AUTH_TOKEN phase two"
         );
         Ok(())
     }
