@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Golden-wire test for the DbObject (PL/SQL record) IN-bind packed image.
 //!
 //! `tests/golden/dbobject_session.txt` is a raw PYO_DEBUG_PACKETS dump produced

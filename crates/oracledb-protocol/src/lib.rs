@@ -1,4 +1,6 @@
 #![forbid(unsafe_code)]
+// Unit-test assertions intentionally panic on invariant violations.
+#![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod capabilities;
 pub mod crypto;

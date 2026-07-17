@@ -561,7 +561,7 @@ mod tests {
                 1,
                 7,
                 false,
-                &[row.clone()],
+                std::slice::from_ref(&row),
                 ExecuteOptions::default(),
                 field_version,
             )
@@ -643,7 +643,7 @@ mod tests {
             1,
             7,
             false,
-            &[row.clone()],
+            std::slice::from_ref(&row),
             ExecuteOptions::default().with_max_string_size(4_000),
             ClientCapabilities::default().ttc_field_version,
         )

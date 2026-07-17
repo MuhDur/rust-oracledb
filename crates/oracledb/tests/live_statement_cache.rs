@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Live test for configurable statement-cache size (bead 5ah, oraclemcp #10).
 //! Exercises the eviction path (tiny cache) and the disabled path (size 0)
 //! end to end: many distinct statements must keep working as cursors are evicted

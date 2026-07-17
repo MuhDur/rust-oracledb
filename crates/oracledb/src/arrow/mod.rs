@@ -530,6 +530,8 @@ mod tests {
         })
     }
 
+    // Compact fixture construction is clearer than a one-off helper struct here.
+    #[allow(clippy::too_many_arguments)]
     fn timestamp_tz(
         year: i32,
         month: u8,

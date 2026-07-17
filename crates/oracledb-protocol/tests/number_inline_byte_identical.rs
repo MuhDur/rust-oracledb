@@ -158,7 +158,8 @@ fn u64_above_i64max_exact() {
 /// The negative-zero wire canonicalizes to "0" through BOTH paths.
 #[test]
 fn negative_zero_canonicalizes_identically() {
-    let wire = encode_number_text("-0").unwrap_or_else(|_| encode_number_text("0").unwrap());
+    let wire = encode_number_text("-0")
+        .unwrap_or_else(|_| encode_number_text("0").expect("zero must encode"));
     assert_byte_identical(&wire, "-0");
 }
 

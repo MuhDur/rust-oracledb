@@ -382,8 +382,14 @@ fn soda_truncate_and_index_and_names() {
             assert!(names.contains(&"RustSodaA".to_string()));
             assert!(names.contains(&"RustSodaB".to_string()));
             // ascending order
-            let a_pos = names.iter().position(|n| n == "RustSodaA").unwrap();
-            let b_pos = names.iter().position(|n| n == "RustSodaB").unwrap();
+            let a_pos = names
+                .iter()
+                .position(|n| n == "RustSodaA")
+                .expect("RustSodaA must be present after create_collection");
+            let b_pos = names
+                .iter()
+                .position(|n| n == "RustSodaB")
+                .expect("RustSodaB must be present after create_collection");
             assert!(a_pos < b_pos);
 
             // insert + truncate

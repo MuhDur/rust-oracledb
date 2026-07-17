@@ -49,7 +49,7 @@ fn mixed_utf8_cells(width: usize) -> Vec<Vec<u8>> {
         .map(|i| {
             let mut s = String::with_capacity(width);
             while s.len() < width {
-                if (i + s.len()) % 7 == 0 {
+                if (i + s.len()).is_multiple_of(7) {
                     s.push('\u{4e2d}'); // CJK, 3 bytes
                 } else {
                     s.push('a');

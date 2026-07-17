@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Allocation-count + timing measurement: owned fetch decode vs the zero-copy
 //! borrowed fetch decode, over a wide many-row synthetic batch.
 //!

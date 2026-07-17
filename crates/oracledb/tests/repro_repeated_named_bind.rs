@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Regression test for bead `qp0`: a named placeholder that occurs more than
 //! once in plain SQL, bound ONCE by name via `query`, must bind correctly.
 //!

@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Differential correctness gate for the columnar fetch->Arrow path (bead
 //! rust-oracledb-wf7): the columnar [`Connection::fetch_all_record_batch_columnar`]
 //! must produce a `RecordBatch` that is BYTE-IDENTICAL, cell-for-cell, to the

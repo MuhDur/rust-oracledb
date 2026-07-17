@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Live test for timeout-aware named-bind queries (bead b85, oraclemcp #11):
 //! `Query::timeout` gives named binds the same per-call timeout parity
 //! the positional path already had. Verifies (a) the success path with binds

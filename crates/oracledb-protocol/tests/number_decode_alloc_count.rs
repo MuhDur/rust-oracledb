@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Allocation-count regression for the inline NUMBER decode (bead
 //! rust-oracledb-65w).
 //!

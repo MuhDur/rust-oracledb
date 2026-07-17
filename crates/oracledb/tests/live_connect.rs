@@ -78,7 +78,8 @@ fn live_connect_ping_and_close() {
 }
 
 /// etib.7 + etib.8: the host()/port()/protocol() accessors expose the connected
-/// endpoint, and db_unique_name() equals SYS_CONTEXT('USERENV','DB_UNIQUE_NAME').
+/// endpoint, and `db_unique_name()` agrees with `SYS_CONTEXT` when the server
+/// supplies the optional AUTH phase-two REAL DB unique-name field.
 #[test]
 #[ignore = "requires local Oracle listener from scripts/container.sh up"]
 fn live_endpoint_and_db_unique_name_accessors() {
@@ -116,7 +117,10 @@ fn live_endpoint_and_db_unique_name_accessors() {
         assert!(!conn.host().is_empty(), "host must be populated");
         assert!(conn.port() > 0, "port must be populated");
 
-        // db_unique_name() == SYS_CONTEXT('USERENV','DB_UNIQUE_NAME').
+        // `db_unique_name()` is the optional AUTH_SC_REAL_DBUNIQUE_NAME field,
+        // not a query-backed value. Older servers such as XE18 can omit that
+        // field while SYS_CONTEXT still reports a DB_UNIQUE_NAME. When it is
+        // present, it must agree exactly with the server's value.
         let result = conn
             .execute_raw(
                 &cx,
@@ -132,11 +136,13 @@ fn live_endpoint_and_db_unique_name_accessors() {
             Some(QueryValue::Text(value)) => value.clone(),
             other => panic!("expected DB_UNIQUE_NAME text, got {other:?}"),
         };
-        assert_eq!(
-            conn.db_unique_name(),
-            expected,
-            "db_unique_name() must equal SYS_CONTEXT('USERENV','DB_UNIQUE_NAME')"
-        );
+        if !conn.db_unique_name().is_empty() {
+            assert_eq!(
+                conn.db_unique_name(),
+                expected,
+                "AUTH_SC_REAL_DBUNIQUE_NAME must equal SYS_CONTEXT('USERENV','DB_UNIQUE_NAME')"
+            );
+        }
 
         conn.close(&cx)
             .await

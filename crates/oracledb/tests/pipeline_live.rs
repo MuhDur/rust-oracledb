@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Live wire test for `Connection::run_pipeline`: drives a real pipelined
 //! batch (BEGIN_PIPELINE piggyback, END_OF_REQUEST framing, end-pipeline
 //! function 200, N+1 boundary-delimited responses) against the disposable

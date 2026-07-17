@@ -86,7 +86,9 @@ impl Connector for OracleConnector {
     }
 }
 
+// This compile-only test sits before the transport implementations by design.
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{Connector, OracleConnector, OracleReadHalf, OracleWriteHalf, WireTransport};
 

@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Live IN OUT bind round-trip for [`RoutineCall`] (bead `iec3.1.31`).
 //!
 //! `RoutineCall::arg_in_out` rides the combined `BindValue::InOut` bind: the

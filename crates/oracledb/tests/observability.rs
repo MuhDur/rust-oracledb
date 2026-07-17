@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Feature-gated observability test (bead rust-oracledb-lv6): with the `tracing`
 //! feature on, an execute + fetch must emit the expected per-round-trip spans
 //! with their structured fields (SQL digest, bind count, rows fetched) — and

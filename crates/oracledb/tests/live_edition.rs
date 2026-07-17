@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Live test for edition selection (bead jr9). `ConnectOptions::with_edition`
 //! sends `AUTH_ORA_EDITION` during authentication (reference messages/auth.pyx),
 //! so `SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME')` reflects the chosen edition.

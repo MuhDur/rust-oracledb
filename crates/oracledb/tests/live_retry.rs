@@ -89,25 +89,25 @@ fn reconnect_then_retry_across_server_side_session_kill() {
 
         // Baseline: the session works, and capture its numeric SID.
         let sid: i64 = {
-            let mut guard = app.borrow_mut();
-            let conn = guard.as_mut().expect("app present");
-            assert_eq!(
-                conn.query_one(&cx, "select 7 from dual", ())
-                    .await
-                    .expect("baseline query")
-                    .get::<i64>(0)
-                    .expect("baseline scalar"),
-                7
-            );
-            conn.query_one(
-                &cx,
-                "select to_number(sys_context('userenv','sid')) from dual",
-                (),
-            )
-            .await
-            .expect("sid query")
-            .get::<i64>(0)
-            .expect("sid scalar")
+            let mut conn = { app.borrow_mut().take().expect("app present") };
+            let sid_result = async {
+                let baseline = conn.query_one(&cx, "select 7 from dual", ()).await?;
+                assert_eq!(
+                    baseline.get::<i64>(0)?,
+                    7,
+                    "baseline query must return its scalar"
+                );
+                conn.query_one(
+                    &cx,
+                    "select to_number(sys_context('userenv','sid')) from dual",
+                    (),
+                )
+                .await?
+                .get::<i64>(0)
+            }
+            .await;
+            *app.borrow_mut() = Some(conn);
+            sid_result.expect("baseline and SID queries must succeed")
         };
 
         // Kill the app session from a separate DBA session.
@@ -135,10 +135,14 @@ fn reconnect_then_retry_across_server_side_session_kill() {
             &RetryPolicy::default(),
             Idempotency::Idempotent,
             || async {
-                let mut guard = app.borrow_mut();
-                let conn = guard.as_mut().expect("app present");
-                let row = conn.query_one(&cx, "select 7 from dual", ()).await?;
-                row.get::<i64>(0)
+                let mut conn = { app.borrow_mut().take().expect("app present") };
+                let query_result = async {
+                    let row = conn.query_one(&cx, "select 7 from dual", ()).await?;
+                    row.get::<i64>(0)
+                }
+                .await;
+                *app.borrow_mut() = Some(conn);
+                query_result
             },
             || async {
                 reconnects.set(reconnects.get() + 1);

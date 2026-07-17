@@ -1,3 +1,5 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
 #![forbid(unsafe_code)]
 
 //! Live integration tests for the typed read/write surface (beads qxn + zjd).
@@ -1737,9 +1739,8 @@ fn exercise_boolean_matrix(conn: &mut Connection) {
         "select :1 as v from dual",
         vec![BindValue::Boolean(true)],
     );
-    assert_eq!(
+    assert!(
         row.get::<bool>(0).expect("BOOLEAN should fetch as bool"),
-        true,
         "BOOLEAN true mismatch"
     );
     assert_typed_null(conn, "BOOLEAN", typed_null(ORA_TYPE_NUM_BOOLEAN, 0, 4));

@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Live test for ergonomic REF CURSOR / implicit result-set consumption
 //! (bead za5). `Connection::fetch_cursor` drains a returned, self-describing
 //! cursor (with column metadata), bounded by max_rows, releasing it at the end.

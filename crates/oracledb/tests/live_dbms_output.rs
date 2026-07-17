@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Live test for the DBMS_OUTPUT capture helper (bead acj). Verifies the helper
 //! enables buffering, captures lines emitted on the SAME session, bounds output
 //! by max_lines (setting `truncated`), and drains cleanly to the end.

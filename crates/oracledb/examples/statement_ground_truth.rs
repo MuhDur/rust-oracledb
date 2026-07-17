@@ -599,7 +599,7 @@ fn emit_json(results: &[(&'static str, CaseResult)]) -> String {
                     let rc = if r + 1 == rows.len() { "" } else { ", " };
                     let _ = write!(out, "[{cells}]{rc}");
                 }
-                let _ = write!(out, "]}}{comma}\n");
+                let _ = writeln!(out, "]}}{comma}");
             }
             CaseResult::Out(cells) => {
                 let cells = cells
@@ -607,15 +607,15 @@ fn emit_json(results: &[(&'static str, CaseResult)]) -> String {
                     .map(|c| format!("\"{}\"", json_escape(c)))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let _ = write!(
+                let _ = writeln!(
                     out,
-                    "    \"{id}\": {{\"ok\": true, \"out\": [{cells}]}}{comma}\n"
+                    "    \"{id}\": {{\"ok\": true, \"out\": [{cells}]}}{comma}"
                 );
             }
             CaseResult::Error(code) => {
-                let _ = write!(
+                let _ = writeln!(
                     out,
-                    "    \"{id}\": {{\"ok\": false, \"error\": \"{}\"}}{comma}\n",
+                    "    \"{id}\": {{\"ok\": false, \"error\": \"{}\"}}{comma}",
                     json_escape(code)
                 );
             }

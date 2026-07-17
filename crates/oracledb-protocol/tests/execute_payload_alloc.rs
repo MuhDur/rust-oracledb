@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Allocation-count probe for the execute-payload build (STEP 3 micro-opt
 //! target): how many heap allocations does building one `select 1 from dual`
 //! EXECUTE payload cost? The payload is built into a `TtcWriter`'s `Vec<u8>`;

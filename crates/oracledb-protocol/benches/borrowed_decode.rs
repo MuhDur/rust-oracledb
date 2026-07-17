@@ -51,11 +51,13 @@ fn build_page(rows: usize) -> (Vec<u8>, Vec<ColumnMetadata>) {
         w.write_u8(ROW_DATA);
         for c in 0..10 {
             if c % 2 == 0 {
-                let n = encode_number_text(&format!("{}", i * 7 + c)).unwrap();
-                w.write_bytes_with_length(&n).unwrap();
+                let n = encode_number_text(&format!("{}", i * 7 + c))
+                    .expect("benchmark NUMBER fixture must encode");
+                w.write_bytes_with_length(&n)
+                    .expect("benchmark NUMBER fixture must fit the TTC writer");
             } else {
                 w.write_bytes_with_length(format!("value-{i:06}-{c}").as_bytes())
-                    .unwrap();
+                    .expect("benchmark text fixture must fit the TTC writer");
             }
         }
     }
@@ -73,8 +75,8 @@ fn bench(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(cell_bytes));
     group.bench_function("decode_20k_x_10", |b| {
         b.iter(|| {
-            let result =
-                parse_query_response_borrowed(black_box(&payload), caps, &columns, None).unwrap();
+            let result = parse_query_response_borrowed(black_box(&payload), caps, &columns, None)
+                .expect("benchmark fixture must decode");
             let mut sum = 0usize;
             result
                 .batch
@@ -88,7 +90,7 @@ fn bench(c: &mut Criterion) {
                     }
                     Ok::<(), ProtocolError>(())
                 })
-                .unwrap();
+                .expect("benchmark decoded rows must iterate");
             black_box(sum)
         })
     });

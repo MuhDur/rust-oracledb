@@ -44,15 +44,18 @@ pub fn live_creds_opt() -> Option<LiveCreds> {
     })
 }
 
-/// All three `PYO_TEST_*` variables, panicking via `unwrap` if any is unset.
+/// All three `PYO_TEST_*` variables, panicking with context if any is unset.
 ///
-/// Mirrors the `std::env::var(..).unwrap()` blocks used by suites that require
+/// Mirrors the `std::env::var(..).expect(..)` blocks used by suites that require
 /// the lane environment to be present.
 pub fn live_creds_required() -> LiveCreds {
     LiveCreds {
-        connect_string: std::env::var("PYO_TEST_CONNECT_STRING").unwrap(),
-        user: std::env::var("PYO_TEST_MAIN_USER").unwrap(),
-        password: std::env::var("PYO_TEST_MAIN_PASSWORD").unwrap(),
+        connect_string: std::env::var("PYO_TEST_CONNECT_STRING")
+            .expect("PYO_TEST_CONNECT_STRING must be set for a required live test"),
+        user: std::env::var("PYO_TEST_MAIN_USER")
+            .expect("PYO_TEST_MAIN_USER must be set for a required live test"),
+        password: std::env::var("PYO_TEST_MAIN_PASSWORD")
+            .expect("PYO_TEST_MAIN_PASSWORD must be set for a required live test"),
     }
 }
 

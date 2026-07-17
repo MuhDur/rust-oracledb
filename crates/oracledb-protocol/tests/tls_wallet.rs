@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Integration tests for the sans-I/O TLS wallet readers, SNI builder and DN
 //! matcher, exercised against REAL fixtures (see
 //! `crates/oracledb/tests/fixtures/tls/` and `docs/TLS_SETUP.md`): openssl-3

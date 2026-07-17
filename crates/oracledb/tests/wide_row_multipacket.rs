@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Regression: multi-packet WIDE-row fetch reassembly (bead rust-oracledb-n2s).
 //!
 //! The thin response reassembler concatenates every DATA packet of a response
@@ -14,7 +17,7 @@
 //! treats a trailing 0x1d as the end-of-response marker when the whole DATA
 //! packet is exactly `PACKET_HEADER_SIZE + 3` bytes (header + 2-byte data flags
 //! + the lone END_OF_RESPONSE message byte). This test fetches a wide,
-//! multi-packet result in one batch and checks that every row arrives intact.
+//!   multi-packet result in one batch and checks that every row arrives intact.
 //!
 //! Self-skips when the container environment is absent, like the rest of the
 //! integration suite. Run against the container with:

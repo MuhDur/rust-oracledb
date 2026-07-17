@@ -1,3 +1,6 @@
+// Unit-test assertions intentionally panic on invariant violations.
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
 //! A pure-Rust, thin-mode driver for Oracle Database.
 //!
 //! `oracledb` speaks the Oracle TNS/TTC wire protocol directly over TCP. It
@@ -11466,7 +11469,7 @@ mod tests {
         )
         .expect("parse");
         let mut addrs = resolve_connect_addresses(&desc, NetProtocol::Tcp);
-        addrs.sort_by(|l, r| l.port.cmp(&r.port));
+        addrs.sort_by_key(|address| address.port);
         assert_eq!(
             addrs,
             vec![
@@ -14362,10 +14365,7 @@ mod tests {
 
     impl ScriptedClock {
         fn advance(&self, duration: Duration) {
-            let nanos = match u64::try_from(duration.as_nanos()) {
-                Ok(nanos) => nanos,
-                Err(_) => u64::MAX,
-            };
+            let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
             self.nanos.fetch_add(nanos, Ordering::Relaxed);
         }
 

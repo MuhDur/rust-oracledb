@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Live test for structured ADT object decoding (bead vx6). Describes an object
 //! type from the data dictionary, then decodes a returned object value into its
 //! scalar attributes (handling NULLs).

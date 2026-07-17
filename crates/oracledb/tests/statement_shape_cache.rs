@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Cross-connection statement-shape cache + DDL-invalidation self-heal
 //! (bead a4-8pp), exercised through the public crate surface.
 //!

@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! W1-T7.4 risk-proof integration tests against the REAL `Pool` (not asupersync
 //! primitives in isolation). Each test nails one of the four risks the design
 //! review flagged:

@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Tests for `#[derive(FromRow)]` (bead 4bv).
 //!
 //! Two layers:

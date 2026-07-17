@@ -287,7 +287,10 @@ fn abort_mode_responses_parse_with_tokens() {
         .iter()
         .map(|row| {
             let id = match &row[0] {
-                Some(v @ QueryValue::Number(_)) => v.as_number_text().unwrap().into_owned(),
+                Some(v @ QueryValue::Number(_)) => v
+                    .as_number_text()
+                    .expect("NUMBER variant must expose its canonical text")
+                    .into_owned(),
                 other => panic!("unexpected id value: {other:?}"),
             };
             let val = match &row[1] {
@@ -346,7 +349,11 @@ fn continue_mode_pipeline_carries_mode_and_surfaces_midstream_error() {
     let count = parse_query_response(&frames.responses[2], caps()).expect("fetchone response");
     assert_eq!(count.token_num, Some(3));
     match &count.rows[0][0] {
-        Some(v @ QueryValue::Number(_)) => assert_eq!(v.as_number_text().unwrap(), "3"),
+        Some(v @ QueryValue::Number(_)) => assert_eq!(
+            v.as_number_text()
+                .expect("NUMBER variant must expose its canonical text"),
+            "3"
+        ),
         other => panic!("unexpected count value: {other:?}"),
     }
 
@@ -392,7 +399,10 @@ fn bound_execute_in_pipeline_byte_matches_reference_client() {
         .rows
         .iter()
         .map(|row| match &row[0] {
-            Some(v @ QueryValue::Number(_)) => v.as_number_text().unwrap().into_owned(),
+            Some(v @ QueryValue::Number(_)) => v
+                .as_number_text()
+                .expect("NUMBER variant must expose its canonical text")
+                .into_owned(),
             other => panic!("unexpected id value: {other:?}"),
         })
         .collect();

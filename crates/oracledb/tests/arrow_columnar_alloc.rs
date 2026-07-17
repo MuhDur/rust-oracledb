@@ -1,3 +1,6 @@
+// Assertion-heavy test code intentionally panics on invariant violations.
+#![allow(clippy::unwrap_used)]
+
 //! Allocation + timing measurement for the columnar fetch->Arrow path
 //! (bead rust-oracledb-wf7): row-materialize-then-`build_record_batch` vs the
 //! columnar `build_record_batch_columnar`, over a wide many-row analytics batch.

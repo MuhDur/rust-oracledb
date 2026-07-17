@@ -740,7 +740,9 @@ impl SodaCollection {
     }
 }
 
+// These focused helpers must remain before the production collection operations.
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::soda::database::collect_owned_query_result;
