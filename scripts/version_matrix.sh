@@ -410,7 +410,7 @@ run_versions() {
   while read -r l; do lanes_run+=("$l"); done < <(lanes_for "$lane_arg")
 
   declare -A cell cellnote cellreason
-  local overall=PASS lane suite logf summ reason
+  local overall=PASS lane suite logf summ reason system_password
 
   for lane in "${lanes_run[@]}"; do
     if lane_expects_refusal "$lane"; then
@@ -434,6 +434,7 @@ run_versions() {
     fi
 
     eval "$(lane_env "$lane")"
+    system_password="$(lane_system_password "$lane")"
     if ! lane_bootstrap "$lane" > "$log_dir/$lane-BOOTSTRAP.log" 2>&1; then
       printf '%-7s BOOTSTRAP FAILED (see %s)\n' "$lane" "$log_dir/$lane-BOOTSTRAP.log" >&2
       overall=FAIL
@@ -461,7 +462,12 @@ run_versions() {
           printf '%-7s %-28s FAIL    %s (log: %s)\n' "$lane" "$suite" \
             "${cellnote[$lane:$suite]}" "$logf"
         fi
-      elif cargo test -q -p oracledb --features "$LIVE_SUITE_FEATURES" \
+      # `live_retry` needs a DBA session to kill the app connection. Keep this
+      # lane-derived password in the child test environment only; it is never
+      # written to suite logs or the JSON evidence artifact.
+      elif PYO_TEST_SYSTEM_USER="${PYO_TEST_SYSTEM_USER:-system}" \
+        PYO_TEST_SYSTEM_PASSWORD="${PYO_TEST_SYSTEM_PASSWORD:-$system_password}" \
+        cargo test -q -p oracledb --features "$LIVE_SUITE_FEATURES" \
           --test "$suite" -- --include-ignored > "$logf" 2>&1; then
         summ="$(grep -hE '^test result:' "$logf" | tail -1)"
         cell[$lane:$suite]=PASS
