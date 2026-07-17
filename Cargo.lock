@@ -1619,6 +1619,7 @@ dependencies = [
  "oracledb-derive",
  "oracledb-protocol",
  "proptest",
+ "ring",
  "rust_decimal",
  "rustls",
  "rustls-pemfile",

@@ -5,9 +5,8 @@
 //! async TCP socket; we supply a custom rustls [`ServerCertVerifier`] that
 //! reproduces python-oracledb thin's behaviour:
 //!
-//! * standard hostname verification is **disabled** (the SNI value is the
-//!   Oracle `S{len}.{service}.V3.{version}` string, not a DNS name that the
-//!   certificate would carry), and
+//! * standard hostname verification is **disabled** (the SNI value is an
+//!   Oracle routing name, not necessarily a certificate identity), and
 //! * after the chain is validated to a trust anchor, the Oracle DN/SAN/CN match
 //!   ([`oracledb_protocol::tls::dn`]) is run instead.
 //!
@@ -24,9 +23,13 @@ use oracledb_protocol::net::EasyConnect;
 use oracledb_protocol::tls::dn::{check_cert_dn, check_server_name, DnMatchError};
 use oracledb_protocol::tls::sni::build_sni;
 use oracledb_protocol::tls::wallet::{resolve_wallet_dir, WalletContents};
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::client::{
+    danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    ResolvesClientCert,
+};
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, WebPkiSupportedAlgorithms};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::sign::CertifiedKey;
 use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 
 use crate::Error;
@@ -46,15 +49,13 @@ pub struct TlsParams {
     pub server_cert_dn: Option<String>,
     /// The expected host (the descriptor `HOST`) for the name-match branch.
     pub expected_host: String,
-    /// Send the Oracle TCPS SNI string (`use_sni`, reference default `false`).
+    /// Request the Oracle TCPS SNI fast path (`use_sni`, reference default
+    /// `false`).
     ///
     /// python-oracledb only emits the `S{len}.{service}.V3.{version}` SNI when
     /// `use_sni=True` is explicitly requested; by default no SNI is sent and the
-    /// server is identified purely by the post-handshake DN match. rustls's
-    /// `ServerName` is RFC-strict and rejects the Oracle SNI's trailing
-    /// all-numeric label (e.g. `.V3.319`), so when `use_sni` is set we send the
-    /// SNI only if rustls accepts it; otherwise we proceed without SNI and the
-    /// DN match still secures the connection. See `docs/TLS_SETUP.md`.
+    /// server is identified purely by the post-handshake DN match. See
+    /// [`decide_sni`] for the strict SNI-selection rules.
     pub use_sni: bool,
 }
 
@@ -159,6 +160,35 @@ impl ServerCertVerifier for OracleServerCertVerifier {
     }
 }
 
+/// A wallet identity selected for every certificate request.
+///
+/// Oracle Autonomous Database wallets can contain an X.509 v1 client
+/// certificate. rustls's [`ClientConfig::with_client_auth_cert`] convenience
+/// constructor rejects that certificate while checking the private-key match,
+/// because the webpki parser it uses only accepts v3 certificates. The TLS
+/// protocol itself transmits the client chain as DER and needs only the private
+/// key to sign the handshake. This resolver therefore keeps the parsed key and
+/// original wallet DER together without parsing the client certificate through
+/// webpki. The peer still performs the authoritative client-certificate chain
+/// validation, while our independent server-certificate and Oracle DN checks
+/// remain unchanged.
+#[derive(Debug)]
+struct StaticClientCert(Arc<CertifiedKey>);
+
+impl ResolvesClientCert for StaticClientCert {
+    fn resolve(
+        &self,
+        _root_hint_subjects: &[&[u8]],
+        _sigschemes: &[SignatureScheme],
+    ) -> Option<Arc<CertifiedKey>> {
+        Some(Arc::clone(&self.0))
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
 /// Map an Oracle DN-match failure to a rustls error.
 fn dn_error_to_rustls(err: DnMatchError) -> RustlsError {
     RustlsError::General(err.to_string())
@@ -221,6 +251,7 @@ pub(crate) fn build_client_config(params: &TlsParams) -> Result<ClientConfig, Er
     use rustls::crypto::ring::default_provider;
 
     let provider = Arc::new(default_provider());
+    let key_provider = provider.key_provider;
     let supported_algs = provider.signature_verification_algorithms;
 
     // Trust anchors: wallet CAs if present, else fall back to the OS roots so a
@@ -261,9 +292,11 @@ pub(crate) fn build_client_config(params: &TlsParams) -> Result<ClientConfig, Er
                 .map(|der| CertificateDer::from(der.clone()))
                 .collect();
             let key = client_private_key(w)?;
-            builder
-                .with_client_auth_cert(chain, key)
-                .map_err(|e| Error::Tls(format!("client certificate setup failed: {e}")))?
+            let signing_key = key_provider
+                .load_private_key(key)
+                .map_err(|e| Error::Tls(format!("client private key rejected: {e}")))?;
+            let certified = Arc::new(CertifiedKey::new(chain, signing_key));
+            builder.with_client_cert_resolver(Arc::new(StaticClientCert(certified)))
         } else {
             builder.with_no_client_auth()
         }
@@ -271,7 +304,7 @@ pub(crate) fn build_client_config(params: &TlsParams) -> Result<ClientConfig, Er
         builder.with_no_client_auth()
     };
 
-    // SNI is on by default; the connector passes the Oracle SNI string.
+    // SNI is on by default; the connector selects the per-descriptor SNI name.
     config.enable_sni = true;
     Ok(config)
 }
@@ -592,11 +625,31 @@ fn resolve_wallet_inner(
 /// `false` in that path, and the Oracle verifier ignores `server_name`.
 const SNI_PLACEHOLDER: &str = "oracle.invalid";
 
-/// Whether the Oracle SNI string is a valid rustls `ServerName`. The Oracle
-/// format ends in an all-numeric label (`.V3.319`), which RFC-strict rustls
-/// rejects; this helper lets the handshake decide whether the SNI can be sent.
+/// Whether `name` is a DNS name rustls can encode in ClientHello SNI.
+///
+/// `ServerName` also accepts IP addresses, but rustls deliberately omits the
+/// SNI extension for them. Require its DNS variant here so `Some(name)` always
+/// means the extension will actually be transmitted.
 fn sni_is_rustls_valid(sni: &str) -> bool {
-    rustls::pki_types::ServerName::try_from(sni.to_string()).is_ok()
+    matches!(
+        rustls::pki_types::ServerName::try_from(sni.to_string()),
+        Ok(ServerName::DnsName(_))
+    )
+}
+
+/// Whether this descriptor is the public OCI Autonomous Database shape.
+///
+/// OCI wallet descriptors separate the load-balancer endpoint
+/// `adb.<region>.oraclecloud.com` from the database service
+/// `*.adb.oraclecloud.com`. Only this narrowly identified form may use the
+/// endpoint as an SNI fallback; all other unencodable Oracle service-form SNI
+/// values remain fail-closed.
+fn is_oci_adb_endpoint(host: &str, service_name: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    let service_name = service_name.to_ascii_lowercase();
+    host.starts_with("adb.")
+        && host.ends_with(".oraclecloud.com")
+        && service_name.ends_with(".adb.oraclecloud.com")
 }
 
 /// Decide the SNI server name for a TCPS handshake (F3, bead `rust-oracledb-clvm`).
@@ -604,8 +657,10 @@ fn sni_is_rustls_valid(sni: &str) -> bool {
 /// - `Ok(None)` — no SNI is sent (`use_sni=false`, the default and the common
 ///   case): the caller uses a placeholder name with `enable_sni=false`, and the
 ///   server is identified purely by the post-handshake Oracle DN match.
-/// - `Ok(Some(name))` — `use_sni=true` and the Oracle SNI is a valid rustls DNS
-///   name; it is transmitted with `enable_sni=true`.
+/// - `Ok(Some(name))` — `use_sni=true` and `name` is a DNS name rustls can
+///   transmit with `enable_sni=true`. The public OCI Autonomous Database shape
+///   uses its valid descriptor host when the Oracle service-form SNI cannot be
+///   represented by rustls.
 /// - `Err(Error::UnsupportedSni)` — `use_sni=true` was explicitly requested but
 ///   the Oracle SNI (`S{len}.{service}.V3.{version}`) is not a valid rustls DNS
 ///   name and therefore cannot be sent. The driver **fails closed** rather than
@@ -613,6 +668,7 @@ fn sni_is_rustls_valid(sni: &str) -> bool {
 ///   was not honored instead of discovering it only from a packet capture.
 pub(crate) fn decide_sni(
     use_sni: bool,
+    host: &str,
     service_name: &str,
     server_type: Option<&str>,
 ) -> Result<Option<String>, Error> {
@@ -621,10 +677,18 @@ pub(crate) fn decide_sni(
     }
     let sni = build_sni(service_name, server_type);
     if sni_is_rustls_valid(&sni) {
-        Ok(Some(sni))
-    } else {
-        Err(Error::UnsupportedSni(sni))
+        return Ok(Some(sni));
     }
+
+    // OCI's public ADB endpoint is a valid DNS name even though the
+    // service-form SNI has the required all-numeric `.V3.<version>` suffix.
+    // The custom verifier below still validates the chain and then the Oracle
+    // DN/name against `TlsParams::expected_host`; SNI never replaces either.
+    if is_oci_adb_endpoint(host, service_name) && sni_is_rustls_valid(host) {
+        return Ok(Some(host.to_string()));
+    }
+
+    Err(Error::UnsupportedSni(sni))
 }
 
 /// Perform the TCPS TLS handshake over a connected TCP stream, returning the
@@ -632,11 +696,11 @@ pub(crate) fn decide_sni(
 ///
 /// SNI handling mirrors python-oracledb: the Oracle `S{len}.{service}.V3.{ver}`
 /// SNI is only emitted when [`TlsParams::use_sni`] is set; by default no SNI is
-/// sent and the server is identified by the post-handshake DN match. When
-/// `use_sni=true` is explicitly requested but rustls cannot encode the Oracle
-/// SNI (its trailing numeric label is rejected), the handshake **fails closed**
-/// with [`Error::UnsupportedSni`] rather than silently proceeding without SNI —
-/// see [`decide_sni`].
+/// sent and the server is identified by the post-handshake DN match. The public
+/// OCI Autonomous Database descriptor shape instead uses its valid endpoint
+/// host when rustls cannot encode that service form. Other unencodable SNI
+/// values fail closed with [`Error::UnsupportedSni`] rather than silently
+/// proceeding without SNI — see [`decide_sni`].
 ///
 /// # Errors
 /// Returns [`Error::UnsupportedSni`] when `use_sni=true` cannot be honored, or
@@ -651,7 +715,12 @@ pub async fn tls_handshake(
 
     // Decide the SNI name. Default (and the common case) is no SNI; an
     // explicitly requested but un-encodable Oracle SNI fails closed here.
-    let server_name = match decide_sni(params.use_sni, &descriptor.service_name, server_type)? {
+    let server_name = match decide_sni(
+        params.use_sni,
+        &params.expected_host,
+        &descriptor.service_name,
+        server_type,
+    )? {
         Some(sni) => {
             config.enable_sni = true;
             sni
@@ -692,18 +761,27 @@ mod tests {
     }
 
     #[test]
-    fn oracle_sni_is_rejected_by_rustls_servername() {
-        // The Oracle SNI ends in an all-numeric label which RFC-strict rustls
-        // rejects; this is why use_sni cannot be honored. Document it as a
-        // test so a future rustls relaxation is noticed.
-        assert!(!sni_is_rustls_valid("S8.FREEPDB1.V3.319"));
+    fn oracle_service_form_sni_rejection_is_the_terminal_numeric_label() {
+        // rustls-pki-types permits underscores in DNS labels. The exact OCI
+        // service-form SNI fails because `.319` is an all-numeric *final*
+        // label, not because the service name contains an underscore.
+        let service_form = "S11.myadb_high.V3.319";
+        let err = ServerName::try_from(service_form.to_string())
+            .expect_err("an Oracle service-form SNI currently is not a rustls ServerName");
+        assert_eq!(err.to_string(), "invalid dns name");
+
+        assert!(ServerName::try_from("myadb_high".to_string()).is_ok());
+        assert!(ServerName::try_from("S11.myadb_high.V3.name".to_string()).is_ok());
+        assert!(!sni_is_rustls_valid(service_form));
+        assert!(!sni_is_rustls_valid("192.0.2.1"));
         assert!(sni_is_rustls_valid("db.example.com"));
     }
 
     #[test]
     fn decide_sni_without_use_sni_sends_no_sni() {
         // The default (use_sni=false) yields no SNI, cleanly (no error).
-        let decided = decide_sni(false, "FREEPDB1", None).expect("no-SNI must be Ok");
+        let decided =
+            decide_sni(false, "db.example.com", "FREEPDB1", None).expect("no-SNI must be Ok");
         assert!(decided.is_none(), "use_sni=false must not send an SNI");
     }
 
@@ -713,7 +791,7 @@ mod tests {
         // degrade to enable_sni=false. Because the Oracle SNI ends in a numeric
         // label rustls rejects, use_sni=true fails closed with the typed
         // UnsupportedSni error naming the SNI string.
-        let err = decide_sni(true, "FREEPDB1", None)
+        let err = decide_sni(true, "db.example.com", "FREEPDB1", None)
             .expect_err("use_sni=true with an un-encodable Oracle SNI must fail closed");
         match err {
             Error::UnsupportedSni(sni) => {
@@ -724,6 +802,33 @@ mod tests {
             }
             other => panic!("expected Error::UnsupportedSni, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn decide_sni_for_oci_adb_uses_the_valid_endpoint_host() {
+        let host = "adb.eu-frankfurt-1.oraclecloud.com";
+        let service_name = "g2bb4261a88e318_myadb_high.adb.oraclecloud.com";
+
+        assert_eq!(
+            decide_sni(true, host, service_name, None).expect("OCI host SNI is encodable"),
+            Some(host.to_string())
+        );
+    }
+
+    #[test]
+    fn only_the_oci_adb_descriptor_shape_gets_the_host_sni_fallback() {
+        assert!(is_oci_adb_endpoint(
+            "adb.eu-frankfurt-1.oraclecloud.com",
+            "g2bb4261a88e318_myadb_high.adb.oraclecloud.com"
+        ));
+        assert!(!is_oci_adb_endpoint(
+            "db.example.com",
+            "g2bb4261a88e318_myadb_high.adb.oraclecloud.com"
+        ));
+        assert!(!is_oci_adb_endpoint(
+            "adb.eu-frankfurt-1.oraclecloud.com",
+            "FREEPDB1"
+        ));
     }
 
     fn fixture_tls_dir() -> std::path::PathBuf {

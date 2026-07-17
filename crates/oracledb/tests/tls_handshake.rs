@@ -23,9 +23,18 @@ use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
 use oracledb_protocol::net::EasyConnect;
 use oracledb_protocol::tls::wallet::parse_ewallet_pem;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::server::WebPkiClientVerifier;
-use rustls::{RootCertStore, ServerConfig, ServerConnection};
+use ring::signature::{UnparsedPublicKey, RSA_PKCS1_2048_8192_SHA256, RSA_PSS_2048_8192_SHA256};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
+use rustls::server::{
+    danger::{ClientCertVerified, ClientCertVerifier},
+    ClientHello, ResolvesServerCert, WebPkiClientVerifier,
+};
+use rustls::sign::CertifiedKey;
+use rustls::{
+    DigitallySignedStruct, Error as RustlsError, ProtocolVersion, RootCertStore, ServerConfig,
+    ServerConnection, SignatureScheme,
+};
+use x509_cert::der::{Decode, Encode};
 
 use oracledb::protocol::ClientIdentity;
 pub use oracledb::Error;
@@ -64,8 +73,9 @@ fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
 }
 
-/// Build a rustls `ServerConfig` presenting the CA-signed leaf cert + key.
-fn server_config() -> Arc<ServerConfig> {
+/// Load the CA-signed leaf certificate chain and matching private key used by
+/// the local rustls servers.
+fn fixture_server_credentials() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
     let leaf = fixture("leaf.crt");
     let key = fixture("leaf.key");
     let ca = fixture("ca.crt");
@@ -81,6 +91,12 @@ fn server_config() -> Arc<ServerConfig> {
         .expect("read key")
         .expect("a private key");
 
+    (chain, key_der)
+}
+
+/// Build a rustls `ServerConfig` presenting the CA-signed leaf cert + key.
+fn server_config() -> Arc<ServerConfig> {
+    let (chain, key_der) = fixture_server_credentials();
     let config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(chain, key_der)
@@ -88,10 +104,207 @@ fn server_config() -> Arc<ServerConfig> {
     Arc::new(config)
 }
 
+/// A test-only v1 client verifier. rustls-webpki deliberately rejects v1
+/// end-entity certificates, so this verifies an exact v1 leaf using ring
+/// directly: its certificate signature must come from the supplied issuer and
+/// its TLS CertificateVerify signature must prove possession of the leaf key.
+#[derive(Debug)]
+struct V1ClientCertVerifier {
+    expected_leaf: Vec<u8>,
+    ca_public_key: Vec<u8>,
+    tls13_signature_scheme: Arc<std::sync::Mutex<Option<SignatureScheme>>>,
+}
+
+impl V1ClientCertVerifier {
+    fn fixture_ca_public_key() -> Vec<u8> {
+        let ca_pem = fixture("ca.crt");
+        let ca_der = rustls_pemfile_certs(&mut std::io::BufReader::new(&ca_pem[..]))
+            .into_iter()
+            .next()
+            .expect("fixture CA must contain a certificate");
+        let ca = x509_cert::Certificate::from_der(ca_der.as_ref())
+            .expect("fixture CA must be parseable");
+        ca.tbs_certificate
+            .subject_public_key_info
+            .subject_public_key
+            .raw_bytes()
+            .to_vec()
+    }
+
+    fn client_leaf_public_key(cert: &CertificateDer<'_>) -> Result<Vec<u8>, RustlsError> {
+        let leaf = x509_cert::Certificate::from_der(cert.as_ref())
+            .map_err(|e| RustlsError::General(format!("invalid v1 client certificate: {e}")))?;
+        if leaf.tbs_certificate.version != x509_cert::Version::V1 {
+            return Err(RustlsError::General(
+                "v1 regression verifier received a non-v1 certificate".to_string(),
+            ));
+        }
+        Ok(leaf
+            .tbs_certificate
+            .subject_public_key_info
+            .subject_public_key
+            .raw_bytes()
+            .to_vec())
+    }
+
+    fn verify_signature(
+        algorithm: &'static dyn ring::signature::VerificationAlgorithm,
+        public_key: &[u8],
+        message: &[u8],
+        signature: &[u8],
+        context: &str,
+    ) -> Result<(), RustlsError> {
+        UnparsedPublicKey::new(algorithm, public_key)
+            .verify(message, signature)
+            .map_err(|_| RustlsError::General(format!("v1 fixture {context} verification failed")))
+    }
+}
+
+impl ClientCertVerifier for V1ClientCertVerifier {
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, RustlsError> {
+        if end_entity.as_ref() != self.expected_leaf.as_slice() {
+            return Err(RustlsError::General(
+                "v1 regression verifier received an unexpected client certificate".to_string(),
+            ));
+        }
+        let leaf = x509_cert::Certificate::from_der(end_entity.as_ref())
+            .map_err(|e| RustlsError::General(format!("invalid v1 client certificate: {e}")))?;
+        if leaf.tbs_certificate.version != x509_cert::Version::V1 {
+            return Err(RustlsError::General(
+                "v1 regression verifier received a non-v1 certificate".to_string(),
+            ));
+        }
+        let tbs = leaf.tbs_certificate.to_der().map_err(|e| {
+            RustlsError::General(format!("v1 client certificate re-encode failed: {e}"))
+        })?;
+        Self::verify_signature(
+            &RSA_PKCS1_2048_8192_SHA256,
+            &self.ca_public_key,
+            &tbs,
+            leaf.signature.raw_bytes(),
+            "CA signature",
+        )?;
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, RustlsError> {
+        self.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, RustlsError> {
+        if let Ok(mut seen_scheme) = self.tls13_signature_scheme.lock() {
+            *seen_scheme = Some(dss.scheme);
+        }
+        let public_key = Self::client_leaf_public_key(cert)?;
+        let algorithm: &'static dyn ring::signature::VerificationAlgorithm = match dss.scheme {
+            SignatureScheme::RSA_PSS_SHA256 => &RSA_PSS_2048_8192_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA256 => &RSA_PKCS1_2048_8192_SHA256,
+            scheme => {
+                return Err(RustlsError::General(format!(
+                    "unexpected v1 fixture client signature scheme: {scheme:?}"
+                )));
+            }
+        };
+        Self::verify_signature(
+            algorithm,
+            &public_key,
+            message,
+            dss.signature(),
+            "CertificateVerify",
+        )?;
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA256,
+        ]
+    }
+}
+
+/// Build a rustls server which requires an exact X.509 v1 client identity.
+fn server_config_requiring_v1_client_auth_with(
+    chain: Vec<CertificateDer<'static>>,
+    key_der: PrivateKeyDer<'static>,
+    expected_leaf: Vec<u8>,
+    ca_public_key: Vec<u8>,
+) -> (
+    Arc<ServerConfig>,
+    Arc<std::sync::Mutex<Option<SignatureScheme>>>,
+) {
+    let tls13_signature_scheme = Arc::new(std::sync::Mutex::new(None));
+    let verifier = Arc::new(V1ClientCertVerifier {
+        expected_leaf,
+        ca_public_key,
+        tls13_signature_scheme: Arc::clone(&tls13_signature_scheme),
+    });
+    (
+        Arc::new(
+            ServerConfig::builder()
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(chain, key_der)
+                .expect("mTLS server config"),
+        ),
+        tls13_signature_scheme,
+    )
+}
+
 fn rustls_pemfile_certs(reader: &mut dyn std::io::BufRead) -> Vec<CertificateDer<'static>> {
     rustls_pemfile::certs(reader)
         .filter_map(Result::ok)
         .collect()
+}
+
+#[derive(Debug)]
+struct RecordingServerCertResolver {
+    key: Arc<CertifiedKey>,
+    sni_tx: std::sync::mpsc::Sender<Option<String>>,
+}
+
+impl ResolvesServerCert for RecordingServerCertResolver {
+    fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        let _ = self
+            .sni_tx
+            .send(client_hello.server_name().map(str::to_owned));
+        Some(Arc::clone(&self.key))
+    }
+}
+
+/// Build a rustls server that records the parsed ClientHello SNI while using
+/// the normal fixture certificate.
+fn recording_server_config(sni_tx: std::sync::mpsc::Sender<Option<String>>) -> Arc<ServerConfig> {
+    let (chain, key_der) = fixture_server_credentials();
+    let key = CertifiedKey::from_der(chain, key_der, &rustls::crypto::ring::default_provider())
+        .expect("fixture certificate and key match");
+
+    Arc::new(
+        ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(RecordingServerCertResolver {
+                key: Arc::new(key),
+                sni_tx,
+            })),
+    )
 }
 
 /// Spawn a one-shot blocking rustls echo server; returns its bound port and the
@@ -118,6 +331,96 @@ fn spawn_tls_server() -> (u16, std::thread::JoinHandle<()>) {
     (port, handle)
 }
 
+type V1MtlsEvidence = (Option<ProtocolVersion>, Option<SignatureScheme>);
+type V1MtlsServer = (
+    u16,
+    std::sync::mpsc::Receiver<V1MtlsEvidence>,
+    std::thread::JoinHandle<()>,
+);
+
+/// Spawn a one-shot blocking rustls echo server which requires the v1 fixture
+/// client certificate and reports its negotiated protocol version.
+fn spawn_tls_server_requiring_client_auth() -> V1MtlsServer {
+    let (chain, key_der) = fixture_server_credentials();
+    let expected_leaf =
+        rustls_pemfile_certs(&mut std::io::BufReader::new(&fixture("client_v1.crt")[..]))
+            .into_iter()
+            .next()
+            .expect("v1 client fixture must contain a certificate")
+            .as_ref()
+            .to_vec();
+    spawn_tls_server_requiring_v1_client_auth_with(
+        chain,
+        key_der,
+        expected_leaf,
+        V1ClientCertVerifier::fixture_ca_public_key(),
+    )
+}
+
+fn spawn_tls_server_requiring_v1_client_auth_with(
+    chain: Vec<CertificateDer<'static>>,
+    key_der: PrivateKeyDer<'static>,
+    expected_leaf: Vec<u8>,
+    ca_public_key: Vec<u8>,
+) -> V1MtlsServer {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let (config, tls13_signature_scheme) =
+        server_config_requiring_v1_client_auth_with(chain, key_der, expected_leaf, ca_public_key);
+    let (protocol_tx, protocol_rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            let mut conn = ServerConnection::new(config).expect("server conn");
+            {
+                let mut tls = rustls::Stream::new(&mut conn, &mut sock);
+                let mut buf = [0u8; 64];
+                match tls.read(&mut buf) {
+                    Ok(n) if n > 0 => {
+                        let _ = tls.write_all(&buf[..n]);
+                        let _ = tls.flush();
+                    }
+                    _ => {}
+                }
+            }
+            let signature_scheme = tls13_signature_scheme
+                .lock()
+                .ok()
+                .and_then(|seen_scheme| *seen_scheme);
+            let _ = protocol_tx.send((conn.protocol_version(), signature_scheme));
+        }
+    });
+    (port, protocol_rx, handle)
+}
+
+/// Spawn a one-shot TLS echo server and report the SNI it received after the
+/// ClientHello is processed.
+fn spawn_tls_server_recording_sni() -> (
+    u16,
+    std::sync::mpsc::Receiver<Option<String>>,
+    std::thread::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let (sni_tx, sni_rx) = std::sync::mpsc::channel();
+    let config = recording_server_config(sni_tx);
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            let mut conn = ServerConnection::new(config).expect("server conn");
+            {
+                let mut tls = rustls::Stream::new(&mut conn, &mut sock);
+                let mut buf = [0u8; 64];
+                if let Ok(n) = tls.read(&mut buf) {
+                    if n > 0 {
+                        let _ = tls.write_all(&buf[..n]);
+                        let _ = tls.flush();
+                    }
+                }
+            }
+        }
+    });
+    (port, sni_rx, handle)
+}
+
 fn descriptor(port: u16) -> EasyConnect {
     EasyConnect::parse(&format!("tcps://127.0.0.1:{port}/FREEPDB1")).expect("parse tcps descriptor")
 }
@@ -134,6 +437,109 @@ fn ca_trust_params(expected_host: &str, dn_match: bool, cert_dn: Option<&str>) -
         expected_host: expected_host.to_string(),
         use_sni: false,
     }
+}
+
+/// Wallet parameters for the CA-signed X.509 v1 client fixture. Its private
+/// key is the fixture `leaf.key`; the appended CA is both the server trust
+/// anchor and the client-chain issuer, just like an Oracle wallet.
+fn v1_client_wallet_params(expected_host: &str) -> TlsParams {
+    let mut pem = fixture("client_v1.crt");
+    pem.extend_from_slice(&fixture("leaf.key"));
+    pem.extend_from_slice(&fixture("ca.crt"));
+    let wallet = parse_ewallet_pem(&pem, None).expect("parse X.509 v1 client wallet");
+    assert!(
+        wallet.has_client_identity(),
+        "v1 wallet must carry an identity"
+    );
+    TlsParams {
+        wallet: Some(wallet),
+        dn_match: true,
+        server_cert_dn: None,
+        expected_host: expected_host.to_string(),
+        use_sni: false,
+    }
+}
+
+/// Return the public key of the certificate that issued the wallet's client
+/// leaf. `ewallet.pem` contains the identity chain in leaf-first order, so the
+/// matching issuer is available locally without contacting an ADB endpoint.
+fn client_leaf_issuer_public_key(client_cert_chain: &[Vec<u8>]) -> Vec<u8> {
+    let leaf_der = client_cert_chain
+        .first()
+        .expect("real wallet must include a client certificate");
+    let leaf = x509_cert::Certificate::from_der(leaf_der)
+        .expect("real wallet client certificate must parse as X.509");
+
+    client_cert_chain
+        .iter()
+        .skip(1)
+        .find_map(|candidate_der| {
+            let candidate = x509_cert::Certificate::from_der(candidate_der).ok()?;
+            (candidate.tbs_certificate.subject == leaf.tbs_certificate.issuer).then(|| {
+                candidate
+                    .tbs_certificate
+                    .subject_public_key_info
+                    .subject_public_key
+                    .raw_bytes()
+                    .to_vec()
+            })
+        })
+        .expect("real wallet must include the issuer of its client certificate")
+}
+
+/// Build an mTLS client configuration from a real OCI wallet selected only at
+/// test time. The wallet itself is deliberately never copied into this
+/// repository. We replace only its server-trust anchors with the committed
+/// synthetic CA so the client can complete a completely local handshake while
+/// retaining the wallet's actual X.509 v1 certificate and private key.
+fn real_v1_wallet_mtls_params() -> (TlsParams, Vec<u8>, Vec<u8>) {
+    let wallet_dir = std::env::var_os("ORACLEDB_REAL_V1_WALLET_DIR")
+        .map(PathBuf::from)
+        .expect("set ORACLEDB_REAL_V1_WALLET_DIR to a retained OCI wallet directory");
+    let pem_path = wallet_dir.join("ewallet.pem");
+    let pem =
+        std::fs::read(&pem_path).unwrap_or_else(|e| panic!("read real wallet ewallet.pem: {e}"));
+    let password_file = std::env::var_os("ORACLEDB_REAL_V1_WALLET_PASSWORD_FILE")
+        .map(PathBuf::from)
+        .expect("set ORACLEDB_REAL_V1_WALLET_PASSWORD_FILE for the retained OCI wallet");
+    let password = std::fs::read_to_string(&password_file)
+        .unwrap_or_else(|e| panic!("read real wallet password file: {e}"));
+    let password = password.trim_end_matches(['\r', '\n']);
+    let mut wallet = parse_ewallet_pem(&pem, Some(password))
+        .expect("parse real OCI ewallet.pem with its password");
+    assert!(
+        wallet.has_client_identity(),
+        "real OCI wallet must contain a client identity"
+    );
+
+    let expected_leaf = wallet
+        .client_cert_chain
+        .first()
+        .expect("real wallet must include a client certificate")
+        .clone();
+    let leaf = x509_cert::Certificate::from_der(&expected_leaf)
+        .expect("real wallet client certificate must parse as X.509");
+    assert_eq!(
+        leaf.tbs_certificate.version,
+        x509_cert::Version::V1,
+        "this regression requires the OCI wallet's real X.509 v1 client certificate"
+    );
+    let issuer_public_key = client_leaf_issuer_public_key(&wallet.client_cert_chain);
+
+    let synthetic_trust = parse_ewallet_pem(&synthetic_fixture("ca.pem"), None)
+        .expect("parse local synthetic server trust anchor");
+    wallet.ca_certificates = synthetic_trust.ca_certificates;
+    (
+        TlsParams {
+            wallet: Some(wallet),
+            dn_match: true,
+            server_cert_dn: None,
+            expected_host: SYNTHETIC_CN.to_string(),
+            use_sni: false,
+        },
+        expected_leaf,
+        issuer_public_key,
+    )
 }
 
 #[test]
@@ -165,6 +571,105 @@ fn tcps_handshake_succeeds_with_ca_wallet_and_name_match() {
         "TLS echo must round-trip through the transport"
     );
     server.join().expect("server thread");
+}
+
+#[test]
+fn tcps_x509_v1_wallet_client_cert_builds_and_handshakes() {
+    // OCI Autonomous Database wallets may contain an X.509 v1 client leaf.
+    // `with_client_auth_cert` rejects it while parsing with webpki; the driver
+    // must instead retain the raw DER in a CertifiedKey resolver and complete
+    // mTLS against a server that requires the fixture CA's client identity.
+    let params = v1_client_wallet_params("localhost");
+    tls::build_client_config(&params)
+        .expect("X.509 v1 client certificate must build a rustls client config");
+
+    let (port, protocol_rx, server) = spawn_tls_server_requiring_client_auth();
+    let desc = descriptor(port);
+    let rt = io_runtime();
+    let echoed: Vec<u8> = rt.block_on(async move {
+        let _cx = Cx::current().expect("ambient cx");
+        let tcp = TcpStream::connect((desc.host.clone(), desc.port))
+            .await
+            .expect("tcp connect");
+        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
+            .await
+            .expect("mTLS handshake must accept the X.509 v1 wallet identity");
+        tls_stream.write_all(b"ping\n").await.expect("write");
+        tls_stream.flush().await.expect("flush");
+        let mut buf = vec![0u8; 5];
+        tls_stream.read_exact(&mut buf).await.expect("read echo");
+        buf
+    });
+    assert_eq!(&echoed, b"ping\n", "v1-wallet mTLS echo must round-trip");
+    server.join().expect("server thread");
+    let (protocol_version, signature_scheme) = protocol_rx
+        .recv()
+        .expect("v1 mTLS server must report its protocol version and CertificateVerify scheme");
+    assert_eq!(
+        protocol_version,
+        Some(ProtocolVersion::TLSv1_3),
+        "the v1-wallet regression must exercise TLS 1.3 client authentication"
+    );
+    assert_eq!(
+        signature_scheme,
+        Some(SignatureScheme::RSA_PSS_SHA256),
+        "TLS 1.3 v1-wallet client authentication must prove the key with RSA-PSS"
+    );
+}
+
+/// Regression proof for the precise live OCI wallet shape. This requires an
+/// operator-retained OCI wallet because its v1 private key must never be added
+/// to test fixtures. The local rustls server sends `CertificateRequest`,
+/// verifies the real wallet leaf's issuer signature, and verifies its TLS 1.3
+/// RSA-PSS `CertificateVerify`; it makes no network connection to OCI.
+#[test]
+#[ignore = "requires ORACLEDB_REAL_V1_WALLET_DIR and ORACLEDB_REAL_V1_WALLET_PASSWORD_FILE"]
+fn tcps_real_v1_wallet_tls13_mtls_handshakes() {
+    let (params, expected_leaf, issuer_public_key) = real_v1_wallet_mtls_params();
+    tls::build_client_config(&params)
+        .expect("real X.509 v1 client certificate must build a rustls client config");
+
+    let (server_chain, server_key) = synthetic_server_identity();
+    let (port, protocol_rx, server) = spawn_tls_server_requiring_v1_client_auth_with(
+        server_chain,
+        server_key,
+        expected_leaf,
+        issuer_public_key,
+    );
+    let desc = descriptor(port);
+    let rt = io_runtime();
+    let echoed: Vec<u8> = rt.block_on(async move {
+        let _cx = Cx::current().expect("ambient cx");
+        let tcp = TcpStream::connect((desc.host.clone(), desc.port))
+            .await
+            .expect("tcp connect");
+        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
+            .await
+            .expect("mTLS handshake must accept the real X.509 v1 wallet identity");
+        tls_stream.write_all(b"ping\n").await.expect("write");
+        tls_stream.flush().await.expect("flush");
+        let mut buf = vec![0u8; 5];
+        tls_stream.read_exact(&mut buf).await.expect("read echo");
+        buf
+    });
+    assert_eq!(
+        &echoed, b"ping\n",
+        "real-v1-wallet TLS 1.3 mTLS echo must round-trip"
+    );
+    server.join().expect("server thread");
+    let (protocol_version, signature_scheme) = protocol_rx.recv().expect(
+        "real-v1 mTLS server must report its protocol version and CertificateVerify scheme",
+    );
+    assert_eq!(
+        protocol_version,
+        Some(ProtocolVersion::TLSv1_3),
+        "the real OCI wallet regression must exercise TLS 1.3 client authentication"
+    );
+    assert_eq!(
+        signature_scheme,
+        Some(SignatureScheme::RSA_PSS_SHA256),
+        "the real OCI wallet must prove its TLS 1.3 client key with RSA-PSS"
+    );
 }
 
 #[test]
@@ -211,6 +716,59 @@ fn tcps_handshake_accepts_explicit_cert_dn() {
     });
     assert!(ok, "explicit matching ssl_server_cert_dn must be accepted");
     let _ = server.join();
+}
+
+#[test]
+fn tcps_handshake_emits_oci_endpoint_host_sni_and_keeps_explicit_dn_check() {
+    let (port, received_sni, server) = spawn_tls_server_recording_sni();
+    let endpoint_host = "adb.eu-frankfurt-1.oraclecloud.com";
+    let desc = EasyConnect::parse(&format!(
+        "tcps://127.0.0.1:{port}/g2bb4261a88e318_myadb_high.adb.oraclecloud.com"
+    ))
+    .expect("parse OCI-shaped descriptor");
+    assert_eq!(
+        desc.service_name,
+        "g2bb4261a88e318_myadb_high.adb.oraclecloud.com"
+    );
+    // The test listener's certificate names `db.example.com`, not the OCI
+    // endpoint. An explicit matching Oracle DN keeps post-handshake
+    // verification active while `expected_host` drives the selected SNI.
+    let mut params = ca_trust_params(
+        endpoint_host,
+        true,
+        Some("CN=db.example.com,O=ExampleDB,C=US"),
+    );
+    params.use_sni = true;
+    assert_eq!(
+        tls::decide_sni(true, &params.expected_host, &desc.service_name, None)
+            .expect("OCI host SNI is selectable"),
+        Some(endpoint_host.to_string())
+    );
+
+    let rt = io_runtime();
+    let echoed: Vec<u8> = rt.block_on(async move {
+        let _cx = Cx::current().expect("ambient cx");
+        let tcp = TcpStream::connect((desc.host.clone(), desc.port))
+            .await
+            .expect("tcp connect");
+        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
+            .await
+            .expect("OCI endpoint-host SNI handshake must succeed");
+        tls_stream.write_all(b"ping\n").await.expect("write");
+        tls_stream.flush().await.expect("flush");
+        let mut buf = vec![0u8; 5];
+        tls_stream.read_exact(&mut buf).await.expect("read echo");
+        buf
+    });
+
+    assert_eq!(&echoed, b"ping\n");
+    assert_eq!(
+        received_sni
+            .recv()
+            .expect("server must report the received SNI"),
+        Some(endpoint_host.to_string())
+    );
+    server.join().expect("server thread");
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +879,52 @@ fn spawn_synthetic_tls_server(require_client_auth: bool) -> (u16, std::thread::J
         }
     });
     (port, handle)
+}
+
+type RecordedClientIdentity = (Vec<Vec<u8>>, Option<ProtocolVersion>);
+type SyntheticMtlsRecordingServer = (
+    u16,
+    std::sync::mpsc::Receiver<RecordedClientIdentity>,
+    std::thread::JoinHandle<()>,
+);
+
+/// Spawn the synthetic mTLS echo server and return the exact client certificate
+/// chain rustls observed after it completed the handshake. This makes the
+/// positive mTLS test prove more than successful config construction: the peer
+/// verified and actually received the wallet identity on the wire.
+fn spawn_synthetic_mtls_server_recording_client_cert() -> SyntheticMtlsRecordingServer {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let config = synthetic_server_config(true);
+    let (client_chain_tx, client_chain_rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            let mut conn = match ServerConnection::new(config) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[C2] synthetic mTLS server conn setup failed: {e}");
+                    return;
+                }
+            };
+            {
+                let mut tls = rustls::Stream::new(&mut conn, &mut sock);
+                let mut buf = [0u8; 64];
+                match tls.read(&mut buf) {
+                    Ok(n) if n > 0 => {
+                        let _ = tls.write_all(&buf[..n]);
+                        let _ = tls.flush();
+                    }
+                    _ => {}
+                }
+            }
+            let client_chain = conn
+                .peer_certificates()
+                .map(|certs| certs.iter().map(|cert| cert.as_ref().to_vec()).collect())
+                .unwrap_or_default();
+            let _ = client_chain_tx.send((client_chain, conn.protocol_version()));
+        }
+    });
+    (port, client_chain_rx, handle)
 }
 
 /// Verify-only client params that trust ONLY the synthetic CA (`ca.pem` alone →
@@ -496,11 +1100,12 @@ fn synthetic_tcps_wallet_trust_anchor_governs() {
 }
 
 #[test]
-fn synthetic_tcps_mutual_tls_succeeds() {
+fn synthetic_tcps_mutual_tls_presents_wallet_client_cert() {
     // mTLS (positive): the server demands a client cert and verifies it against
     // the synthetic CA; the client presents the synthetic identity from the
-    // combined ewallet.pem+ca.pem wallet. Full mutual handshake + echo.
-    let (port, server) = spawn_synthetic_tls_server(true);
+    // combined ewallet.pem+ca.pem wallet. Full mutual handshake + echo, then
+    // assert rustls on the server actually observed that identity.
+    let (port, client_chain_rx, server) = spawn_synthetic_mtls_server_recording_client_cert();
     let params = synthetic_mtls_params(SYNTHETIC_CN);
     let desc = descriptor(port);
 
@@ -520,8 +1125,26 @@ fn synthetic_tcps_mutual_tls_succeeds() {
         buf
     });
     assert_eq!(&echoed, b"ping\n", "mTLS echo must round-trip");
-    eprintln!("[C2] mutual TLS OK: client identity accepted, echo round-tripped");
     server.join().expect("server thread");
+    let (client_chain, protocol_version) = client_chain_rx
+        .recv()
+        .expect("mTLS server must report the peer certificate chain");
+    assert_eq!(
+        protocol_version,
+        Some(ProtocolVersion::TLSv1_3),
+        "the default rustls client/server configurations must negotiate TLS 1.3"
+    );
+    let expected_leaf = rustls_pemfile_certs(&mut std::io::BufReader::new(
+        &synthetic_fixture("ewallet.pem")[..],
+    ))
+    .into_iter()
+    .next()
+    .expect("synthetic ewallet.pem carries its client leaf");
+    assert_eq!(
+        client_chain.first().map(Vec::as_slice),
+        Some(expected_leaf.as_ref()),
+        "mTLS server must receive the client leaf from the wallet"
+    );
 }
 
 #[test]

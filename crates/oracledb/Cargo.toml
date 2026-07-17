@@ -105,6 +105,7 @@ criterion = { version = "0.5", default-features = false, features = ["cargo_benc
 # (tests/value_bridge_properties.rs). Same version the protocol crate pins.
 proptest.workspace = true
 # TLS handshake integration test: a blocking rustls server stub + PEM loading.
+ring = "=0.17.14"
 rustls-pemfile.workspace = true
 sha2.workspace = true
 # Span-capture subscriber for the feature-gated observability test

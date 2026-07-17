@@ -553,6 +553,20 @@ impl<T: WireTransport> ConnectionCore<T> {
         send_data_packet_shared(cx, &self.write, payload, sdu).await
     }
 
+    /// Sends the overflow CONNECT descriptor before the listener has replied
+    /// with ACCEPT. This exchange still uses the legacy 16-bit TNS header;
+    /// normal TTC DATA switches to `Large32` only after ACCEPT.
+    async fn send_connect_data_packet(&self, cx: &Cx, payload: &[u8], sdu: usize) -> Result<()> {
+        send_data_packet_shared_with_width(
+            cx,
+            &self.write,
+            payload,
+            sdu,
+            PacketLengthWidth::Legacy16,
+        )
+        .await
+    }
+
     async fn send_data_packet_with_flags(
         &self,
         cx: &Cx,
@@ -2744,11 +2758,15 @@ impl Connection {
             } else {
                 None
             };
-            // F3 (bead rust-oracledb-clvm): fail closed *before* any transport
-            // is dialled if `use_sni=true` was requested but the Oracle SNI
-            // cannot be encoded as a rustls DNS name — never a silent no-SNI.
+            // Fail closed *before* any transport is dialled if `use_sni=true`
+            // cannot select an SNI rustls can emit — never a silent no-SNI.
             if let Some(tls_params) = tls_params.as_ref() {
-                tls::decide_sni(tls_params.use_sni, &descriptor.service_name, server_type)?;
+                tls::decide_sni(
+                    tls_params.use_sni,
+                    &tls_params.expected_host,
+                    &descriptor.service_name,
+                    server_type,
+                )?;
             }
             let connector = DriverConnector::default();
             // Secret-free support capture (bead K6): when `ORACLEDB_CAPTURE` is
@@ -2913,12 +2931,25 @@ impl Connection {
                 core.write_all(cx, &packet).await?;
                 if split_connect_data {
                     trace_connect_step("send CONNECT descriptor (data packet)");
-                    core.send_data_packet(cx, connect_data.as_bytes(), usize::from(advertised_sdu))
-                        .await?;
+                    core.send_connect_data_packet(
+                        cx,
+                        connect_data.as_bytes(),
+                        usize::from(advertised_sdu),
+                    )
+                    .await?;
                 }
 
                 trace_connect_step("read ACCEPT");
                 let reply = core.read_packet(PacketLengthWidth::Legacy16).await?;
+                trace_connect_value(
+                    "CONNECT reply",
+                    &format!(
+                        "type={} flags=0x{:02x} payload_len={}",
+                        reply.packet_type,
+                        reply.packet_flags,
+                        reply.payload.len()
+                    ),
+                );
                 match reply.packet_type {
                     TNS_PACKET_TYPE_ACCEPT => break reply,
                     TNS_PACKET_TYPE_RESEND => {
@@ -8830,6 +8861,7 @@ where
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct IncomingPacket {
     packet_type: u8,
+    packet_flags: u8,
     payload: Vec<u8>,
 }
 
@@ -8879,6 +8911,20 @@ where
 {
     let mut guard = lock_write(cx, write).await?;
     send_data_packet(&mut *guard, payload, sdu).await
+}
+
+async fn send_data_packet_shared_with_width<W>(
+    cx: &Cx,
+    write: &Arc<AsyncMutex<W>>,
+    payload: &[u8],
+    sdu: usize,
+    width: PacketLengthWidth,
+) -> Result<()>
+where
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+{
+    let mut guard = lock_write(cx, write).await?;
+    send_data_packet_with_flags_and_width(&mut *guard, payload, sdu, 0, 0, width).await
 }
 
 async fn send_data_packet_shared_with_flags<W>(
@@ -8961,6 +9007,28 @@ async fn send_data_packet_with_flags<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    send_data_packet_with_flags_and_width(
+        stream,
+        payload,
+        sdu,
+        first_packet_flags,
+        last_packet_flags,
+        PacketLengthWidth::Large32,
+    )
+    .await
+}
+
+async fn send_data_packet_with_flags_and_width<W>(
+    stream: &mut W,
+    payload: &[u8],
+    sdu: usize,
+    first_packet_flags: u16,
+    last_packet_flags: u16,
+    width: PacketLengthWidth,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     let max_payload = sdu.saturating_sub(TNS_DATA_PACKET_OVERHEAD).max(1);
     let chunk_count = payload.chunks(max_payload).len();
     for (index, chunk) in payload.chunks(max_payload).enumerate() {
@@ -8971,13 +9039,7 @@ where
         if index + 1 == chunk_count {
             flags |= last_packet_flags;
         }
-        let packet = encode_packet(
-            TNS_PACKET_TYPE_DATA,
-            0,
-            Some(flags),
-            chunk,
-            PacketLengthWidth::Large32,
-        )?;
+        let packet = encode_packet(TNS_PACKET_TYPE_DATA, 0, Some(flags), chunk, width)?;
         stream.write_all(&packet).await?;
     }
     stream.flush().await?;
@@ -10038,7 +10100,7 @@ where
 {
     let mut header = [0u8; 8];
     stream.read_exact(&mut header).await?;
-    let [len0, len1, len2, len3, packet_type, _, _, _] = header;
+    let [len0, len1, len2, len3, packet_type, packet_flags, _, _] = header;
     let declared = match width {
         PacketLengthWidth::Legacy16 => usize::from(u16::from_be_bytes([len0, len1])),
         PacketLengthWidth::Large32 => {
@@ -10057,6 +10119,7 @@ where
     stream.read_exact(&mut payload).await?;
     Ok(IncomingPacket {
         packet_type,
+        packet_flags,
         payload,
     })
 }
@@ -14376,6 +14439,86 @@ mod tests {
 
     fn test_cx() -> Result<Cx> {
         Cx::current().ok_or_else(|| Error::Runtime("missing ambient Cx in test runtime".into()))
+    }
+
+    #[test]
+    fn split_connect_descriptor_uses_legacy16_data_framing_before_accept() -> Result<()> {
+        // OCI Autonomous DB descriptors exceed the listener's 230-byte inline
+        // CONNECT-data allowance. The descriptor follows CONNECT as a DATA
+        // packet, but the listener is still using the pre-ACCEPT Legacy16
+        // header at that point.
+        let connect_data = format!(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=adb.example.oraclecloud.com)(PORT=1522))\
+             (CONNECT_DATA=(SERVICE_NAME={})))",
+            "x".repeat(oracledb_protocol::thin::TNS_MAX_CONNECT_DATA)
+        );
+        assert!(
+            !connect_data_fits_inline(&connect_data),
+            "the descriptor must take the split-CONNECT path"
+        );
+
+        let expected = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            connect_data.as_bytes(),
+            PacketLengthWidth::Legacy16,
+        )?;
+        assert_eq!(
+            &expected[..2],
+            &u16::try_from(expected.len())
+                .expect("test packet fits a Legacy16 header")
+                .to_be_bytes(),
+            "the first two bytes carry the Legacy16 packet length"
+        );
+        assert_eq!(
+            &expected[2..4],
+            &[0, 0],
+            "Legacy16 reserves header bytes 2..4; Large32 would put its length there"
+        );
+        assert_eq!(expected[4], TNS_PACKET_TYPE_DATA);
+        assert_eq!(
+            &expected[6..8],
+            &[0, 0],
+            "split CONNECT keeps DATA flags at zero"
+        );
+        let large32 = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(0),
+            connect_data.as_bytes(),
+            PacketLengthWidth::Large32,
+        )?;
+        assert_ne!(
+            &expected[..4],
+            &large32[..4],
+            "the split-CONNECT header must not be Large32"
+        );
+
+        let state = Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+            Vec::new(),
+            vec![WriteAction::expect_bytes(expected, None)],
+            ScriptedClock::default(),
+        )));
+        let core = ConnectionCore::<ScriptedTransport>::from_halves(
+            ScriptedRead::from_state(Arc::clone(&state)),
+            ScriptedWrite::from_state(Arc::clone(&state)),
+            "split_connect_legacy16_write",
+        );
+        let runtime = build_io_runtime()?;
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            core.send_connect_data_packet(&cx, connect_data.as_bytes(), 8192)
+                .await
+        })?;
+        assert!(
+            state
+                .lock()
+                .map_err(|_| Error::Runtime("scripted transport state lock poisoned".into()))?
+                .is_consumed(),
+            "the pre-ACCEPT split descriptor must be written as the exact Legacy16 DATA packet"
+        );
+        Ok(())
     }
 
     #[test]

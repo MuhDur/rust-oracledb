@@ -19,9 +19,14 @@
 //! The value is passed to rustls as the `ServerName`. python-oracledb disables
 //! standard hostname verification (`check_hostname = False`) and instead runs
 //! the Oracle DN-match algorithm after the handshake (see [`super::dn`]), so the
-//! SNI string does not need to be a resolvable DNS name from rustls's point of
-//! view — but it must still be a syntactically valid `ServerName`. The Oracle
-//! SNI format (dotted ASCII labels, digits and letters only) satisfies that.
+//! SNI string does not need to be a resolvable DNS name from Oracle's point of
+//! view. rustls, however, only emits DNS-valid `ServerName` values. In
+//! particular, rustls-pki-types rejects the format's terminal all-numeric
+//! protocol label (for example `.V3.319`). The driver performs the policy
+//! decision at the TCPS connector: public OCI Autonomous Database descriptors
+//! may use their endpoint host as an SNI fallback, while other unencodable
+//! service-form names fail closed. This protocol helper deliberately preserves
+//! python-oracledb's service-form construction exactly.
 
 use crate::TNS_VERSION_DESIRED;
 
