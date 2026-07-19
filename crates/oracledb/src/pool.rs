@@ -15,14 +15,15 @@ use asupersync::sync::Notify;
 use asupersync::Cx;
 use std::collections::VecDeque;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 mod acquire;
 mod engine;
 
-use acquire::{acquire_wait_future, enqueue_request, AsyncAcquireRequest};
+use acquire::{acquire_wait_future, enqueue_request};
+use acquire::{AsyncAcquireRequest, TimedAcquireDeadline};
 use engine::{drop_conn, reaper_main, return_connection_helper};
 
 #[cfg(test)]
@@ -801,12 +802,6 @@ struct EngineInner<B: PoolBackend> {
     /// The asupersync task handle for the region-owned reaper, joined (awaited,
     /// never blocked) by [`PoolEngine::close_async`].
     reaper_handle: Mutex<Option<TaskJoinHandle<()>>>,
-    /// Exact number of externally owned `PoolEngine` handles.
-    ///
-    /// This counter deliberately excludes reaper/runtime references. Unlike an
-    /// `Arc::strong_count` observation, the atomic decrement elects exactly one
-    /// concurrent drop as the last external handle.
-    external_handles: AtomicUsize,
 }
 
 pub struct Pool<B: PoolBackend> {
@@ -1117,7 +1112,6 @@ pub(crate) struct PoolEngine<B: PoolBackend> {
 
 impl<B: PoolBackend> Clone for PoolEngine<B> {
     fn clone(&self) -> Self {
-        self.inner.external_handles.fetch_add(1, Ordering::Relaxed);
         Self {
             inner: Arc::clone(&self.inner),
             runtime: Some(Arc::clone(
@@ -1131,15 +1125,16 @@ impl<B: PoolBackend> Clone for PoolEngine<B> {
 
 impl<B: PoolBackend> Drop for PoolEngine<B> {
     fn drop(&mut self) {
-        // `fetch_sub` is the linearization point for concurrent handle drops.
-        // Exactly one drop observes one and performs shutdown; observing an Arc
-        // count and acting later would leave a check-then-act race.
-        let previous = self.inner.external_handles.fetch_sub(1, Ordering::AcqRel);
-        debug_assert!(previous > 0, "pool external handle count underflow");
-        if previous != 1 {
+        // Detect the last pool handle via the `runtime` Arc, which is held ONLY
+        // by `PoolEngine` clones — the reaper captures a `Weak<EngineInner>` and
+        // a `RuntimeHandle`, never the `Arc<Runtime>`, so this count is exactly
+        // the number of live pool handles (unperturbed by the reaper transiently
+        // upgrading its `Weak` during a work phase). More than one means another
+        // handle is still live; do nothing.
+        let Some(runtime) = self.runtime.as_ref() else {
             return;
-        }
-        if self.runtime.is_none() {
+        };
+        if Arc::strong_count(runtime) > 1 {
             return;
         }
         // Last handle. Close every connection RIGHT HERE, on the dropping thread,
@@ -1510,7 +1505,6 @@ impl<B: PoolBackend> PoolEngine<B> {
             bg: Arc::new(Notify::new()),
             reaper_stop: AtomicBool::new(false),
             reaper_handle: Mutex::new(None),
-            external_handles: AtomicUsize::new(1),
         });
         // The reaper holds a `Weak` so it never keeps `EngineInner` alive across a
         // park; it also holds a strong `Arc` to the `bg` notifier so it can park
@@ -1565,7 +1559,8 @@ impl<B: PoolBackend> PoolEngine<B> {
             (request_id, wait_timeout)
         };
         let mut request = AsyncAcquireRequest::new(inner, request_id);
-        let result = acquire_wait_future(cx, inner, request_id, wait_timeout).await;
+        let deadline = wait_timeout.map(TimedAcquireDeadline::new);
+        let result = acquire_wait_future(cx, inner, request_id, deadline.as_ref()).await;
 
         match result {
             Ok(conn_id) => {
@@ -2569,7 +2564,6 @@ mod tests {
             bg: Arc::new(Notify::new()),
             reaper_stop: AtomicBool::new(false),
             reaper_handle: Mutex::new(None),
-            external_handles: AtomicUsize::new(0),
         });
         (inner, backend, held)
     }
@@ -3441,49 +3435,6 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_last_handle_drops_elect_exactly_one_shutdown() {
-        let backend = Arc::new(FakeBackend::new());
-        let engine = PoolEngine::start(
-            Arc::clone(&backend),
-            test_config(1, 1, 1, POOL_GETMODE_WAIT),
-        )
-        .unwrap();
-        wait_for_open_count(&engine, 1);
-        let weak = Arc::downgrade(&engine.inner);
-
-        const DROPPERS: usize = 64;
-        let barrier = Arc::new(Barrier::new(DROPPERS + 1));
-        let handles = (0..DROPPERS)
-            .map(|_| {
-                let handle = engine.clone();
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    drop(handle);
-                })
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            engine.inner.external_handles.load(Ordering::Acquire),
-            DROPPERS + 1,
-            "the lifecycle counter must track external handles, not transient reaper Arcs"
-        );
-        drop(engine);
-
-        barrier.wait();
-        for handle in handles {
-            handle.join().expect("concurrent pool dropper");
-        }
-
-        wait_for_worker_exit(&weak);
-        assert_eq!(
-            backend.closed.load(Ordering::SeqCst),
-            1,
-            "the single pooled transport must be closed exactly once"
-        );
-    }
-
-    #[test]
     fn nowait_raises_when_full_and_forceget_exceeds_max() {
         let backend = Arc::new(FakeBackend::new());
         let engine = PoolEngine::start(
@@ -3716,99 +3667,6 @@ mod tests {
             "timed async acquire should not park indefinitely"
         );
         engine.return_connection(held).unwrap();
-        engine.close(false).unwrap();
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn timedwait_acquires_share_a_bounded_runtime_timer() {
-        const PROBE_CHILD: &str = "ORACLEDB_POOL_TIMER_PROBE_CHILD";
-        if std::env::var_os(PROBE_CHILD).is_none() {
-            // Isolate the OS-thread measurement from other unit tests, which
-            // legitimately create and tear down runtimes in parallel.
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "pool::tests::timedwait_acquires_share_a_bounded_runtime_timer",
-                    "--nocapture",
-                ])
-                .env(PROBE_CHILD, "1")
-                .output()
-                .expect("run isolated timed-wait thread probe");
-            assert!(
-                output.status.success(),
-                "isolated timed-wait thread probe failed\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
-
-        fn thread_count() -> usize {
-            std::fs::read_dir("/proc/self/task")
-                .expect("Linux exposes process threads")
-                .count()
-        }
-
-        let backend = Arc::new(FakeBackend::new());
-        let config = test_config(1, 1, 1, POOL_GETMODE_TIMEDWAIT).with_wait_timeout_ms(30_000);
-        let engine = PoolEngine::start(Arc::clone(&backend), config).unwrap();
-        wait_for_open_count(&engine, 1);
-        let held = engine.acquire(AcquireOptions::default()).unwrap();
-
-        let runtime = crate::build_io_runtime().expect("asupersync runtime");
-        runtime.block_on(async {
-            let cx = Cx::current().expect("asupersync installs an ambient Cx");
-            let mut waits = Vec::new();
-
-            for _ in 0..8 {
-                waits.push(Box::pin(
-                    engine.acquire_async(&cx, AcquireOptions::default()),
-                ));
-            }
-            poll_fn(|task_cx| {
-                for wait in &mut waits {
-                    assert!(Future::poll(Pin::as_mut(wait), task_cx).is_pending());
-                }
-                Poll::Ready(())
-            })
-            .await;
-            let initial_threads = thread_count();
-
-            for _ in 0..96 {
-                waits.push(Box::pin(
-                    engine.acquire_async(&cx, AcquireOptions::default()),
-                ));
-            }
-            poll_fn(|task_cx| {
-                for wait in &mut waits {
-                    assert!(Future::poll(Pin::as_mut(wait), task_cx).is_pending());
-                }
-                Poll::Ready(())
-            })
-            .await;
-            let expanded_threads = thread_count();
-
-            assert!(
-                expanded_threads <= initial_threads + 8,
-                "adding 96 timed waiters grew OS threads from {initial_threads} to {expanded_threads}; waiters must share the runtime timer"
-            );
-            drop(waits);
-        });
-
-        assert!(
-            engine
-                .inner
-                .state
-                .lock()
-                .unwrap()
-                .requests
-                .iter()
-                .all(|request| !request.waiting),
-            "dropping timed acquire futures must mark every queued request abandoned"
-        );
-        engine.return_connection(held).unwrap();
-        engine.drain().unwrap();
         engine.close(false).unwrap();
     }
 

@@ -24,7 +24,6 @@ on:
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   group: live-${{ github.ref }}
@@ -49,14 +48,9 @@ jobs:
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
 
       - name: Start Oracle Free 23ai
-        id: start_oracle
-        continue-on-error: true
         run: bash scripts/container.sh up
 
       - name: Wait for database ready
-        id: wait_ready
-        if: ${{ always() && steps.start_oracle.outcome == 'success' }}
-        continue-on-error: true
         run: |
           set -euo pipefail
           for i in $(seq 1 90); do
@@ -70,15 +64,9 @@ jobs:
           exit 1
 
       - name: Bootstrap test schema (pythontest user + grants)
-        id: bootstrap_schema
-        if: ${{ always() && steps.start_oracle.outcome == 'success' && steps.wait_ready.outcome == 'success' }}
-        continue-on-error: true
         run: bash scripts/bootstrap_live_schema.sh
 
       - name: Verify connect-trace credentials are distinguishable
-        id: verify_credentials
-        if: ${{ always() && steps.start_oracle.outcome == 'success' && steps.wait_ready.outcome == 'success' && steps.bootstrap_schema.outcome == 'success' }}
-        continue-on-error: true
         run: |
           set -euo pipefail
           eval "$(scripts/container.sh env)"
@@ -90,9 +78,6 @@ jobs:
           test "$FAILOVER_PASSWORD" = "$PYO_TEST_MAIN_PASSWORD"
 
       - name: Driver live tests (serial, ignored)
-        id: live_tests
-        if: ${{ always() && steps.start_oracle.outcome == 'success' && steps.wait_ready.outcome == 'success' && steps.bootstrap_schema.outcome == 'success' && steps.verify_credentials.outcome == 'success' }}
-        continue-on-error: true
         run: |
           set -uo pipefail
           eval "$(scripts/container.sh env)"
@@ -116,80 +101,3 @@ jobs:
           done
           echo "live tests failed after 2 attempts" >&2
           exit 1
-
-      - name: Classify machine-readable Live observation
-        id: observation
-        if: ${{ always() }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "${{ steps.start_oracle.outcome }}" != success ||
-                "${{ steps.wait_ready.outcome }}" != success ||
-                "${{ steps.bootstrap_schema.outcome }}" != success ||
-                "${{ steps.verify_credentials.outcome }}" != success ]]; then
-            observation=infra_skip
-          elif [[ "${{ steps.live_tests.outcome }}" == success ]]; then
-            observation=green
-          else
-            observation=red
-          fi
-          echo "observation=$observation" >> "$GITHUB_OUTPUT"
-          echo "Live observation: $observation"
-
-      - name: Restore latest Live gate state
-        id: restore_state
-        if: ${{ always() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          state_dir="$RUNNER_TEMP/live-gate-state"
-          mkdir -p "$state_dir"
-          artifact_id="$(gh api \
-            "/repos/${GITHUB_REPOSITORY}/actions/artifacts?name=driver-live-gate-state&per_page=100" \
-            --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | reverse | .[0].id // empty')"
-          if [[ -n "$artifact_id" ]]; then
-            gh api "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
-              > "$RUNNER_TEMP/driver-live-gate-state.zip"
-            unzip -p "$RUNNER_TEMP/driver-live-gate-state.zip" live-gate-state.json \
-              > "$state_dir/previous.json"
-            echo "restored Live gate state artifact $artifact_id"
-          else
-            echo "no prior Live gate state; starting in advisory mode"
-          fi
-
-      - name: Advance advisory-to-blocking state machine
-        id: advance_state
-        if: ${{ always() && steps.restore_state.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          state_dir="$RUNNER_TEMP/live-gate-state"
-          python3 scripts/live_gate_state.py self-test
-          python3 scripts/live_gate_state.py transition \
-            --previous "$state_dir/previous.json" \
-            --allow-missing \
-            --observation "${{ steps.observation.outputs.observation }}" \
-            --output "$state_dir/live-gate-state.json"
-          {
-            echo "### Live nightly gate state"
-            echo
-            echo "- Observation: \`${{ steps.observation.outputs.observation }}\`"
-            echo "- Mode: \`$(jq -r .mode "$state_dir/live-gate-state.json")\`"
-            echo "- Consecutive greens: \`$(jq -r .green_streak "$state_dir/live-gate-state.json")/3\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Persist Live gate state
-        if: ${{ always() && steps.advance_state.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: driver-live-gate-state
-          path: ${{ runner.temp }}/live-gate-state/live-gate-state.json
-          if-no-files-found: error
-
-      - name: Enforce automatically re-armed Live gate
-        if: ${{ always() }}
-        run: >-
-          python3 scripts/live_gate_state.py enforce
-          --state "$RUNNER_TEMP/live-gate-state/live-gate-state.json"

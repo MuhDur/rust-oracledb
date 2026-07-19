@@ -32,13 +32,10 @@ env:
   CARGO_SEMVER_CHECKS_VERSION: "0.48.0"
 
 jobs:
-  validate:
-    name: validate quality inputs (${{ inputs.profile }}/${{ inputs.budget }})
+  quality:
+    name: quality (${{ inputs.profile }}/${{ inputs.budget }})
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      fuzz_seconds: ${{ steps.budget.outputs.fuzz_seconds }}
-      package: ${{ steps.budget.outputs.package }}
+    timeout-minutes: 120
     steps:
       - name: Validate inputs
         shell: bash
@@ -91,13 +88,6 @@ jobs:
           echo "force_failure requested for reporter verification"
           exit 1
 
-  core:
-    name: core suite (${{ inputs.profile }}/${{ inputs.budget }})
-    needs: validate
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
@@ -125,7 +115,6 @@ jobs:
           set -euo pipefail
           bash scripts/check_evidence_contract.sh
           bash scripts/check_entry_trace_contract.sh --self-test
-          python3 scripts/check_ci_workflow_contract.py
           bash scripts/check_release_surface_versions.sh
           bash scripts/check_ci_taxonomy.sh
 
@@ -157,23 +146,7 @@ jobs:
 
       - name: Install cargo-hack
         if: ${{ inputs.profile != 'canary' }}
-        uses: taiki-e/install-action@6385177bd1684e175e09301c9ee3ae18c14a367e # v2
-        with:
-          tool: cargo-hack@${{ env.CARGO_HACK_VERSION }}
-
-      - name: Verify cargo-hack version
-        if: ${{ inputs.profile != 'canary' }}
-        run: cargo hack --version | grep -F "${CARGO_HACK_VERSION}"
-
-      - name: Preflight powerset disk and write/fsync/read canary
-        if: ${{ inputs.profile != 'canary' }}
-        env:
-          ORACLEDB_BUDGET_BASE: ${{ runner.temp }}/oracledb-budget-runs
-        run: >-
-          bash scripts/resource_budget.sh
-          --profile build
-          --run-id "ci-powerset-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          --emit-budget
+        run: cargo install cargo-hack --version "$CARGO_HACK_VERSION" --locked
 
       - name: Feature profile matrix
         if: ${{ inputs.profile != 'canary' }}
@@ -203,13 +176,7 @@ jobs:
 
       - name: Install cargo-public-api
         if: ${{ inputs.profile != 'canary' }}
-        uses: taiki-e/install-action@6385177bd1684e175e09301c9ee3ae18c14a367e # v2
-        with:
-          tool: cargo-public-api@${{ env.CARGO_PUBLIC_API_VERSION }}
-
-      - name: Verify cargo-public-api version
-        if: ${{ inputs.profile != 'canary' }}
-        run: cargo public-api --version | grep -F "${CARGO_PUBLIC_API_VERSION}"
+        run: cargo install cargo-public-api --version "$CARGO_PUBLIC_API_VERSION" --locked
 
       - name: Baseline drift check
         if: ${{ inputs.profile != 'canary' }}
@@ -274,13 +241,7 @@ jobs:
 
       - name: Install cargo-semver-checks
         if: ${{ inputs.profile != 'canary' }}
-        uses: taiki-e/install-action@6385177bd1684e175e09301c9ee3ae18c14a367e # v2
-        with:
-          tool: cargo-semver-checks@${{ env.CARGO_SEMVER_CHECKS_VERSION }}
-
-      - name: Verify cargo-semver-checks version
-        if: ${{ inputs.profile != 'canary' }}
-        run: cargo semver-checks --version | grep -F "${CARGO_SEMVER_CHECKS_VERSION}"
+        run: cargo install cargo-semver-checks --version "$CARGO_SEMVER_CHECKS_VERSION" --locked
 
       # BLOCKING since 0.3.0 (road-to-1.0 W2-T1.5): the 0.3.0 public surface is
       # the published SemVer baseline. A breaking change without an appropriate

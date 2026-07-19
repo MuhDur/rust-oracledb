@@ -910,14 +910,14 @@ impl ThinVar {
                 ThinVarReturnKind::Plain,
                 Some(QueryValue::DateTime { .. } | QueryValue::TimestampTz { .. }),
             ) if target_is_char => {
-                let datetime = query_value_to_py(py, value, None, lob_context, true, false, None)?;
+                let datetime = query_value_to_py(py, value, None, lob_context, true, false)?;
                 let builtins = PyModule::import(py, "builtins")?;
                 Ok(builtins.getattr("str")?.call1((datetime,))?.unbind())
             }
             // str(timedelta) for INTERVAL DS wire data requested as a
             // character type (converters.pyx:565-566)
             (ThinVarReturnKind::Plain, Some(QueryValue::IntervalDS { .. })) if target_is_char => {
-                let interval = query_value_to_py(py, value, None, lob_context, true, false, None)?;
+                let interval = query_value_to_py(py, value, None, lob_context, true, false)?;
                 let builtins = PyModule::import(py, "builtins")?;
                 Ok(builtins.getattr("str")?.call1((interval,))?.unbind())
             }
@@ -983,7 +983,7 @@ impl ThinVar {
                     DbObjectImpl::with_packed_data(object_type, packed_data.clone(), None),
                 )
             }
-            _ => query_value_to_py(py, value, None, lob_context, true, false, None),
+            _ => query_value_to_py(py, value, None, lob_context, true, false),
         }
         // outconverter + convert_nulls are applied by the wrapper (see
         // get_output_value above) — do not apply here or it runs twice

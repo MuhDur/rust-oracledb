@@ -3,11 +3,13 @@ use super::{
     abandon_request, checkpoint_pool, lock_state, wake_waiters, AcquireOptions, EngineInner,
     PoolBackend, PoolError, PoolState, Request,
 };
-use asupersync::{time, Cx};
+use asupersync::Cx;
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
-use std::task::Poll;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Poll, Waker};
+use std::time::{Duration, Instant};
 
 pub(super) struct AsyncAcquireRequest<'a, B: PoolBackend> {
     inner: &'a EngineInner<B>,
@@ -43,6 +45,78 @@ impl<'a, B: PoolBackend> AsyncAcquireRequest<'a, B> {
 impl<B: PoolBackend> Drop for AsyncAcquireRequest<'_, B> {
     fn drop(&mut self) {
         self.abandon();
+    }
+}
+
+struct TimedAcquireWakeState {
+    stop: AtomicBool,
+    waker: Mutex<Option<Waker>>,
+}
+
+pub(super) struct TimedAcquireDeadline {
+    deadline: Instant,
+    wake_state: Arc<TimedAcquireWakeState>,
+    wake_thread: std::thread::Thread,
+}
+
+impl TimedAcquireDeadline {
+    pub(super) fn new(wait_timeout: Duration) -> Self {
+        let start = Instant::now();
+        let deadline = start
+            .checked_add(wait_timeout)
+            .expect("u32 millisecond pool wait timeout must fit in Instant");
+        let wake_state = Arc::new(TimedAcquireWakeState {
+            stop: AtomicBool::new(false),
+            waker: Mutex::new(None),
+        });
+        let wake_state_for_thread = Arc::clone(&wake_state);
+        let join = std::thread::spawn(move || {
+            while !wake_state_for_thread.stop.load(Ordering::Acquire) {
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                std::thread::park_timeout(deadline.saturating_duration_since(now));
+            }
+
+            if wake_state_for_thread.stop.load(Ordering::Acquire) {
+                return;
+            }
+            if let Ok(mut waker) = wake_state_for_thread.waker.lock() {
+                if let Some(waker) = waker.take() {
+                    waker.wake();
+                }
+            }
+        });
+        let wake_thread = join.thread().clone();
+        drop(join);
+        Self {
+            deadline,
+            wake_state,
+            wake_thread,
+        }
+    }
+
+    fn register_waker(&self, waker: &Waker) {
+        if let Ok(mut registered) = self.wake_state.waker.lock() {
+            let replace = registered
+                .as_ref()
+                .is_none_or(|current| !current.will_wake(waker));
+            if replace {
+                *registered = Some(waker.clone());
+            }
+        }
+    }
+
+    fn is_elapsed(&self) -> bool {
+        Instant::now() >= self.deadline
+    }
+}
+
+impl Drop for TimedAcquireDeadline {
+    fn drop(&mut self) {
+        self.wake_state.stop.store(true, Ordering::Release);
+        self.wake_thread.unpark();
     }
 }
 
@@ -112,15 +186,9 @@ pub(super) fn acquire_wait_future<'a, B: PoolBackend>(
     cx: &'a Cx,
     inner: &'a EngineInner<B>,
     request_id: u64,
-    wait_timeout: Option<Duration>,
+    deadline: Option<&'a TimedAcquireDeadline>,
 ) -> impl Future<Output = Result<u64, PoolError>> + 'a {
     let mut notified = None;
-    // `asupersync::time::Sleep` registers with the runtime's shared timer
-    // driver. A TIMEDWAIT acquire therefore consumes one small future, not one
-    // detached operating-system thread. Dropping the acquire future drops both
-    // this timer registration and `AsyncAcquireRequest`, so cancellation also
-    // removes the queued request without a stray wake thread.
-    let mut deadline = wait_timeout.map(|timeout| Box::pin(time::sleep(time::wall_now(), timeout)));
     poll_fn(move |task_cx| loop {
         if let Err(err) = checkpoint_pool(cx) {
             return Poll::Ready(Err(err));
@@ -136,8 +204,9 @@ pub(super) fn acquire_wait_future<'a, B: PoolBackend>(
             Err(err) => return Poll::Ready(Err(err)),
         }
 
-        if let Some(deadline) = deadline.as_mut() {
-            if Future::poll(Pin::as_mut(deadline), task_cx).is_ready() {
+        if let Some(deadline) = deadline {
+            deadline.register_waker(task_cx.waker());
+            if deadline.is_elapsed() {
                 return Poll::Ready(Err(PoolError::NoConnectionAvailable));
             }
         }

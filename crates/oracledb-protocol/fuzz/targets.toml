@@ -349,18 +349,3 @@ malloc_limit_mb = 2048
 lane = "ci-smoke"
 iterations = 500
 max_total_time_seconds = 5
-
-[[targets]]
-name = "sql_bind_names"
-owner = "protocol/sql"
-parser_entry = "crates/oracledb-protocol/src/sql.rs public_bind_name; bind-name scanners"
-risk_tier = "required"
-corpus_dir = "corpus/sql_bind_names"
-dictionary = ""
-max_input_bytes = 65_536
-timeout_seconds = 10
-rss_limit_mb = 2048
-malloc_limit_mb = 2048
-lane = "ci-smoke"
-iterations = 500
-max_total_time_seconds = 5

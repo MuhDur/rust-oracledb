@@ -16,7 +16,6 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use asupersync::net::TcpStream;
@@ -65,16 +64,11 @@ fn io_runtime() -> asupersync::runtime::Runtime {
         .expect("io runtime")
 }
 
-fn fixture_dir() -> PathBuf {
+fn fixture(name: &str) -> Vec<u8> {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("tests");
     p.push("fixtures");
     p.push("tls");
-    p
-}
-
-fn fixture(name: &str) -> Vec<u8> {
-    let mut p = fixture_dir();
     p.push(name);
     std::fs::read(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
 }
@@ -337,19 +331,6 @@ fn spawn_tls_server() -> (u16, std::thread::JoinHandle<()>) {
     (port, handle)
 }
 
-/// Accept one TCP connection but never send a TLS ServerHello. This is a real
-/// socket-level stalled handshake, not a mocked future.
-fn spawn_stalled_tls_peer(hold: Duration) -> (u16, std::thread::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let port = listener.local_addr().expect("addr").port();
-    let handle = std::thread::spawn(move || {
-        if let Ok((_socket, _)) = listener.accept() {
-            std::thread::sleep(hold);
-        }
-    });
-    (port, handle)
-}
-
 type V1MtlsEvidence = (Option<ProtocolVersion>, Option<SignatureScheme>);
 type V1MtlsServer = (
     u16,
@@ -593,112 +574,6 @@ fn tcps_handshake_succeeds_with_ca_wallet_and_name_match() {
 }
 
 #[test]
-fn configured_connect_timeout_bounds_a_stalled_tls_handshake() {
-    let (port, server) = spawn_stalled_tls_peer(Duration::from_millis(350));
-    let identity =
-        ClientIdentity::new("tls-timeout", "host", "user", "term", "rust").expect("test identity");
-    let options = ConnectOptions::new(
-        format!("tcps://127.0.0.1:{port}/FREEPDB1?transport_connect_timeout=75ms"),
-        "user",
-        "password",
-        identity,
-    )
-    // A committed local fixture makes TLS configuration deterministic; the
-    // peer stalls before presenting a certificate, so identity matching is
-    // not involved in this timeout regression.
-    .with_wallet_location(fixture_dir().display().to_string())
-    .with_ssl_server_dn_match(false);
-
-    let started = Instant::now();
-    let error = BlockingConnection::connect(options)
-        .expect_err("the configured 75ms budget must stop a stalled handshake");
-    let elapsed = started.elapsed();
-    assert!(
-        matches!(error, Error::CallTimeout(75)),
-        "the outer configured connect budget must own classification, got {error:?}"
-    );
-    assert!(
-        elapsed < Duration::from_millis(300),
-        "the former fixed 20s TLS cap must not preempt the configured 75ms budget: {elapsed:?}"
-    );
-    server.join().expect("stalled peer thread");
-}
-
-#[test]
-fn tcps_hard_close_delivers_complete_plaintext_before_missing_close_notify() {
-    // `spawn_tls_server` deliberately drops the TCP socket after flushing the
-    // echo; it does not queue a rustls close_notify. This is the Oracle session
-    // shutdown shape: complete application bytes followed by a bare TCP FIN.
-    let (port, server) = spawn_tls_server();
-    let params = ca_trust_params("localhost", true, None);
-    let desc = descriptor(port);
-
-    let rt = io_runtime();
-    let error = rt.block_on(async move {
-        let _cx = Cx::current().expect("ambient cx");
-        let tcp = TcpStream::connect((desc.host.clone(), desc.port))
-            .await
-            .expect("tcp connect");
-        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
-            .await
-            .expect("TCPS handshake");
-        tls_stream.write_all(b"ping\n").await.expect("write");
-        tls_stream.flush().await.expect("flush");
-
-        let mut complete = [0u8; 5];
-        tls_stream
-            .read_exact(&mut complete)
-            .await
-            .expect("complete plaintext must be delivered before transport EOF");
-        assert_eq!(&complete, b"ping\n");
-
-        let mut next = [0u8; 1];
-        tls_stream
-            .read(&mut next)
-            .await
-            .expect_err("bare TCP close must retain Asupersync's typed TLS EOF")
-    });
-    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
-    assert_eq!(
-        error.to_string(),
-        "tls connection closed without close_notify"
-    );
-    server.join().expect("server thread");
-}
-
-#[test]
-fn tcps_hard_close_before_expected_plaintext_remains_unexpected_eof() {
-    let (port, server) = spawn_tls_server();
-    let params = ca_trust_params("localhost", true, None);
-    let desc = descriptor(port);
-
-    let rt = io_runtime();
-    let error = rt.block_on(async move {
-        let _cx = Cx::current().expect("ambient cx");
-        let tcp = TcpStream::connect((desc.host.clone(), desc.port))
-            .await
-            .expect("tcp connect");
-        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
-            .await
-            .expect("TCPS handshake");
-        tls_stream.write_all(b"ping\n").await.expect("write");
-        tls_stream.flush().await.expect("flush");
-
-        let mut truncated = [0u8; 6];
-        tls_stream
-            .read_exact(&mut truncated)
-            .await
-            .expect_err("a missing application byte must not become clean EOF")
-    });
-    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
-    assert_eq!(
-        error.to_string(),
-        "tls connection closed without close_notify"
-    );
-    server.join().expect("server thread");
-}
-
-#[test]
 fn tcps_x509_v1_wallet_client_cert_builds_and_handshakes() {
     // OCI Autonomous Database wallets may contain an X.509 v1 client leaf.
     // `with_client_auth_cert` rejects it while parsing with webpki; the driver
@@ -840,105 +715,6 @@ fn tcps_handshake_accepts_explicit_cert_dn() {
         tls::tls_handshake(&desc, None, &params, tcp).await.is_ok()
     });
     assert!(ok, "explicit matching ssl_server_cert_dn must be accepted");
-    let _ = server.join();
-}
-
-#[test]
-fn dsn_only_cert_dn_rejects_a_san_matching_subject_mismatch() {
-    let (port, server) = spawn_tls_server();
-    // The fixture certificate carries DNS:localhost, so ordinary hostname/SAN
-    // verification would accept it. The pin exists only in the descriptor
-    // inputs and deliberately names a different subject; the shared resolver
-    // must install that pin in the real rustls verifier and reject the peer.
-    let resolved = tls::resolve_tls_security(
-        None,
-        None,
-        true,
-        Some("CN=not-the-server.example.test,O=Acme,C=US"),
-    );
-    let params = ca_trust_params(
-        "localhost",
-        resolved.dn_match,
-        resolved.server_cert_dn.as_deref(),
-    );
-    let desc = descriptor(port);
-
-    let rt = io_runtime();
-    let error = rt.block_on(async move {
-        let _cx = Cx::current().expect("ambient cx");
-        let tcp = TcpStream::connect((desc.host.clone(), desc.port))
-            .await
-            .expect("tcp connect");
-        tls::tls_handshake(&desc, None, &params, tcp)
-            .await
-            .expect_err("a DSN-only mismatched certificate DN must fail closed")
-    });
-    let rendered = error.to_string();
-    assert!(
-        rendered.contains("distinguished name (DN)") && rendered.contains("does not match"),
-        "expected the real verifier's certificate-DN mismatch, got {error}"
-    );
-    let _ = server.join();
-}
-
-#[test]
-fn dsn_dn_match_off_disables_only_name_matching() {
-    let resolved = tls::resolve_tls_security(None, None, false, None);
-    assert!(!resolved.dn_match, "DSN-only OFF must survive resolution");
-
-    // The trusted leaf does not name this host, but disabling the Oracle name
-    // check intentionally permits it after the chain validates.
-    let (port, server) = spawn_tls_server();
-    let params = ca_trust_params(
-        "not-in-cert.example.org",
-        resolved.dn_match,
-        resolved.server_cert_dn.as_deref(),
-    );
-    let desc = descriptor(port);
-    let rt = io_runtime();
-    let echoed: Vec<u8> = rt.block_on(async move {
-        let _cx = Cx::current().expect("ambient cx");
-        let tcp = TcpStream::connect((desc.host.clone(), desc.port))
-            .await
-            .expect("tcp connect");
-        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
-            .await
-            .expect("DN_MATCH=OFF should bypass only the SAN/CN check");
-        tls_stream.write_all(b"ping\n").await.expect("write");
-        tls_stream.flush().await.expect("flush");
-        let mut buf = vec![0u8; 5];
-        tls_stream.read_exact(&mut buf).await.expect("read echo");
-        buf
-    });
-    assert_eq!(&echoed, b"ping\n");
-    server.join().expect("server thread");
-
-    // Turning name matching off must not weaken certificate-chain validation.
-    // The synthetic CA is unrelated to the regular fixture server's chain.
-    let unrelated_wallet = parse_ewallet_pem(&synthetic_fixture("ca.pem"), None)
-        .expect("parse unrelated synthetic CA");
-    let (port, server) = spawn_tls_server();
-    let params = TlsParams {
-        wallet: Some(unrelated_wallet),
-        dn_match: resolved.dn_match,
-        server_cert_dn: None,
-        expected_host: "not-in-cert.example.org".to_string(),
-        use_sni: false,
-    };
-    let desc = descriptor(port);
-    let error = rt.block_on(async move {
-        let _cx = Cx::current().expect("ambient cx");
-        let tcp = TcpStream::connect((desc.host.clone(), desc.port))
-            .await
-            .expect("tcp connect");
-        tls::tls_handshake(&desc, None, &params, tcp)
-            .await
-            .expect_err("DN_MATCH=OFF must still reject an untrusted chain")
-    });
-    assert!(
-        error.to_string().contains("certificate"),
-        "expected a chain-validation failure, got {error}"
-    );
     let _ = server.join();
 }
 

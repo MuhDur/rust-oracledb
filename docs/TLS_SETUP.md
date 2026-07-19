@@ -36,7 +36,7 @@ let options = ConnectOptions::new(
         ClientIdentity::new("myapp", "host", "appuser", "term", "rust-oracledb")?,
     )
     .with_wallet_location("/etc/oracle/wallets/db1") // dir with ewallet.pem
-    // .with_ssl_server_dn_match(false) // explicit override; normally omit
+    .with_ssl_server_dn_match(true)                  // default
     // .with_ssl_server_cert_dn("CN=db.example.com,O=Acme,C=US") // optional exact DN
     // .with_wallet_password("…")  // only for an encrypted mTLS key
     // .with_use_sni(true)         // opt-in Oracle SNI (see §3 caveat)
@@ -56,22 +56,6 @@ Wallet directory resolution mirrors python-oracledb:
 | 1 | `with_wallet_location(...)` — the explicit dir. `SYSTEM` (case-insensitive) means "use the OS trust store, no wallet file". |
 | 2 | the `TNS_ADMIN` environment variable |
 | — | if neither is set, the OS root bundle is used (verify against public CAs) |
-
-TLS identity options use the same explicit-first rule. Calling
-`with_ssl_server_dn_match(...)` or `with_ssl_server_cert_dn(...)` is an explicit
-structured override; otherwise the matching `SSL_SERVER_DN_MATCH` or
-`SSL_SERVER_CERT_DN` value from the EasyConnect/full descriptor applies.
-`SSL_SERVER_DN_MATCH` defaults to `ON` only when neither source specifies it.
-
-| Setting | Precedence |
-|---|---|
-| server-DN match | `with_ssl_server_dn_match(...)` → descriptor `SSL_SERVER_DN_MATCH` → `ON` |
-| exact certificate DN | `with_ssl_server_cert_dn(...)` → descriptor `SSL_SERVER_CERT_DN` → unset |
-
-The resolved values configure both the local certificate verifier and the
-Oracle `SECURITY` clause sent on the wire. `DN_MATCH=OFF` disables only the
-Oracle subject/SAN/CN identity comparison; certificate-chain validation against
-the configured wallet or OS trust store remains mandatory.
 
 ---
 

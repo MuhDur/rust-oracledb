@@ -400,7 +400,7 @@ pub fn scan_bind_names(statement: &str) -> Result<Vec<String>> {
 }
 
 pub fn is_quoted_bind_name(name: &str) -> bool {
-    name.len() >= 2 && name.starts_with('"') && name.ends_with('"')
+    name.starts_with('"') && name.ends_with('"')
 }
 
 pub fn bind_names_equal(left: &str, right: &str) -> bool {
@@ -907,9 +907,6 @@ mod tests {
     fn converts_public_bind_names_like_python_oracledb() {
         assert_eq!(public_bind_name("abc"), "ABC");
         assert_eq!(public_bind_name("\"MiX\""), "MiX");
-        assert_eq!(public_bind_name("\""), "\"");
-        assert_eq!(public_bind_name(""), "");
-        assert_eq!(public_bind_name("\"工具\""), "工具");
     }
 
     #[test]

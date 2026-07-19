@@ -9,26 +9,16 @@ for the publish order, the version, what ships, and the post-publish checklist.
 | field | value |
 |---|---|
 | Initial public release | **0.1.0** |
-| Latest published release | [**0.8.4**](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.4), 2026-07-17 |
-| Next patch target | **0.8.5** |
-| Current workspace version | **0.8.4**, matching the published tag |
-| Target source | `[workspace.package].version` in the root `Cargo.toml`; bump it to exactly **0.8.5** during release preparation |
+| Latest published release | **0.8.3** |
+| Prepared release candidate | **0.8.4** (not published) |
+| Candidate source | `[workspace.package].version` in the root `Cargo.toml` |
 
 `0.1.0` (not `0.0.0`, which crates.io treats as a placeholder, and not a
 `-alpha` pre-release) is the deliberate first public cut: the driver passes the
 reference python-oracledb thin-mode test suite and is honestly usable, while the
 `0.x` major signals that the public API may still evolve before `1.0`.
 
-All workspace crates share the workspace version via `version.workspace = true`.
-The 0.8.4 release was exact-SHA qualified and published by the tag pipeline:
-
-- [release tag and assets](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.4)
-- [exact-SHA qualification run](https://github.com/MuhDur/rust-oracledb/actions/runs/29583399057)
-- [tag-driven release run](https://github.com/MuhDur/rust-oracledb/actions/runs/29596141970)
-- crates.io packages:
-  [`oracledb`](https://crates.io/crates/oracledb/0.8.4),
-  [`oracledb-protocol`](https://crates.io/crates/oracledb-protocol/0.8.4), and
-  [`oracledb-derive`](https://crates.io/crates/oracledb-derive/0.8.4)
+All workspace crates share the prepared candidate version via `version.workspace = true`.
 
 ## Crates and the publish dependency graph
 
@@ -52,12 +42,12 @@ exist when it is uploaded):
 
 `oracledb` depends on `oracledb-protocol` (always) and `oracledb-derive` (under
 the default `derive` feature). Both are declared with **both** a `path` (used for
-local development) and a version pin matching the workspace release. During the
-next release-preparation bump, all three versions must move together to 0.8.5:
+local development) and a version pin matching the workspace release (for 0.8.4,
+`version = "0.8.4"`, used by crates.io when published):
 
 ```toml
-oracledb-protocol = { path = "../oracledb-protocol", version = "0.8.5" }
-oracledb-derive   = { path = "../oracledb-derive",   version = "0.8.5", optional = true }
+oracledb-protocol = { path = "../oracledb-protocol", version = "0.8.4" }
+oracledb-derive   = { path = "../oracledb-derive",   version = "0.8.4", optional = true }
 ```
 
 `asupersync = "=0.3.9"` is the only non-trivial external runtime dependency and
@@ -137,16 +127,14 @@ default. Per-crate specifics:
 | `categories` | database, asynchronous | database, network-programming | database |
 | `readme` | `README.md` | `false` | `false` |
 
-## Expected next-release dry-run behavior
+## Dry-run results (recorded)
 
-After the 0.8.5 version bump, run with the repository's managed Cargo target
-configuration (never redirect to or alter `/tmp/cargo-target`):
+Run with `CARGO_TARGET_DIR` / `TMPDIR` pointed at a scratch cache:
 
 - `cargo publish --dry-run -p oracledb-protocol` → **PASS** (packages + verify-builds
   clean; 38 files).
 - `cargo publish --dry-run -p oracledb-derive` → **PASS** (5 files, builds clean).
-- `cargo publish --dry-run -p oracledb` → **fails at dependency resolution**
-  before the 0.8.5 dependency crates are published:
+- `cargo publish --dry-run -p oracledb` → **fails at dependency resolution**:
   `no matching package named oracledb-derive found / location searched: crates.io
   index`. This is **expected**: `oracledb` depends on `oracledb-protocol` and
   `oracledb-derive` by `version`, and those are not on crates.io until steps 1–2
@@ -163,9 +151,9 @@ After each `cargo publish`, and once all three are live:
       `.../oracledb-protocol`, `.../oracledb-derive`.
 - [ ] docs.rs build succeeds: `https://docs.rs/oracledb` (check the build log;
       enable any required features there if the default docs are thin).
-- [ ] `cargo add oracledb@0.8.5` in a fresh project resolves `0.8.5` and compiles a
+- [ ] `cargo add oracledb@0.8.4` in a fresh project resolves `0.8.4` and compiles a
       trivial `use oracledb::ConnectOptions;`.
-- [ ] Tag the release in git: `git tag v0.8.5 && git push origin v0.8.5` (operator-authorized only).
+- [ ] Tag the release in git: `git tag v0.8.4 && git push --tags`.
 - [ ] Verify the published `oracledb` README renders correctly on crates.io
       (links point at the GitHub repo, not broken relative `docs/` paths).
 - [ ] Confirm `oracledb-pyshim` and `oracledb-protocol-fuzz` did NOT get

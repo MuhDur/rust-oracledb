@@ -1115,11 +1115,6 @@ pub trait FromRow: Sized {
 /// features). Each impl is a 1:1 map to an existing [`BindValue`] variant, so
 /// `(40, "alice")` and [`params!`](crate::params) flow straight into the
 /// execute helpers. `Option<T>` binds `None` as SQL `NULL`.
-///
-/// Oracle's fixed-offset TIMESTAMP WITH TIME ZONE wire is minute-granular. A
-/// chrono `DateTime<FixedOffset>` with a sub-minute offset therefore preserves
-/// its UTC instant exactly and projects only its display offset to the nearest
-/// encodable minute; half-minute ties round away from zero.
 pub trait ToSql {
     /// Produce the [`BindValue`] this value binds as.
     fn to_sql(&self) -> BindValue;
@@ -1206,27 +1201,6 @@ mod chrono_to_sql {
     use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, Timelike, Utc};
     use oracledb_protocol::thin::BindValue;
 
-    /// Project chrono's second-granular fixed offset onto Oracle's
-    /// minute-granular TIMESTAMP WITH TIME ZONE wire field. The UTC components
-    /// always preserve the exact instant; the display offset is the closest
-    /// representable minute, with exact half-minute ties rounded away from zero
-    /// so `+00:00:30` and `-00:00:30` retain their direction. This projection is
-    /// necessary because the patch-safe public `BindValue::TimestampTz` contract
-    /// and Oracle wire both carry offset minutes, not seconds. Chrono's extreme
-    /// second offsets are clamped to the wire codec's inclusive +/-1439-minute
-    /// range after rounding.
-    fn fixed_offset_wire_minutes(offset_seconds: i32) -> i32 {
-        const MAX_WIRE_OFFSET_MINUTES: i64 = 1_439;
-        let seconds = i64::from(offset_seconds);
-        let rounded = if seconds >= 0 {
-            (seconds + 30) / 60
-        } else {
-            (seconds - 30) / 60
-        }
-        .clamp(-MAX_WIRE_OFFSET_MINUTES, MAX_WIRE_OFFSET_MINUTES);
-        i32::try_from(rounded).expect("chrono FixedOffset is bounded to less than 24 hours")
-    }
-
     impl ToSql for NaiveDateTime {
         fn to_sql(&self) -> BindValue {
             BindValue::Timestamp {
@@ -1270,7 +1244,7 @@ mod chrono_to_sql {
                 minute: utc.minute() as u8,
                 second: utc.second() as u8,
                 nanosecond: utc.nanosecond(),
-                offset_minutes: fixed_offset_wire_minutes(self.offset().local_minus_utc()),
+                offset_minutes: self.offset().local_minus_utc() / 60,
             }
         }
     }
@@ -2426,59 +2400,6 @@ mod tests {
                 offset_minutes: 345,
             }
         );
-
-        // chrono permits second-granular fixed offsets, but Oracle's wire can
-        // only encode minutes. Preserve the exact UTC instant and choose the
-        // nearest display offset; half-minute ties retain their sign.
-        for (offset_seconds, expected_minutes) in [
-            (-86_399, -1_439),
-            (-90, -2),
-            (-89, -1),
-            (-30, -1),
-            (-29, 0),
-            (0, 0),
-            (29, 0),
-            (30, 1),
-            (89, 1),
-            (90, 2),
-            (86_399, 1_439),
-        ] {
-            let value = FixedOffset::east_opt(offset_seconds)
-                .unwrap()
-                .with_ymd_and_hms(2026, 6, 29, 12, 0, 0)
-                .unwrap();
-            let expected_utc = value.naive_utc();
-            match value.to_sql() {
-                BindValue::TimestampTz {
-                    year,
-                    month,
-                    day,
-                    hour,
-                    minute,
-                    second,
-                    nanosecond,
-                    offset_minutes,
-                } => {
-                    assert_eq!(offset_minutes, expected_minutes, "{offset_seconds}s");
-                    assert_eq!(year, expected_utc.year(), "{offset_seconds}s year");
-                    assert_eq!(month, expected_utc.month() as u8, "{offset_seconds}s month");
-                    assert_eq!(day, expected_utc.day() as u8, "{offset_seconds}s day");
-                    assert_eq!(hour, expected_utc.hour() as u8, "{offset_seconds}s hour");
-                    assert_eq!(
-                        minute,
-                        expected_utc.minute() as u8,
-                        "{offset_seconds}s minute"
-                    );
-                    assert_eq!(
-                        second,
-                        expected_utc.second() as u8,
-                        "{offset_seconds}s second"
-                    );
-                    assert_eq!(nanosecond, expected_utc.nanosecond());
-                }
-                other => panic!("expected TimestampTz bind, got {other:?}"),
-            }
-        }
     }
 
     #[cfg(feature = "uuid")]

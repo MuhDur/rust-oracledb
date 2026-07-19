@@ -16,7 +16,6 @@
 //! exactly mirroring OpenSSL `check_hostname = False` plus `CERT_REQUIRED`.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use asupersync::net::TcpStream;
 use asupersync::tls::{TlsConnector, TlsStream};
@@ -58,70 +57,6 @@ pub struct TlsParams {
     /// server is identified purely by the post-handshake DN match. See
     /// [`decide_sni`] for the strict SNI-selection rules.
     pub use_sni: bool,
-}
-
-/// Effective Oracle TLS identity settings after applying structured-option
-/// precedence over the connect descriptor.
-///
-/// Keeping this as one value is important: the same settings must configure
-/// both the local rustls verifier and the `SECURITY` clause sent to Oracle.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ResolvedTlsSecurity {
-    pub(crate) dn_match: bool,
-    pub(crate) server_cert_dn: Option<String>,
-}
-
-/// Resolve Oracle TLS identity settings with explicit structured options
-/// taking precedence over descriptor values.
-///
-/// An absent structured option falls back to the DSN. The parser supplies the
-/// protocol default (`SSL_SERVER_DN_MATCH=ON`) when the DSN omits it.
-pub(crate) fn resolve_tls_security(
-    explicit_dn_match: Option<bool>,
-    explicit_cert_dn: Option<&str>,
-    descriptor_dn_match: bool,
-    descriptor_cert_dn: Option<&str>,
-) -> ResolvedTlsSecurity {
-    ResolvedTlsSecurity {
-        dn_match: explicit_dn_match.unwrap_or(descriptor_dn_match),
-        server_cert_dn: explicit_cert_dn.or(descriptor_cert_dn).map(str::to_owned),
-    }
-}
-
-/// Fully validated TLS setup for one connect descriptor.
-///
-/// Construction performs every deterministic operation that can fail before
-/// network I/O (client-config construction, wallet key validation, and SNI
-/// selection). A prepared value can therefore be reused across address
-/// failover attempts without allowing a configuration error to masquerade as
-/// a transient handshake failure.
-pub(crate) struct PreparedTlsHandshake {
-    config: ClientConfig,
-    server_name: String,
-}
-
-/// A failure produced only after a prepared TLS configuration starts its
-/// network handshake.
-///
-/// Keeping this distinct from [`Error::Tls`] internally is what makes address
-/// failover stage-aware without adding or changing any public error variant.
-#[derive(Debug)]
-pub(crate) struct TlsHandshakeError(String);
-
-impl TlsHandshakeError {
-    pub(crate) fn new(message: String) -> Self {
-        Self(message)
-    }
-
-    pub(crate) fn into_driver_error(self) -> Error {
-        Error::Tls(format!("TCPS handshake failed: {}", self.0))
-    }
-}
-
-impl std::fmt::Display for TlsHandshakeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TLS/TCPS error: TCPS handshake failed: {}", self.0)
-    }
 }
 
 /// The Oracle server-certificate verifier.
@@ -756,18 +691,30 @@ pub(crate) fn decide_sni(
     Err(Error::UnsupportedSni(sni))
 }
 
-/// Validate and prepare all deterministic TLS configuration before a transport
-/// address is dialled.
-pub(crate) fn prepare_tls_handshake(
+/// Perform the TCPS TLS handshake over a connected TCP stream, returning the
+/// established [`TlsStream`].
+///
+/// SNI handling mirrors python-oracledb: the Oracle `S{len}.{service}.V3.{ver}`
+/// SNI is only emitted when [`TlsParams::use_sni`] is set; by default no SNI is
+/// sent and the server is identified by the post-handshake DN match. The public
+/// OCI Autonomous Database descriptor shape instead uses its valid endpoint
+/// host when rustls cannot encode that service form. Other unencodable SNI
+/// values fail closed with [`Error::UnsupportedSni`] rather than silently
+/// proceeding without SNI — see [`decide_sni`].
+///
+/// # Errors
+/// Returns [`Error::UnsupportedSni`] when `use_sni=true` cannot be honored, or
+/// [`Error::Tls`] on configuration or handshake failure.
+pub async fn tls_handshake(
     descriptor: &EasyConnect,
     server_type: Option<&str>,
     params: &TlsParams,
-) -> Result<PreparedTlsHandshake, Error> {
+    tcp: TcpStream,
+) -> Result<TlsStream<TcpStream>, Error> {
     let mut config = build_client_config(params)?;
 
-    // Decide the SNI name before any address attempt. Default (and the common
-    // case) is no SNI; an explicitly requested but un-encodable Oracle SNI
-    // fails closed here without consuming failover retries or the call budget.
+    // Decide the SNI name. Default (and the common case) is no SNI; an
+    // explicitly requested but un-encodable Oracle SNI fails closed here.
     let server_name = match decide_sni(
         params.use_sni,
         &params.expected_host,
@@ -784,147 +731,17 @@ pub(crate) fn prepare_tls_handshake(
         }
     };
 
-    Ok(PreparedTlsHandshake {
-        config,
-        server_name,
-    })
-}
-
-/// Perform a network TLS handshake from already-validated configuration.
-pub(crate) async fn tls_handshake_prepared(
-    prepared: &PreparedTlsHandshake,
-    tcp: TcpStream,
-    handshake_timeout: Duration,
-) -> Result<TlsStream<TcpStream>, TlsHandshakeError> {
     let connector =
-        TlsConnector::new(prepared.config.clone()).with_handshake_timeout(handshake_timeout);
+        TlsConnector::new(config).with_handshake_timeout(std::time::Duration::from_secs(20));
     connector
-        .connect(&prepared.server_name, tcp)
+        .connect(&server_name, tcp)
         .await
-        .map_err(|error| TlsHandshakeError::new(error.to_string()))
-}
-
-/// Perform the TCPS TLS handshake over a connected TCP stream, returning the
-/// established [`TlsStream`].
-///
-/// SNI handling mirrors python-oracledb: the Oracle `S{len}.{service}.V3.{ver}`
-/// SNI is only emitted when [`TlsParams::use_sni`] is set; by default no SNI is
-/// sent and the server is identified by the post-handshake DN match. The public
-/// OCI Autonomous Database descriptor shape instead uses its valid endpoint
-/// host when rustls cannot encode that service form. Other unencodable SNI
-/// values fail closed with [`Error::UnsupportedSni`] rather than silently
-/// proceeding without SNI — see [`decide_sni`].
-///
-/// # Errors
-/// Returns [`Error::UnsupportedSni`] when `use_sni=true` cannot be honored, or
-/// [`Error::Tls`] on configuration or handshake failure.
-#[cfg(test)]
-#[allow(dead_code)] // Direct entry point for the TLS integration-test harness.
-pub async fn tls_handshake(
-    descriptor: &EasyConnect,
-    server_type: Option<&str>,
-    params: &TlsParams,
-    tcp: TcpStream,
-) -> Result<TlsStream<TcpStream>, Error> {
-    // The direct entry point exists only for the local TLS integration-test
-    // harness. Production always supplies its resolved connect/call budget to
-    // `tls_handshake_prepared` from `Connection::connect`.
-    const TEST_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-    let prepared = prepare_tls_handshake(descriptor, server_type, params)?;
-    tls_handshake_prepared(&prepared, tcp, TEST_HANDSHAKE_TIMEOUT)
-        .await
-        .map_err(TlsHandshakeError::into_driver_error)
+        .map_err(|e| Error::Tls(format!("TCPS handshake failed: {e}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tls_security_resolution_has_stable_explicit_option_precedence() {
-        struct Case {
-            name: &'static str,
-            explicit_dn_match: Option<bool>,
-            explicit_cert_dn: Option<&'static str>,
-            descriptor_dn_match: bool,
-            descriptor_cert_dn: Option<&'static str>,
-            expected_dn_match: bool,
-            expected_cert_dn: Option<&'static str>,
-        }
-
-        let cases = [
-            Case {
-                name: "descriptor defaults apply when options are absent",
-                explicit_dn_match: None,
-                explicit_cert_dn: None,
-                descriptor_dn_match: true,
-                descriptor_cert_dn: None,
-                expected_dn_match: true,
-                expected_cert_dn: None,
-            },
-            Case {
-                name: "DSN-only DN_MATCH OFF is honored",
-                explicit_dn_match: None,
-                explicit_cert_dn: None,
-                descriptor_dn_match: false,
-                descriptor_cert_dn: None,
-                expected_dn_match: false,
-                expected_cert_dn: None,
-            },
-            Case {
-                name: "explicit ON overrides DSN OFF",
-                explicit_dn_match: Some(true),
-                explicit_cert_dn: None,
-                descriptor_dn_match: false,
-                descriptor_cert_dn: None,
-                expected_dn_match: true,
-                expected_cert_dn: None,
-            },
-            Case {
-                name: "explicit OFF overrides DSN ON",
-                explicit_dn_match: Some(false),
-                explicit_cert_dn: None,
-                descriptor_dn_match: true,
-                descriptor_cert_dn: None,
-                expected_dn_match: false,
-                expected_cert_dn: None,
-            },
-            Case {
-                name: "DSN-only certificate DN is honored",
-                explicit_dn_match: None,
-                explicit_cert_dn: None,
-                descriptor_dn_match: true,
-                descriptor_cert_dn: Some("CN=dsn-pin.example.test,O=Acme"),
-                expected_dn_match: true,
-                expected_cert_dn: Some("CN=dsn-pin.example.test,O=Acme"),
-            },
-            Case {
-                name: "explicit certificate DN overrides the DSN pin",
-                explicit_dn_match: None,
-                explicit_cert_dn: Some("CN=explicit-pin.example.test,O=Acme"),
-                descriptor_dn_match: true,
-                descriptor_cert_dn: Some("CN=dsn-pin.example.test,O=Acme"),
-                expected_dn_match: true,
-                expected_cert_dn: Some("CN=explicit-pin.example.test,O=Acme"),
-            },
-        ];
-
-        for case in cases {
-            let resolved = resolve_tls_security(
-                case.explicit_dn_match,
-                case.explicit_cert_dn,
-                case.descriptor_dn_match,
-                case.descriptor_cert_dn,
-            );
-            assert_eq!(resolved.dn_match, case.expected_dn_match, "{}", case.name);
-            assert_eq!(
-                resolved.server_cert_dn.as_deref(),
-                case.expected_cert_dn,
-                "{}",
-                case.name
-            );
-        }
-    }
 
     #[test]
     fn build_config_requires_trust_anchors() {
@@ -941,35 +758,6 @@ mod tests {
         };
         // Empty wallet => falls back to system roots; result depends on host.
         let _ = build_client_config(&params);
-    }
-
-    #[test]
-    fn tls_configuration_failure_is_typed_before_any_transport_attempt() {
-        let descriptor =
-            EasyConnect::parse("tcps://db.example.com:2484/FREEPDB1").expect("descriptor");
-        let params = TlsParams {
-            wallet: Some(WalletContents {
-                // Any non-empty anchor set keeps this test independent of the
-                // host's system-root installation. The bad client key fails
-                // before certificate-chain verification is relevant.
-                ca_certificates: vec![vec![0x30, 0x00]],
-                client_cert_chain: vec![vec![0x30, 0x00]],
-                client_private_key: Some(vec![0xff]),
-            }),
-            dn_match: true,
-            server_cert_dn: None,
-            expected_host: "db.example.com".to_string(),
-            use_sni: false,
-        };
-
-        let error = match prepare_tls_handshake(&descriptor, None, &params) {
-            Ok(_) => panic!("an invalid client private key must fail TLS preparation"),
-            Err(error) => error,
-        };
-        assert!(
-            matches!(error, Error::Tls(ref detail) if detail.contains("private key")),
-            "configuration failure must remain the original typed TLS error, got {error:?}"
-        );
     }
 
     #[test]

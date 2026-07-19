@@ -16,7 +16,7 @@ use oracledb::protocol::vector::{Vector, VectorValues};
 use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyBytesMethods, PyDict, PyInt, PyList, PyTuple};
+use pyo3::types::{PyBool, PyBytes, PyBytesMethods, PyDict, PyList, PyTuple};
 
 use crate::*;
 
@@ -104,23 +104,6 @@ pub(crate) fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> 
     }
     if let Ok(text) = value.extract::<String>() {
         return Ok(BindValue::Text(text));
-    }
-    // The reference binds Decimal through PyObject_Str before considering any
-    // binary float conversion. Doing the same here preserves all significant
-    // digits for an untyped Decimal bind (the typed and OSON paths already use
-    // this exact text representation).
-    let decimal_type = PyModule::import(value.py(), "decimal")?.getattr("Decimal")?;
-    if value.is_instance(&decimal_type)? {
-        return Ok(BindValue::Number(value.str()?.extract::<String>()?));
-    }
-    // Python integers are arbitrary precision. Keep the cheap i128 path for
-    // ordinary values, but never fall through to f64 when a PyInt is larger:
-    // its decimal string is the exact Oracle NUMBER bind representation.
-    if value.is_instance_of::<PyInt>() {
-        return Ok(BindValue::Number(match value.extract::<i128>() {
-            Ok(number) => number.to_string(),
-            Err(_) => value.str()?.extract::<String>()?,
-        }));
     }
     if let Ok(number) = value.extract::<i128>() {
         return Ok(BindValue::Number(number.to_string()));
@@ -1223,12 +1206,8 @@ pub(crate) fn interval_ds_to_py(
 ) -> PyResult<Py<PyAny>> {
     let timedelta = PyModule::import(py, "datetime")?.getattr("timedelta")?;
     let total_seconds = i64::from(hours) * 3600 + i64::from(minutes) * 60 + i64::from(seconds);
-    // Python timedelta has microsecond resolution. Euclidean division floors a
-    // negative fractional second, so -1ns through -999ns normalize to -1us
-    // instead of being truncated to zero.
-    let microseconds = i64::from(fseconds).div_euclid(1000);
     Ok(timedelta
-        .call1((days, total_seconds, microseconds))?
+        .call1((days, total_seconds, i64::from(fseconds) / 1000))?
         .unbind())
 }
 
@@ -1239,7 +1218,6 @@ pub(crate) fn query_value_to_py(
     lob_context: Option<&ThinLobContext>,
     fetch_lobs: bool,
     fetch_decimals: bool,
-    number_scale: Option<i8>,
 ) -> PyResult<Py<PyAny>> {
     match value {
         None => Ok(py.None()),
@@ -1281,13 +1259,6 @@ pub(crate) fn query_value_to_py(
                     .getattr("Decimal")?
                     .call1((text.as_str(),))?
                     .unbind())
-            } else if number_scale.is_some_and(|scale| scale > 0) {
-                // python-oracledb chooses the default Python NUMBER type from
-                // column metadata, not from the individual value: every value
-                // in NUMBER(p, scale>0) is a float, including a whole value such
-                // as 100 in NUMBER(10,2).
-                let value = text.parse::<f64>().map_err(runtime_error)?;
-                Ok(value.into_pyobject(py)?.unbind().into())
             } else if num.is_integer() {
                 python_int_from_decimal_text(py, &text)
             } else {
@@ -1341,7 +1312,6 @@ pub(crate) fn query_value_to_py(
                         lob_context,
                         fetch_lobs,
                         fetch_decimals,
-                        None,
                     )
                 })
                 .collect::<PyResult<Vec<_>>>()?;
@@ -1511,7 +1481,7 @@ pub(crate) fn json_query_value_to_py(
     // an empty CLOB/BLOB column is not passed to json.loads (which would raise
     // "Expecting value"). fetch_lobs=false materializes any CLOB/BLOB to
     // str/bytes already, so there is no LOB object left to read here.
-    let value = query_value_to_py(py, value, owner_cursor, lob_context, false, false, None)?;
+    let value = query_value_to_py(py, value, owner_cursor, lob_context, false, false)?;
     let mut value = value.into_bound(py);
     if value.is_none() {
         return Ok(value.unbind());

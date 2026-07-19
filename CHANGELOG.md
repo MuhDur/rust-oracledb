@@ -5,15 +5,15 @@ is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows the SemVer contract described in
 [`docs/adr/0002-semver-contract.md`](docs/adr/0002-semver-contract.md).
 
-Scope window: canonical published release entries from 0.3.0 through 0.8.4.
-The 0.7.4–0.8.2 spine was reconstructed from git tags, GitHub Releases, tag
-ranges, release-matrix artifacts, and the checked-in API/provenance ledgers.
+Scope window: canonical published release entries from 0.3.0 through 0.8.3,
+plus the prepared (not published) 0.8.4 candidate. The 0.7.4–0.8.2 spine was
+reconstructed from git tags, GitHub Releases, tag ranges, release-matrix
+artifacts, and the checked-in API/provenance ledgers.
 
 ## Version Timeline
 
 | Version | Released | Release role |
 | --- | --- | --- |
-| [0.8.4](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.4) | 2026-07-17 | OCI ADB TCPS/IAM authentication, timeout/cancellation fixes, and exact-SHA qualification |
 | [0.8.3](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.3) | 2026-07-14 | Arrow interoperability, endpoint APIs, and recovery hardening |
 | [0.8.2](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.2) | 2026-07-08 | K10 owned-row stream, timer correction, and quality campaigns |
 | [0.8.1](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.1) | 2026-07-08 | Wallet/session accessors and opt-in support capture |
@@ -28,15 +28,11 @@ ranges, release-matrix artifacts, and the checked-in API/provenance ledgers.
 - [0.8.2 runtime timer correction](https://github.com/MuhDur/rust-oracledb/commit/9059165a34b43921f44d56c6a2c12009f2fb23db)
 - [0.8.2 K10 owning row stream](https://github.com/MuhDur/rust-oracledb/commit/06244bfa4c8aab2efb62bfdbd8793dc1e089bd02)
 
-## [Unreleased](https://github.com/MuhDur/rust-oracledb/compare/v0.8.4...HEAD)
+## [Unreleased]
 
-The next planned patch release is exactly **0.8.5**.
+## [0.8.4]
 
-## [0.8.4](https://github.com/MuhDur/rust-oracledb/compare/v0.8.3...v0.8.4) - 2026-07-17
-
-Published from exact tag SHA
-[`2d8f4cb`](https://github.com/MuhDur/rust-oracledb/commit/2d8f4cb015eb7ed4180415342d8ca50a7ecb384c)
-after the [exact-SHA qualification run](https://github.com/MuhDur/rust-oracledb/actions/runs/29583399057).
+> Prepared release candidate; not published to crates.io or tagged.
 
 ### Added
 
@@ -73,7 +69,7 @@ after the [exact-SHA qualification run](https://github.com/MuhDur/rust-oracledb/
   rather than unbounded work.
 - **Exact-SHA tag qualification.** A release tag must consume immutable,
   exact-SHA Required and live-matrix evidence from the qualification workflow;
-  a parent artifact is never substituted for the tagged release SHA.
+  a parent artifact is never substituted for the tagged candidate.
 
 ### Changed
 
