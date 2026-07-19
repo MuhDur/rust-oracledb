@@ -1218,6 +1218,13 @@ mod tests {
                 "(DESCRIPTION=(RETRY_COUNT=wrong)(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1))(CONNECT_DATA=(SERVICE_NAME=s)))",
                 "not a non-negative integer",
             ),
+            // non-numeric TRANSPORT_CONNECT_TIMEOUT (parse_duration's error
+            // path had zero coverage: duration_units_parse above only feeds
+            // it valid unit strings).
+            (
+                "(DESCRIPTION=(TRANSPORT_CONNECT_TIMEOUT=banana)(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1))(CONNECT_DATA=(SERVICE_NAME=s)))",
+                "not a valid duration",
+            ),
             // simple value for a container keyword (reference DPY-4017)
             ("(address=5)", "container"),
             // mixed complex/simple data (reference DPY-4017)

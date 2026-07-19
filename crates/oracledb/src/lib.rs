@@ -21410,6 +21410,92 @@ mod tests {
         Ok(())
     }
 
+    /// A listener that answers every CONNECT with RESEND must terminate with
+    /// a structured error instead of spinning forever, mirroring
+    /// `connect_redirect_loop_is_bounded` above but for the RESEND bound.
+    /// `Error::ConnectResendLoop` had zero test coverage before H5.
+    #[test]
+    fn connect_resend_loop_is_bounded() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let hops = u32::from(MAX_CONNECT_RESEND_ROUNDS) + 1;
+        // Unlike a REDIRECT (a new connection to a new target), a RESEND is
+        // answered on the SAME socket: the client just retransmits CONNECT.
+        let server = thread::spawn(move || -> std::io::Result<u32> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let mut served = 0;
+            for _ in 0..hops {
+                let _ = read_tns_packet_sync(&mut socket)?;
+                send_tns_packet_sync(&mut socket, TNS_PACKET_TYPE_RESEND, &[])?;
+                served += 1;
+            }
+            Ok(served)
+        });
+
+        let options = ConnectOptions::new(
+            format!("127.0.0.1:{}/resendsvc", addr.port()),
+            "user",
+            "password",
+            identity(),
+        );
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("ambient Cx");
+                Connection::connect(&cx, options).await
+            })
+            .expect_err("a resend loop must terminate with a structured error");
+        assert!(
+            matches!(err, Error::ConnectResendLoop(rounds)
+                if rounds == MAX_CONNECT_RESEND_ROUNDS + 1),
+            "expected ConnectResendLoop, got {err:?}"
+        );
+        assert_eq!(err.kind(), ErrorKind::Protocol);
+        let served = server.join().expect("listener thread")?;
+        assert_eq!(served, hops, "every round reached the listener");
+        Ok(())
+    }
+
+    /// A multi-address `ADDRESS_LIST` where every address refuses the
+    /// transport must aggregate into `Error::AllAddressesFailed` rather than
+    /// surfacing only the last address's raw I/O error. Both addresses are
+    /// closed local ports (bound then immediately dropped so the OS answers
+    /// ECONNREFUSED) — no live database needed, this is a pure transport
+    /// failover test. `Error::AllAddressesFailed` had zero test coverage
+    /// before H5.
+    #[test]
+    fn connect_all_addresses_failed_when_every_address_refuses() {
+        let closed_port = |listener: TcpListener| -> u16 {
+            let port = listener.local_addr().expect("addr").port();
+            drop(listener);
+            port
+        };
+        let port_a = closed_port(TcpListener::bind("127.0.0.1:0").expect("bind a"));
+        let port_b = closed_port(TcpListener::bind("127.0.0.1:0").expect("bind b"));
+
+        let connect_string = format!(
+            "(DESCRIPTION=(RETRY_COUNT=0)\
+             (ADDRESS_LIST=(ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={port_a}))\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={port_b})))\
+             (CONNECT_DATA=(SERVICE_NAME=svc)))"
+        );
+        let options = ConnectOptions::new(connect_string, "user", "password", identity());
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("ambient Cx");
+                Connection::connect(&cx, options).await
+            })
+            .expect_err("every address refuses; the aggregate must surface");
+        assert!(
+            matches!(&err, Error::AllAddressesFailed(detail) if detail.contains(&port_a.to_string())
+                && detail.contains(&port_b.to_string())),
+            "expected AllAddressesFailed naming both addresses, got {err:?}"
+        );
+        assert_eq!(err.kind(), ErrorKind::Network);
+    }
+
     // ------------------------------------------------------------------
     // Packet-layer vs TTC-layer error labelling
     // (bead rust-oracledb-pre23ai-connect-z47u.3)

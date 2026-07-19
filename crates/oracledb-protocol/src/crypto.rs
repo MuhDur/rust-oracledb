@@ -231,3 +231,136 @@ fn hex_upper_truncated(bytes: &[u8], chars: usize) -> String {
     text.truncate(chars);
     text
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // This module had zero tests before H5: every error variant this file can
+    // raise (MissingAuthParameter, UnsupportedVerifier, InvalidAesKey,
+    // InvalidServerResponse) is server-response-driven — a hostile or buggy
+    // listener controls `session_data`, so a missing/malformed AUTH_* key must
+    // fail closed with the right typed error, never panic.
+
+    #[test]
+    fn generate_verifier_rejects_missing_auth_vfr_data() {
+        let session_data = std::collections::BTreeMap::new();
+        let err = generate_verifier(b"password", &session_data, TNS_VERIFIER_TYPE_12C)
+            .expect_err("missing AUTH_VFR_DATA must be rejected");
+        assert!(
+            matches!(
+                err,
+                ProtocolError::MissingAuthParameter {
+                    key: "AUTH_VFR_DATA"
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn generate_verifier_rejects_non_hex_auth_vfr_data() {
+        let mut session_data = std::collections::BTreeMap::new();
+        session_data.insert("AUTH_VFR_DATA".to_string(), "not-hex!!".to_string());
+        let err = generate_verifier(b"password", &session_data, TNS_VERIFIER_TYPE_12C)
+            .expect_err("non-hex AUTH_VFR_DATA must be rejected");
+        assert!(
+            matches!(
+                err,
+                ProtocolError::MissingAuthParameter {
+                    key: "AUTH_VFR_DATA"
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn generate_verifier_rejects_unsupported_verifier_type() {
+        let mut session_data = std::collections::BTreeMap::new();
+        session_data.insert("AUTH_VFR_DATA".to_string(), "aabbcc".to_string());
+        let bogus_verifier_type = 0x9999;
+        let err = generate_verifier(b"password", &session_data, bogus_verifier_type)
+            .expect_err("unknown verifier type must be rejected");
+        assert!(
+            matches!(
+                err,
+                ProtocolError::UnsupportedVerifier {
+                    verifier_type: 0x9999
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_server_response_rejects_missing_auth_svr_response() {
+        let session_data = std::collections::BTreeMap::new();
+        let err = verify_server_response(&[0u8; 32], &session_data)
+            .expect_err("missing AUTH_SVR_RESPONSE must be rejected");
+        assert!(
+            matches!(err, ProtocolError::InvalidServerResponse),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_server_response_rejects_non_hex_auth_svr_response() {
+        let mut session_data = std::collections::BTreeMap::new();
+        session_data.insert("AUTH_SVR_RESPONSE".to_string(), "zz-not-hex".to_string());
+        let err = verify_server_response(&[0u8; 32], &session_data)
+            .expect_err("non-hex AUTH_SVR_RESPONSE must be rejected");
+        assert!(
+            matches!(err, ProtocolError::InvalidServerResponse),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_server_response_rejects_content_mismatch() {
+        // A server response that decrypts cleanly under the shared combo key
+        // but does not carry the "SERVER_TO_CLIENT" marker at bytes 16..32
+        // must still be rejected — a server that can complete the handshake
+        // crypto but skips the marker (or a MITM without the key trying
+        // garbage) does not get treated as verified.
+        let combo_key = [0x42u8; 32];
+        let plain = b"0123456789ABCDEFNOT_SERVER_RESP!"; // 33 bytes; [16..32] != marker
+        let ciphertext = encrypt_cbc(&combo_key, plain, true).expect("encrypt fixture");
+        let mut session_data = std::collections::BTreeMap::new();
+        session_data.insert("AUTH_SVR_RESPONSE".to_string(), hex_upper(&ciphertext));
+        let err = verify_server_response(&combo_key, &session_data)
+            .expect_err("mismatched server response content must be rejected");
+        assert!(
+            matches!(err, ProtocolError::InvalidServerResponse),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_server_response_accepts_the_matching_marker() {
+        // Positive control for the mismatch test above: proves the assertion
+        // is discriminating (the marker really does flip the outcome) rather
+        // than `verify_server_response` always failing.
+        let combo_key = [0x24u8; 32];
+        let mut plain = vec![0u8; 16];
+        plain.extend_from_slice(b"SERVER_TO_CLIENT");
+        let ciphertext = encrypt_cbc(&combo_key, &plain, true).expect("encrypt fixture");
+        let mut session_data = std::collections::BTreeMap::new();
+        session_data.insert("AUTH_SVR_RESPONSE".to_string(), hex_upper(&ciphertext));
+        verify_server_response(&combo_key, &session_data)
+            .expect("matching marker must be accepted");
+    }
+
+    #[test]
+    fn decrypt_cbc_raw_rejects_wrong_length_aes_key() {
+        // AES-256 requires an exact 32-byte key; a combo key of any other
+        // length (corrupted derivation, or a hostile/buggy server driving
+        // this path with unexpected session data) must fail closed with a
+        // typed error instead of panicking inside the `aes` crate.
+        let short_key = [0u8; 10];
+        let block_aligned_ciphertext = [0u8; 16];
+        let err = decrypt_cbc_raw(&short_key, &block_aligned_ciphertext)
+            .expect_err("wrong-length AES key must be rejected");
+        assert!(matches!(err, ProtocolError::InvalidAesKey), "got {err:?}");
+    }
+}

@@ -1673,6 +1673,60 @@ mod tests {
     }
 
     #[test]
+    fn decode_oson_rejects_interval_ym_node_type() {
+        // OsonValue has no INTERVAL YEAR TO MONTH variant (the encoder never
+        // emits TNS_JSON_TYPE_INTERVAL_YM), so this node type is exercised by
+        // mutating a real, well-formed scalar image's node-type byte — the
+        // same technique the tree-size test above uses. A server that DOES
+        // emit an OSON INTERVAL YM node (or a hostile one) must get a typed
+        // DPY-3007, not a decode panic or a silently wrong value.
+        let mut encoded = encode_oson(&num("1"), false).expect("encode scalar OSON fixture");
+        assert_eq!(
+            encoded[8], TNS_JSON_TYPE_NUMBER_LENGTH_UINT8,
+            "precondition: byte 8 is the scalar node-type tag"
+        );
+        encoded[8] = TNS_JSON_TYPE_INTERVAL_YM;
+
+        let err =
+            decode_oson(&encoded).expect_err("INTERVAL YEAR TO MONTH node type must be rejected");
+        assert!(
+            matches!(
+                err,
+                ProtocolError::OsonTypeNotSupported("DB_TYPE_INTERVAL_YM")
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_oson_rejects_unknown_extended_node_type() {
+        // TNS_JSON_TYPE_EXTENDED currently only carries VECTOR; any other
+        // extended sub-type byte (a newer server feature this thin build does
+        // not decode) must fail closed with a typed error instead of
+        // misreading the following bytes as a vector image.
+        let value = OsonValue::Vector(crate::vector::Vector::Dense(
+            crate::vector::VectorValues::Float32(vec![1.0, 2.0]),
+        ));
+        let mut encoded = encode_oson(&value, false).expect("encode vector OSON fixture");
+        assert_eq!(
+            (encoded[8], encoded[9]),
+            (TNS_JSON_TYPE_EXTENDED, TNS_JSON_TYPE_VECTOR),
+            "precondition: bytes 8..10 are the extended node-type + sub-type tags"
+        );
+        encoded[9] = 0x02; // not TNS_JSON_TYPE_VECTOR
+
+        let err =
+            decode_oson(&encoded).expect_err("unknown extended node sub-type must be rejected");
+        assert!(
+            matches!(
+                err,
+                ProtocolError::OsonTypeNotSupported("JSON extended type")
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
     fn bad_magic_is_dpy_5004() {
         let bytes = b"{'not a previous encoded value': 3}";
         let err = decode_oson(bytes).unwrap_err();

@@ -291,6 +291,16 @@ mod tests {
     }
 
     #[test]
+    fn rejects_header_shorter_than_magic() {
+        // A cassette file (or a corrupted/truncated one an operator points
+        // the replay transport at) shorter than the 8-byte magic must hit the
+        // distinct Truncated{"magic"} arm, not read out-of-bounds or be
+        // mistaken for BadMagic (which requires a full 8 bytes to compare).
+        let err = Reader::new(b"TNSCA").expect_err("short header must fail");
+        assert_eq!(err, CassetteError::Truncated { wanted: "magic" });
+    }
+
+    #[test]
     fn rejects_unsupported_version() {
         let mut data = CASSETTE_MAGIC.to_vec();
         data.push(99);

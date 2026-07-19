@@ -784,6 +784,17 @@ mod tests {
     }
 
     #[test]
+    fn reports_unclosed_double_quote() {
+        // An unterminated quoted identifier must be distinguished from an
+        // unterminated string literal (SqlError::MissingEndingDoubleQuote vs
+        // MissingEndingSingleQuote) so callers can tell "bad ':bind'" apart
+        // from "bad \"IDENT\"" — this variant had zero test coverage before.
+        let err = scan_bind_names("select \"col from dual")
+            .expect_err("unclosed quoted identifier should be rejected");
+        assert_eq!(err, SqlError::MissingEndingDoubleQuote);
+    }
+
+    #[test]
     fn deduplicates_unquoted_names_case_insensitively() {
         let names = unique_bind_names(":a, :A, :\"A\", :\"A\"").expect("unique names");
         assert_eq!(names, vec!["a".to_string(), "\"A\"".to_string()]);

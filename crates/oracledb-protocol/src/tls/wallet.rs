@@ -615,6 +615,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_malformed_pem_body() {
+        // A wallet directory can be pointed at any file; a corrupted or
+        // truncated ewallet.pem (bad base64 inside a real BEGIN/END block, as
+        // opposed to just "no certificates at all") must surface the distinct
+        // WalletError::Pem parse failure rather than NoCertificates.
+        let bad =
+            b"-----BEGIN CERTIFICATE-----\n***not valid base64***\n-----END CERTIFICATE-----\n";
+        let err = parse_ewallet_pem(bad, None).unwrap_err();
+        assert!(matches!(err, WalletError::Pem(_)), "got {err:?}");
+    }
+
+    #[test]
     fn bounded_wallet_reader_rejects_oversized_input() {
         let bytes = read_wallet_reader(std::io::Cursor::new([0u8; 17]), 16)
             .expect("in-memory reader is infallible");
