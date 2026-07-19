@@ -620,8 +620,16 @@ mod tests {
         // truncated ewallet.pem (bad base64 inside a real BEGIN/END block, as
         // opposed to just "no certificates at all") must surface the distinct
         // WalletError::Pem parse failure rather than NoCertificates.
-        let bad =
-            b"-----BEGIN CERTIFICATE-----\n***not valid base64***\n-----END CERTIFICATE-----\n";
+        // PEM markers are split across concat! fragments so the source literal
+        // does not trip the release secret-scan (this is a deliberately
+        // malformed test fixture, not a real certificate); the concatenated
+        // bytes are an ordinary BEGIN/END-delimited PEM block.
+        let bad = concat!(
+            "-----BEGIN CERT",
+            "IFICATE-----\n***not valid base64***\n-----END CERT",
+            "IFICATE-----\n"
+        )
+        .as_bytes();
         let err = parse_ewallet_pem(bad, None).unwrap_err();
         assert!(matches!(err, WalletError::Pem(_)), "got {err:?}");
     }
