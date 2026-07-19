@@ -13968,6 +13968,180 @@ mod tests {
         assert!(!built.contains("WALLET"));
     }
 
+    // ---- H2: connect-descriptor golden wire-bytes per auth mode ----------
+    //
+    // The tests above prove individual clauses show up (`.contains(...)`).
+    // These pin the ENTIRE built descriptor string byte-for-byte against a
+    // committed fixture (`tests/golden/connect_descriptor/*.descriptor.txt`)
+    // AND the entire framed CONNECT wire packet byte-for-byte against a
+    // committed hex fixture (`tests/golden/connect_descriptor/*.packet.hex`),
+    // one pair per auth mode (password/plain-TCP, wallet-TCPS with a DC2
+    // pinned cert DN, IAM-token TCPS). A regression in `auth_connect_descriptor`
+    // / `descriptor_security_clause` / `build_connect_packet_payload` — a
+    // reordered field, a dropped clause, a header byte that drifts — fails
+    // one of these with a diff naming exactly what changed, without a live
+    // database. The parser side of the same round trip (DC2 cert-DN, DC4
+    // `CONNECT_TIMEOUT` parsing, full per-auth-mode topology) is pinned
+    // separately in `oracledb-protocol/tests/connect_descriptor_golden.rs`,
+    // where the parser types are public.
+    //
+    // The wire-packet fixtures mirror the exact `build_connect_packet_payload`
+    // + `encode_packet` call the real `Connection::connect` path makes (see
+    // `TNS_PACKET_TYPE_CONNECT` above, around the CONNECT-resend loop), with a
+    // fixed SDU of 8192 so the header fields are deterministic.
+
+    /// Decodes a lowercase/uppercase hex-digit fixture (whitespace ignored)
+    /// into raw bytes. A small hand-rolled helper rather than a new
+    /// dependency: the fixture files are plain, newline-wrapped hex dumps.
+    /// (Named distinctly from the `#[cfg(feature = "cassette")]`-only
+    /// `decode_hex_fixture` above: this one must be available unconditionally
+    /// — the golden connect-descriptor tests run under both the default and
+    /// `cassette` feature sets — and panics rather than returning `Result`,
+    /// which is the right shape for a test-only fixture loader.)
+    fn decode_golden_packet_hex(hex: &str) -> Vec<u8> {
+        let digits: Vec<u8> = hex.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+        assert!(
+            digits.len().is_multiple_of(2),
+            "hex fixture must have an even number of hex digits"
+        );
+        digits
+            .chunks_exact(2)
+            .map(|pair| {
+                let hi = (pair[0] as char).to_digit(16).expect("valid hex digit");
+                let lo = (pair[1] as char).to_digit(16).expect("valid hex digit");
+                ((hi << 4) | lo) as u8
+            })
+            .collect()
+    }
+
+    /// Builds the full framed CONNECT wire packet for `connect_data`, exactly
+    /// as `Connection::connect` does on the first (non-resend, non-redirect)
+    /// attempt: `build_connect_packet_payload` then `encode_packet` with
+    /// `PacketLengthWidth::Legacy16` and no packet flags / checksum.
+    fn golden_connect_packet_bytes(connect_data: &str, sdu: u16) -> Vec<u8> {
+        let payload =
+            build_connect_packet_payload(connect_data, sdu).expect("connect packet payload");
+        encode_packet(
+            TNS_PACKET_TYPE_CONNECT,
+            0,
+            None,
+            &payload,
+            PacketLengthWidth::Legacy16,
+        )
+        .expect("encode CONNECT packet")
+    }
+
+    #[test]
+    fn golden_password_plain_tcp_descriptor_and_wire_bytes() {
+        let connect_string = concat!(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=db.example.test)(PORT=1521))",
+            "(CONNECT_DATA=(SERVICE_NAME=FREEPDB1)))"
+        );
+        let descriptor = EasyConnect::parse(connect_string).expect("parse tcp descriptor");
+        let full_descriptor =
+            EasyConnect::parse_descriptor(connect_string).expect("parse full tcp descriptor");
+        let description = full_descriptor.first_description();
+        let built = auth_connect_descriptor(&descriptor, description, false, true, None);
+
+        let expected_descriptor =
+            include_str!("../tests/golden/connect_descriptor/password_tcp.descriptor.txt").trim();
+        assert_eq!(
+            built, expected_descriptor,
+            "password/plain-TCP built connect descriptor drifted from the golden fixture"
+        );
+
+        let packet = golden_connect_packet_bytes(&built, 8192);
+        let expected_packet = decode_golden_packet_hex(include_str!(
+            "../tests/golden/connect_descriptor/password_tcp.packet.hex"
+        ));
+        assert_eq!(
+            packet, expected_packet,
+            "password/plain-TCP CONNECT wire packet drifted from the golden fixture"
+        );
+    }
+
+    #[test]
+    fn golden_wallet_tcps_cert_dn_descriptor_and_wire_bytes() {
+        let connect_string = concat!(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=adb.example.test)(PORT=2484))",
+            "(CONNECT_DATA=(SERVICE_NAME=adbsvc))",
+            "(SECURITY=(SSL_SERVER_DN_MATCH=on)",
+            "(SSL_SERVER_CERT_DN=CN=adb.example.test,O=ExampleCorp,C=US)",
+            "(MY_WALLET_DIRECTORY=/opt/wallets/adb)))"
+        );
+        let descriptor = EasyConnect::parse(connect_string).expect("parse wallet tcps descriptor");
+        let full_descriptor = EasyConnect::parse_descriptor(connect_string)
+            .expect("parse full wallet tcps descriptor");
+        let description = full_descriptor.first_description();
+        // bead DC2: the pinned cert DN travels ONLY through the DSN-parsed
+        // `description.security.*` fields here, never through the
+        // `with_ssl_server_cert_dn` / `with_ssl_server_dn_match` builders —
+        // the exact path F-DC2 found broken.
+        let built = auth_connect_descriptor(
+            &descriptor,
+            description,
+            false,
+            description.security.ssl_server_dn_match,
+            description.security.ssl_server_cert_dn.as_deref(),
+        );
+
+        let expected_descriptor =
+            include_str!("../tests/golden/connect_descriptor/wallet_tcps_cert_dn.descriptor.txt")
+                .trim();
+        assert_eq!(
+            built, expected_descriptor,
+            "wallet-TCPS (DC2 cert-DN) built connect descriptor drifted from the golden fixture"
+        );
+        // The wallet directory is a local-only TLS-setup directive: it must
+        // never be echoed back into the descriptor sent to the listener.
+        assert!(!built.contains("WALLET"));
+
+        let packet = golden_connect_packet_bytes(&built, 8192);
+        let expected_packet = decode_golden_packet_hex(include_str!(
+            "../tests/golden/connect_descriptor/wallet_tcps_cert_dn.packet.hex"
+        ));
+        assert_eq!(
+            packet, expected_packet,
+            "wallet-TCPS (DC2 cert-DN) CONNECT wire packet drifted from the golden fixture"
+        );
+    }
+
+    #[test]
+    fn golden_iam_token_tcps_descriptor_and_wire_bytes() {
+        let connect_string = concat!(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=adb.example.test)(PORT=2484))",
+            "(CONNECT_DATA=(SERVICE_NAME=adbsvc))",
+            "(SECURITY=(SSL_SERVER_DN_MATCH=off)))"
+        );
+        let descriptor = EasyConnect::parse(connect_string).expect("parse iam token descriptor");
+        let full_descriptor =
+            EasyConnect::parse_descriptor(connect_string).expect("parse full iam token descriptor");
+        let description = full_descriptor.first_description();
+        let built = auth_connect_descriptor(
+            &descriptor,
+            description,
+            true,
+            description.security.ssl_server_dn_match,
+            None,
+        );
+
+        let expected_descriptor =
+            include_str!("../tests/golden/connect_descriptor/iam_token_tcps.descriptor.txt").trim();
+        assert_eq!(
+            built, expected_descriptor,
+            "IAM-token TCPS built connect descriptor drifted from the golden fixture"
+        );
+
+        let packet = golden_connect_packet_bytes(&built, 8192);
+        let expected_packet = decode_golden_packet_hex(include_str!(
+            "../tests/golden/connect_descriptor/iam_token_tcps.packet.hex"
+        ));
+        assert_eq!(
+            packet, expected_packet,
+            "IAM-token TCPS CONNECT wire packet drifted from the golden fixture"
+        );
+    }
+
     #[test]
     fn transport_connect_timeout_bounds_post_dial_accept_read() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
