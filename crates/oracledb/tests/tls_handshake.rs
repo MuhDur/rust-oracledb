@@ -678,6 +678,22 @@ fn tcps_x509_v1_wallet_client_cert_builds_and_handshakes() {
 #[test]
 #[ignore = "requires ORACLEDB_REAL_V1_WALLET_DIR and ORACLEDB_REAL_V1_WALLET_PASSWORD_FILE"]
 fn tcps_real_v1_wallet_tls13_mtls_handshakes() {
+    // Operator-only: this needs a retained OCI ADB wallet that is deliberately
+    // never committed (zero-cost / confidentiality policy). The nightly Live
+    // lane (live.yml) runs `cargo test -- --include-ignored`, which un-ignores
+    // this test even though the wallet env is absent there — so self-skip with a
+    // message instead of panicking, otherwise this single operator-local test
+    // reddens the whole scheduled Live (database) tests workflow.
+    if std::env::var_os("ORACLEDB_REAL_V1_WALLET_DIR").is_none()
+        || std::env::var_os("ORACLEDB_REAL_V1_WALLET_PASSWORD_FILE").is_none()
+    {
+        eprintln!(
+            "skipping tcps_real_v1_wallet_tls13_mtls_handshakes: set \
+             ORACLEDB_REAL_V1_WALLET_DIR and ORACLEDB_REAL_V1_WALLET_PASSWORD_FILE \
+             to a retained OCI wallet directory to run it"
+        );
+        return;
+    }
     let (params, expected_leaf, issuer_public_key) = real_v1_wallet_mtls_params();
     tls::build_client_config(&params)
         .expect("real X.509 v1 client certificate must build a rustls client config");
