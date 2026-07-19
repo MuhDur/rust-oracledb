@@ -103,10 +103,10 @@ This driver's credibility rests on evidence, not claims. Preserve it:
   See `docs/PARITY_SKIPS.md`, `docs/RELEASE_CERTIFICATION.md`,
   `docs/FAKE_PARITY_AUDIT.md`. A change that drops parity or turns a proven skip
   into a hidden defect is a release blocker.
-- **Fuzzing / robustness.** 20 cargo-fuzz targets cover the untrusted decode
-  boundaries plus the connect-string parser, with a differential oracle that
-  cross-checks the decoder against python-oracledb's on identical wire bytes.
-  See `docs/FUZZING.md`.
+- **Fuzzing / robustness.** 21 cargo-fuzz targets cover the untrusted decode
+  boundaries plus the connect-string parser and the `sql.rs` statement
+  surface, with a differential oracle that cross-checks the decoder against
+  python-oracledb's on identical wire bytes. See `docs/FUZZING.md`.
 - **Multi-version live matrix (standing release gate).** `scripts/version_matrix.sh`
   runs one gvenzl-backed container per server generation (11g / 18c / 21c / 23ai;
   `.github/workflows/version-matrix.yml`). The 11g lane sits **below** the

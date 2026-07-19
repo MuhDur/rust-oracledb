@@ -14,7 +14,7 @@ lockfile and the normal `cargo build --workspace` is unaffected.
 
 ## Targets
 
-Twenty libFuzzer targets cover the untrusted decode/parse boundaries. Most take
+Twenty-one libFuzzer targets cover the untrusted decode/parse boundaries. Most take
 `data: &[u8]`, guard the input size, and call the decoder asserting only that
 it returns a `Result` (an `Err` is a perfectly good outcome — a panic / OOM /
 hang is the bug). The connect-string target (#10) is **structure-aware**: it
@@ -43,6 +43,7 @@ deep is unreachable by byte-level mutation alone (see its row below).
 | 18 | `oac_record` | OAC record parser | Oracle access/control records used in notifications and auth-adjacent payloads |
 | 19 | `wallet_parsers` | wallet PEM/SSO parser entry points | Wallet container parsing and typed fail-closed diagnostics |
 | 20 | `borrowed_query_response` | borrowed query/define response parsers | Zero-copy row/LOB decode paths and borrowed lifetime-safe parsing |
+| 21 | `sql_statement_surface` | `fuzz_api::fuzz_sql_statement_surface` | `sql.rs` bind-name extraction (scan/unique/per-occurrence/PL-SQL-output/RETURNING-INTO) and statement parsing (PL/SQL・DDL・DML classification, placeholder rewriting, DML RETURNING-projection rewriting) |
 
 Several targets reach `pub(crate)` (or `#[cfg(fuzzing)] pub`)
 functions through a tiny, **`#[cfg(fuzzing)]`-only** shim module
@@ -220,6 +221,28 @@ covered by a regression unit test plus a corpus seed.
 - **Regression:** `wire::tests::sb4_sb8_negate_overflow_does_not_panic`,
   `wire::tests::sb4_decodes_representative_values`;
   seed `fuzz/corpus/query_response/regression_sb4_negate_overflow`.
+
+### 5. `sql::public_bind_name` — out-of-range slice on a lone `"` bind name
+- **Target:** `sql_statement_surface` (found within the first ~7000 mutated
+  executions of an initial smoke run, well inside the seed corpus's basin)
+- **Signature:** `panicked at src/sql.rs:63:13: byte range starts at 1 but
+  ends at 0` → `libFuzzer: deadly signal`
+- **Root cause:** `is_quoted_bind_name` checked only
+  `name.starts_with('"') && name.ends_with('"')`. For the one-character
+  string `"\""` both conditions are trivially true (the same byte is both the
+  first and last), so `public_bind_name` took the quoted branch and sliced
+  `name[1..name.len() - 1]` = `name[1..0]` — a `1..0` range panics rather than
+  returning empty. This is reachable from a `pub fn` with no wire/decoder
+  involvement: any caller building a bind name from untrusted or malformed
+  text (not just the crate's own parser, which never emits a bare `"`) could
+  trigger it.
+- **Fix** (`src/sql.rs`): `is_quoted_bind_name` now requires `name.len() >=
+  2` before checking the delimiters — a validly quoted name needs distinct
+  positions for the opening and closing `"` (the minimum is the empty quoted
+  name `""`).
+- **Regression:** `sql::tests::public_bind_name_never_panics_on_a_lone_quote_character`;
+  seed `fuzz/corpus/sql_statement_surface/regression_lone_quote_panic`
+  (bytes `3a 22`, i.e. selector byte `0x3a` then payload `"`).
 
 ## OOM-from-length is now closed by construction
 

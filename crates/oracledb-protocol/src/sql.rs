@@ -399,8 +399,16 @@ pub fn scan_bind_names(statement: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// `len() >= 2` matters: a lone `"` trivially satisfies both `starts_with`
+/// and `ends_with` on a one-character string, which is not a validly quoted
+/// name (there is no room for a distinct open quote, content, and close
+/// quote — even the empty quoted name `""` needs both delimiter bytes). Without
+/// this guard, [`public_bind_name`]'s `name[1..name.len() - 1]` slice
+/// underflows (`1..0`) and panics on that single-quote-character input —
+/// found by the `sql_statement_surface` fuzz target within seconds of
+/// mutating the seed corpus.
 pub fn is_quoted_bind_name(name: &str) -> bool {
-    name.starts_with('"') && name.ends_with('"')
+    name.len() >= 2 && name.starts_with('"') && name.ends_with('"')
 }
 
 pub fn bind_names_equal(left: &str, right: &str) -> bool {
@@ -907,6 +915,24 @@ mod tests {
     fn converts_public_bind_names_like_python_oracledb() {
         assert_eq!(public_bind_name("abc"), "ABC");
         assert_eq!(public_bind_name("\"MiX\""), "MiX");
+    }
+
+    /// Regression for a `sql_statement_surface` fuzz-target find: a bind
+    /// "name" that is a single `"` character trivially satisfies the naive
+    /// `starts_with('"') && ends_with('"')` check (same byte, both
+    /// conditions), which used to make `public_bind_name` slice `[1..0]` and
+    /// panic. `is_quoted_bind_name` must require at least two bytes, and
+    /// `public_bind_name` must fall back to the unquoted (upper-cased) path
+    /// for any string shorter than that instead of panicking.
+    #[test]
+    fn public_bind_name_never_panics_on_a_lone_quote_character() {
+        assert!(!is_quoted_bind_name("\""));
+        assert_eq!(public_bind_name("\""), "\"");
+        assert!(!is_quoted_bind_name(""));
+        assert_eq!(public_bind_name(""), "");
+        // Two quote characters back-to-back IS a valid (empty) quoted name.
+        assert!(is_quoted_bind_name("\"\""));
+        assert_eq!(public_bind_name("\"\""), "");
     }
 
     #[test]

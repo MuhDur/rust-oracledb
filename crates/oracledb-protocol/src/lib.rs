@@ -415,6 +415,65 @@ pub mod fuzz_api {
         let key = keys[input.as_bytes().first().copied().unwrap_or(0) as usize % keys.len()];
         let _ = crate::sql::parse_alter_session_value(input, key);
     }
+
+    /// Drive the `sql.rs` statement-processing surface: bind-name extraction
+    /// (`scan_bind_names` and everything built on it), the PL/SQL / DDL / DML
+    /// statement classifiers, placeholder rewriting, and the DML RETURNING
+    /// projection helpers — every public entry point in `sql.rs` except
+    /// `parse_alter_session_value`, which already has its own dedicated
+    /// `alter_session` target.
+    ///
+    /// These are pure `&str` tokenizers over caller-supplied SQL text (never
+    /// server wire bytes), but a real application builds dynamic SQL from
+    /// request-shaped fragments, so this text is not fully trusted either.
+    /// The contract is the same as every other fuzz target: never panic —
+    /// in particular, never slice across a UTF-8 char boundary while walking
+    /// quoted strings (`'...'`), q-strings (`q'{...}'`), `--`/`/* */`
+    /// comments, or bind-name identifiers — only ever return `Err` / `None`
+    /// / an empty `Vec` on malformed or adversarial input (an unterminated
+    /// quote, a bind name that never closes, deeply repeated `INTO`/
+    /// `RETURNING` keyword collisions inside string literals, ...).
+    pub fn fuzz_sql_statement_surface(data: &[u8]) {
+        let (selector, payload) = data.split_first().map_or((0u8, data), |(v, r)| (*v, r));
+        let Ok(statement) = core::str::from_utf8(payload) else {
+            return;
+        };
+
+        let _ = crate::sql::scan_bind_names(statement);
+        let _ = crate::sql::unique_bind_names(statement);
+        let _ = crate::sql::bind_names_per_occurrence(statement);
+        let _ = crate::sql::plsql_output_bind_names(statement);
+        let _ = crate::sql::plsql_assignment_bind_names(statement);
+        let _ = crate::sql::returning_bind_names(statement);
+        let _ = crate::sql::dml_returning_single_bind_name(statement);
+        let _ = crate::sql::rewrite_dml_returning_projection(statement, "ATTR");
+        let _ = crate::sql::plsql_function_return_bind_name(statement);
+        let _ = crate::sql::statement_is_plsql(statement);
+        let _ = crate::sql::statement_is_ddl(statement);
+        let _ = crate::sql::statement_is_dml(statement);
+        let _ = crate::sql::simple_sql_identifier(statement);
+        // Replacing needs a bind name + replacement text; reuse the
+        // statement itself for both so the output size stays bounded by the
+        // fuzzer's own input rather than growing without bound.
+        let _ = crate::sql::replace_bind_placeholder(statement, "value", statement);
+        let _ = crate::sql::replace_input_bind_placeholder(statement, "value", statement);
+
+        // The name-shaped helpers take a bind *name*, not a whole statement.
+        // Slice a selector-sized, UTF-8-checked prefix of the payload so the
+        // bare-identifier and quoted-identifier (`"..."`) forms are both
+        // reachable.
+        let name_len = payload.len().min(usize::from(selector).max(1));
+        if let Some(name) = payload
+            .get(..name_len)
+            .and_then(|slice| core::str::from_utf8(slice).ok())
+        {
+            let _ = crate::sql::is_quoted_bind_name(name);
+            let _ = crate::sql::public_bind_name(name);
+            let _ = crate::sql::bind_names_equal(name, statement);
+            let _ = crate::sql::bind_name_matches_key(name, statement);
+            let _ = crate::sql::generated_object_attr_bind_name(name, statement);
+        }
+    }
 }
 
 #[cfg(test)]

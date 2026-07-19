@@ -349,3 +349,18 @@ malloc_limit_mb = 2048
 lane = "ci-smoke"
 iterations = 500
 max_total_time_seconds = 5
+
+[[targets]]
+name = "sql_statement_surface"
+owner = "protocol/sql"
+parser_entry = "crates/oracledb-protocol/src/lib.rs:436 fuzz_sql_statement_surface; crates/oracledb-protocol/src/sql.rs:351 scan_bind_names; crates/oracledb-protocol/src/sql.rs:249 plsql_output_bind_names; crates/oracledb-protocol/src/sql.rs:456 replace_input_bind_placeholder"
+risk_tier = "required"
+corpus_dir = "corpus/sql_statement_surface"
+dictionary = "dictionaries/sql_statement_surface.dict"
+max_input_bytes = 1_000_000
+timeout_seconds = 10
+rss_limit_mb = 2048
+malloc_limit_mb = 2048
+lane = "ci-smoke"
+iterations = 500
+max_total_time_seconds = 5
