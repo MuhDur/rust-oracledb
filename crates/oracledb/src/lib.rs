@@ -2898,13 +2898,29 @@ impl Connection {
             } else {
                 None
             };
+            // F-DC2 (security fix): feed the TLS verifier the SAME resolved
+            // `SSL_SERVER_DN_MATCH` / `SSL_SERVER_CERT_DN` values that
+            // `descriptor_ssl_server_dn_match` / `descriptor_ssl_server_cert_dn`
+            // already computed above (options merged over the DSN-parsed
+            // descriptor) and that drive the outbound listener CONNECT
+            // descriptor below. Passing the raw, unmerged `options.*` fields
+            // here (the prior bug) meant a cert DN pinned ONLY in the connect
+            // string (`(SECURITY=(SSL_SERVER_CERT_DN=...)))`, never touching
+            // the `with_ssl_server_cert_dn` builder) never reached the
+            // verifier: `run_dn_match` would silently fall back to the
+            // hostname/SAN/CN match instead of enforcing the pinned DN, so
+            // DN pinning configured via the DSN did not actually pin. The
+            // same gap dropped a DSN-only `SSL_SERVER_DN_MATCH=OFF`, so the
+            // check stayed enforced even when the descriptor asked to
+            // disable it. One resolved value now feeds both the verifier and
+            // the wire descriptor, so they can never diverge.
             let tls_params = if descriptor.protocol.is_tls() {
                 Some(tls::resolve_tls_params(
                     &descriptor,
                     effective_wallet_location,
                     options.wallet_password.as_deref(),
-                    options.ssl_server_dn_match,
-                    options.ssl_server_cert_dn.as_deref(),
+                    descriptor_ssl_server_dn_match,
+                    descriptor_ssl_server_cert_dn,
                     effective_use_sni,
                 )?)
             } else {
@@ -14049,6 +14065,266 @@ mod tests {
         );
         server.join().expect("server thread joins")?;
         Ok(())
+    }
+
+    // ---- bead F-DC2 / F-DC3: DSN-only SSL_SERVER_CERT_DN / SSL_SERVER_DN_MATCH ----
+    //
+    // `tests/tls_handshake.rs` proves the crate-internal `tls::` module's DN
+    // check is correct when `TlsParams` is built directly. It does NOT prove
+    // that the full `Connection::connect` pipeline actually threads a
+    // `SSL_SERVER_CERT_DN` / `SSL_SERVER_DN_MATCH` supplied ONLY via the
+    // connect string (never through the `with_ssl_server_cert_dn` /
+    // `with_ssl_server_dn_match` builder methods) into that verifier — which
+    // is exactly the gap F-DC2 found: `Connection::connect` was passing the
+    // raw, unmerged `options.ssl_server_dn_match` /
+    // `options.ssl_server_cert_dn` (both default/absent unless the builder
+    // was called) into `tls::resolve_tls_params`, silently dropping whatever
+    // the DSN itself said. The three tests below drive the real
+    // `Connection::connect` against a real rustls server presenting the
+    // CA-signed `leaf.crt` fixture (subject DN
+    // "C=US, O=ExampleDB, CN=db.example.com", SAN db.example.com/localhost —
+    // no DNS SAN for a bare IP), dialled by IP (`HOST=127.0.0.1`) so the
+    // outcome never depends on real DNS resolution.
+    //
+    // Discrimination does not rely on the coarse "did it fail" question —
+    // dialling a non-Oracle stub server always eventually fails one way or
+    // another. It relies on *which* failure: `check_cert_dn`'s
+    // `DnMatchError::CertDnMismatch` echoes the pinned DN verbatim in its
+    // message, while the broken fallback path (`server_cert_dn` silently
+    // dropped to `None`) instead runs `check_server_name` against
+    // `HOST=127.0.0.1`, which can never match this leaf's SAN (127.0.0.1 is
+    // only present as an IP-typed SAN entry, and `parse_cert_identity` only
+    // collects DNS-typed SAN names) — so that fallback ALWAYS fails, but with
+    // `DnMatchError::NameMismatch`, a message that never contains the pinned
+    // DN string. That distinction is what a passing test after the fix, and a
+    // failing test before it, actually turns on — verified by temporarily
+    // reverting the `descriptor_ssl_server_dn_match` /
+    // `descriptor_ssl_server_cert_dn` wiring in `Connection::connect` and
+    // confirming each test below fails.
+
+    /// Spawn a one-shot real rustls TLS server presenting the CA-signed
+    /// `leaf.crt`/`leaf.key` fixture (the same identity `tests/tls_handshake.rs`
+    /// uses). It completes exactly one handshake, reads whatever the peer sends
+    /// next (the driver's TNS CONNECT packet) without attempting to understand
+    /// it, and then closes without answering — so a `Connection::connect` that
+    /// gets PAST the TLS/DN layer always still fails overall, just with
+    /// something other than `Error::Tls`.
+    fn spawn_dc2_dc3_fixture_tls_server() -> (u16, thread::JoinHandle<()>) {
+        let mut fixtures = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fixtures.push("tests");
+        fixtures.push("fixtures");
+        fixtures.push("tls");
+        let leaf = std::fs::read(fixtures.join("leaf.crt")).expect("read leaf.crt fixture");
+        let key = std::fs::read(fixtures.join("leaf.key")).expect("read leaf.key fixture");
+        let ca = std::fs::read(fixtures.join("ca.crt")).expect("read ca.crt fixture");
+
+        let mut chain: Vec<rustls::pki_types::CertificateDer<'static>> =
+            rustls_pemfile::certs(&mut std::io::BufReader::new(&leaf[..]))
+                .filter_map(std::result::Result::ok)
+                .collect();
+        chain.extend(
+            rustls_pemfile::certs(&mut std::io::BufReader::new(&ca[..]))
+                .filter_map(std::result::Result::ok),
+        );
+        let key_der = rustls_pemfile::private_key(&mut std::io::BufReader::new(&key[..]))
+            .expect("read leaf.key")
+            .expect("leaf.key must contain a private key");
+
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(chain, key_der)
+            .expect("fixture server config");
+        let config = std::sync::Arc::new(config);
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let handle = thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                if let Ok(mut conn) = rustls::ServerConnection::new(config) {
+                    let mut tls = rustls::Stream::new(&mut conn, &mut sock);
+                    let mut buf = [0u8; 4096];
+                    // Best-effort: complete the handshake (if the client's
+                    // verifier accepts it) and read whatever the client sends
+                    // next. Never answer it — closing here is what turns
+                    // "got past TLS" into a clean, fast non-Tls failure for
+                    // the driver instead of a hang.
+                    let _ = tls.read(&mut buf);
+                }
+            }
+        });
+        (port, handle)
+    }
+
+    /// Copy the fixture CA-only trust wallet (`ca_wallet.pem` — the CA that
+    /// signs `leaf.crt`, no client identity) into a fresh temp directory named
+    /// `ewallet.pem`, the filename the directory-based wallet loader
+    /// (`resolve_wallet_dir`/`load_wallet`) requires. Mirrors `tls.rs`'s own
+    /// `temp_wallet_dir` test helper (a different module, so not reusable
+    /// directly here).
+    fn dc2_dc3_temp_ca_trust_wallet_dir(label: &str) -> std::path::PathBuf {
+        let mut fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fixture.push("tests");
+        fixture.push("fixtures");
+        fixture.push("tls");
+        fixture.push("ca_wallet.pem");
+
+        let dir = std::env::temp_dir().join(format!(
+            "oracledb-dc2-dc3-wallet-{label}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp wallet dir");
+        std::fs::copy(&fixture, dir.join("ewallet.pem")).expect("copy ca_wallet.pem fixture");
+        dir
+    }
+
+    /// Build a full `(DESCRIPTION=...)` TCPS connect string pinning
+    /// `SSL_SERVER_CERT_DN` (and, when `dn_match_off` is set,
+    /// `SSL_SERVER_DN_MATCH=OFF`) entirely in the connect string — the
+    /// DSN-only path F-DC2/F-DC3 found broken. `wallet_dir` must hold a
+    /// directory-loadable wallet trusting the CA that signed the server's
+    /// presented certificate.
+    fn dc2_dc3_connect_string(
+        port: u16,
+        wallet_dir: &std::path::Path,
+        cert_dn: &str,
+        dn_match_off: bool,
+    ) -> String {
+        let dn_match_clause = if dn_match_off {
+            "(SSL_SERVER_DN_MATCH=off)"
+        } else {
+            ""
+        };
+        let wallet = wallet_dir.display();
+        format!(
+            "(DESCRIPTION=(CONNECT_TIMEOUT=10)\
+             (ADDRESS=(PROTOCOL=tcps)(HOST=127.0.0.1)(PORT={port}))\
+             (CONNECT_DATA=(SERVICE_NAME=FREEPDB1))\
+             (SECURITY={dn_match_clause}(SSL_SERVER_CERT_DN={cert_dn})\
+             (MY_WALLET_DIRECTORY=\"{wallet}\")))"
+        )
+    }
+
+    /// The exact phrase `DnMatchError::CertDnMismatch` renders
+    /// (`crates/oracledb-protocol/src/tls/dn.rs`), independent of the pinned
+    /// DN value — used to detect that `check_cert_dn` genuinely ran.
+    const DC_CERT_DN_MISMATCH_PHRASE: &str =
+        "distinguished name (DN) on the server certificate does not match";
+    /// The exact phrase `DnMatchError::NameMismatch` renders — used to detect
+    /// the broken fallback path (hostname/SAN match) the DC2 bug silently
+    /// took instead of the pinned-DN check.
+    const DC_NAME_MISMATCH_PHRASE: &str = "does not match the names in the server certificate";
+
+    /// A single connect attempt against the loopback address is
+    /// failover-eligible (`is_failover_eligible`), so a TLS/DN rejection
+    /// surfaces wrapped in `Error::AllAddressesFailed` rather than as a bare
+    /// `Error::Tls` — but its `Display`/`Debug` chain still embeds the
+    /// original message verbatim (via the inner error's own `Display`), so
+    /// asserting on the *rendered text* is the discriminator that survives
+    /// that wrapping.
+    fn dc_rendered_error(err: &Error) -> String {
+        format!("{err} / debug={err:?}")
+    }
+
+    /// F-DC2 discriminating test: a `SSL_SERVER_CERT_DN` pinned ONLY in the
+    /// connect string (never through `with_ssl_server_cert_dn`) that does NOT
+    /// match the server's real subject DN must be refused, with the DN check
+    /// actually having run (`check_cert_dn`'s rejection echoes the pinned DN
+    /// verbatim) — not merely refused for some unrelated reason, and not the
+    /// broken fallback (a hostname/SAN `NameMismatch` against HOST=127.0.0.1,
+    /// which never mentions the pinned DN at all).
+    #[test]
+    fn f_dc2_dsn_only_pinned_cert_dn_mismatch_is_refused() {
+        let (port, server) = spawn_dc2_dc3_fixture_tls_server();
+        let wallet_dir = dc2_dc3_temp_ca_trust_wallet_dir("mismatch");
+        let wrong_dn = "CN=not-the-real-server.invalid,O=Nope,C=ZZ";
+        let connect_string = dc2_dc3_connect_string(port, &wallet_dir, wrong_dn, false);
+        let options = ConnectOptions::new(connect_string, "user", "password", identity());
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("ambient Cx");
+                Connection::connect(&cx, options).await
+            })
+            .expect_err(
+                "a server whose DN does not match a DSN-only pinned SSL_SERVER_CERT_DN must be \
+                 refused",
+            );
+        let rendered = dc_rendered_error(&err);
+        assert!(
+            rendered.contains(wrong_dn) && rendered.contains(DC_CERT_DN_MISMATCH_PHRASE),
+            "the DSN-only pinned SSL_SERVER_CERT_DN must actually reach the verifier — expected \
+             the rejection to echo the pinned DN {wrong_dn:?} via a CertDnMismatch \
+             ({DC_CERT_DN_MISMATCH_PHRASE:?}), proving `check_cert_dn` ran with the DSN-supplied \
+             value; got: {rendered}"
+        );
+        let _ = server.join();
+    }
+
+    /// F-DC2 positive counterpart: a `SSL_SERVER_CERT_DN` pinned ONLY in the
+    /// connect string that DOES match the server's real subject DN must pass
+    /// the TLS/DN layer cleanly. The stub server never answers a real Oracle
+    /// listener response, so the overall connect still fails — but the
+    /// rejection must carry NEITHER DN-match failure phrase, proving the
+    /// pinned DN was accepted rather than never checked (or checked and
+    /// rejected via the broken hostname/SAN fallback).
+    #[test]
+    fn f_dc2_dsn_only_pinned_cert_dn_match_passes_tls_layer() {
+        let (port, server) = spawn_dc2_dc3_fixture_tls_server();
+        let wallet_dir = dc2_dc3_temp_ca_trust_wallet_dir("match");
+        let real_dn = "CN=db.example.com,O=ExampleDB,C=US";
+        let connect_string = dc2_dc3_connect_string(port, &wallet_dir, real_dn, false);
+        let options = ConnectOptions::new(connect_string, "user", "password", identity());
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("ambient Cx");
+                Connection::connect(&cx, options).await
+            })
+            .expect_err(
+                "the stub server never answers a real Oracle listener response, so connect must \
+                 still fail overall",
+            );
+        let rendered = dc_rendered_error(&err);
+        assert!(
+            !rendered.contains(DC_CERT_DN_MISMATCH_PHRASE)
+                && !rendered.contains(DC_NAME_MISMATCH_PHRASE),
+            "a matching DSN-only pinned SSL_SERVER_CERT_DN must pass the TLS/DN layer cleanly — \
+             got a DN-match rejection instead, meaning the pin was not honored (it likely fell \
+             back to a hostname/SAN check against HOST=127.0.0.1, which this certificate's SAN \
+             never matches): {rendered}"
+        );
+        let _ = server.join();
+    }
+
+    /// F-DC3 discriminating test: `SSL_SERVER_DN_MATCH=OFF` set ONLY in the
+    /// connect string must deliberately disable the DN check — including
+    /// against a mismatched pinned `SSL_SERVER_CERT_DN` — never leave it
+    /// silently enforced. Paired with the default-enforces case above
+    /// (`f_dc2_dsn_only_pinned_cert_dn_mismatch_is_refused`, which pins the
+    /// SAME wrong DN without DN_MATCH=OFF and must still be refused).
+    #[test]
+    fn f_dc3_dn_match_off_deliberately_skips_the_pinned_cert_dn_check() {
+        let (port, server) = spawn_dc2_dc3_fixture_tls_server();
+        let wallet_dir = dc2_dc3_temp_ca_trust_wallet_dir("off");
+        let wrong_dn = "CN=not-the-real-server.invalid,O=Nope,C=ZZ";
+        let connect_string = dc2_dc3_connect_string(port, &wallet_dir, wrong_dn, true);
+        let options = ConnectOptions::new(connect_string, "user", "password", identity());
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("ambient Cx");
+                Connection::connect(&cx, options).await
+            })
+            .expect_err("the stub server never answers a real Oracle listener response");
+        let rendered = dc_rendered_error(&err);
+        assert!(
+            !rendered.contains(DC_CERT_DN_MISMATCH_PHRASE)
+                && !rendered.contains(DC_NAME_MISMATCH_PHRASE),
+            "SSL_SERVER_DN_MATCH=OFF set only in the connect string must deliberately disable \
+             the DN check — even with a mismatched pinned SSL_SERVER_CERT_DN — got a DN-match \
+             rejection instead, meaning OFF did not actually reach the verifier: {rendered}"
+        );
+        let _ = server.join();
     }
 
     #[test]

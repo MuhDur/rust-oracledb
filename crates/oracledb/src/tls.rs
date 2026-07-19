@@ -359,6 +359,18 @@ fn rustls_pemfile_certs(reader: &mut dyn std::io::BufRead) -> Vec<Vec<u8>> {
 /// `cwallet.sso` — see [`load_wallet`]), and capture the DN-match
 /// configuration.
 ///
+/// F-DC3: `ssl_server_dn_match=false` deliberately disables the Oracle
+/// server-certificate identity check (`OracleServerCertVerifier::run_dn_match`
+/// short-circuits to `Ok` — chain-of-trust validation still applies, only the
+/// DN/SAN/CN match is skipped). That is a real security posture change for
+/// this connection, so it is surfaced as an audited WARN rather than a silent
+/// downgrade: an operator grepping logs can see exactly when and where DN
+/// matching was turned off, instead of discovering it only by noticing that
+/// impersonation would have gone undetected. This only fires when the
+/// *effective* (options-merged-with-descriptor) value is off, so it reflects
+/// the same resolved setting the verifier actually uses — never an
+/// approximation that could itself drift from what is enforced.
+///
 /// # Errors
 /// Returns [`Error::Wallet`] when a configured wallet directory is missing or
 /// its wallet file cannot be parsed.
@@ -376,6 +388,20 @@ pub(crate) fn resolve_tls_params(
         Some(dir) => Some(load_wallet(&dir, wallet_password)?),
         None => None,
     };
+    if !ssl_server_dn_match {
+        // Explicit, audited: SSL_SERVER_DN_MATCH=OFF (or with_ssl_server_dn_match(false))
+        // must never be an invisible bypass. A pinned SSL_SERVER_CERT_DN, if
+        // any, is named here too, since it is what would have been enforced.
+        obs_warn!(
+            server.host = %descriptor.host,
+            server.port = descriptor.port as u64,
+            pinned_cert_dn_configured = ssl_server_cert_dn.is_some(),
+            "TCPS SSL_SERVER_DN_MATCH=OFF: the Oracle server-certificate identity check \
+             (DN/SAN/CN match) is disabled for this connection; TLS chain-of-trust \
+             validation still applies, but the peer's identity is not verified. This must be \
+             a deliberate, explicit choice, never a default."
+        );
+    }
     Ok(TlsParams {
         wallet,
         dn_match: ssl_server_dn_match,
