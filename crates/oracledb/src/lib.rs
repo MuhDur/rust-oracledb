@@ -2961,8 +2961,20 @@ impl Connection {
                     trace_connect_step("tcp connected");
                     let halves = if let Some(tls_params) = tls_params {
                         trace_connect_step("tls handshake");
-                        let tls_stream =
-                            tls::tls_handshake(descriptor, server_type, tls_params, stream).await?;
+                        // Honor the same configured connect timeout that already
+                        // bounds the TCP dial above, instead of a hard-coded
+                        // value: `connect_timeout` is resolved uniformly from
+                        // the DSN `TRANSPORT_CONNECT_TIMEOUT`/`CONNECT_TIMEOUT`
+                        // for both easy-connect and full-descriptor DSN forms
+                        // (bead F-DC4).
+                        let tls_stream = tls::tls_handshake(
+                            descriptor,
+                            server_type,
+                            tls_params,
+                            stream,
+                            connect_timeout,
+                        )
+                        .await?;
                         trace_connect_step("tls established");
                         // Install the capture recorder around the SYNCHRONOUS
                         // split only (no await while held) so the thread-local
@@ -13980,6 +13992,60 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(2),
             "post-dial ACCEPT read should be bounded"
+        );
+        server.join().expect("server thread joins")?;
+        Ok(())
+    }
+
+    /// bead F-DC4: a full `(DESCRIPTION=...)` Oracle Net descriptor's own
+    /// `CONNECT_TIMEOUT` must actually bound a TCPS connect attempt end to
+    /// end, including a stalled TLS handshake — not just the TCP dial, and
+    /// not just the easy-connect `?transport_connect_timeout=` query-param
+    /// form covered by `transport_connect_timeout_bounds_post_dial_accept_read`
+    /// above. This is an end-to-end companion to
+    /// `tls::tests::tls_handshake_honors_a_short_caller_supplied_timeout_against_a_stalled_peer`
+    /// (`tests/tls_handshake.rs`), which isolates the handshake-timeout fix
+    /// itself by calling `tls_handshake` directly; this test instead proves
+    /// the full `Connection::connect` pipeline actually delivers that
+    /// behavior for a full descriptor, whichever layer (the outer connect
+    /// deadline or the handshake's own timeout) ends up enforcing it.
+    #[test]
+    fn full_descriptor_connect_timeout_bounds_a_stalled_tls_handshake() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        // Hold the TCP connection open with zero bytes sent, well past the
+        // assertion window, so only the configured connect timeout (not a
+        // connection-close race) can explain a fast return.
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (socket, _) = listener.accept()?;
+            thread::sleep(Duration::from_secs(3));
+            drop(socket);
+            Ok(())
+        });
+
+        let wallet_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tls");
+        let connect_string = format!(
+            "(DESCRIPTION=(CONNECT_TIMEOUT=0.3)\
+             (ADDRESS=(PROTOCOL=tcps)(HOST=127.0.0.1)(PORT={}))\
+             (CONNECT_DATA=(SERVICE_NAME=FREEPDB1))\
+             (SECURITY=(SSL_SERVER_DN_MATCH=off)(MY_WALLET_DIRECTORY=\"{wallet_dir}\")))",
+            addr.port(),
+        );
+        let options = ConnectOptions::new(connect_string, "user", "password", identity());
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let started = Instant::now();
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("ambient Cx");
+                Connection::connect(&cx, options).await
+            })
+            .expect_err("a peer that never speaks TLS must not let connect succeed");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the descriptor's 0.3s CONNECT_TIMEOUT must bound the TLS handshake too, not just \
+             the TCP dial (the old hard-coded ~20s handshake timeout, or the peer's own 3s \
+             silent hold, would both blow this budget); actually took {elapsed:?}, err={err:?}"
         );
         server.join().expect("server thread joins")?;
         Ok(())

@@ -557,9 +557,10 @@ fn tcps_handshake_succeeds_with_ca_wallet_and_name_match() {
         let tcp = TcpStream::connect((desc.host.clone(), desc.port))
             .await
             .expect("tcp connect");
-        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
-            .await
-            .expect("TCPS handshake must succeed against CA-trusted server");
+        let mut tls_stream =
+            tls::tls_handshake(&desc, None, &params, tcp, std::time::Duration::from_secs(5))
+                .await
+                .expect("TCPS handshake must succeed against CA-trusted server");
         tls_stream.write_all(b"ping\n").await.expect("write");
         tls_stream.flush().await.expect("flush");
         let mut buf = vec![0u8; 5];
@@ -569,6 +570,57 @@ fn tcps_handshake_succeeds_with_ca_wallet_and_name_match() {
     assert_eq!(
         &echoed, b"ping\n",
         "TLS echo must round-trip through the transport"
+    );
+    server.join().expect("server thread");
+}
+
+/// bead F-DC4: `tls_handshake` previously hard-coded a ~20s handshake
+/// timeout regardless of what the caller configured. A peer that accepts
+/// the TCP connection but never sends a single TLS byte (a stalled network
+/// path, not a rejection) must not be allowed to hang the driver anywhere
+/// near that old hard-coded ceiling — the timeout the caller actually passes
+/// in must be the one that governs the handshake.
+#[test]
+fn tls_handshake_honors_a_short_caller_supplied_timeout_against_a_stalled_peer() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    // The server keeps the TCP connection open (no close, no bytes) for well
+    // past the assertion window below, so the client can only be released by
+    // its own handshake timeout firing — never by a connection-close race.
+    const SERVER_HOLD: std::time::Duration = std::time::Duration::from_secs(3);
+    let server = std::thread::spawn(move || {
+        // Accept the TCP connection and then go silent: no ServerHello, no
+        // close. This is exactly what a black-holed network path or a
+        // wedged middlebox looks like from the client's side.
+        if let Ok((sock, _)) = listener.accept() {
+            std::thread::sleep(SERVER_HOLD);
+            drop(sock);
+        }
+    });
+
+    let params = ca_trust_params("localhost", true, None);
+    let desc = descriptor(port);
+    let rt = io_runtime();
+    let short_timeout = std::time::Duration::from_millis(150);
+    let started = std::time::Instant::now();
+    let result = rt.block_on(async move {
+        let _cx = Cx::current().expect("ambient cx");
+        let tcp = TcpStream::connect((desc.host.clone(), desc.port))
+            .await
+            .expect("tcp connect");
+        tls::tls_handshake(&desc, None, &params, tcp, short_timeout).await
+    });
+    let elapsed = started.elapsed();
+
+    assert!(
+        result.is_err(),
+        "a handshake against a peer that never speaks TLS must fail, not hang forever"
+    );
+    assert!(
+        elapsed < SERVER_HOLD / 2,
+        "a {short_timeout:?} caller-supplied handshake timeout must be honored (the peer stayed \
+         silent for {SERVER_HOLD:?} without closing, so only the timeout itself can explain a \
+         fast return); actually took {elapsed:?}"
     );
     server.join().expect("server thread");
 }
@@ -591,9 +643,10 @@ fn tcps_x509_v1_wallet_client_cert_builds_and_handshakes() {
         let tcp = TcpStream::connect((desc.host.clone(), desc.port))
             .await
             .expect("tcp connect");
-        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
-            .await
-            .expect("mTLS handshake must accept the X.509 v1 wallet identity");
+        let mut tls_stream =
+            tls::tls_handshake(&desc, None, &params, tcp, std::time::Duration::from_secs(5))
+                .await
+                .expect("mTLS handshake must accept the X.509 v1 wallet identity");
         tls_stream.write_all(b"ping\n").await.expect("write");
         tls_stream.flush().await.expect("flush");
         let mut buf = vec![0u8; 5];
@@ -643,9 +696,10 @@ fn tcps_real_v1_wallet_tls13_mtls_handshakes() {
         let tcp = TcpStream::connect((desc.host.clone(), desc.port))
             .await
             .expect("tcp connect");
-        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
-            .await
-            .expect("mTLS handshake must accept the real X.509 v1 wallet identity");
+        let mut tls_stream =
+            tls::tls_handshake(&desc, None, &params, tcp, std::time::Duration::from_secs(5))
+                .await
+                .expect("mTLS handshake must accept the real X.509 v1 wallet identity");
         tls_stream.write_all(b"ping\n").await.expect("write");
         tls_stream.flush().await.expect("flush");
         let mut buf = vec![0u8; 5];
@@ -685,7 +739,7 @@ fn tcps_handshake_rejects_on_dn_mismatch() {
         let tcp = TcpStream::connect((desc.host.clone(), desc.port))
             .await
             .expect("tcp connect");
-        tls::tls_handshake(&desc, None, &params, tcp).await
+        tls::tls_handshake(&desc, None, &params, tcp, std::time::Duration::from_secs(5)).await
     });
     assert!(
         result.is_err(),
@@ -712,7 +766,9 @@ fn tcps_handshake_accepts_explicit_cert_dn() {
         let tcp = TcpStream::connect((desc.host.clone(), desc.port))
             .await
             .expect("tcp connect");
-        tls::tls_handshake(&desc, None, &params, tcp).await.is_ok()
+        tls::tls_handshake(&desc, None, &params, tcp, std::time::Duration::from_secs(5))
+            .await
+            .is_ok()
     });
     assert!(ok, "explicit matching ssl_server_cert_dn must be accepted");
     let _ = server.join();
@@ -751,9 +807,10 @@ fn tcps_handshake_emits_oci_endpoint_host_sni_and_keeps_explicit_dn_check() {
         let tcp = TcpStream::connect((desc.host.clone(), desc.port))
             .await
             .expect("tcp connect");
-        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
-            .await
-            .expect("OCI endpoint-host SNI handshake must succeed");
+        let mut tls_stream =
+            tls::tls_handshake(&desc, None, &params, tcp, std::time::Duration::from_secs(5))
+                .await
+                .expect("OCI endpoint-host SNI handshake must succeed");
         tls_stream.write_all(b"ping\n").await.expect("write");
         tls_stream.flush().await.expect("flush");
         let mut buf = vec![0u8; 5];
@@ -980,9 +1037,10 @@ fn synthetic_tcps_handshake_succeeds_with_ca_wallet_cn_match() {
         let tcp = TcpStream::connect((desc.host.clone(), desc.port))
             .await
             .expect("tcp connect");
-        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
-            .await
-            .expect("TCPS handshake must succeed against the synthetic CA-trusted server");
+        let mut tls_stream =
+            tls::tls_handshake(&desc, None, &params, tcp, std::time::Duration::from_secs(5))
+                .await
+                .expect("TCPS handshake must succeed against the synthetic CA-trusted server");
         tls_stream.write_all(b"ping\n").await.expect("write");
         tls_stream.flush().await.expect("flush");
         let mut buf = vec![0u8; 5];
@@ -1007,7 +1065,7 @@ fn synthetic_tcps_handshake_rejects_on_name_mismatch() {
         let tcp = TcpStream::connect((desc.host.clone(), desc.port))
             .await
             .expect("tcp connect");
-        tls::tls_handshake(&desc, None, &params, tcp)
+        tls::tls_handshake(&desc, None, &params, tcp, std::time::Duration::from_secs(5))
             .await
             .expect_err("handshake must FAIL when the host is not in the synthetic cert")
     });
@@ -1029,7 +1087,9 @@ fn synthetic_tcps_handshake_accepts_explicit_cert_dn() {
         let tcp = TcpStream::connect((desc.host.clone(), desc.port))
             .await
             .expect("tcp connect");
-        tls::tls_handshake(&desc, None, &params, tcp).await.is_ok()
+        tls::tls_handshake(&desc, None, &params, tcp, std::time::Duration::from_secs(5))
+            .await
+            .is_ok()
     });
     assert!(
         ok,
@@ -1056,7 +1116,7 @@ fn synthetic_tcps_handshake_rejects_on_cert_dn_mismatch() {
         let tcp = TcpStream::connect((desc.host.clone(), desc.port))
             .await
             .expect("tcp connect");
-        tls::tls_handshake(&desc, None, &params, tcp)
+        tls::tls_handshake(&desc, None, &params, tcp, std::time::Duration::from_secs(5))
             .await
             .expect_err("a non-matching ssl_server_cert_dn must fail closed")
     });
@@ -1091,7 +1151,7 @@ fn synthetic_tcps_wallet_trust_anchor_governs() {
         let tcp = TcpStream::connect((desc.host.clone(), desc.port))
             .await
             .expect("tcp connect");
-        tls::tls_handshake(&desc, None, &params, tcp)
+        tls::tls_handshake(&desc, None, &params, tcp, std::time::Duration::from_secs(5))
             .await
             .expect_err("an unrelated wallet CA must reject the synthetic leaf")
     });
@@ -1115,9 +1175,10 @@ fn synthetic_tcps_mutual_tls_presents_wallet_client_cert() {
         let tcp = TcpStream::connect((desc.host.clone(), desc.port))
             .await
             .expect("tcp connect");
-        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
-            .await
-            .expect("mutual-TLS handshake must succeed with the synthetic client identity");
+        let mut tls_stream =
+            tls::tls_handshake(&desc, None, &params, tcp, std::time::Duration::from_secs(5))
+                .await
+                .expect("mutual-TLS handshake must succeed with the synthetic client identity");
         tls_stream.write_all(b"ping\n").await.expect("write");
         tls_stream.flush().await.expect("flush");
         let mut buf = vec![0u8; 5];
@@ -1173,7 +1234,9 @@ fn synthetic_tcps_mutual_tls_rejects_without_client_cert() {
         let tcp = TcpStream::connect((desc.host.clone(), desc.port))
             .await
             .expect("tcp connect");
-        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp).await?;
+        let mut tls_stream =
+            tls::tls_handshake(&desc, None, &params, tcp, std::time::Duration::from_secs(5))
+                .await?;
         tls_stream
             .write_all(b"ping\n")
             .await
@@ -1304,9 +1367,10 @@ fn c3_mock_iam_token_frames_auth_token_over_tcps_lane() {
         let tcp = TcpStream::connect((desc.host.clone(), desc.port))
             .await
             .expect("tcp connect");
-        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
-            .await
-            .expect("TCPS handshake must succeed for the C3 token lane");
+        let mut tls_stream =
+            tls::tls_handshake(&desc, None, &params, tcp, std::time::Duration::from_secs(5))
+                .await
+                .expect("TCPS handshake must succeed for the C3 token lane");
         let len = u32::try_from(sent.len()).expect("payload fits u32");
         tls_stream
             .write_all(&len.to_be_bytes())
@@ -1447,9 +1511,10 @@ fn a23_mtls_handshake_with_decrypted_3des_p12_identity() {
         let tcp = TcpStream::connect((desc.host.clone(), desc.port))
             .await
             .expect("tcp connect");
-        let mut tls_stream = tls::tls_handshake(&desc, None, &params, tcp)
-            .await
-            .expect("mTLS handshake with the 3DES-decrypted identity must succeed");
+        let mut tls_stream =
+            tls::tls_handshake(&desc, None, &params, tcp, std::time::Duration::from_secs(5))
+                .await
+                .expect("mTLS handshake with the 3DES-decrypted identity must succeed");
         tls_stream.write_all(b"ping\n").await.expect("write");
         tls_stream.flush().await.expect("flush");
         let mut buf = vec![0u8; 5];

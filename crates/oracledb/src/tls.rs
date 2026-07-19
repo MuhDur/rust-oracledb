@@ -702,6 +702,13 @@ pub(crate) fn decide_sni(
 /// values fail closed with [`Error::UnsupportedSni`] rather than silently
 /// proceeding without SNI — see [`decide_sni`].
 ///
+/// `handshake_timeout` bounds the handshake itself. Callers should pass the
+/// same configured connect timeout that already bounds the preceding TCP
+/// dial (the DSN `TRANSPORT_CONNECT_TIMEOUT`/`CONNECT_TIMEOUT`, resolved
+/// identically for easy-connect and full-descriptor DSN forms) rather than a
+/// separate hard-coded value, so a short (or long) configured connect
+/// timeout is actually honored on the TLS phase, not just the TCP dial.
+///
 /// # Errors
 /// Returns [`Error::UnsupportedSni`] when `use_sni=true` cannot be honored, or
 /// [`Error::Tls`] on configuration or handshake failure.
@@ -710,6 +717,7 @@ pub async fn tls_handshake(
     server_type: Option<&str>,
     params: &TlsParams,
     tcp: TcpStream,
+    handshake_timeout: std::time::Duration,
 ) -> Result<TlsStream<TcpStream>, Error> {
     let mut config = build_client_config(params)?;
 
@@ -731,8 +739,7 @@ pub async fn tls_handshake(
         }
     };
 
-    let connector =
-        TlsConnector::new(config).with_handshake_timeout(std::time::Duration::from_secs(20));
+    let connector = TlsConnector::new(config).with_handshake_timeout(handshake_timeout);
     connector
         .connect(&server_name, tcp)
         .await
