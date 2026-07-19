@@ -39,10 +39,21 @@ without being classified, and a required job cannot quietly become advisory.
 | `release` | only fires on a release tag (`push: tags:`) | no |
 | `manual` | only `workflow_dispatch` | no |
 
-Current: 11 required, 2 advisory, 6 scheduled, 4 release, 2 manual (25 jobs).
+Current: 12 required, 2 advisory, 6 scheduled, 4 release, 4 manual (28 jobs).
 The authoritative list is [`ci_taxonomy.json`](ci_taxonomy.json). `workflows` and
 `groups` in that file are **derived views** over `jobs[]`, which stays the single
 place a tier is recorded, so a view cannot disagree with it.
+
+### Live nightly re-arm state
+
+The scheduled `Live (database) tests` lane has a second, persisted state contract
+while its known blocker is repaired. Each run records exactly one of `green`,
+`red`, or `infra_skip` in the `driver-live-gate-state` artifact. Red and
+infrastructure-skip observations are deliberately distinct and both reset a
+pending green streak. The lane begins honestly advisory; the third consecutive
+green changes its state to `blocking`. That change is sticky, so any later red or
+infrastructure skip fails the workflow instead of silently demoting it again.
+`scripts/live_gate_state.py self-test` proves the transition boundaries offline.
 
 ## The rule
 

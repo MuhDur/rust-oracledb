@@ -793,11 +793,19 @@ pub(crate) fn dbobject_unpack_value(
                     return Ok(value.into_pyobject(py)?.unbind().into());
                 }
             }
-            query_value_to_py(py, &Some(value), None, None, true, false)
+            query_value_to_py(
+                py,
+                &Some(value),
+                None,
+                None,
+                true,
+                false,
+                Some(metadata.scale),
+            )
         }
         "DB_TYPE_DATE" | "DB_TYPE_TIMESTAMP" | "DB_TYPE_TIMESTAMP_TZ" | "DB_TYPE_TIMESTAMP_LTZ" => {
             let value = decode_datetime_value(&bytes).map_err(runtime_error)?;
-            query_value_to_py(py, &Some(value), None, None, true, false)
+            query_value_to_py(py, &Some(value), None, None, true, false, None)
         }
         "DB_TYPE_BINARY_FLOAT" => Ok(f64::from(decode_dbobject_binary_float(&bytes)?)
             .into_pyobject(py)?

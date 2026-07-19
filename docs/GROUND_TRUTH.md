@@ -8,11 +8,15 @@
 > [PARITY_SKIPS.md](PARITY_SKIPS.md), and
 > [qualification/1.0.0-rc.1/SUMMARY.md](qualification/1.0.0-rc.1/SUMMARY.md).
 >
-> **Current status (2026-07-16).** The workspace has a prepared, unpublished
-> 0.8.4 candidate. TCPS and wallet support are implemented and tested; the
+> **Current status (2026-07-18).** Version
+> [0.8.4](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.4) was
+> published on 2026-07-17 from exact tag SHA
+> [`2d8f4cb`](https://github.com/MuhDur/rust-oracledb/commit/2d8f4cb015eb7ed4180415342d8ca50a7ecb384c);
+> the next patch target is exactly **0.8.5**. TCPS and wallet support are
+> implemented and tested. The
 > 2,462 / 2,578 result above is historical qualification evidence, not a fresh
-> candidate run. See [CURRENT_ROADMAP.md](CURRENT_ROADMAP.md) for the current
-> plan, [SUPPORT.md](SUPPORT.md) for support boundaries, and
+> 0.8.4 reference-suite run. See [CURRENT_ROADMAP.md](CURRENT_ROADMAP.md) for
+> the current plan, [SUPPORT.md](SUPPORT.md) for support boundaries, and
 > [PUBLISHING.md](PUBLISHING.md) and [CHANGELOG.md](../CHANGELOG.md) for release
 > state.
 

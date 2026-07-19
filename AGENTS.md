@@ -68,9 +68,10 @@ publishing as a gated, deliberate, operator-authorized step, never an incidental
   `-j` or `--jobs`.
 - Before every workspace-wide compile (`cargo build`, `cargo test`, or
   `cargo clippy --workspace`) and before a full commit gate, acquire an MCP
-  Agent Mail build slot for this repository. At most two slots may be active;
-  wait and retry when unavailable, and release the slot immediately when the
-  build finishes.
+  Agent Mail build slot for this repository. At most two slots may be active.
+  Probe once; if the service is disabled, fall through to the repository's
+  enforced local lock and existing job/TasksMax limits instead of polling it.
+  Release any acquired slot immediately when the build finishes.
 
 ## Thin-mode invariants (do not weaken)
 
@@ -164,6 +165,44 @@ The `vX.Y.Z` git tag is the source of truth (`.github/workflows/release.yml`):
   `-`) skip the crates.io publish. `workflow_dispatch` validates gates + build
   **without** publishing.
 - `oracledb-pyshim` is `publish = false` and never goes to crates.io.
+
+## Swarm operations charter v2
+
+The operator constitution is binding: never defer planned work unilaterally;
+report red before calling anything green; make only evidence-backed claims;
+reread this file and README.md every session; verify before acting; protect host,
+disk, and token budgets; drive autonomously while following operator choices
+exactly; preserve thin-mode and fail-closed decode invariants; quarantine field
+identifiers and secrets; create no surprise cost (OCI must remain provably
+free-tier); land the complete release scope rather than spreading it across
+version bumps; and escalate true blockers while delegating unforeseen in-scope
+work.
+
+- Shared-tree work is limited to at most three agents on disjoint reserved
+  domains. A build-heavy swarm requires one managed git worktree and one
+  per-agent `CARGO_TARGET_DIR` on real disk per agent, short-lived bead-scoped
+  branches, one canonical tracker database, fixture bootstrap, sccache, and
+  managed merge/removal. Never use `/tmp/cargo-target` or tmpfs for agent build
+  state. Preflight free space plus a write/read canary and report capacity
+  failures as `DISK`, not `OOM`.
+- Every Cargo invocation goes through the repository concurrency guard. Default
+  to scoped `-p` checks. `rch` may accelerate mutation, TSan, powerset, and RQ
+  lanes after `rch doctor`, but unreachable workers must fall back locally and
+  no gate may require remote capacity.
+- Pin one Agent Mail identity to each pane and persist its registration token
+  outside compactable chat context. Reattach after compaction; never remint.
+  Before spawning, verify requested model, quota, and context headroom; size
+  waves to capacity, reconcile silently failed children, and never route release
+  finalization to a near-full pane.
+- The self-drive loop is `br ready` → claim → implement → prove → close; never
+  park an `in_progress` claim. Keep orders, Beads, and a running scratch summary
+  current. Child completion is event-driven. CI status is reported on a fixed
+  heartbeat and every transition, using a durable scheduler and debounced idle
+  notifications.
+- Before an expensive live loop, capture all diagnostics once and falsify the
+  hypothesis offline. Seed durable campaign lessons and the constitution into
+  repo-local cass-memory; the retro is evidence, this charter is policy, and
+  memory is only the task-time retrieval layer.
 
 ## Issue tracking — br (Beads), repo-local
 

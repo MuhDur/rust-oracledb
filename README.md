@@ -51,9 +51,13 @@ the reference driver runs against itself — in thin mode against Oracle Databas
 | Skips that hide a Rust-engine defect | **0** | Rust passes all 303 non-skip tests in the skip-bearing modules |
 | Regressions vs the recorded baseline | **0** | [docs/RELEASE_CERTIFICATION.md](docs/RELEASE_CERTIFICATION.md) |
 
-These are historical qualification results, not a claim that a fresh 0.8.4
-candidate run has already completed. The exact release-SHA evidence required for
-the candidate is tracked in [docs/CURRENT_ROADMAP.md](docs/CURRENT_ROADMAP.md).
+These pass/skip counts are historical qualification results, not the exact-SHA
+evidence for any later release. Version 0.8.4 was separately qualified at
+[`2d8f4cb`](https://github.com/MuhDur/rust-oracledb/commit/2d8f4cb015eb7ed4180415342d8ca50a7ecb384c)
+([qualification run](https://github.com/MuhDur/rust-oracledb/actions/runs/29583399057))
+and [published on 2026-07-17](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.4).
+The next patch target is exactly **0.8.5**; its planning and evidence boundaries
+are tracked in [docs/CURRENT_ROADMAP.md](docs/CURRENT_ROADMAP.md).
 
 Every one of the 116 skips is forced by the thin-mode contract, not by a
 shortcoming in this engine: 88 are `requires thick mode` (the reference thin

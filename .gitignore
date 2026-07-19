@@ -37,11 +37,13 @@ reference/
 # Harness run artifacts
 harness/.baseline/
 harness/.results/
+tests/artifacts/version_matrix/versions-*.json
 
 # PARITY-RIGOR lane run artifacts (scripts/parity_rigor.sh; regenerable)
 .lane-logs/
 
-# NTM runtime artifacts
+# Agent state (never commit)
+.claude/
 .ntm/
 
 # bv (beads viewer) local config and caches

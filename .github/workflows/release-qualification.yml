@@ -7,6 +7,11 @@ on:
         description: "Exact release-candidate commit SHA to qualify."
         required: true
         type: string
+      protect_for_tag:
+        description: "Protect this operator-selected imminent-tag qualification from superseding dispatches."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -18,8 +23,11 @@ env:
   CARGO_SEMVER_CHECKS_VERSION: "0.48.0"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ inputs.candidate_sha }}
-  cancel-in-progress: false
+  # Ordinary candidates are single-flight: a newer candidate cancels stale
+  # runner work. An operator can protect the one run selected for an imminent
+  # tag; its run-id-scoped group cannot be canceled by a later dispatch.
+  group: ${{ inputs.protect_for_tag && format('release-qualification-protected-{0}', github.run_id) || 'release-qualification-candidate' }}
+  cancel-in-progress: ${{ !inputs.protect_for_tag }}
 
 jobs:
   release-qualification:
@@ -31,8 +39,6 @@ jobs:
 
   emit-required-proof:
     name: emit exact required proof
-    needs: release-qualification
-    if: ${{ needs.release-qualification.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -66,8 +72,6 @@ jobs:
 
   emit-version-matrix:
     name: emit exact version-matrix evidence
-    needs: release-qualification
-    if: ${{ needs.release-qualification.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -94,8 +98,8 @@ jobs:
 
   report-release-qualification-failure:
     name: report release qualification failure
-    needs: release-qualification
-    if: ${{ always() && github.event_name == 'workflow_dispatch' && needs['release-qualification'].result != 'success' }}
+    needs: [release-qualification, emit-required-proof, emit-version-matrix]
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && (needs['release-qualification'].result != 'success' || needs['emit-required-proof'].result != 'success' || needs['emit-version-matrix'].result != 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -104,7 +108,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       PROFILE: release-qualification
-      JOB_RESULT: ${{ needs['release-qualification'].result }}
+      JOB_RESULT: quality=${{ needs['release-qualification'].result }},required-proof=${{ needs['emit-required-proof'].result }},live-matrix=${{ needs['emit-version-matrix'].result }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       SHA: ${{ inputs.candidate_sha }}
       REF_NAME: ${{ github.ref_name }}

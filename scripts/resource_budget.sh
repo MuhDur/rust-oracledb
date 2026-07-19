@@ -41,6 +41,10 @@ usage: resource_budget.sh --profile <name> [--run-id ID] [--emit-budget] [-- CMD
   --run-id ID      name the run (default: profile-$$); fixes the target dir
   --tasks N        override pid_task_max (use MEASURED evidence, not a hunch)
   --memory BYTES   override memory_max_bytes
+  --min-free-bytes BYTES
+                   refuse unless the target filesystem has at least BYTES free
+                   (default: 8589934592, configurable with
+                   ORACLEDB_BUDGET_MIN_FREE_BYTES)
   --emit-budget    print the resource_budget JSON and exit without running
   -- CMD...        the command to run under the budget
 
@@ -66,6 +70,7 @@ while [ $# -gt 0 ]; do
     --run-id)  RUN_ID="${2:-}"; shift 2 ;;
     --tasks)   OVERRIDE_TASKS="${2:-}"; shift 2 ;;
     --memory)  OVERRIDE_MEM="${2:-}"; shift 2 ;;
+    --min-free-bytes) OVERRIDE_MIN_FREE="${2:-}"; shift 2 ;;
     --emit-budget) EMIT_ONLY=true; shift ;;
     --help|-h) usage ;;
     --) shift; CMD=("$@"); break ;;
@@ -121,43 +126,66 @@ esac
 # Evidence-backed per-run overrides.
 [ -n "${OVERRIDE_TASKS:-}" ] && TASKS="$OVERRIDE_TASKS"
 [ -n "${OVERRIDE_MEM:-}" ] && MEM_BYTES="$OVERRIDE_MEM"
+MIN_FREE_BYTES="${ORACLEDB_BUDGET_MIN_FREE_BYTES:-8589934592}"
+[ -n "${OVERRIDE_MIN_FREE:-}" ] && MIN_FREE_BYTES="$OVERRIDE_MIN_FREE"
+if [[ ! "$MIN_FREE_BYTES" =~ ^[0-9]+$ ]] || [ "${#MIN_FREE_BYTES}" -gt 18 ]; then
+  echo "resource_budget: --min-free-bytes must be a non-negative integer of at most 18 digits" >&2
+  exit 64
+fi
 
 RUN_ID="${RUN_ID:-${PROFILE}-$$}"
 TARGET_DIR="$BUDGET_BASE/$RUN_ID/target"
 
 # ---------------------------------------------------------------------------
-# Fail-closed: the target dir must not be on tmpfs.
+# Fail-closed real-disk preflight.
 #
 # This is 2026-07-16 encoded as a check rather than a docs paragraph. tmpfs is
 # RAM: a 73G build cache there is 73G of memory the box cannot use, and when it
 # fills, the failure is EDQUOT and a wedged machine, not a clean "disk full".
 # Refuse rather than "warn": a warning on a heavy run is a warning nobody reads.
 #
-# Check the nearest existing ancestor *before* creating TARGET_DIR. The previous
-# ordering made a negative-control probe leave its build-<pid>/target tree on
-# tmpfs even though the run was correctly refused. A refusal must not materialize
-# the very cache path it rejects.
+# Inspect the nearest existing ancestor before creating TARGET_DIR. A refused
+# tmpfs or low-space run must not materialize the cache path it rejects. After
+# creation, a fixed write/fsync/read canary catches unwritable filesystems,
+# EDQUOT reported only on fsync, and silent truncation before any heavy command.
 # ---------------------------------------------------------------------------
-filesystem_type_for_planned_path() {
+existing_ancestor_for_planned_path() {
   local path="$1"
   local parent
 
   while [ ! -e "$path" ]; do
     parent="$(dirname -- "$path")"
     if [ "$parent" = "$path" ]; then
-      echo "resource_budget: cannot find an existing ancestor for $1" >&2
       return 1
     fi
     path="$parent"
   done
 
-  stat -f -c %T "$path"
+  printf '%s\n' "$path"
 }
 
-fstype="$(filesystem_type_for_planned_path "$TARGET_DIR")" || exit 78
+disk_refusal() {
+  local reason="$1"
+  cat >&2 <<EOF
+resource_budget: REFUSING to run: DISK, not OOM.
+
+  target dir : $TARGET_DIR
+  reason     : $reason
+EOF
+}
+
+if ! planned_ancestor="$(existing_ancestor_for_planned_path "$TARGET_DIR")"; then
+  disk_refusal "cannot find an existing ancestor for the planned target path"
+  exit 78
+fi
+
+if ! fstype="$(stat -f -c %T "$planned_ancestor")"; then
+  disk_refusal "cannot inspect the target filesystem"
+  exit 78
+fi
 if [ "$fstype" = "tmpfs" ] || [ "$fstype" = "ramfs" ]; then
   cat >&2 <<EOF
-resource_budget: REFUSING to run.
+resource_budget: REFUSING to run: DISK, not OOM.
 
   target dir : $TARGET_DIR
   filesystem : $fstype  (RAM-backed)
@@ -172,7 +200,44 @@ EOF
   exit 78
 fi
 
-mkdir -p "$TARGET_DIR"
+if ! space_fields="$(stat -f -c '%a %S' "$planned_ancestor")"; then
+  disk_refusal "cannot measure free space on the target filesystem"
+  exit 78
+fi
+read -r available_blocks block_size <<<"$space_fields"
+if [[ ! "$available_blocks" =~ ^[0-9]+$ ]] || [[ ! "$block_size" =~ ^[0-9]+$ ]]; then
+  disk_refusal "target filesystem returned an invalid free-space measurement"
+  exit 78
+fi
+available_bytes=$((available_blocks * block_size))
+if [ "$available_bytes" -lt "$MIN_FREE_BYTES" ]; then
+  disk_refusal "only $available_bytes bytes free; configured minimum is $MIN_FREE_BYTES bytes"
+  exit 78
+fi
+
+if ! mkdir -p "$TARGET_DIR"; then
+  disk_refusal "cannot create the isolated target directory"
+  exit 78
+fi
+
+CANARY_PATH="$TARGET_DIR/.resource-budget-canary"
+CANARY_VALUE="resource-budget-canary/v1"
+if ! printf '%s\n' "$CANARY_VALUE" >"$CANARY_PATH"; then
+  disk_refusal "write/fsync/read canary failed during write"
+  exit 78
+fi
+if ! sync "$CANARY_PATH"; then
+  disk_refusal "write/fsync/read canary failed during fsync"
+  exit 78
+fi
+if ! IFS= read -r canary_read <"$CANARY_PATH"; then
+  disk_refusal "write/fsync/read canary failed during read"
+  exit 78
+fi
+if [ "$canary_read" != "$CANARY_VALUE" ]; then
+  disk_refusal "write/fsync/read canary detected silent truncation or corruption"
+  exit 78
+fi
 
 if $EMIT_ONLY; then
   # The exact resource_budget block required by required-proof/v1 and

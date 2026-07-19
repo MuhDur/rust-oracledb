@@ -392,6 +392,30 @@ impl ThinConnImpl {
         Ok(())
     }
 
+    /// Run the post-authentication edition statement without holding the GIL.
+    /// This is deliberately separate from `execute_statement`: connect is the
+    /// only caller that needs this path before the connection is returned to
+    /// Python, and no pending session state exists at that point.
+    fn execute_connect_statement_detached(&self, py: Python<'_>, sql: String) -> PyResult<()> {
+        let call_timeout = self.call_timeout()?;
+        let connection = Arc::clone(&self.connection);
+        let result = py.detach(move || -> Result<(), TaskError> {
+            let mut guard = connection
+                .lock()
+                .map_err(|err| TaskError::from(err.to_string()))?;
+            let connection = guard
+                .as_mut()
+                .ok_or_else(|| TaskError::from("connection is closed"))?;
+            BlockingConnection::execute_with(
+                connection,
+                execute_with_call_timeout(&sql, call_timeout),
+            )
+            .map(|_| ())
+            .map_err(TaskError::from)
+        });
+        result.map_err(|err| raise_task_error(&err, &self.connection))
+    }
+
     fn execute_statement_with_binds(&self, sql: &str, binds: &[BindValue]) -> PyResult<()> {
         self.execute_with_binds(sql, binds)?;
         Ok(())
@@ -1201,22 +1225,27 @@ impl ThinConnImpl {
         self.invoke_session_callback = value;
     }
 
-    fn connect(&mut self, params_impl: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn connect(&mut self, py: Python<'_>, params_impl: &Bound<'_, PyAny>) -> PyResult<()> {
         let prepared = self.prepare_connect(params_impl)?;
         // retain the connect options so a CQN subscription can spawn the emon
         // background connection (clone + (SERVER=emon))
         *self.connect_options.lock().map_err(runtime_error)? = Some(prepared.options.clone());
-        let connection = BlockingConnection::connect(prepared.options).map_err(runtime_error)?;
+        let connection = py
+            .detach(move || BlockingConnection::connect(prepared.options).map_err(TaskError::from))
+            .map_err(|err| raise_task_error(&err, &self.connection))?;
         let cancel_handle = connection.cancel_handle().map_err(runtime_error)?;
         self.server_version = connection.server_version_tuple().unwrap_or_default();
         *self.cancel_handle.lock().map_err(runtime_error)? = Some(cancel_handle);
         *self.connection.lock().map_err(runtime_error)? = Some(connection);
         if let Some(new_password) = &prepared.new_password {
-            self.change_password(&prepared.password, new_password)?;
+            self.change_password(py, &prepared.password, new_password)?;
         }
         if let Some(edition) = prepared.edition {
             let identifier = sql_identifier(&edition)?;
-            self.execute_statement(&format!("alter session set edition = {identifier}"))?;
+            self.execute_connect_statement_detached(
+                py,
+                format!("alter session set edition = {identifier}"),
+            )?;
             let mut state = self.state.lock().map_err(runtime_error)?;
             state.edition = Some(edition);
             state.edition_probe_started = true;
@@ -1245,13 +1274,18 @@ impl ThinConnImpl {
         BlockingConnection::ping(connection).map_err(runtime_error)
     }
 
-    fn commit(&self) -> PyResult<()> {
-        let mut guard = self.connection.lock().map_err(runtime_error)?;
-        let connection = guard
-            .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-        BlockingConnection::commit(connection).map_err(runtime_error)?;
-        Ok(())
+    fn commit(&self, py: Python<'_>) -> PyResult<()> {
+        let connection = Arc::clone(&self.connection);
+        let result = py.detach(move || -> Result<(), TaskError> {
+            let mut guard = connection
+                .lock()
+                .map_err(|err| TaskError::from(err.to_string()))?;
+            let connection = guard
+                .as_mut()
+                .ok_or_else(|| TaskError::from("connection is closed"))?;
+            BlockingConnection::commit(connection).map_err(TaskError::from)
+        });
+        result.map_err(|err| raise_task_error(&err, &self.connection))
     }
 
     /// Loads data into a table via the Direct Path Load interface (reference
@@ -1298,13 +1332,18 @@ impl ThinConnImpl {
         Ok(())
     }
 
-    fn rollback(&self) -> PyResult<()> {
-        let mut guard = self.connection.lock().map_err(runtime_error)?;
-        let connection = guard
-            .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-        BlockingConnection::rollback(connection).map_err(runtime_error)?;
-        Ok(())
+    fn rollback(&self, py: Python<'_>) -> PyResult<()> {
+        let connection = Arc::clone(&self.connection);
+        let result = py.detach(move || -> Result<(), TaskError> {
+            let mut guard = connection
+                .lock()
+                .map_err(|err| TaskError::from(err.to_string()))?;
+            let connection = guard
+                .as_mut()
+                .ok_or_else(|| TaskError::from("connection is closed"))?;
+            BlockingConnection::rollback(connection).map_err(TaskError::from)
+        });
+        result.map_err(|err| raise_task_error(&err, &self.connection))
     }
 
     /// Begins a sessionless transaction (reference connection.py
@@ -1441,14 +1480,26 @@ impl ThinConnImpl {
         ))
     }
 
-    fn change_password(&self, old_password: &str, new_password: &str) -> PyResult<()> {
-        let mut guard = self.connection.lock().map_err(runtime_error)?;
-        let connection = guard
-            .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-        BlockingConnection::change_password(connection, old_password, new_password)
-            .map_err(runtime_error)?;
-        drop(guard);
+    fn change_password(
+        &self,
+        py: Python<'_>,
+        old_password: &str,
+        new_password: &str,
+    ) -> PyResult<()> {
+        let connection = Arc::clone(&self.connection);
+        let old_password = old_password.to_string();
+        let new_password_for_io = new_password.to_string();
+        let result = py.detach(move || -> Result<(), TaskError> {
+            let mut guard = connection
+                .lock()
+                .map_err(|err| TaskError::from(err.to_string()))?;
+            let connection = guard
+                .as_mut()
+                .ok_or_else(|| TaskError::from("connection is closed"))?;
+            BlockingConnection::change_password(connection, &old_password, &new_password_for_io)
+                .map_err(TaskError::from)
+        });
+        result.map_err(|err| raise_task_error(&err, &self.connection))?;
         set_password_override_for_user(&self.username, new_password)
     }
 

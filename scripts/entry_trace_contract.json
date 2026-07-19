@@ -12,6 +12,7 @@
     {"path": "scripts/check_async_blocking_coverage.sh", "kind": "entry_point", "trace": "required-quality"},
     {"path": "scripts/check_bead_close_evidence.sh", "kind": "entry_point", "trace": "bead-close-audit"},
     {"path": "scripts/check_ci_taxonomy.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/check_ci_workflow_contract.py", "kind": "entry_point", "trace": "required-quality"},
     {"path": "scripts/check_entry_trace_contract.sh", "kind": "entry_point", "trace": "required-quality"},
     {"path": "scripts/check_evidence_contract.sh", "kind": "entry_point", "trace": "required-quality"},
     {"path": "scripts/check_musl_size.sh", "kind": "entry_point", "trace": "release-qualification"},
@@ -31,6 +32,7 @@
     {"path": "scripts/gen_baseline.sh", "kind": "entry_point", "trace": "required-quality"},
     {"path": "scripts/gen_sbom.sh", "kind": "entry_point", "trace": "required-quality"},
     {"path": "scripts/gen_test_wallets.sh", "kind": "helper", "excluded_reason": "fixture-generator-not-a-gate"},
+    {"path": "scripts/live_gate_state.py", "kind": "entry_point", "trace": "live-nightly-state"},
     {"path": "scripts/merge_pytest_json.py", "kind": "helper", "excluded_reason": "called-by-parity-report-tools"},
     {"path": "scripts/mutation_gate.py", "kind": "entry_point", "trace": "mutation-evidence"},
     {"path": "scripts/parity_rigor.sh", "kind": "entry_point", "trace": "parity-rigor"},
@@ -90,6 +92,17 @@
         {"path": "scripts/mutation_gate.py", "marker": "--check"}
       ],
       "result": {"path": "scripts/mutation_gate.py", "markers": ["mutation-gate:", "REFUSING"]},
+      "capabilities": []
+    },
+    {
+      "id": "live-nightly-state",
+      "tier": "nightly-live",
+      "runner": "scripts/live_gate_state.py",
+      "skip_policy": "typed-skip-reason",
+      "dispatch": [
+        {"path": ".github/workflows/live.yml", "marker": "python3 scripts/live_gate_state.py transition"}
+      ],
+      "result": {"path": "scripts/live_gate_state.py", "markers": ["live-gate-state:", "BLOCKING", "infra_skip"]},
       "capabilities": []
     },
     {

@@ -126,6 +126,7 @@ use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use asupersync::net::TcpStream;
 use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
 use asupersync::sync::Mutex as AsyncMutex;
+use asupersync::types::{Budget, Time};
 use asupersync::{time, Cx};
 use oracledb_protocol::thin::aq::{
     build_aq_array_deq_payload, build_aq_array_enq_payload, build_aq_deq_payload,
@@ -717,6 +718,30 @@ impl<T: WireTransport> ConnectionCore<T> {
         let result = {
             let mut read = InactivityRead::new(self.read_mut()?, inactivity);
             read_classic_data_response_probed_with_limits(&mut read, cx, &write, &probe, limits)
+                .await
+        };
+        self.note_post_sync_result(map_inactivity_timeout(result))
+    }
+
+    /// Read the response to the terminal LOGOFF request.
+    ///
+    /// Oracle may finish a usable TCPS session by closing TCP without a TLS
+    /// `close_notify`. That transport signal is acceptable only before the
+    /// first byte of this terminal response: at that point LOGOFF has already
+    /// been written and there is no next application response to protect. Any
+    /// bytes followed by the same signal remain a truncated response error.
+    async fn read_session_close_response(
+        &mut self,
+        cx: &Cx,
+        classic: bool,
+        probe: impl Fn(&[u8]) -> bool,
+    ) -> Result<()> {
+        let write = Arc::clone(&self.write);
+        let limits = self.protocol_limits;
+        let inactivity = self.inactivity_timeout;
+        let result = {
+            let mut read = InactivityRead::new(self.read_mut()?, inactivity);
+            read_session_close_response_with_limits(&mut read, cx, &write, classic, &probe, limits)
                 .await
         };
         self.note_post_sync_result(map_inactivity_timeout(result))
@@ -2021,9 +2046,10 @@ pub struct ConnectOptions {
     /// applied during authentication before any user SQL. `None` uses the
     /// database default edition.
     edition: Option<String>,
-    /// Run the Oracle server-DN match after the TLS handshake
-    /// (`ssl_server_dn_match`, reference default `true`).
-    ssl_server_dn_match: bool,
+    /// Explicit override for the Oracle server-DN match after the TLS
+    /// handshake. `None` falls back to the connect descriptor's
+    /// `SSL_SERVER_DN_MATCH` value, whose protocol default is `true`.
+    ssl_server_dn_match: Option<bool>,
     /// Explicit expected server-certificate distinguished name
     /// (`ssl_server_cert_dn`). When set, the server's subject DN must equal
     /// this exactly; when `None`, the host name is matched against the
@@ -2100,7 +2126,7 @@ impl std::fmt::Debug for ConnectOptions {
             .field("wallet_location", &wallet_location)
             .field("wallet_password", &wallet_password)
             .field("edition", &self.edition)
-            .field("ssl_server_dn_match", &self.ssl_server_dn_match)
+            .field("ssl_server_dn_match", &self.ssl_server_dn_match())
             .field("ssl_server_cert_dn", &server_cert_dn)
             .field("use_sni", &self.use_sni)
             .field("access_token", &self.access_token)
@@ -2146,7 +2172,7 @@ impl ConnectOptions {
             server_type_emon: false,
             wallet_location: None,
             wallet_password: None,
-            ssl_server_dn_match: true,
+            ssl_server_dn_match: None,
             ssl_server_cert_dn: None,
             use_sni: false,
             edition: None,
@@ -2394,16 +2420,20 @@ impl ConnectOptions {
         self
     }
 
-    /// Enable or disable the Oracle server-DN match (`ssl_server_dn_match`,
-    /// default enabled).
+    /// Explicitly enable or disable the Oracle server-DN match
+    /// (`ssl_server_dn_match`). This structured option takes precedence over
+    /// `SSL_SERVER_DN_MATCH` in the connect descriptor. When this method is not
+    /// called, the descriptor value applies, then the protocol default of
+    /// `true`.
     #[must_use]
     pub fn with_ssl_server_dn_match(mut self, enabled: bool) -> Self {
-        self.ssl_server_dn_match = enabled;
+        self.ssl_server_dn_match = Some(enabled);
         self
     }
 
     /// Set the explicit expected server-certificate DN
-    /// (`ssl_server_cert_dn`).
+    /// (`ssl_server_cert_dn`). This structured option takes precedence over
+    /// `SSL_SERVER_CERT_DN` in the connect descriptor.
     #[must_use]
     pub fn with_ssl_server_cert_dn(mut self, dn: impl Into<String>) -> Self {
         self.ssl_server_cert_dn = Some(dn.into());
@@ -2496,8 +2526,11 @@ impl ConnectOptions {
         self.edition.as_deref()
     }
 
+    /// Return the explicitly configured server-DN-match value, or the protocol
+    /// default (`true`) when no structured override was set. A DSN value is
+    /// parsed and applied when [`Connection::connect`] resolves the descriptor.
     pub fn ssl_server_dn_match(&self) -> bool {
-        self.ssl_server_dn_match
+        self.ssl_server_dn_match.unwrap_or(true)
     }
 
     pub fn ssl_server_cert_dn(&self) -> Option<&str> {
@@ -2847,8 +2880,14 @@ impl Connection {
         }
         let full_descriptor = EasyConnect::parse_descriptor(&options.connect_string)?;
         let primary_description = full_descriptor.first_description().clone();
-        let connect_timeout =
+        let configured_connect_timeout =
             transport_connect_timeout_duration(primary_description.tcp_connect_timeout);
+        // One effective budget owns the whole connect operation. A caller's
+        // ambient deadline may tighten, but never loosen, the DSN transport
+        // timeout. The same duration is passed through TCP dial and TLS so no
+        // nested phase can impose a hidden, contradictory cap.
+        let connect_timeout =
+            effective_connect_timeout(configured_connect_timeout, cx.budget(), time::wall_now());
         let connect_timeout_ms = duration_to_millis_saturating(connect_timeout);
         // GH#14: the opt-in per-read inactivity deadline, and the TCP keepalive
         // idle interval derived from a DSN `EXPIRE_TIME` (minutes). Both are Copy
@@ -2868,12 +2907,12 @@ impl Connection {
                 db.name = %descriptor.service_name,
             );
             let token_auth = options.access_token.is_some();
-            let descriptor_ssl_server_dn_match =
-                primary_description.security.ssl_server_dn_match && options.ssl_server_dn_match;
-            let descriptor_ssl_server_cert_dn = options
-                .ssl_server_cert_dn
-                .as_deref()
-                .or(primary_description.security.ssl_server_cert_dn.as_deref());
+            let resolved_tls_security = tls::resolve_tls_security(
+                options.ssl_server_dn_match,
+                options.ssl_server_cert_dn.as_deref(),
+                primary_description.security.ssl_server_dn_match,
+                primary_description.security.ssl_server_cert_dn.as_deref(),
+            );
             let identity = options.identity;
             // F1 (bead rust-oracledb-clvm): apply the DSN-parsed transport
             // parameters that were previously parsed and dropped. The SDU
@@ -2898,28 +2937,27 @@ impl Connection {
             } else {
                 None
             };
-            let tls_params = if descriptor.protocol.is_tls() {
-                Some(tls::resolve_tls_params(
+            let prepared_tls = if descriptor.protocol.is_tls() {
+                let tls_params = tls::resolve_tls_params(
                     &descriptor,
                     effective_wallet_location,
                     options.wallet_password.as_deref(),
-                    options.ssl_server_dn_match,
-                    options.ssl_server_cert_dn.as_deref(),
+                    resolved_tls_security.dn_match,
+                    resolved_tls_security.server_cert_dn.as_deref(),
                     effective_use_sni,
+                )?;
+                // Build the rustls config, validate the wallet key, and decide
+                // SNI before any address is dialled. These deterministic setup
+                // failures are returned directly and never enter the transient
+                // transport-failover loop below.
+                Some(tls::prepare_tls_handshake(
+                    &descriptor,
+                    server_type,
+                    &tls_params,
                 )?)
             } else {
                 None
             };
-            // Fail closed *before* any transport is dialled if `use_sni=true`
-            // cannot select an SNI rustls can emit — never a silent no-SNI.
-            if let Some(tls_params) = tls_params.as_ref() {
-                tls::decide_sni(
-                    tls_params.use_sni,
-                    &tls_params.expected_host,
-                    &descriptor.service_name,
-                    server_type,
-                )?;
-            }
             let connector = DriverConnector::default();
             // Secret-free support capture (bead K6): when `ORACLEDB_CAPTURE` is
             // set, a recorder is created here and installed around each dial's
@@ -2941,9 +2979,8 @@ impl Connection {
             // matching python-oracledb thin's _connect_tcp ordering). Used
             // for the initial address and for every REDIRECT target.
             let dial = |host: String, port: u16| {
-                let descriptor = &descriptor;
                 let connector = &connector;
-                let tls_params = tls_params.as_ref();
+                let prepared_tls = prepared_tls.as_ref();
                 #[cfg(feature = "cassette")]
                 let capture_recorder = capture_recorder.as_ref();
                 async move {
@@ -2959,10 +2996,11 @@ impl Connection {
                         stream.set_keepalive(Some(idle))?;
                     }
                     trace_connect_step("tcp connected");
-                    let halves = if let Some(tls_params) = tls_params {
+                    let halves = if let Some(prepared_tls) = prepared_tls {
                         trace_connect_step("tls handshake");
                         let tls_stream =
-                            tls::tls_handshake(descriptor, server_type, tls_params, stream).await?;
+                            tls::tls_handshake_prepared(prepared_tls, stream, connect_timeout)
+                                .await?;
                         trace_connect_step("tls established");
                         // Install the capture recorder around the SYNCHRONOUS
                         // split only (no await while held) so the thread-local
@@ -2977,7 +3015,7 @@ impl Connection {
                             capture_recorder.map(|r| transport::install_recorder_scope(r.clone()));
                         connector.plain_split(stream)
                     };
-                    Ok::<_, Error>(halves)
+                    Ok::<_, TransportEstablishmentError>(halves)
                 }
             };
             // F2 (bead rust-oracledb-clvm): sequential multi-address failover.
@@ -3011,11 +3049,10 @@ impl Connection {
                             connected = Some((halves, candidate.clone()));
                             break 'failover;
                         }
-                        Err(err) if is_failover_eligible(&err) => {
+                        Err(err) => {
                             attempt_errors
                                 .push(format!("{}:{} ({err})", candidate.host, candidate.port));
                         }
-                        Err(err) => return Err(err),
                     }
                 }
             }
@@ -3048,8 +3085,8 @@ impl Connection {
                 &identity,
                 options.server_type_emon,
                 token_auth,
-                descriptor_ssl_server_dn_match,
-                descriptor_ssl_server_cert_dn,
+                resolved_tls_security.dn_match,
+                resolved_tls_security.server_cert_dn.as_deref(),
             );
             trace_connect_value("CONNECT descriptor", &connect_descriptor);
             // A descriptor longer than TNS_MAX_CONNECT_DATA travels in a DATA
@@ -3128,7 +3165,9 @@ impl Connection {
                         // the CONNECT there, flagged as a redirect follow-up
                         // and carrying the redirect-supplied connect data
                         // (reference `_connect_phase_one`).
-                        let (read, write) = dial(target.host, target.port).await?;
+                        let (read, write) = dial(target.host, target.port)
+                            .await
+                            .map_err(TransportEstablishmentError::into_driver_error)?;
                         core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
                         core.set_protocol_limits(protocol_limits)?;
                         core.set_inactivity_timeout(inactivity_timeout);
@@ -3182,8 +3221,8 @@ impl Connection {
                 &descriptor,
                 &primary_description,
                 token_auth,
-                descriptor_ssl_server_dn_match,
-                descriptor_ssl_server_cert_dn,
+                resolved_tls_security.dn_match,
+                resolved_tls_security.server_cert_dn.as_deref(),
             );
 
             // Authentication has two shapes. Token auth (OCI IAM / OAuth2) carries
@@ -7700,7 +7739,7 @@ impl Connection {
             time::wall_now(),
             Duration::from_secs(5),
             self.core
-                .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                .read_session_close_response(cx, !self.supports_end_of_response, |bytes| {
                     response_complete(&parse_plain_function_response_with_limits(
                         bytes,
                         capabilities,
@@ -7710,7 +7749,7 @@ impl Connection {
         )
         .await
         {
-            let _ = response?;
+            response?;
         }
         let eof = encode_packet(
             TNS_PACKET_TYPE_DATA,
@@ -9292,6 +9331,97 @@ where
     )
 }
 
+const ASUPERSYNC_TLS_MISSING_CLOSE_NOTIFY: &str = "tls connection closed without close_notify";
+
+fn is_missing_tls_close_notify(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::UnexpectedEof
+        && error.to_string() == ASUPERSYNC_TLS_MISSING_CLOSE_NOTIFY
+}
+
+/// Read adapter for the one terminal LOGOFF response.
+///
+/// It converts Asupersync's exact missing-`close_notify` signal into ordinary
+/// EOF only when no application byte has yet been delivered through the
+/// adapter. The surrounding response reader then reports its usual short-read
+/// error, which [`read_session_close_response_with_limits`] recognizes via the
+/// flag below. Once even one byte has arrived, the signal passes through
+/// unchanged so a partial TNS header or payload can never look like a clean
+/// session close.
+struct SessionCloseRead<'a, R> {
+    inner: &'a mut R,
+    application_bytes: usize,
+    missing_close_notify_at_boundary: bool,
+}
+
+impl<'a, R> SessionCloseRead<'a, R> {
+    fn new(inner: &'a mut R) -> Self {
+        Self {
+            inner,
+            application_bytes: 0,
+            missing_close_notify_at_boundary: false,
+        }
+    }
+}
+
+impl<R> AsyncRead for SessionCloseRead<'_, R>
+where
+    R: AsyncRead + Unpin,
+{
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffer: &mut asupersync::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let filled_before = buffer.filled().len();
+        match std::pin::Pin::new(&mut *this.inner).poll_read(context, buffer) {
+            std::task::Poll::Ready(Ok(())) => {
+                this.application_bytes += buffer.filled().len() - filled_before;
+                std::task::Poll::Ready(Ok(()))
+            }
+            std::task::Poll::Ready(Err(error))
+                if this.application_bytes == 0 && is_missing_tls_close_notify(&error) =>
+            {
+                this.missing_close_notify_at_boundary = true;
+                std::task::Poll::Ready(Ok(()))
+            }
+            other => other,
+        }
+    }
+}
+
+/// Read the terminal LOGOFF response while accepting Oracle's bare TCP close
+/// at the empty response boundary. Every ordinary operation, including the
+/// pre-ACCEPT connect phase, continues to use the strict readers above/below.
+async fn read_session_close_response_with_limits<R, W, P>(
+    read: &mut R,
+    cx: &Cx,
+    write: &Arc<AsyncMutex<W>>,
+    classic: bool,
+    probe: &P,
+    limits: ProtocolLimits,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+    P: Fn(&[u8]) -> bool,
+{
+    let mut close_read = SessionCloseRead::new(read);
+    let result = if classic {
+        read_classic_data_response_probed_with_limits(&mut close_read, cx, write, probe, limits)
+            .await
+            .map(|_| ())
+    } else {
+        read_data_response_with_limits(&mut close_read, cx, write, limits)
+            .await
+            .map(|_| ())
+    };
+    match result {
+        Err(_) if close_read.missing_close_notify_at_boundary => Ok(()),
+        other => other,
+    }
+}
+
 /// Accumulates DATA packets for one classic (pre-END_OF_RESPONSE)
 /// connect-phase response until the payload's terminal message is complete.
 /// Used only for the pre-23ai protocol-negotiation / data-types / auth round
@@ -10459,6 +10589,17 @@ fn transport_connect_timeout_duration(seconds: f64) -> Duration {
     Duration::from_secs_f64(seconds.max(0.001))
 }
 
+/// Tighten a configured transport-connect timeout by the caller's ambient
+/// absolute deadline. `None` means the caller supplied no deadline; an
+/// already-expired deadline yields zero so the enclosing timeout fires without
+/// starting another network phase.
+fn effective_connect_timeout(configured: Duration, call_budget: Budget, now: Time) -> Duration {
+    match call_budget.deadline {
+        None => configured,
+        Some(_) => configured.min(call_budget.remaining_time(now).unwrap_or(Duration::ZERO)),
+    }
+}
+
 /// The SDU (session data unit, in bytes) advertised in the CONNECT packet
 /// (F1, bead `rust-oracledb-clvm`). Precedence: an explicit
 /// [`ConnectOptions::with_sdu`] value wins; otherwise a DSN-parsed `(SDU=...)`
@@ -10483,6 +10624,50 @@ fn resolve_effective_sdu(options_sdu: u16, description: &Description) -> u32 {
 struct ConnectAddress {
     host: String,
     port: u16,
+}
+
+/// A failure that can only occur after deterministic connection configuration
+/// has completed and one concrete transport address is being established.
+///
+/// The type deliberately has no configuration/auth/wallet variants: every
+/// value is therefore safe to aggregate and retry against the next address.
+/// This construction-level boundary prevents a public [`Error::Tls`] produced
+/// while building rustls configuration from being mistaken for a transient TLS
+/// handshake failure.
+#[derive(Debug)]
+enum TransportEstablishmentError {
+    Io(std::io::Error),
+    TlsHandshake(tls::TlsHandshakeError),
+}
+
+impl TransportEstablishmentError {
+    fn into_driver_error(self) -> Error {
+        match self {
+            Self::Io(error) => Error::Io(error),
+            Self::TlsHandshake(error) => error.into_driver_error(),
+        }
+    }
+}
+
+impl std::fmt::Display for TransportEstablishmentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "I/O error: {error}"),
+            Self::TlsHandshake(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl From<std::io::Error> for TransportEstablishmentError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<tls::TlsHandshakeError> for TransportEstablishmentError {
+    fn from(error: tls::TlsHandshakeError) -> Self {
+        Self::TlsHandshake(error)
+    }
 }
 
 /// Build the ordered list of transport endpoints to try for a (possibly
@@ -10534,15 +10719,6 @@ fn resolve_connect_addresses(
         }
     }
     out
-}
-
-/// Whether an error justifies trying the next address in a multi-address
-/// descriptor (F2). Only transport-establishment failures (the TCP dial or the
-/// TLS handshake) fail over; configuration errors (wallet, unsupported SNI,
-/// auth) are fatal and abort the whole connect so the operator sees the real
-/// cause instead of an aggregated all-addresses-failed message.
-fn is_failover_eligible(err: &Error) -> bool {
-    matches!(err, Error::Io(_) | Error::Tls(_))
 }
 
 /// In-place Fisher–Yates shuffle seeded from the wall clock. `LOAD_BALANCE`
@@ -11393,6 +11569,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dc4_tls_handshake_budget_uses_the_tighter_connect_or_call_deadline() {
+        let now = Time::from_secs(100);
+        let cases = [
+            (
+                "configured below the former fixed cap",
+                Duration::from_secs(5),
+                Budget::INFINITE,
+                Duration::from_secs(5),
+            ),
+            (
+                "configured above the former fixed cap",
+                Duration::from_secs(45),
+                Budget::INFINITE,
+                Duration::from_secs(45),
+            ),
+            (
+                "ambient call deadline tightens connect",
+                Duration::from_secs(45),
+                Budget::new().with_deadline(Time::from_secs(107)),
+                Duration::from_secs(7),
+            ),
+            (
+                "longer ambient deadline cannot loosen connect",
+                Duration::from_secs(5),
+                Budget::new().with_deadline(Time::from_secs(130)),
+                Duration::from_secs(5),
+            ),
+            (
+                "expired ambient deadline starts no network phase",
+                Duration::from_secs(45),
+                Budget::new().with_deadline(Time::from_secs(99)),
+                Duration::ZERO,
+            ),
+        ];
+
+        for (name, configured, budget, expected) in cases {
+            assert_eq!(
+                effective_connect_timeout(configured, budget, now),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
     /// GH#14: the TCP keepalive idle interval is derived from a DSN `EXPIRE_TIME`
     /// (minutes). `0`/absent disables it; a positive value maps to that many
     /// minutes of socket idle time.
@@ -11655,17 +11876,26 @@ mod tests {
     }
 
     #[test]
-    fn f2_failover_only_covers_transport_errors() {
-        // TCP dial / TLS handshake failures fail over; config/auth errors abort.
-        assert!(is_failover_eligible(&Error::Io(std::io::Error::new(
+    fn f2_transport_attempt_type_only_covers_io_and_tls_handshake() {
+        // Only errors constructible *inside* `dial` can reach the failover
+        // loop. Configuration/auth errors stay ordinary `Error` values and
+        // have no conversion into this transport-attempt type.
+        let io_failure = TransportEstablishmentError::from(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
-            "refused"
-        ))));
-        assert!(is_failover_eligible(&Error::Tls("handshake".into())));
-        assert!(!is_failover_eligible(&Error::UnsupportedSni(
-            "S1.X.V3.319".into()
-        )));
-        assert!(!is_failover_eligible(&Error::AccessTokenRequiresTcps));
+            "refused",
+        ));
+        assert!(matches!(
+            io_failure.into_driver_error(),
+            Error::Io(error) if error.kind() == std::io::ErrorKind::ConnectionRefused
+        ));
+
+        let tls_failure = TransportEstablishmentError::from(tls::TlsHandshakeError::new(
+            "certificate rejected".to_string(),
+        ));
+        assert!(matches!(
+            tls_failure.into_driver_error(),
+            Error::Tls(detail) if detail == "TCPS handshake failed: certificate rejected"
+        ));
     }
 
     #[test]
@@ -13911,33 +14141,121 @@ mod tests {
     }
 
     #[test]
-    fn token_auth_descriptor_uses_tcps_security_and_passthrough() {
+    fn dsn_tls_security_resolution_and_wire_bytes_are_golden() {
         let connect_string = concat!(
             "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=adb.example.test)(PORT=2484))",
             "(CONNECT_DATA=(SERVICE_NAME=adbsvc))",
             "(SECURITY=(SSL_SERVER_DN_MATCH=off)",
-            "(SSL_SERVER_CERT_DN=CN=adb.example.test)",
+            "(SSL_SERVER_CERT_DN=CN=dsn-pin.example.test,O=Acme)",
+            "(MY_WALLET_DIRECTORY=SYSTEM)",
             "(OCI_IAM_HOST=private-endpoint)))"
         );
+        let options = ConnectOptions::new(connect_string, "user", "password", identity());
         let descriptor = EasyConnect::parse(connect_string).expect("parse tcps descriptor");
         let full_descriptor =
             EasyConnect::parse_descriptor(connect_string).expect("parse full descriptor");
         let description = full_descriptor.first_description();
-        let built = auth_connect_descriptor(
+
+        let resolved = tls::resolve_tls_security(
+            options.ssl_server_dn_match,
+            options.ssl_server_cert_dn.as_deref(),
+            description.security.ssl_server_dn_match,
+            description.security.ssl_server_cert_dn.as_deref(),
+        );
+        assert!(!resolved.dn_match, "DSN-only OFF must reach TLS resolution");
+        assert_eq!(
+            resolved.server_cert_dn.as_deref(),
+            Some("CN=dsn-pin.example.test,O=Acme"),
+            "a DSN-only certificate pin must reach TLS resolution"
+        );
+
+        let tls_params = tls::resolve_tls_params(
+            &descriptor,
+            description.security.wallet_location.as_deref(),
+            None,
+            resolved.dn_match,
+            resolved.server_cert_dn.as_deref(),
+            false,
+        )
+        .expect("SYSTEM wallet selection should resolve without filesystem access");
+        assert!(tls_params.wallet.is_none());
+        assert!(!tls_params.dn_match);
+        assert_eq!(
+            tls_params.server_cert_dn.as_deref(),
+            Some("CN=dsn-pin.example.test,O=Acme")
+        );
+
+        let tcps = auth_connect_descriptor(
+            &descriptor,
+            description,
+            false,
+            resolved.dn_match,
+            resolved.server_cert_dn.as_deref(),
+        );
+        assert_eq!(
+            tcps.as_bytes(),
+            b"(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=adb.example.test)(PORT=2484))(CONNECT_DATA=(SERVICE_NAME=adbsvc))(SECURITY=(SSL_SERVER_DN_MATCH=OFF)(SSL_SERVER_CERT_DN=CN=dsn-pin.example.test,O=Acme)(OCI_IAM_HOST=private-endpoint)))"
+        );
+        assert!(
+            !tcps.contains("WALLET"),
+            "wallet paths configure the client and must not leak onto the wire"
+        );
+
+        let token = auth_connect_descriptor(
             &descriptor,
             description,
             true,
-            false,
-            description.security.ssl_server_cert_dn.as_deref(),
+            resolved.dn_match,
+            resolved.server_cert_dn.as_deref(),
+        );
+        assert_eq!(
+            token.as_bytes(),
+            b"(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=adb.example.test)(PORT=2484))(CONNECT_DATA=(SERVICE_NAME=adbsvc))(SECURITY=(SSL_SERVER_DN_MATCH=OFF)(SSL_SERVER_CERT_DN=CN=dsn-pin.example.test,O=Acme)(OCI_IAM_HOST=private-endpoint)(TOKEN_AUTH=OCI_TOKEN)))"
         );
 
-        assert!(built.contains("(PROTOCOL=tcps)"));
-        assert!(built.contains("(SECURITY="));
-        assert!(built.contains("(SSL_SERVER_DN_MATCH=OFF)"));
-        assert!(built.contains("(SSL_SERVER_CERT_DN=CN=adb.example.test)"));
-        assert!(built.contains("(OCI_IAM_HOST=private-endpoint)"));
-        assert!(built.contains("(TOKEN_AUTH=OCI_TOKEN)"));
-        assert!(!built.contains("WALLET"));
+        let explicit = options
+            .with_ssl_server_dn_match(true)
+            .with_ssl_server_cert_dn("CN=explicit-pin.example.test,O=Acme");
+        let resolved = tls::resolve_tls_security(
+            explicit.ssl_server_dn_match,
+            explicit.ssl_server_cert_dn.as_deref(),
+            description.security.ssl_server_dn_match,
+            description.security.ssl_server_cert_dn.as_deref(),
+        );
+        assert_eq!(
+            resolved,
+            tls::ResolvedTlsSecurity {
+                dn_match: true,
+                server_cert_dn: Some("CN=explicit-pin.example.test,O=Acme".to_string()),
+            }
+        );
+        let explicit_wire = auth_connect_descriptor(
+            &descriptor,
+            description,
+            false,
+            resolved.dn_match,
+            resolved.server_cert_dn.as_deref(),
+        );
+        assert_eq!(
+            explicit_wire.as_bytes(),
+            b"(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=adb.example.test)(PORT=2484))(CONNECT_DATA=(SERVICE_NAME=adbsvc))(SECURITY=(SSL_SERVER_DN_MATCH=ON)(SSL_SERVER_CERT_DN=CN=explicit-pin.example.test,O=Acme)(OCI_IAM_HOST=private-endpoint)))"
+        );
+
+        let plain_descriptor = EasyConnect::parse("tcp://db.example.test:1521/FREEPDB1")
+            .expect("parse plain descriptor");
+        let plain_full = EasyConnect::parse_descriptor("tcp://db.example.test:1521/FREEPDB1")
+            .expect("parse full plain descriptor");
+        let plain = auth_connect_descriptor(
+            &plain_descriptor,
+            plain_full.first_description(),
+            false,
+            true,
+            None,
+        );
+        assert_eq!(
+            plain.as_bytes(),
+            b"(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=db.example.test)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=FREEPDB1)))"
+        );
     }
 
     #[test]
@@ -14408,6 +14726,12 @@ mod tests {
                         state.read.pop_front();
                         return std::task::Poll::Ready(Err(std::io::Error::other(message)));
                     }
+                    Some(ReadAction::ErrorKind(kind, message)) => {
+                        let kind = *kind;
+                        let message = *message;
+                        state.read.pop_front();
+                        return std::task::Poll::Ready(Err(std::io::Error::new(kind, message)));
+                    }
                     Some(ReadAction::AdvanceTime(duration)) => {
                         let duration = *duration;
                         state.read.pop_front();
@@ -14627,6 +14951,7 @@ mod tests {
         PendingUntil(ScriptedGate),
         Eof,
         Error(&'static str),
+        ErrorKind(std::io::ErrorKind, &'static str),
         AdvanceTime(Duration),
     }
 
@@ -19010,6 +19335,122 @@ mod tests {
                 .contains("failed to write whole buffer")
                 || write_eof_err.to_string().contains("write zero"),
             "scripted write EOF should surface as an incomplete write"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn missing_tls_close_notify_is_tolerated_only_at_terminal_session_boundary() -> Result<()> {
+        fn scripted_read(actions: Vec<ReadAction>) -> ScriptedRead {
+            ScriptedRead::from_state(Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+                actions,
+                Vec::new(),
+                ScriptedClock::default(),
+            ))))
+        }
+
+        fn scripted_write() -> Arc<AsyncMutex<ScriptedWrite>> {
+            Arc::new(AsyncMutex::with_name(
+                "session_close_notify_test_write",
+                ScriptedWrite::from_state(Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+                    Vec::new(),
+                    Vec::new(),
+                    ScriptedClock::default(),
+                )))),
+            ))
+        }
+
+        fn missing_notify() -> ReadAction {
+            ReadAction::ErrorKind(
+                std::io::ErrorKind::UnexpectedEof,
+                ASUPERSYNC_TLS_MISSING_CLOSE_NOTIFY,
+            )
+        }
+
+        let runtime = build_io_runtime()?;
+
+        // The pre-ACCEPT and ordinary packet readers remain strict. Turning
+        // this into EOF globally would mask malformed CONNECT exchanges.
+        let mut strict_read = scripted_read(vec![missing_notify()]);
+        let strict_error = runtime
+            .block_on(read_packet_with_limits(
+                &mut strict_read,
+                PacketLengthWidth::Legacy16,
+                ProtocolLimits::DEFAULT,
+            ))
+            .expect_err("pre-ACCEPT missing close_notify must remain an error");
+        assert!(
+            matches!(&strict_error, Error::Io(error)
+                if error.kind() == std::io::ErrorKind::UnexpectedEof
+                    && error.to_string() == ASUPERSYNC_TLS_MISSING_CLOSE_NOTIFY),
+            "strict packet read must preserve the typed TLS EOF, got {strict_error:?}"
+        );
+
+        // Oracle is allowed to answer terminal LOGOFF by closing the already
+        // usable session without a TLS alert and without another TNS packet.
+        let mut clean_close = scripted_read(vec![missing_notify()]);
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let probe = |_bytes: &[u8]| false;
+            read_session_close_response_with_limits(
+                &mut clean_close,
+                &cx,
+                &scripted_write(),
+                false,
+                &probe,
+                ProtocolLimits::DEFAULT,
+            )
+            .await
+        })?;
+
+        // A fully framed response still wins normally; the following hard TLS
+        // close is never consulted once the application boundary is proven.
+        let complete = data_packet(&[TNS_MSG_TYPE_END_OF_RESPONSE], true);
+        let mut complete_close =
+            scripted_read(vec![ReadAction::bytes(complete, Some(3)), missing_notify()]);
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let probe = |_bytes: &[u8]| true;
+            read_session_close_response_with_limits(
+                &mut complete_close,
+                &cx,
+                &scripted_write(),
+                false,
+                &probe,
+                ProtocolLimits::DEFAULT,
+            )
+            .await
+        })?;
+
+        // Once any TNS byte arrived, the same signal proves truncation and
+        // remains a typed UnexpectedEof. Here the final payload byte is absent.
+        let mut truncated = data_packet(b"truncated", true);
+        truncated.pop();
+        let mut truncated_close = scripted_read(vec![
+            ReadAction::bytes(truncated, Some(3)),
+            missing_notify(),
+        ]);
+        let truncated_error = runtime
+            .block_on(async {
+                let cx = test_cx()?;
+                let probe = |_bytes: &[u8]| false;
+                read_session_close_response_with_limits(
+                    &mut truncated_close,
+                    &cx,
+                    &scripted_write(),
+                    false,
+                    &probe,
+                    ProtocolLimits::DEFAULT,
+                )
+                .await
+            })
+            .expect_err("partial application response must not be accepted as clean close");
+        assert!(
+            matches!(&truncated_error, Error::Io(error)
+                if error.kind() == std::io::ErrorKind::UnexpectedEof
+                    && error.to_string() == ASUPERSYNC_TLS_MISSING_CLOSE_NOTIFY),
+            "truncated response must preserve the typed TLS EOF, got {truncated_error:?}"
         );
 
         Ok(())

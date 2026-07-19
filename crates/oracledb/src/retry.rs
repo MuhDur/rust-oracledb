@@ -59,8 +59,9 @@ impl Idempotency {
     /// [`Idempotent`]: Idempotency::Idempotent
     /// [`NonIdempotent`]: Idempotency::NonIdempotent
     pub fn classify_sql(sql: &str) -> Idempotency {
-        // Skip leading whitespace and a single leading line/block comment run so
-        // a hinted `SELECT /*+ ... */` or a commented statement still classifies.
+        // Skip whitespace only. A leading comment remains deliberately
+        // unclassified: proving that comments contain no side-effecting syntax
+        // would widen this fail-safe retry gate.
         let head = sql.trim_start();
         let keyword = head
             .split(|ch: char| !ch.is_ascii_alphabetic())
@@ -461,6 +462,17 @@ mod tests {
             Idempotency::classify_sql("UPDATE t SET x = 1"),
             Idempotency::NonIdempotent
         );
+        for commented_select in [
+            "/* diagnostic */ SELECT * FROM dual",
+            "-- diagnostic\nSELECT * FROM dual",
+            "/*+ index(dual) */ SELECT * FROM dual",
+        ] {
+            assert_eq!(
+                Idempotency::classify_sql(commented_select),
+                Idempotency::NonIdempotent,
+                "leading comments must not silently widen retry eligibility: {commented_select}"
+            );
+        }
         assert_eq!(
             Idempotency::classify_sql("BEGIN proc(); END;"),
             Idempotency::NonIdempotent

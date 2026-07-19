@@ -1768,45 +1768,59 @@ impl ThinCursorImpl {
                     u32::try_from(self.rowcount.max(0) + 1).unwrap_or(u32::MAX),
                 )
             });
-            let mut guard = self.connection.lock().map_err(runtime_error)?;
-            let connection = guard
-                .as_mut()
-                .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-            let result = if let Some((statement, fetch_pos)) = scroll_fetch {
-                BlockingConnection::scroll_cursor(
-                    connection,
-                    &statement,
-                    self.cursor_id,
-                    self.arraysize,
-                    oracledb::protocol::thin::TNS_FETCH_ORIENTATION_CURRENT,
-                    fetch_pos,
-                )
-            } else if requires_define {
-                // The define-fetch is the primary fetch when nothing was
-                // prefetched (prefetchrows == 0): fall back to arraysize so a
-                // row is actually retrieved rather than requesting zero rows.
-                let define_fetch_rows = if self.prefetchrows == 0 {
-                    self.arraysize.max(1)
+            let connection = Arc::clone(&self.connection);
+            let cursor_id = self.cursor_id;
+            let arraysize = self.arraysize;
+            let prefetchrows = self.prefetchrows;
+            let columns = self.columns.clone();
+            let define_columns_for_io = define_columns.clone();
+            let result = py.detach(move || -> Result<QueryResult, TaskError> {
+                let mut guard = connection
+                    .lock()
+                    .map_err(|err| TaskError::from(err.to_string()))?;
+                let connection = guard
+                    .as_mut()
+                    .ok_or_else(|| TaskError::from("connection is closed"))?;
+                let result = if let Some((statement, fetch_pos)) = scroll_fetch {
+                    BlockingConnection::scroll_cursor(
+                        connection,
+                        &statement,
+                        cursor_id,
+                        arraysize,
+                        oracledb::protocol::thin::TNS_FETCH_ORIENTATION_CURRENT,
+                        fetch_pos,
+                    )
+                } else if requires_define {
+                    // The define-fetch is the primary fetch when nothing was
+                    // prefetched (prefetchrows == 0): fall back to arraysize so a
+                    // row is actually retrieved rather than requesting zero rows.
+                    let define_fetch_rows = if prefetchrows == 0 {
+                        arraysize.max(1)
+                    } else {
+                        prefetchrows
+                    };
+                    BlockingConnection::define_and_fetch_rows_with_columns(
+                        connection,
+                        cursor_id,
+                        define_fetch_rows,
+                        &define_columns_for_io,
+                        previous_row.as_deref(),
+                    )
                 } else {
-                    self.prefetchrows
+                    BlockingConnection::fetch_rows_with_columns(
+                        connection,
+                        cursor_id,
+                        arraysize,
+                        &columns,
+                        previous_row.as_deref(),
+                    )
                 };
-                BlockingConnection::define_and_fetch_rows_with_columns(
-                    connection,
-                    self.cursor_id,
-                    define_fetch_rows,
-                    &define_columns,
-                    previous_row.as_deref(),
-                )
-            } else {
-                BlockingConnection::fetch_rows_with_columns(
-                    connection,
-                    self.cursor_id,
-                    self.arraysize,
-                    &self.columns,
-                    previous_row.as_deref(),
-                )
-            }
-            .map_err(runtime_error)?;
+                result.map_err(TaskError::from)
+            });
+            let result = match result {
+                Ok(result) => result,
+                Err(err) => return Err(raise_task_error(&err, &self.connection)),
+            };
             if !result.columns.is_empty() {
                 self.columns = result.columns;
             } else if requires_define {
@@ -1822,7 +1836,6 @@ impl ThinCursorImpl {
                 self.requires_define = false;
             }
             self.invalid_ref_cursor = false;
-            drop(guard);
             self.refresh_buffer_window();
         }
         self.fetch_buffered_next_row(py, _cursor)
@@ -1847,6 +1860,7 @@ impl ThinCursorImpl {
             .iter()
             .enumerate()
             .map(|(index, value)| {
+                let number_scale = self.columns.get(index).map(ColumnMetadata::scale);
                 if let Some(Some(var)) = self.fetch_vars.get(index) {
                     return var
                         .borrow(py)
@@ -1870,6 +1884,7 @@ impl ThinCursorImpl {
                             Some(&lob_context),
                             self.fetch_lobs,
                             self.fetch_decimals,
+                            number_scale,
                         ),
                     };
                 }
@@ -1903,6 +1918,7 @@ impl ThinCursorImpl {
                     Some(&lob_context),
                     self.fetch_lobs,
                     self.fetch_decimals,
+                    number_scale,
                 )
             })
             .collect::<PyResult<Vec<_>>>()?;

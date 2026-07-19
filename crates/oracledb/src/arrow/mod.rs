@@ -532,7 +532,7 @@ mod tests {
 
     // Compact fixture construction is clearer than a one-off helper struct here.
     #[allow(clippy::too_many_arguments)]
-    fn timestamp_tz(
+    fn decoded_timestamp_tz(
         year: i32,
         month: u8,
         day: u8,
@@ -542,16 +542,22 @@ mod tests {
         nanosecond: u32,
         offset_minutes: i32,
     ) -> Option<QueryValue> {
-        Some(QueryValue::TimestampTz {
-            year,
+        let mut wire = vec![
+            u8::try_from(year.div_euclid(100) + 100).expect("TSTZ century byte"),
+            u8::try_from(year.rem_euclid(100) + 100).expect("TSTZ year byte"),
             month,
             day,
-            hour,
-            minute,
-            second,
-            nanosecond,
-            offset_minutes,
-        })
+            hour.checked_add(1).expect("TSTZ hour byte"),
+            minute.checked_add(1).expect("TSTZ minute byte"),
+            second.checked_add(1).expect("TSTZ second byte"),
+        ];
+        wire.extend_from_slice(&nanosecond.to_be_bytes());
+        wire.push(u8::try_from(offset_minutes / 60 + 20).expect("TSTZ offset-hour byte"));
+        wire.push(u8::try_from(offset_minutes % 60 + 60).expect("TSTZ offset-minute byte"));
+        Some(
+            oracledb_protocol::thin::decode_datetime_value(&wire)
+                .expect("real TSTZ decoder accepts fixture wire bytes"),
+        )
     }
 
     #[test]
@@ -594,14 +600,51 @@ mod tests {
     }
 
     #[test]
-    fn max_negative_number_converts_to_minus_1e126() {
+    fn decoder_max_negative_number_converts_to_minus_1e126() {
         let columns = vec![column("N", ORA_TYPE_NUM_NUMBER, 0, -127)];
-        let rows = vec![vec![number("-1e126")]];
+        let sentinel = oracledb_protocol::thin::decode_number_value(&[0])
+            .expect("decode Oracle maximum-negative sentinel");
+        assert_eq!(sentinel.as_number_text().as_deref(), Some("-1e126"));
+        let rows = vec![vec![Some(sentinel)]];
         let batch =
             build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
         assert_eq!(
             batch.column(0).as_primitive::<Float64Type>().value(0),
             -1.0e126
+        );
+    }
+
+    #[test]
+    fn decoder_max_negative_number_never_collapses_to_minus_one_in_integer_arrow() {
+        let columns = vec![column("N", ORA_TYPE_NUM_NUMBER, 0, -127)];
+        let requested = Arc::new(Schema::new(vec![Field::new("N", DataType::Int64, true)]));
+        let options = ArrowFetchOptions::new().with_requested_schema(requested);
+        let sentinel = oracledb_protocol::thin::decode_number_value(&[0])
+            .expect("decode Oracle maximum-negative sentinel");
+        let error = build_record_batch(&columns, &[vec![Some(sentinel)]], &options)
+            .expect_err("the exponent sentinel is not an Arrow integer");
+        assert!(
+            error.to_string().contains("-1e126")
+                && error
+                    .to_string()
+                    .contains("cannot be converted to an Apache Arrow integer"),
+            "typed refusal must retain the exact sentinel without collapsing it: {error}"
+        );
+
+        let neighbor_wire = oracledb_protocol::thin::encode_number_text("-1e125")
+            .expect("encode neighboring finite NUMBER");
+        let neighbor = oracledb_protocol::thin::decode_number_value(&neighbor_wire)
+            .expect("decode neighboring finite NUMBER");
+        let neighbor_text = format!("-1{}", "0".repeat(125));
+        assert_eq!(
+            neighbor.as_number_text().as_deref(),
+            Some(neighbor_text.as_str())
+        );
+        let neighbor_error = build_record_batch(&columns, &[vec![Some(neighbor)]], &options)
+            .expect_err("neighboring out-of-range NUMBER is not an Arrow int64");
+        assert!(
+            !neighbor_error.to_string().contains("value: -1"),
+            "neighboring exponent boundary must not collapse to -1: {neighbor_error}"
         );
     }
 
@@ -772,16 +815,22 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_tz_maps_to_arrow_wall_clock() {
-        // Upstream python-oracledb #596 (714178610379): a TIMESTAMP WITH TIME
-        // ZONE fetched into a tz-naive Arrow `Timestamp` is emitted at its
-        // WALL-CLOCK time, NOT UTC-normalized. For 2024-01-02 03:04:05.123456789
-        // -05:30 the Arrow value is the wall clock 03:04:05.123456789 (the -05:30
-        // offset is dropped), matching the reference DataFrame values. Our 0.5.1
-        // build UTC-normalized this (1_704_184_445_123_456_789); that divergence
-        // is retired here.
+    fn decoded_timestamp_tz_maps_to_arrow_wall_clock() {
+        // The real decoder yields UTC 08:34:05 plus display offset -05:30 for
+        // wall clock 03:04:05. Arrow must add that offset before dropping the
+        // zone metadata. A hand-built 03:04 QueryValue would make this test
+        // self-fulfilling and would not catch the original bug.
         let columns = vec![column("TSTZ", ORA_TYPE_NUM_TIMESTAMP_TZ, 0, 9)];
-        let rows = vec![vec![timestamp_tz(2024, 1, 2, 3, 4, 5, 123_456_789, -330)]];
+        let rows = vec![vec![decoded_timestamp_tz(
+            2024,
+            1,
+            2,
+            8,
+            34,
+            5,
+            123_456_789,
+            -330,
+        )]];
         let batch =
             build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
         assert_eq!(
@@ -799,16 +848,23 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_tz_arrow_wall_clock_independent_of_offset() {
-        // The Arrow (tz-naive) value depends ONLY on the wall-clock components,
-        // never on the zone offset: the same wall clock with different offsets
-        // produces the same Arrow epoch (#596 wall-clock semantics). A positive
-        // and a negative offset both collapse to the wall-clock instant.
+    fn decoded_timestamp_tz_arrow_wall_clock_is_offset_covariant() {
+        // Three decoder-produced UTC representations of the same 12:00 wall
+        // clock must collapse to the same timezone-naive Arrow value.
         let columns = vec![column("TSTZ", ORA_TYPE_NUM_TIMESTAMP_TZ, 0, 6)];
         let rows = vec![
-            vec![timestamp_tz(2024, 6, 1, 12, 0, 0, 500_000_000, 600)],
-            vec![timestamp_tz(2024, 6, 1, 12, 0, 0, 500_000_000, -480)],
-            vec![timestamp_tz(2024, 6, 1, 12, 0, 0, 500_000_000, 0)],
+            vec![decoded_timestamp_tz(2024, 6, 1, 2, 0, 0, 500_000_000, 600)],
+            vec![decoded_timestamp_tz(
+                2024,
+                6,
+                1,
+                20,
+                0,
+                0,
+                500_000_000,
+                -480,
+            )],
+            vec![decoded_timestamp_tz(2024, 6, 1, 12, 0, 0, 500_000_000, 0)],
         ];
         let batch =
             build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
@@ -816,13 +872,36 @@ mod tests {
         assert_eq!(
             col.value(0),
             col.value(1),
-            "offset must not shift the value"
+            "UTC fields plus positive offset must recover the wall clock"
         );
         assert_eq!(
             col.value(1),
             col.value(2),
-            "offset must not shift the value"
+            "UTC fields plus negative offset must recover the wall clock"
         );
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn decoded_tstz_arrow_epoch_matches_row_conversion_epoch() {
+        use crate::FromSql;
+
+        let value =
+            decoded_timestamp_tz(2024, 1, 2, 8, 34, 5, 123_456_789, -330).expect("decoded TSTZ");
+        let columns = vec![column("TSTZ", ORA_TYPE_NUM_TIMESTAMP_TZ, 0, 9)];
+        let rows = vec![vec![Some(value.clone())]];
+        let batch =
+            build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
+        let arrow_epoch = batch
+            .column(0)
+            .as_primitive::<TimestampNanosecondType>()
+            .value(0);
+        let row_value = chrono::NaiveDateTime::from_sql(&value).expect("row conversion");
+        let row_epoch = row_value
+            .and_utc()
+            .timestamp_nanos_opt()
+            .expect("representable epoch");
+        assert_eq!(arrow_epoch, row_epoch);
     }
 
     #[test]
