@@ -31,6 +31,9 @@ node_modules/
 venv/
 target/
 
+# Coverage instrumentation target dir (scripts/coverage_baseline.sh; regenerable, heavy)
+target-cov/
+
 # Clean-room reference checkout (pinned via scripts/pin-reference.sh; never vendored into git)
 reference/
 

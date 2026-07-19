@@ -25,6 +25,8 @@
     {"path": "scripts/compare_pytest_json.py", "kind": "helper", "excluded_reason": "called-by-parity-report-tools"},
     {"path": "scripts/conformance_matrix.sh", "kind": "entry_point", "trace": "conformance-live"},
     {"path": "scripts/container.sh", "kind": "helper", "excluded_reason": "environment-export-helper-for-live-runners"},
+    {"path": "scripts/coverage_baseline.py", "kind": "helper", "excluded_reason": "invoked-by-coverage-baseline-shell-entrypoint"},
+    {"path": "scripts/coverage_baseline.sh", "kind": "entry_point", "trace": "coverage-baseline"},
     {"path": "scripts/extract_reference_gates.sh", "kind": "entry_point", "trace": "required-quality"},
     {"path": "scripts/fake_parity_scan.py", "kind": "entry_point", "trace": "parity-rigor"},
     {"path": "scripts/gen_async_blocking_coverage.py", "kind": "helper", "excluded_reason": "generator-consumed-by-async-coverage-gate"},
@@ -210,6 +212,17 @@
         {"path": "scripts/prepare-local-oracle.py", "marker": "def main()"}
       ],
       "result": {"path": "scripts/prepare-local-oracle.py", "markers": ["raise SystemExit", "Oracle preparation failed"]},
+      "capabilities": []
+    },
+    {
+      "id": "coverage-baseline",
+      "tier": "operator",
+      "runner": "scripts/coverage_baseline.sh",
+      "skip_policy": "fail",
+      "dispatch": [
+        {"path": "scripts/coverage_baseline.sh", "marker": "cargo llvm-cov"}
+      ],
+      "result": {"path": "scripts/coverage_baseline.py", "markers": ["coverage_baseline: wrote", "E_INVALID"]},
       "capabilities": []
     }
   ]
