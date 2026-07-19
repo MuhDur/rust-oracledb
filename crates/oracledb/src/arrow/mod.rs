@@ -530,9 +530,20 @@ mod tests {
         })
     }
 
-    // Compact fixture construction is clearer than a one-off helper struct here.
+    /// Builds a `TIMESTAMP WITH TIME ZONE` `QueryValue` by running the real
+    /// wire decoder (`decode_datetime_value`) over hand-assembled TTC bytes,
+    /// instead of constructing `QueryValue::TimestampTz` directly. `year`
+    /// through `nanosecond` are the UTC instant the wire actually carries;
+    /// `offset_minutes` is the separate display offset the decoder reads from
+    /// the trailing two bytes (mirrors `decoders.pyx::decode_date` /
+    /// `codecs::decode_datetime_value`). Going through the decoder keeps this
+    /// fixture honest about which fields are UTC and which are display
+    /// metadata: a struct literal with the wall clock already baked into
+    /// `hour`/`minute` would make an offset-application test self-fulfilling
+    /// (it would pass even if the conversion under test never touched the
+    /// offset at all).
     #[allow(clippy::too_many_arguments)]
-    fn timestamp_tz(
+    fn decode_tstz_fixture(
         year: i32,
         month: u8,
         day: u8,
@@ -542,16 +553,22 @@ mod tests {
         nanosecond: u32,
         offset_minutes: i32,
     ) -> Option<QueryValue> {
-        Some(QueryValue::TimestampTz {
-            year,
+        let mut wire = vec![
+            u8::try_from(year / 100 + 100).expect("century byte"),
+            u8::try_from(year % 100 + 100).expect("year-in-century byte"),
             month,
             day,
-            hour,
-            minute,
-            second,
-            nanosecond,
-            offset_minutes,
-        })
+            hour.checked_add(1).expect("hour byte"),
+            minute.checked_add(1).expect("minute byte"),
+            second.checked_add(1).expect("second byte"),
+        ];
+        wire.extend_from_slice(&nanosecond.to_be_bytes());
+        wire.push(u8::try_from(offset_minutes / 60 + 20).expect("tz hour byte"));
+        wire.push(u8::try_from(offset_minutes % 60 + 60).expect("tz minute byte"));
+        Some(
+            oracledb_protocol::thin::decode_datetime_value(&wire)
+                .expect("well-formed TSTZ wire fixture"),
+        )
     }
 
     #[test]
@@ -772,16 +789,32 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_tz_maps_to_arrow_wall_clock() {
-        // Upstream python-oracledb #596 (714178610379): a TIMESTAMP WITH TIME
-        // ZONE fetched into a tz-naive Arrow `Timestamp` is emitted at its
-        // WALL-CLOCK time, NOT UTC-normalized. For 2024-01-02 03:04:05.123456789
-        // -05:30 the Arrow value is the wall clock 03:04:05.123456789 (the -05:30
-        // offset is dropped), matching the reference DataFrame values. Our 0.5.1
-        // build UTC-normalized this (1_704_184_445_123_456_789); that divergence
-        // is retired here.
+    fn timestamp_tz_maps_to_arrow_display_wall_clock() {
+        // Ground truth: reference/python-oracledb's
+        // converters.pyx::convert_date_to_python builds a naive datetime from
+        // the wire's UTC civil fields and then ADDS the display offset to it;
+        // convert_date_to_arrow_timestamp reuses that same (now wall-clock)
+        // datetime for the Arrow epoch. An Arrow `Timestamp(_, None)` field
+        // carries no zone, so it must hold that wall-clock instant, not the
+        // raw UTC instant.
+        //
+        // The fixture is decoder-produced (not a hand-built `QueryValue`) so
+        // this test actually exercises offset application: UTC
+        // 2024-01-02T08:34:05.123456789 at display offset -05:30 renders as
+        // wall clock 2024-01-02T03:04:05.123456789. A self-fulfilling fixture
+        // that baked 03:04:05 straight into the `QueryValue` would pass even
+        // if the conversion dropped the offset on the floor.
         let columns = vec![column("TSTZ", ORA_TYPE_NUM_TIMESTAMP_TZ, 0, 9)];
-        let rows = vec![vec![timestamp_tz(2024, 1, 2, 3, 4, 5, 123_456_789, -330)]];
+        let rows = vec![vec![decode_tstz_fixture(
+            2024,
+            1,
+            2,
+            8,
+            34,
+            5,
+            123_456_789,
+            -330,
+        )]];
         let batch =
             build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
         assert_eq!(
@@ -794,34 +827,57 @@ mod tests {
                 .column(0)
                 .as_primitive::<TimestampNanosecondType>()
                 .value(0),
-            1_704_164_645_123_456_789
+            1_704_164_645_123_456_789,
+            "the Arrow epoch must reflect UTC + the display offset, not the raw UTC instant"
         );
     }
 
     #[test]
-    fn timestamp_tz_arrow_wall_clock_independent_of_offset() {
-        // The Arrow (tz-naive) value depends ONLY on the wall-clock components,
-        // never on the zone offset: the same wall clock with different offsets
-        // produces the same Arrow epoch (#596 wall-clock semantics). A positive
-        // and a negative offset both collapse to the wall-clock instant.
-        let columns = vec![column("TSTZ", ORA_TYPE_NUM_TIMESTAMP_TZ, 0, 6)];
+    fn timestamp_tz_arrow_epoch_is_offset_covariant() {
+        // Three decoder-produced UTC instants, each paired with the offset
+        // that resolves it to the SAME display wall clock
+        // (2024-03-15T09:15:30.250), must collapse to the same Arrow epoch.
+        let columns = vec![column("TSTZ", ORA_TYPE_NUM_TIMESTAMP_TZ, 0, 9)];
         let rows = vec![
-            vec![timestamp_tz(2024, 6, 1, 12, 0, 0, 500_000_000, 600)],
-            vec![timestamp_tz(2024, 6, 1, 12, 0, 0, 500_000_000, -480)],
-            vec![timestamp_tz(2024, 6, 1, 12, 0, 0, 500_000_000, 0)],
+            // +05:45 display offset -> UTC 03:30:30.
+            vec![decode_tstz_fixture(
+                2024,
+                3,
+                15,
+                3,
+                30,
+                30,
+                250_000_000,
+                345,
+            )],
+            // -03:00 display offset -> UTC 12:15:30.
+            vec![decode_tstz_fixture(
+                2024,
+                3,
+                15,
+                12,
+                15,
+                30,
+                250_000_000,
+                -180,
+            )],
+            // UTC display offset -> UTC 09:15:30.
+            vec![decode_tstz_fixture(2024, 3, 15, 9, 15, 30, 250_000_000, 0)],
         ];
         let batch =
             build_record_batch(&columns, &rows, &ArrowFetchOptions::default()).expect("batch");
-        let col = batch.column(0).as_primitive::<TimestampMicrosecondType>();
+        let col = batch.column(0).as_primitive::<TimestampNanosecondType>();
         assert_eq!(
             col.value(0),
             col.value(1),
-            "offset must not shift the value"
+            "different UTC instants at their respective display offsets must \
+             resolve to the same wall clock"
         );
         assert_eq!(
             col.value(1),
             col.value(2),
-            "offset must not shift the value"
+            "different UTC instants at their respective display offsets must \
+             resolve to the same wall clock"
         );
     }
 
