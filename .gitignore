@@ -59,3 +59,7 @@ reference
 
 # perf-push lane-local env helper (container name + target dir)
 .lane-perf-env.sh
+
+# Agent state (never commit)
+.claude/
+.ntm/
