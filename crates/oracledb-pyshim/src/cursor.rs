@@ -1852,6 +1852,15 @@ impl ThinCursorImpl {
                         .borrow(py)
                         .output_value_to_py(py, value, Some(&lob_context));
                 }
+                // Declared column scale/precision drive the NUMBER int-vs-float
+                // split inside query_value_to_py (reference
+                // impl/base/metadata.pyx:112-133); the unconstrained-NUMBER
+                // sentinel (-127, 0) falls back to the per-value classification
+                // when no column metadata is present for this index.
+                let (number_scale, number_precision) =
+                    self.columns.get(index).map_or((-127, 0), |metadata| {
+                        (metadata.scale(), metadata.precision())
+                    });
                 // JSON stored in a CLOB/BLOB (is_oson, re-defined as LONG_RAW):
                 // the fetched RAW bytes are the OSON image, decoded via the codec
                 // (reference cursor.pyx:215-220, outconverter = decode_oson).
@@ -1870,6 +1879,7 @@ impl ThinCursorImpl {
                             Some(&lob_context),
                             self.fetch_lobs,
                             self.fetch_decimals,
+                            (number_scale, number_precision),
                         ),
                     };
                 }
@@ -1903,6 +1913,7 @@ impl ThinCursorImpl {
                     Some(&lob_context),
                     self.fetch_lobs,
                     self.fetch_decimals,
+                    (number_scale, number_precision),
                 )
             })
             .collect::<PyResult<Vec<_>>>()?;

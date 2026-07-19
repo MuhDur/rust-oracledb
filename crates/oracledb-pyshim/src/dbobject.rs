@@ -13,8 +13,7 @@ use oracledb::protocol::thin::{
     decode_dbobject_text as protocol_decode_dbobject_text, decode_dbobject_xmltype_text,
     decode_number_value, image_begin, image_finalize, image_write_length, image_write_null,
     image_write_value_bytes, pack_bindvalue_into_image, BindValue, ColumnMetadata,
-    DbObjectPackedReader, QueryValue, CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BLOB,
-    ORA_TYPE_NUM_CLOB,
+    DbObjectPackedReader, CS_FORM_IMPLICIT, CS_FORM_NCHAR, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -784,20 +783,27 @@ pub(crate) fn dbobject_unpack_value(
         "DB_TYPE_XMLTYPE" => decode_dbobject_xmltype(py, &bytes),
         "DB_TYPE_NUMBER" => {
             let value = decode_number_value(&bytes).map_err(runtime_error)?;
-            if metadata.scale == -127 && metadata.precision > 0 {
-                if let QueryValue::Number(num) = &value {
-                    let value = num
-                        .to_canonical_string()
-                        .parse::<f64>()
-                        .map_err(runtime_error)?;
-                    return Ok(value.into_pyobject(py)?.unbind().into());
-                }
-            }
-            query_value_to_py(py, &Some(value), None, None, true, false)
+            // OracleMetadata._finalize_init classification (metadata.pyx:
+            // 112-133) applies identically to object-attribute NUMBER
+            // metadata, so thread the attribute's own declared scale/
+            // precision through rather than duplicating the rule locally
+            // (this used to special-case only the scale==-127&&precision>0
+            // FLOAT/REAL-mapped case; a NUMBER(p,s) attribute with s > 0 fell
+            // through to the old per-value classification, same bug as the
+            // cursor-fetch path).
+            query_value_to_py(
+                py,
+                &Some(value),
+                None,
+                None,
+                true,
+                false,
+                (metadata.scale, metadata.precision),
+            )
         }
         "DB_TYPE_DATE" | "DB_TYPE_TIMESTAMP" | "DB_TYPE_TIMESTAMP_TZ" | "DB_TYPE_TIMESTAMP_LTZ" => {
             let value = decode_datetime_value(&bytes).map_err(runtime_error)?;
-            query_value_to_py(py, &Some(value), None, None, true, false)
+            query_value_to_py(py, &Some(value), None, None, true, false, (-127, 0))
         }
         "DB_TYPE_BINARY_FLOAT" => Ok(f64::from(decode_dbobject_binary_float(&bytes)?)
             .into_pyobject(py)?

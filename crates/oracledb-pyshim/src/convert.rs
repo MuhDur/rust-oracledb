@@ -1211,6 +1211,47 @@ pub(crate) fn interval_ds_to_py(
         .unbind())
 }
 
+/// Classifies a fetched `NUMBER` value as Python `int` (`true`) or `float`
+/// (`false`), by the DECLARED column/attribute scale and precision — never by
+/// the row value alone. Mirrors python-oracledb's
+/// `OracleMetadata._finalize_init` (`impl/base/metadata.pyx:112-133`), which
+/// sets `_py_type_num` once from metadata alone:
+///
+/// - `scale == 0` -> Python `int` (`PY_TYPE_NUM_INT`).
+/// - `scale == -127 && precision == 0` -> "unconstrained" `NUMBER` (no
+///   declared scale/precision at all); falls back to `value_is_integer`
+///   (`converters.pyx:371-381` `convert_number_to_python_int` returns
+///   `float(...)` when the value is not actually an integer, `int(...)`
+///   otherwise).
+/// - any other scale (fractional, e.g. `NUMBER(10,2)`, or the `-127`/nonzero
+///   `precision` FLOAT/REAL-mapped sentinel) -> Python `float`,
+///   UNCONDITIONALLY, even for a whole-number row value
+///   (`converters.pyx:612-617`, `PY_TYPE_NUM_FLOAT` dispatch).
+///
+/// `value_is_integer` is the row value's own integrality (no decimal point in
+/// its canonical text) — only consulted in the unconstrained case above.
+pub(crate) fn number_classifies_as_python_int(
+    scale: i8,
+    precision: i8,
+    value_is_integer: bool,
+) -> bool {
+    if scale == 0 {
+        true
+    } else if scale == -127 && precision == 0 {
+        value_is_integer
+    } else {
+        false
+    }
+}
+
+/// `number_scale_precision` is the declared column (or attribute)
+/// `(scale, precision)` that governs the `QueryValue::Number` int-vs-float
+/// split below (see [`number_classifies_as_python_int`]; bundled into one
+/// tuple argument to stay under `clippy::too_many_arguments`). Callers with
+/// no per-column metadata (JSON, array elements, custom output vars) pass the
+/// unconstrained-NUMBER sentinel `(-127, 0)`, which reproduces the
+/// pre-existing per-value classification exactly (no behavior change for
+/// those paths).
 pub(crate) fn query_value_to_py(
     py: Python<'_>,
     value: &Option<QueryValue>,
@@ -1218,7 +1259,9 @@ pub(crate) fn query_value_to_py(
     lob_context: Option<&ThinLobContext>,
     fetch_lobs: bool,
     fetch_decimals: bool,
+    number_scale_precision: (i8, i8),
 ) -> PyResult<Py<PyAny>> {
+    let (number_scale, number_precision) = number_scale_precision;
     match value {
         None => Ok(py.None()),
         Some(QueryValue::Text(value)) => Ok(value.clone().into_pyobject(py)?.unbind().into()),
@@ -1259,7 +1302,11 @@ pub(crate) fn query_value_to_py(
                     .getattr("Decimal")?
                     .call1((text.as_str(),))?
                     .unbind())
-            } else if num.is_integer() {
+            } else if number_classifies_as_python_int(
+                number_scale,
+                number_precision,
+                num.is_integer(),
+            ) {
                 python_int_from_decimal_text(py, &text)
             } else {
                 let value = text.parse::<f64>().map_err(runtime_error)?;
@@ -1305,6 +1352,9 @@ pub(crate) fn query_value_to_py(
             let values = values
                 .iter()
                 .map(|value| {
+                    // Collection element type carries no per-element scale on
+                    // this path; unconstrained-NUMBER sentinel reproduces the
+                    // pre-existing per-value classification unchanged.
                     query_value_to_py(
                         py,
                         value,
@@ -1312,6 +1362,7 @@ pub(crate) fn query_value_to_py(
                         lob_context,
                         fetch_lobs,
                         fetch_decimals,
+                        (-127, 0),
                     )
                 })
                 .collect::<PyResult<Vec<_>>>()?;
@@ -1481,7 +1532,18 @@ pub(crate) fn json_query_value_to_py(
     // an empty CLOB/BLOB column is not passed to json.loads (which would raise
     // "Expecting value"). fetch_lobs=false materializes any CLOB/BLOB to
     // str/bytes already, so there is no LOB object left to read here.
-    let value = query_value_to_py(py, value, owner_cursor, lob_context, false, false)?;
+    // Not a plain NUMBER column path (this is is_oson CLOB/BLOB-stored JSON
+    // text, not a relational column); unconstrained-NUMBER sentinel keeps
+    // the pre-existing per-value classification.
+    let value = query_value_to_py(
+        py,
+        value,
+        owner_cursor,
+        lob_context,
+        false,
+        false,
+        (-127, 0),
+    )?;
     let mut value = value.into_bound(py);
     if value.is_none() {
         return Ok(value.unbind());
@@ -1496,4 +1558,87 @@ pub(crate) fn json_query_value_to_py(
         .getattr("loads")?
         .call1((&value,))?
         .unbind())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oracledb::protocol::thin::OracleNumber;
+
+    // F-PY1 discriminating proof: NUMBER classification is driven by the
+    // DECLARED column scale/precision (reference metadata.pyx:112-133), never
+    // by the row value alone (converters.pyx:612-617 float branch vs
+    // converters.pyx:371-381 per-value int/float fallback). The pre-fix logic
+    // was `num.is_integer()` alone — i.e. always the "unconstrained" rule
+    // below, regardless of declared scale — so it wrongly classified
+    // NUMBER(10,2) = 5.00 as `int`.
+    #[test]
+    fn number_classification_follows_declared_scale_not_row_value() {
+        let whole_valued = OracleNumber::from_canonical_text("5");
+        assert!(whole_valued.is_integer(), "sanity: 5 is an integral value");
+        let fractional = OracleNumber::from_canonical_text("5.5");
+        assert!(
+            !fractional.is_integer(),
+            "sanity: 5.5 is not an integral value"
+        );
+
+        // NUMBER(10,2) = 5.00: whole-valued row, but the column has a
+        // non-zero declared scale -> ALWAYS float (converters.pyx:612-617),
+        // even though the row value itself is a whole number.
+        assert!(
+            !number_classifies_as_python_int(2, 10, whole_valued.is_integer()),
+            "NUMBER(10,2)=5.00 must classify as float even though the row value is whole"
+        );
+
+        // NUMBER(10,0) = 5: scale == 0 -> int, unconditionally. The value's
+        // own integrality must not even be consulted in this branch.
+        assert!(number_classifies_as_python_int(
+            0,
+            10,
+            whole_valued.is_integer()
+        ));
+        assert!(number_classifies_as_python_int(
+            0,
+            10,
+            fractional.is_integer()
+        ));
+
+        // Unconstrained NUMBER (scale == -127, precision == 0): per-value
+        // fallback (converters.pyx:371-381 convert_number_to_python_int).
+        assert!(
+            number_classifies_as_python_int(-127, 0, whole_valued.is_integer()),
+            "unconstrained NUMBER with a whole row value must classify as int"
+        );
+        assert!(
+            !number_classifies_as_python_int(-127, 0, fractional.is_integer()),
+            "unconstrained NUMBER with a fractional row value must classify as float"
+        );
+
+        // FLOAT/REAL-mapped sentinel (scale == -127, precision > 0, per
+        // oracledb-protocol/src/thin/bind.rs's REAL/DOUBLE PRECISION -> NUMBER
+        // type mapping): unconditionally float, same as any other nonzero
+        // declared scale.
+        assert!(!number_classifies_as_python_int(
+            -127,
+            63,
+            whole_valued.is_integer()
+        ));
+    }
+
+    /// Proves the fix is discriminating against the OLD value-only rule
+    /// (`num.is_integer()`, ignoring scale/precision entirely): that rule
+    /// gets NUMBER(10,2) = 5.00 wrong. This test fails if
+    /// `number_classifies_as_python_int` degenerates back to
+    /// `|_scale, _precision, value_is_integer| value_is_integer`.
+    #[test]
+    fn old_value_only_rule_would_misclassify_number_10_2() {
+        let value_is_integer = true; // 5.00 has no fractional row value
+        let old_rule_result = value_is_integer; // pre-fix behavior: num.is_integer()
+        let new_rule_result = number_classifies_as_python_int(2, 10, value_is_integer);
+        assert_ne!(
+            old_rule_result, new_rule_result,
+            "NUMBER(10,2)=5.00: old value-based rule said int, correct rule must say float"
+        );
+        assert!(!new_rule_result);
+    }
 }
