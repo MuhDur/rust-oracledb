@@ -734,7 +734,7 @@ impl<T: WireTransport> ConnectionCore<T> {
         cx: &Cx,
         classic: bool,
         probe: impl Fn(&[u8]) -> bool,
-    ) -> Result<()> {
+    ) -> Result<SessionCloseDisposition> {
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
         let inactivity = self.inactivity_timeout;
@@ -744,6 +744,42 @@ impl<T: WireTransport> ConnectionCore<T> {
                 .await
         };
         self.note_post_sync_result(map_inactivity_timeout(result))
+    }
+
+    /// Finishes the wire-level half of a terminal LOGOFF exchange.
+    ///
+    /// A peer hard-close accepted at the empty response boundary has already
+    /// made Asupersync's TLS stream terminal, so attempting the ordinary final
+    /// TNS EOF write would only turn a successful close into `BrokenPipe`.
+    /// Complete responses and response timeouts retain the existing EOF write
+    /// and write-shutdown behavior.
+    async fn finish_session_close(
+        &mut self,
+        cx: &Cx,
+        classic: bool,
+        probe: impl Fn(&[u8]) -> bool,
+    ) -> Result<()> {
+        if let Ok(response) = time::timeout(
+            time::wall_now(),
+            Duration::from_secs(5),
+            self.read_session_close_response(cx, classic, probe),
+        )
+        .await
+        {
+            if response? == SessionCloseDisposition::PeerHardClosed {
+                return Ok(());
+            }
+        }
+        let eof = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(oracledb_protocol::thin::TNS_DATA_FLAGS_EOF),
+            &[],
+            PacketLengthWidth::Large32,
+        )?;
+        self.write_all(cx, &eof).await?;
+        let _ = self.shutdown_write(cx).await;
+        Ok(())
     }
 
     /// [`read_data_response_probed`](Self::read_data_response_probed) for the
@@ -7742,32 +7778,15 @@ impl Connection {
             .await?;
         let capabilities = self.capabilities;
         let limits = self.protocol_limits;
-        if let Ok(response) = time::timeout(
-            time::wall_now(),
-            Duration::from_secs(5),
-            self.core
-                .read_session_close_response(cx, !self.supports_end_of_response, |bytes| {
-                    response_complete(&parse_plain_function_response_with_limits(
-                        bytes,
-                        capabilities,
-                        limits,
-                    ))
-                }),
-        )
-        .await
-        {
-            response?;
-        }
-        let eof = encode_packet(
-            TNS_PACKET_TYPE_DATA,
-            0,
-            Some(oracledb_protocol::thin::TNS_DATA_FLAGS_EOF),
-            &[],
-            PacketLengthWidth::Large32,
-        )?;
-        self.core.write_all(cx, &eof).await?;
-        let _ = self.core.shutdown_write(cx).await;
-        Ok(())
+        self.core
+            .finish_session_close(cx, !self.supports_end_of_response, |bytes| {
+                response_complete(&parse_plain_function_response_with_limits(
+                    bytes,
+                    capabilities,
+                    limits,
+                ))
+            })
+            .await
     }
 
     /// Runs a batch of operations as a true wire pipeline (single round trip):
@@ -9365,6 +9384,12 @@ where
 
 const ASUPERSYNC_TLS_MISSING_CLOSE_NOTIFY: &str = "tls connection closed without close_notify";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionCloseDisposition {
+    ResponseComplete,
+    PeerHardClosed,
+}
+
 fn is_missing_tls_close_notify(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::UnexpectedEof
         && error.to_string() == ASUPERSYNC_TLS_MISSING_CLOSE_NOTIFY
@@ -9432,7 +9457,7 @@ async fn read_session_close_response_with_limits<R, W, P>(
     classic: bool,
     probe: &P,
     limits: ProtocolLimits,
-) -> Result<()>
+) -> Result<SessionCloseDisposition>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
@@ -9442,14 +9467,16 @@ where
     let result = if classic {
         read_classic_data_response_probed_with_limits(&mut close_read, cx, write, probe, limits)
             .await
-            .map(|_| ())
+            .map(|_| SessionCloseDisposition::ResponseComplete)
     } else {
         read_data_response_with_limits(&mut close_read, cx, write, limits)
             .await
-            .map(|_| ())
+            .map(|_| SessionCloseDisposition::ResponseComplete)
     };
     match result {
-        Err(_) if close_read.missing_close_notify_at_boundary => Ok(()),
+        Err(_) if close_read.missing_close_notify_at_boundary => {
+            Ok(SessionCloseDisposition::PeerHardClosed)
+        }
         other => other,
     }
 }
@@ -19633,7 +19660,7 @@ mod tests {
         // Oracle is allowed to answer terminal LOGOFF by closing the already
         // usable session without a TLS alert and without another TNS packet.
         let mut clean_close = scripted_read(vec![missing_notify()]);
-        runtime.block_on(async {
+        let clean_disposition = runtime.block_on(async {
             let cx = test_cx()?;
             let probe = |_bytes: &[u8]| false;
             read_session_close_response_with_limits(
@@ -19646,13 +19673,47 @@ mod tests {
             )
             .await
         })?;
+        assert_eq!(
+            clean_disposition,
+            SessionCloseDisposition::PeerHardClosed,
+            "a hard close at the empty terminal-response boundary is distinct from a response"
+        );
+
+        // This is the exact tail used by Connection::close after LOGOFF has
+        // been written. Both modern and classic framing must stop here: the
+        // shared TLS stream is terminal, so any final TNS EOF write would
+        // surface Asupersync's `BrokenPipe` instead of a successful close.
+        for classic in [false, true] {
+            let state = Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+                vec![missing_notify()],
+                Vec::new(),
+                ScriptedClock::default(),
+            )));
+            let mut core = ConnectionCore::<ScriptedTransport>::from_halves(
+                ScriptedRead::from_state(Arc::clone(&state)),
+                ScriptedWrite::from_state(Arc::clone(&state)),
+                "session_close_hard_close_write",
+            );
+            runtime.block_on(async {
+                let cx = test_cx()?;
+                core.finish_session_close(&cx, classic, |_bytes| false)
+                    .await
+            })?;
+            assert!(
+                state
+                    .lock()
+                    .expect("session-close scripted state")
+                    .is_consumed(),
+                "peer hard-close must consume the read without attempting a write (classic={classic})"
+            );
+        }
 
         // A fully framed response still wins normally; the following hard TLS
         // close is never consulted once the application boundary is proven.
         let complete = data_packet(&[TNS_MSG_TYPE_END_OF_RESPONSE], true);
         let mut complete_close =
             scripted_read(vec![ReadAction::bytes(complete, Some(3)), missing_notify()]);
-        runtime.block_on(async {
+        let complete_disposition = runtime.block_on(async {
             let cx = test_cx()?;
             let probe = |_bytes: &[u8]| true;
             read_session_close_response_with_limits(
@@ -19665,6 +19726,42 @@ mod tests {
             )
             .await
         })?;
+        assert_eq!(
+            complete_disposition,
+            SessionCloseDisposition::ResponseComplete,
+            "a framed terminal response must not be classified as a peer hard-close"
+        );
+
+        // The ordinary complete-response path retains the final TNS EOF write.
+        let complete = data_packet(&[TNS_MSG_TYPE_END_OF_RESPONSE], true);
+        let eof = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(oracledb_protocol::thin::TNS_DATA_FLAGS_EOF),
+            &[],
+            PacketLengthWidth::Large32,
+        )?;
+        let state = Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+            vec![ReadAction::bytes(complete, Some(3))],
+            vec![WriteAction::expect_bytes(eof, Some(2))],
+            ScriptedClock::default(),
+        )));
+        let mut core = ConnectionCore::<ScriptedTransport>::from_halves(
+            ScriptedRead::from_state(Arc::clone(&state)),
+            ScriptedWrite::from_state(Arc::clone(&state)),
+            "session_close_complete_response_write",
+        );
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            core.finish_session_close(&cx, false, |_bytes| true).await
+        })?;
+        assert!(
+            state
+                .lock()
+                .expect("session-close scripted state")
+                .is_consumed(),
+            "a complete terminal response must retain the final TNS EOF write"
+        );
 
         // Once any TNS byte arrived, the same signal proves truncation and
         // remains a typed UnexpectedEof. Here the final payload byte is absent.
