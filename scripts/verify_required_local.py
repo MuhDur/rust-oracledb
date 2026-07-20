@@ -26,6 +26,7 @@ RESOURCE_BUDGET = ROOT / "scripts/resource_budget.sh"
 VALIDATOR = ROOT / "scripts/validate_evidence.py"
 
 META_STEPS = {
+    "Aggregate quality results",
     "Validate inputs",
     "Select budget",
     "Forced evidence failure",
@@ -46,6 +47,18 @@ CONDITIONS = {
     "${{ steps.budget.outputs.package == 'true' }}": False,
     "${{ steps.budget.outputs.fuzz_seconds != '0' }}": False,
 }
+FANOUT_JOBS = (
+    "validate",
+    "core",
+    "contracts",
+    "features",
+    "release-surface",
+    "musl",
+    "perf",
+    "fuzz",
+)
+AGGREGATE_JOB = "quality"
+AGGREGATE_CONDITION = "${{ always() }}"
 
 
 class ContractError(RuntimeError):
@@ -55,12 +68,28 @@ class ContractError(RuntimeError):
 @dataclass
 class Step:
     name: str
+    job: str = ""
     condition: str = ""
     uses: str | None = None
     run: str | None = None
     shell: str | None = None
     working_directory: str | None = None
     has_environment: bool = False
+
+
+@dataclass
+class Job:
+    identifier: str
+    name: str = ""
+    condition: str = ""
+    needs: tuple[str, ...] = ()
+    step_count: int = 0
+
+
+@dataclass
+class QualityWorkflow:
+    jobs: dict[str, Job]
+    steps: list[Step]
 
 
 def utc_now() -> str:
@@ -74,18 +103,38 @@ def command_output(argv: list[str]) -> str:
         return "unavailable"
 
 
-def parse_quality_steps(text: str) -> list[Step]:
-    """Parse the deliberately small YAML subset used by `jobs.quality.steps`.
+def parse_needs(value: str, job: str) -> tuple[str, ...]:
+    """Parse the scalar/inline-list `needs` forms used by the quality graph."""
+
+    if not value:
+        raise ContractError(f"job {job!r}: multiline needs is unsupported")
+    if value.startswith("["):
+        if not value.endswith("]"):
+            raise ContractError(f"job {job!r}: malformed inline needs list")
+        values = tuple(item.strip() for item in value[1:-1].split(",") if item.strip())
+    else:
+        values = (value,)
+    if not values or len(values) != len(set(values)):
+        raise ContractError(f"job {job!r}: needs must be a non-empty unique list")
+    return values
+
+
+def parse_quality_workflow(text: str) -> QualityWorkflow:
+    """Parse the deliberately small YAML subset used by `jobs.<id>.steps`.
 
     A dependency on a general YAML parser would make the proof depend on ambient
-    Python packages.  This parser accepts only the workflow shape we audit and
-    fails if it changes beyond that shape.
+    Python packages. This parser accepts only the workflow shape we audit and
+    fails closed on job-level delegation, matrices, demotion, or unfamiliar
+    fields that could make the local Required projection diverge from CI.
     """
 
+    jobs: dict[str, Job] = {}
     steps: list[Step] = []
     current: Step | None = None
+    current_job: Job | None = None
     collecting_run = False
     run_lines: list[str] = []
+    in_jobs = False
     in_steps = False
 
     def finish_current() -> None:
@@ -94,29 +143,86 @@ def parse_quality_steps(text: str) -> list[Step]:
             if collecting_run:
                 current.run = "\n".join(run_lines).strip()
             steps.append(current)
+            jobs[current.job].step_count += 1
         current = None
         collecting_run = False
         run_lines = []
 
     for raw in text.splitlines():
-        if raw == "    steps:":
-            in_steps = True
+        if raw == "jobs:":
+            in_jobs = True
             continue
-        if not in_steps:
+        if not in_jobs:
             continue
-        if raw and not raw.startswith("      "):
+        if raw and not raw.startswith(" "):
             finish_current()
-            break
+            in_jobs = False
+            in_steps = False
+            current_job = None
+            continue
+
+        job_start = re.match(r"^  (?P<job>[A-Za-z0-9_-]+):\s*$", raw)
+        if job_start:
+            finish_current()
+            in_steps = False
+            identifier = job_start.group("job")
+            if identifier in jobs:
+                raise ContractError(f"duplicate quality job {identifier!r}")
+            current_job = Job(identifier=identifier)
+            jobs[identifier] = current_job
+            continue
+
+        if in_steps and raw and not raw.startswith("      "):
+            finish_current()
+            in_steps = False
+
+        if not in_steps:
+            if not raw.strip() or raw.lstrip().startswith("#"):
+                continue
+            job_field = re.match(r"^    (?P<key>[A-Za-z0-9_-]+):(?P<value>.*)$", raw)
+            if not job_field or current_job is None:
+                raise ContractError(f"unclassified jobs block line {raw.strip()!r}")
+            key = job_field.group("key")
+            value = job_field.group("value").strip()
+            if key == "name":
+                current_job.name = value
+            elif key == "needs":
+                current_job.needs = parse_needs(value, current_job.identifier)
+            elif key == "if":
+                current_job.condition = value
+            elif key == "steps":
+                if value:
+                    raise ContractError(
+                        f"job {current_job.identifier!r}: unsupported steps shape {raw.strip()!r}"
+                    )
+                in_steps = True
+            elif key in ("runs-on", "timeout-minutes"):
+                if not value:
+                    raise ContractError(f"job {current_job.identifier!r}: empty {key!r}")
+            else:
+                raise ContractError(
+                    f"job {current_job.identifier!r}: unsupported job-level field {key!r}"
+                )
+            continue
 
         start = re.match(r"^      - (?:(?:name: (?P<name>.+))|(?:uses: (?P<uses>.+)))$", raw)
         if start:
             finish_current()
             uses = start.group("uses")
-            current = Step(name=start.group("name") or f"uses: {uses}", uses=uses)
+            if current_job is None:
+                raise ContractError("workflow step appeared outside a quality job")
+            current = Step(
+                name=start.group("name") or f"uses: {uses}",
+                job=current_job.identifier,
+                uses=uses,
+            )
             continue
         if current is None:
             continue
         if collecting_run:
+            if not raw:
+                run_lines.append("")
+                continue
             if raw.startswith("          "):
                 run_lines.append(raw[10:])
                 continue
@@ -156,17 +262,92 @@ def parse_quality_steps(text: str) -> list[Step]:
             current.has_environment = True
     finish_current()
     if not steps:
-        raise ContractError("could not find jobs.quality.steps in _quality.yml")
-    return steps
+        raise ContractError("could not find any jobs.<id>.steps in _quality.yml")
+    return QualityWorkflow(jobs=jobs, steps=steps)
+
+
+def parse_quality_steps(text: str) -> list[Step]:
+    """Compatibility wrapper used by the focused parser self-tests."""
+
+    return parse_quality_workflow(text).steps
+
+
+def validate_quality_job_graph(workflow: QualityWorkflow) -> None:
+    """Prove the fan-out and stable aggregate cannot omit or demote a shard."""
+
+    expected_jobs = (*FANOUT_JOBS, AGGREGATE_JOB)
+    actual_jobs = tuple(workflow.jobs)
+    if actual_jobs != expected_jobs:
+        raise ContractError(
+            f"quality job order/identity drift: expected {expected_jobs!r}, got {actual_jobs!r}"
+        )
+
+    for identifier in FANOUT_JOBS:
+        job = workflow.jobs[identifier]
+        expected_name = f"quality-{identifier} (${{{{ inputs.profile }}}}/${{{{ inputs.budget }}}})"
+        if job.name != expected_name:
+            raise ContractError(
+                f"job {identifier!r}: stable check name changed from {expected_name!r} to {job.name!r}"
+            )
+        expected_needs = () if identifier == "validate" else ("validate",)
+        if job.needs != expected_needs:
+            raise ContractError(
+                f"job {identifier!r}: expected needs {expected_needs!r}, got {job.needs!r}"
+            )
+        if job.condition:
+            raise ContractError(
+                f"job {identifier!r}: job-level if could create a phantom/skipped check"
+            )
+        if job.step_count == 0:
+            raise ContractError(f"job {identifier!r}: quality shard has no steps")
+
+    aggregate = workflow.jobs[AGGREGATE_JOB]
+    stable_name = "quality (${{ inputs.profile }}/${{ inputs.budget }})"
+    if aggregate.name != stable_name:
+        raise ContractError(
+            f"aggregate job must preserve stable check name {stable_name!r}, got {aggregate.name!r}"
+        )
+    if aggregate.condition != AGGREGATE_CONDITION:
+        raise ContractError(
+            f"aggregate job must run under {AGGREGATE_CONDITION!r}, got {aggregate.condition!r}"
+        )
+    if aggregate.needs != FANOUT_JOBS:
+        raise ContractError(
+            f"aggregate job must need every quality shard {FANOUT_JOBS!r}, got {aggregate.needs!r}"
+        )
+
+    aggregate_steps = [step for step in workflow.steps if step.job == AGGREGATE_JOB]
+    if len(aggregate_steps) != 1 or aggregate_steps[0].name != "Aggregate quality results":
+        raise ContractError("aggregate job must contain only the classified result-check step")
+    aggregate_run = aggregate_steps[0].run or ""
+    result_tokens = {
+        "release-surface": "${{ needs['release-surface'].result }}",
+        **{
+            identifier: f"${{{{ needs.{identifier}.result }}}}"
+            for identifier in FANOUT_JOBS
+            if identifier != "release-surface"
+        },
+    }
+    missing_tokens = sorted(
+        identifier for identifier, token in result_tokens.items() if token not in aggregate_run
+    )
+    if missing_tokens or 'if [[ "$result" != "success" ]]' not in aggregate_run or "exit 1" not in aggregate_run:
+        raise ContractError(
+            "aggregate result step does not fail closed over every shard"
+            + (f": missing {missing_tokens}" if missing_tokens else "")
+        )
 
 
 def effective_plan(workflow: Path = QUALITY_WORKFLOW) -> list[dict[str, object]]:
     entries: list[dict[str, object]] = []
-    for step in parse_quality_steps(workflow.read_text()):
+    parsed = parse_quality_workflow(workflow.read_text())
+    validate_quality_job_graph(parsed)
+    for step in parsed.steps:
         if step.condition not in CONDITIONS:
             raise ContractError(f"{step.name}: unclassified condition {step.condition!r}")
         enabled = CONDITIONS[step.condition]
         record: dict[str, object] = {
+            "job": step.job,
             "name": step.name,
             "condition": step.condition or None,
             "enabled_for_required": enabled,
@@ -411,6 +592,56 @@ def self_test() -> None:
         pass
     else:
         raise AssertionError("unknown setup actions must fail closed")
+
+    parsed = parse_quality_workflow(QUALITY_WORKFLOW.read_text())
+    validate_quality_job_graph(parsed)
+    assert tuple(parsed.jobs) == (*FANOUT_JOBS, AGGREGATE_JOB)
+    assert parsed.jobs[AGGREGATE_JOB].needs == FANOUT_JOBS
+
+    job_level_strategy = (
+        "jobs:\n"
+        "  core:\n"
+        "    strategy:\n"
+        "      matrix:\n"
+        "        shard: [0, 1]\n"
+        "    steps:\n"
+        "      - name: Format\n"
+        "        run: cargo fmt --all -- --check\n"
+    )
+    try:
+        parse_quality_workflow(job_level_strategy)
+    except ContractError as exc:
+        assert "unsupported job-level field 'strategy'" in str(exc), exc
+    else:
+        raise AssertionError("job-level strategy must fail closed")
+
+    broken_condition = parse_quality_workflow(QUALITY_WORKFLOW.read_text())
+    broken_condition.jobs["core"].condition = "${{ inputs.profile != 'canary' }}"
+    try:
+        validate_quality_job_graph(broken_condition)
+    except ContractError as exc:
+        assert "phantom/skipped check" in str(exc), exc
+    else:
+        raise AssertionError("a conditional quality shard must fail closed")
+
+    broken_aggregate = parse_quality_workflow(QUALITY_WORKFLOW.read_text())
+    broken_aggregate.jobs[AGGREGATE_JOB].needs = FANOUT_JOBS[:-1]
+    try:
+        validate_quality_job_graph(broken_aggregate)
+    except ContractError as exc:
+        assert "must need every quality shard" in str(exc), exc
+    else:
+        raise AssertionError("the stable aggregate must cover every shard")
+
+    broken_result_check = parse_quality_workflow(QUALITY_WORKFLOW.read_text())
+    aggregate_step = next(step for step in broken_result_check.steps if step.job == AGGREGATE_JOB)
+    aggregate_step.run = (aggregate_step.run or "").replace("exit 1", "true")
+    try:
+        validate_quality_job_graph(broken_result_check)
+    except ContractError as exc:
+        assert "does not fail closed" in str(exc), exc
+    else:
+        raise AssertionError("a non-failing aggregate result step must fail closed")
 
     test_plan: list[dict[str, object]] = [
         {

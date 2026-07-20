@@ -89,8 +89,11 @@ non-trivial, and all three are handled:
 - **The `on:` trap.** In YAML 1.1 — which PyYAML implements — the bare word `on`
   is a **boolean**. GitHub's `on:` block parses to the key `True`, not `"on"`. A
   naive parser reads zero triggers and silently calls every job manual.
-- **Reusable workflows.** `required.yml` calls `_quality.yml`, and GitHub names the
-  check-run `required / quality (required/required)` — the caller's job id, plus
+- **Reusable workflows.** `required.yml` calls `_quality.yml`, and GitHub prefixes
+  every called job with the caller job id. The parallel quality shards therefore
+  publish names such as `required / quality-core (required/required)`. A final
+  fail-closed aggregate deliberately preserves the established
+  `required / quality (required/required)` check name. In both cases the suffix is
   the called job's `name:` with `${{ inputs.* }}` expanded from the caller's
   `with:` block.
 - **Matrix jobs.** `version-matrix.yml` publishes one check-run per lane

@@ -1,5 +1,14 @@
 name: Reusable Quality
 
+# The original serial quality check name remains on a final compatibility job,
+# while eight fail-fast-independent shards expose every red gate in one run.
+# All profile/budget conditions stay on steps so every check name materializes;
+# the final `quality` job runs under `always()` and fails unless every shard
+# succeeded. This keeps the established `required / quality
+# (required/required)` branch-protection name meaningful while adding parallel
+# diagnostic checks. scripts/verify_required_local.py validates this exact job
+# graph before deriving the local Required projection.
+
 on:
   workflow_call:
     inputs:
@@ -32,10 +41,10 @@ env:
   CARGO_SEMVER_CHECKS_VERSION: "0.48.0"
 
 jobs:
-  quality:
-    name: quality (${{ inputs.profile }}/${{ inputs.budget }})
+  validate:
+    name: quality-validate (${{ inputs.profile }}/${{ inputs.budget }})
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 10
     steps:
       - name: Validate inputs
         shell: bash
@@ -58,40 +67,18 @@ jobs:
             exit 64
           fi
 
-      - name: Select budget
-        id: budget
-        shell: bash
-        run: |
-          set -euo pipefail
-          case "${{ inputs.budget }}" in
-            required)
-              echo "fuzz_seconds=0" >> "$GITHUB_OUTPUT"
-              echo "fuzz_target_cap=0" >> "$GITHUB_OUTPUT"
-              echo "package=false" >> "$GITHUB_OUTPUT"
-              ;;
-            canary)
-              echo "fuzz_seconds=30" >> "$GITHUB_OUTPUT"
-              echo "fuzz_target_cap=6" >> "$GITHUB_OUTPUT"
-              echo "package=false" >> "$GITHUB_OUTPUT"
-              ;;
-            soak)
-              echo "fuzz_seconds=120" >> "$GITHUB_OUTPUT"
-              echo "fuzz_target_cap=6" >> "$GITHUB_OUTPUT"
-              echo "package=false" >> "$GITHUB_OUTPUT"
-              ;;
-            release)
-              echo "fuzz_seconds=120" >> "$GITHUB_OUTPUT"
-              echo "fuzz_target_cap=0" >> "$GITHUB_OUTPUT"
-              echo "package=true" >> "$GITHUB_OUTPUT"
-              ;;
-          esac
-
       - name: Forced evidence failure
         if: ${{ inputs.force_failure }}
         run: |
           echo "force_failure requested for reporter verification"
           exit 1
 
+  core:
+    name: quality-core (${{ inputs.profile }}/${{ inputs.budget }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
@@ -114,15 +101,6 @@ jobs:
           git rev-parse HEAD
           rustc --version
           cargo --version
-
-      - name: Verify checked entry traces and release/evidence contracts
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/check_evidence_contract.sh
-          bash scripts/check_entry_trace_contract.sh --self-test
-          bash scripts/check_release_surface_versions.sh
-          bash scripts/check_ci_taxonomy.sh
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -150,31 +128,35 @@ jobs:
         if: ${{ inputs.profile != 'canary' }}
         run: cargo +stable test -p oracledb-protocol --locked
 
-      - name: Install cargo-hack
-        if: ${{ inputs.profile != 'canary' }}
-        run: cargo install cargo-hack --version "$CARGO_HACK_VERSION" --locked
+  contracts:
+    name: quality-contracts (${{ inputs.profile }}/${{ inputs.budget }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha != '' && inputs.candidate_sha || github.sha }}
 
-      - name: Feature profile matrix
-        if: ${{ inputs.profile != 'canary' }}
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
+
+      - name: Verify checked entry traces and release/evidence contracts
         shell: bash
         run: |
           set -euo pipefail
-          integration_features=chrono,uuid,serde_json,rust_decimal,arrow,soda
-          cargo check -p oracledb --locked --no-default-features
-          cargo check -p oracledb --locked
-          cargo check -p oracledb --locked --all-features
-          cargo hack check -p oracledb --locked \
-            --feature-powerset --depth 1 \
-            --include-features "$integration_features"
-          cargo hack test -p oracledb --locked --lib \
-            --feature-powerset --depth 1 \
-            --include-features "$integration_features"
-
-      - name: Validate release metadata
-        run: bash scripts/release_preflight.sh
-
-      - name: Inter-crate version-pin guard test
-        run: bash scripts/test_release_preflight_pins.sh
+          bash scripts/check_evidence_contract.sh
+          bash scripts/check_entry_trace_contract.sh --self-test
+          bash scripts/check_release_surface_versions.sh
+          bash scripts/check_ci_taxonomy.sh
 
       - name: Install baseline tools
         if: ${{ inputs.profile != 'canary' }}
@@ -228,22 +210,105 @@ jobs:
         if: ${{ inputs.profile != 'canary' }}
         run: bash scripts/gen_sbom.sh --check
 
+  features:
+    name: quality-features (${{ inputs.profile }}/${{ inputs.budget }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha != '' && inputs.candidate_sha || github.sha }}
+
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
+
+      - name: Install cargo-hack
+        if: ${{ inputs.profile != 'canary' }}
+        run: cargo install cargo-hack --version "$CARGO_HACK_VERSION" --locked
+
+      - name: Feature profile matrix
+        if: ${{ inputs.profile != 'canary' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          integration_features=chrono,uuid,serde_json,rust_decimal,arrow,soda
+          cargo check -p oracledb --locked --no-default-features
+          cargo check -p oracledb --locked
+          cargo check -p oracledb --locked --all-features
+          cargo hack check -p oracledb --locked \
+            --feature-powerset --depth 1 \
+            --include-features "$integration_features"
+          cargo hack test -p oracledb --locked --lib \
+            --feature-powerset --depth 1 \
+            --include-features "$integration_features"
+
+      - name: Validate release metadata
+        run: bash scripts/release_preflight.sh
+
+      - name: Inter-crate version-pin guard test
+        run: bash scripts/test_release_preflight_pins.sh
+
+  release-surface:
+    name: quality-release-surface (${{ inputs.profile }}/${{ inputs.budget }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Select budget
+        id: budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ inputs.budget }}" in
+            required)
+              echo "fuzz_seconds=0" >> "$GITHUB_OUTPUT"
+              echo "fuzz_target_cap=0" >> "$GITHUB_OUTPUT"
+              echo "package=false" >> "$GITHUB_OUTPUT"
+              ;;
+            canary)
+              echo "fuzz_seconds=30" >> "$GITHUB_OUTPUT"
+              echo "fuzz_target_cap=6" >> "$GITHUB_OUTPUT"
+              echo "package=false" >> "$GITHUB_OUTPUT"
+              ;;
+            soak)
+              echo "fuzz_seconds=120" >> "$GITHUB_OUTPUT"
+              echo "fuzz_target_cap=6" >> "$GITHUB_OUTPUT"
+              echo "package=false" >> "$GITHUB_OUTPUT"
+              ;;
+            release)
+              echo "fuzz_seconds=120" >> "$GITHUB_OUTPUT"
+              echo "fuzz_target_cap=0" >> "$GITHUB_OUTPUT"
+              echo "package=true" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha != '' && inputs.candidate_sha || github.sha }}
+
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
+
       - name: Standalone packaged-crate build
         if: ${{ inputs.profile == 'release-qualification' }}
         run: bash scripts/check_standalone_package.sh
-
-      - name: Musl binary size gate
-        if: ${{ inputs.profile == 'release-qualification' }}
-        shell: bash
-        env:
-          CC_x86_64_unknown_linux_musl: musl-gcc
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-        run: |
-          set -euo pipefail
-          rustup target add x86_64-unknown-linux-musl
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
-          bash scripts/check_musl_size.sh
 
       - name: Install cargo-semver-checks
         if: ${{ inputs.profile != 'canary' }}
@@ -267,13 +332,126 @@ jobs:
       - name: Supply-chain checks
         run: cargo deny check
 
+      - name: Package crates
+        if: ${{ steps.budget.outputs.package == 'true' }}
+        run: cargo package --workspace --exclude oracledb-pyshim --locked
+
+  musl:
+    name: quality-musl (${{ inputs.profile }}/${{ inputs.budget }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        if: ${{ inputs.profile == 'release-qualification' }}
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha != '' && inputs.candidate_sha || github.sha }}
+
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        if: ${{ inputs.profile == 'release-qualification' }}
+        with:
+          toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        if: ${{ inputs.profile == 'release-qualification' }}
+        with:
+          shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
+
+      - name: Musl binary size gate
+        if: ${{ inputs.profile == 'release-qualification' }}
+        shell: bash
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: |
+          set -euo pipefail
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          bash scripts/check_musl_size.sh
+
+  perf:
+    name: quality-perf (${{ inputs.profile }}/${{ inputs.budget }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        if: ${{ inputs.profile == 'soak' || inputs.profile == 'release-qualification' }}
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha != '' && inputs.candidate_sha || github.sha }}
+
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        if: ${{ inputs.profile == 'soak' || inputs.profile == 'release-qualification' }}
+        with:
+          toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        if: ${{ inputs.profile == 'soak' || inputs.profile == 'release-qualification' }}
+        with:
+          shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
+
       - name: Deterministic performance regression gate
         if: ${{ inputs.profile == 'soak' || inputs.profile == 'release-qualification' }}
         run: bash scripts/check_perf_regression.sh
 
-      - name: Package crates
-        if: ${{ steps.budget.outputs.package == 'true' }}
-        run: cargo package --workspace --exclude oracledb-pyshim --locked
+  fuzz:
+    name: quality-fuzz (${{ inputs.profile }}/${{ inputs.budget }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Select budget
+        id: budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ inputs.budget }}" in
+            required)
+              echo "fuzz_seconds=0" >> "$GITHUB_OUTPUT"
+              echo "fuzz_target_cap=0" >> "$GITHUB_OUTPUT"
+              echo "package=false" >> "$GITHUB_OUTPUT"
+              ;;
+            canary)
+              echo "fuzz_seconds=30" >> "$GITHUB_OUTPUT"
+              echo "fuzz_target_cap=6" >> "$GITHUB_OUTPUT"
+              echo "package=false" >> "$GITHUB_OUTPUT"
+              ;;
+            soak)
+              echo "fuzz_seconds=120" >> "$GITHUB_OUTPUT"
+              echo "fuzz_target_cap=6" >> "$GITHUB_OUTPUT"
+              echo "package=false" >> "$GITHUB_OUTPUT"
+              ;;
+            release)
+              echo "fuzz_seconds=120" >> "$GITHUB_OUTPUT"
+              echo "fuzz_target_cap=0" >> "$GITHUB_OUTPUT"
+              echo "package=true" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        if: ${{ steps.budget.outputs.fuzz_seconds != '0' }}
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha != '' && inputs.candidate_sha || github.sha }}
+
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        if: ${{ steps.budget.outputs.fuzz_seconds != '0' }}
+        with:
+          toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        if: ${{ steps.budget.outputs.fuzz_seconds != '0' }}
+        with:
+          shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
 
       - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
         if: ${{ steps.budget.outputs.fuzz_seconds != '0' }}
@@ -313,6 +491,8 @@ jobs:
             "$(( shard_index + 1 ))" "$shard_count" \
             "${#selected_targets[@]}" "${#all_targets[@]}" \
             "${{ steps.budget.outputs.fuzz_seconds }}"
+          # The backticks below are literal Markdown in the step summary.
+          # shellcheck disable=SC2016
           printf '### Fuzz shard\n\n- Shard: `%d/%d`\n- Targets: `%s`\n\n' \
             "$(( shard_index + 1 ))" "$shard_count" \
             "${selected_targets[*]}" >> "$GITHUB_STEP_SUMMARY"
@@ -323,3 +503,38 @@ jobs:
               -rss_limit_mb=2048 \
               -timeout=10
           done
+
+  quality:
+    name: quality (${{ inputs.profile }}/${{ inputs.budget }})
+    if: ${{ always() }}
+    needs: [validate, core, contracts, features, release-surface, musl, perf, fuzz]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Aggregate quality results
+        shell: bash
+        run: |
+          set -euo pipefail
+          results=(
+            "validate=${{ needs.validate.result }}"
+            "core=${{ needs.core.result }}"
+            "contracts=${{ needs.contracts.result }}"
+            "features=${{ needs.features.result }}"
+            "release-surface=${{ needs['release-surface'].result }}"
+            "musl=${{ needs.musl.result }}"
+            "perf=${{ needs.perf.result }}"
+            "fuzz=${{ needs.fuzz.result }}"
+          )
+          failed=0
+          for entry in "${results[@]}"; do
+            job="${entry%%=*}"
+            result="${entry#*=}"
+            printf '%s: %s\n' "$job" "$result"
+            if [[ "$result" != "success" ]]; then
+              failed=1
+            fi
+          done
+          if (( failed != 0 )); then
+            echo "one or more quality jobs did not succeed" >&2
+            exit 1
+          fi
