@@ -56,7 +56,46 @@
       "path_filtered": false
     },
     {
-      "check_name": "canary / quality-fuzz (canary/canary)",
+      "check_name": "canary / quality-fuzz (canary/canary) [shard 0]",
+      "tier": "scheduled",
+      "workflow": "Canary",
+      "workflow_file": "canary.yml",
+      "job_id": "canary",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "canary / quality-fuzz (canary/canary) [shard 1]",
+      "tier": "scheduled",
+      "workflow": "Canary",
+      "workflow_file": "canary.yml",
+      "job_id": "canary",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "canary / quality-fuzz (canary/canary) [shard 2]",
+      "tier": "scheduled",
+      "workflow": "Canary",
+      "workflow_file": "canary.yml",
+      "job_id": "canary",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "canary / quality-fuzz (canary/canary) [shard 3]",
       "tier": "scheduled",
       "workflow": "Canary",
       "workflow_file": "canary.yml",
@@ -275,17 +314,6 @@
       "path_filtered": false
     },
     {
-      "check_name": "prepare release qualification cache",
-      "tier": "manual",
-      "workflow": "Release Qualification",
-      "workflow_file": "release-qualification.yml",
-      "job_id": "prepare-release-qualification",
-      "triggers": [
-        "workflow_dispatch"
-      ],
-      "path_filtered": false
-    },
-    {
       "check_name": "release-qualification / quality (release-qualification/release)",
       "tier": "manual",
       "workflow": "Release Qualification",
@@ -334,7 +362,43 @@
       "path_filtered": false
     },
     {
-      "check_name": "release-qualification / quality-fuzz (release-qualification/release)",
+      "check_name": "release-qualification / quality-fuzz (release-qualification/release) [shard 0]",
+      "tier": "manual",
+      "workflow": "Release Qualification",
+      "workflow_file": "release-qualification.yml",
+      "job_id": "release-qualification",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "release-qualification / quality-fuzz (release-qualification/release) [shard 1]",
+      "tier": "manual",
+      "workflow": "Release Qualification",
+      "workflow_file": "release-qualification.yml",
+      "job_id": "release-qualification",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "release-qualification / quality-fuzz (release-qualification/release) [shard 2]",
+      "tier": "manual",
+      "workflow": "Release Qualification",
+      "workflow_file": "release-qualification.yml",
+      "job_id": "release-qualification",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "release-qualification / quality-fuzz (release-qualification/release) [shard 3]",
       "tier": "manual",
       "workflow": "Release Qualification",
       "workflow_file": "release-qualification.yml",
@@ -505,7 +569,46 @@
       "path_filtered": false
     },
     {
-      "check_name": "required / quality-fuzz (required/required)",
+      "check_name": "required / quality-fuzz (required/required) [shard 0]",
+      "tier": "required",
+      "workflow": "Required",
+      "workflow_file": "required.yml",
+      "job_id": "required",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "pull_request",
+        "push"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "required / quality-fuzz (required/required) [shard 1]",
+      "tier": "required",
+      "workflow": "Required",
+      "workflow_file": "required.yml",
+      "job_id": "required",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "pull_request",
+        "push"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "required / quality-fuzz (required/required) [shard 2]",
+      "tier": "required",
+      "workflow": "Required",
+      "workflow_file": "required.yml",
+      "job_id": "required",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "pull_request",
+        "push"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "required / quality-fuzz (required/required) [shard 3]",
       "tier": "required",
       "workflow": "Required",
       "workflow_file": "required.yml",
@@ -634,7 +737,46 @@
       "path_filtered": false
     },
     {
-      "check_name": "soak / quality-fuzz (soak/soak)",
+      "check_name": "soak / quality-fuzz (soak/soak) [shard 0]",
+      "tier": "scheduled",
+      "workflow": "Soak",
+      "workflow_file": "soak.yml",
+      "job_id": "soak",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "soak / quality-fuzz (soak/soak) [shard 1]",
+      "tier": "scheduled",
+      "workflow": "Soak",
+      "workflow_file": "soak.yml",
+      "job_id": "soak",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "soak / quality-fuzz (soak/soak) [shard 2]",
+      "tier": "scheduled",
+      "workflow": "Soak",
+      "workflow_file": "soak.yml",
+      "job_id": "soak",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "soak / quality-fuzz (soak/soak) [shard 3]",
       "tier": "scheduled",
       "workflow": "Soak",
       "workflow_file": "soak.yml",
@@ -775,7 +917,10 @@
         "canary / quality-contracts (canary/canary)",
         "canary / quality-core (canary/canary)",
         "canary / quality-features (canary/canary)",
-        "canary / quality-fuzz (canary/canary)",
+        "canary / quality-fuzz (canary/canary) [shard 0]",
+        "canary / quality-fuzz (canary/canary) [shard 1]",
+        "canary / quality-fuzz (canary/canary) [shard 2]",
+        "canary / quality-fuzz (canary/canary) [shard 3]",
         "canary / quality-musl (canary/canary)",
         "canary / quality-perf (canary/canary)",
         "canary / quality-release-surface (canary/canary)",
@@ -819,12 +964,14 @@
       "jobs": [
         "emit exact required proof",
         "emit exact version-matrix evidence",
-        "prepare release qualification cache",
         "release-qualification / quality (release-qualification/release)",
         "release-qualification / quality-contracts (release-qualification/release)",
         "release-qualification / quality-core (release-qualification/release)",
         "release-qualification / quality-features (release-qualification/release)",
-        "release-qualification / quality-fuzz (release-qualification/release)",
+        "release-qualification / quality-fuzz (release-qualification/release) [shard 0]",
+        "release-qualification / quality-fuzz (release-qualification/release) [shard 1]",
+        "release-qualification / quality-fuzz (release-qualification/release) [shard 2]",
+        "release-qualification / quality-fuzz (release-qualification/release) [shard 3]",
         "release-qualification / quality-musl (release-qualification/release)",
         "release-qualification / quality-perf (release-qualification/release)",
         "release-qualification / quality-release-surface (release-qualification/release)",
@@ -856,7 +1003,10 @@
         "required / quality-contracts (required/required)",
         "required / quality-core (required/required)",
         "required / quality-features (required/required)",
-        "required / quality-fuzz (required/required)",
+        "required / quality-fuzz (required/required) [shard 0]",
+        "required / quality-fuzz (required/required) [shard 1]",
+        "required / quality-fuzz (required/required) [shard 2]",
+        "required / quality-fuzz (required/required) [shard 3]",
         "required / quality-musl (required/required)",
         "required / quality-perf (required/required)",
         "required / quality-release-surface (required/required)",
@@ -875,7 +1025,10 @@
         "soak / quality-contracts (soak/soak)",
         "soak / quality-core (soak/soak)",
         "soak / quality-features (soak/soak)",
-        "soak / quality-fuzz (soak/soak)",
+        "soak / quality-fuzz (soak/soak) [shard 0]",
+        "soak / quality-fuzz (soak/soak) [shard 1]",
+        "soak / quality-fuzz (soak/soak) [shard 2]",
+        "soak / quality-fuzz (soak/soak) [shard 3]",
         "soak / quality-musl (soak/soak)",
         "soak / quality-perf (soak/soak)",
         "soak / quality-release-surface (soak/soak)",
@@ -915,12 +1068,14 @@
     "manual": [
       "emit exact required proof",
       "emit exact version-matrix evidence",
-      "prepare release qualification cache",
       "release-qualification / quality (release-qualification/release)",
       "release-qualification / quality-contracts (release-qualification/release)",
       "release-qualification / quality-core (release-qualification/release)",
       "release-qualification / quality-features (release-qualification/release)",
-      "release-qualification / quality-fuzz (release-qualification/release)",
+      "release-qualification / quality-fuzz (release-qualification/release) [shard 0]",
+      "release-qualification / quality-fuzz (release-qualification/release) [shard 1]",
+      "release-qualification / quality-fuzz (release-qualification/release) [shard 2]",
+      "release-qualification / quality-fuzz (release-qualification/release) [shard 3]",
       "release-qualification / quality-musl (release-qualification/release)",
       "release-qualification / quality-perf (release-qualification/release)",
       "release-qualification / quality-release-surface (release-qualification/release)",
@@ -945,7 +1100,10 @@
       "required / quality-contracts (required/required)",
       "required / quality-core (required/required)",
       "required / quality-features (required/required)",
-      "required / quality-fuzz (required/required)",
+      "required / quality-fuzz (required/required) [shard 0]",
+      "required / quality-fuzz (required/required) [shard 1]",
+      "required / quality-fuzz (required/required) [shard 2]",
+      "required / quality-fuzz (required/required) [shard 3]",
       "required / quality-musl (required/required)",
       "required / quality-perf (required/required)",
       "required / quality-release-surface (required/required)",
@@ -961,7 +1119,10 @@
       "canary / quality-contracts (canary/canary)",
       "canary / quality-core (canary/canary)",
       "canary / quality-features (canary/canary)",
-      "canary / quality-fuzz (canary/canary)",
+      "canary / quality-fuzz (canary/canary) [shard 0]",
+      "canary / quality-fuzz (canary/canary) [shard 1]",
+      "canary / quality-fuzz (canary/canary) [shard 2]",
+      "canary / quality-fuzz (canary/canary) [shard 3]",
       "canary / quality-musl (canary/canary)",
       "canary / quality-perf (canary/canary)",
       "canary / quality-release-surface (canary/canary)",
@@ -973,7 +1134,10 @@
       "soak / quality-contracts (soak/soak)",
       "soak / quality-core (soak/soak)",
       "soak / quality-features (soak/soak)",
-      "soak / quality-fuzz (soak/soak)",
+      "soak / quality-fuzz (soak/soak) [shard 0]",
+      "soak / quality-fuzz (soak/soak) [shard 1]",
+      "soak / quality-fuzz (soak/soak) [shard 2]",
+      "soak / quality-fuzz (soak/soak) [shard 3]",
       "soak / quality-musl (soak/soak)",
       "soak / quality-perf (soak/soak)",
       "soak / quality-release-surface (soak/soak)",

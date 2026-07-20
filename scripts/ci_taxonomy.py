@@ -188,21 +188,28 @@ def derive() -> dict:
                 for sub_id, sub_job in (sub.get("jobs") or {}).items():
                     if not isinstance(sub_job, dict):
                         continue
-                    sub_name = _expand(str(sub_job.get("name", sub_id)), inputs)
-                    jobs.append(
-                        {
-                            "check_name": _assert_resolved(
-                                f"{job_id} / {sub_name}", f"{path.name}:{job_id}"
-                            ),
-                            "tier": _tier(sub_job, triggers),
-                            "workflow": str(workflow.get("name", path.stem)),
-                            "workflow_file": path.name,
-                            "job_id": job_id,
-                            "reusable_from": sub_path.name,
-                            "triggers": trigger_names,
-                            "path_filtered": bool(paths),
-                        }
-                    )
+                    sub_name_template = _expand(str(sub_job.get("name", sub_id)), inputs)
+                    # Reusable matrix jobs still publish one check-run per
+                    # concrete combination. Expand the called workflow's
+                    # matrix after substituting the caller inputs so no
+                    # impossible `${{ matrix.* }}` template reaches the
+                    # checked taxonomy.
+                    for combo in _matrix_combos(sub_job):
+                        sub_name = _expand_matrix(sub_name_template, combo)
+                        jobs.append(
+                            {
+                                "check_name": _assert_resolved(
+                                    f"{job_id} / {sub_name}", f"{path.name}:{job_id}"
+                                ),
+                                "tier": _tier(sub_job, triggers),
+                                "workflow": str(workflow.get("name", path.stem)),
+                                "workflow_file": path.name,
+                                "job_id": job_id,
+                                "reusable_from": sub_path.name,
+                                "triggers": trigger_names,
+                                "path_filtered": bool(paths),
+                            }
+                        )
                 continue
 
             # One check-run per matrix combination; [{}] when there is no matrix.

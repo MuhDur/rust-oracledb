@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       mode:
-        description: "Prep warms the exact-SHA cache and tools; strict performs qualification and emits proof."
+        description: "Prep runs every gate and aggregates all failures without qualification proof; strict hard-fails and emits exact-SHA evidence."
         required: true
         default: strict
         type: choice
@@ -20,71 +20,18 @@ permissions:
   contents: read
   actions: write
 
-env:
-  CARGO_PUBLIC_API_VERSION: "0.52.0"
-  CARGO_HACK_VERSION: "0.6.45"
-  CARGO_SEMVER_CHECKS_VERSION: "0.48.0"
-
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.mode }}-${{ inputs.candidate_sha }}
   cancel-in-progress: false
 
 jobs:
-  prepare-release-qualification:
-    name: prepare release qualification cache
-    if: ${{ inputs.mode == 'prep' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ inputs.candidate_sha }}
-      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
-        with:
-          toolchain: nightly-2026-05-11
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
-        with:
-          shared-key: release-qualification
-      - name: Assert exact candidate checkout
-        env:
-          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-        run: test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
-      - name: Warm dependency and tool caches
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup toolchain install stable --profile minimal
-          cargo fetch --locked
-          cargo install cargo-hack --version "$CARGO_HACK_VERSION" --locked
-          cargo install cargo-public-api --version "$CARGO_PUBLIC_API_VERSION" --locked
-          cargo install cargo-semver-checks --version "$CARGO_SEMVER_CHECKS_VERSION" --locked
-          cargo check --workspace --exclude oracledb-pyshim --locked
-      - uses: taiki-e/install-action@6385177bd1684e175e09301c9ee3ae18c14a367e # cargo-deny
-      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
-        with:
-          tool: cargo-fuzz
-      - name: Record prep-only result
-        env:
-          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-        run: |
-          {
-            echo "### Release-qualification prep"
-            echo
-            echo "- Candidate: \`$CANDIDATE_SHA\`"
-            echo "- Shared cache: \`release-qualification\`"
-            echo "- Result: cache and tools warmed; no qualification proof emitted"
-          } >> "$GITHUB_STEP_SUMMARY"
-
   release-qualification:
-    if: ${{ inputs.mode == 'strict' }}
     uses: ./.github/workflows/_quality.yml
     with:
       profile: release-qualification
       budget: release
       candidate_sha: ${{ inputs.candidate_sha }}
+      mode: ${{ inputs.mode }}
 
   emit-required-proof:
     name: emit exact required proof

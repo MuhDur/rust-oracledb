@@ -39,7 +39,7 @@ without being classified, and a required job cannot quietly become advisory.
 | `release` | only fires on a release tag (`push: tags:`) | no |
 | `manual` | only `workflow_dispatch` | no |
 
-Current: 12 required, 2 advisory, 6 scheduled, 4 release, 5 manual (29 jobs).
+Current: 23 required, 2 advisory, 28 scheduled, 4 release, 15 manual (72 jobs).
 The authoritative list is [`ci_taxonomy.json`](ci_taxonomy.json). `workflows` and
 `groups` in that file are **derived views** over `jobs[]`, which stays the single
 place a tier is recorded, so a view cannot disagree with it.
@@ -97,8 +97,9 @@ non-trivial, and all three are handled:
   the called job's `name:` with `${{ inputs.* }}` expanded from the caller's
   `with:` block.
 - **Matrix jobs.** `version-matrix.yml` publishes one check-run per lane
-  (`xe18 full suite`, …), so the taxonomy expands `${{ matrix.lane.name }}` into
-  the concrete combinations.
+  (`xe18 full suite`, …), and the reusable quality workflow publishes four
+  concrete fuzz-shard checks per caller. The taxonomy expands both direct and
+  reusable `${{ matrix.* }}` names into their concrete combinations.
 
 If the deriver meets an expression it cannot expand, it **refuses to emit the
 name** rather than shipping one that could never match. A name that never matches

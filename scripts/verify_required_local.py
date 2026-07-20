@@ -22,14 +22,27 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 QUALITY_WORKFLOW = ROOT / ".github/workflows/_quality.yml"
+RELEASE_QUALIFICATION_WORKFLOW = ROOT / ".github/workflows/release-qualification.yml"
 RESOURCE_BUDGET = ROOT / "scripts/resource_budget.sh"
 VALIDATOR = ROOT / "scripts/validate_evidence.py"
 
+PREP_CONTINUE = "${{ inputs.mode == 'prep' }}"
+PREP_ALWAYS = "${{ always() && inputs.mode == 'prep' }}"
+STRICT_ONLY = "${{ inputs.mode == 'strict' }}"
+FUZZ_STRATEGY = (
+    "fail-fast: false",
+    "matrix:",
+    "  shard: [0, 1, 2, 3]",
+)
 META_STEPS = {
     "Aggregate quality results",
+    "Aggregate prep outcomes",
+    "Download prep outcomes",
     "Validate inputs",
     "Select budget",
     "Forced evidence failure",
+    "Record prep outcomes",
+    "Upload prep outcomes",
     "Show selected target",
 }
 ALLOWED_ACTION_PREFIXES = (
@@ -37,6 +50,8 @@ ALLOWED_ACTION_PREFIXES = (
     "dtolnay/rust-toolchain@",
     "Swatinem/rust-cache@",
     "taiki-e/install-action@",
+    "actions/download-artifact@",
+    "actions/upload-artifact@",
 )
 CONDITIONS = {
     "": True,
@@ -46,6 +61,9 @@ CONDITIONS = {
     "${{ inputs.profile == 'soak' || inputs.profile == 'release-qualification' }}": False,
     "${{ steps.budget.outputs.package == 'true' }}": False,
     "${{ steps.budget.outputs.fuzz_seconds != '0' }}": False,
+    PREP_ALWAYS: False,
+    PREP_CONTINUE: False,
+    STRICT_ONLY: True,
 }
 FANOUT_JOBS = (
     "validate",
@@ -59,6 +77,41 @@ FANOUT_JOBS = (
 )
 AGGREGATE_JOB = "quality"
 AGGREGATE_CONDITION = "${{ always() }}"
+EXPECTED_QUALITY_COMMANDS = (
+    "Format",
+    "Clippy",
+    "Test workspace",
+    "Test cassette replay",
+    "Test docs",
+    "Build docs",
+    "Install stable Rust",
+    "Stable protocol tests",
+    "Verify checked entry traces and release/evidence contracts",
+    "Install baseline tools",
+    "Install cargo-public-api",
+    "Baseline drift check",
+    "API ledger coverage",
+    "Single public path per type",
+    "Async/blocking coverage",
+    "Connect-trace secret exclusion",
+    "Confidentiality secret scan (C4)",
+    "Pin clean-room reference checkout",
+    "Reference version-gate parity coverage",
+    "Reference version-gate boundary-test coverage",
+    "Provenance artifacts drift check (SBOM + dep/action inventory)",
+    "Install cargo-hack",
+    "Feature profile matrix",
+    "Validate release metadata",
+    "Inter-crate version-pin guard test",
+    "Standalone packaged-crate build",
+    "Install cargo-semver-checks",
+    "SemVer advisory checks",
+    "Supply-chain checks",
+    "Package crates",
+    "Musl binary size gate",
+    "Deterministic performance regression gate",
+    "Fuzz targets (bounded shard)",
+)
 
 
 class ContractError(RuntimeError):
@@ -75,6 +128,8 @@ class Step:
     shell: str | None = None
     working_directory: str | None = None
     has_environment: bool = False
+    identifier: str = ""
+    continue_on_error: str = ""
 
 
 @dataclass
@@ -84,6 +139,7 @@ class Job:
     condition: str = ""
     needs: tuple[str, ...] = ()
     step_count: int = 0
+    strategy: tuple[str, ...] = ()
 
 
 @dataclass
@@ -136,6 +192,8 @@ def parse_quality_workflow(text: str) -> QualityWorkflow:
     run_lines: list[str] = []
     in_jobs = False
     in_steps = False
+    in_strategy = False
+    strategy_lines: list[str] = []
 
     def finish_current() -> None:
         nonlocal current, collecting_run, run_lines
@@ -148,6 +206,15 @@ def parse_quality_workflow(text: str) -> QualityWorkflow:
         collecting_run = False
         run_lines = []
 
+    def finish_strategy() -> None:
+        nonlocal in_strategy, strategy_lines
+        if in_strategy:
+            if current_job is None:
+                raise ContractError("strategy appeared outside a quality job")
+            current_job.strategy = tuple(strategy_lines)
+        in_strategy = False
+        strategy_lines = []
+
     for raw in text.splitlines():
         if raw == "jobs:":
             in_jobs = True
@@ -156,6 +223,7 @@ def parse_quality_workflow(text: str) -> QualityWorkflow:
             continue
         if raw and not raw.startswith(" "):
             finish_current()
+            finish_strategy()
             in_jobs = False
             in_steps = False
             current_job = None
@@ -164,6 +232,7 @@ def parse_quality_workflow(text: str) -> QualityWorkflow:
         job_start = re.match(r"^  (?P<job>[A-Za-z0-9_-]+):\s*$", raw)
         if job_start:
             finish_current()
+            finish_strategy()
             in_steps = False
             identifier = job_start.group("job")
             if identifier in jobs:
@@ -171,6 +240,12 @@ def parse_quality_workflow(text: str) -> QualityWorkflow:
             current_job = Job(identifier=identifier)
             jobs[identifier] = current_job
             continue
+
+        if in_strategy:
+            if raw.startswith("      "):
+                strategy_lines.append(raw[6:])
+                continue
+            finish_strategy()
 
         if in_steps and raw and not raw.startswith("      "):
             finish_current()
@@ -196,6 +271,12 @@ def parse_quality_workflow(text: str) -> QualityWorkflow:
                         f"job {current_job.identifier!r}: unsupported steps shape {raw.strip()!r}"
                     )
                 in_steps = True
+            elif key == "strategy":
+                if value:
+                    raise ContractError(
+                        f"job {current_job.identifier!r}: inline strategy is unsupported"
+                    )
+                in_strategy = True
             elif key in ("runs-on", "timeout-minutes"):
                 if not value:
                     raise ContractError(f"job {current_job.identifier!r}: empty {key!r}")
@@ -231,7 +312,7 @@ def parse_quality_workflow(text: str) -> QualityWorkflow:
             run_lines = []
 
         field = re.match(
-            r"^        (?P<key>name|if|uses|run|shell|working-directory|env|id|with):(?P<value>.*)$",
+            r"^        (?P<key>name|if|uses|run|shell|working-directory|env|id|with|continue-on-error):(?P<value>.*)$",
             raw,
         )
         if not field:
@@ -260,7 +341,12 @@ def parse_quality_workflow(text: str) -> QualityWorkflow:
             current.working_directory = value
         elif key == "env":
             current.has_environment = True
+        elif key == "id":
+            current.identifier = value
+        elif key == "continue-on-error":
+            current.continue_on_error = value
     finish_current()
+    finish_strategy()
     if not steps:
         raise ContractError("could not find any jobs.<id>.steps in _quality.yml")
     return QualityWorkflow(jobs=jobs, steps=steps)
@@ -285,6 +371,8 @@ def validate_quality_job_graph(workflow: QualityWorkflow) -> None:
     for identifier in FANOUT_JOBS:
         job = workflow.jobs[identifier]
         expected_name = f"quality-{identifier} (${{{{ inputs.profile }}}}/${{{{ inputs.budget }}}})"
+        if identifier == "fuzz":
+            expected_name += " [shard ${{ matrix.shard }}]"
         if job.name != expected_name:
             raise ContractError(
                 f"job {identifier!r}: stable check name changed from {expected_name!r} to {job.name!r}"
@@ -300,6 +388,79 @@ def validate_quality_job_graph(workflow: QualityWorkflow) -> None:
             )
         if job.step_count == 0:
             raise ContractError(f"job {identifier!r}: quality shard has no steps")
+        expected_strategy = FUZZ_STRATEGY if identifier == "fuzz" else ()
+        if job.strategy != expected_strategy:
+            raise ContractError(
+                f"job {identifier!r}: strategy must be {expected_strategy!r}, got {job.strategy!r}"
+            )
+
+    fanout_steps = [step for step in workflow.steps if step.job in FANOUT_JOBS]
+    for step in fanout_steps:
+        if step.name in ("Record prep outcomes", "Upload prep outcomes"):
+            if step.condition != PREP_ALWAYS:
+                raise ContractError(f"{step.job}/{step.name}: prep reporter condition drifted")
+            if step.continue_on_error:
+                raise ContractError(f"{step.job}/{step.name}: prep reporter must fail hard")
+            continue
+        if step.continue_on_error != PREP_CONTINUE:
+            raise ContractError(
+                f"{step.job}/{step.name}: every prep prerequisite and gate must continue on error"
+            )
+
+    gate_steps = [
+        step
+        for step in fanout_steps
+        if step.uses is None and step.name not in META_STEPS
+    ]
+    actual_gate_names = tuple(step.name for step in gate_steps)
+    if actual_gate_names != EXPECTED_QUALITY_COMMANDS:
+        raise ContractError(
+            "quality command inventory drift: "
+            f"expected {EXPECTED_QUALITY_COMMANDS!r}, got {actual_gate_names!r}"
+        )
+    missing_gate_ids = [step.name for step in gate_steps if not step.identifier]
+    if missing_gate_ids:
+        raise ContractError(f"quality commands missing outcome ids: {missing_gate_ids!r}")
+
+    for identifier in FANOUT_JOBS:
+        job_steps = [step for step in fanout_steps if step.job == identifier]
+        reporters = [step for step in job_steps if step.name == "Record prep outcomes"]
+        uploads = [step for step in job_steps if step.name == "Upload prep outcomes"]
+        if len(reporters) != 1 or len(uploads) != 1:
+            raise ContractError(f"job {identifier!r}: prep outcomes require one recorder and one upload")
+        expected_ids = tuple(
+            step.identifier
+            for step in gate_steps
+            if step.job == identifier
+        )
+        if identifier == "validate":
+            expected_ids = ("validate_inputs",)
+        recorded_ids = tuple(
+            re.findall(r"\$\{\{ steps\.([A-Za-z0-9_-]+)\.outcome \}\}", reporters[0].run or "")
+        )
+        if recorded_ids != expected_ids:
+            raise ContractError(
+                f"job {identifier!r}: prep outcome inventory must be {expected_ids!r}, "
+                f"got {recorded_ids!r}"
+            )
+
+    fuzz_step = next(step for step in gate_steps if step.job == "fuzz")
+    fuzz_run = fuzz_step.run or ""
+    required_fuzz_tokens = (
+        'shard_count=4',
+        'shard_index="${{ matrix.shard }}"',
+        "target_index % shard_count == shard_index",
+        '-max_total_time="${{ steps.budget.outputs.fuzz_seconds }}"',
+    )
+    missing_fuzz_tokens = [token for token in required_fuzz_tokens if token not in fuzz_run]
+    forbidden_fuzz_tokens = [
+        token for token in ("GITHUB_RUN_NUMBER", "fuzz_target_cap", "target_cap") if token in fuzz_run
+    ]
+    if missing_fuzz_tokens or forbidden_fuzz_tokens:
+        raise ContractError(
+            "fuzz shard is not the exact four-way round-robin contract"
+            f"; missing={missing_fuzz_tokens!r}; forbidden={forbidden_fuzz_tokens!r}"
+        )
 
     aggregate = workflow.jobs[AGGREGATE_JOB]
     stable_name = "quality (${{ inputs.profile }}/${{ inputs.budget }})"
@@ -317,9 +478,18 @@ def validate_quality_job_graph(workflow: QualityWorkflow) -> None:
         )
 
     aggregate_steps = [step for step in workflow.steps if step.job == AGGREGATE_JOB]
-    if len(aggregate_steps) != 1 or aggregate_steps[0].name != "Aggregate quality results":
-        raise ContractError("aggregate job must contain only the classified result-check step")
-    aggregate_run = aggregate_steps[0].run or ""
+    if tuple(step.name for step in aggregate_steps) != (
+        "Aggregate quality results",
+        "Download prep outcomes",
+        "Aggregate prep outcomes",
+    ):
+        raise ContractError("aggregate job must contain the strict check and prep result collector")
+    strict_step, download_step, prep_step = aggregate_steps
+    if strict_step.condition != STRICT_ONLY:
+        raise ContractError("strict aggregate result check must be strict-only")
+    if download_step.condition != PREP_CONTINUE or prep_step.condition != PREP_CONTINUE:
+        raise ContractError("prep aggregation steps must be prep-only")
+    aggregate_run = strict_step.run or ""
     result_tokens = {
         "release-surface": "${{ needs['release-surface'].result }}",
         **{
@@ -337,11 +507,90 @@ def validate_quality_job_graph(workflow: QualityWorkflow) -> None:
             + (f": missing {missing_tokens}" if missing_tokens else "")
         )
 
+    prep_run = prep_step.run or ""
+    prep_tokens = (
+        "validate core contracts features release-surface musl perf",
+        "fuzz-0 fuzz-1 fuzz-2 fuzz-3",
+        "Prep diagnostics only; no qualification proof or release evidence was emitted.",
+        'if [[ "$outcome" != "success" ]]',
+        "exit 1",
+    )
+    missing_prep_tokens = [token for token in prep_tokens if token not in prep_run]
+    if missing_prep_tokens:
+        raise ContractError(f"prep aggregate is incomplete: missing {missing_prep_tokens!r}")
+
+
+def validate_d4_workflow_text(text: str) -> None:
+    """Pin D4 details that live inside action inputs rather than the YAML subset."""
+
+    fuzz_match = re.search(r"^  fuzz:\n(?P<body>.*?)(?=^  quality:\n)", text, re.MULTILINE | re.DOTALL)
+    if fuzz_match is None:
+        raise ContractError("could not isolate the fuzz quality job")
+    fuzz = fuzz_match.group("body")
+    cache_contract = (
+        "          workspaces: |\n"
+        "            . -> target\n"
+        "            crates/oracledb-protocol/fuzz -> target\n"
+    )
+    if cache_contract not in fuzz:
+        raise ContractError("fuzz rust-cache must include the standalone fuzz workspace target")
+    if 'echo "fuzz_seconds=120"' not in fuzz:
+        raise ContractError("fuzz release budget must retain 120 seconds per target")
+    if any(token in fuzz for token in ("fuzz_target_cap", "GITHUB_RUN_NUMBER")):
+        raise ContractError("fuzz workflow retained the serial/rotating target-cap implementation")
+
+
+def validate_release_qualification_workflow(text: str) -> None:
+    """Prove prep executes the shared graph while strict alone may emit proof."""
+
+    required = (
+        "          - strict\n          - prep",
+        "  release-qualification:\n"
+        "    uses: ./.github/workflows/_quality.yml\n"
+        "    with:\n"
+        "      profile: release-qualification\n"
+        "      budget: release\n"
+        "      candidate_sha: ${{ inputs.candidate_sha }}\n"
+        "      mode: ${{ inputs.mode }}",
+        "if: ${{ inputs.mode == 'strict' && needs.release-qualification.result == 'success' }}",
+        "if: ${{ always() && inputs.mode == 'strict'",
+    )
+    missing = [token for token in required if token not in text]
+    if missing:
+        raise ContractError(f"release qualification prep/strict contract drift: missing {missing!r}")
+    forbidden = (
+        "prepare-release-qualification:",
+        "Warm dependency and tool caches",
+        "if: ${{ inputs.mode == 'prep' }}\n    uses: ./.github/workflows/_quality.yml",
+    )
+    present = [token for token in forbidden if token in text]
+    if present:
+        raise ContractError(f"release qualification retained a warm-only or prep-only call: {present!r}")
+
+    upload_count = 0
+    for job_name in ("emit-required-proof", "emit-version-matrix"):
+        job_match = re.search(
+            rf"^  {job_name}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            text,
+            re.MULTILINE | re.DOTALL,
+        )
+        if job_match is None:
+            raise ContractError(f"missing strict evidence job {job_name!r}")
+        job_body = job_match.group("body")
+        if "inputs.mode == 'strict'" not in job_body:
+            raise ContractError(f"{job_name}: evidence upload is reachable from prep mode")
+        upload_count += job_body.count("uses: actions/upload-artifact@")
+    if upload_count != 2:
+        raise ContractError("release qualification must have exactly two strict evidence uploads")
+
 
 def effective_plan(workflow: Path = QUALITY_WORKFLOW) -> list[dict[str, object]]:
     entries: list[dict[str, object]] = []
-    parsed = parse_quality_workflow(workflow.read_text())
+    workflow_text = workflow.read_text()
+    parsed = parse_quality_workflow(workflow_text)
     validate_quality_job_graph(parsed)
+    validate_d4_workflow_text(workflow_text)
+    validate_release_qualification_workflow(RELEASE_QUALIFICATION_WORKFLOW.read_text())
     for step in parsed.steps:
         if step.condition not in CONDITIONS:
             raise ContractError(f"{step.name}: unclassified condition {step.condition!r}")
@@ -593,27 +842,44 @@ def self_test() -> None:
     else:
         raise AssertionError("unknown setup actions must fail closed")
 
-    parsed = parse_quality_workflow(QUALITY_WORKFLOW.read_text())
+    quality_text = QUALITY_WORKFLOW.read_text()
+    rq_text = RELEASE_QUALIFICATION_WORKFLOW.read_text()
+    parsed = parse_quality_workflow(quality_text)
     validate_quality_job_graph(parsed)
+    validate_d4_workflow_text(quality_text)
+    validate_release_qualification_workflow(rq_text)
     assert tuple(parsed.jobs) == (*FANOUT_JOBS, AGGREGATE_JOB)
     assert parsed.jobs[AGGREGATE_JOB].needs == FANOUT_JOBS
-
-    job_level_strategy = (
-        "jobs:\n"
-        "  core:\n"
-        "    strategy:\n"
-        "      matrix:\n"
-        "        shard: [0, 1]\n"
-        "    steps:\n"
-        "      - name: Format\n"
-        "        run: cargo fmt --all -- --check\n"
+    parsed_gate_names = tuple(
+        step.name
+        for step in parsed.steps
+        if step.job in FANOUT_JOBS and step.uses is None and step.name not in META_STEPS
     )
+    assert parsed_gate_names == EXPECTED_QUALITY_COMMANDS
+    assert len(parsed_gate_names) == 33
+
+    strategy_on_core = parse_quality_workflow(quality_text)
+    strategy_on_core.jobs["core"].strategy = FUZZ_STRATEGY
     try:
-        parse_quality_workflow(job_level_strategy)
+        validate_quality_job_graph(strategy_on_core)
     except ContractError as exc:
-        assert "unsupported job-level field 'strategy'" in str(exc), exc
+        assert "job 'core': strategy must be" in str(exc), exc
     else:
-        raise AssertionError("job-level strategy must fail closed")
+        raise AssertionError("a matrix outside the fuzz job must fail closed")
+
+    for broken_strategy in (
+        ("fail-fast: true", "matrix:", "  shard: [0, 1, 2, 3]"),
+        ("fail-fast: false", "matrix:", "  shard: [0, 1]"),
+        (*FUZZ_STRATEGY, "  os: [ubuntu-latest]"),
+    ):
+        broken_fuzz = parse_quality_workflow(quality_text)
+        broken_fuzz.jobs["fuzz"].strategy = broken_strategy
+        try:
+            validate_quality_job_graph(broken_fuzz)
+        except ContractError as exc:
+            assert "job 'fuzz': strategy must be" in str(exc), exc
+        else:
+            raise AssertionError(f"fuzz strategy {broken_strategy!r} must fail closed")
 
     broken_condition = parse_quality_workflow(QUALITY_WORKFLOW.read_text())
     broken_condition.jobs["core"].condition = "${{ inputs.profile != 'canary' }}"
@@ -642,6 +908,48 @@ def self_test() -> None:
         assert "does not fail closed" in str(exc), exc
     else:
         raise AssertionError("a non-failing aggregate result step must fail closed")
+
+    for broken_text, expected_error in (
+        (
+            quality_text.replace("            crates/oracledb-protocol/fuzz -> target\n", "", 1),
+            "standalone fuzz workspace target",
+        ),
+        (
+            quality_text.replace('shard_index="${{ matrix.shard }}"', "shard_index=$GITHUB_RUN_NUMBER", 1),
+            "four-way round-robin contract",
+        ),
+        (
+            quality_text.replace("${{ steps.format.outcome }}", "${{ steps.clippy.outcome }}", 1),
+            "prep outcome inventory",
+        ),
+        (
+            quality_text.replace("continue-on-error: ${{ inputs.mode == 'prep' }}", "continue-on-error: false", 1),
+            "must continue on error",
+        ),
+    ):
+        try:
+            broken_parsed = parse_quality_workflow(broken_text)
+            validate_quality_job_graph(broken_parsed)
+            validate_d4_workflow_text(broken_text)
+        except ContractError as exc:
+            assert expected_error in str(exc), exc
+        else:
+            raise AssertionError(f"{expected_error!r} must fail closed")
+
+    for broken_rq in (
+        rq_text.replace("      mode: ${{ inputs.mode }}", "      mode: strict", 1),
+        rq_text.replace(
+            "if: ${{ inputs.mode == 'strict' && needs.release-qualification.result == 'success' }}",
+            "if: ${{ needs.release-qualification.result == 'success' }}",
+            1,
+        ),
+    ):
+        try:
+            validate_release_qualification_workflow(broken_rq)
+        except ContractError:
+            pass
+        else:
+            raise AssertionError("prep must never skip the shared graph or reach strict evidence")
 
     test_plan: list[dict[str, object]] = [
         {

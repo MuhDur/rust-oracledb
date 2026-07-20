@@ -30,6 +30,11 @@ on:
         required: false
         default: false
         type: boolean
+      mode:
+        description: "Strict fails immediately within a gate; prep runs every gate and aggregates all outcomes."
+        required: false
+        default: strict
+        type: string
 
 permissions:
   contents: read
@@ -47,6 +52,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Validate inputs
+        id: validate_inputs
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -57,6 +64,10 @@ jobs:
           case "${{ inputs.budget }}" in
             required|canary|soak|release) ;;
             *) echo "unsupported budget: ${{ inputs.budget }}" >&2; exit 64 ;;
+          esac
+          case "${{ inputs.mode }}" in
+            strict|prep) ;;
+            *) echo "unsupported mode: ${{ inputs.mode }}" >&2; exit 64 ;;
           esac
           if [[ "${{ inputs.profile }}" == "release-qualification" && -z "${{ inputs.candidate_sha }}" ]]; then
             echo "release-qualification requires candidate_sha" >&2
@@ -69,9 +80,30 @@ jobs:
 
       - name: Forced evidence failure
         if: ${{ inputs.force_failure }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: |
           echo "force_failure requested for reporter verification"
           exit 1
+
+      - name: Record prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        shell: bash
+        env:
+          RESULTS_DIR: ${{ runner.temp }}/quality-prep-results
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR"
+          printf 'validate\tValidate inputs\t%s\n' '${{ steps.validate_inputs.outcome }}' \
+            > "$RESULTS_DIR/validate.tsv"
+
+      - name: Upload prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-prep-validate
+          path: ${{ runner.temp }}/quality-prep-results/validate.tsv
+          if-no-files-found: error
+          retention-days: 1
 
   core:
     name: quality-core (${{ inputs.profile }}/${{ inputs.budget }})
@@ -80,21 +112,25 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ inputs.candidate_sha != '' && inputs.candidate_sha || github.sha }}
 
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
 
       - name: Show selected target
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -103,30 +139,74 @@ jobs:
           cargo --version
 
       - name: Format
+        id: format
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: cargo fmt --all -- --check
 
       - name: Clippy
+        id: clippy
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: cargo clippy --workspace --exclude oracledb-pyshim --no-deps -- -D warnings
 
       - name: Test workspace
+        id: test_workspace
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: cargo test --workspace --exclude oracledb-pyshim
 
       - name: Test cassette replay
+        id: test_cassette
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: cargo test -p oracledb --features cassette
 
       - name: Test docs
+        id: test_docs
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: cargo test --workspace --exclude oracledb-pyshim --doc
 
       - name: Build docs
+        id: build_docs
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: cargo doc --workspace --exclude oracledb-pyshim --no-deps
 
       - name: Install stable Rust
+        id: install_stable
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: rustup toolchain install stable --profile minimal
 
       - name: Stable protocol tests
+        id: stable_protocol
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: cargo +stable test -p oracledb-protocol --locked
+
+      - name: Record prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        shell: bash
+        env:
+          RESULTS_DIR: ${{ runner.temp }}/quality-prep-results
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR"
+          {
+            printf 'core\tFormat\t%s\n' '${{ steps.format.outcome }}'
+            printf 'core\tClippy\t%s\n' '${{ steps.clippy.outcome }}'
+            printf 'core\tTest workspace\t%s\n' '${{ steps.test_workspace.outcome }}'
+            printf 'core\tTest cassette replay\t%s\n' '${{ steps.test_cassette.outcome }}'
+            printf 'core\tTest docs\t%s\n' '${{ steps.test_docs.outcome }}'
+            printf 'core\tBuild docs\t%s\n' '${{ steps.build_docs.outcome }}'
+            printf 'core\tInstall stable Rust\t%s\n' '${{ steps.install_stable.outcome }}'
+            printf 'core\tStable protocol tests\t%s\n' '${{ steps.stable_protocol.outcome }}'
+          } > "$RESULTS_DIR/core.tsv"
+
+      - name: Upload prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-prep-core
+          path: ${{ runner.temp }}/quality-prep-results/core.tsv
+          if-no-files-found: error
+          retention-days: 1
 
   contracts:
     name: quality-contracts (${{ inputs.profile }}/${{ inputs.budget }})
@@ -135,21 +215,26 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ inputs.candidate_sha != '' && inputs.candidate_sha || github.sha }}
 
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
 
       - name: Verify checked entry traces and release/evidence contracts
+        id: evidence_contracts
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -159,35 +244,51 @@ jobs:
           bash scripts/check_ci_taxonomy.sh
 
       - name: Install baseline tools
+        id: baseline_tools
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: sudo apt-get update && sudo apt-get install -y ripgrep
 
       - name: Install cargo-public-api
+        id: cargo_public_api
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: cargo install cargo-public-api --version "$CARGO_PUBLIC_API_VERSION" --locked
 
       - name: Baseline drift check
+        id: baseline_drift
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: scripts/gen_baseline.sh --check
 
       - name: API ledger coverage
+        id: api_ledger
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: bash scripts/check_api_ledger.sh
 
       - name: Single public path per type
+        id: single_path
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: bash scripts/check_single_path.sh
 
       - name: Async/blocking coverage
+        id: async_blocking
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: bash scripts/check_async_blocking_coverage.sh
 
       - name: Connect-trace secret exclusion
+        id: trace_secret
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: bash scripts/check_trace_secret_exclusion.sh
 
       - name: Confidentiality secret scan (C4)
+        id: secret_scan
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: bash scripts/secret_scan.sh
 
       # reference/ is the clean-room python-oracledb checkout (gitignored, never
@@ -195,20 +296,61 @@ jobs:
       # against so both the drift check and the boundary-test coverage check see
       # the identical gate set in a clean CI checkout.
       - name: Pin clean-room reference checkout
+        id: pin_reference
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: bash scripts/pin-reference.sh
 
       - name: Reference version-gate parity coverage
+        id: reference_gates
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: bash scripts/extract_reference_gates.sh --check
 
       - name: Reference version-gate boundary-test coverage
+        id: reference_coverage
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: bash scripts/extract_reference_gates.sh --check-coverage
 
       - name: Provenance artifacts drift check (SBOM + dep/action inventory)
+        id: provenance
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: bash scripts/gen_sbom.sh --check
+
+      - name: Record prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        shell: bash
+        env:
+          RESULTS_DIR: ${{ runner.temp }}/quality-prep-results
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR"
+          {
+            printf 'contracts\tVerify checked entry traces and release/evidence contracts\t%s\n' '${{ steps.evidence_contracts.outcome }}'
+            printf 'contracts\tInstall baseline tools\t%s\n' '${{ steps.baseline_tools.outcome }}'
+            printf 'contracts\tInstall cargo-public-api\t%s\n' '${{ steps.cargo_public_api.outcome }}'
+            printf 'contracts\tBaseline drift check\t%s\n' '${{ steps.baseline_drift.outcome }}'
+            printf 'contracts\tAPI ledger coverage\t%s\n' '${{ steps.api_ledger.outcome }}'
+            printf 'contracts\tSingle public path per type\t%s\n' '${{ steps.single_path.outcome }}'
+            printf 'contracts\tAsync/blocking coverage\t%s\n' '${{ steps.async_blocking.outcome }}'
+            printf 'contracts\tConnect-trace secret exclusion\t%s\n' '${{ steps.trace_secret.outcome }}'
+            printf 'contracts\tConfidentiality secret scan (C4)\t%s\n' '${{ steps.secret_scan.outcome }}'
+            printf 'contracts\tPin clean-room reference checkout\t%s\n' '${{ steps.pin_reference.outcome }}'
+            printf 'contracts\tReference version-gate parity coverage\t%s\n' '${{ steps.reference_gates.outcome }}'
+            printf 'contracts\tReference version-gate boundary-test coverage\t%s\n' '${{ steps.reference_coverage.outcome }}'
+            printf 'contracts\tProvenance artifacts drift check (SBOM + dep/action inventory)\t%s\n' '${{ steps.provenance.outcome }}'
+          } > "$RESULTS_DIR/contracts.tsv"
+
+      - name: Upload prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-prep-contracts
+          path: ${{ runner.temp }}/quality-prep-results/contracts.tsv
+          if-no-files-found: error
+          retention-days: 1
 
   features:
     name: quality-features (${{ inputs.profile }}/${{ inputs.budget }})
@@ -217,26 +359,33 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ inputs.candidate_sha != '' && inputs.candidate_sha || github.sha }}
 
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
 
       - name: Install cargo-hack
+        id: cargo_hack
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: cargo install cargo-hack --version "$CARGO_HACK_VERSION" --locked
 
       - name: Feature profile matrix
+        id: feature_matrix
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -252,10 +401,38 @@ jobs:
             --include-features "$integration_features"
 
       - name: Validate release metadata
+        id: release_metadata
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: bash scripts/release_preflight.sh
 
       - name: Inter-crate version-pin guard test
+        id: version_pin_guard
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: bash scripts/test_release_preflight_pins.sh
+
+      - name: Record prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        shell: bash
+        env:
+          RESULTS_DIR: ${{ runner.temp }}/quality-prep-results
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR"
+          {
+            printf 'features\tInstall cargo-hack\t%s\n' '${{ steps.cargo_hack.outcome }}'
+            printf 'features\tFeature profile matrix\t%s\n' '${{ steps.feature_matrix.outcome }}'
+            printf 'features\tValidate release metadata\t%s\n' '${{ steps.release_metadata.outcome }}'
+            printf 'features\tInter-crate version-pin guard test\t%s\n' '${{ steps.version_pin_guard.outcome }}'
+          } > "$RESULTS_DIR/features.tsv"
+
+      - name: Upload prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-prep-features
+          path: ${{ runner.temp }}/quality-prep-results/features.tsv
+          if-no-files-found: error
+          retention-days: 1
 
   release-surface:
     name: quality-release-surface (${{ inputs.profile }}/${{ inputs.budget }})
@@ -265,53 +442,53 @@ jobs:
     steps:
       - name: Select budget
         id: budget
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         shell: bash
         run: |
           set -euo pipefail
           case "${{ inputs.budget }}" in
             required)
-              echo "fuzz_seconds=0" >> "$GITHUB_OUTPUT"
-              echo "fuzz_target_cap=0" >> "$GITHUB_OUTPUT"
               echo "package=false" >> "$GITHUB_OUTPUT"
               ;;
             canary)
-              echo "fuzz_seconds=30" >> "$GITHUB_OUTPUT"
-              echo "fuzz_target_cap=6" >> "$GITHUB_OUTPUT"
               echo "package=false" >> "$GITHUB_OUTPUT"
               ;;
             soak)
-              echo "fuzz_seconds=120" >> "$GITHUB_OUTPUT"
-              echo "fuzz_target_cap=6" >> "$GITHUB_OUTPUT"
               echo "package=false" >> "$GITHUB_OUTPUT"
               ;;
             release)
-              echo "fuzz_seconds=120" >> "$GITHUB_OUTPUT"
-              echo "fuzz_target_cap=0" >> "$GITHUB_OUTPUT"
               echo "package=true" >> "$GITHUB_OUTPUT"
               ;;
           esac
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ inputs.candidate_sha != '' && inputs.candidate_sha || github.sha }}
 
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
 
       - name: Standalone packaged-crate build
+        id: standalone_package
         if: ${{ inputs.profile == 'release-qualification' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: bash scripts/check_standalone_package.sh
 
       - name: Install cargo-semver-checks
+        id: cargo_semver_checks
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: cargo install cargo-semver-checks --version "$CARGO_SEMVER_CHECKS_VERSION" --locked
 
       # BLOCKING since 0.3.0 (road-to-1.0 W2-T1.5): the 0.3.0 public surface is
@@ -320,7 +497,9 @@ jobs:
       # pre-1.0 removal of the 0.3.0-deprecated methods — which semver-checks
       # permits under a 0.x minor bump.)
       - name: SemVer advisory checks
+        id: semver_checks
         if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -328,13 +507,43 @@ jobs:
           cargo semver-checks check-release -p oracledb
 
       - uses: taiki-e/install-action@6385177bd1684e175e09301c9ee3ae18c14a367e # cargo-deny
+        continue-on-error: ${{ inputs.mode == 'prep' }}
 
       - name: Supply-chain checks
+        id: supply_chain
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: cargo deny check
 
       - name: Package crates
+        id: package_crates
         if: ${{ steps.budget.outputs.package == 'true' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: cargo package --workspace --exclude oracledb-pyshim --locked
+
+      - name: Record prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        shell: bash
+        env:
+          RESULTS_DIR: ${{ runner.temp }}/quality-prep-results
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR"
+          {
+            printf 'release-surface\tStandalone packaged-crate build\t%s\n' '${{ steps.standalone_package.outcome }}'
+            printf 'release-surface\tInstall cargo-semver-checks\t%s\n' '${{ steps.cargo_semver_checks.outcome }}'
+            printf 'release-surface\tSemVer advisory checks\t%s\n' '${{ steps.semver_checks.outcome }}'
+            printf 'release-surface\tSupply-chain checks\t%s\n' '${{ steps.supply_chain.outcome }}'
+            printf 'release-surface\tPackage crates\t%s\n' '${{ steps.package_crates.outcome }}'
+          } > "$RESULTS_DIR/release-surface.tsv"
+
+      - name: Upload prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-prep-release-surface
+          path: ${{ runner.temp }}/quality-prep-results/release-surface.tsv
+          if-no-files-found: error
+          retention-days: 1
 
   musl:
     name: quality-musl (${{ inputs.profile }}/${{ inputs.budget }})
@@ -344,6 +553,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         if: ${{ inputs.profile == 'release-qualification' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -351,17 +561,21 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         if: ${{ inputs.profile == 'release-qualification' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         if: ${{ inputs.profile == 'release-qualification' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
 
       - name: Musl binary size gate
+        id: musl_size
         if: ${{ inputs.profile == 'release-qualification' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         shell: bash
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
@@ -373,6 +587,26 @@ jobs:
           sudo apt-get install -y musl-tools
           bash scripts/check_musl_size.sh
 
+      - name: Record prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        shell: bash
+        env:
+          RESULTS_DIR: ${{ runner.temp }}/quality-prep-results
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR"
+          printf 'musl\tMusl binary size gate\t%s\n' '${{ steps.musl_size.outcome }}' \
+            > "$RESULTS_DIR/musl.tsv"
+
+      - name: Upload prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-prep-musl
+          path: ${{ runner.temp }}/quality-prep-results/musl.tsv
+          if-no-files-found: error
+          retention-days: 1
+
   perf:
     name: quality-perf (${{ inputs.profile }}/${{ inputs.budget }})
     needs: validate
@@ -381,6 +615,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         if: ${{ inputs.profile == 'soak' || inputs.profile == 'release-qualification' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -388,55 +623,81 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         if: ${{ inputs.profile == 'soak' || inputs.profile == 'release-qualification' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         if: ${{ inputs.profile == 'soak' || inputs.profile == 'release-qualification' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
 
       - name: Deterministic performance regression gate
+        id: perf_regression
         if: ${{ inputs.profile == 'soak' || inputs.profile == 'release-qualification' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         run: bash scripts/check_perf_regression.sh
 
+      - name: Record prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        shell: bash
+        env:
+          RESULTS_DIR: ${{ runner.temp }}/quality-prep-results
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR"
+          printf 'perf\tDeterministic performance regression gate\t%s\n' '${{ steps.perf_regression.outcome }}' \
+            > "$RESULTS_DIR/perf.tsv"
+
+      - name: Upload prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-prep-perf
+          path: ${{ runner.temp }}/quality-prep-results/perf.tsv
+          if-no-files-found: error
+          retention-days: 1
+
   fuzz:
-    name: quality-fuzz (${{ inputs.profile }}/${{ inputs.budget }})
+    name: quality-fuzz (${{ inputs.profile }}/${{ inputs.budget }}) [shard ${{ matrix.shard }}]
     needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
       - name: Select budget
         id: budget
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         shell: bash
         run: |
           set -euo pipefail
           case "${{ inputs.budget }}" in
             required)
               echo "fuzz_seconds=0" >> "$GITHUB_OUTPUT"
-              echo "fuzz_target_cap=0" >> "$GITHUB_OUTPUT"
               echo "package=false" >> "$GITHUB_OUTPUT"
               ;;
             canary)
               echo "fuzz_seconds=30" >> "$GITHUB_OUTPUT"
-              echo "fuzz_target_cap=6" >> "$GITHUB_OUTPUT"
               echo "package=false" >> "$GITHUB_OUTPUT"
               ;;
             soak)
               echo "fuzz_seconds=120" >> "$GITHUB_OUTPUT"
-              echo "fuzz_target_cap=6" >> "$GITHUB_OUTPUT"
               echo "package=false" >> "$GITHUB_OUTPUT"
               ;;
             release)
               echo "fuzz_seconds=120" >> "$GITHUB_OUTPUT"
-              echo "fuzz_target_cap=0" >> "$GITHUB_OUTPUT"
               echo "package=true" >> "$GITHUB_OUTPUT"
               ;;
           esac
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         if: ${{ steps.budget.outputs.fuzz_seconds != '0' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -444,22 +705,30 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         if: ${{ steps.budget.outputs.fuzz_seconds != '0' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         if: ${{ steps.budget.outputs.fuzz_seconds != '0' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
+          workspaces: |
+            . -> target
+            crates/oracledb-protocol/fuzz -> target
 
       - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
         if: ${{ steps.budget.outputs.fuzz_seconds != '0' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         with:
           tool: cargo-fuzz
 
       - name: Fuzz targets (bounded shard)
+        id: fuzz_targets
         if: ${{ steps.budget.outputs.fuzz_seconds != '0' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
         working-directory: crates/oracledb-protocol
         shell: bash
         run: |
@@ -472,19 +741,17 @@ jobs:
             exit 1
           fi
 
-          target_cap="${{ steps.budget.outputs.fuzz_target_cap }}"
-          selected_targets=("${all_targets[@]}")
-          shard_count=1
-          shard_index=0
-          if (( target_cap > 0 && ${#all_targets[@]} > target_cap )); then
-            shard_count=$(( (${#all_targets[@]} + target_cap - 1) / target_cap ))
-            shard_index=$(( (GITHUB_RUN_NUMBER - 1) % shard_count ))
-            shard_start=$(( shard_index * target_cap ))
-            shard_length=$target_cap
-            if (( shard_start + shard_length > ${#all_targets[@]} )); then
-              shard_length=$(( ${#all_targets[@]} - shard_start ))
+          shard_count=4
+          shard_index="${{ matrix.shard }}"
+          selected_targets=()
+          for target_index in "${!all_targets[@]}"; do
+            if (( target_index % shard_count == shard_index )); then
+              selected_targets+=("${all_targets[$target_index]}")
             fi
-            selected_targets=("${all_targets[@]:shard_start:shard_length}")
+          done
+          if (( ${#selected_targets[@]} == 0 )); then
+            echo "fuzz shard $shard_index selected no targets" >&2
+            exit 1
           fi
 
           printf 'fuzz shard %d/%d: %d of %d targets, %ss each\n' \
@@ -504,6 +771,27 @@ jobs:
               -timeout=10
           done
 
+      - name: Record prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        shell: bash
+        env:
+          RESULTS_DIR: ${{ runner.temp }}/quality-prep-results
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR"
+          printf 'fuzz-%s\tFuzz targets (bounded shard)\t%s\n' \
+            '${{ matrix.shard }}' '${{ steps.fuzz_targets.outcome }}' \
+            > "$RESULTS_DIR/fuzz-${{ matrix.shard }}.tsv"
+
+      - name: Upload prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-prep-fuzz-${{ matrix.shard }}
+          path: ${{ runner.temp }}/quality-prep-results/fuzz-${{ matrix.shard }}.tsv
+          if-no-files-found: error
+          retention-days: 1
+
   quality:
     name: quality (${{ inputs.profile }}/${{ inputs.budget }})
     if: ${{ always() }}
@@ -512,6 +800,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Aggregate quality results
+        if: ${{ inputs.mode == 'strict' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -536,5 +825,56 @@ jobs:
           done
           if (( failed != 0 )); then
             echo "one or more quality jobs did not succeed" >&2
+            exit 1
+          fi
+
+      - name: Download prep outcomes
+        if: ${{ inputs.mode == 'prep' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: quality-prep-*
+          path: ${{ runner.temp }}/quality-prep-results
+          merge-multiple: true
+
+      - name: Aggregate prep outcomes
+        if: ${{ inputs.mode == 'prep' }}
+        shell: bash
+        env:
+          RESULTS_DIR: ${{ runner.temp }}/quality-prep-results
+        run: |
+          set -euo pipefail
+          expected=(
+            validate core contracts features release-surface musl perf
+            fuzz-0 fuzz-1 fuzz-2 fuzz-3
+          )
+          for result_file in "${expected[@]}"; do
+            if [[ ! -f "$RESULTS_DIR/$result_file.tsv" ]]; then
+              echo "missing prep outcome: $result_file" >&2
+              exit 1
+            fi
+          done
+
+          {
+            echo "### Release-qualification prep results"
+            echo
+            echo "Prep diagnostics only; no qualification proof or release evidence was emitted."
+            echo
+            echo "| Shard | Gate | Outcome |"
+            echo "| --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          failed=0
+          for result_file in "${expected[@]}"; do
+            while IFS=$'\t' read -r shard gate outcome; do
+              printf '| %s | %s | %s |\n' "$shard" "$gate" "$outcome" \
+                >> "$GITHUB_STEP_SUMMARY"
+              if [[ "$outcome" != "success" ]]; then
+                printf '%s: %s (%s)\n' "$shard" "$gate" "$outcome" >&2
+                failed=1
+              fi
+            done < "$RESULTS_DIR/$result_file.tsv"
+          done
+          if (( failed != 0 )); then
+            echo "one or more prep gates did not succeed" >&2
             exit 1
           fi
