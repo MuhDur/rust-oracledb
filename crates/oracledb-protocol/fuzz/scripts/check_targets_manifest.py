@@ -90,6 +90,15 @@ def validate() -> int:
             value = target[field]
             if not isinstance(value, int) or value <= 0:
                 errors.append(f"{name}: {field} must be a positive integer")
+        if target["dictionary"]:
+            # Fail closed here, not as libFuzzer's cryptic runtime
+            # "ParseDictionaryFile: file does not exist or is empty" exit.
+            dict_path = ROOT / target["dictionary"]
+            if not dict_path.is_file() or dict_path.stat().st_size == 0:
+                errors.append(
+                    f"{name}: dictionary {target['dictionary']!r} missing or "
+                    f"empty (resolved against the fuzz dir: {dict_path})"
+                )
 
     duplicate_names = sorted({name for name in names if names.count(name) > 1})
     if duplicate_names:
@@ -170,7 +179,11 @@ def print_flags(name: str) -> int:
         f"-malloc_limit_mb={target['malloc_limit_mb']}",
     ]
     if target["dictionary"]:
-        flags.append(f"-dict={target['dictionary']}")
+        # The manifest path is relative to the fuzz dir, but callers invoke
+        # `cargo fuzz run` from the crate dir (and locally from anywhere), and
+        # libFuzzer resolves -dict= against its own cwd — emit an absolute
+        # path so the flag is correct from any invocation directory.
+        flags.append(f"-dict={(ROOT / target['dictionary']).resolve()}")
     print(" ".join(flags))
     return 0
 
