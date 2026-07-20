@@ -21894,6 +21894,47 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::Network);
     }
 
+    /// Public-API regression for bead rust-oracledb-4sfc: deterministic TLS
+    /// preparation must finish before the first address is dialled. The wallet
+    /// fixture has a valid CA certificate plus a malformed PKCS#8 client key,
+    /// reproducing the configuration failure that used to occur only after TCP
+    /// connect and could therefore be retried into an unrelated diagnostic.
+    #[test]
+    fn connection_connect_returns_tls_configuration_error_without_dialling() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind dial sentinel");
+        listener
+            .set_nonblocking(true)
+            .expect("make dial sentinel nonblocking");
+        let port = listener.local_addr().expect("dial sentinel address").port();
+        let wallet = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/invalid_client_key");
+        let options = ConnectOptions::new(
+            format!("tcps://127.0.0.1:{port}/svc"),
+            "user",
+            "password",
+            identity(),
+        )
+        .with_wallet_location(wallet.display().to_string());
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let error = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("ambient Cx");
+                Connection::connect(&cx, options).await
+            })
+            .expect_err("the invalid client key must fail TLS preparation");
+        assert!(
+            matches!(&error, Error::Tls(detail) if detail.contains("private key")),
+            "the original typed TLS configuration error must surface, got {error:?}"
+        );
+
+        match listener.accept() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok(_) => panic!("deterministic TLS configuration failure dialled the listener"),
+            Err(error) => panic!("dial sentinel accept failed unexpectedly: {error}"),
+        }
+    }
+
     // ------------------------------------------------------------------
     // Packet-layer vs TTC-layer error labelling
     // (bead rust-oracledb-pre23ai-connect-z47u.3)
