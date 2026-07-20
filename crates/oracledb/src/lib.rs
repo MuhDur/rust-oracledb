@@ -2914,28 +2914,27 @@ impl Connection {
             // check stayed enforced even when the descriptor asked to
             // disable it. One resolved value now feeds both the verifier and
             // the wire descriptor, so they can never diverge.
-            let tls_params = if descriptor.protocol.is_tls() {
-                Some(tls::resolve_tls_params(
+            let prepared_tls = if descriptor.protocol.is_tls() {
+                let tls_params = tls::resolve_tls_params(
                     &descriptor,
                     effective_wallet_location,
                     options.wallet_password.as_deref(),
                     descriptor_ssl_server_dn_match,
                     descriptor_ssl_server_cert_dn,
                     effective_use_sni,
+                )?;
+                // Build the rustls config, validate the wallet key, and decide
+                // SNI before any address is dialled. These deterministic setup
+                // failures are returned directly and never enter the transient
+                // transport-failover loop below.
+                Some(tls::prepare_tls_handshake(
+                    &descriptor,
+                    server_type,
+                    &tls_params,
                 )?)
             } else {
                 None
             };
-            // Fail closed *before* any transport is dialled if `use_sni=true`
-            // cannot select an SNI rustls can emit — never a silent no-SNI.
-            if let Some(tls_params) = tls_params.as_ref() {
-                tls::decide_sni(
-                    tls_params.use_sni,
-                    &tls_params.expected_host,
-                    &descriptor.service_name,
-                    server_type,
-                )?;
-            }
             let connector = DriverConnector::default();
             // Secret-free support capture (bead K6): when `ORACLEDB_CAPTURE` is
             // set, a recorder is created here and installed around each dial's
@@ -2957,9 +2956,8 @@ impl Connection {
             // matching python-oracledb thin's _connect_tcp ordering). Used
             // for the initial address and for every REDIRECT target.
             let dial = |host: String, port: u16| {
-                let descriptor = &descriptor;
                 let connector = &connector;
-                let tls_params = tls_params.as_ref();
+                let prepared_tls = prepared_tls.as_ref();
                 #[cfg(feature = "cassette")]
                 let capture_recorder = capture_recorder.as_ref();
                 async move {
@@ -2975,7 +2973,7 @@ impl Connection {
                         stream.set_keepalive(Some(idle))?;
                     }
                     trace_connect_step("tcp connected");
-                    let halves = if let Some(tls_params) = tls_params {
+                    let halves = if let Some(prepared_tls) = prepared_tls {
                         trace_connect_step("tls handshake");
                         // Honor the same configured connect timeout that already
                         // bounds the TCP dial above, instead of a hard-coded
@@ -2983,14 +2981,9 @@ impl Connection {
                         // the DSN `TRANSPORT_CONNECT_TIMEOUT`/`CONNECT_TIMEOUT`
                         // for both easy-connect and full-descriptor DSN forms
                         // (bead F-DC4).
-                        let tls_stream = tls::tls_handshake(
-                            descriptor,
-                            server_type,
-                            tls_params,
-                            stream,
-                            connect_timeout,
-                        )
-                        .await?;
+                        let tls_stream =
+                            tls::tls_handshake_prepared(prepared_tls, stream, connect_timeout)
+                                .await?;
                         trace_connect_step("tls established");
                         // Install the capture recorder around the SYNCHRONOUS
                         // split only (no await while held) so the thread-local
@@ -3005,7 +2998,7 @@ impl Connection {
                             capture_recorder.map(|r| transport::install_recorder_scope(r.clone()));
                         connector.plain_split(stream)
                     };
-                    Ok::<_, Error>(halves)
+                    Ok::<_, TransportEstablishmentError>(halves)
                 }
             };
             // F2 (bead rust-oracledb-clvm): sequential multi-address failover.
@@ -3039,11 +3032,10 @@ impl Connection {
                             connected = Some((halves, candidate.clone()));
                             break 'failover;
                         }
-                        Err(err) if is_failover_eligible(&err) => {
+                        Err(err) => {
                             attempt_errors
                                 .push(format!("{}:{} ({err})", candidate.host, candidate.port));
                         }
-                        Err(err) => return Err(err),
                     }
                 }
             }
@@ -3156,7 +3148,9 @@ impl Connection {
                         // the CONNECT there, flagged as a redirect follow-up
                         // and carrying the redirect-supplied connect data
                         // (reference `_connect_phase_one`).
-                        let (read, write) = dial(target.host, target.port).await?;
+                        let (read, write) = dial(target.host, target.port)
+                            .await
+                            .map_err(TransportEstablishmentError::into_driver_error)?;
                         core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
                         core.set_protocol_limits(protocol_limits)?;
                         core.set_inactivity_timeout(inactivity_timeout);
@@ -10513,6 +10507,50 @@ struct ConnectAddress {
     port: u16,
 }
 
+/// A failure that can only occur after deterministic connection configuration
+/// has completed and one concrete transport address is being established.
+///
+/// The type deliberately has no configuration/auth/wallet variants: every
+/// value is therefore safe to aggregate and retry against the next address.
+/// This construction-level boundary prevents a public [`Error::Tls`] produced
+/// while building rustls configuration from being mistaken for a transient TLS
+/// handshake failure.
+#[derive(Debug)]
+enum TransportEstablishmentError {
+    Io(std::io::Error),
+    TlsHandshake(tls::TlsHandshakeError),
+}
+
+impl TransportEstablishmentError {
+    fn into_driver_error(self) -> Error {
+        match self {
+            Self::Io(error) => Error::Io(error),
+            Self::TlsHandshake(error) => error.into_driver_error(),
+        }
+    }
+}
+
+impl std::fmt::Display for TransportEstablishmentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "I/O error: {error}"),
+            Self::TlsHandshake(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl From<std::io::Error> for TransportEstablishmentError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<tls::TlsHandshakeError> for TransportEstablishmentError {
+    fn from(error: tls::TlsHandshakeError) -> Self {
+        Self::TlsHandshake(error)
+    }
+}
+
 /// Build the ordered list of transport endpoints to try for a (possibly
 /// multi-address) connect descriptor (F2, bead `rust-oracledb-clvm`),
 /// restricted to the primary transport `protocol`. Honours `LOAD_BALANCE`
@@ -10562,15 +10600,6 @@ fn resolve_connect_addresses(
         }
     }
     out
-}
-
-/// Whether an error justifies trying the next address in a multi-address
-/// descriptor (F2). Only transport-establishment failures (the TCP dial or the
-/// TLS handshake) fail over; configuration errors (wallet, unsupported SNI,
-/// auth) are fatal and abort the whole connect so the operator sees the real
-/// cause instead of an aggregated all-addresses-failed message.
-fn is_failover_eligible(err: &Error) -> bool {
-    matches!(err, Error::Io(_) | Error::Tls(_))
 }
 
 /// In-place Fisher–Yates shuffle seeded from the wall clock. `LOAD_BALANCE`
@@ -11683,17 +11712,26 @@ mod tests {
     }
 
     #[test]
-    fn f2_failover_only_covers_transport_errors() {
-        // TCP dial / TLS handshake failures fail over; config/auth errors abort.
-        assert!(is_failover_eligible(&Error::Io(std::io::Error::new(
+    fn f2_transport_attempt_type_only_covers_io_and_tls_handshake() {
+        // Only errors constructible inside `dial` can reach the failover loop.
+        // Configuration/auth errors remain ordinary `Error` values and have no
+        // conversion into this transport-attempt type.
+        let io_failure = TransportEstablishmentError::from(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
-            "refused"
-        ))));
-        assert!(is_failover_eligible(&Error::Tls("handshake".into())));
-        assert!(!is_failover_eligible(&Error::UnsupportedSni(
-            "S1.X.V3.319".into()
-        )));
-        assert!(!is_failover_eligible(&Error::AccessTokenRequiresTcps));
+            "refused",
+        ));
+        assert!(matches!(
+            io_failure.into_driver_error(),
+            Error::Io(error) if error.kind() == std::io::ErrorKind::ConnectionRefused
+        ));
+
+        let tls_failure = TransportEstablishmentError::from(tls::TlsHandshakeError::new(
+            "certificate rejected".to_string(),
+        ));
+        assert!(matches!(
+            tls_failure.into_driver_error(),
+            Error::Tls(detail) if detail == "TCPS handshake failed: certificate rejected"
+        ));
     }
 
     #[test]
