@@ -171,6 +171,17 @@
       "path_filtered": false
     },
     {
+      "check_name": "prepare release qualification cache",
+      "tier": "manual",
+      "workflow": "Release Qualification",
+      "workflow_file": "release-qualification.yml",
+      "job_id": "prepare-release-qualification",
+      "triggers": [
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "release-qualification / quality (release-qualification/release)",
       "tier": "manual",
       "workflow": "Release Qualification",
@@ -392,6 +403,7 @@
       "jobs": [
         "emit exact required proof",
         "emit exact version-matrix evidence",
+        "prepare release qualification cache",
         "release-qualification / quality (release-qualification/release)",
         "report release qualification failure"
       ]
@@ -463,6 +475,7 @@
     "manual": [
       "emit exact required proof",
       "emit exact version-matrix evidence",
+      "prepare release qualification cache",
       "release-qualification / quality (release-qualification/release)",
       "report release qualification failure"
     ],

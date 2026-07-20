@@ -66,18 +66,22 @@ jobs:
           case "${{ inputs.budget }}" in
             required)
               echo "fuzz_seconds=0" >> "$GITHUB_OUTPUT"
+              echo "fuzz_target_cap=0" >> "$GITHUB_OUTPUT"
               echo "package=false" >> "$GITHUB_OUTPUT"
               ;;
             canary)
               echo "fuzz_seconds=30" >> "$GITHUB_OUTPUT"
+              echo "fuzz_target_cap=6" >> "$GITHUB_OUTPUT"
               echo "package=false" >> "$GITHUB_OUTPUT"
               ;;
             soak)
               echo "fuzz_seconds=120" >> "$GITHUB_OUTPUT"
+              echo "fuzz_target_cap=6" >> "$GITHUB_OUTPUT"
               echo "package=false" >> "$GITHUB_OUTPUT"
               ;;
             release)
               echo "fuzz_seconds=120" >> "$GITHUB_OUTPUT"
+              echo "fuzz_target_cap=0" >> "$GITHUB_OUTPUT"
               echo "package=true" >> "$GITHUB_OUTPUT"
               ;;
           esac
@@ -100,6 +104,8 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
 
       - name: Show selected target
         shell: bash
@@ -274,16 +280,46 @@ jobs:
         with:
           tool: cargo-fuzz
 
-      - name: Fuzz targets
+      - name: Fuzz targets (bounded shard)
         if: ${{ steps.budget.outputs.fuzz_seconds != '0' }}
         working-directory: crates/oracledb-protocol
         shell: bash
         run: |
           set -euo pipefail
           cargo fuzz build --target x86_64-unknown-linux-gnu
-          while IFS= read -r target; do
+
+          mapfile -t all_targets < <(cargo fuzz list | LC_ALL=C sort)
+          if (( ${#all_targets[@]} == 0 )); then
+            echo "cargo fuzz list returned no targets" >&2
+            exit 1
+          fi
+
+          target_cap="${{ steps.budget.outputs.fuzz_target_cap }}"
+          selected_targets=("${all_targets[@]}")
+          shard_count=1
+          shard_index=0
+          if (( target_cap > 0 && ${#all_targets[@]} > target_cap )); then
+            shard_count=$(( (${#all_targets[@]} + target_cap - 1) / target_cap ))
+            shard_index=$(( (GITHUB_RUN_NUMBER - 1) % shard_count ))
+            shard_start=$(( shard_index * target_cap ))
+            shard_length=$target_cap
+            if (( shard_start + shard_length > ${#all_targets[@]} )); then
+              shard_length=$(( ${#all_targets[@]} - shard_start ))
+            fi
+            selected_targets=("${all_targets[@]:shard_start:shard_length}")
+          fi
+
+          printf 'fuzz shard %d/%d: %d of %d targets, %ss each\n' \
+            "$(( shard_index + 1 ))" "$shard_count" \
+            "${#selected_targets[@]}" "${#all_targets[@]}" \
+            "${{ steps.budget.outputs.fuzz_seconds }}"
+          printf '### Fuzz shard\n\n- Shard: `%d/%d`\n- Targets: `%s`\n\n' \
+            "$(( shard_index + 1 ))" "$shard_count" \
+            "${selected_targets[*]}" >> "$GITHUB_STEP_SUMMARY"
+
+          for target in "${selected_targets[@]}"; do
             cargo fuzz run "$target" --target x86_64-unknown-linux-gnu -- \
               -max_total_time="${{ steps.budget.outputs.fuzz_seconds }}" \
               -rss_limit_mb=2048 \
               -timeout=10
-          done < <(cargo fuzz list)
+          done

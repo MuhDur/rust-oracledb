@@ -39,7 +39,7 @@ without being classified, and a required job cannot quietly become advisory.
 | `release` | only fires on a release tag (`push: tags:`) | no |
 | `manual` | only `workflow_dispatch` | no |
 
-Current: 11 required, 2 advisory, 6 scheduled, 4 release, 2 manual (25 jobs).
+Current: 12 required, 2 advisory, 6 scheduled, 4 release, 5 manual (29 jobs).
 The authoritative list is [`ci_taxonomy.json`](ci_taxonomy.json). `workflows` and
 `groups` in that file are **derived views** over `jobs[]`, which stays the single
 place a tier is recorded, so a view cannot disagree with it.
