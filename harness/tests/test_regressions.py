@@ -7,10 +7,13 @@ Requires the PYO_TEST_* environment variables used by the conformance
 harness (see scripts/container.sh env).
 """
 
+import datetime
 import importlib
 import os
 import signal
 import sys
+import threading
+import time
 
 import pytest
 
@@ -79,6 +82,75 @@ def test_extra_positional_inputsizes_raises_dpy_4009(conn, deadline):
         assert info.value.args[0].full_code in ("DPY-4009", "ORA-01036")
     # connection still healthy after the error exits
     cursor.setinputsizes()
+    cursor.execute("select 1 from dual")
+    assert cursor.fetchone() == (1,)
+    cursor.close()
+
+
+def test_arbitrary_precision_int_bind_is_exact(conn, deadline):
+    """PY3: an int wider than i128 must never take the lossy f64 fallback."""
+    # 40 decimal digits but only 38 significant digits, so Oracle NUMBER can
+    # store it exactly while Rust i128 cannot.
+    value = 1234567890123456789012345678901234567800
+    with conn.cursor() as cursor:
+        cursor.execute("select :value from dual", value=value)
+        (actual,) = cursor.fetchone()
+    assert type(actual) is int
+    assert actual == value
+
+
+def test_negative_submicrosecond_interval_uses_floor(conn, deadline):
+    """PY5: -500 ns becomes -1 us, matching Cython's floor division."""
+    with conn.cursor() as cursor:
+        cursor.execute(
+            "select interval '-0 00:00:00.000000500' "
+            "day(1) to second(9) from dual"
+        )
+        (actual,) = cursor.fetchone()
+    assert type(actual) is datetime.timedelta
+    assert actual == datetime.timedelta(microseconds=-1)
+
+
+def test_threaded_cancel_runs_while_blocking_io_is_in_flight(conn, deadline):
+    """PY4: fetch I/O releases the GIL for cancel and leaves a clean session."""
+    cursor = conn.cursor()
+    cursor.prefetchrows = 0
+    cursor.arraysize = 1
+    # The execute is describe-only. The aggregate is evaluated by the first
+    # fetch, giving the cancel thread a deterministic in-flight fetch without
+    # creating a database fixture or persistent object.
+    cursor.execute(
+        "select sum(v) from ("
+        "select a.object_id * b.object_id v "
+        "from all_objects a cross join all_objects b "
+        "where rownum <= 1000000)"
+    )
+    started = threading.Event()
+    cancel_completed_at = []
+
+    def cancel_after_start():
+        assert started.wait(timeout=2)
+        time.sleep(0.1)
+        conn.cancel()
+        cancel_completed_at.append(time.monotonic())
+
+    thread = threading.Thread(target=cancel_after_start)
+    thread.start()
+    started.set()
+    started_at = time.monotonic()
+    try:
+        with pytest.raises(oracledb.OperationalError) as info:
+            cursor.fetchone()
+        assert info.value.args[0].full_code == "ORA-01013"
+    finally:
+        thread.join(timeout=5)
+    assert not thread.is_alive(), "cancel thread was serialized behind the GIL"
+    assert cancel_completed_at, "cancel thread never completed"
+    assert (
+        cancel_completed_at[0] - started_at < 1.5
+    ), "cancel call was serialized behind blocking I/O's GIL hold"
+
+    # Cancellation recovery must leave the session usable.
     cursor.execute("select 1 from dual")
     assert cursor.fetchone() == (1,)
     cursor.close()

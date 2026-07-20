@@ -35,6 +35,47 @@ pub(crate) fn execute_with_call_timeout(sql: &str, call_timeout: Option<u32>) ->
     }
 }
 
+/// Commit without holding the CPython GIL across the blocking round trip.
+///
+/// The connection mutex deliberately remains held for the operation so the
+/// existing single-operation-per-connection contract is unchanged. A cancel
+/// thread uses the independent `CancelHandle`, so releasing the GIL is what
+/// lets it run while the database call is in flight (PY4).
+pub(crate) fn commit_detached(
+    py: Python<'_>,
+    connection: &Arc<Mutex<Option<RustConnection>>>,
+) -> PyResult<()> {
+    let connection = Arc::clone(connection);
+    py.detach(move || -> Result<(), TaskError> {
+        let mut guard = connection
+            .lock()
+            .map_err(|err| TaskError::from(err.to_string()))?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| TaskError::from("connection is closed"))?;
+        BlockingConnection::commit(connection).map_err(TaskError::from)
+    })
+    .map_err(runtime_error)
+}
+
+/// Roll back without holding the CPython GIL across the blocking round trip.
+pub(crate) fn rollback_detached(
+    py: Python<'_>,
+    connection: &Arc<Mutex<Option<RustConnection>>>,
+) -> PyResult<()> {
+    let connection = Arc::clone(connection);
+    py.detach(move || -> Result<(), TaskError> {
+        let mut guard = connection
+            .lock()
+            .map_err(|err| TaskError::from(err.to_string()))?;
+        let connection = guard
+            .as_mut()
+            .ok_or_else(|| TaskError::from("connection is closed"))?;
+        BlockingConnection::rollback(connection).map_err(TaskError::from)
+    })
+    .map_err(runtime_error)
+}
+
 /// Run a SELECT through the [`Query`] family and return ONLY the first fetch
 /// batch as raw `QueryValue` rows, reproducing the old
 /// `execute_query_with_binds_and_timeout(sql, prefetch, binds, ct)` shape used by
@@ -1201,12 +1242,15 @@ impl ThinConnImpl {
         self.invoke_session_callback = value;
     }
 
-    fn connect(&mut self, params_impl: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn connect(&mut self, py: Python<'_>, params_impl: &Bound<'_, PyAny>) -> PyResult<()> {
         let prepared = self.prepare_connect(params_impl)?;
         // retain the connect options so a CQN subscription can spawn the emon
         // background connection (clone + (SERVER=emon))
         *self.connect_options.lock().map_err(runtime_error)? = Some(prepared.options.clone());
-        let connection = BlockingConnection::connect(prepared.options).map_err(runtime_error)?;
+        let options = prepared.options;
+        let connection = py
+            .detach(move || BlockingConnection::connect(options))
+            .map_err(runtime_error)?;
         let cancel_handle = connection.cancel_handle().map_err(runtime_error)?;
         self.server_version = connection.server_version_tuple().unwrap_or_default();
         *self.cancel_handle.lock().map_err(runtime_error)? = Some(cancel_handle);
@@ -1245,13 +1289,8 @@ impl ThinConnImpl {
         BlockingConnection::ping(connection).map_err(runtime_error)
     }
 
-    fn commit(&self) -> PyResult<()> {
-        let mut guard = self.connection.lock().map_err(runtime_error)?;
-        let connection = guard
-            .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-        BlockingConnection::commit(connection).map_err(runtime_error)?;
-        Ok(())
+    fn commit(&self, py: Python<'_>) -> PyResult<()> {
+        commit_detached(py, &self.connection)
     }
 
     /// Loads data into a table via the Direct Path Load interface (reference
@@ -1298,13 +1337,8 @@ impl ThinConnImpl {
         Ok(())
     }
 
-    fn rollback(&self) -> PyResult<()> {
-        let mut guard = self.connection.lock().map_err(runtime_error)?;
-        let connection = guard
-            .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-        BlockingConnection::rollback(connection).map_err(runtime_error)?;
-        Ok(())
+    fn rollback(&self, py: Python<'_>) -> PyResult<()> {
+        rollback_detached(py, &self.connection)
     }
 
     /// Begins a sessionless transaction (reference connection.py

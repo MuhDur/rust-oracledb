@@ -16,7 +16,7 @@ use oracledb::protocol::vector::{Vector, VectorValues};
 use oracledb::{BlockingConnection, Connection as RustConnection};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyBytesMethods, PyDict, PyList, PyTuple};
+use pyo3::types::{PyBool, PyBytes, PyBytesMethods, PyDict, PyInt, PyList, PyTuple};
 
 use crate::*;
 
@@ -105,8 +105,15 @@ pub(crate) fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> 
     if let Ok(text) = value.extract::<String>() {
         return Ok(BindValue::Text(text));
     }
+    // Python ints are arbitrary precision. Keep the i128 fast path, but do not
+    // let an int that is wider than i128 fall through to f64: that silently
+    // rounds the value to roughly 16 significant digits. python-oracledb binds
+    // the exact `str(int)` representation in this case (PY3).
     if let Ok(number) = value.extract::<i128>() {
         return Ok(BindValue::Number(number.to_string()));
+    }
+    if value.is_instance_of::<PyInt>() {
+        return Ok(BindValue::Number(value.str()?.extract::<String>()?));
     }
     if let Ok(number) = value.extract::<f64>() {
         return Ok(BindValue::Number(number.to_string()));
@@ -1207,8 +1214,22 @@ pub(crate) fn interval_ds_to_py(
     let timedelta = PyModule::import(py, "datetime")?.getattr("timedelta")?;
     let total_seconds = i64::from(hours) * 3600 + i64::from(minutes) * 60 + i64::from(seconds);
     Ok(timedelta
-        .call1((days, total_seconds, i64::from(fseconds) / 1000))?
+        .call1((
+            days,
+            total_seconds,
+            interval_ds_fseconds_to_micros(fseconds),
+        ))?
         .unbind())
+}
+
+/// Convert the wire's nanosecond fraction to Python's microsecond precision.
+///
+/// Cython's `// 1000` floors negative fractions. Rust integer division
+/// truncates toward zero, so `-500 / 1000` used to become `0` instead of the
+/// reference's `-1`. `div_euclid` has the required floor behavior for the
+/// positive divisor (PY5).
+fn interval_ds_fseconds_to_micros(fseconds: i32) -> i64 {
+    i64::from(fseconds).div_euclid(1000)
 }
 
 /// Classifies a fetched `NUMBER` value as Python `int` (`true`) or `float`
@@ -1564,6 +1585,64 @@ pub(crate) fn json_query_value_to_py(
 mod tests {
     use super::*;
     use oracledb::protocol::thin::OracleNumber;
+
+    #[test]
+    fn arbitrary_precision_python_int_binds_exact_decimal_text() {
+        // 40 decimal digits, 38 significant digits: wider than i128, yet still
+        // exactly representable by Oracle NUMBER because the final two digits
+        // are zero. The old f64 fallback changes its middle digits.
+        const VALUE: &str = "1234567890123456789012345678901234567800";
+
+        Python::initialize();
+        Python::attach(|py| {
+            let int_type = PyModule::import(py, "builtins")
+                .and_then(|module| module.getattr("int"))
+                .expect("Python builtins.int must exist");
+            let value = int_type
+                .call1((VALUE,))
+                .expect("40-digit Python int must construct");
+            let old_rounded = value
+                .extract::<f64>()
+                .expect("Python int must remain convertible to f64")
+                .to_string();
+            assert_ne!(old_rounded, VALUE, "fixture must expose f64 precision loss");
+
+            let bind = py_value_to_bind(&value).expect("Python int must bind");
+            match bind {
+                BindValue::Number(text) => assert_eq!(text, VALUE),
+                other => panic!("expected NUMBER bind, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn interval_ds_fractional_seconds_use_floor_division() {
+        for (nanoseconds, expected_micros) in [
+            (0, 0),
+            (500, 0),
+            (1000, 1),
+            (1500, 1),
+            (-1, -1),
+            (-500, -1),
+            (-1000, -1),
+            (-1500, -2),
+            (-999_999_999, -1_000_000),
+        ] {
+            assert_eq!(
+                interval_ds_fseconds_to_micros(nanoseconds),
+                expected_micros,
+                "unexpected floor conversion for {nanoseconds} ns"
+            );
+        }
+
+        // Discriminates the fix from Rust's old truncation-toward-zero rule.
+        for nanoseconds in [-1, -500, -999, -1001, -1999, -123_456_789] {
+            assert_ne!(
+                interval_ds_fseconds_to_micros(nanoseconds),
+                i64::from(nanoseconds) / 1000
+            );
+        }
+    }
 
     // F-PY1 discriminating proof: NUMBER classification is driven by the
     // DECLARED column scale/precision (reference metadata.pyx:112-133), never

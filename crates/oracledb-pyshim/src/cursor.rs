@@ -210,11 +210,20 @@ pub(crate) struct ThinCursorImpl {
 
 impl ThinCursorImpl {
     pub(crate) fn drain_cancel_response(&self) -> PyResult<()> {
-        let mut guard = self.connection.lock().map_err(runtime_error)?;
-        let connection = guard
-            .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-        BlockingConnection::__pyshim_drain_cancel_response(connection).map_err(runtime_error)
+        let connection = Arc::clone(&self.connection);
+        Python::attach(|py| {
+            py.detach(move || -> Result<(), TaskError> {
+                let mut guard = connection
+                    .lock()
+                    .map_err(|err| TaskError::from(err.to_string()))?;
+                let connection = guard
+                    .as_mut()
+                    .ok_or_else(|| TaskError::from("connection is closed"))?;
+                BlockingConnection::__pyshim_drain_cancel_response(connection)
+                    .map_err(TaskError::from)
+            })
+            .map_err(runtime_error)
+        })
     }
 
     /// Resolves a scroll request to either an in-buffer reposition (already
@@ -1479,11 +1488,7 @@ impl ThinCursorImpl {
         let is_query = !result.columns.is_empty();
         let should_commit = !is_query && *self.autocommit.lock().map_err(runtime_error)?;
         if should_commit {
-            let mut guard = self.connection.lock().map_err(runtime_error)?;
-            let connection = guard
-                .as_mut()
-                .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-            BlockingConnection::commit(connection).map_err(runtime_error)?;
+            commit_detached(cursor.py(), &self.connection)?;
         }
         if self.cancel_requested.swap(false, Ordering::SeqCst) {
             self.drain_cancel_response()?;
@@ -1679,11 +1684,7 @@ impl ThinCursorImpl {
         let is_query = !result.columns.is_empty();
         let should_commit = !is_query && *self.autocommit.lock().map_err(runtime_error)?;
         if should_commit {
-            let mut guard = self.connection.lock().map_err(runtime_error)?;
-            let connection = guard
-                .as_mut()
-                .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-            BlockingConnection::commit(connection).map_err(runtime_error)?;
+            commit_detached(cursor.py(), &self.connection)?;
         }
         self.state
             .lock()
@@ -1768,45 +1769,75 @@ impl ThinCursorImpl {
                     u32::try_from(self.rowcount.max(0) + 1).unwrap_or(u32::MAX),
                 )
             });
-            let mut guard = self.connection.lock().map_err(runtime_error)?;
-            let connection = guard
-                .as_mut()
-                .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
-            let result = if let Some((statement, fetch_pos)) = scroll_fetch {
-                BlockingConnection::scroll_cursor(
-                    connection,
-                    &statement,
-                    self.cursor_id,
-                    self.arraysize,
-                    oracledb::protocol::thin::TNS_FETCH_ORIENTATION_CURRENT,
-                    fetch_pos,
-                )
-            } else if requires_define {
-                // The define-fetch is the primary fetch when nothing was
-                // prefetched (prefetchrows == 0): fall back to arraysize so a
-                // row is actually retrieved rather than requesting zero rows.
-                let define_fetch_rows = if self.prefetchrows == 0 {
-                    self.arraysize.max(1)
+            let result = match py.detach(|| -> Result<QueryResult, TaskError> {
+                let mut guard = self
+                    .connection
+                    .lock()
+                    .map_err(|err| TaskError::from(err.to_string()))?;
+                let connection = guard
+                    .as_mut()
+                    .ok_or_else(|| TaskError::from("connection is closed"))?;
+                if let Some((statement, fetch_pos)) = &scroll_fetch {
+                    BlockingConnection::scroll_cursor(
+                        connection,
+                        statement,
+                        self.cursor_id,
+                        self.arraysize,
+                        oracledb::protocol::thin::TNS_FETCH_ORIENTATION_CURRENT,
+                        *fetch_pos,
+                    )
+                } else if requires_define {
+                    // The define-fetch is the primary fetch when nothing
+                    // was prefetched: fall back to arraysize so a row is
+                    // actually retrieved rather than requesting zero rows.
+                    let define_fetch_rows = if self.prefetchrows == 0 {
+                        self.arraysize.max(1)
+                    } else {
+                        self.prefetchrows
+                    };
+                    BlockingConnection::define_and_fetch_rows_with_columns(
+                        connection,
+                        self.cursor_id,
+                        define_fetch_rows,
+                        &define_columns,
+                        previous_row.as_deref(),
+                    )
                 } else {
-                    self.prefetchrows
-                };
-                BlockingConnection::define_and_fetch_rows_with_columns(
-                    connection,
-                    self.cursor_id,
-                    define_fetch_rows,
-                    &define_columns,
-                    previous_row.as_deref(),
-                )
-            } else {
-                BlockingConnection::fetch_rows_with_columns(
-                    connection,
-                    self.cursor_id,
-                    self.arraysize,
-                    &self.columns,
-                    previous_row.as_deref(),
-                )
+                    BlockingConnection::fetch_rows_with_columns(
+                        connection,
+                        self.cursor_id,
+                        self.arraysize,
+                        &self.columns,
+                        previous_row.as_deref(),
+                    )
+                }
+                .map_err(TaskError::from)
+            }) {
+                Ok(result) => result,
+                Err(err) if self.cancel_requested.swap(false, Ordering::SeqCst) => {
+                    if err
+                        .server_error_details()
+                        .is_some_and(|details| details.code == 1013)
+                    {
+                        let mut guard = self.connection.lock().map_err(runtime_error)?;
+                        let connection = guard
+                            .as_mut()
+                            .ok_or_else(|| PyRuntimeError::new_err("connection is closed"))?;
+                        BlockingConnection::__pyshim_reconcile_completed_cancel_response(
+                            connection,
+                        )
+                        .map_err(runtime_error)?;
+                        drop(guard);
+                        return Err(raise_task_error(&err, &self.connection));
+                    }
+                    return Err(ora_cancel_error());
+                }
+                Err(err) => return Err(runtime_error(err)),
+            };
+            if self.cancel_requested.swap(false, Ordering::SeqCst) {
+                self.drain_cancel_response()?;
+                return Err(ora_cancel_error());
             }
-            .map_err(runtime_error)?;
             if !result.columns.is_empty() {
                 self.columns = result.columns;
             } else if requires_define {
@@ -1822,7 +1853,6 @@ impl ThinCursorImpl {
                 self.requires_define = false;
             }
             self.invalid_ref_cursor = false;
-            drop(guard);
             self.refresh_buffer_window();
         }
         self.fetch_buffered_next_row(py, _cursor)

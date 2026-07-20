@@ -12,8 +12,9 @@ This is a **container round-trip differential**. The Oracle server is the
 
 For a proptest-style corpus of *extreme / boundary* values, we INSERT the value
 once, then FETCH the identical row through each engine and assert the decoded
-Python values are byte/semantic-identical. A divergence is a real decoder bug of
-the exact "silent value divergence" class that produced the 8 hand-found bugs
+Python values and their concrete Python types are identical. A divergence is a
+real decoder bug of the exact "silent value divergence" class that produced the
+8 hand-found bugs
 (the bug class that no-panic fuzzing and example tests structurally miss).
 
 FIDELITY CAVEAT (honest): a container round-trip differential is **weaker** than
@@ -25,8 +26,9 @@ a pure in-process decoder differential, for two reasons:
      so a pure decoder differential is impractical without re-exporting Cython).
   2. Both engines share the same server, so a server-side quirk is invisible.
 What it DOES prove with high confidence: for every value Oracle can store and
-emit, rust and python-oracledb recover the *same* Python value. That is the
-parity property that matters for correctness.
+emit, rust and python-oracledb recover the *same Python type and value*. Both
+parts are required: Python equality considers values such as `100` and `100.0`
+equal even though returning `int` instead of `float` is a parity regression.
 
 To defeat the float-precision blind spot (the default NUMBER->float mapping
 collapses the 38-significant-digit cases), NUMBER columns are fetched through an
@@ -39,6 +41,7 @@ USAGE
 -----
     eval "$(ORACLEDB_CONTAINER_NAME=... ORACLEDB_HOST_PORT=... scripts/container.sh env)"
     .venv-py313/bin/python harness/differential/diff_oracle.py [--cases N] [--seed S]
+    python3 harness/differential/diff_oracle.py --self-test
 
 Exit code 0 = all cases agreed; 1 = at least one divergence (printed + a bead
 should be filed). The two engines are run in **separate subprocesses** because
@@ -54,7 +57,6 @@ import os
 import random
 import subprocess
 import sys
-from decimal import Decimal
 
 # ---------------------------------------------------------------------------
 # Corpus generation (proptest-style: deterministic from a seed, boundary-dense).
@@ -166,7 +168,6 @@ def build_corpus(seed: int, cases: int) -> dict:
 
 _FETCH_WORKER = r"""
 import importlib, sys, os, json
-from decimal import Decimal
 
 ENGINE = os.environ["DIFF_ENGINE"]
 if ENGINE == "rust":
@@ -174,6 +175,14 @@ if ENGINE == "rust":
 import oracledb
 
 corpus = json.load(sys.stdin)
+
+def typed_value(value, render=lambda item: item):
+    # JSON-safe value plus the exact Python type that the decoder returned.
+    value_type = type(value)
+    return {
+        "type": f"{value_type.__module__}.{value_type.__qualname__}",
+        "value": render(value),
+    }
 
 def number_as_str(cursor, name, default_type, size, precision, scale):
     # Fetch every NUMBER as its exact decimal string so the full decoded
@@ -204,7 +213,7 @@ for lit in corpus["numbers"]:
     try:
         cur.execute("select cast(" + lit + " as number) from dual")
         (val,) = cur.fetchone()
-        results["numbers"].append(None if val is None else str(val))
+        results["numbers"].append(typed_value(val, lambda value: str(value)))
     except oracledb.DatabaseError:
         results["numbers"].append(SKIP)
 cur.outputtypehandler = None
@@ -222,8 +231,8 @@ for lit in corpus["datetimes"]:
         )
         dt, txt = cur.fetchone()
         results["datetimes"].append({
-            "dt": None if dt is None else dt.isoformat(),
-            "txt": txt,
+            "dt": typed_value(dt, lambda value: None if value is None else value.isoformat()),
+            "txt": typed_value(txt),
         })
     except oracledb.DatabaseError:
         results["datetimes"].append(SKIP)
@@ -258,24 +267,29 @@ def _run_engine(engine: str, corpus: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _number_keys_equal(a: str, b: str) -> bool:
-    """Numeric equality on the two decoded strings (ignores cosmetic form)."""
-    if a == b:
-        return True
-    try:
-        return Decimal(a) == Decimal(b)
-    except Exception:
-        return False
-
-
 SKIP = "__SERVER_REJECTED__"
 
 
 def compare(corpus: dict, ref: dict, rust: dict) -> tuple[list[dict], int, int]:
-    """Returns (divergences, compared_count, skipped_count)."""
+    """Compare exact result shape, Python types, and rendered values."""
     divergences: list[dict] = []
     compared = 0
     skipped = 0
+
+    for kind in ("numbers", "datetimes"):
+        expected = len(corpus[kind])
+        ref_count = len(ref.get(kind, []))
+        rust_count = len(rust.get(kind, []))
+        if ref_count != expected or rust_count != expected:
+            divergences.append(
+                {
+                    "type": kind.upper(),
+                    "input": "<result-count>",
+                    "ref": ref_count,
+                    "rust": rust_count,
+                    "note": f"expected {expected} results from each engine",
+                }
+            )
 
     for lit, r, u in zip(corpus["numbers"], ref["numbers"], rust["numbers"]):
         # If EITHER engine's server rejected the value, skip — but a divergence
@@ -291,9 +305,7 @@ def compare(corpus: dict, ref: dict, rust: dict) -> tuple[list[dict], int, int]:
                 skipped += 1
             continue
         compared += 1
-        if r is None and u is None:
-            continue
-        if r is None or u is None or not _number_keys_equal(r, u):
+        if r != u:
             divergences.append({"type": "NUMBER", "input": lit, "ref": r, "rust": u})
 
     for lit, r, u in zip(corpus["datetimes"], ref["datetimes"], rust["datetimes"]):
@@ -313,6 +325,43 @@ def compare(corpus: dict, ref: dict, rust: dict) -> tuple[list[dict], int, int]:
     return divergences, compared, skipped
 
 
+def self_test() -> None:
+    """Prove the comparator rejects equal-looking wrong types and wrong values."""
+    corpus = {
+        "numbers": ["100"],
+        "datetimes": ["2024-02-29 23:59:59.123456789"],
+    }
+    baseline = {
+        "numbers": [{"type": "builtins.str", "value": "100"}],
+        "datetimes": [
+            {
+                "dt": {
+                    "type": "datetime.datetime",
+                    "value": "2024-02-29T23:59:59.123456",
+                },
+                "txt": {
+                    "type": "builtins.str",
+                    "value": "2024-02-29 23:59:59.123456789",
+                },
+            }
+        ],
+    }
+    divergences, compared, skipped = compare(corpus, baseline, baseline)
+    assert not divergences and compared == 2 and skipped == 0
+
+    # Python says 100 == 100.0. The old value-only assertion shape could let
+    # that stale-CONFIRMED regression pass; the type-bearing record must fail.
+    wrong_type = json.loads(json.dumps(baseline))
+    wrong_type["numbers"][0] = {"type": "builtins.float", "value": "100"}
+    divergences, _, _ = compare(corpus, baseline, wrong_type)
+    assert len(divergences) == 1, "injected wrong-type regression was not caught"
+
+    wrong_value = json.loads(json.dumps(baseline))
+    wrong_value["datetimes"][0]["dt"]["value"] = "2024-02-29T23:59:59.123455"
+    divergences, _, _ = compare(corpus, baseline, wrong_value)
+    assert len(divergences) == 1, "injected wrong-value regression was not caught"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--cases", type=int, default=2000, help="total generated cases")
@@ -323,7 +372,17 @@ def main() -> int:
         help="corpus RNG seed (decimal or 0x-hex)",
     )
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument(
+        "--self-test",
+        action="store_true",
+        help="inject wrong-type and wrong-value results and prove they fail",
+    )
     args = ap.parse_args()
+
+    if args.self_test:
+        self_test()
+        print("OK: differential comparator caught wrong-type and wrong-value injections.")
+        return 0
 
     for var in ("PYO_TEST_CONNECT_STRING", "PYO_TEST_MAIN_USER", "PYO_TEST_MAIN_PASSWORD"):
         if not os.environ.get(var):

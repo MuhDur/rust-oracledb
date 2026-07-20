@@ -8977,6 +8977,31 @@ impl BlockingConnection {
         runtime.block_on(async { connection.drain_cancel_response().await })
     }
 
+    /// Reconcile recovery after a blocking pyshim call received the complete
+    /// ORA-01013 response triggered by a concurrent [`CancelHandle`].
+    ///
+    /// This is intentionally hidden: the caller must have parsed the complete
+    /// TTC response as a structured ORA-01013 before invoking it. At that point
+    /// `read_response_cancellable` has completed and disarmed its read guard,
+    /// so there is nothing left to drain; only the handle's `BreakSent` phase
+    /// remains. Resetting that phase makes the clean connection reusable.
+    #[doc(hidden)]
+    pub fn __pyshim_reconcile_completed_cancel_response(connection: &mut Connection) -> Result<()> {
+        match connection.core.recovery.phase() {
+            SessionRecoveryPhase::Ready => Ok(()),
+            SessionRecoveryPhase::BreakSent => {
+                connection.core.recovery.finish_drain_ready();
+                Ok(())
+            }
+            SessionRecoveryPhase::InFlight | SessionRecoveryPhase::Draining => Err(
+                Error::ConnectionClosed("cancel response is not complete".into()),
+            ),
+            SessionRecoveryPhase::Dead => {
+                Err(Error::ConnectionClosed("connection is closed".into()))
+            }
+        }
+    }
+
     /// Blocking wrapper for [`Connection::supplement_json_column_metadata`].
     pub fn supplement_json_column_metadata(
         connection: &mut Connection,
