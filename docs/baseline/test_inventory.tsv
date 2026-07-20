@@ -51,14 +51,14 @@ crates/oracledb-protocol/tests/reference_contract.rs	1
 crates/oracledb-protocol/tests/sessionless_golden.rs	2
 crates/oracledb-protocol/tests/tls_wallet.rs	26
 crates/oracledb-protocol/tests/tpc_golden.rs	3
-crates/oracledb-pyshim/src/convert.rs	2
+crates/oracledb-pyshim/src/convert.rs	4
 crates/oracledb-pyshim/src/dbobject.rs	3
 crates/oracledb/src/arrow/builders.rs	7
 crates/oracledb/src/arrow/ipc.rs	1
 crates/oracledb/src/arrow/mod.rs	39
 crates/oracledb/src/cursor_logic.rs	14
 crates/oracledb/src/iam_pop.rs	3
-crates/oracledb/src/lib.rs	150
+crates/oracledb/src/lib.rs	152
 crates/oracledb/src/lob_stream.rs	8
 crates/oracledb/src/obs.rs	6
 crates/oracledb/src/pool.rs	33
@@ -75,7 +75,7 @@ crates/oracledb/src/soda/metadata.rs	4
 crates/oracledb/src/soda/operation.rs	15
 crates/oracledb/src/soda/qbe.rs	23
 crates/oracledb/src/sql_convert.rs	41
-crates/oracledb/src/tls.rs	17
+crates/oracledb/src/tls.rs	18
 crates/oracledb/src/transport.rs	23
 crates/oracledb/src/version_cassettes.rs	12
 crates/oracledb/tests/access_token.rs	5
@@ -121,7 +121,7 @@ crates/oracledb/tests/repro_repeated_named_bind.rs	1
 crates/oracledb/tests/reuse_after_call_timeout.rs	1
 crates/oracledb/tests/statement_ground_truth.rs	3
 crates/oracledb/tests/statement_shape_cache.rs	5
-crates/oracledb/tests/tls_handshake.rs	18
+crates/oracledb/tests/tls_handshake.rs	20
 crates/oracledb/tests/token_source.rs	4
 crates/oracledb/tests/trybuild/fail/enum.rs	0
 crates/oracledb/tests/trybuild/fail/invalid_field_attr.rs	0
