@@ -626,6 +626,82 @@ fn tls_handshake_honors_a_short_caller_supplied_timeout_against_a_stalled_peer()
 }
 
 #[test]
+fn tcps_hard_close_delivers_complete_plaintext_before_missing_close_notify() {
+    // `spawn_tls_server` deliberately drops the TCP socket after flushing the
+    // echo; it does not queue a rustls close_notify. This is the Oracle session
+    // shutdown shape: complete application bytes followed by a bare TCP FIN.
+    let (port, server) = spawn_tls_server();
+    let params = ca_trust_params("localhost", true, None);
+    let desc = descriptor(port);
+
+    let rt = io_runtime();
+    let error = rt.block_on(async move {
+        let _cx = Cx::current().expect("ambient cx");
+        let tcp = TcpStream::connect((desc.host.clone(), desc.port))
+            .await
+            .expect("tcp connect");
+        let mut tls_stream =
+            tls::tls_handshake(&desc, None, &params, tcp, std::time::Duration::from_secs(5))
+                .await
+                .expect("TCPS handshake");
+        tls_stream.write_all(b"ping\n").await.expect("write");
+        tls_stream.flush().await.expect("flush");
+
+        let mut complete = [0u8; 5];
+        tls_stream
+            .read_exact(&mut complete)
+            .await
+            .expect("complete plaintext must be delivered before transport EOF");
+        assert_eq!(&complete, b"ping\n");
+
+        let mut next = [0u8; 1];
+        tls_stream
+            .read(&mut next)
+            .await
+            .expect_err("bare TCP close must retain Asupersync's typed TLS EOF")
+    });
+    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    assert_eq!(
+        error.to_string(),
+        "tls connection closed without close_notify"
+    );
+    server.join().expect("server thread");
+}
+
+#[test]
+fn tcps_hard_close_before_expected_plaintext_remains_unexpected_eof() {
+    let (port, server) = spawn_tls_server();
+    let params = ca_trust_params("localhost", true, None);
+    let desc = descriptor(port);
+
+    let rt = io_runtime();
+    let error = rt.block_on(async move {
+        let _cx = Cx::current().expect("ambient cx");
+        let tcp = TcpStream::connect((desc.host.clone(), desc.port))
+            .await
+            .expect("tcp connect");
+        let mut tls_stream =
+            tls::tls_handshake(&desc, None, &params, tcp, std::time::Duration::from_secs(5))
+                .await
+                .expect("TCPS handshake");
+        tls_stream.write_all(b"ping\n").await.expect("write");
+        tls_stream.flush().await.expect("flush");
+
+        let mut truncated = [0u8; 6];
+        tls_stream
+            .read_exact(&mut truncated)
+            .await
+            .expect_err("a missing application byte must not become clean EOF")
+    });
+    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    assert_eq!(
+        error.to_string(),
+        "tls connection closed without close_notify"
+    );
+    server.join().expect("server thread");
+}
+
+#[test]
 fn tcps_x509_v1_wallet_client_cert_builds_and_handshakes() {
     // OCI Autonomous Database wallets may contain an X.509 v1 client leaf.
     // `with_client_auth_cert` rejects it while parsing with webpki; the driver

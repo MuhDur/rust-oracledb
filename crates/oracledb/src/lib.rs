@@ -722,6 +722,30 @@ impl<T: WireTransport> ConnectionCore<T> {
         self.note_post_sync_result(map_inactivity_timeout(result))
     }
 
+    /// Read the response to the terminal LOGOFF request.
+    ///
+    /// Oracle may finish a usable TCPS session by closing TCP without a TLS
+    /// `close_notify`. That transport signal is acceptable only before the
+    /// first byte of this terminal response: at that point LOGOFF has already
+    /// been written and there is no next application response to protect. Any
+    /// bytes followed by the same signal remain a truncated response error.
+    async fn read_session_close_response(
+        &mut self,
+        cx: &Cx,
+        classic: bool,
+        probe: impl Fn(&[u8]) -> bool,
+    ) -> Result<()> {
+        let write = Arc::clone(&self.write);
+        let limits = self.protocol_limits;
+        let inactivity = self.inactivity_timeout;
+        let result = {
+            let mut read = InactivityRead::new(self.read_mut()?, inactivity);
+            read_session_close_response_with_limits(&mut read, cx, &write, classic, &probe, limits)
+                .await
+        };
+        self.note_post_sync_result(map_inactivity_timeout(result))
+    }
+
     /// [`read_data_response_probed`](Self::read_data_response_probed) for the
     /// bind/execute path, which must answer FLUSH_OUT_BINDS requests. With
     /// `classic == false` this is exactly
@@ -7722,7 +7746,7 @@ impl Connection {
             time::wall_now(),
             Duration::from_secs(5),
             self.core
-                .read_data_response_probed(cx, !self.supports_end_of_response, |bytes| {
+                .read_session_close_response(cx, !self.supports_end_of_response, |bytes| {
                     response_complete(&parse_plain_function_response_with_limits(
                         bytes,
                         capabilities,
@@ -7732,7 +7756,7 @@ impl Connection {
         )
         .await
         {
-            let _ = response?;
+            response?;
         }
         let eof = encode_packet(
             TNS_PACKET_TYPE_DATA,
@@ -9312,6 +9336,97 @@ where
             .await?
             .payload,
     )
+}
+
+const ASUPERSYNC_TLS_MISSING_CLOSE_NOTIFY: &str = "tls connection closed without close_notify";
+
+fn is_missing_tls_close_notify(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::UnexpectedEof
+        && error.to_string() == ASUPERSYNC_TLS_MISSING_CLOSE_NOTIFY
+}
+
+/// Read adapter for the one terminal LOGOFF response.
+///
+/// It converts Asupersync's exact missing-`close_notify` signal into ordinary
+/// EOF only when no application byte has yet been delivered through the
+/// adapter. The surrounding response reader then reports its usual short-read
+/// error, which [`read_session_close_response_with_limits`] recognizes via the
+/// flag below. Once even one byte has arrived, the signal passes through
+/// unchanged so a partial TNS header or payload can never look like a clean
+/// session close.
+struct SessionCloseRead<'a, R> {
+    inner: &'a mut R,
+    application_bytes: usize,
+    missing_close_notify_at_boundary: bool,
+}
+
+impl<'a, R> SessionCloseRead<'a, R> {
+    fn new(inner: &'a mut R) -> Self {
+        Self {
+            inner,
+            application_bytes: 0,
+            missing_close_notify_at_boundary: false,
+        }
+    }
+}
+
+impl<R> AsyncRead for SessionCloseRead<'_, R>
+where
+    R: AsyncRead + Unpin,
+{
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+        buffer: &mut asupersync::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let filled_before = buffer.filled().len();
+        match std::pin::Pin::new(&mut *this.inner).poll_read(context, buffer) {
+            std::task::Poll::Ready(Ok(())) => {
+                this.application_bytes += buffer.filled().len() - filled_before;
+                std::task::Poll::Ready(Ok(()))
+            }
+            std::task::Poll::Ready(Err(error))
+                if this.application_bytes == 0 && is_missing_tls_close_notify(&error) =>
+            {
+                this.missing_close_notify_at_boundary = true;
+                std::task::Poll::Ready(Ok(()))
+            }
+            other => other,
+        }
+    }
+}
+
+/// Read the terminal LOGOFF response while accepting Oracle's bare TCP close
+/// at the empty response boundary. Every ordinary operation, including the
+/// pre-ACCEPT connect phase, continues to use the strict readers above/below.
+async fn read_session_close_response_with_limits<R, W, P>(
+    read: &mut R,
+    cx: &Cx,
+    write: &Arc<AsyncMutex<W>>,
+    classic: bool,
+    probe: &P,
+    limits: ProtocolLimits,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + std::fmt::Debug + Unpin,
+    P: Fn(&[u8]) -> bool,
+{
+    let mut close_read = SessionCloseRead::new(read);
+    let result = if classic {
+        read_classic_data_response_probed_with_limits(&mut close_read, cx, write, probe, limits)
+            .await
+            .map(|_| ())
+    } else {
+        read_data_response_with_limits(&mut close_read, cx, write, limits)
+            .await
+            .map(|_| ())
+    };
+    match result {
+        Err(_) if close_read.missing_close_notify_at_boundary => Ok(()),
+        other => other,
+    }
 }
 
 /// Accumulates DATA packets for one classic (pre-END_OF_RESPONSE)
@@ -14962,6 +15077,12 @@ mod tests {
                         state.read.pop_front();
                         return std::task::Poll::Ready(Err(std::io::Error::other(message)));
                     }
+                    Some(ReadAction::ErrorKind(kind, message)) => {
+                        let kind = *kind;
+                        let message = *message;
+                        state.read.pop_front();
+                        return std::task::Poll::Ready(Err(std::io::Error::new(kind, message)));
+                    }
                     Some(ReadAction::AdvanceTime(duration)) => {
                         let duration = *duration;
                         state.read.pop_front();
@@ -15181,6 +15302,7 @@ mod tests {
         PendingUntil(ScriptedGate),
         Eof,
         Error(&'static str),
+        ErrorKind(std::io::ErrorKind, &'static str),
         AdvanceTime(Duration),
     }
 
@@ -19433,6 +19555,122 @@ mod tests {
 
         server_a.join().expect("lane A server joins");
         server_b.join().expect("lane B server joins");
+        Ok(())
+    }
+
+    #[test]
+    fn missing_tls_close_notify_is_tolerated_only_at_terminal_session_boundary() -> Result<()> {
+        fn scripted_read(actions: Vec<ReadAction>) -> ScriptedRead {
+            ScriptedRead::from_state(Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+                actions,
+                Vec::new(),
+                ScriptedClock::default(),
+            ))))
+        }
+
+        fn scripted_write() -> Arc<AsyncMutex<ScriptedWrite>> {
+            Arc::new(AsyncMutex::with_name(
+                "session_close_notify_test_write",
+                ScriptedWrite::from_state(Arc::new(std::sync::Mutex::new(ScriptedIoState::new(
+                    Vec::new(),
+                    Vec::new(),
+                    ScriptedClock::default(),
+                )))),
+            ))
+        }
+
+        fn missing_notify() -> ReadAction {
+            ReadAction::ErrorKind(
+                std::io::ErrorKind::UnexpectedEof,
+                ASUPERSYNC_TLS_MISSING_CLOSE_NOTIFY,
+            )
+        }
+
+        let runtime = build_io_runtime()?;
+
+        // The pre-ACCEPT and ordinary packet readers remain strict. Turning
+        // this into EOF globally would mask malformed CONNECT exchanges.
+        let mut strict_read = scripted_read(vec![missing_notify()]);
+        let strict_error = runtime
+            .block_on(read_packet_with_limits(
+                &mut strict_read,
+                PacketLengthWidth::Legacy16,
+                ProtocolLimits::DEFAULT,
+            ))
+            .expect_err("pre-ACCEPT missing close_notify must remain an error");
+        assert!(
+            matches!(&strict_error, Error::Io(error)
+                if error.kind() == std::io::ErrorKind::UnexpectedEof
+                    && error.to_string() == ASUPERSYNC_TLS_MISSING_CLOSE_NOTIFY),
+            "strict packet read must preserve the typed TLS EOF, got {strict_error:?}"
+        );
+
+        // Oracle is allowed to answer terminal LOGOFF by closing the already
+        // usable session without a TLS alert and without another TNS packet.
+        let mut clean_close = scripted_read(vec![missing_notify()]);
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let probe = |_bytes: &[u8]| false;
+            read_session_close_response_with_limits(
+                &mut clean_close,
+                &cx,
+                &scripted_write(),
+                false,
+                &probe,
+                ProtocolLimits::DEFAULT,
+            )
+            .await
+        })?;
+
+        // A fully framed response still wins normally; the following hard TLS
+        // close is never consulted once the application boundary is proven.
+        let complete = data_packet(&[TNS_MSG_TYPE_END_OF_RESPONSE], true);
+        let mut complete_close =
+            scripted_read(vec![ReadAction::bytes(complete, Some(3)), missing_notify()]);
+        runtime.block_on(async {
+            let cx = test_cx()?;
+            let probe = |_bytes: &[u8]| true;
+            read_session_close_response_with_limits(
+                &mut complete_close,
+                &cx,
+                &scripted_write(),
+                false,
+                &probe,
+                ProtocolLimits::DEFAULT,
+            )
+            .await
+        })?;
+
+        // Once any TNS byte arrived, the same signal proves truncation and
+        // remains a typed UnexpectedEof. Here the final payload byte is absent.
+        let mut truncated = data_packet(b"truncated", true);
+        truncated.pop();
+        let mut truncated_close = scripted_read(vec![
+            ReadAction::bytes(truncated, Some(3)),
+            missing_notify(),
+        ]);
+        let truncated_error = runtime
+            .block_on(async {
+                let cx = test_cx()?;
+                let probe = |_bytes: &[u8]| false;
+                read_session_close_response_with_limits(
+                    &mut truncated_close,
+                    &cx,
+                    &scripted_write(),
+                    false,
+                    &probe,
+                    ProtocolLimits::DEFAULT,
+                )
+                .await
+            })
+            .expect_err("partial application response must not be accepted as clean close");
+        assert!(
+            matches!(&truncated_error, Error::Io(error)
+                if error.kind() == std::io::ErrorKind::UnexpectedEof
+                    && error.to_string() == ASUPERSYNC_TLS_MISSING_CLOSE_NOTIFY),
+            "truncated response must preserve the typed TLS EOF, got {truncated_error:?}"
+        );
+
         Ok(())
     }
 
