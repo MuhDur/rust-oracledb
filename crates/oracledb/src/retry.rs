@@ -47,11 +47,27 @@ pub enum Idempotency {
 impl Idempotency {
     /// A conservative, fail-safe classification from SQL text alone.
     ///
-    /// Only a leading `SELECT` keyword is treated as [`Idempotent`]. Everything
+    /// Only a statement whose first alphabetic token (after **leading
+    /// whitespace only**) is `SELECT` is treated as [`Idempotent`]. Everything
     /// else — DML, DDL, PL/SQL blocks (`BEGIN`/`DECLARE`), `CALL`, `MERGE`,
-    /// `WITH ... SELECT` (which can carry a `WITH FUNCTION` side effect), and any
-    /// text we do not recognize — is [`NonIdempotent`]. A blind retry of those
-    /// could double-apply, so the safe default is "do not retry".
+    /// `WITH ... SELECT` (which can carry a `WITH FUNCTION` side effect), text
+    /// that begins with a line/block comment, and any text we do not recognize
+    /// — is [`NonIdempotent`]. A blind retry of those could double-apply, so
+    /// the safe default is "do not retry".
+    ///
+    /// **Leading comments are deliberately not skipped.** A `SELECT` that is
+    /// preceded by `-- ...` or `/* ... */` therefore classifies as
+    /// [`NonIdempotent`]. That is stricter than the reference thin driver's
+    /// comment-skipping first-keyword scan (used there for protocol
+    /// `_is_query`, not for automatic retry), and it is intentional: this
+    /// helper is a *retry eligibility* gate, not a statement-type detector.
+    /// Widening it to peel comments would silently re-enable retry for any
+    /// shape we mis-parse past the comment. Callers who know a commented
+    /// `SELECT` is safe must pass [`Idempotency::Idempotent`] explicitly.
+    ///
+    /// Optimizer hints that follow the keyword (`SELECT /*+ ... */ ...`) still
+    /// classify as idempotent, because the first alphabetic token remains
+    /// `SELECT`.
     ///
     /// A caller who *knows* a statement is safe to replay should pass
     /// [`Idempotency::Idempotent`] explicitly rather than rely on this.
@@ -59,8 +75,9 @@ impl Idempotency {
     /// [`Idempotent`]: Idempotency::Idempotent
     /// [`NonIdempotent`]: Idempotency::NonIdempotent
     pub fn classify_sql(sql: &str) -> Idempotency {
-        // Skip leading whitespace and a single leading line/block comment run so
-        // a hinted `SELECT /*+ ... */` or a commented statement still classifies.
+        // Whitespace only — never peel leading comments. See the doc comment:
+        // retry eligibility is fail-safe; a leading-comment SELECT is
+        // NonIdempotent unless the caller vouches for Idempotent explicitly.
         let head = sql.trim_start();
         let keyword = head
             .split(|ch: char| !ch.is_ascii_alphabetic())
@@ -453,6 +470,11 @@ mod tests {
             Idempotency::classify_sql("  select 1 from dual"),
             Idempotency::Idempotent
         );
+        // Hint after the keyword still leaves SELECT as the first token.
+        assert_eq!(
+            Idempotency::classify_sql("SELECT /*+ FIRST_ROWS */ 1 FROM dual"),
+            Idempotency::Idempotent
+        );
         assert_eq!(
             Idempotency::classify_sql("INSERT INTO t VALUES (1)"),
             Idempotency::NonIdempotent
@@ -475,6 +497,42 @@ mod tests {
             Idempotency::NonIdempotent
         );
         assert_eq!(Idempotency::classify_sql(""), Idempotency::NonIdempotent);
+    }
+
+    /// Contract pin (f-driver-retry-leading-comment-contract): leading comments
+    /// are **not** peeled. A SELECT that only becomes visible after a `--` or
+    /// `/* */` prefix is NonIdempotent. This matches the whitespace-only
+    /// implementation and the docs; it deliberately refuses to silently widen
+    /// retry eligibility by skipping comments the way the reference's
+    /// statement-type scanner does for `_is_query`.
+    #[test]
+    fn classify_sql_leading_comment_select_is_non_idempotent() {
+        assert_eq!(
+            Idempotency::classify_sql("-- comment\nSELECT 1 FROM dual"),
+            Idempotency::NonIdempotent,
+            "line-comment prefix must not unlock automatic retry"
+        );
+        assert_eq!(
+            Idempotency::classify_sql("/* block */ SELECT 1 FROM dual"),
+            Idempotency::NonIdempotent,
+            "block-comment prefix must not unlock automatic retry"
+        );
+        assert_eq!(
+            Idempotency::classify_sql("  /* block */\n  SELECT 1 FROM dual"),
+            Idempotency::NonIdempotent,
+            "whitespace + block-comment prefix must stay fail-safe"
+        );
+        // A DML after a comment must never become retry-eligible either.
+        assert_eq!(
+            Idempotency::classify_sql("/* x */ INSERT INTO t VALUES (1)"),
+            Idempotency::NonIdempotent
+        );
+        // And a non-comment non-SELECT token at the head stays NonIdempotent.
+        assert_eq!(
+            Idempotency::classify_sql("(SELECT 1 FROM dual)"),
+            Idempotency::NonIdempotent,
+            "parenthesized SELECT is not a leading SELECT keyword"
+        );
     }
 
     // --- async executor over a scripted transport ----------------------------
