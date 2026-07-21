@@ -21,7 +21,6 @@
   },
   "source": {
     "sha": "d99927d0723ecae10a732a9f89ebeab76af75445",
-    "implementing_commits": ["d99927d0723ecae10a732a9f89ebeab76af75445"],
     "tree_clean": true,
     "branch": "master"
   },
