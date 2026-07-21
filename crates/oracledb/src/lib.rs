@@ -1781,7 +1781,8 @@ impl std::fmt::Debug for AccessToken {
 /// The RSA private key (PKCS#8 PEM) an OCI IAM database token is bound to, used
 /// to sign the proof-of-possession header. Like [`AccessToken`] its [`Debug`]
 /// is redacted so the key never leaks into logs, errors, or panics. Set it with
-/// [`ConnectOptions::with_access_token_and_key`].
+/// [`ConnectOptions::with_access_token_and_key`] or
+/// [`ConnectOptions::with_token_source_and_key`].
 #[derive(Clone)]
 pub struct TokenPrivateKey(String);
 
@@ -2129,7 +2130,8 @@ pub struct ConnectOptions {
     /// against the token's embedded public key. Required for OCI IAM database
     /// tokens (`oci iam db-token get`); a plain OAuth2 bearer token needs none.
     /// Redacted from `Debug`. Set with
-    /// [`ConnectOptions::with_access_token_and_key`].
+    /// [`ConnectOptions::with_access_token_and_key`] or
+    /// [`ConnectOptions::with_token_source_and_key`].
     access_token_private_key: Option<TokenPrivateKey>,
     /// Pluggable source of database access tokens (OCI IAM / OAuth2). When set
     /// and no static [`access_token`](Self::access_token) is present, the driver
@@ -2367,6 +2369,33 @@ impl ConnectOptions {
         private_key_pkcs8_pem: impl Into<String>,
     ) -> Self {
         self.access_token = Some(AccessToken::new(token));
+        self.access_token_private_key = Some(TokenPrivateKey::new(private_key_pkcs8_pem));
+        self.auth_mode = AuthMode::IamToken;
+        self
+    }
+
+    /// Authenticate with an OCI IAM **database** token obtained from a
+    /// refreshable [`TokenSource`] and its bound RSA private key (PKCS#8 PEM).
+    ///
+    /// OCI IAM database tokens are proof-of-possession credentials: each token
+    /// is bound to the supplied key, which the driver uses to produce
+    /// `AUTH_HEADER`/`AUTH_SIGNATURE`. The source is consulted once for every
+    /// physical connection attempt, so it owns freshness; no token is stored in
+    /// these options. As with [`Self::with_token_source`], the descriptor must
+    /// use TLS/TCPS or the driver fails with [`Error::AccessTokenRequiresTcps`]
+    /// before consulting the source. Both the source's token and the key remain
+    /// redacted from [`Debug`].
+    ///
+    /// This method deliberately does not set a static access token. Supplying a
+    /// static token separately still takes precedence, exactly as documented by
+    /// [`Self::with_token_source`].
+    #[must_use]
+    pub fn with_token_source_and_key(
+        mut self,
+        source: std::sync::Arc<dyn TokenSource>,
+        private_key_pkcs8_pem: impl Into<String>,
+    ) -> Self {
+        self.token_source = Some(source);
         self.access_token_private_key = Some(TokenPrivateKey::new(private_key_pkcs8_pem));
         self.auth_mode = AuthMode::IamToken;
         self

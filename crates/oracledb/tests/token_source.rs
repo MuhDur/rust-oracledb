@@ -11,6 +11,8 @@
 //!      token frames correctly as `AUTH_TOKEN`.
 //!   4. A source is invoked once for every physical connection attempt; token
 //!      freshness and any refresh policy stay inside the source.
+//!   5. OCI IAM sources carry their bound proof-of-possession key without
+//!      storing a static token or falling back to password authentication.
 //!
 //! Real-cloud token *acceptance* is an operator smoke test (C5-smoke); the
 //! over-the-wire `AUTH_TOKEN` framing across a real TLS transport is pinned by
@@ -26,6 +28,10 @@ use oracledb::{
 
 /// A secret-shaped token value used to prove it never leaks through any error.
 const SECRET_TOKEN: &str = "HEADER.PAYLOAD.super-secret-signature-value";
+/// Deliberately malformed private-key material. It must reach the PoP signer
+/// only after the source produces a token, then fail before the test endpoint
+/// can be dialled.
+const PRIVATE_KEY_SENTINEL: &str = "not-a-PKCS8-private-key-super-secret-value";
 
 #[derive(Clone)]
 enum Outcome {
@@ -107,7 +113,7 @@ fn token_source_over_plaintext_is_refused_before_fetch() {
     // so no token is ever fetched for a transport that could not carry it.
     let err = BlockingConnection::connect(
         ConnectOptions::new("127.0.0.1:1/FREEPDB1", "OCITESTUSER", "", identity())
-            .with_token_source(source),
+            .with_token_source_and_key(source, PRIVATE_KEY_SENTINEL),
     )
     .expect_err("a token source over plaintext must be refused");
 
@@ -137,7 +143,7 @@ fn token_source_failure_over_tcps_maps_to_redacted_error_before_dial() {
     // Network, not Authentication).
     let err = BlockingConnection::connect(
         ConnectOptions::new("tcps://127.0.0.1:1/FREEPDB1", "OCITESTUSER", "", identity())
-            .with_token_source(source),
+            .with_token_source_and_key(source, PRIVATE_KEY_SENTINEL),
     )
     .expect_err("a failing token source must fail the connect");
 
@@ -170,6 +176,57 @@ fn token_source_is_reinvoked_for_each_physical_connect_attempt() {
             attempt,
             "the token source must be invoked once per physical connect attempt"
         );
+    }
+}
+
+#[test]
+fn token_source_and_key_refreshes_without_static_token_fallback() {
+    let (source, calls) = MockTokenSource::new(Outcome::Token(SECRET_TOKEN.to_string()));
+    let options = ConnectOptions::new("tcps://127.0.0.1:1/FREEPDB1", "OCITESTUSER", "", identity())
+        .with_token_source_and_key(source, PRIVATE_KEY_SENTINEL);
+
+    assert!(
+        options.access_token().is_none(),
+        "a source-and-key configuration must not retain a stale static token"
+    );
+    assert!(
+        options.token_source().is_some(),
+        "the refreshable source must be retained"
+    );
+    let rendered_options = format!("{options:?}");
+    assert!(
+        rendered_options.contains("TokenPrivateKey(***redacted***)"),
+        "the source-and-key builder must retain the PoP key: {rendered_options}"
+    );
+    assert!(
+        !rendered_options.contains(SECRET_TOKEN)
+            && !rendered_options.contains(PRIVATE_KEY_SENTINEL),
+        "the source token and private key must stay redacted: {rendered_options}"
+    );
+
+    // PoP signing deliberately happens after the database ACCEPT packet, so an
+    // unopened loopback port cannot exercise it. Each clone still models a
+    // distinct physical connect attempt: the source refreshes before the
+    // transport attempt and cannot fall back to a stale static token or password
+    // authentication.
+    for attempt in 1..=2 {
+        let err = BlockingConnection::connect(options.clone())
+            .expect_err("the test endpoint must not establish a TCPS session");
+        assert!(
+            matches!(err, Error::AllAddressesFailed(_)),
+            "expected the unopened endpoint's aggregate network failure, got: {err:?}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            attempt,
+            "the source must refresh once per physical connect attempt"
+        );
+        for rendered in [format!("{err}"), format!("{err:?}")] {
+            assert!(
+                !rendered.contains(SECRET_TOKEN) && !rendered.contains(PRIVATE_KEY_SENTINEL),
+                "source token and private key must stay redacted: {rendered}"
+            );
+        }
     }
 }
 

@@ -280,6 +280,7 @@ pub fn oracledb::ConnectOptions::with_ssl_server_cert_dn(self, impl core::conver
 pub fn oracledb::ConnectOptions::with_ssl_server_dn_match(self, bool) -> Self
 pub fn oracledb::ConnectOptions::with_statement_cache_size(self, usize) -> Self
 pub fn oracledb::ConnectOptions::with_token_source(self, alloc::sync::Arc<dyn oracledb::TokenSource>) -> Self
+pub fn oracledb::ConnectOptions::with_token_source_and_key(self, alloc::sync::Arc<dyn oracledb::TokenSource>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_use_sni(self, bool) -> Self
 pub fn oracledb::ConnectOptions::with_wallet_location(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_wallet_password(self, impl core::convert::Into<alloc::string::String>) -> Self
@@ -1066,6 +1067,7 @@ pub fn oracledb::ConnectOptions::with_ssl_server_cert_dn(self, impl core::conver
 pub fn oracledb::ConnectOptions::with_ssl_server_dn_match(self, bool) -> Self
 pub fn oracledb::ConnectOptions::with_statement_cache_size(self, usize) -> Self
 pub fn oracledb::ConnectOptions::with_token_source(self, alloc::sync::Arc<dyn oracledb::TokenSource>) -> Self
+pub fn oracledb::ConnectOptions::with_token_source_and_key(self, alloc::sync::Arc<dyn oracledb::TokenSource>, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_use_sni(self, bool) -> Self
 pub fn oracledb::ConnectOptions::with_wallet_location(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oracledb::ConnectOptions::with_wallet_password(self, impl core::convert::Into<alloc::string::String>) -> Self
