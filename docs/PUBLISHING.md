@@ -10,7 +10,7 @@ for the publish order, the version, what ships, and the post-publish checklist.
 |---|---|
 | Initial public release | **0.1.0** |
 | Latest published release | **0.9.0** |
-| Prepared release candidate | Not prepared |
+| Workspace release version | **0.9.0** |
 | Candidate source | `[workspace.package].version` in the root `Cargo.toml` |
 
 `0.1.0` (not `0.0.0`, which crates.io treats as a placeholder, and not a
@@ -18,7 +18,7 @@ for the publish order, the version, what ships, and the post-publish checklist.
 reference python-oracledb thin-mode test suite and is honestly usable, while the
 `0.x` major signals that the public API may still evolve before `1.0`.
 
-All workspace crates share the prepared candidate version via `version.workspace = true`.
+All workspace crates share the workspace release version via `version.workspace = true`.
 
 ## Mandatory pre-tag live-matrix check
 

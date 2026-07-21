@@ -11,7 +11,7 @@ toml_key = "workspace.package.version"
 
 [[canonical]]
 name = "published_version"
-value = "0.8.3"
+value = "0.9.0"
 
 [[canonical]]
 name = "runtime_version"
@@ -36,11 +36,11 @@ replacement = "| Latest published release | **{published_version}** |"
 match_count = 1
 
 [[surface]]
-name = "publishing_release_candidate"
+name = "publishing_workspace_release"
 source = "workspace_version"
 path = "docs/PUBLISHING.md"
-pattern = "\\| Prepared release candidate \\| \\*\\*(?P<value>[0-9]+\\.[0-9]+\\.[0-9]+)\\*\\* \\(not published\\) \\|"
-replacement = "| Prepared release candidate | **{workspace_version}** (not published) |"
+pattern = "\\| Workspace release version \\| \\*\\*(?P<value>[0-9]+\\.[0-9]+\\.[0-9]+)\\*\\* \\|"
+replacement = "| Workspace release version | **{workspace_version}** |"
 match_count = 1
 
 [[surface]]
