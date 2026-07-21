@@ -56,6 +56,55 @@ fn exec(c: &mut oracledb::Connection, sql: &str) {
     );
 }
 
+/// B13 TTC-129 regression exercise: keep several connections alive while each
+/// repeatedly fetches a multi-row data-dictionary result. A parser that leaves
+/// a trailing TTC value unconsumed surfaces on the next operation as the
+/// fail-closed `unknown TTC message type 129` error, so every iteration must
+/// complete on its original session.
+///
+/// Run with `ORACLEDB_TRACE_QUERY=1` to retain execute/fetch wire traces for a
+/// failing lane. The trace is intentionally opt-in because it includes query
+/// payload bytes.
+#[test]
+#[ignore]
+fn long_lived_concurrent_dictionary_reads_do_not_desync_ttc() {
+    const WORKERS: usize = 4;
+    const ITERATIONS_PER_WORKER: usize = 32;
+    const DICTIONARY_QUERY: &str = "select owner, object_name, object_type \
+        from all_objects where rownum <= 25";
+
+    let workers = (0..WORKERS)
+        .map(|worker| {
+            std::thread::spawn(move || {
+                let mut connection = connect();
+                for iteration in 0..ITERATIONS_PER_WORKER {
+                    let rows = BlockingConnection::query_all(
+                        &mut connection,
+                        DICTIONARY_QUERY,
+                        (),
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "dictionary query failed on worker {worker}, iteration {iteration}: {error}"
+                        )
+                    });
+                    assert!(
+                        !rows.is_empty(),
+                        "ALL_OBJECTS unexpectedly returned no rows on worker {worker}, iteration {iteration}"
+                    );
+                }
+                BlockingConnection::close(connection)
+                    .unwrap_or_else(|error| panic!("close worker {worker}: {error}"));
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for (worker, join) in workers.into_iter().enumerate() {
+        join.join()
+            .unwrap_or_else(|_| panic!("dictionary worker {worker} panicked"));
+    }
+}
+
 #[test]
 #[ignore]
 fn describe_timestamp_and_interval_precision_scale() {
