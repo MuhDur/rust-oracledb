@@ -331,12 +331,11 @@ fi
       --glob '!**/fuzz/**' \
       '^[[:space:]]*pub(\([^)]*\))?[[:space:]]+(use|mod|struct|enum|trait|type|const|static|async[[:space:]]+fn|fn)[[:space:]]+' \
       "$crate_dir" 2>/dev/null |
-      sort |
       while IFS=: read -r path _line item; do
         printf '%s\t%s\t%s\n' "$crate" "$(relpath "$path")" "$(awk '{$1=$1; print}' <<<"$item")"
       done
   done
-} > "$OUT/public_source_items.tsv"
+} | sort > "$OUT/public_source_items.tsv"
 
 {
   printf 'crate\titems\n'
