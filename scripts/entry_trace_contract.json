@@ -33,6 +33,7 @@
     {"path": "scripts/gen_baseline.sh", "kind": "entry_point", "trace": "required-quality"},
     {"path": "scripts/gen_sbom.sh", "kind": "entry_point", "trace": "required-quality"},
     {"path": "scripts/gen_test_wallets.sh", "kind": "helper", "excluded_reason": "fixture-generator-not-a-gate"},
+    {"path": "scripts/install_git_hooks.sh", "kind": "entry_point", "trace": "local-baseline-pre-push"},
     {"path": "scripts/merge_pytest_json.py", "kind": "helper", "excluded_reason": "called-by-parity-report-tools"},
     {"path": "scripts/mutation_gate.py", "kind": "entry_point", "trace": "mutation-evidence"},
     {"path": "scripts/parity_rigor.sh", "kind": "entry_point", "trace": "parity-rigor"},
@@ -49,6 +50,7 @@
     {"path": "scripts/smoke-static.sh", "kind": "entry_point", "trace": "required-quality"},
     {"path": "scripts/statement_ground_truth.py", "kind": "entry_point", "trace": "version-matrix-live"},
     {"path": "scripts/test_release_preflight_pins.sh", "kind": "entry_point", "trace": "required-quality"},
+    {"path": "scripts/test_baseline_pre_push_guard.sh", "kind": "entry_point", "trace": "required-quality"},
     {"path": "scripts/test_verify_release_exact_sha.sh", "kind": "helper", "excluded_reason": "contract-test-for-exact-sha-release-proof"},
     {"path": "scripts/test_verify_required_local.sh", "kind": "helper", "excluded_reason": "contract-test-for-required-local-proof"},
     {"path": "scripts/tsan_campaign.sh", "kind": "entry_point", "trace": "tsan-campaign"},
@@ -81,6 +83,18 @@
         {"path": "scripts/verify_required_local.sh", "marker": "python3"}
       ],
       "result": {"path": "scripts/verify_required_local.py", "markers": ["required-proof: wrote", "required-proof: REFUSING"]},
+      "capabilities": []
+    },
+    {
+      "id": "local-baseline-pre-push",
+      "tier": "operator",
+      "runner": "scripts/install_git_hooks.sh",
+      "skip_policy": "fail",
+      "dispatch": [
+        {"path": "scripts/install_git_hooks.sh", "marker": "core.hooksPath"},
+        {"path": ".githooks/pre-push", "marker": "scripts/gen_baseline.sh"}
+      ],
+      "result": {"path": "scripts/install_git_hooks.sh", "markers": ["git-hooks: OK", "git-hooks: NOT INSTALLED"]},
       "capabilities": []
     },
     {

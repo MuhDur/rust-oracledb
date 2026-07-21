@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Reject pushes whose baseline inputs changed without regenerating the checked
+# derived artifacts. CI's Required baseline gate remains the authoritative
+# backstop; this hook only moves the same failure to the developer's machine.
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+needs_baseline_check=false
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  # Deleted refs carry an all-zero local SHA and cannot introduce source drift.
+  if [[ "$local_sha" == "0000000000000000000000000000000000000000" ]]; then
+    continue
+  fi
+
+  base="$remote_sha"
+  if [[ "$base" == "0000000000000000000000000000000000000000" ]]; then
+    base="$EMPTY_TREE"
+  fi
+
+  if git diff --name-only "$base" "$local_sha" -- | rg -q \
+    '^(crates/|Cargo\.toml$|Cargo\.lock$|rust-toolchain\.toml$|\.github/workflows/|scripts/|docs/baseline/)'; then
+    needs_baseline_check=true
+    break
+  fi
+done
+
+if [[ "$needs_baseline_check" != true ]]; then
+  echo "baseline pre-push: no baseline inputs changed"
+  exit 0
+fi
+
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/oracledb-baseline-pre-push.XXXXXX")"
+if [[ "${ORACLEDB_HOOK_KEEP_SCRATCH:-0}" == "1" ]]; then
+  echo "baseline pre-push: preserving check output at $scratch"
+else
+  trap 'rm -rf -- "$scratch"' EXIT
+fi
+
+if ORACLEDB_BASELINE_DIR="$scratch" "$ROOT/scripts/gen_baseline.sh" --check; then
+  echo "baseline pre-push: OK"
+  exit 0
+fi
+
+echo "baseline pre-push: REJECTED stale derived baseline" >&2
+echo "baseline pre-push: run scripts/gen_baseline.sh, commit docs/baseline/, then push again" >&2
+exit 1

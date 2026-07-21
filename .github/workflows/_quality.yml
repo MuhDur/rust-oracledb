@@ -242,6 +242,7 @@ jobs:
           bash scripts/check_entry_trace_contract.sh --self-test
           bash scripts/check_release_surface_versions.sh
           bash scripts/check_ci_taxonomy.sh
+          bash scripts/test_baseline_pre_push_guard.sh
 
       - name: Install baseline tools
         id: baseline_tools

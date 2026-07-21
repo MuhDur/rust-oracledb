@@ -95,6 +95,10 @@ one place to check:
   change with the source change. CI treats baseline drift as a Required failure.
   To verify without modifying the checkout, run
   `ORACLEDB_BASELINE_DIR=<outside-checkout> scripts/gen_baseline.sh --check`.
+  Install the versioned early-warning hook in each clone with
+  `scripts/install_git_hooks.sh`; verify actual installation with
+  `scripts/install_git_hooks.sh --check`. The hook is convenience only: CI's
+  Required baseline drift gate remains the non-bypassable backstop.
   `oracledb-pyshim` is excluded from the local gates because it needs a Python
   toolchain and a live database; it is exercised by the conformance harness, not
   plain `cargo test`.

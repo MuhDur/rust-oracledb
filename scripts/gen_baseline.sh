@@ -315,7 +315,10 @@ fi
 } > "$OUT/test_inventory.tsv"
 
 {
-  printf 'crate\tpath\tline\titem\n'
+  # Public-source drift is semantic, not positional.  Absolute line numbers
+  # made harmless layout changes fail the Required gate even though no public
+  # declaration had changed.
+  printf 'crate\tpath\titem\n'
   for crate_dir in \
     "$ROOT/crates/oracledb/src" \
     "$ROOT/crates/oracledb-protocol/src" \
@@ -329,8 +332,8 @@ fi
       '^[[:space:]]*pub(\([^)]*\))?[[:space:]]+(use|mod|struct|enum|trait|type|const|static|async[[:space:]]+fn|fn)[[:space:]]+' \
       "$crate_dir" 2>/dev/null |
       sort |
-      while IFS=: read -r path line item; do
-        printf '%s\t%s\t%s\t%s\n' "$crate" "$(relpath "$path")" "$line" "$(awk '{$1=$1; print}' <<<"$item")"
+      while IFS=: read -r path _line item; do
+        printf '%s\t%s\t%s\n' "$crate" "$(relpath "$path")" "$(awk '{$1=$1; print}' <<<"$item")"
       done
   done
 } > "$OUT/public_source_items.tsv"
