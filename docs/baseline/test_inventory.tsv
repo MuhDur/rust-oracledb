@@ -76,7 +76,7 @@ crates/oracledb/src/soda/metadata.rs	4
 crates/oracledb/src/soda/operation.rs	15
 crates/oracledb/src/soda/qbe.rs	23
 crates/oracledb/src/sql_convert.rs	41
-crates/oracledb/src/tls.rs	22
+crates/oracledb/src/tls.rs	23
 crates/oracledb/src/transport.rs	23
 crates/oracledb/src/version_cassettes.rs	13
 crates/oracledb/tests/access_token.rs	5
