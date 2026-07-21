@@ -66,15 +66,21 @@ pub fn append_auth_phase_two_token(
         connect_string,
         edition,
         None,
+        None,
     )
 }
 
-/// [`append_auth_phase_two_token`] with an optional OCI IAM database-token
-/// proof-of-possession. When `pop` is `Some`, the token is bound to a private
-/// key: the auth mode gains `TNS_AUTH_MODE_IAM_TOKEN` and two extra pairs
-/// (`AUTH_HEADER`, `AUTH_SIGNATURE`) are written between `AUTH_ALTER_SESSION` and
-/// `AUTH_ORA_EDITION`, exactly matching the reference key/value order. `None` is
-/// identical to [`append_auth_phase_two_token`] (a plain OAuth2 bearer token).
+/// [`append_auth_phase_two_token`] with optional OCI IAM proof-of-possession and
+/// optional proxy authentication.
+///
+/// When `pop` is `Some`, the token is bound to a private key: the auth mode gains
+/// `TNS_AUTH_MODE_IAM_TOKEN` and two extra pairs (`AUTH_HEADER`, `AUTH_SIGNATURE`)
+/// are written between `AUTH_ALTER_SESSION` and `AUTH_ORA_EDITION`, matching the
+/// reference key/value order.
+///
+/// When `proxy_user` is `Some`, `PROXY_CLIENT_NAME` is written **before**
+/// `AUTH_TOKEN` (messages/auth.pyx `_write_message`). Empty `user` is valid for
+/// proxy-only token sessions (`[proxy]` form after upstream e861662).
 #[allow(clippy::too_many_arguments)] // mirrors the reference message attribute set
 pub fn append_auth_phase_two_token_with_pop(
     out: &mut Vec<u8>,
@@ -85,12 +91,13 @@ pub fn append_auth_phase_two_token_with_pop(
     connect_string: &str,
     edition: Option<&str>,
     pop: Option<TokenPop<'_>>,
+    proxy_user: Option<&str>,
 ) -> Result<()> {
     let mut writer = TtcWriter::new();
     writer.write_function_code(TNS_FUNC_AUTH_PHASE_TWO);
     // AUTH_TOKEN + the four mandatory session pairs, plus the optional
-    // AUTH_HEADER/AUTH_SIGNATURE (IAM proof-of-possession), AUTH_ORA_EDITION and
-    // AUTH_CONNECT_STRING.
+    // PROXY_CLIENT_NAME, AUTH_HEADER/AUTH_SIGNATURE (IAM proof-of-possession),
+    // AUTH_ORA_EDITION and AUTH_CONNECT_STRING.
     let mut num_pairs = 5u32;
     let auth_mode = if pop.is_some() {
         // AUTH_HEADER + AUTH_SIGNATURE.
@@ -99,6 +106,9 @@ pub fn append_auth_phase_two_token_with_pop(
     } else {
         TNS_AUTH_MODE_LOGON
     };
+    if proxy_user.is_some() {
+        num_pairs += 1;
+    }
     if edition.is_some() {
         num_pairs += 1;
     }
@@ -106,6 +116,10 @@ pub fn append_auth_phase_two_token_with_pop(
         num_pairs += 1;
     }
     write_auth_header(&mut writer, user, auth_mode, num_pairs)?;
+    // Reference order: PROXY_CLIENT_NAME before AUTH_TOKEN when proxying.
+    if let Some(proxy_user) = proxy_user {
+        write_key_value(&mut writer, "PROXY_CLIENT_NAME", proxy_user, 0)?;
+    }
     write_key_value(&mut writer, "AUTH_TOKEN", token, 0)?;
     write_key_value(&mut writer, "SESSION_CLIENT_CHARSET", "873", 0)?;
     write_key_value(&mut writer, "SESSION_CLIENT_DRIVER_NAME", driver_name, 0)?;
@@ -616,6 +630,7 @@ mod token_auth_tests {
                 header: "date: Fri, 17 Jul 2026 07:00:00 GMT\n(request-target): svc\nhost: h:1522",
                 signature: "c2lnbmF0dXJl",
             }),
+            None,
         )
         .unwrap();
         let mut pos = 4;
@@ -668,5 +683,52 @@ mod token_auth_tests {
         let _ = read_ub4(&out2, &mut p);
         p += 1;
         assert_eq!(read_ub4(&out2, &mut p), 7, "+ AUTH_CONNECT_STRING");
+    }
+
+    /// Upstream e861662: proxy-only token auth (`user=""`, proxy set) writes
+    /// `PROXY_CLIENT_NAME` before `AUTH_TOKEN` with has_user=0.
+    #[test]
+    fn token_message_proxy_only_writes_proxy_client_name_before_token() {
+        let mut out = Vec::new();
+        append_auth_phase_two_token_with_pop(
+            &mut out,
+            "", // no base user
+            "tok",
+            "drv",
+            1,
+            "",
+            None,
+            None,
+            Some("proxy_only"),
+        )
+        .unwrap();
+        // Function header: msg type, function code, seq, then has_user flag.
+        assert_eq!(out[3], 0, "has_user must be 0 for empty base user");
+        let mut pos = 4;
+        let user_len = read_ub4(&out, &mut pos);
+        assert_eq!(user_len, 0);
+        let _auth_mode = read_ub4(&out, &mut pos);
+        pos += 1; // authivl
+        assert_eq!(
+            read_ub4(&out, &mut pos),
+            6,
+            "PROXY_CLIENT_NAME + AUTH_TOKEN + 4 session pairs"
+        );
+        assert!(contains(&out, b"PROXY_CLIENT_NAME"));
+        assert!(contains(&out, b"proxy_only"));
+        assert!(contains(&out, b"AUTH_TOKEN"));
+        // PROXY_CLIENT_NAME must appear before AUTH_TOKEN in the key stream.
+        let proxy_at = out
+            .windows(b"PROXY_CLIENT_NAME".len())
+            .position(|w| w == b"PROXY_CLIENT_NAME")
+            .expect("PROXY_CLIENT_NAME present");
+        let token_at = out
+            .windows(b"AUTH_TOKEN".len())
+            .position(|w| w == b"AUTH_TOKEN")
+            .expect("AUTH_TOKEN present");
+        assert!(
+            proxy_at < token_at,
+            "reference order is PROXY_CLIENT_NAME before AUTH_TOKEN"
+        );
     }
 }

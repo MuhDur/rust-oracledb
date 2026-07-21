@@ -191,12 +191,12 @@ pub fn build_fast_auth_token_payload(
         connect_string,
         edition,
         None,
+        None,
     )
 }
 
-/// [`build_fast_auth_token_payload`] with an optional OCI IAM database-token
-/// proof-of-possession (`AUTH_HEADER`/`AUTH_SIGNATURE`). `None` is identical to
-/// [`build_fast_auth_token_payload`].
+/// [`build_fast_auth_token_payload`] with optional OCI IAM proof-of-possession
+/// and optional proxy user (`PROXY_CLIENT_NAME`).
 pub fn build_fast_auth_token_payload_with_pop(
     user: &str,
     token: &str,
@@ -205,6 +205,7 @@ pub fn build_fast_auth_token_payload_with_pop(
     connect_string: &str,
     edition: Option<&str>,
     pop: Option<TokenPop<'_>>,
+    proxy_user: Option<&str>,
 ) -> Result<Vec<u8>> {
     let mut out = Vec::from_hex(FAST_AUTH_PREFIX_HEX)
         .map_err(|_| ProtocolError::TtcDecode("invalid static fast-auth prefix"))?;
@@ -217,6 +218,7 @@ pub fn build_fast_auth_token_payload_with_pop(
         connect_string,
         edition,
         pop,
+        proxy_user,
     )?;
     Ok(out)
 }
@@ -243,12 +245,12 @@ pub fn build_auth_phase_two_token_payload(
         connect_string,
         edition,
         None,
+        None,
     )
 }
 
-/// [`build_auth_phase_two_token_payload`] with an optional OCI IAM database-token
-/// proof-of-possession (`AUTH_HEADER`/`AUTH_SIGNATURE`). `None` is identical to
-/// [`build_auth_phase_two_token_payload`].
+/// [`build_auth_phase_two_token_payload`] with optional OCI IAM proof-of-possession
+/// and optional proxy user (`PROXY_CLIENT_NAME`).
 pub fn build_auth_phase_two_token_payload_with_pop(
     user: &str,
     token: &str,
@@ -257,6 +259,7 @@ pub fn build_auth_phase_two_token_payload_with_pop(
     connect_string: &str,
     edition: Option<&str>,
     pop: Option<TokenPop<'_>>,
+    proxy_user: Option<&str>,
 ) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     append_auth_phase_two_token_with_pop(
@@ -268,6 +271,7 @@ pub fn build_auth_phase_two_token_payload_with_pop(
         connect_string,
         edition,
         pop,
+        proxy_user,
     )?;
     Ok(out)
 }

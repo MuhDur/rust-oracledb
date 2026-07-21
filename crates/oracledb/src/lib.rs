@@ -491,6 +491,9 @@ struct TokenAuthentication<'a> {
     /// OCI IAM database-token proof-of-possession (`AUTH_HEADER`/`AUTH_SIGNATURE`).
     /// `None` for a plain OAuth2 bearer token.
     pop: Option<TokenPop<'a>>,
+    /// Proxy client name (`PROXY_CLIENT_NAME`); `None` when not proxying.
+    /// Empty base `user` with `Some(proxy)` is the token-auth `[proxy]` form.
+    proxy_user: Option<&'a str>,
 }
 
 #[derive(Debug)]
@@ -677,6 +680,7 @@ impl<T: WireTransport> ConnectionCore<T> {
             token_auth.connect_string,
             token_auth.edition,
             token_auth.pop,
+            token_auth.proxy_user,
         )?;
         trace_connect_step("send AUTH token (classic phase two)");
         self.send_data_packet(cx, &auth_payload, sdu).await?;
@@ -2039,6 +2043,24 @@ impl UnsupportedAuthMode {
     }
 }
 
+/// Parse a username that may use the reference bracket form.
+///
+/// Mirrors python-oracledb `ConnectParamsImpl.parse_user` after upstream
+/// e861662a75b5: `base[proxy]` splits into base user + proxy; `[proxy]`
+/// (leading bracket, empty base) is valid for token-auth proxy-only sessions.
+/// A string that does not end in `]` or has no `[` is returned unchanged with
+/// no proxy. The closing `]` must be the final character.
+pub fn parse_user_and_proxy(user: &str) -> (String, Option<String>) {
+    if let Some(start) = user.find('[') {
+        if user.ends_with(']') && start < user.len() - 1 {
+            let base = user[..start].to_string();
+            let proxy = user[start + 1..user.len() - 1].to_string();
+            return (base, Some(proxy));
+        }
+    }
+    (user.to_string(), None)
+}
+
 /// Everything needed to open a connection: where to connect, who to
 /// authenticate as, and the [`ClientIdentity`] the database will record.
 ///
@@ -2153,7 +2175,7 @@ impl std::fmt::Debug for ConnectOptions {
         let server_cert_dn = self.ssl_server_cert_dn.as_ref().map(|_| REDACTED_SECRET);
         f.debug_struct("ConnectOptions")
             .field("connect_string", &self.connect_string)
-            .field("user", &self.user)
+            .field("user", &self.full_user())
             .field("password", &REDACTED_SECRET)
             .field("identity", &self.identity)
             .field("app_context", &self.app_context)
@@ -2192,21 +2214,33 @@ impl ConnectOptions {
     /// EasyConnect descriptor (`host:port/service_name`); `identity` is the
     /// session identity the database will record. Optional settings default to
     /// an 8 KiB SDU, no application context, and no proxy user.
+    ///
+    /// `user` may be a plain username or the reference bracket form
+    /// `base[proxy]` / `[proxy]` (proxy-only, typically with token auth). See
+    /// [`parse_user_and_proxy`]. An explicit later [`Self::with_proxy_user`]
+    /// call overwrites any proxy desugared here.
     pub fn new(
         connect_string: impl Into<String>,
         user: impl Into<String>,
         password: impl Into<String>,
         identity: ClientIdentity,
     ) -> Self {
+        let raw_user = user.into();
+        let (user, proxy_user) = parse_user_and_proxy(&raw_user);
+        let auth_mode = if proxy_user.is_some() {
+            AuthMode::Proxy
+        } else {
+            AuthMode::Password
+        };
         Self {
             connect_string: connect_string.into(),
-            user: user.into(),
+            user,
             password: password.into(),
             identity,
             app_context: Vec::new(),
             sdu: 8192,
-            proxy_user: None,
-            auth_mode: AuthMode::Password,
+            proxy_user,
+            auth_mode,
             server_type_emon: false,
             wallet_location: None,
             wallet_password: None,
@@ -2491,6 +2525,10 @@ impl ConnectOptions {
     }
 
     /// Set the proxy user for `[proxy_user]` style authentication.
+    ///
+    /// When `Some`, this **overwrites** any proxy desugared from a bracketed
+    /// username in [`Self::new`] (explicit API wins). Passing `None` clears the
+    /// proxy and, if the mode was only Proxy, restores password mode.
     pub fn with_proxy_user(mut self, proxy_user: Option<String>) -> Self {
         if proxy_user.is_some() {
             self.auth_mode = AuthMode::Proxy;
@@ -2516,6 +2554,17 @@ impl ConnectOptions {
 
     pub fn user(&self) -> &str {
         &self.user
+    }
+
+    /// Full user display including any proxy, matching the reference
+    /// `get_full_user` form: `base[proxy]`, or `[proxy]` when the base user is
+    /// empty (token-auth proxy-only sessions). Never includes the password.
+    pub fn full_user(&self) -> String {
+        match (self.user.as_str(), self.proxy_user.as_deref()) {
+            ("", Some(proxy)) => format!("[{proxy}]"),
+            (base, Some(proxy)) => format!("{base}[{proxy}]"),
+            (base, None) => base.to_string(),
+        }
     }
 
     pub fn password(&self) -> &str {
@@ -3322,6 +3371,7 @@ impl Connection {
                         &auth_connect_string,
                         options.edition.as_deref(),
                         pop,
+                        options.proxy_user.as_deref(),
                     )?;
                     trace_connect_step("send AUTH token (fast-auth phase two)");
                     core.send_data_packet(cx, &auth_payload, sdu).await?;
@@ -3342,6 +3392,7 @@ impl Connection {
                             connect_string: &auth_connect_string,
                             edition: options.edition.as_deref(),
                             pop,
+                            proxy_user: options.proxy_user.as_deref(),
                         },
                         sdu,
                     )
@@ -14116,6 +14167,93 @@ mod tests {
     }
 
     #[test]
+    fn parse_user_and_proxy_bracket_forms() {
+        // Plain user.
+        assert_eq!(parse_user_and_proxy("scott"), ("scott".into(), None));
+        // base[proxy] — reference form.
+        assert_eq!(
+            parse_user_and_proxy("scott[proxy]"),
+            ("scott".into(), Some("proxy".into()))
+        );
+        // [proxy] only — upstream e861662 token-auth form (empty base).
+        assert_eq!(
+            parse_user_and_proxy("[proxy_only]"),
+            ("".into(), Some("proxy_only".into()))
+        );
+        // No closing bracket → unchanged.
+        assert_eq!(
+            parse_user_and_proxy("scott[proxy"),
+            ("scott[proxy".into(), None)
+        );
+        // No opening bracket → unchanged.
+        assert_eq!(parse_user_and_proxy("scott]"), ("scott]".into(), None));
+    }
+
+    #[test]
+    fn connect_options_desugars_bracket_user_and_full_user_display() {
+        let base_proxy = ConnectOptions::new("h:1521/s", "scott[proxy]", "pw", identity());
+        assert_eq!(base_proxy.user(), "scott");
+        assert_eq!(base_proxy.proxy_user(), Some("proxy"));
+        assert_eq!(base_proxy.full_user(), "scott[proxy]");
+        assert!(matches!(base_proxy.auth_mode(), AuthMode::Proxy));
+
+        let proxy_only = ConnectOptions::new("h:1521/s", "[proxy_only]", "", identity())
+            .with_access_token("super-secret-db-token-xyz");
+        assert_eq!(proxy_only.user(), "");
+        assert_eq!(proxy_only.proxy_user(), Some("proxy_only"));
+        assert_eq!(proxy_only.full_user(), "[proxy_only]");
+        // Debug must show the full-user form and never leak the token/password.
+        let dbg = format!("{proxy_only:?}");
+        assert!(dbg.contains("[proxy_only]"), "debug was {dbg}");
+        assert!(
+            !dbg.contains("super-secret-db-token-xyz"),
+            "token leaked in debug: {dbg}"
+        );
+        assert!(
+            dbg.contains("***redacted***"),
+            "password/token field missing redaction: {dbg}"
+        );
+
+        // Explicit with_proxy_user overwrites bracket desugar.
+        let overwritten = ConnectOptions::new("h:1521/s", "scott[from_bracket]", "pw", identity())
+            .with_proxy_user(Some("from_explicit".into()));
+        assert_eq!(overwritten.user(), "scott");
+        assert_eq!(overwritten.proxy_user(), Some("from_explicit"));
+        assert_eq!(overwritten.full_user(), "scott[from_explicit]");
+    }
+
+    #[test]
+    fn proxy_only_token_auth_encodes_phase_two_proxy_header() {
+        // Wire path: empty base user + PROXY_CLIENT_NAME for proxy-only.
+        use oracledb_protocol::crypto::EncryptedPassword;
+        use oracledb_protocol::thin::build_auth_phase_two_payload_with_proxy_with_seq;
+        let encrypted = EncryptedPassword {
+            session_key: "00".repeat(32),
+            speedy_key: None,
+            password: "00".repeat(32),
+            combo_key: vec![0u8; 32],
+        };
+        let payload = build_auth_phase_two_payload_with_proxy_with_seq(
+            "",
+            &encrypted,
+            "rust-oracledb",
+            0,
+            "",
+            1,
+            &[],
+            Some("proxy_only"),
+            None,
+            17, // TNS_CCAP_FIELD_VERSION_23_1
+        )
+        .expect("phase-two proxy payload");
+        let text = String::from_utf8_lossy(&payload);
+        assert!(
+            text.contains("PROXY_CLIENT_NAME") && text.contains("proxy_only"),
+            "payload missing PROXY_CLIENT_NAME/proxy_only: {text:?}"
+        );
+    }
+
+    #[test]
     fn descriptor_builder_uses_identity_in_listener_cid() {
         let options = ConnectOptions::new("localhost/FREEPDB1", "user", "password", identity());
         let descriptor =
@@ -15591,6 +15729,7 @@ mod tests {
             CONNECT_STRING,
             None,
             None,
+            None,
         )?;
         let expected_writes = [protocol_payload, data_types_payload, token_payload]
             .into_iter()
@@ -15643,6 +15782,7 @@ mod tests {
                         connect_string: CONNECT_STRING,
                         edition: None,
                         pop: None,
+                        proxy_user: None,
                     },
                     8192,
                 )
