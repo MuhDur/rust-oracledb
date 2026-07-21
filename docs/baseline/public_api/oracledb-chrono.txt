@@ -245,6 +245,7 @@ pub fn oracledb::ConnectOptions::auth_mode(&self) -> &oracledb::AuthMode
 pub fn oracledb::ConnectOptions::connect_string(&self) -> &str
 pub fn oracledb::ConnectOptions::edition(&self) -> core::option::Option<&str>
 pub fn oracledb::ConnectOptions::external_auth(impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
+pub fn oracledb::ConnectOptions::full_user(&self) -> alloc::string::String
 pub fn oracledb::ConnectOptions::identity(&self) -> &oracledb_protocol::ClientIdentity
 pub fn oracledb::ConnectOptions::inactivity_timeout(&self) -> core::option::Option<core::time::Duration>
 pub fn oracledb::ConnectOptions::kerberos_auth(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
@@ -1030,6 +1031,7 @@ pub fn oracledb::ConnectOptions::auth_mode(&self) -> &oracledb::AuthMode
 pub fn oracledb::ConnectOptions::connect_string(&self) -> &str
 pub fn oracledb::ConnectOptions::edition(&self) -> core::option::Option<&str>
 pub fn oracledb::ConnectOptions::external_auth(impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
+pub fn oracledb::ConnectOptions::full_user(&self) -> alloc::string::String
 pub fn oracledb::ConnectOptions::identity(&self) -> &oracledb_protocol::ClientIdentity
 pub fn oracledb::ConnectOptions::inactivity_timeout(&self) -> core::option::Option<core::time::Duration>
 pub fn oracledb::ConnectOptions::kerberos_auth(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, oracledb_protocol::ClientIdentity) -> Self
@@ -1651,6 +1653,7 @@ pub fn oracledb::decode_object(&oracledb_protocol::thin::types::ObjectValue, &or
 pub fn oracledb::fetch_profile_arm(bool)
 pub fn oracledb::fetch_profile_read_decode_ns() -> (u64, u64)
 pub fn oracledb::fetch_profile_reset()
+pub fn oracledb::parse_user_and_proxy(&str) -> (alloc::string::String, core::option::Option<alloc::string::String>)
 pub fn oracledb::render_caret(&str, usize, &str) -> alloc::string::String
 pub fn oracledb::resolve_wallet(&std::path::Path, core::option::Option<&str>) -> core::result::Result<oracledb::WalletResolution, oracledb::Error>
 pub type oracledb::BoxFuture<'a, T> = core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = T> + core::marker::Send + 'a)>>

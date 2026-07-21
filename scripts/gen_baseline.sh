@@ -11,7 +11,8 @@ set -euo pipefail
 export LC_ALL=C
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT="${ORACLEDB_BASELINE_DIR:-$ROOT/docs/baseline}"
+REFERENCE_OUT="$ROOT/docs/baseline"
+OUT="${ORACLEDB_BASELINE_DIR:-$REFERENCE_OUT}"
 CHECK=false
 REFRESH_PIN=false
 
@@ -22,12 +23,14 @@ Usage: scripts/gen_baseline.sh [--check] [--refresh-pin]
 Writes deterministic baseline artifacts under docs/baseline/ by default.
 
 Options:
-  --check        fail if a tracked docs/baseline artifact changes after generation
+  --check        generate to ORACLEDB_BASELINE_DIR and fail if it differs from
+                 the committed docs/baseline (never mutates the worktree)
   --refresh-pin  reset docs/baseline/source_commit.txt to the current HEAD
   -h, --help     show this help
 
 Environment:
-  ORACLEDB_BASELINE_DIR  alternate output directory for smoke tests or CI probes
+  ORACLEDB_BASELINE_DIR  alternate output directory for smoke tests or CI probes;
+                         required outside the checkout for --check (caller owns it)
 USAGE
 }
 
@@ -48,6 +51,24 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
+if $CHECK && $REFRESH_PIN; then
+  echo "gen-baseline: --check and --refresh-pin cannot be combined" >&2
+  exit 2
+fi
+
+if $CHECK; then
+  if [[ -z "${ORACLEDB_BASELINE_DIR:-}" ]]; then
+    echo "gen-baseline: --check requires ORACLEDB_BASELINE_DIR outside the checkout" >&2
+    exit 2
+  fi
+  case "$OUT" in
+    "$ROOT"|"$ROOT"/*)
+      echo "gen-baseline: --check output must be outside the checkout: $OUT" >&2
+      exit 2
+      ;;
+  esac
+fi
+
 need() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "gen-baseline: missing required command: $1" >&2
@@ -60,6 +81,16 @@ relpath() {
   case "$path" in
     "$ROOT"/*) printf '%s\n' "${path#"$ROOT"/}" ;;
     *) printf '%s\n' "$path" ;;
+  esac
+}
+
+# Generated inventories must name the reviewed baseline location, not a
+# caller-owned scratch directory used by --check.
+baseline_relpath() {
+  local path="$1"
+  case "$path" in
+    "$OUT"/*) printf 'docs/baseline/%s\n' "${path#"$OUT"/}" ;;
+    *) relpath "$path" ;;
   esac
 }
 
@@ -80,6 +111,7 @@ workflow_env() {
 
 need awk
 need cargo
+need diff
 need git
 need jq
 need python3
@@ -90,7 +122,14 @@ mkdir -p "$OUT"
 mkdir -p "$OUT/public_api"
 
 pin_file="$OUT/source_commit.txt"
-if [ "$REFRESH_PIN" = true ] || [ ! -s "$pin_file" ]; then
+if $CHECK; then
+  [ -s "$REFERENCE_OUT/source_commit.txt" ] || {
+    echo "gen-baseline: checked baseline pin is missing: $REFERENCE_OUT/source_commit.txt" >&2
+    exit 2
+  }
+  cp "$REFERENCE_OUT/source_commit.txt" "$pin_file"
+  source_commit="$(tr -d '\n' < "$pin_file")"
+elif [ "$REFRESH_PIN" = true ] || [ ! -s "$pin_file" ]; then
   source_commit="$(git -C "$ROOT" rev-parse HEAD)"
 else
   source_commit="$(tr -d '\n' < "$pin_file")"
@@ -195,7 +234,7 @@ run_public_api() {
     cargo public-api -p "$package" -ss --color never "$@"
   } > "$output"
 
-  printf '%s\t%s\t%s\tok\n' "$profile" "$package" "$(relpath "$output")"
+  printf '%s\t%s\t%s\tok\n' "$profile" "$package" "$(baseline_relpath "$output")"
 }
 
 {
@@ -304,18 +343,31 @@ fi
 } > "$OUT/public_source_counts.tsv"
 
 if [ "$CHECK" = true ]; then
-  case "$OUT" in
-    "$ROOT"/*)
-      if ! git -C "$ROOT" diff --exit-code -- "$(relpath "$OUT")" >/dev/null; then
-        echo "gen-baseline: docs/baseline is out of date; rerun scripts/gen_baseline.sh and commit the result" >&2
-        git -C "$ROOT" diff --stat -- "$(relpath "$OUT")" >&2
-        exit 1
-      fi
-      ;;
-    *)
-      echo "gen-baseline: --check skipped git diff because ORACLEDB_BASELINE_DIR is outside the repo" >&2
-      ;;
-  esac
+  committed="$ROOT/docs/baseline"
+  drift=0
+  # Compare every generated file against its committed counterpart. We do NOT
+  # flag committed files that the generator doesn't produce: docs/baseline/ is
+  # shared with hand-maintained references (e.g. perf_regression_reference.json)
+  # that are not gen_baseline.sh output.
+  while IFS= read -r -d '' generated_file; do
+    rel="${generated_file#"$OUT"/}"
+    committed_file="$committed/$rel"
+    if [ ! -f "$committed_file" ]; then
+      echo "gen-baseline: new artifact $rel is not committed (rerun scripts/gen_baseline.sh and commit)" >&2
+      drift=1
+    elif ! diff -q "$committed_file" "$generated_file" >/dev/null 2>&1; then
+      echo "gen-baseline: $rel differs from committed baseline" >&2
+      diff --unified=1 "$committed_file" "$generated_file" >&2 || true
+      drift=1
+    fi
+  done < <(find "$OUT" -type f -print0 | sort -z)
+
+  if [ "$drift" -ne 0 ]; then
+    echo "gen-baseline: baseline is out of date; rerun scripts/gen_baseline.sh and commit the result" >&2
+    exit 1
+  fi
+  echo "gen-baseline: --check OK (committed baseline matches generated output)"
+  exit 0
 fi
 
 echo "gen-baseline: wrote $(relpath "$OUT") for source $source_commit"

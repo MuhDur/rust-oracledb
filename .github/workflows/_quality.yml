@@ -259,7 +259,10 @@ jobs:
         id: baseline_drift
         if: ${{ inputs.profile != 'canary' }}
         continue-on-error: ${{ inputs.mode == 'prep' }}
-        run: scripts/gen_baseline.sh --check
+        run: |
+          scratch="$RUNNER_TEMP/oracledb-baseline-check"
+          mkdir -p "$scratch"
+          ORACLEDB_BASELINE_DIR="$scratch" scripts/gen_baseline.sh --check
 
       - name: API ledger coverage
         id: api_ledger

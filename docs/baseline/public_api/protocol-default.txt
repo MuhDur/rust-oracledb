@@ -1405,6 +1405,7 @@ pub fn oracledb_protocol::thin::adjust_refetch_metadata(&oracledb_protocol::thin
 pub fn oracledb_protocol::thin::append_auth_phase_one(&mut alloc::vec::Vec<u8>, &str, &str, &str, &str, &str, u32) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::thin::append_auth_phase_two_token(&mut alloc::vec::Vec<u8>, &str, &str, &str, u32, &str, core::option::Option<&str>) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::thin::append_auth_phase_two_token_with_pop(&mut alloc::vec::Vec<u8>, &str, &str, &str, u32, &str, core::option::Option<&str>, core::option::Option<oracledb_protocol::thin::TokenPop<'_>>) -> oracledb_protocol::Result<()>
+pub fn oracledb_protocol::thin::append_auth_phase_two_token_with_pop_and_proxy(&mut alloc::vec::Vec<u8>, &str, &str, &str, u32, &str, core::option::Option<&str>, core::option::Option<oracledb_protocol::thin::TokenPop<'_>>, core::option::Option<&str>) -> oracledb_protocol::Result<()>
 pub fn oracledb_protocol::thin::bind_template_from_type_name(&str, u32) -> oracledb_protocol::thin::BindValue
 pub fn oracledb_protocol::thin::bind_value_type_info(&oracledb_protocol::thin::BindValue) -> core::option::Option<oracledb_protocol::thin::BindTypeInfo>
 pub fn oracledb_protocol::thin::build_auth_phase_one_payload(&str, &str, &str, &str, &str, u32) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
@@ -1414,6 +1415,7 @@ pub fn oracledb_protocol::thin::build_auth_phase_two_payload_with_proxy_with_seq
 pub fn oracledb_protocol::thin::build_auth_phase_two_payload_with_seq(&str, &oracledb_protocol::crypto::EncryptedPassword, &str, u32, &str, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_auth_phase_two_token_payload(&str, &str, &str, u32, &str, core::option::Option<&str>) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_auth_phase_two_token_payload_with_pop(&str, &str, &str, u32, &str, core::option::Option<&str>, core::option::Option<oracledb_protocol::thin::TokenPop<'_>>) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_auth_phase_two_token_payload_with_pop_and_proxy(&str, &str, &str, u32, &str, core::option::Option<&str>, core::option::Option<oracledb_protocol::thin::TokenPop<'_>>, core::option::Option<&str>) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_begin_pipeline_piggyback(u8, u64, u8) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::build_change_password_payload_with_seq(&str, &str, &str, u8, u8) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_close_cursors_piggyback(&[u32], u8, u8) -> alloc::vec::Vec<u8>
@@ -1431,6 +1433,7 @@ pub fn oracledb_protocol::thin::build_execute_query_payload_with_seq(&str, u32, 
 pub fn oracledb_protocol::thin::build_fast_auth_phase_one_payload(&str, &str, &str, &str, &str, u32) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_fast_auth_token_payload(&str, &str, &str, u32, &str, core::option::Option<&str>) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_fast_auth_token_payload_with_pop(&str, &str, &str, u32, &str, core::option::Option<&str>, core::option::Option<oracledb_protocol::thin::TokenPop<'_>>) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
+pub fn oracledb_protocol::thin::build_fast_auth_token_payload_with_pop_and_proxy(&str, &str, &str, u32, &str, core::option::Option<&str>, core::option::Option<oracledb_protocol::thin::TokenPop<'_>>, core::option::Option<&str>) -> oracledb_protocol::Result<alloc::vec::Vec<u8>>
 pub fn oracledb_protocol::thin::build_fetch_payload(u32, u32, u8) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::build_fetch_payload_with_seq(u32, u32, u8, u8) -> alloc::vec::Vec<u8>
 pub fn oracledb_protocol::thin::build_function_payload(u8, u8) -> alloc::vec::Vec<u8>
