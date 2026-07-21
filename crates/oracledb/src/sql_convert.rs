@@ -1118,6 +1118,19 @@ pub trait FromRow: Sized {
 pub trait ToSql {
     /// Produce the [`BindValue`] this value binds as.
     fn to_sql(&self) -> BindValue;
+
+    /// Try to produce the [`BindValue`] this value binds as without losing
+    /// information.
+    ///
+    /// Most supported Rust values always have an exact bind representation, so
+    /// the default delegates to [`ToSql::to_sql`]. Types with values Oracle
+    /// cannot encode exactly override this method with a
+    /// [`ConversionError`]. Callers that accept values from outside their own
+    /// control should prefer this fallible form over the legacy infallible
+    /// [`ToSql::to_sql`] convenience method.
+    fn try_to_sql(&self) -> Result<BindValue, ConversionError> {
+        Ok(self.to_sql())
+    }
 }
 
 impl ToSql for i64 {
@@ -1184,6 +1197,10 @@ impl<T: ToSql + ?Sized> ToSql for &T {
     fn to_sql(&self) -> BindValue {
         (**self).to_sql()
     }
+
+    fn try_to_sql(&self) -> Result<BindValue, ConversionError> {
+        (**self).try_to_sql()
+    }
 }
 
 impl<T: ToSql> ToSql for Option<T> {
@@ -1193,11 +1210,18 @@ impl<T: ToSql> ToSql for Option<T> {
             None => BindValue::Null,
         }
     }
+
+    fn try_to_sql(&self) -> Result<BindValue, ConversionError> {
+        match self {
+            Some(value) => value.try_to_sql(),
+            None => Ok(BindValue::Null),
+        }
+    }
 }
 
 #[cfg(feature = "chrono")]
 mod chrono_to_sql {
-    use super::ToSql;
+    use super::{ConversionError, ToSql};
     use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, Timelike, Utc};
     use oracledb_protocol::thin::BindValue;
 
@@ -1232,20 +1256,34 @@ mod chrono_to_sql {
 
     impl ToSql for DateTime<FixedOffset> {
         fn to_sql(&self) -> BindValue {
+            self.try_to_sql().unwrap_or_else(|error| {
+                panic!(
+                    "cannot convert chrono::DateTime<FixedOffset> to an Oracle TIMESTAMP WITH TIME ZONE without losing offset precision: {error}; use ToSql::try_to_sql to handle this conversion error"
+                )
+            })
+        }
+
+        fn try_to_sql(&self) -> Result<BindValue, ConversionError> {
             // BindValue::TimestampTz fields must be UTC (the wire stores UTC +
             // display offset; see bead rust-oracledb-97cj). Emit the UTC
             // components, not the local wall clock.
             //
             // Oracle's TSTZ offset is minute-granularity. Chrono `FixedOffset`
-            // can carry residual seconds. Truncating toward zero (`/ 60`) used
-            // to collapse ±30s offsets to 0 minutes and silently drop them.
-            // Floor-divide with `div_euclid` so a negative residual does not
-            // become 0; the UTC fields still carry the true instant, so
-            // sub-minute offsets "survive" as the correct absolute time even
-            // when the display offset is rounded to a whole minute (DC5).
+            // can carry residual seconds, which must be rejected rather than
+            // rounded into a different display offset.
             let utc = self.naive_utc();
             let offset_seconds = self.offset().local_minus_utc();
-            BindValue::TimestampTz {
+            let residual_seconds = offset_seconds.rem_euclid(60);
+            if residual_seconds != 0 {
+                return Err(ConversionError::OutOfRange {
+                    expected: "Oracle TIMESTAMP WITH TIME ZONE offset",
+                    detail: format!(
+                        "UTC offset {offset_seconds:+} seconds contains {residual_seconds} sub-minute second(s) that Oracle TIMESTAMP WITH TIME ZONE cannot represent"
+                    ),
+                });
+            }
+
+            Ok(BindValue::TimestampTz {
                 year: utc.year(),
                 month: utc.month() as u8,
                 day: utc.day() as u8,
@@ -1253,8 +1291,8 @@ mod chrono_to_sql {
                 minute: utc.minute() as u8,
                 second: utc.second() as u8,
                 nanosecond: utc.nanosecond(),
-                offset_minutes: offset_seconds.div_euclid(60),
-            }
+                offset_minutes: offset_seconds / 60,
+            })
         }
     }
 
@@ -2375,7 +2413,9 @@ mod tests {
         // Round-trip consistency: converting the fixed-offset value back to a
         // bind must reproduce the original UTC fields + offset.
         assert_eq!(
-            fixed.to_sql(),
+            fixed
+                .try_to_sql()
+                .expect("whole-minute FixedOffset must encode"),
             BindValue::TimestampTz {
                 year: 2026,
                 month: 6,
@@ -2397,7 +2437,7 @@ mod tests {
             .with_nanosecond(123_000_000)
             .unwrap();
         assert_eq!(
-            outbound.to_sql(),
+            outbound.try_to_sql().expect("+05:45 must encode exactly"),
             BindValue::TimestampTz {
                 year: 2026,
                 month: 6,
@@ -2409,58 +2449,110 @@ mod tests {
                 offset_minutes: 345,
             }
         );
+        let outbound_round_trip = DateTime::<FixedOffset>::from_sql(&QueryValue::TimestampTz {
+            year: 2026,
+            month: 6,
+            day: 29,
+            hour: 1,
+            minute: 23,
+            second: 9,
+            nanosecond: 123_000_000,
+            offset_minutes: 345,
+        })
+        .unwrap();
+        assert_eq!(outbound_round_trip.to_rfc3339(), outbound.to_rfc3339());
 
-        // DC5: sub-minute FixedOffset. Oracle TSTZ offsets are minute-
-        // granularity, so the display offset may quantize, but the UTC
-        // fields must keep the true absolute instant (positive and negative
-        // thirty-second residuals must not be silently dropped from the
-        // instant). Negative residual must not collapse to offset_minutes=0
-        // under truncating division.
-        let plus_30 = FixedOffset::east_opt(30)
+        // -03:30 is likewise a valid whole-minute offset and must round-trip
+        // as -210 minutes without changing the instant or its display offset.
+        let negative_outbound = FixedOffset::west_opt(3 * 3600 + 30 * 60)
             .unwrap()
-            .with_ymd_and_hms(2026, 6, 29, 12, 0, 0)
+            .with_ymd_and_hms(2026, 6, 29, 7, 8, 9)
             .unwrap();
-        // Wall 12:00:00+00:00:30 → UTC 11:59:30.
-        match plus_30.to_sql() {
+        assert_eq!(
+            negative_outbound
+                .try_to_sql()
+                .expect("-03:30 must encode exactly"),
             BindValue::TimestampTz {
-                year,
-                month,
-                day,
-                hour,
-                minute,
-                second,
-                nanosecond,
-                offset_minutes,
-            } => {
-                assert_eq!((year, month, day), (2026, 6, 29));
-                assert_eq!((hour, minute, second, nanosecond), (11, 59, 30, 0));
-                // +30s floors to 0 minutes; instant is what survives.
-                assert_eq!(offset_minutes, 0);
+                year: 2026,
+                month: 6,
+                day: 29,
+                hour: 10,
+                minute: 38,
+                second: 9,
+                nanosecond: 0,
+                offset_minutes: -210,
             }
-            other => panic!("expected TimestampTz bind, got {other:?}"),
-        }
-        let minus_30 = FixedOffset::east_opt(-30)
-            .unwrap()
-            .with_ymd_and_hms(2026, 6, 29, 12, 0, 0)
-            .unwrap();
-        // Wall 12:00:00-00:00:30 → UTC 12:00:30.
-        match minus_30.to_sql() {
+        );
+        let negative_round_trip = DateTime::<FixedOffset>::from_sql(&QueryValue::TimestampTz {
+            year: 2026,
+            month: 6,
+            day: 29,
+            hour: 10,
+            minute: 38,
+            second: 9,
+            nanosecond: 0,
+            offset_minutes: -210,
+        })
+        .unwrap();
+        assert_eq!(
+            negative_round_trip.to_rfc3339(),
+            negative_outbound.to_rfc3339()
+        );
+
+        let utc_outbound = outbound.with_timezone(&Utc);
+        assert_eq!(
+            utc_outbound.try_to_sql().expect("UTC must encode exactly"),
             BindValue::TimestampTz {
-                year,
-                month,
-                day,
-                hour,
-                minute,
-                second,
-                nanosecond,
-                offset_minutes,
-            } => {
-                assert_eq!((year, month, day), (2026, 6, 29));
-                assert_eq!((hour, minute, second, nanosecond), (12, 0, 30, 0));
-                // Floor-divide: -30 div_euclid 60 = -1 (truncation would be 0).
-                assert_eq!(offset_minutes, -1);
+                year: 2026,
+                month: 6,
+                day: 29,
+                hour: 1,
+                minute: 23,
+                second: 9,
+                nanosecond: 123_000_000,
+                offset_minutes: 0,
             }
-            other => panic!("expected TimestampTz bind, got {other:?}"),
+        );
+        assert_eq!(
+            DateTime::<Utc>::from_sql(&QueryValue::TimestampTz {
+                year: 2026,
+                month: 6,
+                day: 29,
+                hour: 1,
+                minute: 23,
+                second: 9,
+                nanosecond: 123_000_000,
+                offset_minutes: 0,
+            })
+            .unwrap(),
+            utc_outbound
+        );
+
+        // DC5: sub-minute FixedOffset has no faithful Oracle TSTZ encoding.
+        // Both signs must fail before a TimestampTz bind can be returned; the
+        // diagnostic names the residual seconds that would otherwise be lost.
+        for offset_seconds in [30, -30] {
+            let value = FixedOffset::east_opt(offset_seconds)
+                .unwrap()
+                .with_ymd_and_hms(2026, 6, 29, 12, 0, 0)
+                .unwrap();
+            let error = value
+                .try_to_sql()
+                .expect_err("sub-minute FixedOffset must not emit a TimestampTz bind");
+            match error {
+                ConversionError::OutOfRange { expected, detail } => {
+                    assert_eq!(expected, "Oracle TIMESTAMP WITH TIME ZONE offset");
+                    assert!(
+                        detail.contains(&format!("{offset_seconds:+} seconds")),
+                        "detail must name the original offset: {detail}"
+                    );
+                    assert!(
+                        detail.contains("30 sub-minute second(s)"),
+                        "detail must name the precision that would be lost: {detail}"
+                    );
+                }
+                other => panic!("expected a typed offset precision error, got {other:?}"),
+            }
         }
     }
 

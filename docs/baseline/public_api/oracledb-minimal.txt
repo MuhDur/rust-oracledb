@@ -1599,34 +1599,49 @@ pub fn oracledb_protocol::thin::types::QueryResult::rows_as<T: oracledb::FromRow
 pub fn oracledb_protocol::thin::types::QueryResult::typed_row(&self, usize) -> oracledb::TypedRow<'_>
 pub trait oracledb::ToSql
 pub fn oracledb::ToSql::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
+pub fn oracledb::ToSql::try_to_sql(&self) -> core::result::Result<oracledb_protocol::thin::types::BindValue, oracledb::ConversionError>
 impl oracledb::ToSql for [f32]
 pub fn [f32]::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
+pub fn [f32]::try_to_sql(&self) -> core::result::Result<oracledb_protocol::thin::types::BindValue, oracledb::ConversionError>
 impl oracledb::ToSql for [u8]
 pub fn [u8]::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
+pub fn [u8]::try_to_sql(&self) -> core::result::Result<oracledb_protocol::thin::types::BindValue, oracledb::ConversionError>
 impl oracledb::ToSql for alloc::string::String
 pub fn alloc::string::String::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
+pub fn alloc::string::String::try_to_sql(&self) -> core::result::Result<oracledb_protocol::thin::types::BindValue, oracledb::ConversionError>
 impl oracledb::ToSql for alloc::vec::Vec<f32>
 pub fn alloc::vec::Vec<f32>::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
+pub fn alloc::vec::Vec<f32>::try_to_sql(&self) -> core::result::Result<oracledb_protocol::thin::types::BindValue, oracledb::ConversionError>
 impl oracledb::ToSql for alloc::vec::Vec<u8>
 pub fn alloc::vec::Vec<u8>::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
+pub fn alloc::vec::Vec<u8>::try_to_sql(&self) -> core::result::Result<oracledb_protocol::thin::types::BindValue, oracledb::ConversionError>
 impl oracledb::ToSql for bool
 pub fn bool::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
+pub fn bool::try_to_sql(&self) -> core::result::Result<oracledb_protocol::thin::types::BindValue, oracledb::ConversionError>
 impl oracledb::ToSql for f32
 pub fn f32::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
+pub fn f32::try_to_sql(&self) -> core::result::Result<oracledb_protocol::thin::types::BindValue, oracledb::ConversionError>
 impl oracledb::ToSql for f64
 pub fn f64::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
+pub fn f64::try_to_sql(&self) -> core::result::Result<oracledb_protocol::thin::types::BindValue, oracledb::ConversionError>
 impl oracledb::ToSql for i32
 pub fn i32::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
+pub fn i32::try_to_sql(&self) -> core::result::Result<oracledb_protocol::thin::types::BindValue, oracledb::ConversionError>
 impl oracledb::ToSql for i64
 pub fn i64::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
+pub fn i64::try_to_sql(&self) -> core::result::Result<oracledb_protocol::thin::types::BindValue, oracledb::ConversionError>
 impl oracledb::ToSql for str
 pub fn str::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
+pub fn str::try_to_sql(&self) -> core::result::Result<oracledb_protocol::thin::types::BindValue, oracledb::ConversionError>
 impl oracledb::ToSql for u32
 pub fn u32::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
+pub fn u32::try_to_sql(&self) -> core::result::Result<oracledb_protocol::thin::types::BindValue, oracledb::ConversionError>
 impl<T: oracledb::ToSql + ?core::marker::Sized> oracledb::ToSql for &T
 pub fn &T::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
+pub fn &T::try_to_sql(&self) -> core::result::Result<oracledb_protocol::thin::types::BindValue, oracledb::ConversionError>
 impl<T: oracledb::ToSql> oracledb::ToSql for core::option::Option<T>
 pub fn core::option::Option<T>::to_sql(&self) -> oracledb_protocol::thin::types::BindValue
+pub fn core::option::Option<T>::try_to_sql(&self) -> core::result::Result<oracledb_protocol::thin::types::BindValue, oracledb::ConversionError>
 pub trait oracledb::TokenSource: core::marker::Send + core::marker::Sync
 pub fn oracledb::TokenSource::get_token(&self) -> oracledb::BoxFuture<'_, core::result::Result<alloc::string::String, oracledb::TokenSourceError>>
 pub fn oracledb::bind_rows_need_iterative_plsql(&str, &[alloc::vec::Vec<oracledb_protocol::thin::types::BindValue>]) -> bool
