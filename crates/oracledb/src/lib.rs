@@ -11040,10 +11040,14 @@ fn parse_session_u16(
     data: &std::collections::BTreeMap<String, String>,
     key: &'static str,
 ) -> Result<u16> {
+    // Parse straight into the target width. Going through u64 and casting with
+    // `as u16` silently wrapped, so AUTH_SERIAL_NUM=70000 was reported as 4464
+    // and the connection carried a session serial the server never issued —
+    // which is the number cancellation and session correlation are matched on
+    // (finding DC7, bead oraclemcp-eng-program-bp8ia.7.11.3).
     data.get(key)
         .ok_or(Error::MissingSessionField(key))?
-        .parse::<u64>()
-        .map(|value| value as u16)
+        .parse::<u16>()
         .map_err(|_| Error::MissingSessionField(key))
 }
 
@@ -12288,16 +12292,36 @@ mod tests {
         assert_eq!(cache[0].bind_shape, text);
     }
 
+    /// This test previously asserted the wrap it was named for
+    /// (`auth_serial_num_truncates_to_low_u16_instead_of_rejecting`), pinning
+    /// 70000 -> 4464 as intended behaviour. A wrapped serial is a session
+    /// identity the server never issued, so the contract is now rejection.
     #[test]
-    fn auth_serial_num_truncates_to_low_u16_instead_of_rejecting() {
-        let mut data = BTreeMap::new();
-        data.insert("AUTH_SERIAL_NUM".to_string(), "70000".to_string());
+    fn auth_serial_num_out_of_u16_range_is_rejected_not_wrapped() {
+        for out_of_range in ["65536", "70000", "4294967296", "-1"] {
+            let mut data = BTreeMap::new();
+            data.insert("AUTH_SERIAL_NUM".to_string(), out_of_range.to_string());
+            let error = parse_session_u16(&data, "AUTH_SERIAL_NUM")
+                .expect_err("a serial outside u16 must not be silently wrapped");
+            assert!(
+                matches!(error, Error::MissingSessionField("AUTH_SERIAL_NUM")),
+                "out-of-range {out_of_range} must use the existing typed session-field error, got {error:?}"
+            );
+        }
+    }
 
-        assert_eq!(
-            parse_session_u16(&data, "AUTH_SERIAL_NUM")
-                .expect("large AUTH_SERIAL_NUM should parse"),
-            70000_u64 as u16
-        );
+    /// Positive acceptance: the whole u16 domain still parses exactly, so
+    /// ordinary authentication fixtures are unaffected.
+    #[test]
+    fn auth_serial_num_parses_the_full_u16_domain_exactly() {
+        for (text, expected) in [("0", 0_u16), ("1", 1), ("4464", 4464), ("65535", 65535)] {
+            let mut data = BTreeMap::new();
+            data.insert("AUTH_SERIAL_NUM".to_string(), text.to_string());
+            assert_eq!(
+                parse_session_u16(&data, "AUTH_SERIAL_NUM").expect("in-range serial parses"),
+                expected
+            );
+        }
     }
 
     #[test]
