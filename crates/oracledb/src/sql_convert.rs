@@ -1235,7 +1235,16 @@ mod chrono_to_sql {
             // BindValue::TimestampTz fields must be UTC (the wire stores UTC +
             // display offset; see bead rust-oracledb-97cj). Emit the UTC
             // components, not the local wall clock.
+            //
+            // Oracle's TSTZ offset is minute-granularity. Chrono `FixedOffset`
+            // can carry residual seconds. Truncating toward zero (`/ 60`) used
+            // to collapse ±30s offsets to 0 minutes and silently drop them.
+            // Floor-divide with `div_euclid` so a negative residual does not
+            // become 0; the UTC fields still carry the true instant, so
+            // sub-minute offsets "survive" as the correct absolute time even
+            // when the display offset is rounded to a whole minute (DC5).
             let utc = self.naive_utc();
+            let offset_seconds = self.offset().local_minus_utc();
             BindValue::TimestampTz {
                 year: utc.year(),
                 month: utc.month() as u8,
@@ -1244,7 +1253,7 @@ mod chrono_to_sql {
                 minute: utc.minute() as u8,
                 second: utc.second() as u8,
                 nanosecond: utc.nanosecond(),
-                offset_minutes: self.offset().local_minus_utc() / 60,
+                offset_minutes: offset_seconds.div_euclid(60),
             }
         }
     }
@@ -2400,6 +2409,59 @@ mod tests {
                 offset_minutes: 345,
             }
         );
+
+        // DC5: sub-minute FixedOffset. Oracle TSTZ offsets are minute-
+        // granularity, so the display offset may quantize, but the UTC
+        // fields must keep the true absolute instant (positive and negative
+        // thirty-second residuals must not be silently dropped from the
+        // instant). Negative residual must not collapse to offset_minutes=0
+        // under truncating division.
+        let plus_30 = FixedOffset::east_opt(30)
+            .unwrap()
+            .with_ymd_and_hms(2026, 6, 29, 12, 0, 0)
+            .unwrap();
+        // Wall 12:00:00+00:00:30 → UTC 11:59:30.
+        match plus_30.to_sql() {
+            BindValue::TimestampTz {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+                offset_minutes,
+            } => {
+                assert_eq!((year, month, day), (2026, 6, 29));
+                assert_eq!((hour, minute, second, nanosecond), (11, 59, 30, 0));
+                // +30s floors to 0 minutes; instant is what survives.
+                assert_eq!(offset_minutes, 0);
+            }
+            other => panic!("expected TimestampTz bind, got {other:?}"),
+        }
+        let minus_30 = FixedOffset::east_opt(-30)
+            .unwrap()
+            .with_ymd_and_hms(2026, 6, 29, 12, 0, 0)
+            .unwrap();
+        // Wall 12:00:00-00:00:30 → UTC 12:00:30.
+        match minus_30.to_sql() {
+            BindValue::TimestampTz {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+                offset_minutes,
+            } => {
+                assert_eq!((year, month, day), (2026, 6, 29));
+                assert_eq!((hour, minute, second, nanosecond), (12, 0, 30, 0));
+                // Floor-divide: -30 div_euclid 60 = -1 (truncation would be 0).
+                assert_eq!(offset_minutes, -1);
+            }
+            other => panic!("expected TimestampTz bind, got {other:?}"),
+        }
     }
 
     #[cfg(feature = "uuid")]
