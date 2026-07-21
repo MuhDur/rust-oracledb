@@ -51,6 +51,9 @@ artifacts, and the checked-in API/provenance ledgers.
   callers that pass `foo[bar]` no longer retain that literal as the base user:
   it becomes base user `foo` plus proxy user `bar` (and `[bar]` becomes the
   proxy-only form). A later `with_proxy_user(...)` still overrides it.
+- **Out-of-range Oracle session serials are rejected.** `AUTH_SERIAL_NUM`
+  values outside the `u16` range no longer wrap to their low 16 bits; they
+  return the existing session-field error.
 - **TCPS trust anchors are a union.** Platform roots (or explicit
   `SSL_CERT_FILE` / `SSL_CERT_DIR` roots) are loaded through
   `rustls-native-certs` and wallet CA certificates are added to them. A wallet
