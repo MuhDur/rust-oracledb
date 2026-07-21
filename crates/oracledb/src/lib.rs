@@ -14850,6 +14850,74 @@ mod tests {
         let _ = server.join();
     }
 
+    /// F-DC3 precedence pin: effective `dn_match` is the **AND** of the
+    /// DSN-parsed `SECURITY.SSL_SERVER_DN_MATCH` and
+    /// `ConnectOptions::ssl_server_dn_match` (both default `true`). Either side
+    /// set to OFF disables identity matching; chain-of-trust validation is
+    /// unaffected (see `OracleServerCertVerifier::run_dn_match` /
+    /// `resolve_tls_params`).
+    #[test]
+    fn f_dc3_dsn_and_options_dn_match_merge_is_and_not_options_only() {
+        fn effective(dsn_match: bool, options_match: bool) -> bool {
+            // Mirrors `Connection::connect`:
+            // `primary_description.security.ssl_server_dn_match && options.ssl_server_dn_match`
+            dsn_match && options_match
+        }
+
+        assert!(
+            effective(true, true),
+            "default DSN + default options must keep DN matching ON"
+        );
+        assert!(
+            !effective(false, true),
+            "DSN SSL_SERVER_DN_MATCH=OFF must win over default options=true"
+        );
+        assert!(
+            !effective(true, false),
+            "explicit ConnectOptions::with_ssl_server_dn_match(false) must win over DSN=ON"
+        );
+        assert!(!effective(false, false), "both OFF stays OFF");
+
+        // DSN-only OFF parses to false on the security block.
+        let off_dsn = concat!(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=h.example)(PORT=2484))",
+            "(CONNECT_DATA=(SERVICE_NAME=svc))",
+            "(SECURITY=(SSL_SERVER_DN_MATCH=off)))"
+        );
+        let off_desc = EasyConnect::parse_descriptor(off_dsn).expect("parse OFF dsn");
+        assert!(
+            !off_desc.first_description().security.ssl_server_dn_match,
+            "DSN SSL_SERVER_DN_MATCH=off must parse to security.ssl_server_dn_match=false"
+        );
+
+        let on_dsn = concat!(
+            "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=h.example)(PORT=2484))",
+            "(CONNECT_DATA=(SERVICE_NAME=svc))",
+            "(SECURITY=(SSL_SERVER_DN_MATCH=on)))"
+        );
+        let on_desc = EasyConnect::parse_descriptor(on_dsn).expect("parse ON dsn");
+        assert!(on_desc.first_description().security.ssl_server_dn_match);
+
+        // Builder surface: options OFF combines with DSN ON → effective false.
+        let options_off =
+            ConnectOptions::new(on_dsn, "u", "p", identity()).with_ssl_server_dn_match(false);
+        assert!(!options_off.ssl_server_dn_match());
+        assert!(!effective(
+            on_desc.first_description().security.ssl_server_dn_match,
+            options_off.ssl_server_dn_match()
+        ));
+
+        // resolve_tls_params must receive the effective false and set dn_match=false
+        // (identity short-circuit only — chain still validated by the verifier).
+        let easy = EasyConnect::parse(off_dsn).expect("easy parse OFF");
+        let params = crate::tls::resolve_tls_params(&easy, None, None, false, None, false)
+            .expect("resolve with dn_match=false");
+        assert!(
+            !params.dn_match,
+            "resolve_tls_params must record dn_match=false when effective OFF"
+        );
+    }
+
     #[test]
     fn async_cancel_handle_requests_break_and_reconciles_ready() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");

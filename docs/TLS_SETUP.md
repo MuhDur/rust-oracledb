@@ -159,7 +159,13 @@ custom rustls `ServerCertVerifier`
    `EndEntityCert::verify_for_usage`. This is the same crypto rustls uses
    internally, just without binding the SNI/DNS name — mirroring OpenSSL
    `CERT_REQUIRED` + `check_hostname = False`.
-2. **Oracle DN / name match** (when `ssl_server_dn_match`, the default):
+2. **Oracle DN / name match** (when effective `ssl_server_dn_match` is true —
+   the default). The effective flag is the **AND** of the DSN
+   `SECURITY.SSL_SERVER_DN_MATCH` and `ConnectOptions::ssl_server_dn_match`
+   (both default `true`), so a DSN-only `SSL_SERVER_DN_MATCH=OFF` is honored
+   without calling the builder, and `with_ssl_server_dn_match(false)` always
+   wins over a DSN `ON`. Turning match **OFF** skips only this identity step;
+   chain-of-trust validation (step 1) still runs:
    - if `ssl_server_cert_dn` is set, the server's subject DN must **equal** it
      (order-independent attribute-map comparison, `crypto.pyx` `DN_REGEX`);
    - otherwise the connect host is matched against the certificate's **SAN DNS
