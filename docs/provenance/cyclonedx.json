@@ -659,6 +659,19 @@
           }
         }
       ],
+      "name": "core-foundation",
+      "purl": "pkg:cargo/core-foundation@0.10.1",
+      "type": "library",
+      "version": "0.10.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
       "name": "core-foundation-sys",
       "purl": "pkg:cargo/core-foundation-sys@0.8.7",
       "type": "library",
@@ -1959,6 +1972,19 @@
           }
         }
       ],
+      "name": "openssl-probe",
+      "purl": "pkg:cargo/openssl-probe@0.2.1",
+      "type": "library",
+      "version": "0.2.1"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
       "name": "oracledb-derive",
       "purl": "pkg:cargo/oracledb-derive@0.8.4",
       "type": "library",
@@ -2531,6 +2557,19 @@
           }
         }
       ],
+      "name": "rustls-native-certs",
+      "purl": "pkg:cargo/rustls-native-certs@0.8.4",
+      "type": "library",
+      "version": "0.8.4"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache-2.0 OR ISC OR MIT"
+          }
+        }
+      ],
       "name": "rustls-pemfile",
       "purl": "pkg:cargo/rustls-pemfile@2.2.0",
       "type": "library",
@@ -2579,6 +2618,19 @@
       "licenses": [
         {
           "license": {
+            "name": "MIT"
+          }
+        }
+      ],
+      "name": "schannel",
+      "purl": "pkg:cargo/schannel@0.1.29",
+      "type": "library",
+      "version": "0.1.29"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
             "name": "MIT OR Apache-2.0"
           }
         }
@@ -2600,6 +2652,32 @@
       "purl": "pkg:cargo/seahash@4.1.0",
       "type": "library",
       "version": "4.1.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
+      "name": "security-framework",
+      "purl": "pkg:cargo/security-framework@3.7.0",
+      "type": "library",
+      "version": "3.7.0"
+    },
+    {
+      "licenses": [
+        {
+          "license": {
+            "name": "MIT OR Apache-2.0"
+          }
+        }
+      ],
+      "name": "security-framework-sys",
+      "purl": "pkg:cargo/security-framework-sys@2.17.0",
+      "type": "library",
+      "version": "2.17.0"
     },
     {
       "licenses": [
