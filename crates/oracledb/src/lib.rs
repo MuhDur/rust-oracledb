@@ -2984,7 +2984,7 @@ impl Connection {
             );
             let token_auth = options.access_token.is_some();
             let descriptor_ssl_server_dn_match =
-                primary_description.security.ssl_server_dn_match && options.ssl_server_dn_match;
+                effective_ssl_server_dn_match(&primary_description, &options);
             let descriptor_ssl_server_cert_dn = options
                 .ssl_server_cert_dn
                 .as_deref()
@@ -3096,9 +3096,12 @@ impl Connection {
                         // the DSN `TRANSPORT_CONNECT_TIMEOUT`/`CONNECT_TIMEOUT`
                         // for both easy-connect and full-descriptor DSN forms
                         // (bead F-DC4).
-                        let tls_stream =
-                            tls::tls_handshake_prepared(prepared_tls, stream, connect_timeout)
-                                .await?;
+                        let tls_stream = tls::tls_handshake_prepared(
+                            prepared_tls,
+                            stream,
+                            tls::handshake_timeout_from_connect_timeout(connect_timeout),
+                        )
+                        .await?;
                         trace_connect_step("tls established");
                         // Install the capture recorder around the SYNCHRONOUS
                         // split only (no await while held) so the thread-local
@@ -10705,6 +10708,13 @@ fn transport_connect_timeout_duration(seconds: f64) -> Duration {
     Duration::from_secs_f64(seconds.max(0.001))
 }
 
+/// Resolve the fail-closed DN-match setting from the parsed descriptor and
+/// explicit connection options. Either side opting out disables only identity
+/// matching; certificate-chain validation remains mandatory.
+fn effective_ssl_server_dn_match(description: &Description, options: &ConnectOptions) -> bool {
+    description.security.ssl_server_dn_match && options.ssl_server_dn_match
+}
+
 /// The SDU (session data unit, in bytes) advertised in the CONNECT packet
 /// (F1, bead `rust-oracledb-clvm`). Precedence: an explicit
 /// [`ConnectOptions::with_sdu`] value wins; otherwise a DSN-parsed `(SDU=...)`
@@ -14590,6 +14600,62 @@ mod tests {
         Ok(())
     }
 
+    /// DC4's short-budget coverage proves the timeout fires promptly. This
+    /// companion pin proves an explicitly configured budget above the old
+    /// 20-second ceiling reaches the production TLS handoff unchanged, while
+    /// keeping the stalled-peer exercise short by letting the peer close first.
+    #[test]
+    fn full_descriptor_preserves_above_twenty_second_tls_handshake_budget() -> Result<()> {
+        const CONFIGURED_TIMEOUT: Duration = Duration::from_secs(45);
+        const SERVER_HOLD: Duration = Duration::from_millis(250);
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (socket, _) = listener.accept()?;
+            thread::sleep(SERVER_HOLD);
+            drop(socket);
+            Ok(())
+        });
+
+        let wallet_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tls");
+        let connect_string = format!(
+            "(DESCRIPTION=(CONNECT_TIMEOUT=45)\
+             (ADDRESS=(PROTOCOL=tcps)(HOST=127.0.0.1)(PORT={}))\
+             (CONNECT_DATA=(SERVICE_NAME=FREEPDB1))\
+             (SECURITY=(SSL_SERVER_DN_MATCH=off)(MY_WALLET_DIRECTORY=\"{wallet_dir}\")))",
+            addr.port(),
+        );
+        let parsed = EasyConnect::parse_descriptor(&connect_string)
+            .expect("full descriptor with a 45-second CONNECT_TIMEOUT parses");
+        let resolved_connect_timeout =
+            transport_connect_timeout_duration(parsed.first_description().tcp_connect_timeout);
+        assert_eq!(resolved_connect_timeout, CONFIGURED_TIMEOUT);
+        assert_eq!(
+            tls::handshake_timeout_from_connect_timeout(resolved_connect_timeout),
+            CONFIGURED_TIMEOUT,
+            "the production TLS handoff must not re-clamp a configured 45-second budget"
+        );
+
+        let options = ConnectOptions::new(connect_string, "user", "password", identity());
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let started = Instant::now();
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("ambient Cx");
+                Connection::connect(&cx, options).await
+            })
+            .expect_err("a peer that never completes TLS must not connect");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= SERVER_HOLD / 2 && elapsed < Duration::from_secs(2),
+            "the stalled peer must drive the observed failure without turning a {CONFIGURED_TIMEOUT:?} \
+             configuration check into a long wait; took {elapsed:?}, err={err:?}"
+        );
+        server.join().expect("server thread joins")?;
+        Ok(())
+    }
+
     // ---- bead F-DC2 / F-DC3: DSN-only SSL_SERVER_CERT_DN / SSL_SERVER_DN_MATCH ----
     //
     // `tests/tls_handshake.rs` proves the crate-internal `tls::` module's DN
@@ -14858,25 +14924,13 @@ mod tests {
     /// `resolve_tls_params`).
     #[test]
     fn f_dc3_dsn_and_options_dn_match_merge_is_and_not_options_only() {
-        fn effective(dsn_match: bool, options_match: bool) -> bool {
-            // Mirrors `Connection::connect`:
-            // `primary_description.security.ssl_server_dn_match && options.ssl_server_dn_match`
-            dsn_match && options_match
-        }
-
+        let default_dsn = "tcps://h.example:2484/svc";
+        let default_desc = EasyConnect::parse_descriptor(default_dsn).expect("parse default dsn");
+        let default_options = ConnectOptions::new(default_dsn, "u", "p", identity());
         assert!(
-            effective(true, true),
+            effective_ssl_server_dn_match(default_desc.first_description(), &default_options),
             "default DSN + default options must keep DN matching ON"
         );
-        assert!(
-            !effective(false, true),
-            "DSN SSL_SERVER_DN_MATCH=OFF must win over default options=true"
-        );
-        assert!(
-            !effective(true, false),
-            "explicit ConnectOptions::with_ssl_server_dn_match(false) must win over DSN=ON"
-        );
-        assert!(!effective(false, false), "both OFF stays OFF");
 
         // DSN-only OFF parses to false on the security block.
         let off_dsn = concat!(
@@ -14888,6 +14942,11 @@ mod tests {
         assert!(
             !off_desc.first_description().security.ssl_server_dn_match,
             "DSN SSL_SERVER_DN_MATCH=off must parse to security.ssl_server_dn_match=false"
+        );
+        let off_options = ConnectOptions::new(off_dsn, "u", "p", identity());
+        assert!(
+            !effective_ssl_server_dn_match(off_desc.first_description(), &off_options),
+            "DSN SSL_SERVER_DN_MATCH=OFF must win over default options=true"
         );
 
         let on_dsn = concat!(
@@ -14902,16 +14961,30 @@ mod tests {
         let options_off =
             ConnectOptions::new(on_dsn, "u", "p", identity()).with_ssl_server_dn_match(false);
         assert!(!options_off.ssl_server_dn_match());
-        assert!(!effective(
-            on_desc.first_description().security.ssl_server_dn_match,
-            options_off.ssl_server_dn_match()
-        ));
+        assert!(
+            !effective_ssl_server_dn_match(on_desc.first_description(), &options_off),
+            "explicit ConnectOptions::with_ssl_server_dn_match(false) must win over DSN=ON"
+        );
+
+        let both_off =
+            ConnectOptions::new(off_dsn, "u", "p", identity()).with_ssl_server_dn_match(false);
+        assert!(
+            !effective_ssl_server_dn_match(off_desc.first_description(), &both_off),
+            "both OFF stays OFF"
+        );
 
         // resolve_tls_params must receive the effective false and set dn_match=false
         // (identity short-circuit only — chain still validated by the verifier).
         let easy = EasyConnect::parse(off_dsn).expect("easy parse OFF");
-        let params = crate::tls::resolve_tls_params(&easy, None, None, false, None, false)
-            .expect("resolve with dn_match=false");
+        let params = crate::tls::resolve_tls_params(
+            &easy,
+            None,
+            None,
+            effective_ssl_server_dn_match(off_desc.first_description(), &off_options),
+            None,
+            false,
+        )
+        .expect("resolve with dn_match=false");
         assert!(
             !params.dn_match,
             "resolve_tls_params must record dn_match=false when effective OFF"

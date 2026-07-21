@@ -256,6 +256,18 @@
       "path_filtered": false
     },
     {
+      "check_name": "pyshim Rust unit tests",
+      "tier": "required",
+      "workflow": "CI",
+      "workflow_file": "ci.yml",
+      "job_id": "pyshim-unit",
+      "triggers": [
+        "pull_request",
+        "push"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "release metadata sync",
       "tier": "required",
       "workflow": "CI",
@@ -942,6 +954,7 @@
         "evidence control contracts",
         "fuzz targets compile/smoke (nightly)",
         "musl size gate smoke",
+        "pyshim Rust unit tests",
         "release metadata sync",
         "rustfmt"
       ]
@@ -1095,6 +1108,7 @@
       "clippy (-D warnings)",
       "evidence control contracts",
       "free23 full suite",
+      "pyshim Rust unit tests",
       "release metadata sync",
       "required / quality (required/required)",
       "required / quality-contracts (required/required)",

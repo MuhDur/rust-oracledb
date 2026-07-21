@@ -13,9 +13,10 @@ name: Live (database) tests
 #
 # Scope note: this runs the DRIVER's own live tests (which self-provision their
 # tables and need only the pythontest user). The full python-oracledb conformance
-# suite (harness/run.sh) additionally needs a Python venv + the maturin-built
-# PyO3 pyshim + the pinned reference checkout; wiring that richer lane is a
-# follow-up.
+# suite (`harness/run.sh`) remains operator-run-only because it additionally
+# needs a Python venv, a maturin-built PyO3 pyshim, and the pinned reference
+# checkout. The required CI workflow separately executes the pyshim's Rust unit
+# tests without a database.
 
 on:
   schedule:

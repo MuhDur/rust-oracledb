@@ -883,6 +883,14 @@ pub(crate) async fn tls_handshake_prepared(
         .map_err(|error| TlsHandshakeError::new(error.to_string()))
 }
 
+/// Keep the TLS phase on the caller's already-resolved connect budget.
+///
+/// This deliberately performs no cap or fallback. In particular, a configured
+/// budget above the historical 20-second default must reach rustls unchanged.
+pub(crate) const fn handshake_timeout_from_connect_timeout(connect_timeout: Duration) -> Duration {
+    connect_timeout
+}
+
 /// Perform the TCPS TLS handshake over a connected TCP stream, returning the
 /// established [`TlsStream`].
 ///

@@ -1594,6 +1594,25 @@ mod tests {
     use super::*;
     use oracledb::protocol::thin::OracleNumber;
 
+    /// `py_value_to_bind` recognizes the two public Python-only value classes
+    /// before it reaches the plain numeric paths. Unit tests need their names
+    /// present, but not a compiled python-oracledb reference extension.
+    fn install_oracledb_type_stubs(py: Python<'_>) {
+        let builtins = PyModule::import(py, "builtins").expect("builtins must import");
+        let new_type = builtins.getattr("type").expect("builtins.type must exist");
+        let module = PyModule::new(py, "oracledb").expect("stub module must construct");
+        for name in ["IntervalYM", "SparseVector"] {
+            let class = new_type
+                .call1((name, PyTuple::empty(py), PyDict::new(py)))
+                .expect("stub class must construct");
+            module.add(name, class).expect("stub class must register");
+        }
+        PyModule::import(py, "sys")
+            .and_then(|sys| sys.getattr("modules"))
+            .and_then(|modules| modules.set_item("oracledb", module))
+            .expect("stub module must register");
+    }
+
     #[test]
     fn arbitrary_precision_python_int_binds_exact_decimal_text() {
         // 40 decimal digits, 38 significant digits: wider than i128, yet still
@@ -1603,6 +1622,7 @@ mod tests {
 
         Python::initialize();
         Python::attach(|py| {
+            install_oracledb_type_stubs(py);
             let int_type = PyModule::import(py, "builtins")
                 .and_then(|module| module.getattr("int"))
                 .expect("Python builtins.int must exist");
@@ -1620,6 +1640,43 @@ mod tests {
                 BindValue::Number(text) => assert_eq!(text, VALUE),
                 other => panic!("expected NUMBER bind, got {other:?}"),
             }
+        });
+    }
+
+    #[test]
+    fn decimal_exponent_binds_exact_text_through_boxed_number_fallback() {
+        const VALUE: &str = "1E+30";
+
+        Python::initialize();
+        Python::attach(|py| {
+            install_oracledb_type_stubs(py);
+            let decimal = PyModule::import(py, "decimal")
+                .and_then(|module| module.getattr("Decimal"))
+                .expect("decimal.Decimal must exist");
+            let value = decimal
+                .call1((VALUE,))
+                .expect("exponent Decimal must construct");
+            assert_eq!(
+                value
+                    .str()
+                    .and_then(|text| text.extract::<String>())
+                    .expect("Decimal must stringify"),
+                VALUE,
+                "fixture must preserve Python's exponent spelling"
+            );
+
+            match py_value_to_bind(&value).expect("Decimal must bind") {
+                BindValue::Number(text) => assert_eq!(text, VALUE),
+                other => panic!("expected NUMBER bind, got {other:?}"),
+            }
+
+            assert!(
+                matches!(
+                    OracleNumber::from_canonical_text(VALUE),
+                    OracleNumber::Text { .. }
+                ),
+                "exponent notation cannot use parse_canonical_inline and must remain boxed text"
+            );
         });
     }
 

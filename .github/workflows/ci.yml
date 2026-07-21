@@ -21,8 +21,8 @@ concurrency:
 # so every compiling job pins the nightly from rust-toolchain.toml via
 # a pinned dtolnay/rust-toolchain action SHA + toolchain input (dated nightlies
 # are not valid action @refs). There is no stable MSRV, hence no MSRV job. The
-# PyO3 harness oracledb-pyshim (publish=false) needs Python + a live DB and is
-# excluded.
+# The publish=false PyO3 harness needs Python. Its live reference-suite remains
+# operator-run-only, while the pyshim's Rust unit tests run in `pyshim-unit`.
 jobs:
   fmt:
     name: rustfmt
@@ -67,6 +67,43 @@ jobs:
       - run: cargo test --workspace --exclude oracledb-pyshim
       - run: cargo test -p oracledb --features cassette
       - run: cargo test --workspace --exclude oracledb-pyshim --doc
+
+  pyshim-unit:
+    name: pyshim Rust unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: nightly-2026-05-11
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      # Match parity_rigor.sh: create a venv, then let maturin build the shim
+      # as an extension module. Modern maturin sets PYO3_BUILD_EXTENSION_MODULE
+      # for this build only, leaving cargo test free to link libpython.
+      - name: Build the pyshim through maturin
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv .venv-pyshim
+          .venv-pyshim/bin/python -m pip install --upgrade pip 'maturin>=1.9.4'
+          prefix="$(.venv-pyshim/bin/python -c 'import sys; print(sys.prefix)')"
+          VIRTUAL_ENV="$prefix" PATH="$prefix/bin:$PATH" \
+            .venv-pyshim/bin/python -m maturin develop -m crates/oracledb-pyshim/Cargo.toml
+      - name: Run pyshim Rust unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python_libdir="$(.venv-pyshim/bin/python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+          python_home="$(.venv-pyshim/bin/python -c 'import sys; print(sys.base_prefix)')"
+          LD_LIBRARY_PATH="$python_libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            PYTHONHOME="$python_home" \
+            PYO3_PYTHON="$PWD/.venv-pyshim/bin/python" \
+            cargo test -p oracledb-pyshim --lib
 
   docs:
     name: cargo doc (builds)
