@@ -94,6 +94,7 @@ oracledb-derive = { path = "../oracledb-derive", version = "0.8.4", optional = t
 oracledb-protocol = { path = "../oracledb-protocol", version = "0.8.4" }
 rust_decimal = { version = "1", optional = true, default-features = false, features = ["std"] }
 rustls.workspace = true
+rustls-native-certs.workspace = true
 rustls-pki-types.workspace = true
 rustls-webpki.workspace = true
 serde_json = { workspace = true, optional = true }

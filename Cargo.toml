@@ -28,6 +28,9 @@ aes = "0.8"
 # in our usage; versions are pinned to the copies asupersync's `tls` feature
 # links so a single rustls / pki-types is in the dependency graph.
 rustls = { version = "0.23.39", default-features = false, features = ["std", "tls12", "ring"] }
+# Native platform trust stores plus SSL_CERT_FILE / SSL_CERT_DIR override
+# semantics, matching Python ssl.create_default_context().
+rustls-native-certs = "0.8.4"
 rustls-pemfile = "2.2"
 rustls-pki-types = "1.14.1"
 # Sans-I/O ASN.1 + symmetric crypto for the cwallet.sso reader.

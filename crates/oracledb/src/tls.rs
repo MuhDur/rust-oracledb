@@ -291,13 +291,10 @@ pub(crate) fn build_client_config(params: &TlsParams) -> Result<ClientConfig, Er
     let key_provider = provider.key_provider;
     let supported_algs = provider.signature_verification_algorithms;
 
-    // Trust anchors: wallet CAs if present, else fall back to the OS roots so a
-    // server with a publicly-trusted cert still works (python-oracledb uses
-    // ssl.create_default_context()).
-    let trust_anchor_ders: Vec<Vec<u8>> = match &params.wallet {
-        Some(w) if !w.ca_certificates.is_empty() => w.ca_certificates.clone(),
-        _ => load_system_roots(),
-    };
+    // python-oracledb starts with ssl.create_default_context() and then adds
+    // the wallet's CAs. Keep that union: an ADB wallet can supply mTLS and
+    // private roots while the server chain still terminates at a public root.
+    let trust_anchor_ders = union_trust_anchors(load_system_roots(), params.wallet.as_ref());
     if trust_anchor_ders.is_empty() {
         return Err(Error::Tls(
             "no trust anchors available for TCPS: supply a wallet (ewallet.pem) \
@@ -358,13 +355,24 @@ fn client_private_key(
         .map_err(|e| Error::Tls(format!("client private key parse failed: {e}")))
 }
 
-/// Best-effort load of OS root certificates for the no-wallet path. Returns an
-/// empty vec when no native-roots backend is available; the caller surfaces a
-/// clear error in that case.
+/// Best-effort load of platform root certificates.
+///
+/// `rustls-native-certs` consults the native Windows/macOS/Linux store and
+/// honors `SSL_CERT_FILE` / `SSL_CERT_DIR`. The legacy Unix bundle locations
+/// remain a fallback for hosts whose native loader yields no roots, but never
+/// override an explicit environment-root selection.
 fn load_system_roots() -> Vec<Vec<u8>> {
-    // We don't pull rustls-native-certs directly; instead read the common
-    // bundle locations. This keeps the dependency surface minimal while still
-    // allowing publicly-trusted-cert TCPS endpoints to work without a wallet.
+    let native = rustls_native_certs::load_native_certs();
+    let native_roots: Vec<Vec<u8>> = native
+        .certs
+        .into_iter()
+        .map(|certificate| certificate.as_ref().to_vec())
+        .collect();
+    if !native_roots.is_empty() || explicit_root_override_is_set() {
+        return native_roots;
+    }
+
+    // Fallback for Unix hosts where native discovery has no usable roots.
     const BUNDLES: &[&str] = &[
         "/etc/ssl/certs/ca-certificates.crt",
         "/etc/pki/tls/certs/ca-bundle.crt",
@@ -381,6 +389,20 @@ fn load_system_roots() -> Vec<Vec<u8>> {
         }
     }
     Vec::new()
+}
+
+fn explicit_root_override_is_set() -> bool {
+    std::env::var_os("SSL_CERT_FILE").is_some() || std::env::var_os("SSL_CERT_DIR").is_some()
+}
+
+fn union_trust_anchors(
+    mut system_roots: Vec<Vec<u8>>,
+    wallet: Option<&WalletContents>,
+) -> Vec<Vec<u8>> {
+    if let Some(wallet) = wallet {
+        system_roots.extend(wallet.ca_certificates.iter().cloned());
+    }
+    system_roots
 }
 
 /// Parse all CERTIFICATE blocks from a PEM reader into DER byte vectors,
@@ -857,6 +879,36 @@ mod tests {
         };
         // Empty wallet => falls back to system roots; result depends on host.
         let _ = build_client_config(&params);
+    }
+
+    #[test]
+    fn platform_and_wallet_trust_anchors_are_unioned() {
+        let platform_root = vec![0x30, 0x01];
+        let wallet_root = vec![0x30, 0x02];
+        let wallet = WalletContents {
+            ca_certificates: vec![wallet_root.clone()],
+            ..WalletContents::default()
+        };
+
+        assert_eq!(
+            union_trust_anchors(vec![platform_root.clone()], Some(&wallet)),
+            vec![platform_root, wallet_root]
+        );
+    }
+
+    #[test]
+    fn native_cert_loader_reads_an_explicit_pem_file() {
+        let path = fixture_tls_dir().join("ca_wallet.pem");
+        let result = rustls_native_certs::load_certs_from_paths(Some(&path), None);
+        assert!(
+            result.errors.is_empty(),
+            "fixture PEM must load without native-root errors: {:?}",
+            result.errors
+        );
+        assert!(
+            !result.certs.is_empty(),
+            "fixture PEM must yield an explicit native-cert root"
+        );
     }
 
     #[test]
