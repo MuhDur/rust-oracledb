@@ -41,9 +41,9 @@ GENERIC_PATTERNS=(
   # presence in a tracked file would be an accidental leak. The sovereign
   # suffix variants (.eu, .com.au, .oraclegovcloud.com) are covered so a
   # regional endpoint cannot evade the scan by using a non-.com TLD.
-  '[a-z0-9]([-a-z0-9]*[a-z0-9])?\.(adb\.)?[a-z0-9-]+\.oraclecloud\.(com|eu|com\.au)'
-  '[a-z0-9]([-a-z0-9]*[a-z0-9])?\.[a-z0-9-]+\.oraclegovcloud\.com'
-  '[a-z0-9]([-a-z0-9]*[a-z0-9])?\.oraclevcn\.com'
+  '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\.oraclecloud\.(com|eu|com\.au)'
+  '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\.oraclegovcloud\.com'
+  '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*\.oraclevcn\.com'
 )
 
 scan_paths() {
@@ -185,6 +185,18 @@ run_selftest() {
   fi
   unset SECRET_SCAN_SELFTEST_PATH
   echo "secret_scan: self-test OK (bare public suffix in prose is not flagged)" >&2
+
+  # Phase 4: a concrete one-label host is still confidential. This prevents the
+  # documentation exception from accidentally requiring an ADB region label.
+  printf '%s\n' 'host=scan-selftest.oraclecloud.com' >"$scratch"
+  SECRET_SCAN_SELFTEST_PATH="$scratch"
+  if run_generic_heuristics; then
+    echo "secret_scan: self-test FAILED (scanner did not fail on one-label hostname)" >&2
+    unset SECRET_SCAN_SELFTEST_PATH
+    return 1
+  fi
+  unset SECRET_SCAN_SELFTEST_PATH
+  echo "secret_scan: self-test OK (one-label hostname trips generic scan)" >&2
   return 0
 }
 
