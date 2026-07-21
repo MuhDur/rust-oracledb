@@ -87,6 +87,15 @@ def test_extra_positional_inputsizes_raises_dpy_4009(conn, deadline):
     cursor.close()
 
 
+def test_number_scale_preserves_default_float_type(conn, deadline):
+    """PY1: NUMBER(10,2)=5.00 must fetch as float, not value-derived int."""
+    with conn.cursor() as cursor:
+        cursor.execute("select cast(5 as number(10,2)) from dual")
+        (actual,) = cursor.fetchone()
+    assert type(actual) is float
+    assert actual == 5.0
+
+
 def test_arbitrary_precision_int_bind_is_exact(conn, deadline):
     """PY3: an int wider than i128 must never take the lossy f64 fallback."""
     # 40 decimal digits but only 38 significant digits, so Oracle NUMBER can
