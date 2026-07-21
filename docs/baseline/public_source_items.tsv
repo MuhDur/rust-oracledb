@@ -71,7 +71,7 @@ oracledb	crates/oracledb/src/lib.rs	1112	pub fn into_attributes(self) -> Vec<(St
 oracledb	crates/oracledb/src/lib.rs	1116	pub fn into_elements(self) -> Option<Vec<Option<oracledb_protocol::thin::QueryValue>>> {
 oracledb	crates/oracledb/src/lib.rs	1131	pub fn decode_object(
 oracledb	crates/oracledb/src/lib.rs	1237	pub enum ErrorKind {
-oracledb	crates/oracledb/src/lib.rs	12385	pub(crate) fn loopback_connection(
+oracledb	crates/oracledb/src/lib.rs	12409	pub(crate) fn loopback_connection(
 oracledb	crates/oracledb/src/lib.rs	1251	pub enum ConnectionDisposition {
 oracledb	crates/oracledb/src/lib.rs	1259	pub enum RetryHint {
 oracledb	crates/oracledb/src/lib.rs	1267	pub enum Error {
