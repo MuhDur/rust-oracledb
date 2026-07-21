@@ -21,7 +21,7 @@ concurrency:
 # so every compiling job pins the nightly from rust-toolchain.toml via
 # a pinned dtolnay/rust-toolchain action SHA + toolchain input (dated nightlies
 # are not valid action @refs). There is no stable MSRV, hence no MSRV job. The
-# The publish=false PyO3 harness needs Python. Its live reference-suite remains
+# publish=false PyO3 harness needs Python. Its live reference-suite remains
 # operator-run-only, while the pyshim's Rust unit tests run in `pyshim-unit`.
 jobs:
   fmt:
