@@ -96,9 +96,16 @@ hypothesis; please treat the repro + measurements as the authoritative report.
 
 ## Workaround in the consuming project (rust-oracledb)
 
-Only short, repeated timers are affected, so for the one place we depend on a
-short timer firing on time (the connection-pool `TIMEDWAIT` acquire) we bypass
-the async timer entirely: `TimedAcquireDeadline`
-(`crates/oracledb/src/pool/acquire.rs`) spawns a dedicated `std::thread` that
-`park_timeout`s to the deadline and wakes the waiter. Seconds-scale connect/read
-timeouts use `time::timeout` directly and are unaffected (≥ 250ms is accurate).
+**Historical (asupersync 0.3.4):** only short, repeated timers were affected, so
+for the one place we depended on a short timer firing on time (the
+connection-pool `TIMEDWAIT` acquire) we bypassed the async timer entirely:
+`TimedAcquireDeadline` (`crates/oracledb/src/pool/acquire.rs`) spawned a
+dedicated `std::thread` that `park_timeout`s to the deadline and woke the waiter.
+Seconds-scale connect/read timeouts used `time::timeout` directly and were
+unaffected (≥ 250ms is accurate).
+
+**Current (asupersync =0.3.9, DK2 / bead
+`rust-oracledb-f-driver-dk1-dk2-pool-lifecycle-rbte`):** TIMEDWAIT acquires wrap
+the wait loop in asupersync `time::timeout` against the ambient Cx timer driver
+(with the process-shared fallback pump when no driver is present). No per-waiter
+OS threads. See `pool::tests::timedwait_acquires_do_not_spawn_one_os_thread_each`.

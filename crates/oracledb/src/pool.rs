@@ -15,15 +15,14 @@ use asupersync::sync::Notify;
 use asupersync::Cx;
 use std::collections::VecDeque;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 mod acquire;
 mod engine;
 
-use acquire::{acquire_wait_future, enqueue_request};
-use acquire::{AsyncAcquireRequest, TimedAcquireDeadline};
+use acquire::{acquire_wait_future, enqueue_request, AsyncAcquireRequest};
 use engine::{drop_conn, reaper_main, return_connection_helper};
 
 #[cfg(test)]
@@ -1108,10 +1107,17 @@ pub(crate) struct PoolEngine<B: PoolBackend> {
     /// the runtime on the external handles lets the last pool handle hand the
     /// runtime join to a helper thread, never the worker thread itself.
     runtime: Option<Arc<Runtime>>,
+    /// Live external `PoolEngine` handles. Clone increments; Drop decrements
+    /// with `fetch_sub`. Exactly one drop observes the `1 → 0` transition and
+    /// runs last-handle teardown. This deliberately does **not** use
+    /// `Arc::strong_count` on `runtime` — strong-count is not a synchronization
+    /// API and would be perturbed if anything else ever held the `Runtime` Arc.
+    handles: Arc<AtomicUsize>,
 }
 
 impl<B: PoolBackend> Clone for PoolEngine<B> {
     fn clone(&self) -> Self {
+        self.handles.fetch_add(1, Ordering::Relaxed);
         Self {
             inner: Arc::clone(&self.inner),
             runtime: Some(Arc::clone(
@@ -1119,22 +1125,22 @@ impl<B: PoolBackend> Clone for PoolEngine<B> {
                     .as_ref()
                     .expect("pool runtime present before drop"),
             )),
+            handles: Arc::clone(&self.handles),
         }
     }
 }
 
 impl<B: PoolBackend> Drop for PoolEngine<B> {
     fn drop(&mut self) {
-        // Detect the last pool handle via the `runtime` Arc, which is held ONLY
-        // by `PoolEngine` clones — the reaper captures a `Weak<EngineInner>` and
-        // a `RuntimeHandle`, never the `Arc<Runtime>`, so this count is exactly
-        // the number of live pool handles (unperturbed by the reaper transiently
-        // upgrading its `Weak` during a work phase). More than one means another
-        // handle is still live; do nothing.
-        let Some(runtime) = self.runtime.as_ref() else {
+        // Already torn down (runtime taken by a prior last-handle path) — nothing
+        // to do. Normal Clone/Drop pairs always leave `runtime` populated until
+        // the sole last-handle winner takes it.
+        if self.runtime.is_none() {
             return;
-        };
-        if Arc::strong_count(runtime) > 1 {
+        }
+        // Atomic handle accounting: exactly one drop observes prev == 1.
+        let prev = self.handles.fetch_sub(1, Ordering::AcqRel);
+        if prev != 1 {
             return;
         }
         // Last handle. Close every connection RIGHT HERE, on the dropping thread,
@@ -1157,6 +1163,9 @@ impl<B: PoolBackend> Drop for PoolEngine<B> {
         // cannot be spawned (or vanishes before receiving), we `mem::forget` the
         // runtime — leaking it at pool/process teardown is strictly preferable to
         // re-introducing the very GIL-vs-worker-join deadlock this avoids.
+        //
+        // This single helper is unrelated to TIMEDWAIT: it runs once per pool
+        // lifetime at last-handle teardown, never once per waiter.
         let (tx, rx) = std::sync::mpsc::sync_channel::<Arc<Runtime>>(1);
         match std::thread::Builder::new()
             .name("oracledb-pool-runtime-drop".to_string())
@@ -1520,6 +1529,7 @@ impl<B: PoolBackend> PoolEngine<B> {
         Ok(Self {
             inner,
             runtime: Some(runtime),
+            handles: Arc::new(AtomicUsize::new(1)),
         })
     }
 
@@ -1559,8 +1569,7 @@ impl<B: PoolBackend> PoolEngine<B> {
             (request_id, wait_timeout)
         };
         let mut request = AsyncAcquireRequest::new(inner, request_id);
-        let deadline = wait_timeout.map(TimedAcquireDeadline::new);
-        let result = acquire_wait_future(cx, inner, request_id, deadline.as_ref()).await;
+        let result = acquire_wait_future(cx, inner, request_id, wait_timeout).await;
 
         match result {
             Ok(conn_id) => {
@@ -3432,6 +3441,138 @@ mod tests {
             1,
             "dropping the last pool handle must request forced worker shutdown"
         );
+    }
+
+    /// DK1: concurrent last-handle drops must close transports exactly once.
+    /// Handle accounting is via AtomicUsize, not Arc::strong_count(runtime).
+    #[test]
+    fn racing_pool_handle_drops_close_exactly_once() {
+        let backend = Arc::new(FakeBackend::new());
+        let engine = PoolEngine::start(
+            Arc::clone(&backend),
+            test_config(1, 1, 1, POOL_GETMODE_WAIT),
+        )
+        .unwrap();
+        wait_for_open_count(&engine, 1);
+        let weak = Arc::downgrade(&engine.inner);
+
+        const N: usize = 16;
+        let barrier = Arc::new(std::sync::Barrier::new(N));
+        let mut join_handles = Vec::with_capacity(N);
+        for _ in 0..N {
+            let clone = engine.clone();
+            let barrier = Arc::clone(&barrier);
+            join_handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                drop(clone);
+            }));
+        }
+        // Drop the original after clones exist so only the racing threads can win.
+        drop(engine);
+        for handle in join_handles {
+            handle.join().expect("racing drop thread");
+        }
+
+        wait_for_worker_exit(&weak);
+        assert_eq!(
+            backend.closed.load(Ordering::SeqCst),
+            1,
+            "racing PoolEngine drops must close each pooled connection exactly once"
+        );
+    }
+
+    fn process_thread_count() -> usize {
+        std::fs::read_dir(format!("/proc/{}/task", std::process::id()))
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    }
+
+    /// DK2: N concurrent TIMEDWAIT acquires must not spawn N OS timer threads.
+    /// Timeouts ride asupersync's ambient timer driver / shared fallback pump.
+    #[test]
+    fn timedwait_acquires_do_not_spawn_one_os_thread_each() {
+        let backend = Arc::new(FakeBackend::new());
+        let config = test_config(1, 1, 1, POOL_GETMODE_TIMEDWAIT).with_wait_timeout_ms(200);
+        let engine = PoolEngine::start(Arc::clone(&backend), config).unwrap();
+        wait_for_open_count(&engine, 1);
+        let held = engine.acquire(AcquireOptions::default()).unwrap();
+
+        // Warm the thread-local I/O runtime so baseline includes its worker.
+        let _ = engine.stats();
+        let runtime = crate::build_io_runtime().expect("asupersync runtime");
+
+        const WAITERS: usize = 8;
+        let baseline = process_thread_count();
+        let peak = Arc::new(AtomicUsize::new(baseline));
+        let peak_for_sampler = Arc::clone(&peak);
+        let sampling = Arc::new(AtomicBool::new(true));
+        let sampling_flag = Arc::clone(&sampling);
+        let sampler = std::thread::spawn(move || {
+            while sampling_flag.load(Ordering::Acquire) {
+                let now = process_thread_count();
+                peak_for_sampler.fetch_max(now, Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+
+        // Drive N concurrent timed acquires on ONE async runtime so the test
+        // harness itself does not contribute N OS threads. Old code spawned one
+        // park_timeout thread per waiter on top of that.
+        let results = runtime.block_on(async {
+            let cx = Cx::current().expect("asupersync installs an ambient Cx");
+            let e0 = engine.clone();
+            let e1 = engine.clone();
+            let e2 = engine.clone();
+            let e3 = engine.clone();
+            let e4 = engine.clone();
+            let e5 = engine.clone();
+            let e6 = engine.clone();
+            let e7 = engine.clone();
+            let c0 = cx.clone();
+            let c1 = cx.clone();
+            let c2 = cx.clone();
+            let c3 = cx.clone();
+            let c4 = cx.clone();
+            let c5 = cx.clone();
+            let c6 = cx.clone();
+            let c7 = cx.clone();
+            asupersync::join!(
+                e0.acquire_async(&c0, AcquireOptions::default()),
+                e1.acquire_async(&c1, AcquireOptions::default()),
+                e2.acquire_async(&c2, AcquireOptions::default()),
+                e3.acquire_async(&c3, AcquireOptions::default()),
+                e4.acquire_async(&c4, AcquireOptions::default()),
+                e5.acquire_async(&c5, AcquireOptions::default()),
+                e6.acquire_async(&c6, AcquireOptions::default()),
+                e7.acquire_async(&c7, AcquireOptions::default()),
+            )
+        });
+
+        sampling.store(false, Ordering::Release);
+        sampler.join().expect("sampler thread");
+
+        let timed_out = [
+            results.0, results.1, results.2, results.3, results.4, results.5, results.6, results.7,
+        ]
+        .into_iter()
+        .filter(|r| matches!(r, Err(PoolError::NoConnectionAvailable)))
+        .count();
+        assert_eq!(
+            timed_out, WAITERS,
+            "every concurrent TIMEDWAIT acquire must time out while the slot is held"
+        );
+
+        let observed_peak = peak.load(Ordering::Relaxed);
+        let growth = observed_peak.saturating_sub(baseline);
+        // Sampler (+1) and at most the process-shared asupersync fallback pump
+        // (+1) are allowed. Reject the old N-threads-per-N-waiters shape.
+        assert!(
+            growth < WAITERS,
+            "TIMEDWAIT must not spawn one OS thread per waiter: baseline={baseline} peak={observed_peak} growth={growth} waiters={WAITERS}"
+        );
+
+        engine.return_connection(held).unwrap();
+        engine.close(false).unwrap();
     }
 
     #[test]
