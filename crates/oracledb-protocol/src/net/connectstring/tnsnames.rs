@@ -362,6 +362,12 @@ mod tests {
 
     use super::{TnsnamesReader, MAX_IFILE_DEPTH};
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    // The Rust test harness runs these tests concurrently. A timestamp alone
+    // can repeat at the host clock's resolution, causing two tests to write
+    // different `tnsnames.ora` contents into the same directory.
+    static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     /// Writes `contents` to `<dir>/<name>` and returns nothing.
     fn write_file(dir: &std::path::Path, name: &str, contents: &str) {
@@ -373,12 +379,13 @@ mod tests {
     fn temp_dir() -> std::path::PathBuf {
         let base = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
         let unique = format!(
-            "hk6_tns_{}_{}",
+            "hk6_tns_{}_{}_{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed),
         );
         let dir = std::path::Path::new(&base).join(unique);
         std::fs::create_dir_all(&dir).expect("create temp dir");

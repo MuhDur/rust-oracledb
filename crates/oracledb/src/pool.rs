@@ -3491,6 +3491,26 @@ mod tests {
     /// Timeouts ride asupersync's ambient timer driver / shared fallback pump.
     #[test]
     fn timedwait_acquires_do_not_spawn_one_os_thread_each() {
+        // The lib test harness runs its tests concurrently. Thread counts are
+        // process-wide, so unrelated tests that create runtimes would make the
+        // peak below nondeterministic. Run the measurement in a fresh copy of
+        // this test binary, where this is the only test process, while keeping
+        // the actual N-waiter assertion unchanged.
+        const CHILD_ENV: &str = "ORACLEDB_TIMEDWAIT_THREAD_TEST_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .arg("pool::tests::timedwait_acquires_do_not_spawn_one_os_thread_each")
+            .arg("--exact")
+            .arg("--test-threads=1")
+            .env(CHILD_ENV, "1")
+            .status()
+            .expect("run isolated TIMEDWAIT thread-growth test");
+            assert!(status.success(), "isolated TIMEDWAIT test failed: {status}");
+            return;
+        }
+
         let backend = Arc::new(FakeBackend::new());
         let config = test_config(1, 1, 1, POOL_GETMODE_TIMEDWAIT).with_wait_timeout_ms(200);
         let engine = PoolEngine::start(Arc::clone(&backend), config).unwrap();

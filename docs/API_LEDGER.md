@@ -35,6 +35,7 @@ pub use oracledb::transport::CassetteError	keep	Cassette diagnostics are part of
 *oracledb::AuthModeSupport*	keep	Machine-classifiable support status for each known authentication mode.
 *oracledb::AuthMode*	keep	Typed authentication intent surface, including supported password/proxy/IAM-token modes and fail-closed unsupported external/Kerberos/RADIUS intents.
 *oracledb::UnsupportedAuthMode*	keep	Structured diagnostic returned before network I/O when the caller selects a known auth mode unsupported by this thin build.
+*oracledb::parse_user_and_proxy*	keep	Public, reference-parity parser for bracketed proxy usernames, including the token-auth proxy-only form.
 *oracledb::BlockingConnection::query<'*	keep	Blocking mirror of the query family.
 *oracledb::BlockingConnection::query_one*	keep	Blocking mirror of the query-one helper.
 *oracledb::BlockingConnection::query_opt*	keep	Blocking mirror of the optional-row query helper.
