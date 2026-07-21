@@ -956,17 +956,18 @@ mod tests {
     }
 
     #[test]
-    fn native_cert_loader_reads_an_explicit_pem_file() {
-        let path = fixture_tls_dir().join("ca_wallet.pem");
-        let result = rustls_native_certs::load_certs_from_paths(Some(&path), None);
-        assert!(
-            result.errors.is_empty(),
-            "fixture PEM must load without native-root errors: {:?}",
-            result.errors
+    fn system_root_loader_honors_ssl_cert_file() {
+        assert_system_root_loader_honors_explicit_override(
+            "file",
+            "system_root_loader_honors_ssl_cert_file",
         );
-        assert!(
-            !result.certs.is_empty(),
-            "fixture PEM must yield an explicit native-cert root"
+    }
+
+    #[test]
+    fn system_root_loader_honors_ssl_cert_dir() {
+        assert_system_root_loader_honors_explicit_override(
+            "dir",
+            "system_root_loader_honors_ssl_cert_dir",
         );
     }
 
@@ -1130,6 +1131,65 @@ mod tests {
             .join("tests")
             .join("fixtures")
             .join("tls")
+    }
+
+    /// Assert the production root loader honors the two OpenSSL-compatible
+    /// overrides. Run the environment-mutating half in a child test process:
+    /// Cargo's unit tests are parallel, while process environment is global.
+    fn assert_system_root_loader_honors_explicit_override(mode: &str, test_name: &str) {
+        const CHILD_MODE: &str = "ORACLEDB_TEST_SYSTEM_ROOT_LOADER_MODE";
+
+        if let Some(child_mode) = std::env::var_os(CHILD_MODE) {
+            let (configured_path, expected_cert_file) = match child_mode.to_string_lossy().as_ref()
+            {
+                "file" => {
+                    let cert = fixture_tls_dir().join("ca_wallet.pem");
+                    (cert.clone(), cert)
+                }
+                "dir" => {
+                    let dir = fixture_tls_dir().join("invalid_client_key");
+                    (dir.clone(), dir.join("ewallet.pem"))
+                }
+                other => panic!("unexpected child root-loader mode {other:?}"),
+            };
+            let expected = std::fs::File::open(&expected_cert_file)
+                .map(std::io::BufReader::new)
+                .map(|mut reader| rustls_pemfile_certs(&mut reader))
+                .expect("read fixture certificate");
+            assert!(
+                !expected.is_empty(),
+                "fixture must provide an explicit trust anchor"
+            );
+
+            let actual = load_system_roots();
+            assert_eq!(
+                actual,
+                expected,
+                "load_system_roots must use the {child_mode:?} SSL_CERT_* override at {}",
+                configured_path.display()
+            );
+            return;
+        }
+
+        let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"));
+        child
+            .arg("--exact")
+            .arg(format!("tls::tests::{test_name}"))
+            .arg("--nocapture")
+            .env(CHILD_MODE, mode)
+            .env_remove("SSL_CERT_FILE")
+            .env_remove("SSL_CERT_DIR");
+        match mode {
+            "file" => {
+                child.env("SSL_CERT_FILE", fixture_tls_dir().join("ca_wallet.pem"));
+            }
+            "dir" => {
+                child.env("SSL_CERT_DIR", fixture_tls_dir().join("invalid_client_key"));
+            }
+            other => panic!("unexpected root-loader mode {other:?}"),
+        }
+        let status = child.status().expect("run isolated root-loader test");
+        assert!(status.success(), "isolated {mode} root-loader test failed");
     }
 
     #[test]

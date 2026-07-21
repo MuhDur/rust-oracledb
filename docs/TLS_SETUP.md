@@ -53,9 +53,18 @@ Wallet directory resolution mirrors python-oracledb:
 
 | Precedence | Source |
 |---|---|
-| 1 | `with_wallet_location(...)` — the explicit dir. `SYSTEM` (case-insensitive) means "use the OS trust store, no wallet file". |
+| 1 | `with_wallet_location(...)` — the explicit dir. `SYSTEM` (case-insensitive) means "do not load a wallet". |
 | 2 | the `TNS_ADMIN` environment variable |
-| — | if neither is set, the OS root bundle is used (verify against public CAs) |
+| — | if neither is set, no wallet is loaded. |
+
+This precedence selects only the wallet material. Trust anchors are always the
+union of the system roots and any wallet CA certificates: a wallet therefore
+does **not** replace or narrow platform trust. System roots come from
+`rustls-native-certs` (the native platform store), unless `SSL_CERT_FILE` or
+`SSL_CERT_DIR` selects explicit PEM source locations; those explicit roots are
+still unioned with wallet CAs. `SYSTEM` and no-wallet configurations use only
+the system/explicit roots. The legacy Unix PEM-bundle paths are a fallback only
+when native discovery yields no roots and neither override is set.
 
 ---
 
@@ -154,11 +163,13 @@ python-oracledb thin **disables standard TLS hostname verification**
 custom rustls `ServerCertVerifier`
 ([`oracledb::tls::OracleServerCertVerifier`]):
 
-1. **Chain validation** — the server's leaf is validated to a trust anchor
-   (wallet CA, or OS roots) using `rustls-webpki`'s name-unbound
+1. **Chain validation** — the server's leaf is validated to a trust anchor from
+   the union of system roots (or explicit `SSL_CERT_FILE` / `SSL_CERT_DIR`
+   roots) and wallet CA certificates using `rustls-webpki`'s name-unbound
    `EndEntityCert::verify_for_usage`. This is the same crypto rustls uses
    internally, just without binding the SNI/DNS name — mirroring OpenSSL
-   `CERT_REQUIRED` + `check_hostname = False`.
+   `CERT_REQUIRED` + `check_hostname = False`. A wallet CA adds trust; it does
+   not exclude the system roots.
 2. **Oracle DN / name match** (when effective `ssl_server_dn_match` is true —
    the default). The effective flag is the **AND** of the DSN
    `SECURITY.SSL_SERVER_DN_MATCH` and `ConnectOptions::ssl_server_dn_match`
