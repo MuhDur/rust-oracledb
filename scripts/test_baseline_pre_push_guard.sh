@@ -45,7 +45,7 @@ git -C "$fixture" config user.email "baseline-pre-push-guard@example.invalid"
 # retaining the current hook implementation. Reverting then cherry-picking the
 # exact historical commit proves the same missing-baseline failure CI saw.
 git -C "$fixture" revert --no-commit --no-edit "$SESSION_SERIAL_COMMIT"
-"$fixture/scripts/gen_baseline.sh"
+(cd "$fixture" && scripts/gen_baseline.sh)
 git -C "$fixture" add -- crates/oracledb/src/lib.rs docs/baseline
 git -C "$fixture" commit --no-verify -m "test: seed pre-session-serial baseline" >/dev/null
 
@@ -81,7 +81,7 @@ rg -q '^baseline pre-push: REJECTED stale derived baseline$' "$scratch/rejected.
 echo "baseline-pre-push-guard: leg 1 OK — source-only 5ed87b0 replay rejected; remote unchanged"
 
 # Leg 2: regenerate and commit every derived artifact, then make the same push.
-"$fixture/scripts/gen_baseline.sh"
+(cd "$fixture" && scripts/gen_baseline.sh)
 if git -C "$fixture" diff --quiet -- docs/baseline; then
   fail "regenerating after 5ed87b0 replay changed no baseline artifact"
 fi
