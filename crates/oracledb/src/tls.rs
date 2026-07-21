@@ -722,19 +722,75 @@ fn sni_is_rustls_valid(sni: &str) -> bool {
     )
 }
 
-/// Whether this descriptor is the public OCI Autonomous Database shape.
+/// Whether `host` looks like an OCI Autonomous Database listener hostname.
 ///
-/// OCI wallet descriptors separate the load-balancer endpoint
-/// `adb.<region>.oraclecloud.com` from the database service
-/// `*.adb.oraclecloud.com`. Only this narrowly identified form may use the
-/// endpoint as an SNI fallback; all other unencodable Oracle service-form SNI
-/// values remain fail-closed.
-fn is_oci_adb_endpoint(host: &str, service_name: &str) -> bool {
+/// Covered shapes (case-insensitive):
+/// - Shared / public LB: `adb.<region>.oraclecloud.com`
+/// - Private endpoint / node-qualified: `<label>.adb.<region>.oraclecloud.com`
+/// - Sovereign clouds: the same patterns under `.oraclecloud.eu`,
+///   `.oraclegovcloud.com`, and `.oraclecloud.com.au`
+///
+/// Rejects bare IPs, customer custom DNS, and non-OCI hosts. The SNI host
+/// fallback is only a ClientHello label — the post-handshake Oracle DN/name
+/// match remains authoritative.
+fn is_oci_adb_host(host: &str) -> bool {
     let host = host.to_ascii_lowercase();
+    // Reject anything that is not a plain hostname (IPs, empty, wildcards).
+    if host.is_empty() || host.contains(':') || host.starts_with('.') || host.ends_with('.') {
+        return false;
+    }
+    let Some(rest) = strip_oci_cloud_suffix(&host) else {
+        return false;
+    };
+    // rest is everything before the cloud suffix, e.g.
+    //   "adb.eu-frankfurt-1" or "pe1.adb.us-ashburn-1"
+    rest == "adb" || rest.starts_with("adb.") || rest.ends_with(".adb") || rest.contains(".adb.")
+}
+
+/// Whether `service_name` is an OCI ADB service name (`*.adb.<region>.…`).
+fn is_oci_adb_service(service_name: &str) -> bool {
     let service_name = service_name.to_ascii_lowercase();
-    host.starts_with("adb.")
-        && host.ends_with(".oraclecloud.com")
-        && service_name.ends_with(".adb.oraclecloud.com")
+    let Some(rest) = strip_oci_cloud_suffix(&service_name) else {
+        return false;
+    };
+    // Shared and PE services both end as `<db>_<tier>.adb.<region>` before the
+    // cloud suffix → rest contains ".adb." (or ends with ".adb" for pathological
+    // short names; require the ".adb." form in practice).
+    rest.contains(".adb.") || rest.ends_with(".adb")
+}
+
+/// Strip a known OCI commercial / sovereign cloud DNS suffix.
+///
+/// Returns the hostname prefix before the suffix, or `None` if no known suffix
+/// matches.
+fn strip_oci_cloud_suffix(name: &str) -> Option<&str> {
+    // Longest match first so `.oraclecloud.com.au` wins over `.oraclecloud.com`.
+    const SUFFIXES: &[&str] = &[
+        ".oraclecloud.com.au",
+        ".oraclegovcloud.com",
+        ".oraclecloud.eu",
+        ".oraclecloud.com",
+    ];
+    for suffix in SUFFIXES {
+        if let Some(rest) = name.strip_suffix(suffix) {
+            if !rest.is_empty() {
+                return Some(rest);
+            }
+        }
+    }
+    None
+}
+
+/// Whether this descriptor is an OCI Autonomous Database shape eligible for
+/// the host-as-SNI fallback when the Oracle service-form SNI token is not a
+/// rustls-valid DNS name.
+///
+/// OCI wallet descriptors separate the listener endpoint hostname from the
+/// database service (`*.adb.<region>.oraclecloud.com`). Only this family may
+/// use the endpoint as an SNI fallback; all other unencodable Oracle
+/// service-form SNI values remain fail-closed with [`Error::UnsupportedSni`].
+fn is_oci_adb_endpoint(host: &str, service_name: &str) -> bool {
+    is_oci_adb_host(host) && is_oci_adb_service(service_name)
 }
 
 /// Decide the SNI server name for a TCPS handshake (F3, bead `rust-oracledb-clvm`).
@@ -743,9 +799,9 @@ fn is_oci_adb_endpoint(host: &str, service_name: &str) -> bool {
 ///   case): the caller uses a placeholder name with `enable_sni=false`, and the
 ///   server is identified purely by the post-handshake Oracle DN match.
 /// - `Ok(Some(name))` — `use_sni=true` and `name` is a DNS name rustls can
-///   transmit with `enable_sni=true`. The public OCI Autonomous Database shape
-///   uses its valid descriptor host when the Oracle service-form SNI cannot be
-///   represented by rustls.
+///   transmit with `enable_sni=true`. The OCI Autonomous Database shape uses
+///   its valid descriptor host when the Oracle service-form SNI cannot be
+///   represented by rustls (host-as-SNI carve-out; see [`is_oci_adb_endpoint`]).
 /// - `Err(Error::UnsupportedSni)` — `use_sni=true` was explicitly requested but
 ///   the Oracle SNI (`S{len}.{service}.V3.{version}`) is not a valid rustls DNS
 ///   name and therefore cannot be sent. The driver **fails closed** rather than
@@ -765,10 +821,13 @@ pub(crate) fn decide_sni(
         return Ok(Some(sni));
     }
 
-    // OCI's public ADB endpoint is a valid DNS name even though the
-    // service-form SNI has the required all-numeric `.V3.<version>` suffix.
-    // The custom verifier below still validates the chain and then the Oracle
-    // DN/name against `TlsParams::expected_host`; SNI never replaces either.
+    // OCI ADB endpoints are valid DNS names even though the service-form SNI
+    // has the required all-numeric `.V3.<version>` suffix (and often underscores
+    // in the service label). The custom verifier still validates the chain and
+    // then the Oracle DN/name against `TlsParams::expected_host`; SNI never
+    // replaces either. Host-as-SNI completes the handshake but does **not**
+    // trigger Oracle's one-negotiation routing fast-path (documented structural
+    // parity limit vs python-oracledb; see docs/PARITY_LEDGER.md).
     if is_oci_adb_endpoint(host, service_name) && sni_is_rustls_valid(host) {
         return Ok(Some(host.to_string()));
     }
@@ -997,18 +1056,73 @@ mod tests {
 
     #[test]
     fn only_the_oci_adb_descriptor_shape_gets_the_host_sni_fallback() {
+        // Shared public LB shape.
         assert!(is_oci_adb_endpoint(
             "adb.eu-frankfurt-1.oraclecloud.com",
             "g2bb4261a88e318_myadb_high.adb.oraclecloud.com"
         ));
+        // Private-endpoint / node-qualified host (the 0.8.4 predicate miss).
+        assert!(is_oci_adb_endpoint(
+            "pe1.adb.us-ashburn-1.oraclecloud.com",
+            "g2bb4261a88e318_myadb_high.adb.oraclecloud.com"
+        ));
+        // Sovereign EU commercial cloud.
+        assert!(is_oci_adb_endpoint(
+            "adb.eu-frankfurt-1.oraclecloud.eu",
+            "g2bb4261a88e318_myadb_high.adb.eu-frankfurt-1.oraclecloud.eu"
+        ));
+        // Case-insensitive.
+        assert!(is_oci_adb_endpoint(
+            "ADB.US-ASHBURN-1.ORACLECLOUD.COM",
+            "G2BB4261A88E318_MYADB_HIGH.ADB.ORACLECLOUD.COM"
+        ));
+
+        // Negative: non-OCI host with an ADB-looking service.
         assert!(!is_oci_adb_endpoint(
             "db.example.com",
             "g2bb4261a88e318_myadb_high.adb.oraclecloud.com"
         ));
+        // Negative: ADB host with a non-ADB service (local Free, etc.).
         assert!(!is_oci_adb_endpoint(
             "adb.eu-frankfurt-1.oraclecloud.com",
             "FREEPDB1"
         ));
+        // Negative: bare IP — never a host-SNI carve-out.
+        assert!(!is_oci_adb_endpoint(
+            "203.0.113.10",
+            "g2bb4261a88e318_myadb_high.adb.oraclecloud.com"
+        ));
+        // Negative: customer custom DNS, even with ADB-ish service.
+        assert!(!is_oci_adb_endpoint(
+            "db.customer.example",
+            "g2bb4261a88e318_myadb_high.adb.oraclecloud.com"
+        ));
+    }
+
+    #[test]
+    fn decide_sni_private_endpoint_adb_uses_host_fallback() {
+        let host = "abcd1234.adb.us-phoenix-1.oraclecloud.com";
+        let service = "g2bb4261a88e318_myadb_tp.adb.oraclecloud.com";
+        // Service-form SNI is never rustls-valid (numeric .V3.319 + underscores).
+        let service_form = build_sni(service, None);
+        assert!(
+            !sni_is_rustls_valid(&service_form),
+            "fixture must stay unencodable as rustls DNS: {service_form}"
+        );
+        assert_eq!(
+            decide_sni(true, host, service, None).expect("PE ADB host SNI"),
+            Some(host.to_string())
+        );
+    }
+
+    #[test]
+    fn decide_sni_sovereign_cloud_adb_uses_host_fallback() {
+        let host = "adb.uk-london-1.oraclegovcloud.com";
+        let service = "govdb_high.adb.uk-london-1.oraclegovcloud.com";
+        assert_eq!(
+            decide_sni(true, host, service, None).expect("gov ADB host SNI"),
+            Some(host.to_string())
+        );
     }
 
     fn fixture_tls_dir() -> std::path::PathBuf {

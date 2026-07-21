@@ -174,17 +174,32 @@ The Oracle TCPS SNI string is `S{len}.{service}[.T1.{c}].V3.{version}`
 (`use_sni` defaults to `false`); by default no SNI is sent and the server is
 identified purely by the DN match.
 
-rustls's `ServerName` is RFC-strict and **rejects** the Oracle SNI because it
-ends in an all-numeric label (`.V3.319`) — a DNS name cannot end in an
-all-numeric label (RFC 1123 / the IP-address ambiguity rule). Consequently:
+rustls's `ServerName` is RFC-strict and **rejects** the Oracle service-form SNI
+because it ends in an all-numeric label (`.V3.319`) — a DNS name cannot end in
+an all-numeric label (RFC 1123 / the IP-address ambiguity rule) — and ADB service
+names also contain underscores. Consequently this driver:
 
 - **`use_sni = false` (default):** no SNI is sent; the DN match secures the
-  connection. This is the normal, fully-working path.
-- **`use_sni = true`:** the driver builds the Oracle SNI and sends it **only if
-  rustls accepts it as a `ServerName`**; otherwise it transparently falls back
-  to no-SNI (the DN match still applies). The SNI-bypass routing optimization on
-  the Oracle side is therefore best-effort under rustls. This is a documented
-  limitation of rustls's strict `ServerName`, not a security gap.
+  connection. This is the normal, fully-working path (and matches both the
+  driver default and python-oracledb's default).
+- **`use_sni = true` on an OCI Autonomous Database descriptor:** the service-form
+  token is not rustls-encodable, so the driver sends the **listener host** as
+  SNI instead (`is_oci_adb_endpoint` / `decide_sni` in `crates/oracledb/src/tls.rs`).
+  Covered host shapes: shared LB `adb.<region>.oraclecloud.com`, private-endpoint
+  `<label>.adb.<region>.oraclecloud.com`, and the same patterns under sovereign
+  suffixes (`.oraclecloud.eu`, `.oraclegovcloud.com`, `.oraclecloud.com.au`).
+  The post-handshake Oracle DN/name match remains authoritative. Host-as-SNI
+  completes the handshake but does **not** trigger Oracle's one-negotiation
+  routing fast-path (a documented performance nuance; see
+  `docs/PARITY_LEDGER.md` entry `sni-service-form`).
+- **`use_sni = true` on any other descriptor** whose service-form SNI is not a
+  valid rustls DNS name: **fails closed** with typed `Error::UnsupportedSni`
+  naming the token. There is **no** silent downgrade to no-SNI (that was the
+  pre-F3 behavior and is deliberately gone). Reconnect with `use_sni=false` to
+  rely on the DN match alone.
+
+True service-form parity with python-oracledb is impossible without patching
+rustls so it can carry Oracle's non-DNS SNI token.
 
 ---
 
