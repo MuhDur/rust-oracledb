@@ -34,9 +34,16 @@ GENERIC_PATTERNS=(
   'gho_[0-9A-Za-z]{36,}'
   'github_pat_[0-9A-Za-z_]{20,}'
   '-----BEGIN CERTIFICATE-----'
-  'oraclecloud\.com'
-  'oraclevcn\.com'
-  'adb\.[a-z0-9-]+\.oraclecloud\.com'
+  # Oracle Cloud endpoint leakage: match a *concrete* hostname (at least one
+  # subdomain label before the public suffix), not the bare suffix in prose.
+  # A bare "oraclecloud.com" in documentation is a public-domain reference;
+  # "<name>.adb.<region>.oraclecloud.com" is a real connection target whose
+  # presence in a tracked file would be an accidental leak. The sovereign
+  # suffix variants (.eu, .com.au, .oraclegovcloud.com) are covered so a
+  # regional endpoint cannot evade the scan by using a non-.com TLD.
+  '[a-z0-9]([-a-z0-9]*[a-z0-9])?\.(adb\.)?[a-z0-9-]+\.oraclecloud\.(com|eu|com\.au)'
+  '[a-z0-9]([-a-z0-9]*[a-z0-9])?\.[a-z0-9-]+\.oraclegovcloud\.com'
+  '[a-z0-9]([-a-z0-9]*[a-z0-9])?\.oraclevcn\.com'
 )
 
 scan_paths() {
@@ -101,11 +108,13 @@ should_skip_generic() {
     crates/oracledb-protocol/tests/tls_wallet.rs) return 0 ;;
     # The OCI ADB TCPS surface *is* Oracle Cloud connectivity: the SNI /
     # server-cert-DN logic and its tests must reference synthetic
-    # `*.adb.oraclecloud.com` / `*.oraclecloud.com` hostnames by construction, so
-    # the loose generic `oraclecloud.com` heuristics are false positives here. The
-    # high-confidence STRUCTURAL patterns (real OCIDs `ocid1.*`, cert DNs
-    # `CN=*.oraclecloud.com`) and the operator denylist still scan these files —
-    # only the broad hostname heuristics are skipped.
+    # `*.adb.oraclecloud.com` / `*.oraclecloud.com` hostnames by construction.
+    # These are concrete hostnames that the generic endpoint-leakage patterns
+    # (correctly) match, but the context is test fixtures exercising the SNI
+    # logic, not leaked infrastructure. The high-confidence STRUCTURAL patterns
+    # (real OCIDs `ocid1.*`, cert DNs `CN=*.oraclecloud.com`) and the operator
+    # denylist still scan these files — only the generic hostname patterns are
+    # skipped.
     crates/oracledb/src/tls.rs) return 0 ;;
     crates/oracledb/src/lib.rs) return 0 ;;
     crates/oracledb/tests/tls_handshake.rs) return 0 ;;
@@ -161,6 +170,21 @@ run_selftest() {
   fi
   unset SECRET_SCAN_SELFTEST_PATH
   echo "secret_scan: self-test OK (binary-embedded marker trips generic scan)" >&2
+
+  # Phase 3: a bare public suffix in prose (documentation referencing the
+  # domain without a concrete hostname) must NOT trip the scan. This is the
+  # regression guard for kw48: the old loose `oraclecloud\.com` pattern
+  # false-positived on documented endpoint suffixes, training operators to
+  # ignore scanner output.
+  printf '%s\n' 'suffixes (.oraclecloud.eu, .oraclegovcloud.com, .oraclecloud.com.au)' >"$scratch"
+  SECRET_SCAN_SELFTEST_PATH="$scratch"
+  if ! run_generic_heuristics; then
+    echo "secret_scan: self-test FAILED (false positive on bare public suffix in prose)" >&2
+    unset SECRET_SCAN_SELFTEST_PATH
+    return 1
+  fi
+  unset SECRET_SCAN_SELFTEST_PATH
+  echo "secret_scan: self-test OK (bare public suffix in prose is not flagged)" >&2
   return 0
 }
 
