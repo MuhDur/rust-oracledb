@@ -13,6 +13,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -127,7 +128,7 @@ class Step:
     run: str | None = None
     shell: str | None = None
     working_directory: str | None = None
-    has_environment: bool = False
+    environment: dict[str, str] | None = None
     identifier: str = ""
     continue_on_error: str = ""
 
@@ -140,12 +141,14 @@ class Job:
     needs: tuple[str, ...] = ()
     step_count: int = 0
     strategy: tuple[str, ...] = ()
+    environment: dict[str, str] | None = None
 
 
 @dataclass
 class QualityWorkflow:
     jobs: dict[str, Job]
     steps: list[Step]
+    environment: dict[str, str]
 
 
 def utc_now() -> str:
@@ -175,6 +178,69 @@ def parse_needs(value: str, job: str) -> tuple[str, ...]:
     return values
 
 
+def parse_environment_value(value: str, scope: str) -> str:
+    """Parse the scalar subset accepted for an environment-variable value."""
+
+    if not value:
+        return ""
+    if value[0] == '"':
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ContractError(f"{scope}: invalid double-quoted environment value") from exc
+        if not isinstance(decoded, str):
+            raise ContractError(f"{scope}: environment value must be a string")
+        return decoded
+    if value[0] == "'":
+        if len(value) < 2 or not value.endswith("'"):
+            raise ContractError(f"{scope}: invalid single-quoted environment value")
+        return value[1:-1].replace("''", "'")
+    if value.startswith(("[", "{")):
+        raise ContractError(f"{scope}: inline environment collections are unsupported")
+    return value
+
+
+def parse_environment_entry(raw: str, indent: int, scope: str) -> tuple[str, str] | None:
+    """Parse one indented ``KEY: value`` mapping entry, failing closed on drift."""
+
+    entry = re.match(rf"^ {{{indent}}}(?P<key>[A-Za-z_][A-Za-z0-9_]*):(?P<value>.*)$", raw)
+    if entry is None:
+        return None
+    key = entry.group("key")
+    return key, parse_environment_value(entry.group("value").strip(), f"{scope}.{key}")
+
+
+def merged_environment(workflow: "QualityWorkflow", step: Step) -> dict[str, str]:
+    """Apply GitHub Actions environment precedence for one quality command."""
+
+    job = workflow.jobs[step.job]
+    return {
+        **workflow.environment,
+        **(job.environment or {}),
+        **(step.environment or {}),
+    }
+
+
+def validate_environment(environment: dict[str, str], command_name: str) -> None:
+    """Reject values that the local runner cannot faithfully resolve."""
+
+    unresolved = {
+        key: value
+        for key, value in environment.items()
+        if "${{" in value or "}}" in value
+    }
+    if unresolved:
+        names = ", ".join(sorted(unresolved))
+        raise ContractError(f"{command_name}: unresolved GitHub expression in active environment: {names}")
+
+
+def execution_environment(environment: dict[str, str], command_name: str) -> dict[str, str]:
+    """Build the child environment without pretending to resolve GitHub contexts."""
+
+    validate_environment(environment, command_name)
+    return {**os.environ, **environment}
+
+
 def parse_quality_workflow(text: str) -> QualityWorkflow:
     """Parse the deliberately small YAML subset used by `jobs.<id>.steps`.
 
@@ -186,6 +252,7 @@ def parse_quality_workflow(text: str) -> QualityWorkflow:
 
     jobs: dict[str, Job] = {}
     steps: list[Step] = []
+    workflow_environment: dict[str, str] = {}
     current: Step | None = None
     current_job: Job | None = None
     collecting_run = False
@@ -194,6 +261,9 @@ def parse_quality_workflow(text: str) -> QualityWorkflow:
     in_steps = False
     in_strategy = False
     strategy_lines: list[str] = []
+    collecting_workflow_environment = False
+    collecting_job_environment = False
+    collecting_step_environment = False
 
     def finish_current() -> None:
         nonlocal current, collecting_run, run_lines
@@ -216,11 +286,64 @@ def parse_quality_workflow(text: str) -> QualityWorkflow:
         strategy_lines = []
 
     for raw in text.splitlines():
-        if raw == "jobs:":
-            in_jobs = True
-            continue
         if not in_jobs:
+            if collecting_workflow_environment:
+                entry = parse_environment_entry(raw, 2, "workflow env")
+                if entry is not None:
+                    key, value = entry
+                    if key in workflow_environment:
+                        raise ContractError(f"workflow env: duplicate variable {key!r}")
+                    workflow_environment[key] = value
+                    continue
+                if raw.startswith("  ") and raw.strip() and not raw.lstrip().startswith("#"):
+                    raise ContractError(f"workflow env: unclassified mapping line {raw.strip()!r}")
+                collecting_workflow_environment = False
+            if raw == "env:":
+                collecting_workflow_environment = True
+                continue
+            if raw == "jobs:":
+                in_jobs = True
+                continue
             continue
+
+        if collecting_job_environment:
+            entry = parse_environment_entry(
+                raw,
+                6,
+                f"job {current_job.identifier if current_job is not None else '<unknown>'} env",
+            )
+            if entry is not None:
+                if current_job is None or current_job.environment is None:
+                    raise ContractError("job environment appeared outside a quality job")
+                key, value = entry
+                if key in current_job.environment:
+                    raise ContractError(
+                        f"job {current_job.identifier!r}: duplicate environment variable {key!r}"
+                    )
+                current_job.environment[key] = value
+                continue
+            if raw.startswith("      ") and raw.strip() and not raw.lstrip().startswith("#"):
+                raise ContractError(f"job environment: unclassified mapping line {raw.strip()!r}")
+            collecting_job_environment = False
+
+        if collecting_step_environment:
+            entry = parse_environment_entry(
+                raw,
+                10,
+                f"{current.name if current is not None else '<unknown>'} env",
+            )
+            if entry is not None:
+                if current is None or current.environment is None:
+                    raise ContractError("step environment appeared outside a quality step")
+                key, value = entry
+                if key in current.environment:
+                    raise ContractError(f"{current.name}: duplicate environment variable {key!r}")
+                current.environment[key] = value
+                continue
+            if raw.startswith("          ") and raw.strip() and not raw.lstrip().startswith("#"):
+                raise ContractError(f"step environment: unclassified mapping line {raw.strip()!r}")
+            collecting_step_environment = False
+
         if raw and not raw.startswith(" "):
             finish_current()
             finish_strategy()
@@ -277,6 +400,13 @@ def parse_quality_workflow(text: str) -> QualityWorkflow:
                         f"job {current_job.identifier!r}: inline strategy is unsupported"
                     )
                 in_strategy = True
+            elif key == "env":
+                if value:
+                    raise ContractError(
+                        f"job {current_job.identifier!r}: inline environment is unsupported"
+                    )
+                current_job.environment = {}
+                collecting_job_environment = True
             elif key in ("runs-on", "timeout-minutes"):
                 if not value:
                     raise ContractError(f"job {current_job.identifier!r}: empty {key!r}")
@@ -340,7 +470,10 @@ def parse_quality_workflow(text: str) -> QualityWorkflow:
         elif key == "working-directory":
             current.working_directory = value
         elif key == "env":
-            current.has_environment = True
+            if value:
+                raise ContractError(f"{current.name}: inline environment is unsupported")
+            current.environment = {}
+            collecting_step_environment = True
         elif key == "id":
             current.identifier = value
         elif key == "continue-on-error":
@@ -349,7 +482,7 @@ def parse_quality_workflow(text: str) -> QualityWorkflow:
     finish_strategy()
     if not steps:
         raise ContractError("could not find any jobs.<id>.steps in _quality.yml")
-    return QualityWorkflow(jobs=jobs, steps=steps)
+    return QualityWorkflow(jobs=jobs, steps=steps, environment=workflow_environment)
 
 
 def parse_quality_steps(text: str) -> list[Step]:
@@ -567,7 +700,7 @@ def validate_release_qualification_workflow(text: str) -> None:
     if present:
         raise ContractError(f"release qualification retained a warm-only or prep-only call: {present!r}")
 
-    upload_count = 0
+    evidence_jobs: dict[str, str] = {}
     for job_name in ("emit-required-proof", "emit-version-matrix"):
         job_match = re.search(
             rf"^  {job_name}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
@@ -579,9 +712,30 @@ def validate_release_qualification_workflow(text: str) -> None:
         job_body = job_match.group("body")
         if "inputs.mode == 'strict'" not in job_body:
             raise ContractError(f"{job_name}: evidence upload is reachable from prep mode")
-        upload_count += job_body.count("uses: actions/upload-artifact@")
-    if upload_count != 2:
-        raise ContractError("release qualification must have exactly two strict evidence uploads")
+        evidence_jobs[job_name] = job_body
+
+    required_proof = evidence_jobs["emit-required-proof"]
+    version_matrix = evidence_jobs["emit-version-matrix"]
+    if required_proof.count("uses: actions/upload-artifact@") != 2:
+        raise ContractError("required-proof job must upload the proof and diagnostic command logs")
+    if version_matrix.count("uses: actions/upload-artifact@") != 1:
+        raise ContractError("version-matrix job must upload exactly one exact-SHA evidence artifact")
+    required_proof_tokens = (
+        "        if: ${{ always() }}\n"
+        "        with:\n"
+        "          name: release-required-proof-${{ inputs.candidate_sha }}\n"
+        "          path: ${{ runner.temp }}/required-proof-${{ inputs.candidate_sha }}.json\n"
+        "          if-no-files-found: error",
+        "      - name: Upload required-proof command logs\n"
+        "        if: ${{ always() }}\n"
+        "        uses: actions/upload-artifact@",
+        "          name: release-required-logs-${{ inputs.candidate_sha }}\n"
+        "          path: ${{ runner.temp }}/logs/${{ inputs.candidate_sha }}\n"
+        "          if-no-files-found: warn",
+    )
+    missing = [token for token in required_proof_tokens if token not in required_proof]
+    if missing:
+        raise ContractError(f"required-proof diagnostic artifact contract drift: missing {missing!r}")
 
 
 def effective_plan(workflow: Path = QUALITY_WORKFLOW) -> list[dict[str, object]]:
@@ -623,11 +777,15 @@ def effective_plan(workflow: Path = QUALITY_WORKFLOW) -> list[dict[str, object]]
             raise ContractError(
                 f"{step.name}: active working-directory {step.working_directory!r} is not yet replayable"
             )
-        elif step.has_environment:
-            raise ContractError(f"{step.name}: active environment block is not yet replayable")
         else:
+            environment = merged_environment(parsed, step)
+            validate_environment(environment, step.name)
             record["classification"] = "required-command"
             record["argv"] = ["bash", "-lc", step.run]
+            # Execution-only metadata: it is deliberately omitted from the
+            # required-proof command records so a workflow secret cannot become
+            # release evidence merely because a command needs it at runtime.
+            record["environment"] = environment
         entries.append(record)
     if not any(row["classification"] == "required-command" for row in entries):
         raise ContractError("required profile has no executable commands")
@@ -753,9 +911,21 @@ def run_required(plan: list[dict[str, object]], sha: str, output: Path, run_id: 
             continue
         argv = row["argv"]
         assert isinstance(argv, list)
+        environment = row.get("environment", {})
+        if not isinstance(environment, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in environment.items()
+        ):
+            raise ContractError(f"{row['name']}: invalid replay environment")
         started = utc_now()
         try:
-            completed = subprocess.run(argv, cwd=ROOT, text=True, capture_output=True, check=False)
+            completed = subprocess.run(
+                argv,
+                cwd=ROOT,
+                env=execution_environment(environment, str(row["name"])),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
             outcome = "pass" if completed.returncode == 0 else "fail"
             exit_code: int | None = completed.returncode
             output_text = completed.stdout + completed.stderr
@@ -777,6 +947,13 @@ def run_required(plan: list[dict[str, object]], sha: str, output: Path, run_id: 
         if outcome == "skip":
             record["skip_reason"] = "required-tool-unavailable"
         commands.append(record)
+        if outcome != "pass":
+            print(
+                "required-command: "
+                f"id={record['id']} outcome={outcome} exit_code={json.dumps(exit_code)} "
+                f"argv={json.dumps(argv)}",
+                flush=True,
+            )
 
     commands.append(
         {
@@ -848,6 +1025,12 @@ def self_test() -> None:
     validate_quality_job_graph(parsed)
     validate_d4_workflow_text(quality_text)
     validate_release_qualification_workflow(rq_text)
+    assert parsed.environment == {
+        "CARGO_TERM_COLOR": "always",
+        "CARGO_PUBLIC_API_VERSION": "0.52.0",
+        "CARGO_HACK_VERSION": "0.6.45",
+        "CARGO_SEMVER_CHECKS_VERSION": "0.48.0",
+    }
     assert tuple(parsed.jobs) == (*FANOUT_JOBS, AGGREGATE_JOB)
     assert parsed.jobs[AGGREGATE_JOB].needs == FANOUT_JOBS
     parsed_gate_names = tuple(
@@ -857,6 +1040,49 @@ def self_test() -> None:
     )
     assert parsed_gate_names == EXPECTED_QUALITY_COMMANDS
     assert len(parsed_gate_names) == 33
+
+    required_plan = effective_plan()
+    for name, version_key in (
+        ("Install cargo-public-api", "CARGO_PUBLIC_API_VERSION"),
+        ("Install cargo-hack", "CARGO_HACK_VERSION"),
+        ("Install cargo-semver-checks", "CARGO_SEMVER_CHECKS_VERSION"),
+    ):
+        row = next(item for item in required_plan if item["name"] == name)
+        assert row["classification"] == "required-command"
+        environment = row["environment"]
+        assert isinstance(environment, dict)
+        assert environment[version_key] == parsed.environment[version_key]
+
+    environment_fixture = """\
+env:
+  SHARED: workflow
+  WORKFLOW_ONLY: workflow-only
+jobs:
+  sample:
+    env:
+      SHARED: job
+      JOB_ONLY: job-only
+    steps:
+      - name: Environment precedence
+        env:
+          SHARED: step
+          STEP_ONLY: step-only
+        run: echo ok
+"""
+    environment_workflow = parse_quality_workflow(environment_fixture)
+    environment_step = environment_workflow.steps[0]
+    assert merged_environment(environment_workflow, environment_step) == {
+        "SHARED": "step",
+        "WORKFLOW_ONLY": "workflow-only",
+        "JOB_ONLY": "job-only",
+        "STEP_ONLY": "step-only",
+    }
+    try:
+        validate_environment({"RESULTS_DIR": "${{ runner.temp }}"}, "Environment precedence")
+    except ContractError as exc:
+        assert "unresolved GitHub expression" in str(exc), exc
+    else:
+        raise AssertionError("unresolved active environment must fail closed")
 
     strategy_on_core = parse_quality_workflow(quality_text)
     strategy_on_core.jobs["core"].strategy = FUZZ_STRATEGY
@@ -943,6 +1169,11 @@ def self_test() -> None:
             "if: ${{ needs.release-qualification.result == 'success' }}",
             1,
         ),
+        rq_text.replace(
+            "          name: release-required-logs-${{ inputs.candidate_sha }}",
+            "          name: release-required-proof-logs-${{ inputs.candidate_sha }}",
+            1,
+        ),
     ):
         try:
             validate_release_qualification_workflow(broken_rq)
@@ -1026,7 +1257,11 @@ def main() -> int:
         return 0
     plan = effective_plan()
     if args.plan:
-        print(json.dumps({"profile": "required", "steps": plan}, indent=2))
+        public_plan = [
+            {key: value for key, value in row.items() if key != "environment"}
+            for row in plan
+        ]
+        print(json.dumps({"profile": "required", "steps": public_plan}, indent=2))
         return 0
 
     sha = git_sha()

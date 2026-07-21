@@ -63,10 +63,18 @@ jobs:
           --run-id "release-qualification-$CANDIDATE_SHA"
           --output "$RUNNER_TEMP/required-proof-$CANDIDATE_SHA.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: ${{ always() }}
         with:
           name: release-required-proof-${{ inputs.candidate_sha }}
           path: ${{ runner.temp }}/required-proof-${{ inputs.candidate_sha }}.json
           if-no-files-found: error
+      - name: Upload required-proof command logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-required-logs-${{ inputs.candidate_sha }}
+          path: ${{ runner.temp }}/logs/${{ inputs.candidate_sha }}
+          if-no-files-found: warn
 
   emit-version-matrix:
     name: emit exact version-matrix evidence
