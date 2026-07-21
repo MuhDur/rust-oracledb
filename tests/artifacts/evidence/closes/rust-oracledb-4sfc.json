@@ -1,0 +1,65 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-21T12:40:00Z",
+  "bead_id": "rust-oracledb-4sfc",
+  "scope": {
+    "summary": "Return deterministic TLS configuration failures before address failover so the original typed cause cannot be retried into a call-timeout diagnostic.",
+    "in_scope": [
+      "crates/oracledb/src/lib.rs",
+      "crates/oracledb/src/tls.rs",
+      "crates/oracledb/tests/fixtures/tls/invalid_client_key/ewallet.pem",
+      "TLS parameter resolution, rustls configuration, wallet-key validation, and SNI selection before network I/O",
+      "A transport-attempt error type that admits only TCP I/O and prepared TLS handshake failures",
+      "A public Connection::connect regression proving malformed client-key configuration returns its typed cause without opening a TCP connection"
+    ],
+    "out_of_scope": [
+      "Changing retry behavior for genuine TCP or prepared TLS handshake failures",
+      "Proving a live OCI Autonomous Database wallet failure against a cloud resource",
+      "Changing TLS close-notify handling, which is tracked separately by rust-oracledb-s0se"
+    ]
+  },
+  "source": {
+    "sha": "d99927d0723ecae10a732a9f89ebeab76af75445",
+    "tree_clean": true,
+    "branch": "master",
+    "implementing_commits": [
+      "880134ee97f40409ccceae8580c8bd1771e5173e",
+      "d99927d0723ecae10a732a9f89ebeab76af75445"
+    ]
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Connection::connect",
+        "kind": "api",
+        "trace": "At HEAD (ancestor of 880134e + d99927d), `connection_connect_returns_tls_configuration_error_without_dialling` invokes the public async Connection::connect path with a valid CA and malformed PKCS#8 client key, asserts the original typed Error::Tls private-key diagnostic, and proves a real nonblocking TCP sentinel accepted no connection. Re-run 2026-07-21: cargo test -p oracledb --lib connection_connect_returns_tls_configuration_error_without_dialling → ok."
+      },
+      {
+        "name": "TLS preparation before transport",
+        "kind": "api",
+        "trace": "`tls_configuration_failure_is_typed_before_any_transport_attempt` and `f2_transport_attempt_type_only_covers_io_and_tls_handshake` pass on HEAD (re-run 2026-07-21). prepare_tls_handshake runs before the address loop; configuration/auth/wallet errors cannot be constructed as retryable per-address failures."
+      },
+      {
+        "name": "genuine transport failover",
+        "kind": "api",
+        "trace": "`connect_all_addresses_failed_when_every_address_refuses` passes on HEAD (re-run 2026-07-21) and proves genuine TCP refusal still traverses the address list and surfaces Error::AllAddressesFailed; commit 880134e moved only deterministic ClientConfig, wallet-key, and SNI preparation out of that retry path."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No cloud or live Oracle endpoint was contacted: the discriminating defect is pre-network and is proved by a deterministic local TCP sentinel plus a committed synthetic wallet fixture.",
+    "The original required-proof JSON path was not present in this tree; close is pinned by the four unit tests above re-run green on HEAD with 880134e/d99927d as ancestors."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "pin-tests-on-head"
+  }
+}
