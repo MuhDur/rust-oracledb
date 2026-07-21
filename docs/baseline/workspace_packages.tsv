@@ -1,5 +1,5 @@
 package	version	publish	manifest_path
-oracledb	0.8.4		crates/oracledb/Cargo.toml
-oracledb-derive	0.8.4		crates/oracledb-derive/Cargo.toml
-oracledb-protocol	0.8.4		crates/oracledb-protocol/Cargo.toml
-oracledb-pyshim	0.8.4		crates/oracledb-pyshim/Cargo.toml
+oracledb	0.9.0		crates/oracledb/Cargo.toml
+oracledb-derive	0.9.0		crates/oracledb-derive/Cargo.toml
+oracledb-protocol	0.9.0		crates/oracledb-protocol/Cargo.toml
+oracledb-pyshim	0.9.0		crates/oracledb-pyshim/Cargo.toml

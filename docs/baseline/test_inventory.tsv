@@ -52,14 +52,14 @@ crates/oracledb-protocol/tests/reference_contract.rs	1
 crates/oracledb-protocol/tests/sessionless_golden.rs	2
 crates/oracledb-protocol/tests/tls_wallet.rs	26
 crates/oracledb-protocol/tests/tpc_golden.rs	3
-crates/oracledb-pyshim/src/convert.rs	4
+crates/oracledb-pyshim/src/convert.rs	5
 crates/oracledb-pyshim/src/dbobject.rs	3
 crates/oracledb/src/arrow/builders.rs	7
 crates/oracledb/src/arrow/ipc.rs	1
 crates/oracledb/src/arrow/mod.rs	40
 crates/oracledb/src/cursor_logic.rs	14
 crates/oracledb/src/iam_pop.rs	3
-crates/oracledb/src/lib.rs	156
+crates/oracledb/src/lib.rs	157
 crates/oracledb/src/lob_stream.rs	8
 crates/oracledb/src/obs.rs	6
 crates/oracledb/src/pool.rs	35
