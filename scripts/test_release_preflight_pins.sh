@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# W4-T3.1 test: prove scripts/release_preflight.sh REJECTS a mismatched
-# inter-crate version pin (the 0.2.1/0.2.2 gap). Deliberately rewrites the
-# oracledb -> oracledb-protocol requirement to a wrong version, asserts the
-# preflight fails, and always restores the manifest (trap on EXIT).
+# Regression tests for release_preflight.sh: the inter-crate version-pin guard
+# and the pre-tag live-matrix guard. The latter simulates a docs-only candidate
+# whose ordinary Required checks are green but whose four path-filtered live
+# matrix check-runs are absent.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -14,6 +14,10 @@ restore() { cp "$backup" "$MANIFEST"; rm -f "$backup"; }
 trap restore EXIT
 
 fail() { echo "test-preflight-pins: FAIL: $*" >&2; exit 1; }
+
+if ! bash "$ROOT/scripts/release_preflight.sh" --self-test; then
+  fail "preflight self-test did not reject the docs-only missing-matrix case"
+fi
 
 # 1) Baseline: the unmodified manifest must PASS the preflight.
 if ! bash "$ROOT/scripts/release_preflight.sh" >/dev/null 2>&1; then
@@ -35,4 +39,4 @@ if bash "$ROOT/scripts/release_preflight.sh" >/dev/null 2>&1; then
   fail "preflight ACCEPTED a mismatched inter-crate pin (0.0.0-mismatch)"
 fi
 
-echo "test-preflight-pins: OK — preflight rejects a mismatched inter-crate pin and accepts the lockstep one"
+echo "test-preflight-pins: OK — preflight rejects docs-only missing-matrix candidates and mismatched inter-crate pins"

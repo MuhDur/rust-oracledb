@@ -9,8 +9,8 @@ for the publish order, the version, what ships, and the post-publish checklist.
 | field | value |
 |---|---|
 | Initial public release | **0.1.0** |
-| Latest published release | **0.8.3** |
-| Prepared release candidate | **0.9.0** (not published) |
+| Latest published release | **0.9.0** |
+| Prepared release candidate | Not prepared |
 | Candidate source | `[workspace.package].version` in the root `Cargo.toml` |
 
 `0.1.0` (not `0.0.0`, which crates.io treats as a placeholder, and not a
@@ -19,6 +19,48 @@ reference python-oracledb thin-mode test suite and is honestly usable, while the
 `0.x` major signals that the public API may still evolve before `1.0`.
 
 All workspace crates share the prepared candidate version via `version.workspace = true`.
+
+## Mandatory pre-tag live-matrix check
+
+Before creating any release tag, the candidate must be the current `main` SHA
+and must already have every Required check-run, including the four live Oracle
+version-matrix lanes. A tag push does not trigger those lanes: the matrix is
+intentionally limited to path-filtered pushes to `main`, so a CHANGELOG-only or
+version-hygiene candidate otherwise reaches the release workflow with no
+exact-SHA live evidence.
+
+Run this from a clean checkout at the intended `main` candidate, replacing the
+example tag with the workspace version:
+
+```bash
+candidate_sha="$(git rev-parse HEAD)"
+RELEASE_TAG=vX.Y.Z bash scripts/release_preflight.sh --pre-tag
+```
+
+If it reports `E_PRETAG_LIVE_MATRIX_MISSING`, dispatch the existing live matrix
+on `main`, wait for all four lanes, and rerun the pre-tag check. The final
+taxonomy command must report `ci_green: true` for the same SHA before the tag is
+created:
+
+```bash
+gh workflow run version-matrix.yml --ref main
+run_id="$(gh run list --workflow version-matrix.yml --commit "$candidate_sha" --limit 1 --json databaseId --jq '.[0].databaseId')"
+test -n "$run_id"
+gh run watch "$run_id" --exit-status
+python3 scripts/ci_taxonomy.py --status "$candidate_sha"
+RELEASE_TAG=vX.Y.Z bash scripts/release_preflight.sh --pre-tag
+```
+
+Only after the last command passes may the operator create and push the exact
+candidate tag:
+
+```bash
+git tag vX.Y.Z "$candidate_sha"
+git push origin vX.Y.Z
+```
+
+This is an early, fail-closed process gate; it does not weaken the tag workflow's
+own exact-SHA evidence validation, which remains the final publish backstop.
 
 ## Crates and the publish dependency graph
 

@@ -7,6 +7,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+usage() {
+  cat <<'USAGE'
+Usage: scripts/release_preflight.sh [--pre-tag|--self-test]
+
+Validates release metadata by default. Before creating a release tag, run with
+RELEASE_TAG=vX.Y.Z and --pre-tag to require that the exact current origin/main
+commit already has every Required check, including the live version matrix.
+USAGE
+}
+
 need() {
   command -v "$1" >/dev/null 2>&1 || {
     echo "release-preflight: missing required command: $1" >&2
@@ -18,6 +28,110 @@ fail() {
   echo "release-preflight: $*" >&2
   exit 1
 }
+
+live_matrix_checks=(
+  "free23 full suite"
+  "xe11 full suite"
+  "xe18 full suite"
+  "xe21 full suite"
+)
+
+# Validate the machine-readable Required-CI report used by the pre-tag path.
+# This stays deliberately strict: an absent, non-terminal, red, or unknown
+# check is never evidence that the candidate can be tagged. The four live
+# matrix lanes receive a specific diagnostic because their main-only path
+# filter is the release trap this preflight closes.
+check_pre_tag_ci_status() {
+  local candidate_sha="$1"
+  local report="$2"
+  local expected_matrix_json
+  expected_matrix_json="$(printf '%s\n' "${live_matrix_checks[@]}" | jq -R . | jq -s 'sort')"
+
+  if ! jq -e --arg sha "$candidate_sha" '
+    .schema == "ci-taxonomy/v1" and
+    .sha == $sha and
+    (.ci_green | type == "boolean") and
+    (.required_not_green | type == "array") and
+    (.required_missing_path_filtered | type == "array") and
+    (.required_missing_unexpected | type == "array") and
+    (.unknown_jobs | type == "array")
+  ' >/dev/null <<<"$report"; then
+    echo "release-preflight: E_PRETAG_CI_STATUS_INVALID: ci-taxonomy returned an invalid report for $candidate_sha" >&2
+    return 2
+  fi
+
+  if jq -e --arg sha "$candidate_sha" '
+    .sha == $sha and
+    .ci_green == true and
+    .required_not_green == [] and
+    .required_missing_path_filtered == [] and
+    .required_missing_unexpected == [] and
+    .unknown_jobs == []
+  ' >/dev/null <<<"$report"; then
+    return 0
+  fi
+
+  if jq -e --argjson expected "$expected_matrix_json" '
+    .ci_green == false and
+    (.required_missing_path_filtered | sort) == $expected and
+    .required_not_green == [] and
+    .required_missing_unexpected == [] and
+    .unknown_jobs == []
+  ' >/dev/null <<<"$report"; then
+    echo "release-preflight: E_PRETAG_LIVE_MATRIX_MISSING: $candidate_sha has no exact-SHA live version-matrix checks" >&2
+    echo "release-preflight: before tagging, dispatch version-matrix.yml on main at this candidate, wait for all four lanes, then rerun: python3 scripts/ci_taxonomy.py --status $candidate_sha" >&2
+    return 1
+  fi
+
+  echo "release-preflight: E_PRETAG_REQUIRED_CI_NOT_GREEN: Required CI is not fully green for $candidate_sha" >&2
+  printf '%s\n' "$report" >&2
+  return 1
+}
+
+run_self_test() {
+  local docs_only_sha="1111111111111111111111111111111111111111"
+  local green_sha="2222222222222222222222222222222222222222"
+  local docs_only_report
+  local green_report
+  local output
+
+  docs_only_report="$(jq -n --arg sha "$docs_only_sha" \
+    --argjson missing "$(printf '%s\n' "${live_matrix_checks[@]}" | jq -R . | jq -s 'sort')" \
+    '{schema: "ci-taxonomy/v1", sha: $sha, ci_green: false, required_not_green: [], required_missing_path_filtered: $missing, required_missing_unexpected: [], unknown_jobs: []}')"
+  green_report="$(jq -n --arg sha "$green_sha" \
+    '{schema: "ci-taxonomy/v1", sha: $sha, ci_green: true, required_not_green: [], required_missing_path_filtered: [], required_missing_unexpected: [], unknown_jobs: []}')"
+
+  if output="$(check_pre_tag_ci_status "$docs_only_sha" "$docs_only_report" 2>&1)"; then
+    fail "self-test accepted a docs-only candidate without the four live matrix checks"
+  fi
+  grep -Fqx "release-preflight: E_PRETAG_LIVE_MATRIX_MISSING: $docs_only_sha has no exact-SHA live version-matrix checks" <<<"$output" ||
+    fail "self-test did not identify the docs-only live-matrix gap"
+  check_pre_tag_ci_status "$green_sha" "$green_report" ||
+    fail "self-test rejected a fully green Required-CI report"
+
+  echo "release-preflight: self-test OK — docs-only candidate is rejected until all four live matrix checks exist"
+}
+
+mode="metadata"
+case "${1:-}" in
+  "") ;;
+  --pre-tag) mode="pre-tag" ;;
+  --self-test) mode="self-test" ;;
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
+
+if [ "$mode" = "self-test" ]; then
+  need jq
+  run_self_test
+  exit 0
+fi
 
 need cargo
 need jq
@@ -125,6 +239,23 @@ if [ "${RELEASE_REQUIRE_MAIN:-false}" = "true" ]; then
   git fetch --no-tags origin main >/dev/null 2>&1 || fail "could not fetch origin/main for tag ancestry check"
   git merge-base --is-ancestor HEAD origin/main ||
     fail "release tag commit is not contained in origin/main"
+fi
+
+if [ "$mode" = "pre-tag" ]; then
+  [ -n "$tag" ] || fail "--pre-tag requires RELEASE_TAG=v$version"
+  need git
+  need python3
+  need gh
+  git fetch --no-tags origin main >/dev/null 2>&1 || fail "could not fetch origin/main for pre-tag validation"
+  candidate_sha="$(git rev-parse HEAD)"
+  main_sha="$(git rev-parse origin/main)"
+  [ "$candidate_sha" = "$main_sha" ] ||
+    fail "pre-tag candidate $candidate_sha is not current origin/main $main_sha; update to main and qualify that exact SHA"
+
+  ci_status="$(python3 "$ROOT/scripts/ci_taxonomy.py" --status "$candidate_sha" 2>/dev/null)" || {
+    [ -n "$ci_status" ] || fail "could not obtain ci-taxonomy status for $candidate_sha"
+  }
+  check_pre_tag_ci_status "$candidate_sha" "$ci_status" || exit $?
 fi
 
 echo "release-preflight: OK version=$version tag=${tag:-none}"
