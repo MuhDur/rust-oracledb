@@ -622,6 +622,72 @@ mod tests {
         );
     }
 
+    /// DC6: the single-byte max-negative NUMBER sentinel (`[0x00]` → `-1e126`)
+    /// must not collapse to integer `-1` via strtoll-style scanning when the
+    /// Arrow type is an integer. Float64 keeps `-1e126`; Int64 fails closed.
+    #[test]
+    fn number_sentinel_preserves_float_and_rejects_integer_collapse() {
+        // Decoder-produced fixture: single-byte negative sentinel wire.
+        let sentinel = oracledb_protocol::thin::decode_number_value(&[0x00])
+            .expect("single-byte negative NUMBER sentinel must decode");
+        assert_eq!(
+            match &sentinel {
+                QueryValue::Number(n) => n.to_canonical_string(),
+                other => panic!("expected Number, got {other:?}"),
+            },
+            "-1e126"
+        );
+
+        // Unconstrained NUMBER → Float64 retains the sentinel magnitude.
+        let float_columns = vec![column("N", ORA_TYPE_NUM_NUMBER, 0, -127)];
+        let float_rows = vec![vec![Some(sentinel.clone())]];
+        let float_batch = build_record_batch(
+            &float_columns,
+            &float_rows,
+            &ArrowFetchOptions::default(),
+        )
+        .expect("float batch");
+        assert_eq!(
+            float_batch.column(0).as_primitive::<Float64Type>().value(0),
+            -1.0e126
+        );
+
+        // Integer Arrow target must NOT silently become -1 (the old strtoll
+        // collapse). Fail closed with CannotConvertToInteger.
+        let int_columns = vec![column("N", ORA_TYPE_NUM_NUMBER, 10, 0)];
+        let int_rows = vec![vec![Some(sentinel)]];
+        let err = build_record_batch(&int_columns, &int_rows, &ArrowFetchOptions::default())
+            .expect_err("sentinel must not collapse to int -1");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("-1e126") || msg.contains("integer") || msg.contains("convert"),
+            "unexpected error for sentinel→int: {msg}"
+        );
+
+        // Neighboring pure-integer still maps; scientific-notation forms that
+        // would have been strtoll-collapsed must fail closed.
+        let plain = build_record_batch(
+            &int_columns,
+            &[vec![number("-1")], vec![number("12")]],
+            &ArrowFetchOptions::default(),
+        )
+        .expect("plain integers");
+        assert_eq!(plain.column(0).as_primitive::<Int64Type>().value(0), -1);
+        assert_eq!(plain.column(0).as_primitive::<Int64Type>().value(1), 12);
+        let sci_err = build_record_batch(
+            &int_columns,
+            &[vec![number("1e3")]],
+            &ArrowFetchOptions::default(),
+        )
+        .expect_err("scientific notation must not collapse via leading digits");
+        assert!(
+            sci_err.to_string().contains("1e3")
+                || sci_err.to_string().contains("integer")
+                || sci_err.to_string().contains("convert"),
+            "unexpected error for 1e3→int: {sci_err}"
+        );
+    }
+
     #[test]
     fn fetch_decimals_maps_constrained_number_to_decimal128() {
         let options = ArrowFetchOptions::new().with_fetch_decimals(true);

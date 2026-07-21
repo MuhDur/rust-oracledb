@@ -98,7 +98,15 @@ fn numeric_text<'a>(
 /// Mirrors C `strtoll` as used by converters.pyx:432-516: parses the leading
 /// integer part and ignores a trailing fraction ("1.5" -> 1). Unlike strtoll,
 /// a value without any leading digits is an error (fail-closed).
+///
+/// Scientific-notation forms (including Oracle's `-1e126` max-negative NUMBER
+/// sentinel) are rejected rather than collapsed to the leading integer. The
+/// reference `strtoll` path silently turns `-1e126` into `-1`; we fail closed
+/// so Arrow and row APIs cannot disagree on the sentinel (DC6).
 fn parse_number_i64(text: &str) -> Option<i64> {
+    if text.as_bytes().iter().any(|b| matches!(b, b'e' | b'E')) {
+        return None;
+    }
     let (negative, rest) = match text.as_bytes().first() {
         Some(b'-') => (true, &text[1..]),
         Some(b'+') => (false, &text[1..]),
@@ -120,6 +128,9 @@ fn parse_number_i64(text: &str) -> Option<i64> {
 }
 
 fn parse_number_u64(text: &str) -> Option<u64> {
+    if text.as_bytes().iter().any(|b| matches!(b, b'e' | b'E')) {
+        return None;
+    }
     let rest = text.strip_prefix('+').unwrap_or(text);
     let digits_len = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
     if digits_len == 0 {
