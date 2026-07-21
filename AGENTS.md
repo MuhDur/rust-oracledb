@@ -89,6 +89,12 @@ one place to check:
   cargo test -p oracledb --features cassette
   cargo deny check
   ```
+  **Regenerate checked-in baselines in the same commit.** Before committing a
+  change that adds or renames tests, or adds, removes, or moves a `pub` item,
+  run `scripts/gen_baseline.sh` and commit every resulting `docs/baseline/`
+  change with the source change. CI treats baseline drift as a Required failure.
+  To verify without modifying the checkout, run
+  `ORACLEDB_BASELINE_DIR=<outside-checkout> scripts/gen_baseline.sh --check`.
   `oracledb-pyshim` is excluded from the local gates because it needs a Python
   toolchain and a live database; it is exercised by the conformance harness, not
   plain `cargo test`.
