@@ -9,6 +9,8 @@
 //!   3. A source **failure** over a TCPS descriptor maps to the redacted
 //!      [`Error::TokenSource`] before any socket is dialled, and a source's
 //!      token frames correctly as `AUTH_TOKEN`.
+//!   4. A source is invoked once for every physical connection attempt; token
+//!      freshness and any refresh policy stay inside the source.
 //!
 //! Real-cloud token *acceptance* is an operator smoke test (C5-smoke); the
 //! over-the-wire `AUTH_TOKEN` framing across a real TLS transport is pinned by
@@ -149,6 +151,26 @@ fn token_source_failure_over_tcps_maps_to_redacted_error_before_dial() {
         "the token source must be consulted exactly once on a TCPS descriptor"
     );
     assert_eq!(err.kind(), oracledb::ErrorKind::Authentication);
+}
+
+#[test]
+fn token_source_is_reinvoked_for_each_physical_connect_attempt() {
+    let (source, calls) = MockTokenSource::new(Outcome::Token(SECRET_TOKEN.to_string()));
+    let options = ConnectOptions::new("tcps://127.0.0.1:1/FREEPDB1", "OCITESTUSER", "", identity())
+        .with_token_source(source);
+
+    // Port 1 has no listener in the hermetic test environment, so both calls
+    // fail after the source has produced a token. `ConnectOptions` is cloned
+    // exactly as a caller would reuse it for two distinct physical connects.
+    for attempt in 1..=2 {
+        BlockingConnection::connect(options.clone())
+            .expect_err("the test endpoint must not establish a TCPS session");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            attempt,
+            "the token source must be invoked once per physical connect attempt"
+        );
+    }
 }
 
 #[test]

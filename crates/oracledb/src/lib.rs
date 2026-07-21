@@ -1874,9 +1874,12 @@ impl std::error::Error for TokenSourceError {}
 ///
 /// Implement this to obtain a fresh token at connect time (for example by
 /// shelling out to the OCI CLI, calling an instance-principal endpoint, or
-/// reading a short-lived token file). The driver calls [`get_token`] **once at
-/// connect**, and again **only if** the initial token is rejected during
-/// authentication (token refresh on expiry). The returned token is placed in
+/// reading a short-lived token file). The driver calls [`get_token`] **once
+/// for each physical connection attempt**, before it dials a TCPS endpoint.
+/// The source owns freshness: this interface returns only a token string, so
+/// the driver cannot inspect token expiry and does not retry after an
+/// authentication rejection. Return a current token on every call (or retain
+/// and refresh it inside the source). The returned token is placed in
 /// `AUTH_TOKEN` and therefore requires a TCPS transport; a token source on a
 /// plaintext descriptor is refused with [`Error::AccessTokenRequiresTcps`]
 /// *before* the source is ever consulted, so a token is never fetched for a
@@ -2108,9 +2111,10 @@ pub struct ConnectOptions {
     access_token_private_key: Option<TokenPrivateKey>,
     /// Pluggable source of database access tokens (OCI IAM / OAuth2). When set
     /// and no static [`access_token`](Self::access_token) is present, the driver
-    /// calls it once at connect to obtain the token (and again only on an auth
-    /// rejection). Like a static token it requires TCPS; a token source on a
-    /// plaintext descriptor is refused before it is ever consulted. Set with
+    /// calls it once for each physical connection attempt. The source owns
+    /// freshness; the driver does not inspect expiry or retry a rejected token.
+    /// Like a static token it requires TCPS; a token source on a plaintext
+    /// descriptor is refused before it is ever consulted. Set with
     /// [`ConnectOptions::with_token_source`].
     token_source: Option<std::sync::Arc<dyn TokenSource>>,
     /// Maximum number of open statements kept in this connection's statement
@@ -2335,13 +2339,15 @@ impl ConnectOptions {
     }
 
     /// Authenticate with a database access token obtained from a pluggable
-    /// [`TokenSource`] (OCI IAM / OAuth2). The driver calls the source once at
-    /// connect to fetch the token — and again only if the token is rejected at
-    /// authentication (refresh on expiry). Like [`Self::with_access_token`] this
-    /// selects token auth and therefore **requires** a TLS/TCPS connection: a
-    /// token source on a plaintext descriptor fails with the typed
-    /// [`Error::AccessTokenRequiresTcps`] *before* the source is consulted, so a
-    /// token is never fetched for a transport that could not carry it securely.
+    /// [`TokenSource`] (OCI IAM / OAuth2). The driver calls the source once for
+    /// each physical connection attempt. The source owns freshness: this API
+    /// does not expose token expiry, so the driver neither inspects expiry nor
+    /// retries after an authentication rejection. Like
+    /// [`Self::with_access_token`] this selects token auth and therefore
+    /// **requires** a TLS/TCPS connection: a token source on a plaintext
+    /// descriptor fails with the typed [`Error::AccessTokenRequiresTcps`]
+    /// *before* the source is consulted, so a token is never fetched for a
+    /// transport that could not carry it securely.
     ///
     /// A static [`Self::with_access_token`] takes precedence if both are set.
     #[must_use]
