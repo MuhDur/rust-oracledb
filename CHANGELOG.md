@@ -31,6 +31,8 @@ artifacts, and the checked-in API/provenance ledgers.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-21
+
 ### Added
 
 - **Bracket proxy usernames and proxy-only token authentication.**
