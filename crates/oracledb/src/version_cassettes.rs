@@ -103,7 +103,7 @@ use oracledb_protocol::thin::{
     build_connect_packet_payload, parse_accept_payload, TNS_AQ_MESSAGE_ID_LENGTH,
     TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_CONNECT, TNS_PACKET_TYPE_RESEND,
 };
-use oracledb_protocol::wire::{encode_packet, PacketLengthWidth, ProtocolLimits};
+use oracledb_protocol::wire::{encode_packet, PacketLengthWidth, ProtocolLimits, TtcWriter};
 use oracledb_protocol::ProtocolError;
 
 use crate::transport::{self, scan_for_secret_fields, ReplayWriteMode};
@@ -118,6 +118,10 @@ const ADVERTISED_SDU: u16 = 8192;
 
 /// Below-floor protocol version Oracle 11g negotiates (12.1 = 315 is the floor).
 const ORACLE_11G_PROTOCOL_VERSION: u16 = 314;
+
+/// D11's offline 19c-shaped profile. This is a reference-derived fixture, not
+/// an assertion about a particular live 19c server's ACCEPT bytes.
+const SYNTHETIC_19C_PROTOCOL_VERSION: u16 = 318;
 
 const MANIFEST_SCHEMA_VERSION: &str = "1";
 const CASSETTE_FORMAT_VERSION: &str = "1";
@@ -599,6 +603,84 @@ fn replay_version_connect_cassettes_offline() {
         }
     }
     assert!(failures.is_empty(), "replay failures: {failures:?}");
+}
+
+/// Build the smallest ACCEPT layout that selects the 19c protocol branch:
+/// protocol 318 reads flags2 but does not enable end-of-response (which starts
+/// at 319). The fixture deliberately advertises neither optional flag.
+fn synthetic_19c_accept_payload() -> Vec<u8> {
+    let mut writer = TtcWriter::new();
+    writer.write_u16be(SYNTHETIC_19C_PROTOCOL_VERSION);
+    writer.write_u16be(0); // protocol options: no OOB attention
+    writer.write_raw(&[0; 10]);
+    writer.write_u8(0); // flags1: no native network encryption requirement
+    writer.write_raw(&[0; 9]);
+    writer.write_u32be(u32::from(ADVERTISED_SDU));
+    writer.write_raw(&[0; 5]);
+    writer.write_u32be(0); // flags2: no fast auth, no OOB check, no EOR
+    writer.into_bytes()
+}
+
+/// A full secret-free `.tns-cassette` exchange for the synthetic 19c profile.
+/// It uses the same packet writer and replay transport as recorded lanes, but
+/// never needs a database or a committed binary fixture.
+fn synthetic_19c_caps_cassette() -> Result<Vec<u8>> {
+    let connect_data = capture_connect_descriptor("NINETEEN_C_PROFILE");
+    let connect_payload = build_connect_packet_payload(&connect_data, ADVERTISED_SDU)?;
+    let connect_packet = encode_packet(
+        TNS_PACKET_TYPE_CONNECT,
+        0,
+        None,
+        &connect_payload,
+        PacketLengthWidth::Legacy16,
+    )?;
+    let accept_packet = encode_packet(
+        TNS_PACKET_TYPE_ACCEPT,
+        0,
+        None,
+        &synthetic_19c_accept_payload(),
+        PacketLengthWidth::Legacy16,
+    )?;
+
+    let mut cassette = Vec::new();
+    cassette::write_header(&mut cassette);
+    cassette::write_frame(&mut cassette, Direction::ClientToServer, 0, &connect_packet);
+    cassette::write_frame(&mut cassette, Direction::ServerToClient, 1, &accept_packet);
+    Ok(cassette)
+}
+
+/// Offline 19c-caps lane: strict replay reissues the normal CONNECT request,
+/// consumes the synthetic ACCEPT, and proves the protocol-318 selection stays
+/// `fast_auth=false` / `end_of_response=false`.
+#[test]
+fn replay_synthetic_19c_caps_cassette_offline() -> Result<()> {
+    let cassette_bytes = synthetic_19c_caps_cassette()?;
+    assert!(
+        scan_for_secret_fields(&cassette_bytes).is_empty(),
+        "synthetic handshake must remain secret-free"
+    );
+    let (read, write, audit) =
+        transport::replay_split_with_audit(&cassette_bytes, ReplayWriteMode::Check)
+            .map_err(|err| Error::Runtime(format!("invalid 19c profile cassette: {err}")))?;
+    let mut core = ConnectionCore::<DriverTransport>::from_halves(read, write, "19c-profile");
+    core.set_protocol_limits(ProtocolLimits::DEFAULT)?;
+    let connect_data = capture_connect_descriptor("NINETEEN_C_PROFILE");
+
+    let runtime = build_io_runtime()?;
+    runtime.block_on(async move {
+        let cx = Cx::current()
+            .ok_or_else(|| Error::Runtime("missing ambient Cx in 19c replay runtime".into()))?;
+        let accept = drive_connect_handshake(&mut core, &cx, &connect_data).await?;
+        let info = parse_accept_payload(&accept.payload)?;
+        assert_eq!(info.protocol_version, SYNTHETIC_19C_PROTOCOL_VERSION);
+        assert!(!info.supports_fast_auth);
+        assert!(!info.supports_end_of_response);
+        Ok::<_, Error>(())
+    })?;
+    audit
+        .assert_finished()
+        .map_err(|err| Error::Runtime(format!("synthetic 19c replay: {err}")))?;
+    Ok(())
 }
 
 // ---- POST-AUTH validation (cwsr) ------------------------------------------

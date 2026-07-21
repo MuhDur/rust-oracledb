@@ -144,3 +144,33 @@ pub(crate) const fn writes_subscribe_client_id_block(ttc_field_version: u8) -> b
 pub(crate) const fn reads_subscribe_response_details(ttc_field_version: u8) -> bool {
     ttc_field_version >= TNS_CCAP_FIELD_VERSION_12_1
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::thin::constants::TNS_CCAP_FIELD_VERSION_19_1_EXT_1;
+
+    /// Offline 19c capability-profile differential against the reference
+    /// `TNS_CCAP_FIELD_VERSION_19_1_EXT_1` branches. This pins branch
+    /// selection only; a live 19c lane is still needed for session semantics.
+    #[test]
+    fn nineteen_c_caps_profile_matches_reference_gate_selection() {
+        let field_version = TNS_CCAP_FIELD_VERSION_19_1_EXT_1;
+
+        // Present on both sides of the 19c profile.
+        assert!(carries_oaccolid(field_version));
+        assert!(writes_al8sqlsig(field_version));
+        assert!(writes_execute_chunk_ids(field_version));
+        assert!(writes_subscribe_client_id_block(field_version));
+        assert!(reads_subscribe_response_details(field_version));
+
+        // 20c, 21c, and 23ai additions must remain absent.
+        assert!(!reads_error_sql_type_and_checksum(field_version));
+        assert!(!writes_aq_json_payload(field_version));
+        assert!(!carries_aq_shard_id(field_version));
+        assert!(!reads_column_domain(field_version));
+        assert!(!reads_column_annotations(field_version));
+        assert!(!reads_column_vector_metadata(field_version));
+        assert!(!writes_pipeline_token(field_version));
+    }
+}

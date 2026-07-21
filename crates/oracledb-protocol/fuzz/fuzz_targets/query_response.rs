@@ -13,11 +13,17 @@ fuzz_target!(|data: &[u8]| {
     if data.len() > 1_000_000 {
         return;
     }
-    // Derive the negotiated TTC field version from the first byte so the fuzzer
-    // can reach the version-gated branches (12.2 / 23.1 / 23.4 metadata fields).
-    let (ttc_field_version, payload) = data
-        .split_first()
-        .map_or((24u8, data), |(v, rest)| (*v, rest));
+    // The `19c:` corpus prefix selects the reference-derived 19c capability
+    // profile (field version 13) without requiring a binary seed file. All
+    // other inputs retain the one-byte selector used to reach arbitrary
+    // version-gated branches (12.2 / 23.1 / 23.4 metadata fields).
+    let (ttc_field_version, payload) = data.strip_prefix(b"19c:").map_or_else(
+        || {
+            data.split_first()
+                .map_or((24u8, data), |(v, rest)| (*v, rest))
+        },
+        |payload| (13, payload),
+    );
     let caps = ClientCapabilities {
         ttc_field_version,
         ..ClientCapabilities::default()

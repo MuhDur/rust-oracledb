@@ -301,6 +301,12 @@ pub(crate) const TNS_SERVER_PIGGYBACK_SESS_SIGNATURE: u8 = 10;
 pub(crate) const TNS_CCAP_FIELD_VERSION: usize = 7;
 pub(crate) const TNS_CCAP_FIELD_VERSION_12_2: u8 = 8;
 pub(crate) const TNS_CCAP_FIELD_VERSION_12_2_EXT1: u8 = 9;
+/// Reference `TNS_CCAP_FIELD_VERSION_19_1_EXT_1`; python-oracledb emits this
+/// field-version byte inside the fast-auth envelope. The production fast-auth
+/// payload is a pinned byte fixture; this name is used by the offline 19c
+/// profile regressions.
+#[cfg(test)]
+pub(crate) const TNS_CCAP_FIELD_VERSION_19_1_EXT_1: u8 = 13;
 pub(crate) const TNS_CCAP_FIELD_VERSION_20_1: u8 = 14;
 pub(crate) const TNS_CCAP_FIELD_VERSION_21_1: u8 = 16;
 pub(crate) const TNS_CCAP_FIELD_VERSION_23_1: u8 = 17;

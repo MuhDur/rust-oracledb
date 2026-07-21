@@ -197,6 +197,7 @@ pub fn build_fast_auth_token_payload(
 
 /// [`build_fast_auth_token_payload`] with optional OCI IAM proof-of-possession
 /// and optional proxy user (`PROXY_CLIENT_NAME`).
+#[allow(clippy::too_many_arguments)] // public token-auth compatibility surface
 pub fn build_fast_auth_token_payload_with_pop(
     user: &str,
     token: &str,
@@ -251,6 +252,7 @@ pub fn build_auth_phase_two_token_payload(
 
 /// [`build_auth_phase_two_token_payload`] with optional OCI IAM proof-of-possession
 /// and optional proxy user (`PROXY_CLIENT_NAME`).
+#[allow(clippy::too_many_arguments)] // public token-auth compatibility surface
 pub fn build_auth_phase_two_token_payload_with_pop(
     user: &str,
     token: &str,
@@ -516,5 +518,50 @@ mod tests {
                 .supports_end_of_response,
             "319 without the flag: no end-of-response"
         );
+    }
+
+    /// Minimal protocol-info message with controllable compile/runtime caps.
+    /// The leading fields are deliberately empty because this test targets the
+    /// capability section consumed by `skip_protocol_message`.
+    fn protocol_info_with_caps(field_version: u8, runtime_ttc: u8) -> Vec<u8> {
+        let mut writer = TtcWriter::new();
+        writer.write_u8(0); // server version (not used by the parser)
+        writer.write_u8(0); // skipped server flags
+        writer.write_u8(0); // NUL-terminated server version string
+        writer.write_u16le(873); // AL32UTF8 charset
+        writer.write_u8(0); // server flags
+        writer.write_u16le(0); // no element descriptors
+        writer.write_u16be(0); // no FDO bytes
+
+        let mut compile_caps = vec![0; TNS_CCAP_FIELD_VERSION + 1];
+        compile_caps[TNS_CCAP_FIELD_VERSION] = field_version;
+        writer
+            .write_bytes_with_length(&compile_caps)
+            .expect("short compile caps");
+
+        let mut runtime_caps = vec![0; TNS_RCAP_TTC + 1];
+        runtime_caps[TNS_RCAP_TTC] = runtime_ttc;
+        writer
+            .write_bytes_with_length(&runtime_caps)
+            .expect("short runtime caps");
+        writer.into_bytes()
+    }
+
+    #[test]
+    fn nineteen_c_caps_profile_derives_the_reference_19c_mask() {
+        // constants.pxi:503 defines 19.1-ext1 as 13. A 19c-shaped protocol
+        // message has no 32K TTC bit, so python-oracledb selects 4K strings
+        // (capabilities.pyx:134-150); the Rust parser must make the same mask.
+        let bytes = protocol_info_with_caps(TNS_CCAP_FIELD_VERSION_19_1_EXT_1, 0);
+        let caps = skip_protocol_message(&mut TtcReader::new(&bytes))
+            .expect("19c profile decodes")
+            .expect("compile caps present");
+
+        assert_eq!(
+            caps.ttc_field_version, TNS_CCAP_FIELD_VERSION_19_1_EXT_1,
+            "server field version caps the client at the 19c profile"
+        );
+        assert_eq!(caps.max_string_size, 4_000);
+        assert_eq!(caps.charset_id, 873);
     }
 }
