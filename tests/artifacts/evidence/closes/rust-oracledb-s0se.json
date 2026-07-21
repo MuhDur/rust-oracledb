@@ -1,0 +1,69 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-21T12:45:00Z",
+  "bead_id": "rust-oracledb-s0se",
+  "scope": {
+    "summary": "Accept Asupersync's exact missing-close-notify EOF only at an empty terminal LOGOFF response boundary, skip the impossible final EOF write after that peer hard-close, and preserve strict pre-ACCEPT, ordinary-read, truncated-response, and normal-close behavior.",
+    "in_scope": [
+      "crates/oracledb/src/lib.rs",
+      "crates/oracledb/tests/tls_handshake.rs",
+      "Terminal session LOGOFF response handling after a usable TLS session",
+      "Exact UnexpectedEof classification for the Asupersync missing-close-notify diagnostic",
+      "Connection::close tail behavior for modern and classic framing, including no final TNS EOF write after a terminal peer hard-close"
+    ],
+    "out_of_scope": [
+      "Tolerating missing close_notify during connect, pre-ACCEPT, authentication, or ordinary query responses",
+      "Accepting a partial TNS header or payload as a clean close",
+      "Changing deterministic TLS configuration failover, which is tracked separately by rust-oracledb-4sfc"
+    ]
+  },
+  "source": {
+    "sha": "4eddf9b480d61bd09b3b4d06af14c507e49e0682",
+    "tree_clean": true,
+    "branch": "master",
+    "implementing_commits": [
+      "3f55d30849d15fc27b5edce17d6d029c3a4065c4",
+      "4eddf9b480d61bd09b3b4d06af14c507e49e0682"
+    ]
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Connection::close terminal wire tail",
+        "kind": "api",
+        "trace": "On HEAD (ancestors 3f55d30 + 4eddf9b), `missing_tls_close_notify_is_tolerated_only_at_terminal_session_boundary` drives the production finish_session_close tail used by Connection::close. For modern and classic framing it proves an empty terminal peer hard-close succeeds with no final TNS EOF write; it also proves a fully framed response retains that EOF write. Re-run 2026-07-21: cargo test -p oracledb --lib missing_tls_close_notify_is_tolerated_only_at_terminal_session_boundary → ok. is_missing_tls_close_notify lives at crates/oracledb/src/lib.rs:9444."
+      },
+      {
+        "name": "TLS hard-close after complete plaintext",
+        "kind": "api",
+        "trace": "`tcps_hard_close_delivers_complete_plaintext_before_missing_close_notify` passes on HEAD (re-run 2026-07-21) against a local rustls server that deliberately closes TCP without writing close_notify."
+      },
+      {
+        "name": "TLS hard-close before expected plaintext",
+        "kind": "api",
+        "trace": "`tcps_hard_close_before_expected_plaintext_remains_unexpected_eof` passes on HEAD (re-run 2026-07-21) and proves a hard close before the expected plaintext is not normalized into success."
+      },
+      {
+        "name": "terminal disposition boundary",
+        "kind": "api",
+        "trace": "Commit 3f55d30 confines missing-close-notify normalization to Connection::close's terminal LOGOFF response. Commit 4eddf9b preserves the peer-hard-close disposition through the public close tail so it can skip only the now-impossible EOF write."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The integration proof uses a local deterministic rustls peer rather than a live OCI endpoint; it reproduces the exact bare-TCP-FIN/no-close_notify transport shape without consuming a cloud resource.",
+    "The original required-proof JSON path was not present in this tree; close is pinned by the three tests above re-run green on HEAD with 3f55d30/4eddf9b as ancestors."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "pin-tests-on-head"
+  }
+}
