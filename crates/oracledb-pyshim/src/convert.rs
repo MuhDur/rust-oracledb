@@ -105,6 +105,14 @@ pub(crate) fn py_value_to_bind(value: &Bound<'_, PyAny>) -> PyResult<BindValue> 
     if let Ok(text) = value.extract::<String>() {
         return Ok(BindValue::Text(text));
     }
+    // A decimal.Decimal must reach Oracle through its exact decimal text.
+    // Letting it reach the generic numeric conversions below invokes
+    // Decimal.__float__ and loses significant digits (reference metadata.pyx
+    // maps Decimal directly to DB_TYPE_NUMBER; PY2).
+    let decimal_type = PyModule::import(value.py(), "decimal")?.getattr("Decimal")?;
+    if value.is_instance(&decimal_type)? {
+        return Ok(BindValue::Number(value.str()?.extract::<String>()?));
+    }
     // Python ints are arbitrary precision. Keep the i128 fast path, but do not
     // let an int that is wider than i128 fall through to f64: that silently
     // rounds the value to roughly 16 significant digits. python-oracledb binds
