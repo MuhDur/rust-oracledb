@@ -40,6 +40,10 @@ artifacts, and the checked-in API/provenance ledgers.
   `[proxy]`; token authentication sends `PROXY_CLIENT_NAME` before
   `AUTH_TOKEN`, including the empty-base proxy-only form. `full_user()` exposes
   the display form without revealing credentials.
+- **Refreshable IAM proof-of-possession token sources.**
+  `ConnectOptions::with_token_source_and_key` pairs a refreshable `TokenSource`
+  with its bound PKCS#8 IAM signing key, a combination the separate
+  `with_access_token_and_key` and `with_token_source` APIs could not express.
 - **Offline Oracle 19c capability coverage.** A conservative,
   reference-derived synthetic 19c capability profile exercises the decoder and
   version gates, including their protocol gates. It proves offline branch
