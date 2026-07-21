@@ -641,12 +641,9 @@ mod tests {
         // Unconstrained NUMBER → Float64 retains the sentinel magnitude.
         let float_columns = vec![column("N", ORA_TYPE_NUM_NUMBER, 0, -127)];
         let float_rows = vec![vec![Some(sentinel.clone())]];
-        let float_batch = build_record_batch(
-            &float_columns,
-            &float_rows,
-            &ArrowFetchOptions::default(),
-        )
-        .expect("float batch");
+        let float_batch =
+            build_record_batch(&float_columns, &float_rows, &ArrowFetchOptions::default())
+                .expect("float batch");
         assert_eq!(
             float_batch.column(0).as_primitive::<Float64Type>().value(0),
             -1.0e126
