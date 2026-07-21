@@ -40,10 +40,10 @@ artifacts, and the checked-in API/provenance ledgers.
   `[proxy]`; token authentication sends `PROXY_CLIENT_NAME` before
   `AUTH_TOKEN`, including the empty-base proxy-only form. `full_user()` exposes
   the display form without revealing credentials.
-- **Offline Oracle 19c capability coverage.** The decoder and version gates now
-  carry a captured 19c capability profile, including its protocol gates, so
-  older-server behavior is tested without treating an unsupported feature as a
-  later-server response.
+- **Offline Oracle 19c capability coverage.** A conservative,
+  reference-derived synthetic 19c capability profile exercises the decoder and
+  version gates, including their protocol gates. It proves offline branch
+  selection, not live 19c session behavior.
 
 ### Changed
 
@@ -63,16 +63,21 @@ artifacts, and the checked-in API/provenance ledgers.
 ### Fixed
 
 - **TCPS setup and shutdown hardening.** Configuration errors fail before a
-  transport attempt, configured TLS handshake budgets are honored, the OCI ADB
-  SNI carve-out recognizes the supported endpoint forms, and a terminal TLS
+  transport attempt; DSN-only `SSL_SERVER_CERT_DN` reaches the verifier and
+  DSN `SSL_SERVER_DN_MATCH=OFF` is honored explicitly while chain validation
+  remains mandatory; configured TLS handshake budgets are honored; the OCI ADB
+  SNI carve-out recognizes the supported endpoint forms; and a terminal TLS
   close without `close_notify` no longer causes a follow-on EOF write.
 - **Connection and pool recovery.** A final pool handle is tracked without a
   race, `TIMEDWAIT` acquisition no longer creates one OS thread per waiter, and
   retries refuse `SELECT` statements hidden behind leading comments.
-- **Value/parity correctness.** Arrow NUMBER sentinels can no longer collapse
-  into `-1`; chrono preserves sub-minute `FixedOffset` instants; the Python
-  harness binds `Decimal` through exact text and hardens conversion and
-  cancellation behavior.
+- **Value/parity correctness.** Arrow TSTZ values apply their display offset,
+  and Arrow NUMBER sentinels can no longer collapse into `-1`; chrono preserves
+  sub-minute `FixedOffset` instants; the Python harness classifies `NUMBER`
+  values by declared scale, binds `Decimal` through exact text, and hardens
+  conversion and cancellation behavior.
+- **Malformed bind-name robustness.** A lone double quote no longer panics the
+  public bind-name formatter.
 - **Required-check stability.** Parallel `tnsnames.ora` tests now use a unique
   temporary-directory counter instead of colliding at coarse clock resolution.
 
