@@ -135,18 +135,18 @@ use oracledb_protocol::thin::aq::{
 };
 use oracledb_protocol::thin::{
     adjust_refetch_metadata, build_auth_phase_one_payload,
-    build_auth_phase_two_payload_with_proxy_with_seq, build_auth_phase_two_token_payload_with_pop,
-    build_begin_pipeline_piggyback, build_change_password_payload_with_seq,
-    build_connect_packet_payload, build_data_types_payload, build_define_fetch_payload_with_seq,
-    build_end_pipeline_payload_with_seq, build_execute_payload_with_bind_rows_and_options_with_seq,
-    build_fast_auth_phase_one_payload, build_fast_auth_token_payload_with_pop,
-    build_fetch_payload_with_seq, build_function_payload_with_seq,
-    build_function_payload_with_seq_and_token, build_lob_create_temp_payload_with_seq,
-    build_lob_free_temp_payload_with_seq, build_lob_read_payload_with_seq,
-    build_lob_trim_payload_with_seq, build_lob_write_payload_with_seq,
-    build_protocol_negotiation_payload, classic_connect_response_is_complete,
-    connect_data_fits_inline, parse_accept_payload, parse_auth_response_with_limits,
-    parse_define_fetch_response_borrowed_with_limits,
+    build_auth_phase_two_payload_with_proxy_with_seq,
+    build_auth_phase_two_token_payload_with_pop_and_proxy, build_begin_pipeline_piggyback,
+    build_change_password_payload_with_seq, build_connect_packet_payload, build_data_types_payload,
+    build_define_fetch_payload_with_seq, build_end_pipeline_payload_with_seq,
+    build_execute_payload_with_bind_rows_and_options_with_seq, build_fast_auth_phase_one_payload,
+    build_fast_auth_token_payload_with_pop_and_proxy, build_fetch_payload_with_seq,
+    build_function_payload_with_seq, build_function_payload_with_seq_and_token,
+    build_lob_create_temp_payload_with_seq, build_lob_free_temp_payload_with_seq,
+    build_lob_read_payload_with_seq, build_lob_trim_payload_with_seq,
+    build_lob_write_payload_with_seq, build_protocol_negotiation_payload,
+    classic_connect_response_is_complete, connect_data_fits_inline, parse_accept_payload,
+    parse_auth_response_with_limits, parse_define_fetch_response_borrowed_with_limits,
     parse_define_fetch_response_with_context_and_limits,
     parse_fetch_response_with_context_and_limits, parse_lob_create_temp_response_with_limits,
     parse_lob_free_temp_response_with_limits, parse_lob_read_response_with_limits,
@@ -672,7 +672,7 @@ impl<T: WireTransport> ConnectionCore<T> {
         trace_connect_bytes("data types response", &response);
         parse_auth_response_with_limits(&response, protocol_limits)?;
 
-        let auth_payload = build_auth_phase_two_token_payload_with_pop(
+        let auth_payload = build_auth_phase_two_token_payload_with_pop_and_proxy(
             token_auth.user,
             token_auth.token,
             token_auth.driver_name,
@@ -3363,7 +3363,7 @@ impl Connection {
                     // One combined fast-auth bundle carrying a phase-two
                     // `AUTH_TOKEN` message; no resend. The payload embeds the
                     // token, so it is never passed to `trace_connect_bytes`.
-                    let auth_payload = build_fast_auth_token_payload_with_pop(
+                    let auth_payload = build_fast_auth_token_payload_with_pop_and_proxy(
                         &options.user,
                         token.expose(),
                         &identity.driver_name,
@@ -15789,7 +15789,7 @@ mod tests {
 
         let protocol_payload = build_protocol_negotiation_payload()?;
         let data_types_payload = build_data_types_payload()?;
-        let token_payload = build_auth_phase_two_token_payload_with_pop(
+        let token_payload = build_auth_phase_two_token_payload_with_pop_and_proxy(
             USER,
             TOKEN,
             DRIVER_NAME,

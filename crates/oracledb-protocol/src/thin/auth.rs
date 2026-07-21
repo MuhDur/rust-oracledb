@@ -66,12 +66,38 @@ pub fn append_auth_phase_two_token(
         connect_string,
         edition,
         None,
+    )
+}
+
+/// [`append_auth_phase_two_token`] with optional OCI IAM proof-of-possession.
+///
+/// This preserves the public 0.8.x API. For proxy token authentication, use
+/// [`append_auth_phase_two_token_with_pop_and_proxy`].
+#[allow(clippy::too_many_arguments)] // public token-auth compatibility surface
+pub fn append_auth_phase_two_token_with_pop(
+    out: &mut Vec<u8>,
+    user: &str,
+    token: &str,
+    driver_name: &str,
+    version_num: u32,
+    connect_string: &str,
+    edition: Option<&str>,
+    pop: Option<TokenPop<'_>>,
+) -> Result<()> {
+    append_auth_phase_two_token_with_pop_and_proxy(
+        out,
+        user,
+        token,
+        driver_name,
+        version_num,
+        connect_string,
+        edition,
+        pop,
         None,
     )
 }
 
-/// [`append_auth_phase_two_token`] with optional OCI IAM proof-of-possession and
-/// optional proxy authentication.
+/// [`append_auth_phase_two_token_with_pop`] with optional proxy authentication.
 ///
 /// When `pop` is `Some`, the token is bound to a private key: the auth mode gains
 /// `TNS_AUTH_MODE_IAM_TOKEN` and two extra pairs (`AUTH_HEADER`, `AUTH_SIGNATURE`)
@@ -82,7 +108,7 @@ pub fn append_auth_phase_two_token(
 /// `AUTH_TOKEN` (messages/auth.pyx `_write_message`). Empty `user` is valid for
 /// proxy-only token sessions (`[proxy]` form after upstream e861662).
 #[allow(clippy::too_many_arguments)] // mirrors the reference message attribute set
-pub fn append_auth_phase_two_token_with_pop(
+pub fn append_auth_phase_two_token_with_pop_and_proxy(
     out: &mut Vec<u8>,
     user: &str,
     token: &str,
@@ -630,7 +656,6 @@ mod token_auth_tests {
                 header: "date: Fri, 17 Jul 2026 07:00:00 GMT\n(request-target): svc\nhost: h:1522",
                 signature: "c2lnbmF0dXJl",
             }),
-            None,
         )
         .unwrap();
         let mut pos = 4;
@@ -690,7 +715,7 @@ mod token_auth_tests {
     #[test]
     fn token_message_proxy_only_writes_proxy_client_name_before_token() {
         let mut out = Vec::new();
-        append_auth_phase_two_token_with_pop(
+        append_auth_phase_two_token_with_pop_and_proxy(
             &mut out,
             "", // no base user
             "tok",

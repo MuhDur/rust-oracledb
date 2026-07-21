@@ -191,14 +191,38 @@ pub fn build_fast_auth_token_payload(
         connect_string,
         edition,
         None,
+    )
+}
+
+/// [`build_fast_auth_token_payload`] with optional OCI IAM proof-of-possession.
+///
+/// This preserves the public 0.8.x API. For proxy token authentication, use
+/// [`build_fast_auth_token_payload_with_pop_and_proxy`].
+pub fn build_fast_auth_token_payload_with_pop(
+    user: &str,
+    token: &str,
+    driver_name: &str,
+    version_num: u32,
+    connect_string: &str,
+    edition: Option<&str>,
+    pop: Option<TokenPop<'_>>,
+) -> Result<Vec<u8>> {
+    build_fast_auth_token_payload_with_pop_and_proxy(
+        user,
+        token,
+        driver_name,
+        version_num,
+        connect_string,
+        edition,
+        pop,
         None,
     )
 }
 
-/// [`build_fast_auth_token_payload`] with optional OCI IAM proof-of-possession
-/// and optional proxy user (`PROXY_CLIENT_NAME`).
+/// [`build_fast_auth_token_payload_with_pop`] with optional proxy user
+/// (`PROXY_CLIENT_NAME`).
 #[allow(clippy::too_many_arguments)] // public token-auth compatibility surface
-pub fn build_fast_auth_token_payload_with_pop(
+pub fn build_fast_auth_token_payload_with_pop_and_proxy(
     user: &str,
     token: &str,
     driver_name: &str,
@@ -210,7 +234,7 @@ pub fn build_fast_auth_token_payload_with_pop(
 ) -> Result<Vec<u8>> {
     let mut out = Vec::from_hex(FAST_AUTH_PREFIX_HEX)
         .map_err(|_| ProtocolError::TtcDecode("invalid static fast-auth prefix"))?;
-    append_auth_phase_two_token_with_pop(
+    append_auth_phase_two_token_with_pop_and_proxy(
         &mut out,
         user,
         token,
@@ -246,14 +270,38 @@ pub fn build_auth_phase_two_token_payload(
         connect_string,
         edition,
         None,
+    )
+}
+
+/// [`build_auth_phase_two_token_payload`] with optional OCI IAM proof-of-possession.
+///
+/// This preserves the public 0.8.x API. For proxy token authentication, use
+/// [`build_auth_phase_two_token_payload_with_pop_and_proxy`].
+pub fn build_auth_phase_two_token_payload_with_pop(
+    user: &str,
+    token: &str,
+    driver_name: &str,
+    version_num: u32,
+    connect_string: &str,
+    edition: Option<&str>,
+    pop: Option<TokenPop<'_>>,
+) -> Result<Vec<u8>> {
+    build_auth_phase_two_token_payload_with_pop_and_proxy(
+        user,
+        token,
+        driver_name,
+        version_num,
+        connect_string,
+        edition,
+        pop,
         None,
     )
 }
 
-/// [`build_auth_phase_two_token_payload`] with optional OCI IAM proof-of-possession
-/// and optional proxy user (`PROXY_CLIENT_NAME`).
+/// [`build_auth_phase_two_token_payload_with_pop`] with optional proxy user
+/// (`PROXY_CLIENT_NAME`).
 #[allow(clippy::too_many_arguments)] // public token-auth compatibility surface
-pub fn build_auth_phase_two_token_payload_with_pop(
+pub fn build_auth_phase_two_token_payload_with_pop_and_proxy(
     user: &str,
     token: &str,
     driver_name: &str,
@@ -264,7 +312,7 @@ pub fn build_auth_phase_two_token_payload_with_pop(
     proxy_user: Option<&str>,
 ) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    append_auth_phase_two_token_with_pop(
+    append_auth_phase_two_token_with_pop_and_proxy(
         &mut out,
         user,
         token,
