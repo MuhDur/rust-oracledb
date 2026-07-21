@@ -5,8 +5,8 @@ is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project follows the SemVer contract described in
 [`docs/adr/0002-semver-contract.md`](docs/adr/0002-semver-contract.md).
 
-Scope window: canonical published release entries from 0.3.0 through 0.8.3,
-plus the prepared (not published) 0.8.4 candidate. The 0.7.4–0.8.2 spine was
+Scope window: canonical published release entries from 0.3.0 through 0.8.4.
+The 0.7.4–0.8.2 spine was
 reconstructed from git tags, GitHub Releases, tag ranges, release-matrix
 artifacts, and the checked-in API/provenance ledgers.
 
@@ -14,6 +14,7 @@ artifacts, and the checked-in API/provenance ledgers.
 
 | Version | Released | Release role |
 | --- | --- | --- |
+| [0.8.4](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.4) | 2026-07-17 | Autonomous Database / IAM release with TCPS, wallet, and cancellation hardening |
 | [0.8.3](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.3) | 2026-07-14 | Arrow interoperability, endpoint APIs, and recovery hardening |
 | [0.8.2](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.2) | 2026-07-08 | K10 owned-row stream, timer correction, and quality campaigns |
 | [0.8.1](https://github.com/MuhDur/rust-oracledb/releases/tag/v0.8.1) | 2026-07-08 | Wallet/session accessors and opt-in support capture |
@@ -30,9 +31,52 @@ artifacts, and the checked-in API/provenance ledgers.
 
 ## [Unreleased]
 
+### Added
+
+- **Bracket proxy usernames and proxy-only token authentication.**
+  `ConnectOptions::new` accepts the reference forms `base[proxy]` and
+  `[proxy]`; token authentication sends `PROXY_CLIENT_NAME` before
+  `AUTH_TOKEN`, including the empty-base proxy-only form. `full_user()` exposes
+  the display form without revealing credentials.
+- **Offline Oracle 19c capability coverage.** The decoder and version gates now
+  carry a captured 19c capability profile, including its protocol gates, so
+  older-server behavior is tested without treating an unsupported feature as a
+  later-server response.
+
+### Changed
+
+- **`ConnectOptions::new` now desugars bracketed usernames.** Existing 0.8.x
+  callers that pass `foo[bar]` no longer retain that literal as the base user:
+  it becomes base user `foo` plus proxy user `bar` (and `[bar]` becomes the
+  proxy-only form). A later `with_proxy_user(...)` still overrides it.
+- **TCPS trust anchors are a union.** Platform roots (or explicit
+  `SSL_CERT_FILE` / `SSL_CERT_DIR` roots) are loaded through
+  `rustls-native-certs` and wallet CA certificates are added to them. A wallet
+  no longer narrows platform trust; explicit environment roots replace platform
+  discovery before the wallet union.
+- **Required-quality evidence is more deterministic.** Quality fan-out and
+  release-qualification preparation preserve exact command evidence, fuzz
+  target coverage, and non-mutating baseline checks.
+
+### Fixed
+
+- **TCPS setup and shutdown hardening.** Configuration errors fail before a
+  transport attempt, configured TLS handshake budgets are honored, the OCI ADB
+  SNI carve-out recognizes the supported endpoint forms, and a terminal TLS
+  close without `close_notify` no longer causes a follow-on EOF write.
+- **Connection and pool recovery.** A final pool handle is tracked without a
+  race, `TIMEDWAIT` acquisition no longer creates one OS thread per waiter, and
+  retries refuse `SELECT` statements hidden behind leading comments.
+- **Value/parity correctness.** Arrow NUMBER sentinels can no longer collapse
+  into `-1`; chrono preserves sub-minute `FixedOffset` instants; the Python
+  harness binds `Decimal` through exact text and hardens conversion and
+  cancellation behavior.
+- **Required-check stability.** Parallel `tnsnames.ora` tests now use a unique
+  temporary-directory counter instead of colliding at coarse clock resolution.
+
 ## [0.8.4]
 
-> Prepared release candidate; not published to crates.io or tagged.
+> Published to crates.io and tagged as `v0.8.4` on 2026-07-17.
 
 ### Added
 
