@@ -1,0 +1,49 @@
+{
+  "schema": "pyshim-live-regression/v1",
+  "generated_at": "2026-07-21T22:46:01Z",
+  "source": {
+    "sha": "93595357c84dc58fe271b8801abc4d6b9b611293",
+    "tree_clean": true,
+    "checkout": "fresh detached clone"
+  },
+  "environment": {
+    "database": "pre-existing rust-oracledb-free (gvenzl/oracle-free:23-slim)",
+    "python": "CPython 3.13",
+    "shim": "maturin develop from crates/oracledb-pyshim/Cargo.toml"
+  },
+  "reproduce": [
+    "git clone <rust-oracledb> <clean-clone> && cd <clean-clone> && git checkout --detach 93595357c84dc58fe271b8801abc4d6b9b611293",
+    "eval \"$(scripts/container.sh env)\"",
+    "VIRTUAL_ENV=.venv-py313 PATH=.venv-py313/bin:$PATH .venv-py313/bin/python -m maturin develop -m crates/oracledb-pyshim/Cargo.toml",
+    "PYTHONPATH=harness .venv-py313/bin/python -m pytest -q harness/tests/test_regressions.py::test_number_scale_preserves_default_float_type harness/tests/test_regressions.py::test_arbitrary_precision_int_bind_is_exact harness/tests/test_regressions.py::test_threaded_cancel_runs_while_blocking_io_is_in_flight"
+  ],
+  "results": {
+    "exit_code": 0,
+    "passed": 3,
+    "total": 3,
+    "tests": [
+      {
+        "bead": "rust-oracledb-f-driver-py1-number-scale-type-k8df",
+        "nodeid": "harness/tests/test_regressions.py::test_number_scale_preserves_default_float_type",
+        "outcome": "passed",
+        "assertion": "NUMBER(10,2)=5.00 fetches as type(actual) is float and actual == 5.0"
+      },
+      {
+        "bead": "rust-oracledb-f-driver-py3-bigint-exact-bind-rykk",
+        "nodeid": "harness/tests/test_regressions.py::test_arbitrary_precision_int_bind_is_exact",
+        "outcome": "passed",
+        "assertion": "a 40-digit Python int binds and fetches exactly as type(actual) is int"
+      },
+      {
+        "bead": "rust-oracledb-f-driver-py4-detach-blocking-io-yh97",
+        "nodeid": "harness/tests/test_regressions.py::test_threaded_cancel_runs_while_blocking_io_is_in_flight",
+        "outcome": "passed",
+        "assertion": "cancel completes while fetch is in flight and the session remains usable"
+      }
+    ]
+  },
+  "limitations": [
+    "This is a targeted Free23 live regression run, not a multi-version matrix or complete python-oracledb parity run.",
+    "The raw pytest-json-report output is deliberately not committed because it embeds the local checkout root; this sanitized record preserves the exact source SHA, command, test identities, and observed outcomes without committing local identifiers."
+  ]
+}
