@@ -17,6 +17,11 @@ scripts/check_bead_close_evidence.sh --strict       # also fail on unevidenced c
 Documents live at `tests/artifacts/evidence/closes/<bead-id>.json`. The filename
 must match the document's `bead_id`; the audit checks it.
 
+The non-strict audit runs in both CI and Required against the committed
+`.beads/issues.jsonl` export. Hard findings fail those jobs; advisory findings
+are printed but do not gate. This makes the structural contract enforceable
+without treating the historical free-text heuristics as decisive evidence.
+
 ## The audit is read-only
 
 It never writes a bead, never closes or reopens anything, never edits a file.
@@ -51,14 +56,14 @@ audit that cries wolf gets muted, and a muted audit is worse than no audit.
 
 ## Unevidenced closes are not failures
 
-This repo has **337 closed beads** and the contract is new. Retroactively failing
+This repo has **413 closed beads** and the contract is new. Retroactively failing
 every close that predates it would produce a permanently red gate, which teaches
-people to ignore it. So the audit reports coverage as a number — currently 2 of
-337 — and that number should only move one way. `--strict` opts into failing on
+people to ignore it. So the audit reports coverage as a number — currently 6 of
+413 — and that number should only move one way. `--strict` opts into failing on
 it, for a future where the backlog is worked down.
 
-The 70 advisory `LIVE_CLAIM_WITHOUT_REFERENCE` hits are a real finding about this
-repo's history, not noise to suppress: 70 closes claim live or end-to-end work
+The 88 advisory findings are a real finding about this repo's history, not noise
+to suppress: some closes claim live or end-to-end work
 without citing a commit or artifact. That is the pattern the epic was opened for.
 They are recorded rather than fixed, because rewriting other agents' historical
 closes is not this bead's job.

@@ -6,7 +6,7 @@
     "skip_reason_pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
   },
   "script_inventory": [
-    {"path": "scripts/audit_bead_closes.py", "kind": "entry_point", "trace": "bead-close-audit"},
+    {"path": "scripts/audit_bead_closes.py", "kind": "helper", "excluded_reason": "invoked-by-close-evidence-shell-entrypoint"},
     {"path": "scripts/bootstrap_live_schema.sh", "kind": "helper", "excluded_reason": "invoked-by-version-matrix-fixture-bootstrap"},
     {"path": "scripts/check_api_ledger.sh", "kind": "entry_point", "trace": "required-quality"},
     {"path": "scripts/check_async_blocking_coverage.sh", "kind": "entry_point", "trace": "required-quality"},
@@ -208,13 +208,14 @@
     },
     {
       "id": "bead-close-audit",
-      "tier": "operator",
-      "runner": "scripts/audit_bead_closes.py",
+      "tier": "required",
+      "runner": "scripts/check_bead_close_evidence.sh",
       "skip_policy": "fail",
       "dispatch": [
-        {"path": "scripts/audit_bead_closes.py", "marker": "argparse"}
+        {"path": ".github/workflows/ci.yml", "marker": "bash scripts/check_bead_close_evidence.sh"},
+        {"path": ".github/workflows/_quality.yml", "marker": "bash scripts/check_bead_close_evidence.sh"}
       ],
-      "result": {"path": "scripts/audit_bead_closes.py", "markers": ["sys.exit", "audit"]},
+      "result": {"path": "scripts/audit_bead_closes.py", "markers": ["HARD findings", "return 1"]},
       "capabilities": []
     },
     {

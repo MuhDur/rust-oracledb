@@ -22,11 +22,7 @@
   "source": {
     "sha": "d99927d0723ecae10a732a9f89ebeab76af75445",
     "tree_clean": true,
-    "branch": "master",
-    "implementing_commits": [
-      "880134ee97f40409ccceae8580c8bd1771e5173e",
-      "d99927d0723ecae10a732a9f89ebeab76af75445"
-    ]
+    "branch": "master"
   },
   "proofs": [],
   "integration_evidence": {
@@ -54,12 +50,12 @@
   },
   "limitations": [
     "No cloud or live Oracle endpoint was contacted: the discriminating defect is pre-network and is proved by a deterministic local TCP sentinel plus a committed synthetic wallet fixture.",
-    "The original required-proof JSON path was not present in this tree; close is pinned by the four unit tests above re-run green on HEAD with 880134e/d99927d as ancestors."
+    "No exact-SHA Required proof or live artifact is committed for d99927d0723ecae10a732a9f89ebeab76af75445; this is not-ready and records scoped local regression evidence only."
   ],
   "known_defects": [],
   "follow_ups": [],
   "readiness": {
-    "claim": "ready",
-    "basis": "pin-tests-on-head"
+    "claim": "not-ready",
+    "basis": "scoped-test"
   }
 }

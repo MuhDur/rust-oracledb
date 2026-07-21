@@ -164,6 +164,7 @@ jobs:
           bash scripts/check_entry_trace_contract.sh --self-test
           bash scripts/check_release_surface_versions.sh
           bash scripts/check_ci_taxonomy.sh
+          bash scripts/check_bead_close_evidence.sh
 
   musl-size-smoke:
     name: musl size gate smoke

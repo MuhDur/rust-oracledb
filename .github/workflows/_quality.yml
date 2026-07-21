@@ -232,6 +232,13 @@ jobs:
         with:
           shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
 
+      # The versioned pre-push-hook fixture invokes gen_baseline.sh, which uses
+      # ripgrep. Install its declared prerequisite before executing that fixture.
+      - name: Install baseline tools
+        id: baseline_tools
+        continue-on-error: ${{ inputs.mode == 'prep' }}
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Verify checked entry traces and release/evidence contracts
         id: evidence_contracts
         continue-on-error: ${{ inputs.mode == 'prep' }}
@@ -242,13 +249,8 @@ jobs:
           bash scripts/check_entry_trace_contract.sh --self-test
           bash scripts/check_release_surface_versions.sh
           bash scripts/check_ci_taxonomy.sh
+          bash scripts/check_bead_close_evidence.sh
           bash scripts/test_baseline_pre_push_guard.sh
-
-      - name: Install baseline tools
-        id: baseline_tools
-        if: ${{ inputs.profile != 'canary' }}
-        continue-on-error: ${{ inputs.mode == 'prep' }}
-        run: sudo apt-get update && sudo apt-get install -y ripgrep
 
       - name: Install cargo-public-api
         id: cargo_public_api
@@ -332,8 +334,8 @@ jobs:
           set -euo pipefail
           mkdir -p "$RESULTS_DIR"
           {
-            printf 'contracts\tVerify checked entry traces and release/evidence contracts\t%s\n' '${{ steps.evidence_contracts.outcome }}'
             printf 'contracts\tInstall baseline tools\t%s\n' '${{ steps.baseline_tools.outcome }}'
+            printf 'contracts\tVerify checked entry traces and release/evidence contracts\t%s\n' '${{ steps.evidence_contracts.outcome }}'
             printf 'contracts\tInstall cargo-public-api\t%s\n' '${{ steps.cargo_public_api.outcome }}'
             printf 'contracts\tBaseline drift check\t%s\n' '${{ steps.baseline_drift.outcome }}'
             printf 'contracts\tAPI ledger coverage\t%s\n' '${{ steps.api_ledger.outcome }}'

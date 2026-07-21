@@ -21,11 +21,7 @@
   "source": {
     "sha": "4eddf9b480d61bd09b3b4d06af14c507e49e0682",
     "tree_clean": true,
-    "branch": "master",
-    "implementing_commits": [
-      "3f55d30849d15fc27b5edce17d6d029c3a4065c4",
-      "4eddf9b480d61bd09b3b4d06af14c507e49e0682"
-    ]
+    "branch": "master"
   },
   "proofs": [],
   "integration_evidence": {
@@ -58,12 +54,12 @@
   },
   "limitations": [
     "The integration proof uses a local deterministic rustls peer rather than a live OCI endpoint; it reproduces the exact bare-TCP-FIN/no-close_notify transport shape without consuming a cloud resource.",
-    "The original required-proof JSON path was not present in this tree; close is pinned by the three tests above re-run green on HEAD with 3f55d30/4eddf9b as ancestors."
+    "No exact-SHA Required proof or live artifact is committed for 4eddf9b480d61bd09b3b4d06af14c507e49e0682; this is not-ready and records scoped local regression evidence only."
   ],
   "known_defects": [],
   "follow_ups": [],
   "readiness": {
-    "claim": "ready",
-    "basis": "pin-tests-on-head"
+    "claim": "not-ready",
+    "basis": "scoped-test"
   }
 }

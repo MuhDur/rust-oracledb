@@ -41,6 +41,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CLOSES_DIR = ROOT / "tests" / "artifacts" / "evidence" / "closes"
+ISSUES_PATH = ROOT / ".beads" / "issues.jsonl"
 
 _spec = importlib.util.spec_from_file_location(
     "validate_evidence", ROOT / "scripts" / "validate_evidence.py"
@@ -82,18 +83,41 @@ def _commit_exists(sha: str) -> bool:
 
 
 def _closed_beads() -> list:
-    out = subprocess.run(
-        ["br", "list", "--status", "closed", "--json", "--limit", "1000"],
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=ROOT,
-    )
-    if out.returncode != 0:
-        print(f"audit: br list failed: {out.stderr.strip()}", file=sys.stderr)
-        raise SystemExit(2)
-    payload = json.loads(out.stdout)
-    return payload["issues"] if isinstance(payload, dict) else payload
+    """Return closed beads from the committed export available to every CI runner."""
+    try:
+        lines = ISSUES_PATH.read_text().splitlines()
+    except OSError as exc:
+        print(f"audit: cannot read {ISSUES_PATH.relative_to(ROOT)}: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+    closed: list = []
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            bead = json.loads(line)
+        except json.JSONDecodeError as exc:
+            print(
+                f"audit: malformed {ISSUES_PATH.relative_to(ROOT)} line {line_number}: {exc}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2) from exc
+        if not isinstance(bead, dict):
+            print(
+                f"audit: {ISSUES_PATH.relative_to(ROOT)} line {line_number} is not an object",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        if bead.get("status") == "closed":
+            bead_id = bead.get("id")
+            if not isinstance(bead_id, str) or not bead_id:
+                print(
+                    f"audit: {ISSUES_PATH.relative_to(ROOT)} line {line_number} has no bead id",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
+            closed.append(bead)
+    return closed
 
 
 def _reason_of(bead: dict) -> str:
