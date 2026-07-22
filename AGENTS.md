@@ -29,12 +29,15 @@ publishing as a gated, deliberate, operator-authorized step, never an incidental
 
 ## Swarm operating constitution
 
-Twelve rules mined from the 2026-07 multi-repo swarm retrospective (see the
-sibling `oraclemcp` checkout's `docs/plan/RETRO_SWARM_CAMPAIGN_2026-07.md`
-§3G and `docs/plan/PLAN_ENGINEERING_PROGRAM.md` §27.3 — this repo has no
-local copy). Binding on every agent in this repo, solo or swarmed — most are
-new; a few name-and-link existing rules above so the constitution stays the
-one place to check:
+Eighteen rules. Rules 1-12 were mined from the 2026-07 multi-repo swarm
+retrospective (see the sibling `oraclemcp` checkout's
+`docs/plan/RETRO_SWARM_CAMPAIGN_2026-07.md` §3G and
+`docs/plan/PLAN_ENGINEERING_PROGRAM.md` §27.3 — this repo has no local copy);
+rules 13-17 were mined from the 2026-07-21 five-agent session, one per incident
+it produced (rule 18 from an incident during the session that encoded the
+others). Binding on every agent in this repo, solo or swarmed — most are new; a
+few name-and-link existing rules above so the constitution stays the one place
+to check:
 
 1. Never defer planned work on your own initiative — deferral is the
    operator's call, not an agent's judgment call.
@@ -63,6 +66,31 @@ one place to check:
 12. Escalate blockers to the operator; delegate unforeseen work to the
     tracker (`br create`), don't quietly derail the authoritative prompt's
     scope.
+13. **A modified file that is not yours is another agent mid-edit, not a
+    defect.** Check `git status` on a file before declaring it broken, and
+    judge the committed truth (`git show HEAD:<path>`) before filing a build
+    blocker or going idle on one.
+14. **Close evidence comes from a tree verified clean of other agents' work.**
+    Derive the evidence `source` block from git rather than asserting it;
+    commit your in-scope work first, and generate a whole-tree reproducibility
+    proof from a dedicated clean worktree at HEAD.
+15. **Read the gate verdict yourself; never infer a pass from a successful
+    push.** `git push` reports what the remote accepted, not what the gate
+    decided. A gate that printed a failure is a failure no matter how the push
+    went.
+16. **Never block a turn on an unbounded wait.** Check once, report, move on.
+    Every wait carries a deadline, and reaching the deadline is a result to
+    report — not a reason to wait again. A blocked turn queues every dispatch
+    behind it.
+17. **A struct field and its initializers are ONE logical change, landed in ONE
+    commit by ONE agent.** The same holds for any edit whose halves do not
+    compile apart: a `git mv` and its references, a trait method and its impls,
+    an enum variant and its exhaustive matches. Split it across panes and you
+    break the build for everyone in the shared checkout.
+18. **Commit explicit paths, then verify what landed.** `git commit -- <path>...`
+    and `git show --stat HEAD`; never `-a`/`git add -A` in a shared checkout.
+    A deletion of a path that still exists in the worktree is a stale index
+    snapshot committed over someone else's landed work, not a delete.
 
 ## Rust toolchain & gates
 
