@@ -3180,6 +3180,9 @@ impl Connection {
                             break 'failover;
                         }
                         Err(err) => {
+                            if err.is_terminal() {
+                                return Err(err.into_driver_error());
+                            }
                             attempt_errors
                                 .push(format!("{}:{} ({err})", candidate.host, candidate.port));
                         }
@@ -10785,6 +10788,13 @@ enum TransportEstablishmentError {
 }
 
 impl TransportEstablishmentError {
+    fn is_terminal(&self) -> bool {
+        match self {
+            Self::Io(_) => false,
+            Self::TlsHandshake(error) => error.is_terminal(),
+        }
+    }
+
     fn into_driver_error(self) -> Error {
         match self {
             Self::Io(error) => Error::Io(error),
@@ -14819,6 +14829,27 @@ mod tests {
         dir
     }
 
+    /// Copy an unrelated synthetic CA into a temp wallet. The local TLS server
+    /// presents `leaf.crt`, signed by `ca.crt`; trusting this unrelated CA
+    /// makes the client fail at chain validation (`UnknownIssuer`) before any
+    /// Oracle protocol bytes are exchanged.
+    fn dc5_untrusted_temp_wallet_dir(label: &str) -> std::path::PathBuf {
+        let mut fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        fixture.push("tests");
+        fixture.push("fixtures");
+        fixture.push("tls");
+        fixture.push("synthetic");
+        fixture.push("ca.pem");
+
+        let dir = std::env::temp_dir().join(format!(
+            "oracledb-dc5-untrusted-wallet-{label}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp untrusted wallet dir");
+        std::fs::copy(&fixture, dir.join("ewallet.pem")).expect("copy unrelated ca.pem fixture");
+        dir
+    }
+
     /// Build a full `(DESCRIPTION=...)` TCPS connect string pinning
     /// `SSL_SERVER_CERT_DN` (and, when `dn_match_off` is set,
     /// `SSL_SERVER_DN_MATCH=OFF`) entirely in the connect string — the
@@ -14865,6 +14896,52 @@ mod tests {
     /// that wrapping.
     fn dc_rendered_error(err: &Error) -> String {
         format!("{err} / debug={err:?}")
+    }
+
+    /// B5 / oraclemcp-u9ldz: an untrusted TCPS server certificate is a terminal
+    /// certificate-verification failure, not a transport timeout and not a
+    /// generic all-addresses aggregate. Differential proof against
+    /// python-oracledb 4.0.1 on the same synthetic shape:
+    /// `CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate` in
+    /// ~10 ms, with the server receiving `tlsv1 alert unknown ca`.
+    #[test]
+    fn b5_tcps_unknown_issuer_is_tls_error_not_timeout_or_failover() {
+        let (port, server) = spawn_dc2_dc3_fixture_tls_server();
+        let wallet_dir = dc5_untrusted_temp_wallet_dir("unknown-issuer");
+        let options = ConnectOptions::new(
+            format!("tcps://127.0.0.1:{port}/FREEPDB1?transport_connect_timeout=2"),
+            "user",
+            "password",
+            identity(),
+        )
+        .with_wallet_location(wallet_dir.display().to_string());
+
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let started = Instant::now();
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("ambient Cx");
+                Connection::connect(&cx, options).await
+            })
+            .expect_err("an untrusted synthetic TCPS certificate must be refused");
+        let elapsed = started.elapsed();
+        let rendered = dc_rendered_error(&err);
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "untrusted issuer must fail fast, not wait for connect timeout; took {elapsed:?}, \
+             error={rendered}"
+        );
+        assert!(
+            matches!(&err, Error::Tls(detail)
+                if detail.contains("certificate") && detail.contains("not trusted")),
+            "untrusted issuer must surface as a structured TLS certificate error, not timeout or \
+             failover aggregation; got {rendered}"
+        );
+        assert!(
+            !matches!(err, Error::CallTimeout(_) | Error::AllAddressesFailed(_)),
+            "untrusted issuer must not be hidden as timeout/failover aggregation: {rendered}"
+        );
+        let _ = server.join();
     }
 
     /// F-DC2 discriminating test: a `SSL_SERVER_CERT_DN` pinned ONLY in the

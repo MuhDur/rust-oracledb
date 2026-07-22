@@ -859,12 +859,13 @@ oracledb	crates/oracledb/src/tls.rs	pub(crate) const fn handshake_timeout_from_c
 oracledb	crates/oracledb/src/tls.rs	pub(crate) fn build_client_config(params: &TlsParams) -> Result<ClientConfig, Error> {
 oracledb	crates/oracledb/src/tls.rs	pub(crate) fn decide_sni(
 oracledb	crates/oracledb/src/tls.rs	pub(crate) fn into_driver_error(self) -> Error {
+oracledb	crates/oracledb/src/tls.rs	pub(crate) fn is_terminal(&self) -> bool {
 oracledb	crates/oracledb/src/tls.rs	pub(crate) fn new(message: String) -> Self {
 oracledb	crates/oracledb/src/tls.rs	pub(crate) fn prepare_tls_handshake(
 oracledb	crates/oracledb/src/tls.rs	pub(crate) fn resolve_tls_params(
 oracledb	crates/oracledb/src/tls.rs	pub(crate) struct OracleServerCertVerifier {
 oracledb	crates/oracledb/src/tls.rs	pub(crate) struct PreparedTlsHandshake {
-oracledb	crates/oracledb/src/tls.rs	pub(crate) struct TlsHandshakeError(String);
+oracledb	crates/oracledb/src/tls.rs	pub(crate) struct TlsHandshakeError {
 oracledb	crates/oracledb/src/transport.rs	pub enum CassetteCaptureError {
 oracledb	crates/oracledb/src/transport.rs	pub enum ReplayWriteMode {
 oracledb	crates/oracledb/src/transport.rs	pub fn capture_scope() -> CaptureScope {

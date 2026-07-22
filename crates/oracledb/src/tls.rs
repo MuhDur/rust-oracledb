@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use asupersync::net::TcpStream;
-use asupersync::tls::{TlsConnector, TlsStream};
+use asupersync::tls::{TlsConnector, TlsError as AsupersyncTlsError, TlsStream};
 use oracledb_protocol::net::EasyConnect;
 use oracledb_protocol::tls::dn::{check_cert_dn, check_server_name, DnMatchError};
 use oracledb_protocol::tls::sni::build_sni;
@@ -78,22 +78,67 @@ pub(crate) struct PreparedTlsHandshake {
 /// Keeping this distinct from [`Error::Tls`] internally makes the address
 /// failover boundary stage-aware without changing the public error enum.
 #[derive(Debug)]
-pub(crate) struct TlsHandshakeError(String);
+pub(crate) struct TlsHandshakeError {
+    message: String,
+    terminal: bool,
+}
 
 impl TlsHandshakeError {
+    #[cfg(test)]
     pub(crate) fn new(message: String) -> Self {
-        Self(message)
+        Self {
+            message,
+            terminal: false,
+        }
+    }
+
+    fn from_asupersync(error: AsupersyncTlsError) -> Self {
+        let terminal = tls_error_is_terminal(&error);
+        Self {
+            message: error.to_string(),
+            terminal,
+        }
+    }
+
+    pub(crate) fn is_terminal(&self) -> bool {
+        self.terminal
     }
 
     pub(crate) fn into_driver_error(self) -> Error {
-        Error::Tls(format!("TCPS handshake failed: {}", self.0))
+        Error::Tls(format!("TCPS handshake failed: {}", self.message))
     }
 }
 
 impl std::fmt::Display for TlsHandshakeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TLS/TCPS error: TCPS handshake failed: {}", self.0)
+        write!(f, "TLS/TCPS error: TCPS handshake failed: {}", self.message)
     }
+}
+
+fn tls_error_is_terminal(error: &AsupersyncTlsError) -> bool {
+    match error {
+        AsupersyncTlsError::Certificate(_)
+        | AsupersyncTlsError::CertificateExpired { .. }
+        | AsupersyncTlsError::CertificateNotYetValid { .. }
+        | AsupersyncTlsError::ChainValidation(_)
+        | AsupersyncTlsError::PinMismatch { .. } => true,
+        AsupersyncTlsError::Rustls(error) => rustls_error_is_terminal(error),
+        AsupersyncTlsError::Handshake(message) => tls_error_message_is_terminal(message),
+        _ => false,
+    }
+}
+
+fn rustls_error_is_terminal(error: &RustlsError) -> bool {
+    matches!(error, RustlsError::InvalidCertificate(_))
+        || tls_error_message_is_terminal(&error.to_string())
+}
+
+fn tls_error_message_is_terminal(message: &str) -> bool {
+    message.contains("certificate")
+        || message.contains("distinguished name (DN)")
+        || message.contains("server certificate")
+        || message.contains("UnknownIssuer")
+        || message.contains("unknown issuer")
 }
 
 /// The Oracle server-certificate verifier.
@@ -880,7 +925,7 @@ pub(crate) async fn tls_handshake_prepared(
     connector
         .connect(&prepared.server_name, tcp)
         .await
-        .map_err(|error| TlsHandshakeError::new(error.to_string()))
+        .map_err(TlsHandshakeError::from_asupersync)
 }
 
 /// Keep the TLS phase on the caller's already-resolved connect budget.

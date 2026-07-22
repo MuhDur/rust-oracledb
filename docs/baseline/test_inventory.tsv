@@ -59,7 +59,7 @@ crates/oracledb/src/arrow/ipc.rs	1
 crates/oracledb/src/arrow/mod.rs	40
 crates/oracledb/src/cursor_logic.rs	14
 crates/oracledb/src/iam_pop.rs	3
-crates/oracledb/src/lib.rs	158
+crates/oracledb/src/lib.rs	159
 crates/oracledb/src/lob_stream.rs	8
 crates/oracledb/src/obs.rs	6
 crates/oracledb/src/pool.rs	35
