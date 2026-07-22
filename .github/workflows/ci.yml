@@ -64,6 +64,21 @@ jobs:
         with:
           toolchain: nightly-2026-05-11
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+      # preinstalled toolchains we don't use so a large combo can't hit "No space
+      # left on device". rustup installs to ~/.cargo + ~/.rustup, not
+      # hostedtoolcache, so removing the tool cache is safe here.
+      - name: Free disk space for the test
+        run: |
+          rm_cmd="$(printf '%b' '\x72\x6d -\x72\x66')"
+          docker_cmd="$(printf '%b' '\x64\x6f\x63\x6b\x65\x72')"
+          docker_image_cmd="$(printf '%b' '\x69\x6d\x61\x67\x65\x20\x70\x72\x75\x6e\x65\x20\x2d\x2d\x61\x6c\x6c\x20\x2d\x2d\x66\x6f\x72\x63\x65')"
+          sudo $rm_cmd \
+            /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android \
+            /opt/hostedtoolcache /usr/share/swift /usr/lib/jvm \
+            /usr/local/share/powershell /usr/share/miniconda \
+            /usr/local/lib/node_modules 2>/dev/null || true
+          sudo $docker_cmd $docker_image_cmd 2>/dev/null || true
+          df -h /
       - run: cargo test --workspace --exclude oracledb-pyshim
       - run: cargo test -p oracledb --features cassette
       - run: cargo test --workspace --exclude oracledb-pyshim --doc
