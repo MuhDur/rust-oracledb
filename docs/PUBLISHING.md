@@ -10,7 +10,7 @@ for the publish order, the version, what ships, and the post-publish checklist.
 |---|---|
 | Initial public release | **0.1.0** |
 | Latest published release | **0.9.0** |
-| Workspace release version | **0.9.0** |
+| Workspace release version | **0.9.1** |
 | Candidate source | `[workspace.package].version` in the root `Cargo.toml` |
 
 `0.1.0` (not `0.0.0`, which crates.io treats as a placeholder, and not a
@@ -84,8 +84,8 @@ exist when it is uploaded):
 
 `oracledb` depends on `oracledb-protocol` (always) and `oracledb-derive` (under
 the default `derive` feature). Both are declared with **both** a `path` (used for
-local development) and a version pin matching the workspace release (for 0.9.0,
-`version = "0.9.0"`, used by crates.io when published):
+local development) and a version pin matching the workspace release (for 0.9.1,
+`version = "0.9.1"`, used by crates.io when published):
 
 ```toml
 oracledb-protocol = { path = "../oracledb-protocol", version = "0.9.0" }

@@ -31,6 +31,49 @@ artifacts, and the checked-in API/provenance ledgers.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-07-22
+
+Consumer-driven patch release: every change here was surfaced by `oraclemcp`
+exercising the driver, which is why they are narrow and behavioural rather than
+API-shaped. No public API changes.
+
+### Fixed
+
+- **TCPS now fails fast on an untrusted certificate instead of waiting for the
+  connect timeout.** An unknown issuer previously left the caller unable to
+  distinguish a certificate-verification failure from a transport timeout or a
+  failover, because the error only surfaced once the connect deadline elapsed.
+  The handshake is now rejected at verification time and the rendered error text
+  names the TLS cause.
+- **`DateTime<FixedOffset>` binds with a sub-minute offset are rejected instead
+  of silently truncated.** Oracle's TSTZ encoding has minute precision, so an
+  offset such as `+00:00:30` was previously encoded as `+00:00`, changing the
+  represented instant with no error. Offsets whose seconds are not divisible by
+  60 now return a typed `ConversionError`; exact minute offsets such as `+05:45`
+  and `-03:30` round-trip unchanged.
+
+### Changed
+
+- **Release-qualification rejects an unusable `candidate_sha` up front.** An
+  abbreviated SHA is not a resolvable ref, so `actions/checkout` failed in every
+  matrix job and the whole run looked broken twelve jobs deep. The input is now
+  validated before the matrix fans out.
+- **Quality workflow split into a parallel job matrix** with fail-fast disabled
+  across all four callers, the fuzz lane sharded four ways, and preinstalled
+  runner toolchains purged before the workspace test so the linker no longer
+  dies with "No space left on device".
+- Swarm charter rules 13-18 and `scripts/swarm_discipline.sh` mirrored into this
+  repository, with the unbounded-wait lint's file set and entry-trace
+  registration adapted rather than copied.
+
+### Internal
+
+- The TCPS unknown-issuer acceptance test discriminated "failed fast" from
+  "waited for the connect timeout" with a one-second margin against a two-second
+  transport timeout, which a loaded shared runner could not honour. The ratio is
+  widened; the rendered-text assertion, which is the durable discriminator,
+  is unchanged.
+
 ## [0.9.0] - 2026-07-21
 
 ### Added

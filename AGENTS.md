@@ -113,7 +113,7 @@ refusal and each acceptance; CI can run it with your required local proofs.
 
 ## Rust toolchain & gates
 
-- Cargo workspace, `resolver = "2"`, workspace version **0.9.0**,
+- Cargo workspace, `resolver = "2"`, workspace version **0.9.1**,
   `edition = "2021"`.
 - **NIGHTLY Rust is required** — pinned to **`nightly-2026-05-11`** in
   `rust-toolchain.toml` (components `rustfmt`, `clippy`). There is **no stable
