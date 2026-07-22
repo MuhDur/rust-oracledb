@@ -68,7 +68,12 @@ CONDITIONS = {
 }
 FANOUT_JOBS = (
     "validate",
-    "core",
+    "format",
+    "clippy",
+    "test-workspace",
+    "test-cassette",
+    "docs",
+    "stable",
     "contracts",
     "features",
     "release-surface",
@@ -623,14 +628,12 @@ def validate_quality_job_graph(workflow: QualityWorkflow) -> None:
     if download_step.condition != PREP_CONTINUE or prep_step.condition != PREP_CONTINUE:
         raise ContractError("prep aggregation steps must be prep-only")
     aggregate_run = strict_step.run or ""
-    result_tokens = {
-        "release-surface": "${{ needs['release-surface'].result }}",
-        **{
-            identifier: f"${{{{ needs.{identifier}.result }}}}"
-            for identifier in FANOUT_JOBS
-            if identifier != "release-surface"
-        },
-    }
+    result_tokens = {}
+    for identifier in FANOUT_JOBS:
+        if "-" in identifier:
+            result_tokens[identifier] = f"${{{{ needs['{identifier}'].result }}}}"
+        else:
+            result_tokens[identifier] = f"${{{{ needs.{identifier}.result }}}}"
     missing_tokens = sorted(
         identifier for identifier, token in result_tokens.items() if token not in aggregate_run
     )
@@ -642,7 +645,8 @@ def validate_quality_job_graph(workflow: QualityWorkflow) -> None:
 
     prep_run = prep_step.run or ""
     prep_tokens = (
-        "validate core contracts features release-surface musl perf",
+        "validate format clippy test-workspace test-cassette docs stable",
+        "contracts features release-surface musl perf",
         "fuzz-0 fuzz-1 fuzz-2 fuzz-3",
         "Prep diagnostics only; no qualification proof or release evidence was emitted.",
         'if [[ "$outcome" != "success" ]]',
@@ -1084,12 +1088,12 @@ jobs:
     else:
         raise AssertionError("unresolved active environment must fail closed")
 
-    strategy_on_core = parse_quality_workflow(quality_text)
-    strategy_on_core.jobs["core"].strategy = FUZZ_STRATEGY
+    strategy_on_clippy = parse_quality_workflow(quality_text)
+    strategy_on_clippy.jobs["clippy"].strategy = FUZZ_STRATEGY
     try:
-        validate_quality_job_graph(strategy_on_core)
+        validate_quality_job_graph(strategy_on_clippy)
     except ContractError as exc:
-        assert "job 'core': strategy must be" in str(exc), exc
+        assert "job 'clippy': strategy must be" in str(exc), exc
     else:
         raise AssertionError("a matrix outside the fuzz job must fail closed")
 
@@ -1108,7 +1112,7 @@ jobs:
             raise AssertionError(f"fuzz strategy {broken_strategy!r} must fail closed")
 
     broken_condition = parse_quality_workflow(QUALITY_WORKFLOW.read_text())
-    broken_condition.jobs["core"].condition = "${{ inputs.profile != 'canary' }}"
+    broken_condition.jobs["clippy"].condition = "${{ inputs.profile != 'canary' }}"
     try:
         validate_quality_job_graph(broken_condition)
     except ContractError as exc:

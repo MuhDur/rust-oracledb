@@ -17,6 +17,19 @@
       "path_filtered": false
     },
     {
+      "check_name": "canary / quality-clippy (canary/canary)",
+      "tier": "scheduled",
+      "workflow": "Canary",
+      "workflow_file": "canary.yml",
+      "job_id": "canary",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "canary / quality-contracts (canary/canary)",
       "tier": "scheduled",
       "workflow": "Canary",
@@ -30,7 +43,7 @@
       "path_filtered": false
     },
     {
-      "check_name": "canary / quality-core (canary/canary)",
+      "check_name": "canary / quality-docs (canary/canary)",
       "tier": "scheduled",
       "workflow": "Canary",
       "workflow_file": "canary.yml",
@@ -44,6 +57,19 @@
     },
     {
       "check_name": "canary / quality-features (canary/canary)",
+      "tier": "scheduled",
+      "workflow": "Canary",
+      "workflow_file": "canary.yml",
+      "job_id": "canary",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "canary / quality-format (canary/canary)",
       "tier": "scheduled",
       "workflow": "Canary",
       "workflow_file": "canary.yml",
@@ -135,6 +161,45 @@
     },
     {
       "check_name": "canary / quality-release-surface (canary/canary)",
+      "tier": "scheduled",
+      "workflow": "Canary",
+      "workflow_file": "canary.yml",
+      "job_id": "canary",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "canary / quality-stable (canary/canary)",
+      "tier": "scheduled",
+      "workflow": "Canary",
+      "workflow_file": "canary.yml",
+      "job_id": "canary",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "canary / quality-test-cassette (canary/canary)",
+      "tier": "scheduled",
+      "workflow": "Canary",
+      "workflow_file": "canary.yml",
+      "job_id": "canary",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "canary / quality-test-workspace (canary/canary)",
       "tier": "scheduled",
       "workflow": "Canary",
       "workflow_file": "canary.yml",
@@ -338,6 +403,18 @@
       "path_filtered": false
     },
     {
+      "check_name": "release-qualification / quality-clippy (release-qualification/release)",
+      "tier": "manual",
+      "workflow": "Release Qualification",
+      "workflow_file": "release-qualification.yml",
+      "job_id": "release-qualification",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "release-qualification / quality-contracts (release-qualification/release)",
       "tier": "manual",
       "workflow": "Release Qualification",
@@ -350,7 +427,7 @@
       "path_filtered": false
     },
     {
-      "check_name": "release-qualification / quality-core (release-qualification/release)",
+      "check_name": "release-qualification / quality-docs (release-qualification/release)",
       "tier": "manual",
       "workflow": "Release Qualification",
       "workflow_file": "release-qualification.yml",
@@ -363,6 +440,18 @@
     },
     {
       "check_name": "release-qualification / quality-features (release-qualification/release)",
+      "tier": "manual",
+      "workflow": "Release Qualification",
+      "workflow_file": "release-qualification.yml",
+      "job_id": "release-qualification",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "release-qualification / quality-format (release-qualification/release)",
       "tier": "manual",
       "workflow": "Release Qualification",
       "workflow_file": "release-qualification.yml",
@@ -458,6 +547,42 @@
       "path_filtered": false
     },
     {
+      "check_name": "release-qualification / quality-stable (release-qualification/release)",
+      "tier": "manual",
+      "workflow": "Release Qualification",
+      "workflow_file": "release-qualification.yml",
+      "job_id": "release-qualification",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "release-qualification / quality-test-cassette (release-qualification/release)",
+      "tier": "manual",
+      "workflow": "Release Qualification",
+      "workflow_file": "release-qualification.yml",
+      "job_id": "release-qualification",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "release-qualification / quality-test-workspace (release-qualification/release)",
+      "tier": "manual",
+      "workflow": "Release Qualification",
+      "workflow_file": "release-qualification.yml",
+      "job_id": "release-qualification",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "release-qualification / quality-validate (release-qualification/release)",
       "tier": "manual",
       "workflow": "Release Qualification",
@@ -542,6 +667,19 @@
       "path_filtered": false
     },
     {
+      "check_name": "required / quality-clippy (required/required)",
+      "tier": "required",
+      "workflow": "Required",
+      "workflow_file": "required.yml",
+      "job_id": "required",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "pull_request",
+        "push"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "required / quality-contracts (required/required)",
       "tier": "required",
       "workflow": "Required",
@@ -555,7 +693,7 @@
       "path_filtered": false
     },
     {
-      "check_name": "required / quality-core (required/required)",
+      "check_name": "required / quality-docs (required/required)",
       "tier": "required",
       "workflow": "Required",
       "workflow_file": "required.yml",
@@ -569,6 +707,19 @@
     },
     {
       "check_name": "required / quality-features (required/required)",
+      "tier": "required",
+      "workflow": "Required",
+      "workflow_file": "required.yml",
+      "job_id": "required",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "pull_request",
+        "push"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "required / quality-format (required/required)",
       "tier": "required",
       "workflow": "Required",
       "workflow_file": "required.yml",
@@ -672,6 +823,45 @@
       "path_filtered": false
     },
     {
+      "check_name": "required / quality-stable (required/required)",
+      "tier": "required",
+      "workflow": "Required",
+      "workflow_file": "required.yml",
+      "job_id": "required",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "pull_request",
+        "push"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "required / quality-test-cassette (required/required)",
+      "tier": "required",
+      "workflow": "Required",
+      "workflow_file": "required.yml",
+      "job_id": "required",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "pull_request",
+        "push"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "required / quality-test-workspace (required/required)",
+      "tier": "required",
+      "workflow": "Required",
+      "workflow_file": "required.yml",
+      "job_id": "required",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "pull_request",
+        "push"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "required / quality-validate (required/required)",
       "tier": "required",
       "workflow": "Required",
@@ -710,6 +900,19 @@
       "path_filtered": false
     },
     {
+      "check_name": "soak / quality-clippy (soak/soak)",
+      "tier": "scheduled",
+      "workflow": "Soak",
+      "workflow_file": "soak.yml",
+      "job_id": "soak",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "soak / quality-contracts (soak/soak)",
       "tier": "scheduled",
       "workflow": "Soak",
@@ -723,7 +926,7 @@
       "path_filtered": false
     },
     {
-      "check_name": "soak / quality-core (soak/soak)",
+      "check_name": "soak / quality-docs (soak/soak)",
       "tier": "scheduled",
       "workflow": "Soak",
       "workflow_file": "soak.yml",
@@ -737,6 +940,19 @@
     },
     {
       "check_name": "soak / quality-features (soak/soak)",
+      "tier": "scheduled",
+      "workflow": "Soak",
+      "workflow_file": "soak.yml",
+      "job_id": "soak",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "soak / quality-format (soak/soak)",
       "tier": "scheduled",
       "workflow": "Soak",
       "workflow_file": "soak.yml",
@@ -840,6 +1056,45 @@
       "path_filtered": false
     },
     {
+      "check_name": "soak / quality-stable (soak/soak)",
+      "tier": "scheduled",
+      "workflow": "Soak",
+      "workflow_file": "soak.yml",
+      "job_id": "soak",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "soak / quality-test-cassette (soak/soak)",
+      "tier": "scheduled",
+      "workflow": "Soak",
+      "workflow_file": "soak.yml",
+      "job_id": "soak",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "soak / quality-test-workspace (soak/soak)",
+      "tier": "scheduled",
+      "workflow": "Soak",
+      "workflow_file": "soak.yml",
+      "job_id": "soak",
+      "reusable_from": "_quality.yml",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "soak / quality-validate (soak/soak)",
       "tier": "scheduled",
       "workflow": "Soak",
@@ -926,9 +1181,11 @@
       ],
       "jobs": [
         "canary / quality (canary/canary)",
+        "canary / quality-clippy (canary/canary)",
         "canary / quality-contracts (canary/canary)",
-        "canary / quality-core (canary/canary)",
+        "canary / quality-docs (canary/canary)",
         "canary / quality-features (canary/canary)",
+        "canary / quality-format (canary/canary)",
         "canary / quality-fuzz (canary/canary) [shard 0]",
         "canary / quality-fuzz (canary/canary) [shard 1]",
         "canary / quality-fuzz (canary/canary) [shard 2]",
@@ -936,6 +1193,9 @@
         "canary / quality-musl (canary/canary)",
         "canary / quality-perf (canary/canary)",
         "canary / quality-release-surface (canary/canary)",
+        "canary / quality-stable (canary/canary)",
+        "canary / quality-test-cassette (canary/canary)",
+        "canary / quality-test-workspace (canary/canary)",
         "canary / quality-validate (canary/canary)",
         "report canary failure"
       ]
@@ -978,9 +1238,11 @@
         "emit exact required proof",
         "emit exact version-matrix evidence",
         "release-qualification / quality (release-qualification/release)",
+        "release-qualification / quality-clippy (release-qualification/release)",
         "release-qualification / quality-contracts (release-qualification/release)",
-        "release-qualification / quality-core (release-qualification/release)",
+        "release-qualification / quality-docs (release-qualification/release)",
         "release-qualification / quality-features (release-qualification/release)",
+        "release-qualification / quality-format (release-qualification/release)",
         "release-qualification / quality-fuzz (release-qualification/release) [shard 0]",
         "release-qualification / quality-fuzz (release-qualification/release) [shard 1]",
         "release-qualification / quality-fuzz (release-qualification/release) [shard 2]",
@@ -988,6 +1250,9 @@
         "release-qualification / quality-musl (release-qualification/release)",
         "release-qualification / quality-perf (release-qualification/release)",
         "release-qualification / quality-release-surface (release-qualification/release)",
+        "release-qualification / quality-stable (release-qualification/release)",
+        "release-qualification / quality-test-cassette (release-qualification/release)",
+        "release-qualification / quality-test-workspace (release-qualification/release)",
         "release-qualification / quality-validate (release-qualification/release)",
         "report release qualification failure"
       ]
@@ -1013,9 +1278,11 @@
       ],
       "jobs": [
         "required / quality (required/required)",
+        "required / quality-clippy (required/required)",
         "required / quality-contracts (required/required)",
-        "required / quality-core (required/required)",
+        "required / quality-docs (required/required)",
         "required / quality-features (required/required)",
+        "required / quality-format (required/required)",
         "required / quality-fuzz (required/required) [shard 0]",
         "required / quality-fuzz (required/required) [shard 1]",
         "required / quality-fuzz (required/required) [shard 2]",
@@ -1023,6 +1290,9 @@
         "required / quality-musl (required/required)",
         "required / quality-perf (required/required)",
         "required / quality-release-surface (required/required)",
+        "required / quality-stable (required/required)",
+        "required / quality-test-cassette (required/required)",
+        "required / quality-test-workspace (required/required)",
         "required / quality-validate (required/required)"
       ]
     },
@@ -1035,9 +1305,11 @@
       "jobs": [
         "report soak failure",
         "soak / quality (soak/soak)",
+        "soak / quality-clippy (soak/soak)",
         "soak / quality-contracts (soak/soak)",
-        "soak / quality-core (soak/soak)",
+        "soak / quality-docs (soak/soak)",
         "soak / quality-features (soak/soak)",
+        "soak / quality-format (soak/soak)",
         "soak / quality-fuzz (soak/soak) [shard 0]",
         "soak / quality-fuzz (soak/soak) [shard 1]",
         "soak / quality-fuzz (soak/soak) [shard 2]",
@@ -1045,6 +1317,9 @@
         "soak / quality-musl (soak/soak)",
         "soak / quality-perf (soak/soak)",
         "soak / quality-release-surface (soak/soak)",
+        "soak / quality-stable (soak/soak)",
+        "soak / quality-test-cassette (soak/soak)",
+        "soak / quality-test-workspace (soak/soak)",
         "soak / quality-validate (soak/soak)"
       ]
     },
@@ -1082,9 +1357,11 @@
       "emit exact required proof",
       "emit exact version-matrix evidence",
       "release-qualification / quality (release-qualification/release)",
+      "release-qualification / quality-clippy (release-qualification/release)",
       "release-qualification / quality-contracts (release-qualification/release)",
-      "release-qualification / quality-core (release-qualification/release)",
+      "release-qualification / quality-docs (release-qualification/release)",
       "release-qualification / quality-features (release-qualification/release)",
+      "release-qualification / quality-format (release-qualification/release)",
       "release-qualification / quality-fuzz (release-qualification/release) [shard 0]",
       "release-qualification / quality-fuzz (release-qualification/release) [shard 1]",
       "release-qualification / quality-fuzz (release-qualification/release) [shard 2]",
@@ -1092,6 +1369,9 @@
       "release-qualification / quality-musl (release-qualification/release)",
       "release-qualification / quality-perf (release-qualification/release)",
       "release-qualification / quality-release-surface (release-qualification/release)",
+      "release-qualification / quality-stable (release-qualification/release)",
+      "release-qualification / quality-test-cassette (release-qualification/release)",
+      "release-qualification / quality-test-workspace (release-qualification/release)",
       "release-qualification / quality-validate (release-qualification/release)",
       "report release qualification failure"
     ],
@@ -1111,9 +1391,11 @@
       "pyshim Rust unit tests",
       "release metadata sync",
       "required / quality (required/required)",
+      "required / quality-clippy (required/required)",
       "required / quality-contracts (required/required)",
-      "required / quality-core (required/required)",
+      "required / quality-docs (required/required)",
       "required / quality-features (required/required)",
+      "required / quality-format (required/required)",
       "required / quality-fuzz (required/required) [shard 0]",
       "required / quality-fuzz (required/required) [shard 1]",
       "required / quality-fuzz (required/required) [shard 2]",
@@ -1121,6 +1403,9 @@
       "required / quality-musl (required/required)",
       "required / quality-perf (required/required)",
       "required / quality-release-surface (required/required)",
+      "required / quality-stable (required/required)",
+      "required / quality-test-cassette (required/required)",
+      "required / quality-test-workspace (required/required)",
       "required / quality-validate (required/required)",
       "rustfmt",
       "xe11 full suite",
@@ -1130,9 +1415,11 @@
     "scheduled": [
       "TSan offline instrumented suite",
       "canary / quality (canary/canary)",
+      "canary / quality-clippy (canary/canary)",
       "canary / quality-contracts (canary/canary)",
-      "canary / quality-core (canary/canary)",
+      "canary / quality-docs (canary/canary)",
       "canary / quality-features (canary/canary)",
+      "canary / quality-format (canary/canary)",
       "canary / quality-fuzz (canary/canary) [shard 0]",
       "canary / quality-fuzz (canary/canary) [shard 1]",
       "canary / quality-fuzz (canary/canary) [shard 2]",
@@ -1140,14 +1427,19 @@
       "canary / quality-musl (canary/canary)",
       "canary / quality-perf (canary/canary)",
       "canary / quality-release-surface (canary/canary)",
+      "canary / quality-stable (canary/canary)",
+      "canary / quality-test-cassette (canary/canary)",
+      "canary / quality-test-workspace (canary/canary)",
       "canary / quality-validate (canary/canary)",
       "driver live tests (Oracle Free 23ai)",
       "report canary failure",
       "report soak failure",
       "soak / quality (soak/soak)",
+      "soak / quality-clippy (soak/soak)",
       "soak / quality-contracts (soak/soak)",
-      "soak / quality-core (soak/soak)",
+      "soak / quality-docs (soak/soak)",
       "soak / quality-features (soak/soak)",
+      "soak / quality-format (soak/soak)",
       "soak / quality-fuzz (soak/soak) [shard 0]",
       "soak / quality-fuzz (soak/soak) [shard 1]",
       "soak / quality-fuzz (soak/soak) [shard 2]",
@@ -1155,6 +1447,9 @@
       "soak / quality-musl (soak/soak)",
       "soak / quality-perf (soak/soak)",
       "soak / quality-release-surface (soak/soak)",
+      "soak / quality-stable (soak/soak)",
+      "soak / quality-test-cassette (soak/soak)",
+      "soak / quality-test-workspace (soak/soak)",
       "soak / quality-validate (soak/soak)"
     ]
   }

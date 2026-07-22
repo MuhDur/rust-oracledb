@@ -1,7 +1,7 @@
 name: Reusable Quality
 
 # The original serial quality check name remains on a final compatibility job,
-# while eight fail-fast-independent shards expose every red gate in one run.
+# while thirteen fail-fast-independent shards expose every red gate in one run.
 # All profile/budget conditions stay on steps so every check name materializes;
 # the final `quality` job runs under `always()` and fails unless every shard
 # succeeded. This keeps the established `required / quality
@@ -105,11 +105,55 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  core:
-    name: quality-core (${{ inputs.profile }}/${{ inputs.budget }})
+  format:
+    name: quality-format (${{ inputs.profile }}/${{ inputs.budget }})
     needs: validate
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        continue-on-error: ${{ inputs.mode == 'prep' }}
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha != '' && inputs.candidate_sha || github.sha }}
+
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        continue-on-error: ${{ inputs.mode == 'prep' }}
+        with:
+          toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
+          components: rustfmt, clippy
+
+      - name: Format
+        id: format
+        continue-on-error: ${{ inputs.mode == 'prep' }}
+        run: cargo fmt --all -- --check
+
+      - name: Record prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        shell: bash
+        env:
+          RESULTS_DIR: ${{ runner.temp }}/quality-prep-results
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR"
+          printf 'format\tFormat\t%s\n' '${{ steps.format.outcome }}' \
+            > "$RESULTS_DIR/format.tsv"
+
+      - name: Upload prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-prep-format
+          path: ${{ runner.temp }}/quality-prep-results/format.tsv
+          if-no-files-found: error
+          retention-days: 1
+
+  clippy:
+    name: quality-clippy (${{ inputs.profile }}/${{ inputs.budget }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         continue-on-error: ${{ inputs.mode == 'prep' }}
@@ -129,34 +173,152 @@ jobs:
         with:
           shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
 
-      - name: Show selected target
-        continue-on-error: ${{ inputs.mode == 'prep' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          git rev-parse HEAD
-          rustc --version
-          cargo --version
-
-      - name: Format
-        id: format
-        continue-on-error: ${{ inputs.mode == 'prep' }}
-        run: cargo fmt --all -- --check
-
       - name: Clippy
         id: clippy
         continue-on-error: ${{ inputs.mode == 'prep' }}
         run: cargo clippy --workspace --exclude oracledb-pyshim --no-deps -- -D warnings
+
+      - name: Record prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        shell: bash
+        env:
+          RESULTS_DIR: ${{ runner.temp }}/quality-prep-results
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR"
+          printf 'clippy\tClippy\t%s\n' '${{ steps.clippy.outcome }}' \
+            > "$RESULTS_DIR/clippy.tsv"
+
+      - name: Upload prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-prep-clippy
+          path: ${{ runner.temp }}/quality-prep-results/clippy.tsv
+          if-no-files-found: error
+          retention-days: 1
+
+  test-workspace:
+    name: quality-test-workspace (${{ inputs.profile }}/${{ inputs.budget }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        continue-on-error: ${{ inputs.mode == 'prep' }}
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha != '' && inputs.candidate_sha || github.sha }}
+
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        continue-on-error: ${{ inputs.mode == 'prep' }}
+        with:
+          toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        continue-on-error: ${{ inputs.mode == 'prep' }}
+        with:
+          shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
 
       - name: Test workspace
         id: test_workspace
         continue-on-error: ${{ inputs.mode == 'prep' }}
         run: cargo test --workspace --exclude oracledb-pyshim
 
+      - name: Record prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        shell: bash
+        env:
+          RESULTS_DIR: ${{ runner.temp }}/quality-prep-results
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR"
+          printf 'test-workspace\tTest workspace\t%s\n' '${{ steps.test_workspace.outcome }}' \
+            > "$RESULTS_DIR/test-workspace.tsv"
+
+      - name: Upload prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-prep-test-workspace
+          path: ${{ runner.temp }}/quality-prep-results/test-workspace.tsv
+          if-no-files-found: error
+          retention-days: 1
+
+  test-cassette:
+    name: quality-test-cassette (${{ inputs.profile }}/${{ inputs.budget }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        continue-on-error: ${{ inputs.mode == 'prep' }}
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha != '' && inputs.candidate_sha || github.sha }}
+
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        continue-on-error: ${{ inputs.mode == 'prep' }}
+        with:
+          toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        continue-on-error: ${{ inputs.mode == 'prep' }}
+        with:
+          shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
+
       - name: Test cassette replay
         id: test_cassette
         continue-on-error: ${{ inputs.mode == 'prep' }}
         run: cargo test -p oracledb --features cassette
+
+      - name: Record prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        shell: bash
+        env:
+          RESULTS_DIR: ${{ runner.temp }}/quality-prep-results
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR"
+          printf 'test-cassette\tTest cassette replay\t%s\n' '${{ steps.test_cassette.outcome }}' \
+            > "$RESULTS_DIR/test-cassette.tsv"
+
+      - name: Upload prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-prep-test-cassette
+          path: ${{ runner.temp }}/quality-prep-results/test-cassette.tsv
+          if-no-files-found: error
+          retention-days: 1
+
+  docs:
+    name: quality-docs (${{ inputs.profile }}/${{ inputs.budget }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        continue-on-error: ${{ inputs.mode == 'prep' }}
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha != '' && inputs.candidate_sha || github.sha }}
+
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        continue-on-error: ${{ inputs.mode == 'prep' }}
+        with:
+          toolchain: ${{ inputs.profile == 'canary' && 'nightly' || 'nightly-2026-05-11' }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        continue-on-error: ${{ inputs.mode == 'prep' }}
+        with:
+          shared-key: ${{ inputs.profile == 'release-qualification' && 'release-qualification' || '' }}
 
       - name: Test docs
         id: test_docs
@@ -167,6 +329,42 @@ jobs:
         id: build_docs
         continue-on-error: ${{ inputs.mode == 'prep' }}
         run: cargo doc --workspace --exclude oracledb-pyshim --no-deps
+
+      - name: Record prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        shell: bash
+        env:
+          RESULTS_DIR: ${{ runner.temp }}/quality-prep-results
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESULTS_DIR"
+          {
+            printf 'docs\tTest docs\t%s\n' '${{ steps.test_docs.outcome }}'
+            printf 'docs\tBuild docs\t%s\n' '${{ steps.build_docs.outcome }}'
+          } > "$RESULTS_DIR/docs.tsv"
+
+      - name: Upload prep outcomes
+        if: ${{ always() && inputs.mode == 'prep' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: quality-prep-docs
+          path: ${{ runner.temp }}/quality-prep-results/docs.tsv
+          if-no-files-found: error
+          retention-days: 1
+
+  stable:
+    name: quality-stable (${{ inputs.profile }}/${{ inputs.budget }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha != '' && inputs.candidate_sha || github.sha }}
 
       - name: Install stable Rust
         id: install_stable
@@ -189,22 +387,16 @@ jobs:
           set -euo pipefail
           mkdir -p "$RESULTS_DIR"
           {
-            printf 'core\tFormat\t%s\n' '${{ steps.format.outcome }}'
-            printf 'core\tClippy\t%s\n' '${{ steps.clippy.outcome }}'
-            printf 'core\tTest workspace\t%s\n' '${{ steps.test_workspace.outcome }}'
-            printf 'core\tTest cassette replay\t%s\n' '${{ steps.test_cassette.outcome }}'
-            printf 'core\tTest docs\t%s\n' '${{ steps.test_docs.outcome }}'
-            printf 'core\tBuild docs\t%s\n' '${{ steps.build_docs.outcome }}'
-            printf 'core\tInstall stable Rust\t%s\n' '${{ steps.install_stable.outcome }}'
-            printf 'core\tStable protocol tests\t%s\n' '${{ steps.stable_protocol.outcome }}'
-          } > "$RESULTS_DIR/core.tsv"
+            printf 'stable\tInstall stable Rust\t%s\n' '${{ steps.install_stable.outcome }}'
+            printf 'stable\tStable protocol tests\t%s\n' '${{ steps.stable_protocol.outcome }}'
+          } > "$RESULTS_DIR/stable.tsv"
 
       - name: Upload prep outcomes
         if: ${{ always() && inputs.mode == 'prep' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: quality-prep-core
-          path: ${{ runner.temp }}/quality-prep-results/core.tsv
+          name: quality-prep-stable
+          path: ${{ runner.temp }}/quality-prep-results/stable.tsv
           if-no-files-found: error
           retention-days: 1
 
@@ -801,7 +993,7 @@ jobs:
   quality:
     name: quality (${{ inputs.profile }}/${{ inputs.budget }})
     if: ${{ always() }}
-    needs: [validate, core, contracts, features, release-surface, musl, perf, fuzz]
+    needs: [validate, format, clippy, test-workspace, test-cassette, docs, stable, contracts, features, release-surface, musl, perf, fuzz]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -812,7 +1004,12 @@ jobs:
           set -euo pipefail
           results=(
             "validate=${{ needs.validate.result }}"
-            "core=${{ needs.core.result }}"
+            "format=${{ needs.format.result }}"
+            "clippy=${{ needs.clippy.result }}"
+            "test-workspace=${{ needs['test-workspace'].result }}"
+            "test-cassette=${{ needs['test-cassette'].result }}"
+            "docs=${{ needs.docs.result }}"
+            "stable=${{ needs.stable.result }}"
             "contracts=${{ needs.contracts.result }}"
             "features=${{ needs.features.result }}"
             "release-surface=${{ needs['release-surface'].result }}"
@@ -850,7 +1047,8 @@ jobs:
         run: |
           set -euo pipefail
           expected=(
-            validate core contracts features release-surface musl perf
+            validate format clippy test-workspace test-cassette docs stable
+            contracts features release-surface musl perf
             fuzz-0 fuzz-1 fuzz-2 fuzz-3
           )
           for result_file in "${expected[@]}"; do
