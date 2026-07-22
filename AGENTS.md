@@ -92,6 +92,25 @@ to check:
     A deletion of a path that still exists in the worktree is a stale index
     snapshot committed over someone else's landed work, not a delete.
 
+Rules 13-18 are mechanized, one subcommand per rule, so the question each one
+answers is settled by git or an exit status rather than by a buffer or a hope:
+
+```bash
+scripts/swarm_discipline.sh foreign-edit <path>...          # 13
+scripts/swarm_discipline.sh evidence-source --kind close --from <evidence.json>  # 14
+scripts/swarm_discipline.sh evidence-source --kind proof --scope <path>...       # 14
+scripts/swarm_discipline.sh verified-push \
+  --gate-cmd 'cargo fmt --all -- --check && scripts/check_resource_budget.sh --profile release-qualification && cargo test -p oracledb --features cassette && cargo deny check' \
+  -- origin main                                            # 15
+scripts/swarm_discipline.sh bounded-run --timeout 120 -- <cmd>                   # 16
+scripts/swarm_discipline.sh unbounded-wait-lint                                  # 16
+scripts/swarm_discipline.sh struct-atomicity --staged                            # 17
+scripts/swarm_discipline.sh stale-delete-check --staged                           # 18
+```
+
+Exit 65 from any of them is a refusal, not advice. `--selftest` proves each
+refusal and each acceptance; CI can run it with your required local proofs.
+
 ## Rust toolchain & gates
 
 - Cargo workspace, `resolver = "2"`, workspace version **0.9.0**,
