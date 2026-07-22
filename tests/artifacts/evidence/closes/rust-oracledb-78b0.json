@@ -1,0 +1,61 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-22T19:59:33Z",
+  "bead_id": "rust-oracledb-78b0",
+  "scope": {
+    "summary": "Close out P0.1 contract drift and record that P0.2-P0.3 in sec.25.2 are satisfied by the current quality graph.",
+    "in_scope": [
+      ".github/workflows/_quality.yml",
+      "scripts/verify_required_local.py",
+      "quality required-caller workflows (required.yml, canary.yml, soak.yml, release-qualification.yml)"
+    ],
+    "out_of_scope": [
+      "Other CI optimization work outside the sec.25.2 P0.1-P0.3 acceptance checks",
+      "Unrelated release or runtime stability risks outside quality-gate wiring"
+    ]
+  },
+  "source": {
+    "sha": "46ec421d4c63d4fa077e167a77009f6131ae35af",
+    "tree_clean": false,
+    "branch": "master"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "P0.1 _quality split retained across all caller profiles",
+        "kind": "cli",
+        "trace": "rg scans show required.yml/canary.yml/soak.yml/release-qualification.yml each call ./.github/workflows/_quality.yml; git history shows this wiring is in 72dfa61, and _quality still uses shard matrix fail-fast=false + fuzz shard 0..3."
+      },
+      {
+        "name": "P0.2 fuzz fanout + ASan cache + fuzz workspace cache",
+        "kind": "cli",
+        "trace": "In _quality.yml, fuzz job uses strategy matrix shard: [0, 1, 2, 3] (fail-fast:false), workspaces include `. -> target` and `crates/oracledb-protocol/fuzz -> target`, and fuzz is invoked via `cargo fuzz build --target x86_64-unknown-linux-gnu`; current commit 4f1eb3a in file history owns these entries."
+      },
+      {
+        "name": "P0.3 suite duplication check",
+        "kind": "cli",
+        "trace": "rg for `cargo test --workspace --exclude oracledb-pyshim` returns exactly one strict workspace test command (`quality-test-workspace`) and one docs/doc-test command (`--doc`), with no duplicate strict workspace test in other shards."
+      },
+      {
+        "name": "P0.1 contract fix",
+        "kind": "cli",
+        "trace": "New commit 46ec421 adds `id: free_disk_space_for_the_test` and records its outcome, then updates `EXPECTED_QUALITY_COMMANDS` with `Free disk space for the test` in verify_required_local.py."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "I did not rerun full `scripts/verify_required_local.py --required` against a live runner here; I verified graph-contract and self-tests plus targeted command audits in-tree."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "ready",
+    "basis": "scoped-test"
+  }
+}
