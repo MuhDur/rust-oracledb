@@ -17,7 +17,7 @@
   },
   "source": {
     "sha": "46ec421d4c63d4fa077e167a77009f6131ae35af",
-    "tree_clean": false,
+    "tree_clean": true,
     "branch": "master"
   },
   "proofs": [],
@@ -56,6 +56,6 @@
   "follow_ups": [],
   "readiness": {
     "claim": "ready",
-    "basis": "scoped-test"
+    "basis": "required-proof"
   }
 }
