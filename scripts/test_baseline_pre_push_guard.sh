@@ -15,6 +15,53 @@ fail() {
   exit 1
 }
 
+check_push() {
+  local label="$1"
+  local expected_sha="$2"
+  local log_file="$3"
+  local expected_banner="$4"
+
+  local before_sha
+  before_sha="$(git --git-dir="$remote" rev-parse refs/heads/main)"
+
+  if ! ORACLEDB_HOOK_KEEP_SCRATCH="${ORACLEDB_GUARD_TEST_KEEP_DIR:-0}" \
+    git -C "$fixture" push guard HEAD:refs/heads/main >"$log_file" 2>&1; then
+    echo "baseline-pre-push-guard: $label FAIL — push command returned non-zero" >&2
+    echo "baseline-pre-push-guard: expected remote SHA $expected_sha" >&2
+    echo "baseline-pre-push-guard: remote before push $before_sha" >&2
+    echo "baseline-pre-push-guard: expected verdict $expected_banner" >&2
+    if [[ -s "$log_file" ]]; then
+      echo "baseline-pre-push-guard: push log (tail):" >&2
+      tail -n 80 "$log_file" >&2
+    fi
+    fail "${label} push command failed"
+  fi
+
+  local after_sha
+  after_sha="$(git --git-dir="$remote" rev-parse refs/heads/main)"
+  if [[ "$after_sha" != "$expected_sha" ]]; then
+    echo "baseline-pre-push-guard: $label FAIL — remote SHA mismatch" >&2
+    echo "baseline-pre-push-guard: expected remote SHA $expected_sha" >&2
+    echo "baseline-pre-push-guard: remote before push $before_sha" >&2
+    echo "baseline-pre-push-guard: remote after push $after_sha" >&2
+    if [[ -s "$log_file" ]]; then
+      echo "baseline-pre-push-guard: push log (tail):" >&2
+      tail -n 80 "$log_file" >&2
+    fi
+    fail "$label push did not update remote"
+  fi
+
+  if ! rg -q "^${expected_banner}$" "$log_file"; then
+    echo "baseline-pre-push-guard: $label FAIL — hook verdict mismatch" >&2
+    echo "baseline-pre-push-guard: expected hook verdict $expected_banner" >&2
+    if [[ -s "$log_file" ]]; then
+      echo "baseline-pre-push-guard: push log (tail):" >&2
+      tail -n 80 "$log_file" >&2
+    fi
+    fail "$label push did not emit expected baseline verdict"
+  fi
+}
+
 need() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
@@ -87,12 +134,8 @@ if git -C "$fixture" diff --quiet -- docs/baseline; then
 fi
 git -C "$fixture" add -- docs/baseline
 git -C "$fixture" commit --no-verify -m "test: regenerate baseline after 5ed87b0 replay" >/dev/null
-git -C "$fixture" push guard HEAD:refs/heads/main >"$scratch/regenerated.log" 2>&1
 regenerated_sha="$(git -C "$fixture" rev-parse HEAD)"
-[[ "$(git --git-dir="$remote" rev-parse refs/heads/main)" == "$regenerated_sha" ]] || \
-  fail "regenerated baseline push did not advance the disposable remote"
-rg -q '^baseline pre-push: OK$' "$scratch/regenerated.log" || \
-  fail "regenerated baseline push did not run and pass the hook"
+check_push "leg 2" "$regenerated_sha" "$scratch/regenerated.log" "baseline pre-push: OK"
 echo "baseline-pre-push-guard: leg 2 OK — regenerated baseline push accepted"
 
 # Leg 3: 34 comment-only lines above every declaration change source locations
@@ -145,11 +188,7 @@ git -C "$fixture" commit --no-verify -m "test: shift layout without changing dec
 if ! git -C "$fixture" diff --quiet HEAD^ -- docs/baseline; then
   fail "layout-only change unexpectedly modified docs/baseline"
 fi
-git -C "$fixture" push guard HEAD:refs/heads/main >"$scratch/layout.log" 2>&1
 layout_sha="$(git -C "$fixture" rev-parse HEAD)"
-[[ "$(git --git-dir="$remote" rev-parse refs/heads/main)" == "$layout_sha" ]] || \
-  fail "layout-only push did not advance the disposable remote"
-rg -q '^baseline pre-push: OK$' "$scratch/layout.log" || \
-  fail "layout-only push did not run and pass the hook"
+check_push "leg 3" "$layout_sha" "$scratch/layout.log" "baseline pre-push: OK"
 echo "baseline-pre-push-guard: leg 3 OK — 34-line layout-only push accepted without baseline update"
 echo "baseline-pre-push-guard: OK"
