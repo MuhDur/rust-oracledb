@@ -1063,13 +1063,21 @@ jobs:
           RESULTS_DIR: ${{ runner.temp }}/quality-prep-results
         run: |
           set -euo pipefail
+
+          find_result_file() {
+            local file="$1"
+            local path
+            path="$(find "$RESULTS_DIR" -type f -name "$file" -print -quit || true)"
+            printf '%s\n' "${path:-}"
+          }
+
           expected=(
             validate format clippy test-workspace test-cassette docs stable
             contracts features release-surface musl perf
             fuzz-0 fuzz-1 fuzz-2 fuzz-3
           )
           for result_file in "${expected[@]}"; do
-            if [[ ! -f "$RESULTS_DIR/$result_file.tsv" ]]; then
+            if [[ -z "$(find_result_file "${result_file}.tsv")" ]]; then
               echo "missing prep outcome: $result_file" >&2
               exit 1
             fi
@@ -1086,6 +1094,7 @@ jobs:
 
           failed=0
           for result_file in "${expected[@]}"; do
+            result_path="$(find_result_file "${result_file}.tsv")"
             while IFS=$'\t' read -r shard gate outcome; do
               printf '| %s | %s | %s |\n' "$shard" "$gate" "$outcome" \
                 >> "$GITHUB_STEP_SUMMARY"
@@ -1093,7 +1102,7 @@ jobs:
                 printf '%s: %s (%s)\n' "$shard" "$gate" "$outcome" >&2
                 failed=1
               fi
-            done < "$RESULTS_DIR/$result_file.tsv"
+            done < "$result_path"
           done
           if (( failed != 0 )); then
             echo "one or more prep gates did not succeed" >&2
