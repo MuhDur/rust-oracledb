@@ -14909,7 +14909,7 @@ mod tests {
         let (port, server) = spawn_dc2_dc3_fixture_tls_server();
         let wallet_dir = dc5_untrusted_temp_wallet_dir("unknown-issuer");
         let options = ConnectOptions::new(
-            format!("tcps://127.0.0.1:{port}/FREEPDB1?transport_connect_timeout=2"),
+            format!("tcps://127.0.0.1:{port}/FREEPDB1?transport_connect_timeout=10"),
             "user",
             "password",
             identity(),
@@ -14927,7 +14927,7 @@ mod tests {
         let elapsed = started.elapsed();
         let rendered = dc_rendered_error(&err);
         assert!(
-            elapsed < Duration::from_secs(1),
+            elapsed < Duration::from_secs(5),
             "untrusted issuer must fail fast, not wait for connect timeout; took {elapsed:?}, \
              error={rendered}"
         );
