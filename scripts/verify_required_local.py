@@ -86,6 +86,7 @@ AGGREGATE_CONDITION = "${{ always() }}"
 EXPECTED_QUALITY_COMMANDS = (
     "Format",
     "Clippy",
+    "Free disk space for the test",
     "Test workspace",
     "Test cassette replay",
     "Test docs",
@@ -1043,7 +1044,7 @@ def self_test() -> None:
         if step.job in FANOUT_JOBS and step.uses is None and step.name not in META_STEPS
     )
     assert parsed_gate_names == EXPECTED_QUALITY_COMMANDS
-    assert len(parsed_gate_names) == 33
+    assert len(parsed_gate_names) == 34
 
     required_plan = effective_plan()
     for name, version_key in (

@@ -232,6 +232,7 @@ jobs:
       # left on device". rustup installs to ~/.cargo + ~/.rustup, not
       # hostedtoolcache, so removing the tool cache is safe here.
       - name: Free disk space for the test
+        id: free_disk_space_for_the_test
         continue-on-error: ${{ inputs.mode == 'prep' }}
         run: |
           rm_cmd="$(printf '%b' '\x72\x6d -\x72\x66')"
@@ -258,8 +259,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RESULTS_DIR"
-          printf 'test-workspace\tTest workspace\t%s\n' '${{ steps.test_workspace.outcome }}' \
+          printf 'test-workspace\tFree disk space for the test\t%s\n' '${{ steps.free_disk_space_for_the_test.outcome }}' \
             > "$RESULTS_DIR/test-workspace.tsv"
+          printf 'test-workspace\tTest workspace\t%s\n' '${{ steps.test_workspace.outcome }}' \
+            >> "$RESULTS_DIR/test-workspace.tsv"
 
       - name: Upload prep outcomes
         if: ${{ always() && inputs.mode == 'prep' }}
