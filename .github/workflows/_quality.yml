@@ -57,6 +57,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          candidate_sha='${{ inputs.candidate_sha }}'
           case "${{ inputs.profile }}" in
             required|canary|soak|release-qualification) ;;
             *) echo "unsupported profile: ${{ inputs.profile }}" >&2; exit 64 ;;
@@ -69,8 +70,13 @@ jobs:
             strict|prep) ;;
             *) echo "unsupported mode: ${{ inputs.mode }}" >&2; exit 64 ;;
           esac
-          if [[ "${{ inputs.profile }}" == "release-qualification" && -z "${{ inputs.candidate_sha }}" ]]; then
+          if [[ "${{ inputs.profile }}" == "release-qualification" && -z "$candidate_sha" ]]; then
             echo "release-qualification requires candidate_sha" >&2
+            exit 64
+          fi
+          if [[ "${{ inputs.profile }}" == "release-qualification" && ! "$candidate_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "release-qualification candidate_sha must be a full 40-char lowercase hex SHA, got: $candidate_sha" >&2
+            echo "hint: use git rev-parse HEAD in the triggering repo" >&2
             exit 64
           fi
           if [[ "${{ inputs.profile }}" == "required" && "${{ inputs.force_failure }}" == "true" ]]; then
