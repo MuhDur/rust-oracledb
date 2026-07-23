@@ -255,7 +255,12 @@ run_public_api() {
   else
     unavailable="$OUT/public_api/UNAVAILABLE.txt"
     printf 'cargo-public-api is not installed; install it with: cargo install cargo-public-api\n' > "$unavailable"
-    printf 'unavailable\tall\t%s\tmissing cargo-public-api\n' "$(relpath "$unavailable")"
+    # baseline_relpath, not relpath: the success branch above uses it so the path
+    # is always the stable `docs/baseline/...` form. relpath prints an ABSOLUTE
+    # path when $OUT is a temp dir outside $ROOT (the baseline pre-push guard's
+    # leg-2 fixture), which makes the fallback non-deterministic and fails the
+    # guard's self-test whenever cargo-public-api is absent on the runner.
+    printf 'unavailable\tall\t%s\tmissing cargo-public-api\n' "$(baseline_relpath "$unavailable")"
   fi
 } > "$OUT/public_api_profiles.tsv"
 
