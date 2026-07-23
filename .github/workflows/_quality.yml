@@ -477,6 +477,20 @@ jobs:
         continue-on-error: ${{ inputs.mode == 'prep' }}
         run: sudo apt-get update && sudo apt-get install -y ripgrep
 
+      # MUST precede "Verify checked entry traces": that step runs
+      # test_baseline_pre_push_guard.sh, whose fixture regenerates the baseline
+      # and needs cargo-public-api to reproduce the committed public-api +
+      # async/blocking-coverage rows. Installed after, the guard fell back to the
+      # "unavailable" form (1 row) and mismatched the committed baseline (75
+      # rows). It only passed on profiles whose Swatinem cache happened to be warm
+      # with the tool; the release-qualification profile's dedicated cache key is
+      # cold, so it failed deterministically. Install first, depend on no cache.
+      - name: Install cargo-public-api
+        id: cargo_public_api
+        if: ${{ inputs.profile != 'canary' }}
+        continue-on-error: ${{ inputs.mode == 'prep' }}
+        run: cargo install cargo-public-api --version "$CARGO_PUBLIC_API_VERSION" --locked
+
       - name: Verify checked entry traces and release/evidence contracts
         id: evidence_contracts
         continue-on-error: ${{ inputs.mode == 'prep' }}
@@ -489,12 +503,6 @@ jobs:
           bash scripts/check_ci_taxonomy.sh
           bash scripts/check_bead_close_evidence.sh
           bash scripts/test_baseline_pre_push_guard.sh
-
-      - name: Install cargo-public-api
-        id: cargo_public_api
-        if: ${{ inputs.profile != 'canary' }}
-        continue-on-error: ${{ inputs.mode == 'prep' }}
-        run: cargo install cargo-public-api --version "$CARGO_PUBLIC_API_VERSION" --locked
 
       - name: Baseline drift check
         id: baseline_drift
