@@ -330,8 +330,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RESULTS_DIR"
-          printf 'test-cassette\tTest cassette replay\t%s\n' '${{ steps.test_cassette.outcome }}' \
+          printf 'test-cassette\tFree disk space for the cassette test\t%s\n' '${{ steps.free_disk_space_for_the_cassette_test.outcome }}' \
             > "$RESULTS_DIR/test-cassette.tsv"
+          printf 'test-cassette\tTest cassette replay\t%s\n' '${{ steps.test_cassette.outcome }}' \
+            >> "$RESULTS_DIR/test-cassette.tsv"
 
       - name: Upload prep outcomes
         if: ${{ always() && inputs.mode == 'prep' }}
@@ -581,8 +583,8 @@ jobs:
           mkdir -p "$RESULTS_DIR"
           {
             printf 'contracts\tInstall baseline tools\t%s\n' '${{ steps.baseline_tools.outcome }}'
-            printf 'contracts\tVerify checked entry traces and release/evidence contracts\t%s\n' '${{ steps.evidence_contracts.outcome }}'
             printf 'contracts\tInstall cargo-public-api\t%s\n' '${{ steps.cargo_public_api.outcome }}'
+            printf 'contracts\tVerify checked entry traces and release/evidence contracts\t%s\n' '${{ steps.evidence_contracts.outcome }}'
             printf 'contracts\tBaseline drift check\t%s\n' '${{ steps.baseline_drift.outcome }}'
             printf 'contracts\tAPI ledger coverage\t%s\n' '${{ steps.api_ledger.outcome }}'
             printf 'contracts\tSingle public path per type\t%s\n' '${{ steps.single_path.outcome }}'
