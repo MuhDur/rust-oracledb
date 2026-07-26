@@ -1,0 +1,44 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-26T17:54:00Z",
+  "bead_id": "rust-oracledb-g-driver-085-release-finalization-5swy",
+  "scope": {
+    "summary": "Terminal driver release sink satisfied: oracledb 0.9.0 (MINOR) was operator-tagged and published to crates.io on 2026-07-21, and the follow-on 0.9.1 patch shipped on 2026-07-23; the repo carries the immutable tags v0.9.0 (2efd7b54) and v0.9.1 (6c594a0b, current HEAD of the release line, workspace version = 0.9.1).",
+    "in_scope": [
+      "Cargo.toml"
+    ],
+    "out_of_scope": [
+      "the qualification work (bead 5jdu)",
+      "downstream oraclemcp server repin to =0.9.1 (tracked in the oraclemcp repo, bead u9ldz)"
+    ]
+  },
+  "source": {
+    "sha": "6c594a0b1ab8142349577add00416b1fd4d626bd",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "immutable driver tag + crates.io publish",
+        "kind": "config-gate",
+        "trace": "vX.Y.Z tag drives release.yml. oracledb 0.9.0 is live on crates.io (2026-07-21) and 0.9.1 (2026-07-23); the repo is tagged v0.9.0 at 2efd7b54 and v0.9.1 at 6c594a0b (workspace version = 0.9.1 at that commit). The operator performed the tag; agents never tag or publish."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The publication (crates.io) and immutable git tags are external, manually verified facts, not a committed machine artifact in this doc. The sink was defined for 0.9.0; 0.9.1 supersedes it and is also live, so the terminal publish obligation is fully met."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

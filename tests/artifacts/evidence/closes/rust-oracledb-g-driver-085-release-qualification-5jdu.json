@@ -1,0 +1,44 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-26T17:54:00Z",
+  "bead_id": "rust-oracledb-g-driver-085-release-qualification-5jdu",
+  "scope": {
+    "summary": "Driver 0.9.0 minor scope qualified at one exact candidate SHA (the v0.9.0 tag commit, workspace version = 0.9.0): every train-090 driver bead is terminal, the additive-only minor delta is documented, and the candidate shipped. b13a (TTC-129) is the pre-authorized operator-deferral exception (no-stall ruling 2026-07-21) and did not block the release.",
+    "in_scope": [
+      "Cargo.toml"
+    ],
+    "out_of_scope": [
+      "GCP showcase / launch scope (explicitly non-driver, tracked separately)",
+      "the tag/publish step itself (terminal sink bead 5swy)"
+    ]
+  },
+  "source": {
+    "sha": "2efd7b545d64261295e5bb37eb6306ba543c87d0",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "driver 0.9.0 release candidate qualification",
+        "kind": "config-gate",
+        "trace": "The v0.9.0 candidate SHA 2efd7b54 pins workspace version = 0.9.0 (Cargo.toml:11) and was tagged and published: oracledb 0.9.0 is live on crates.io (2026-07-21). All direct train-090 blockers of 5jdu are closed except b13a (TTC-129), which is the pre-authorized operator-deferral exception per the 2026-07-21 no-stall ruling recorded in bead 5swy."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This close records the qualification of the 0.9.0 minor candidate; the immutable crates.io publication and git tag are the external evidence (manually verified), not a committed machine artifact in this doc. b13a remains a deferred, pre-authorized exception."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
