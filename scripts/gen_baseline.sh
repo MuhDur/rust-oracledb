@@ -237,9 +237,12 @@ run_public_api() {
   printf '%s\t%s\t%s\tok\n' "$profile" "$package" "$(baseline_relpath "$output")"
 }
 
+# OUT may already contain reviewed snapshots; only consume one generated now.
+generated_public_api=false
 {
   printf 'profile\tpackage\tpath\tstatus\n'
   if command -v cargo-public-api >/dev/null 2>&1; then
+    generated_public_api=true
     run_public_api oracledb-minimal oracledb --no-default-features
     run_public_api oracledb-default oracledb
     run_public_api oracledb-all-features oracledb --all-features
@@ -264,7 +267,7 @@ run_public_api() {
   fi
 } > "$OUT/public_api_profiles.tsv"
 
-if [ -f "$OUT/public_api/oracledb-all-features.txt" ]; then
+if [[ "$generated_public_api" == true ]]; then
   python3 "$ROOT/scripts/gen_async_blocking_coverage.py" \
     "$OUT/public_api/oracledb-all-features.txt" \
     "$OUT/async_blocking_coverage.tsv"
