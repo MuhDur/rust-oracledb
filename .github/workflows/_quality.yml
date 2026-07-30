@@ -788,7 +788,16 @@ jobs:
         id: package_crates
         if: ${{ steps.budget.outputs.package == 'true' }}
         continue-on-error: ${{ inputs.mode == 'prep' }}
-        run: cargo package --workspace --exclude oracledb-pyshim --locked
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The main crate's normalized registry dependencies cannot resolve
+          # until both renamed leaves have been published. The standalone step
+          # above proves the packaged main crate against extracted sibling
+          # tarballs; registry-backed main qualification runs in
+          # publish_crates.sh after the leaves become index-visible.
+          cargo package -p oraclemcp-driver-cx-protocol --locked
+          cargo package -p oraclemcp-driver-cx-derive --locked
 
       - name: Record prep outcomes
         if: ${{ always() && inputs.mode == 'prep' }}

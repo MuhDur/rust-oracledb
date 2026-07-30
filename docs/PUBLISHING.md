@@ -114,14 +114,17 @@ honored, and `--all-features` so the full API surface is verified.
 #    Prefer the env var so the token never lands in shell history / files:
 export CARGO_REGISTRY_TOKEN=<crates.io-publish-token>
 
-# 1. Dry-run everything first (see "Dry-run" below for expected results).
-cargo publish --dry-run -p oraclemcp-driver-cx-protocol
-cargo publish --dry-run -p oraclemcp-driver-cx-derive
-cargo package -p oraclemcp-driver-cx
+# 1. Dry-run the independently resolvable leaves.
+cargo publish --dry-run -p oraclemcp-driver-cx-protocol --locked --all-features
+cargo publish --dry-run -p oraclemcp-driver-cx-derive --locked --all-features
+cargo package --list -p oraclemcp-driver-cx
 
-# 2. Real publish, dependency order. Wait for the index to update between steps.
+# 2. Publish the leaves and wait for each to become index-visible.
 cargo publish -p oraclemcp-driver-cx-protocol --locked --all-features
 cargo publish -p oraclemcp-driver-cx-derive --locked --all-features
+
+# 3. Only now can the main registry package resolve. Dry-run it before upload.
+cargo publish --dry-run -p oraclemcp-driver-cx --locked --all-features
 cargo publish -p oraclemcp-driver-cx --locked --all-features
 ```
 
@@ -197,7 +200,8 @@ and derive crates must be published and visible in the index before the main
 crate can receive a green package/dry-run result. Task
 `rust-oracledb-cx-driver-handover-wgwq.4` therefore publishes the two leaves,
 waits for index visibility, re-runs the main package qualification, and only
-then publishes `oraclemcp-driver-cx`.
+then publishes `oraclemcp-driver-cx`. The tag workflow enforces this order in
+`scripts/publish_crates.sh`; a failed main dry-run stops before the main upload.
 
 ## Pre-transition dry-run results (historical only)
 

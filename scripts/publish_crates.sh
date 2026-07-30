@@ -74,6 +74,11 @@ for crate in "${order[@]}"; do
     continue
   fi
 
+  if [ "$crate" = "oraclemcp-driver-cx" ]; then
+    echo "publish-crates: dry-running $crate $version against published siblings"
+    cargo publish --dry-run -p "$crate" --locked --all-features
+  fi
+
   echo "publish-crates: publishing $crate $version"
   cargo publish -p "$crate" --locked
   wait_for_index "$crate"

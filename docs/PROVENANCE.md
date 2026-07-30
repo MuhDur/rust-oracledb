@@ -62,7 +62,12 @@ workspace path resolution:
   inter-crate `path =` and pins the workspace version, then extracts every
   `.crate` outside the workspace and builds each one there —
   `oraclemcp-driver-cx` against the extracted sibling tarballs, never the
-  workspace — plus `cargo publish --dry-run` for the two leaf crates.
+  workspace — plus `cargo publish --dry-run` for the two leaf crates. At release
+  time, `scripts/publish_crates.sh` waits for both leaves to become index-visible
+  and then requires a registry-backed main-crate dry-run before its upload. For
+  the first renamed-family release, the standalone check accepts only Cargo's
+  exact absent-renamed-sibling error after Cargo has produced the normalized
+  main archive; every other packaging error remains fatal.
 
 ## Crate integrity
 

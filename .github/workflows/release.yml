@@ -108,10 +108,13 @@ jobs:
       - run: cargo doc --workspace --exclude oracledb-pyshim --no-deps
       - uses: taiki-e/install-action@6385177bd1684e175e09301c9ee3ae18c14a367e # cargo-deny
       - run: cargo deny check
-      # Validate the published tarballs build cleanly before the matrix/publish.
-      # --exclude pyshim: cargo package (unlike publish) does not skip
-      # publish=false crates, and pyshim's path-deps have no version requirement.
-      - run: cargo package --workspace --exclude oracledb-pyshim --locked
+      # Package both independently publishable leaves. The main crate's
+      # normalized registry dependencies cannot resolve before those leaves
+      # exist; publish_crates.sh dry-runs it after index visibility and before
+      # its upload. Exact packaged-main proof is also carried by the successful
+      # release-qualification standalone-package gate.
+      - run: cargo package -p oraclemcp-driver-cx-protocol --locked
+      - run: cargo package -p oraclemcp-driver-cx-derive --locked
 
   build:
     name: static musl binary
