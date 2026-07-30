@@ -22284,24 +22284,20 @@ mod tests {
     /// A multi-address `ADDRESS_LIST` where every address refuses the
     /// transport must aggregate into `Error::AllAddressesFailed` rather than
     /// surfacing only the last address's raw I/O error. Both addresses are
-    /// closed local ports (bound then immediately dropped so the OS answers
-    /// ECONNREFUSED) — no live database needed, this is a pure transport
-    /// failover test. `Error::AllAddressesFailed` had zero test coverage
-    /// before H5.
+    /// distinct loopback addresses at destination port zero. TCP port zero
+    /// cannot be allocated to a listener, so parallel tests cannot race to
+    /// reuse it after fixture setup. No live database is needed; this is a pure
+    /// transport failover test. `Error::AllAddressesFailed` had zero test
+    /// coverage before H5.
     #[test]
     fn connect_all_addresses_failed_when_every_address_refuses() {
-        let closed_port = |listener: TcpListener| -> u16 {
-            let port = listener.local_addr().expect("addr").port();
-            drop(listener);
-            port
-        };
-        let port_a = closed_port(TcpListener::bind("127.0.0.1:0").expect("bind a"));
-        let port_b = closed_port(TcpListener::bind("127.0.0.1:0").expect("bind b"));
+        let host_a = "127.0.0.1";
+        let host_b = "127.0.0.2";
 
         let connect_string = format!(
             "(DESCRIPTION=(RETRY_COUNT=0)\
-             (ADDRESS_LIST=(ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={port_a}))\
-             (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={port_b})))\
+             (ADDRESS_LIST=(ADDRESS=(PROTOCOL=tcp)(HOST={host_a})(PORT=0))\
+             (ADDRESS=(PROTOCOL=tcp)(HOST={host_b})(PORT=0)))\
              (CONNECT_DATA=(SERVICE_NAME=svc)))"
         );
         let options = ConnectOptions::new(connect_string, "user", "password", identity());
@@ -22313,8 +22309,8 @@ mod tests {
             })
             .expect_err("every address refuses; the aggregate must surface");
         assert!(
-            matches!(&err, Error::AllAddressesFailed(detail) if detail.contains(&port_a.to_string())
-                && detail.contains(&port_b.to_string())),
+            matches!(&err, Error::AllAddressesFailed(detail) if detail.contains("tried 2 address(es)")
+                && detail.contains(host_a) && detail.contains(host_b)),
             "expected AllAddressesFailed naming both addresses, got {err:?}"
         );
         assert_eq!(err.kind(), ErrorKind::Network);
