@@ -1,0 +1,60 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-30T22:26:54Z",
+  "bead_id": "rust-oracledb-cx-driver-handover-wgwq.4",
+  "scope": {
+    "summary": "Publish and independently verify the immutable oraclemcp-driver-cx 0.9.2 crate family and signed GitHub release.",
+    "in_scope": [
+      "oraclemcp-driver-cx-protocol 0.9.2 on crates.io and docs.rs",
+      "oraclemcp-driver-cx-derive 0.9.2 on crates.io and docs.rs",
+      "oraclemcp-driver-cx 0.9.2 on crates.io and docs.rs",
+      "v0.9.2 GitHub release assets, checksum, provenance attestation, and clean external consumer compile"
+    ],
+    "out_of_scope": [
+      "Adding an Oracle crates.io owner without a verified crates.io username.",
+      "Repinning oraclemcp, tracked in the consumer repository."
+    ]
+  },
+  "source": {
+    "sha": "2d8d3257cfca13b47c72a4ca9e21f8d684e9eadc",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "crates.io API and external Cargo consumer",
+        "kind": "api",
+        "trace": "All three exact versions are unyanked and checksum-matched; a new Cargo project resolved and checked oraclemcp-driver-cx =0.9.2 plus both renamed siblings."
+      },
+      {
+        "name": ".github/workflows/release.yml",
+        "kind": "config-gate",
+        "trace": "Run 30584920482 completed all release, crates.io, and GitHub release jobs successfully for v0.9.2 at source.sha."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "release-publication-receipt",
+        "path": "tests/artifacts/evidence/releases/v0.9.2/publication-receipt.json",
+        "sha": "2d8d3257cfca13b47c72a4ca9e21f8d684e9eadc"
+      }
+    ]
+  },
+  "limitations": [
+    "The installed gh CLI predates the attestation subcommand; verification used GitHub's attestations REST endpoint for the release asset digest and confirmed the attested source SHA."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "rust-oracledb-cx-driver-handover-wgwq.5"
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}

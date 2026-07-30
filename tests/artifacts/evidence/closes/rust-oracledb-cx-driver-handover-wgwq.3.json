@@ -1,0 +1,56 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-30T22:26:54Z",
+  "bead_id": "rust-oracledb-cx-driver-handover-wgwq.3",
+  "scope": {
+    "summary": "Qualify the renamed 0.9.2 crate family at the exact release source with targeted package, driver, and live Oracle evidence.",
+    "in_scope": [
+      "oraclemcp-driver-cx-protocol 0.9.2 package archive",
+      "oraclemcp-driver-cx-derive 0.9.2 package archive",
+      "oraclemcp-driver-cx 0.9.2 standalone packaged-crate proof",
+      "exact-SHA Required, CI, and Oracle 11g/18c/21c/23ai/TCPS qualification"
+    ],
+    "out_of_scope": [
+      "Broad ad hoc fuzzing or mutation campaigns beyond the normal bounded release graph.",
+      "Oracle ownership transfer, tracked by rust-oracledb-cx-driver-handover-wgwq.5."
+    ]
+  },
+  "source": {
+    "sha": "2d8d3257cfca13b47c72a4ca9e21f8d684e9eadc",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": ".github/workflows/release-qualification.yml",
+        "kind": "config-gate",
+        "trace": "Run 30581533659 completed successfully for source.sha and supplied the exact-SHA Required proof plus the recorded version-matrix artifact."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "version-matrix",
+        "path": "tests/artifacts/evidence/releases/v0.9.2/results-2d8d3257cfca13b47c72a4ca9e21f8d684e9eadc.json",
+        "sha": "2d8d3257cfca13b47c72a4ca9e21f8d684e9eadc"
+      }
+    ]
+  },
+  "limitations": [
+    "The close-evidence v1 proof reference enum cannot name the repository's v2 Required and release-candidate proof schemas, so the exact-SHA hosted runs are traced as integration evidence and the live matrix is attached directly."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "rust-oracledb-cx-driver-handover-wgwq.4",
+    "rust-oracledb-cx-driver-handover-wgwq.5"
+  ],
+  "readiness": {
+    "claim": "ready",
+    "basis": "live-evidence"
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "schema": "release-publication-receipt/v1",
+  "repo": "rust-oracledb",
+  "recorded_at": "2026-07-30T22:26:54Z",
+  "source": {
+    "sha": "2d8d3257cfca13b47c72a4ca9e21f8d684e9eadc",
+    "tag": "v0.9.2",
+    "tag_resolves_to_source": true
+  },
+  "qualification": {
+    "strict_release_qualification_run": 30581533659,
+    "required_run": 30581509543,
+    "ci_run": 30581509327,
+    "version_matrix_run": 30581509331,
+    "verdict": "PASS"
+  },
+  "release": {
+    "workflow_run": 30584920482,
+    "workflow_conclusion": "success",
+    "published_at": "2026-07-30T22:18:22Z",
+    "github_release": "https://github.com/MuhDur/rust-oracledb/releases/tag/v0.9.2",
+    "asset": "oraclemcp-driver-cx-smoke-x86_64-unknown-linux-musl.tar.gz",
+    "asset_sha256": "5ae2b1c902eb8714acb481ccec818a8dc3468be1e7997fe7387332339a38fbe5",
+    "checksum_file_verified": true,
+    "github_attestation_found": true,
+    "attestation_source_sha": "2d8d3257cfca13b47c72a4ca9e21f8d684e9eadc"
+  },
+  "crates": [
+    {
+      "name": "oraclemcp-driver-cx-protocol",
+      "version": "0.9.2",
+      "checksum": "5538d814d0e009aebb614bc04679aa96054022ceed754d959fe015f16c3338ca",
+      "qualified_archive_checksum": "5538d814d0e009aebb614bc04679aa96054022ceed754d959fe015f16c3338ca",
+      "yanked": false,
+      "owner_logins": ["MuhDur"],
+      "docs_rs_build": 3995622,
+      "docs_rs_status": "All builds succeeded"
+    },
+    {
+      "name": "oraclemcp-driver-cx-derive",
+      "version": "0.9.2",
+      "checksum": "986bb4fb1bc1f3c0e588d636fca5d8ea37742964063c4aece392aedff333e032",
+      "qualified_archive_checksum": "986bb4fb1bc1f3c0e588d636fca5d8ea37742964063c4aece392aedff333e032",
+      "yanked": false,
+      "owner_logins": ["MuhDur"],
+      "docs_rs_build": 3995623,
+      "docs_rs_status": "All builds succeeded"
+    },
+    {
+      "name": "oraclemcp-driver-cx",
+      "version": "0.9.2",
+      "checksum": "8aaaa3ead5f0244103960b5f817fdac23a6b3ebdab8a2ecf50965ef50b86fdc4",
+      "post_publication_package_checksum": "8aaaa3ead5f0244103960b5f817fdac23a6b3ebdab8a2ecf50965ef50b86fdc4",
+      "yanked": false,
+      "owner_logins": ["MuhDur"],
+      "docs_rs_build": 3995655,
+      "docs_rs_status": "All builds succeeded"
+    }
+  ],
+  "external_consumer": {
+    "manifest_dependency": "oraclemcp-driver-cx = \"=0.9.2\"",
+    "command": "cargo +nightly-2026-05-11 check --locked",
+    "result": "PASS",
+    "resolved_main": "oraclemcp-driver-cx 0.9.2",
+    "resolved_protocol": "oraclemcp-driver-cx-protocol 0.9.2",
+    "resolved_derive": "oraclemcp-driver-cx-derive 0.9.2"
+  },
+  "ownership_handover": {
+    "status": "pending",
+    "reason": "Oracle crates.io username has not been verified; no owner was guessed from email.",
+    "bead_id": "rust-oracledb-cx-driver-handover-wgwq.5"
+  }
+}
