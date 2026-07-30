@@ -31,6 +31,8 @@
 //! cargo test -p oracledb --test reuse_after_call_timeout
 //! ```
 
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::thin::{ExecuteOptions, QueryResult, QueryValue};
 use oracledb::{BlockingConnection, ConnectOptions, Connection, Error};
 use oracledb_protocol::ClientIdentity;

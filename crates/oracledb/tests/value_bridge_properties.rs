@@ -31,6 +31,8 @@
 //!   round-trip is exact at the `Value` level (JSON's own canonicalization).
 //! - VECTOR float32 elements round-trip bit-exact.
 
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::{FromSql, ToSql};
 use oracledb_protocol::thin::{BindValue, QueryValue};
 use proptest::prelude::*;

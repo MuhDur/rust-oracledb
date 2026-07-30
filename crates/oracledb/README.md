@@ -1,4 +1,4 @@
-# oracledb
+# oraclemcp-driver-cx
 
 **A pure-Rust, async, thin-mode Oracle Database driver.** A clean-room port of
 python-oracledb v4.0.1 thin mode that passes the reference's own test suite, with
@@ -8,7 +8,10 @@ no Oracle Instant Client, no OCI, and no C library at runtime.
 [![Rust: nightly](https://img.shields.io/badge/rust-nightly-orange.svg)](https://www.rust-lang.org)
 [![unsafe: forbidden](https://img.shields.io/badge/unsafe-forbidden-success.svg)](https://github.com/MuhDur/rust-oracledb)
 
-`oracledb` speaks the Oracle TNS/TTC wire protocol directly over TCP. You add the
+`Cx` means **context**: operations carry `asupersync::Cx` for structured
+cancellation, deadlines, budgets, and scoped runtime capabilities.
+
+`oraclemcp-driver-cx` speaks the Oracle TNS/TTC wire protocol directly over TCP. You add the
 crate, point it at a listener, and connect: no Instant Client to install, no
 shared libraries to ship. It is a faithful re-implementation of the
 python-oracledb thin client, so its behaviour tracks that reference, verified by
@@ -17,6 +20,10 @@ running python-oracledb's **own** thin-mode test suite against the Rust engine.
 > This is an independent project and is not affiliated with Oracle. "Oracle" and
 > "python-oracledb" are referenced here only to describe what this driver is
 > compatible with.
+>
+> Earlier releases used the `oracledb` package family. That legacy namespace is
+> being handed to Oracle; this maintained continuation uses the distinct
+> `oraclemcp-driver-cx` name.
 
 ## Highlights
 
@@ -42,8 +49,8 @@ running python-oracledb's **own** thin-mode test suite against the Rust engine.
 ## Quick example
 
 ```rust
-use oracledb::{BlockingConnection, ConnectOptions, FromRow, QueryResultExt};
-use oracledb::protocol::ClientIdentity;
+use oraclemcp_driver_cx::{BlockingConnection, ConnectOptions, FromRow, QueryResultExt};
+use oraclemcp_driver_cx::protocol::ClientIdentity;
 
 #[derive(FromRow)]
 struct Emp {
@@ -52,7 +59,7 @@ struct Emp {
     manager_id: Option<i64>, // nullable column -> Option
 }
 
-fn main() -> Result<(), oracledb::Error> {
+fn main() -> Result<(), oraclemcp_driver_cx::Error> {
     let identity = ClientIdentity::new(
         "billing-worker", // program
         "edge-pod-7",     // machine
@@ -93,7 +100,7 @@ visible runtime. The async API is identical minus the blocking wrapper.
 
 | feature | default | what it adds |
 |---|---|---|
-| `derive` | yes | `#[derive(FromRow)]` (the `oracledb-derive` proc-macro) |
+| `derive` | yes | `#[derive(FromRow)]` (the `oraclemcp-driver-cx-derive` proc-macro) |
 | `arrow` | no | Apache Arrow row ingest |
 | `chrono` / `uuid` / `serde_json` / `rust_decimal` | no | typed `FromSql` / `ToSql` bridges |
 | `soda` | no | experimental thin-mode SODA |

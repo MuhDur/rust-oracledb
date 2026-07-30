@@ -1,18 +1,19 @@
 [package]
-name = "oracledb-derive"
+name = "oraclemcp-driver-cx-derive"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation = "https://docs.rs/oracledb-derive"
-description = "Procedural macros for the `oracledb` driver (`#[derive(FromRow)]`)."
+documentation = "https://docs.rs/oraclemcp-driver-cx-derive"
+description = "Procedural macros for oraclemcp-driver-cx (`#[derive(FromRow)]`)."
 keywords = ["oracle", "database", "derive", "proc-macro", "fromrow"]
 categories = ["database"]
-# Internal derive crate; user-facing docs live on the `oracledb` crate.
+# Internal derive crate; user-facing docs live on `oraclemcp-driver-cx`.
 readme = false
 
 [lib]
+name = "oraclemcp_driver_cx_derive"
 proc-macro = true
 
 [dependencies]

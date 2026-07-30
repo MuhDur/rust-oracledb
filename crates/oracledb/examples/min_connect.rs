@@ -6,8 +6,8 @@
 
 use std::num::NonZeroU32;
 
-use oracledb::protocol::ClientIdentity;
-use oracledb::{params, ConnectOptions, Query};
+use oraclemcp_driver_cx::protocol::ClientIdentity;
+use oraclemcp_driver_cx::{params, ConnectOptions, Query};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let identity = ClientIdentity::new(

@@ -1,8 +1,8 @@
-use oracledb::FromRow;
+use oraclemcp_driver_cx::FromRow;
 
 #[derive(FromRow)]
 struct Row {
-    #[oracledb(foo = "ID")]
+    #[driver_cx(foo = "ID")]
     id: i64,
 }
 

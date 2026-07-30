@@ -15,6 +15,8 @@
 //! Allocations are counted with `allocation-counter` (its unsafe lives inside
 //! that crate, so the workspace stays `#![forbid(unsafe_code)]`-clean).
 
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::thin::{
     encode_number_text, parse_fetch_response_with_context, ClientCapabilities, ColumnMetadata,
 };

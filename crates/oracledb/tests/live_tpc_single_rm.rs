@@ -21,6 +21,8 @@ use std::pin::Pin;
 
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::thin::{ExecuteOptions, QueryResult, QueryValue, TPC_TXN_FLAGS_NEW};
 use oracledb::{ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;

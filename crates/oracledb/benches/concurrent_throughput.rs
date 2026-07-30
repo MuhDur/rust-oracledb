@@ -75,6 +75,8 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::thin::{QueryResult, QueryValue};
 use oracledb::{BlockingConnection, ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;

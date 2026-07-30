@@ -55,7 +55,7 @@ scan_paths() {
   # self-test marker) they hunt for; scanning them would flag the scanner on
   # itself. Exclude them here so every phase (structural/denylist/generic) skips
   # them uniformly.
-  if [[ -d .git ]]; then
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     git ls-files -z
   else
     find . -type f \

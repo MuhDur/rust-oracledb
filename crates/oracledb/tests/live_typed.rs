@@ -22,6 +22,8 @@ use std::num::NonZeroU32;
 
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::oson::OsonValue;
 use oracledb::protocol::thin::{
     decode_lob_text, BindValue, ExecuteOptions, QueryResult, QueryValue, CS_FORM_IMPLICIT,

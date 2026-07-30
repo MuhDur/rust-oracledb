@@ -14,6 +14,8 @@
 use arrow_array::cast::AsArray;
 use arrow_array::types::{Float32Type, Float64Type, Int64Type, IntervalMonthDayNanoType};
 use arrow_schema::{DataType, IntervalUnit};
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::arrow::ArrowFetchOptions;
 use oracledb::{BlockingConnection, ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;

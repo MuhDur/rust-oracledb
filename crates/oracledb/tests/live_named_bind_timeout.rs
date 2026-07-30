@@ -12,6 +12,8 @@
 //!      cargo test -p oracledb --test live_named_bind_timeout -- --ignored --nocapture
 use std::time::Duration;
 
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::thin::QueryValue;
 use oracledb::protocol::ClientIdentity;
 use oracledb::{params, BlockingConnection, ConnectOptions, Error, Execute, Query};

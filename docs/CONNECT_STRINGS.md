@@ -1,7 +1,7 @@
 # Connect-String Parsing
 
 `rust-oracledb` ships a real, full-fidelity connect-string parser in
-`oracledb_protocol::net::connectstring`, matching python-oracledb thin-mode
+`oraclemcp_driver_cx_protocol::net::connectstring`, matching python-oracledb thin-mode
 semantics (`impl/base/parsers.pyx` + `connect_params.pyx`) and going beyond the
 reference with precise, offset-pointed diagnostics.
 

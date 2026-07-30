@@ -30,6 +30,9 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
+// Keep this exhaustive matrix readable; the alias is local to the example.
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::prelude::*;
 use oracledb::protocol::thin::{
     decode_lob_text, encode_lob_text, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB, ORA_TYPE_NUM_DATE,

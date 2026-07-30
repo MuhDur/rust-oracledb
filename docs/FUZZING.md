@@ -47,7 +47,7 @@ deep is unreachable by byte-level mutation alone (see its row below).
 
 Several targets reach `pub(crate)` (or `#[cfg(fuzzing)] pub`)
 functions through a tiny, **`#[cfg(fuzzing)]`-only** shim module
-`oracledb_protocol::fuzz_api` (see `crates/oracledb-protocol/src/lib.rs`).
+`oraclemcp_driver_cx_protocol::fuzz_api` (see `crates/oracledb-protocol/src/lib.rs`).
 The shim is compiled only under `--cfg fuzzing` (which `cargo-fuzz` sets
 automatically), so it never widens the crate's normal public API. The
 `cfg(fuzzing)` flag is registered in the workspace `[workspace.lints.rust]`

@@ -1,5 +1,5 @@
 [package]
-name = "oracledb"
+name = "oraclemcp-driver-cx"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -20,8 +20,11 @@ exclude = [
     "tests/",
 ]
 
+[lib]
+name = "oraclemcp_driver_cx"
+
 [features]
-# `derive` is on by default: it pulls in the `oracledb-derive` proc-macro crate
+# `derive` is on by default: it pulls in the driver-cx proc-macro crate
 # (and, transitively, syn/quote/proc-macro2), which are BUILD-TIME-ONLY deps and
 # already present in the workspace dependency graph, so the default runtime build
 # gains no extra compiled artifact. Disable with `default-features = false` if you
@@ -90,8 +93,11 @@ chrono = { version = "0.4", optional = true, default-features = false, features 
 # deny.toml's allow-list and the registry is already permitted, so no deny.toml
 # change is required.
 futures-core = { version = "0.3", default-features = false }
-oracledb-derive = { path = "../oracledb-derive", version = "0.9.1", optional = true }
-oracledb-protocol = { path = "../oracledb-protocol", version = "0.9.1" }
+# The dependency keys intentionally preserve short internal identifiers. The
+# published packages and their direct-consumer crate paths use the driver-cx
+# names; these aliases are private implementation details of this crate.
+oracledb-derive = { package = "oraclemcp-driver-cx-derive", path = "../oracledb-derive", version = "0.9.1", optional = true }
+oracledb-protocol = { package = "oraclemcp-driver-cx-protocol", path = "../oracledb-protocol", version = "0.9.1" }
 rust_decimal = { version = "1", optional = true, default-features = false, features = ["std"] }
 rustls.workspace = true
 rustls-native-certs.workspace = true

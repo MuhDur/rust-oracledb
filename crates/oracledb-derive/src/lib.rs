@@ -1,13 +1,13 @@
-//! Procedural macros for the `oracledb` driver.
+//! Procedural macros for the `oraclemcp-driver-cx` driver.
 //!
 //! This crate hosts the `#[derive(FromRow)]` macro. It is an implementation
-//! detail of the `oracledb` crate: end users never depend on it directly. The
-//! `oracledb` crate re-exports the derive (gated behind its default-on `derive`
+//! detail of the `oraclemcp-driver-cx` crate: end users never depend on it
+//! directly. The driver crate re-exports the derive (gated behind its default-on `derive`
 //! feature) alongside the `FromRow` trait the generated code implements, so the
 //! single import
 //!
 //! ```ignore
-//! use oracledb::FromRow;
+//! use oraclemcp_driver_cx::FromRow;
 //! ```
 //!
 //! brings both the trait and the derive into scope.
@@ -21,7 +21,8 @@
 //! struct Emp { id: i64, name: String, hired: Option<chrono::NaiveDate> }
 //! ```
 //!
-//! the macro emits an `impl oracledb::FromRow for Emp`, whose `from_row` pulls
+//! the macro emits an `impl oraclemcp_driver_cx::FromRow for Emp`, whose
+//! `from_row` pulls
 //! each field out of the row **by column name** through the existing typed
 //! accessor (`TypedRow::get_by_name`), which itself goes through the real
 //! `FromSql` conversion. There is no stringly-typed shortcut: an `i64` field is
@@ -32,12 +33,12 @@
 //!
 //! * Named-field structs — each field maps to a column named after the field.
 //! * Tuple structs — each field maps to a column **by position** (index 0, 1, …).
-//! * `#[oracledb(rename_all = "UPPERCASE" | "lowercase" | "snake_case" |
+//! * `#[driver_cx(rename_all = "UPPERCASE" | "lowercase" | "snake_case" |
 //!   "SCREAMING_SNAKE_CASE" | "camelCase" | "PascalCase")]` on the struct
 //!   renames every field's column (column resolution is case-insensitive, so
 //!   `UPPERCASE`/`lowercase` are cosmetic, but the others change word casing).
-//! * `#[oracledb(column = "…")]` on a field overrides that one column name.
-//! * `#[oracledb(rename = "…")]` is an accepted alias for `column = "…"`.
+//! * `#[driver_cx(column = "…")]` on a field overrides that one column name.
+//! * `#[driver_cx(rename = "…")]` is an accepted alias for `column = "…"`.
 //!
 //! Enums, unions, and unit/zero-field structs produce a clear `compile_error!`.
 
@@ -46,12 +47,12 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{parse_macro_input, spanned::Spanned, Data, DeriveInput, Fields, LitStr, Meta, Token};
 
-/// Derive an `oracledb::FromRow` implementation that maps a query row into the
+/// Derive an `oraclemcp_driver_cx::FromRow` implementation that maps a query row into the
 /// annotated struct, with compile-time-checked field types.
 ///
 /// See the [crate-level documentation](crate) for the supported shapes and the
-/// `#[oracledb(...)]` attributes.
-#[proc_macro_derive(FromRow, attributes(oracledb))]
+/// `#[driver_cx(...)]` attributes.
+#[proc_macro_derive(FromRow, attributes(driver_cx))]
 pub fn derive_from_row(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand(input)
@@ -147,23 +148,23 @@ fn to_camel(field: &str, pascal: bool) -> String {
     out
 }
 
-/// Container-level options parsed from `#[oracledb(...)]` on the struct.
+/// Container-level options parsed from `#[driver_cx(...)]` on the struct.
 #[derive(Default)]
 struct ContainerOpts {
     rename_all: Option<RenameAll>,
 }
 
-/// Field-level options parsed from `#[oracledb(...)]` on a field.
+/// Field-level options parsed from `#[driver_cx(...)]` on a field.
 #[derive(Default)]
 struct FieldOpts {
     column: Option<String>,
 }
 
-/// Parse every `#[oracledb(...)]` attribute on a struct into container options.
+/// Parse every `#[driver_cx(...)]` attribute on a struct into container options.
 fn parse_container_opts(input: &DeriveInput) -> syn::Result<ContainerOpts> {
     let mut opts = ContainerOpts::default();
     for attr in &input.attrs {
-        if !attr.path().is_ident("oracledb") {
+        if !attr.path().is_ident("driver_cx") {
             continue;
         }
         let metas =
@@ -177,7 +178,7 @@ fn parse_container_opts(input: &DeriveInput) -> syn::Result<ContainerOpts> {
                 _ => {
                     return Err(syn::Error::new(
                         meta.span(),
-                        "unsupported #[oracledb(...)] container option; \
+                        "unsupported #[driver_cx(...)] container option; \
                          expected `rename_all = \"...\"`",
                     ));
                 }
@@ -187,11 +188,11 @@ fn parse_container_opts(input: &DeriveInput) -> syn::Result<ContainerOpts> {
     Ok(opts)
 }
 
-/// Parse every `#[oracledb(...)]` attribute on a field into field options.
+/// Parse every `#[driver_cx(...)]` attribute on a field into field options.
 fn parse_field_opts(attrs: &[syn::Attribute]) -> syn::Result<FieldOpts> {
     let mut opts = FieldOpts::default();
     for attr in attrs {
-        if !attr.path().is_ident("oracledb") {
+        if !attr.path().is_ident("driver_cx") {
             continue;
         }
         let metas =
@@ -205,7 +206,7 @@ fn parse_field_opts(attrs: &[syn::Attribute]) -> syn::Result<FieldOpts> {
                 _ => {
                     return Err(syn::Error::new(
                         meta.span(),
-                        "unsupported #[oracledb(...)] field option; \
+                        "unsupported #[driver_cx(...)] field option; \
                          expected `column = \"...\"` or `rename = \"...\"`",
                     ));
                 }
@@ -311,10 +312,10 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
 
     Ok(quote! {
         #[automatically_derived]
-        impl #impl_generics ::oracledb::FromRow for #name #ty_generics #where_clause {
+        impl #impl_generics ::oraclemcp_driver_cx::FromRow for #name #ty_generics #where_clause {
             fn from_row(
-                row: &::oracledb::TypedRow<'_>,
-            ) -> ::core::result::Result<Self, ::oracledb::ConversionError> {
+                row: &::oraclemcp_driver_cx::TypedRow<'_>,
+            ) -> ::core::result::Result<Self, ::oraclemcp_driver_cx::ConversionError> {
                 ::core::result::Result::Ok(#name #body)
             }
         }
@@ -375,7 +376,7 @@ fn unnamed_body(unnamed: &syn::FieldsUnnamed) -> syn::Result<TokenStream2> {
         if opts.column.is_some() {
             return Err(syn::Error::new(
                 field.span(),
-                "#[oracledb(column = ...)] is not supported on a tuple struct field; \
+                "#[driver_cx(column = ...)] is not supported on a tuple struct field; \
                  tuple-struct fields map to columns by position",
             ));
         }

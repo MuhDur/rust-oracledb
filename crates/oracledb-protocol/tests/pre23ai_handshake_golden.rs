@@ -18,6 +18,8 @@
 //!   terminate at their terminal TTC message WITHOUT any END_OF_RESPONSE
 //!   framing (and the incomplete-prefix "keep reading" loop behavior).
 
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::packet::TnsPacket;
 use oracledb_protocol::thin::{
     classic_connect_response_is_complete, parse_accept_payload, parse_auth_response,

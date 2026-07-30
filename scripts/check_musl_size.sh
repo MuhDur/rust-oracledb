@@ -36,7 +36,7 @@ if [ -z "${CC_x86_64_unknown_linux_musl:-}" ]; then
 fi
 
 echo "musl-size: building $EXAMPLE for $TARGET"
-cargo build -p oracledb --example "$EXAMPLE" --release --target "$TARGET"
+cargo build -p oraclemcp-driver-cx --example "$EXAMPLE" --release --target "$TARGET"
 
 BIN="$CARGO_TARGET_DIR/$TARGET/release/examples/$EXAMPLE"
 if [ ! -x "$BIN" ]; then

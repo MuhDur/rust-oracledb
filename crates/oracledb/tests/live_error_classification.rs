@@ -14,6 +14,8 @@
 //! cargo test -p oracledb --test live_error_classification -- --nocapture
 //! ```
 
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::{BlockingConnection, ConnectOptions, Connection, Error};
 use oracledb_protocol::ClientIdentity;
 

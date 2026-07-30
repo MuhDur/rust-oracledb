@@ -176,9 +176,9 @@ grep -Eq "^Status: implemented in (prepared )?workspace version $version_re;" "$
 
 # The three crates that actually get published, in dependency order.
 expected_packages=(
-  oracledb-protocol
-  oracledb-derive
-  oracledb
+  oraclemcp-driver-cx-protocol
+  oraclemcp-driver-cx-derive
+  oraclemcp-driver-cx
 )
 
 for package in "${expected_packages[@]}"; do
@@ -188,27 +188,27 @@ for package in "${expected_packages[@]}"; do
 done
 
 # Inter-crate version-pin guard (W4-T3.1). The package-version check above proves
-# every workspace crate shares one version, but NOT that the published `oracledb`
+# every workspace crate shares one version, but NOT that the published driver
 # crate's path-dependency *requirements* on its siblings equal that version. A
 # stale `version = "X"` requirement publishes a crate that resolves a wrong/old
 # sibling from crates.io even though the workspace built against the local path —
 # the gap that bit 0.2.1/0.2.2. Assert each inter-crate requirement pins the
 # current workspace version.
-for dep in oracledb-protocol oracledb-derive; do
+for dep in oraclemcp-driver-cx-protocol oraclemcp-driver-cx-derive; do
   req="$(
     jq -r --arg d "$dep" '
-      .packages[] | select(.name == "oracledb")
+      .packages[] | select(.name == "oraclemcp-driver-cx")
       | .dependencies[] | select(.name == $d) | .req
     ' <<<"$metadata"
   )"
   if [ -z "$req" ] || [ "$req" = "null" ]; then
-    fail "the oracledb crate is missing its inter-crate dependency on $dep"
+    fail "the oraclemcp-driver-cx crate is missing its inter-crate dependency on $dep"
   fi
   # cargo normalizes `version = "X"` to the requirement `^X`; strip a leading
   # comparator (^ ~ = >= <=) and surrounding space to recover the pinned version.
   req_version="$(printf '%s' "$req" | sed -E 's/^[[:space:]]*[\^~=<>]*[[:space:]]*//')"
   [ "$req_version" = "$version" ] || fail \
-    "oracledb's '$dep' requirement '$req' (pinned version '$req_version') does not match the workspace version '$version' — bump the inter-crate pin in crates/oracledb/Cargo.toml in lockstep"
+    "oraclemcp-driver-cx's '$dep' requirement '$req' (pinned version '$req_version') does not match the workspace version '$version' — bump the inter-crate pin in crates/oracledb/Cargo.toml in lockstep"
 done
 
 tag="${RELEASE_TAG:-}"

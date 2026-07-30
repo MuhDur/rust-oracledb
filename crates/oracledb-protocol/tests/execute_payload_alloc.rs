@@ -11,6 +11,8 @@
 //! This is a measurement-only test (it asserts a sane upper bound so a future
 //! regression is caught), counted with the `allocation-counter` crate.
 
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::thin::{build_execute_payload_with_seq, ClientCapabilities};
 
 #[test]

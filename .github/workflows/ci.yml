@@ -80,7 +80,7 @@ jobs:
           sudo $docker_cmd $docker_image_cmd 2>/dev/null || true
           df -h /
       - run: cargo test --workspace --exclude oracledb-pyshim
-      - run: cargo test -p oracledb --features cassette
+      - run: cargo test -p oraclemcp-driver-cx --features cassette
       - run: cargo test --workspace --exclude oracledb-pyshim --doc
 
   pyshim-unit:

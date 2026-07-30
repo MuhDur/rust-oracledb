@@ -10,6 +10,8 @@
 //!   cargo bench -p oracledb-protocol --bench borrowed_decode
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::thin::{
     encode_number_text, parse_query_response_borrowed, ClientCapabilities, ColumnMetadata,
     QueryValueRef,

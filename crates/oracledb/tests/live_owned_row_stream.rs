@@ -18,6 +18,8 @@ use std::pin::Pin;
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
 use futures_core::Stream;
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::thin::QueryValue;
 use oracledb::{ConnectOptions, Connection, OwnedRowStream, Query};
 use oracledb_protocol::ClientIdentity;

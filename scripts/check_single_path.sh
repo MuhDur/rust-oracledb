@@ -32,8 +32,8 @@ fi
 # Verified-distinct same-leaf type pairs (NOT re-exports). Format: the two full
 # paths, sorted, joined by a space — must match the pair the detector reports.
 DISTINCT_PAIRS="$(cat <<'EOF'
-oracledb_protocol::net::Protocol oracledb_protocol::net::connectstring::Protocol
-oracledb_protocol::Result oracledb_protocol::sql::Result
+oraclemcp_driver_cx_protocol::net::Protocol oraclemcp_driver_cx_protocol::net::connectstring::Protocol
+oraclemcp_driver_cx_protocol::Result oraclemcp_driver_cx_protocol::sql::Result
 EOF
 )"
 
@@ -51,7 +51,7 @@ is_distinct_pair() {
 
 violations=0
 
-for crate in oracledb oracledb-protocol; do
+for crate in oraclemcp-driver-cx oraclemcp-driver-cx-protocol; do
   api="$(cargo public-api -p "$crate" --all-features 2>/dev/null)"
   if [ -z "$api" ]; then
     echo "single-path: empty public-api for $crate" >&2

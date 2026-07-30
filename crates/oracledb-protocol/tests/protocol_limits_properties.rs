@@ -24,6 +24,8 @@
 //! The `allocation-counter` crate keeps its `unsafe GlobalAlloc` inside itself,
 //! so this test (and the whole workspace) stays `#![forbid(unsafe_code)]`-clean.
 
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::packet::TnsPacket;
 use oracledb_protocol::vector::{decode_vector_with_limits, TNS_VECTOR_MAGIC_BYTE};
 use oracledb_protocol::wire::{

@@ -1,16 +1,16 @@
 package	feature	members
-oracledb	arrow	dep:arrow-array,dep:arrow-buffer,dep:arrow-data,dep:arrow-ipc,dep:arrow-schema
-oracledb	cassette	oracledb-protocol/cassette
-oracledb	chrono	dep:chrono
-oracledb	default	derive
-oracledb	derive	dep:oracledb-derive
-oracledb	experimental	oracledb-protocol/experimental
-oracledb	rust_decimal	dep:rust_decimal
-oracledb	serde_json	dep:serde_json
-oracledb	soda	dep:serde_json
-oracledb	tracing	dep:tracing
-oracledb	uuid	dep:uuid
-oracledb-protocol	cassette	
-oracledb-protocol	default	
-oracledb-protocol	experimental	
-oracledb-protocol	simd-decode	dep:simdutf8
+oraclemcp-driver-cx	arrow	dep:arrow-array,dep:arrow-buffer,dep:arrow-data,dep:arrow-ipc,dep:arrow-schema
+oraclemcp-driver-cx	cassette	oracledb-protocol/cassette
+oraclemcp-driver-cx	chrono	dep:chrono
+oraclemcp-driver-cx	default	derive
+oraclemcp-driver-cx	derive	dep:oracledb-derive
+oraclemcp-driver-cx	experimental	oracledb-protocol/experimental
+oraclemcp-driver-cx	rust_decimal	dep:rust_decimal
+oraclemcp-driver-cx	serde_json	dep:serde_json
+oraclemcp-driver-cx	soda	dep:serde_json
+oraclemcp-driver-cx	tracing	dep:tracing
+oraclemcp-driver-cx	uuid	dep:uuid
+oraclemcp-driver-cx-protocol	cassette	-
+oraclemcp-driver-cx-protocol	default	-
+oraclemcp-driver-cx-protocol	experimental	-
+oraclemcp-driver-cx-protocol	simd-decode	dep:simdutf8

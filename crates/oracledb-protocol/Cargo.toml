@@ -1,15 +1,15 @@
 [package]
-name = "oracledb-protocol"
+name = "oraclemcp-driver-cx-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation = "https://docs.rs/oracledb-protocol"
-description = "Sans-I/O Oracle TNS/TTC protocol core for the oracledb crate."
+documentation = "https://docs.rs/oraclemcp-driver-cx-protocol"
+description = "Sans-I/O Oracle TNS/TTC protocol core for oraclemcp-driver-cx."
 keywords = ["oracle", "database", "protocol", "tns", "ttc"]
 categories = ["database", "network-programming"]
-# Internal protocol crate; the user-facing docs live on the `oracledb` crate.
+# Internal protocol crate; user-facing docs live on `oraclemcp-driver-cx`.
 readme = false
 # Keep the published tarball lean. The golden/ wire-trace corpus and the fuzz
 # sub-crate are sizable dev-time assets not needed to build or use the crate.
@@ -18,6 +18,9 @@ exclude = [
     "fuzz/",
     "proptest-regressions/",
 ]
+
+[lib]
+name = "oraclemcp_driver_cx_protocol"
 
 [features]
 default = []

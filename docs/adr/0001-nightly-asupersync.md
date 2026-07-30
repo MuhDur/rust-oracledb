@@ -6,7 +6,7 @@ Date: 2026-06-19
 
 ## Context
 
-`oracledb` is the Rust thin driver used by first-party consumers such as the
+`oraclemcp-driver-cx` package is the Rust thin driver used by first-party consumers such as the
 Python shim and oraclemcp. The driver runs on asupersync, which currently
 requires nightly Rust through `try_trait_v2` support. The nightly requirement is
 a build-time constraint for the Rust crate and is invisible to users of

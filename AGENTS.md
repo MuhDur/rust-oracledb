@@ -2,12 +2,13 @@
 
 Operating rules for agents working in this repository.
 
-**rust-oracledb** is a pure-Rust, async, **thin-mode** Oracle Database driver: it
+**oraclemcp-driver-cx** is a pure-Rust, async, **thin-mode** Oracle Database driver: it
 speaks the Oracle TNS/TTC wire protocol directly over TCP, so it needs **no
 Oracle Instant Client, no OCI, no ODPI-C, no `libclntsh`, and no C toolchain** to
 talk to a database. It is a faithful clean-room port of python-oracledb v4.0.1
-thin mode and tracks that reference's behaviour. The crate ships on crates.io as
-[`oracledb`](https://crates.io/crates/oracledb). Independent open-source project;
+thin mode and tracks that reference's behaviour. The maintained crate family is
+`oraclemcp-driver-cx`; `Cx` identifies its `asupersync::Cx` structured-concurrency
+contract. The legacy `oracledb` namespace is being handed to Oracle. Independent open-source project;
 **not affiliated with Oracle** — "Oracle" and "python-oracledb" are named only to
 describe what this driver is compatible with.
 
@@ -24,7 +25,7 @@ Never run `git reset --hard`, `git clean -fd`, `git push --force`, branch
 deletion, or `rm -rf` on tracked paths without explicit in-session approval.
 Never force-push `main`. **Do not commit or push on the operator's behalf without
 a clear in-session go-ahead.** crates.io publishes are **permanent** — a version
-is immutable once uploaded and the `oracledb` name is claimed forever — so treat
+is immutable once uploaded and crate names are claimed forever — so treat
 publishing as a gated, deliberate, operator-authorized step, never an incidental one.
 
 ## Swarm operating constitution
@@ -100,7 +101,7 @@ scripts/swarm_discipline.sh foreign-edit <path>...          # 13
 scripts/swarm_discipline.sh evidence-source --kind close --from <evidence.json>  # 14
 scripts/swarm_discipline.sh evidence-source --kind proof --scope <path>...       # 14
 scripts/swarm_discipline.sh verified-push \
-  --gate-cmd 'cargo fmt --all -- --check && scripts/check_resource_budget.sh --profile release-qualification && cargo test -p oracledb --features cassette && cargo deny check' \
+  --gate-cmd 'cargo fmt --all -- --check && scripts/check_resource_budget.sh --profile release-qualification && cargo test -p oraclemcp-driver-cx --features cassette && cargo deny check' \
   -- origin main                                            # 15
 scripts/swarm_discipline.sh bounded-run --timeout 120 -- <cmd>                   # 16
 scripts/swarm_discipline.sh unbounded-wait-lint                                  # 16
@@ -123,7 +124,7 @@ refusal and each acceptance; CI can run it with your required local proofs.
   the pin in lockstep with asupersync upgrades (and the matching
   `dtolnay/rust-toolchain` pins under `.github/workflows/`).
 - The whole workspace forbids `unsafe`: `unsafe_code = "forbid"` in
-  `[workspace.lints.rust]`, and `oracledb-protocol` / `oracledb` are each
+  `[workspace.lints.rust]`, and the driver/protocol crates are each
   `#![forbid(unsafe_code)]`. The **only** `unsafe` is one audited Arrow C-Data
   FFI module (`crates/oracledb-pyshim/src/arrow_capsule.rs`), quarantined to the
   **non-published** PyO3 test harness. Do not introduce `unsafe` anywhere else.
@@ -133,7 +134,7 @@ refusal and each acceptance; CI can run it with your required local proofs.
   cargo fmt --all -- --check
   cargo clippy --workspace --exclude oracledb-pyshim --no-deps -- -D warnings
   cargo test --workspace --exclude oracledb-pyshim
-  cargo test -p oracledb --features cassette
+  cargo test -p oraclemcp-driver-cx --features cassette
   cargo deny check
   ```
   **Regenerate checked-in baselines in the same commit.** Before committing a
@@ -212,7 +213,8 @@ This driver's credibility rests on evidence, not claims. Preserve it:
 
 ## Workspace layout
 
-Three published crates plus one test-only harness:
+Three published `oraclemcp-driver-cx*` crates plus one test-only harness. Source
+directories retain their historical names to preserve path history:
 
 ```text
 crates/oracledb-protocol   sans-I/O TNS/TTC codec. #![forbid(unsafe_code)].

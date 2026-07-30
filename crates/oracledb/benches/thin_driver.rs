@@ -36,6 +36,8 @@ use std::time::Duration;
 use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
 use asupersync::Cx;
 use criterion::{criterion_group, criterion_main, Criterion};
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::thin::{decode_lob_text, BindValue, QueryValue, QueryValueRef};
 use oracledb::{BlockingConnection, ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;

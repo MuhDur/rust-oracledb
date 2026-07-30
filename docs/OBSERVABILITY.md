@@ -124,10 +124,10 @@ the default build does not compile it in. Verify directly:
 
 ```sh
 # Default build: NO tracing in the library dependency graph.
-cargo tree -p oracledb -e no-dev | grep -i tracing      # → no matches
+cargo tree -p oraclemcp-driver-cx -e no-dev | grep -i tracing      # → no matches
 
 # Feature on: tracing appears.
-cargo tree -p oracledb --features tracing -e no-dev | grep -i '^.*tracing v'
+cargo tree -p oraclemcp-driver-cx --features tracing -e no-dev | grep -i '^.*tracing v'
 ```
 
 The `-e no-dev` edge filter excludes dev-dependencies (the span-capture test's

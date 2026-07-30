@@ -1,5 +1,5 @@
 error: unknown rename_all rule "kebab-case"; expected one of "UPPERCASE", "lowercase", "snake_case", "SCREAMING_SNAKE_CASE", "camelCase", "PascalCase"
- --> tests/trybuild/fail/invalid_rename_all.rs:4:25
+ --> tests/trybuild/fail/invalid_rename_all.rs:4:26
   |
-4 | #[oracledb(rename_all = "kebab-case")]
-  |                         ^^^^^^^^^^^^
+4 | #[driver_cx(rename_all = "kebab-case")]
+  |                          ^^^^^^^^^^^^

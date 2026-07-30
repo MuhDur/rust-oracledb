@@ -1,7 +1,7 @@
-use oracledb::FromRow;
+use oraclemcp_driver_cx::FromRow;
 
 #[derive(FromRow)]
-#[oracledb(rename_all = "kebab-case")]
+#[driver_cx(rename_all = "kebab-case")]
 struct Row {
     employee_id: i64,
 }

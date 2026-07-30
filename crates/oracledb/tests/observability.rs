@@ -22,6 +22,8 @@ use std::time::Duration;
 
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::thin::{
     encode_lob_text, ColumnMetadata, LobValue, QueryValue, CS_FORM_IMPLICIT, ORA_TYPE_NUM_CLOB,
     ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_VARCHAR,

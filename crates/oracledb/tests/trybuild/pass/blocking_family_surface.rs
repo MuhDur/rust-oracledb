@@ -1,13 +1,13 @@
 use std::time::Duration;
 
-use oracledb::protocol::thin::{BindValue, ExecuteOptions, LobReadResult, QueryResult};
-use oracledb::protocol::{wire::ProtocolLimits, ClientIdentity};
-use oracledb::{
+use oraclemcp_driver_cx::protocol::thin::{BindValue, ExecuteOptions, LobReadResult, QueryResult};
+use oraclemcp_driver_cx::protocol::{wire::ProtocolLimits, ClientIdentity};
+use oraclemcp_driver_cx::{
     Batch, BatchOutcome, BlockingConnection, BlockingRows, ConnectOptions, Connection, Execute,
     ExecuteOutcome, NotificationOutcome, PipelineRequest, Query, Registration, RegistrationOutcome,
     Result, Row,
 };
-use oracledb::pool::{
+use oraclemcp_driver_cx::pool::{
     AcquireOptions, BlockingPool, BlockingPooledConnection, PoolBackend, PoolConfig, PoolError,
     PoolStats, POOL_GETMODE_TIMEDWAIT,
 };
@@ -108,7 +108,7 @@ fn option_config_surface() {
     let _: bool = connect.ssl_server_dn_match();
     let _: Option<&str> = connect.ssl_server_cert_dn();
     let _: bool = connect.use_sni();
-    let _: Option<&oracledb::AccessToken> = connect.access_token();
+    let _: Option<&oraclemcp_driver_cx::AccessToken> = connect.access_token();
     let _: usize = connect.statement_cache_size();
     let _: ProtocolLimits = connect.protocol_limits();
 
@@ -174,7 +174,7 @@ fn option_config_surface() {
         .scrollable()
         .timeout(Duration::from_secs(1));
     let _: &str = query.sql();
-    let _: &oracledb::Params<'_> = query.params();
+    let _: &oraclemcp_driver_cx::Params<'_> = query.params();
     let _: std::num::NonZeroU32 = query.arraysize_value();
     let _: u32 = query.prefetch_rows();
     let _: bool = query.materialize_lobs();
@@ -187,7 +187,7 @@ fn option_config_surface() {
         .parse_only()
         .raw_options(exec_options);
     let _: &str = execute.sql();
-    let _: &oracledb::Params<'_> = execute.params();
+    let _: &oraclemcp_driver_cx::Params<'_> = execute.params();
     let _: Option<Duration> = execute.timeout_duration();
     let _: ExecuteOptions = execute.options();
 
@@ -198,7 +198,7 @@ fn option_config_surface() {
         .timeout(Duration::from_secs(1))
         .raw_options(exec_options);
     let _: &str = batch.sql();
-    let _: &oracledb::BatchRows<'_> = batch.rows();
+    let _: &oraclemcp_driver_cx::BatchRows<'_> = batch.rows();
     let _: Option<Duration> = batch.timeout_duration();
     let _: ExecuteOptions = batch.options();
 
@@ -206,7 +206,7 @@ fn option_config_surface() {
         .bind(vec![BindValue::Number("1".into())])
         .timeout(Duration::from_secs(1));
     let _: &str = registration.sql();
-    let _: &oracledb::Params<'_> = registration.params();
+    let _: &oraclemcp_driver_cx::Params<'_> = registration.params();
     let _: u64 = registration.registration_id();
     let _: Option<Duration> = registration.timeout_duration();
 

@@ -14,7 +14,7 @@ memory *and* tasks *and* an isolated target dir, and the kernel enforces all thr
 
 ```bash
 scripts/resource_budget.sh --profile build   -- cargo test --workspace
-scripts/resource_budget.sh --profile mutants -- cargo mutants -p oracledb-protocol
+scripts/resource_budget.sh --profile mutants -- cargo mutants -p oraclemcp-driver-cx-protocol
 scripts/resource_budget.sh --profile mutants --emit-budget    # JSON only, runs nothing
 scripts/check_resource_budget.sh                              # prove it is enforced
 ```
@@ -74,7 +74,7 @@ run produced what, and two runs can fight over the same lock.
 The obvious objection is that a fresh target dir means a cold build every time.
 In practice it does not, because `~/.cargo/config.toml` sets
 `rustc-wrapper = sccache`: compilation results are cached *across* target dirs.
-Measured here — a cold, isolated `cargo check -p oracledb-derive` finished in
+Measured here — a cold, isolated `cargo check -p oraclemcp-driver-cx-derive` finished in
 **2.54s** against a warm sccache (3538 cache hits). Isolation costs approximately
 nothing; sccache is what pays for it.
 

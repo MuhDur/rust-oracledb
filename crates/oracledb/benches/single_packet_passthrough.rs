@@ -19,6 +19,8 @@
 //!   cargo bench -p oracledb --bench single_packet_passthrough
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+extern crate oraclemcp_driver_cx as oracledb;
+
 #[cfg(feature = "cassette")]
 use oracledb::protocol::net::cassette::{self, Direction};
 use oracledb::protocol::thin::{

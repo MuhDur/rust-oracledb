@@ -21,6 +21,8 @@ use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use asupersync::net::TcpStream;
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb_protocol::net::EasyConnect;
 use oracledb_protocol::tls::wallet::parse_ewallet_pem;
 use ring::signature::{UnparsedPublicKey, RSA_PKCS1_2048_8192_SHA256, RSA_PSS_2048_8192_SHA256};

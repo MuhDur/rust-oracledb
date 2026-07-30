@@ -27,7 +27,7 @@ A TCPS connection is requested by a `tcps://` EZConnect prefix (default port
 **2484**), plus a wallet and the DN-match settings:
 
 ```rust
-use oracledb::{Connection, ConnectOptions, ClientIdentity};
+use oraclemcp_driver_cx::{Connection, ConnectOptions, ClientIdentity};
 
 let options = ConnectOptions::new(
         "tcps://db.example.com:2484/FREEPDB1", // tcps:// => TLS, default port 2484
@@ -75,7 +75,7 @@ when native discovery yields no roots and neither override is set.
 A single PEM file holding the trust-anchor certificate(s) and, for mutual TLS,
 the client certificate chain plus the client private key. This is the format
 python-oracledb thin loads (`transport.pyx::create_ssl_context`). The reader
-([`oracledb_protocol::tls::wallet`]):
+([`oraclemcp_driver_cx_protocol::tls::wallet`]):
 
 - loads **every** `CERTIFICATE` block as a trust anchor (server verification),
 - if an (unencrypted PKCS#8 / PKCS#1 / SEC1) `PRIVATE KEY` block is also
@@ -161,7 +161,7 @@ python-oracledb thin **disables standard TLS hostname verification**
 (`check_hostname = False`) and instead runs its own check after the handshake
 (`crypto.pyx::check_server_dn`). The Rust driver reproduces this exactly with a
 custom rustls `ServerCertVerifier`
-([`oracledb::tls::OracleServerCertVerifier`]):
+([`oraclemcp_driver_cx::tls::OracleServerCertVerifier`]):
 
 1. **Chain validation** — the server's leaf is validated to a trust anchor from
    the union of system roots (or explicit `SSL_CERT_FILE` / `SSL_CERT_DIR`
@@ -187,7 +187,7 @@ custom rustls `ServerCertVerifier`
 
 The Oracle TCPS SNI string is `S{len}.{service}[.T1.{c}].V3.{version}`
 (`transport.pyx::_calc_sni_data`; the builder and its tests live in
-[`oracledb_protocol::tls::sni`]). In python-oracledb this is **opt-in**
+[`oraclemcp_driver_cx_protocol::tls::sni`]). In python-oracledb this is **opt-in**
 (`use_sni` defaults to `false`); by default no SNI is sent and the server is
 identified purely by the DN match.
 

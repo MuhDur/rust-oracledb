@@ -10,6 +10,8 @@
 
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::thin::{QueryValue, QueryValueRef, ORA_TYPE_NUM_CLOB};
 use oracledb::{ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;

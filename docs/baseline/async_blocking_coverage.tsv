@@ -1,169 +1,169 @@
 surface	async_owner	async_method	blocking_owner	blocking_method	status	note
-connection	oracledb::Connection	aq_deq_many	oracledb::BlockingConnection	aq_deq_many	covered	blocking twin present
-connection	oracledb::Connection	aq_deq_one	oracledb::BlockingConnection	aq_deq_one	covered	blocking twin present
-connection	oracledb::Connection	aq_enq_many	oracledb::BlockingConnection	aq_enq_many	covered	blocking twin present
-connection	oracledb::Connection	aq_enq_one	oracledb::BlockingConnection	aq_enq_one	covered	blocking twin present
-connection	oracledb::Connection	begin_sessionless_transaction	oracledb::BlockingConnection	begin_sessionless_transaction	covered	blocking twin present
-connection	oracledb::Connection	cancel	oracledb::BlockingConnection	cancel	covered	blocking twin present
-connection	oracledb::Connection	change_password	oracledb::BlockingConnection	change_password	covered	blocking twin present
-connection	oracledb::Connection	close	oracledb::BlockingConnection	close	covered	blocking twin present
-connection	oracledb::Connection	commit	oracledb::BlockingConnection	commit	covered	blocking twin present
-connection	oracledb::Connection	connect	oracledb::BlockingConnection	connect	covered	blocking twin present
-connection	oracledb::Connection	create_temp_lob	oracledb::BlockingConnection	create_temp_lob	covered	blocking twin present
-connection	oracledb::Connection	define_and_fetch_rows_with_columns	oracledb::BlockingConnection	define_and_fetch_rows_with_columns	covered	blocking twin present
-connection	oracledb::Connection	describe_object_type	oracledb::BlockingConnection	describe_object_type	covered	blocking twin present
-connection	oracledb::Connection	direct_path_load	oracledb::BlockingConnection	direct_path_load	covered	blocking twin present
-connection	oracledb::Connection	direct_path_load_prepared	oracledb::BlockingConnection	direct_path_load_prepared	covered	blocking twin present
-connection	oracledb::Connection	direct_path_load_stream	oracledb::BlockingConnection	direct_path_load_stream	exception	Low-level direct-path streaming primitive stays async-only; blocking direct_path_load/load_prepared cover owned batches.
-connection	oracledb::Connection	direct_path_op	oracledb::BlockingConnection	direct_path_op	exception	Low-level direct-path operation primitive stays async-only; blocking direct_path_load/load_prepared cover owned batches.
-connection	oracledb::Connection	direct_path_prepare	oracledb::BlockingConnection	direct_path_prepare	covered	blocking twin present
-connection	oracledb::Connection	enable_dbms_output	oracledb::BlockingConnection	enable_dbms_output	covered	blocking twin present
-connection	oracledb::Connection	execute	oracledb::BlockingConnection	execute	covered	blocking twin present
-connection	oracledb::Connection	execute_many	oracledb::BlockingConnection	execute_many	covered	blocking twin present
-connection	oracledb::Connection	execute_many_with	oracledb::BlockingConnection	execute_many_with	covered	blocking twin present
-connection	oracledb::Connection	execute_raw	oracledb::BlockingConnection	execute_raw	covered	blocking twin present
-connection	oracledb::Connection	execute_with	oracledb::BlockingConnection	execute_with	covered	blocking twin present
-connection	oracledb::Connection	fetch_cursor	oracledb::BlockingConnection	fetch_cursor	covered	blocking twin present
-connection	oracledb::Connection	fetch_rows	oracledb::BlockingConnection	fetch_rows	covered	blocking twin present
-connection	oracledb::Connection	fetch_rows_ref	oracledb::BlockingConnection	fetch_rows_ref	exception	Zero-copy borrowed fetch is async-only because borrowed buffers cannot cross the block_on facade.
-connection	oracledb::Connection	fetch_rows_ref_response	oracledb::BlockingConnection	fetch_rows_ref_response	exception	Zero-copy borrowed fetch response is async-only because borrowed buffers cannot cross the block_on facade.
-connection	oracledb::Connection	fetch_rows_request	oracledb::BlockingConnection	fetch_rows_request	exception	Half-round-trip borrowed-fetch primitive is async-only; blocking callers use fetch_rows/fetch_rows_with_columns.
-connection	oracledb::Connection	fetch_rows_with_columns	oracledb::BlockingConnection	fetch_rows_with_columns	covered	blocking twin present
-connection	oracledb::Connection	for_each_row_ref	oracledb::BlockingConnection	for_each_row_ref	exception	Borrowed-row callback is async-only because QueryValueRef lifetimes cannot cross the block_on facade.
-connection	oracledb::Connection	free_temp_lobs	oracledb::BlockingConnection	free_temp_lobs	covered	blocking twin present
-connection	oracledb::Connection	free_temp_lobs_with_timeout	oracledb::BlockingConnection	free_temp_lobs_with_timeout	covered	blocking twin present
-connection	oracledb::Connection	notify_register	oracledb::BlockingConnection	notify_register	covered	blocking twin present
-connection	oracledb::Connection	ping	oracledb::BlockingConnection	ping	covered	blocking twin present
-connection	oracledb::Connection	ping_with_timeout	oracledb::BlockingConnection	ping_with_timeout	covered	blocking twin present
-connection	oracledb::Connection	query	oracledb::BlockingConnection	query	covered	blocking twin present
-connection	oracledb::Connection	query_all	oracledb::BlockingConnection	query_all	covered	blocking twin present
-connection	oracledb::Connection	query_one	oracledb::BlockingConnection	query_one	covered	blocking twin present
-connection	oracledb::Connection	query_opt	oracledb::BlockingConnection	query_opt	covered	blocking twin present
-connection	oracledb::Connection	query_with	oracledb::BlockingConnection	query_with	covered	blocking twin present
-connection	oracledb::Connection	read_dbms_output	oracledb::BlockingConnection	read_dbms_output	covered	blocking twin present
-connection	oracledb::Connection	read_lob	oracledb::BlockingConnection	read_lob	covered	blocking twin present
-connection	oracledb::Connection	read_lob_with_timeout	oracledb::BlockingConnection	read_lob_with_timeout	covered	blocking twin present
-connection	oracledb::Connection	recv_notification	oracledb::BlockingConnection	recv_notification	covered	blocking twin present
-connection	oracledb::Connection	register_query	oracledb::BlockingConnection	register_query	covered	blocking twin present
-connection	oracledb::Connection	resume_sessionless_transaction	oracledb::BlockingConnection	resume_sessionless_transaction	covered	blocking twin present
-connection	oracledb::Connection	rollback	oracledb::BlockingConnection	rollback	covered	blocking twin present
-connection	oracledb::Connection	run_pipeline	oracledb::BlockingConnection	run_pipeline	covered	blocking twin present
-connection	oracledb::Connection	run_pipeline_decoded	oracledb::BlockingConnection	run_pipeline_decoded	covered	blocking twin present
-connection	oracledb::Connection	scroll_cursor	oracledb::BlockingConnection	scroll_cursor	covered	blocking twin present
-connection	oracledb::Connection	subscribe_register	oracledb::BlockingConnection	subscribe_register	covered	blocking twin present
-connection	oracledb::Connection	subscribe_unregister	oracledb::BlockingConnection	subscribe_unregister	covered	blocking twin present
-connection	oracledb::Connection	supplement_json_column_metadata	oracledb::BlockingConnection	supplement_json_column_metadata	covered	blocking twin present
-connection	oracledb::Connection	suspend_sessionless_transaction	oracledb::BlockingConnection	suspend_sessionless_transaction	covered	blocking twin present
-connection	oracledb::Connection	tpc_begin	oracledb::BlockingConnection	tpc_begin	covered	blocking twin present
-connection	oracledb::Connection	tpc_commit	oracledb::BlockingConnection	tpc_commit	covered	blocking twin present
-connection	oracledb::Connection	tpc_end	oracledb::BlockingConnection	tpc_end	covered	blocking twin present
-connection	oracledb::Connection	tpc_prepare	oracledb::BlockingConnection	tpc_prepare	covered	blocking twin present
-connection	oracledb::Connection	tpc_rollback	oracledb::BlockingConnection	tpc_rollback	covered	blocking twin present
-connection	oracledb::Connection	trim_lob	oracledb::BlockingConnection	trim_lob	covered	blocking twin present
-connection	oracledb::Connection	trim_lob_with_timeout	oracledb::BlockingConnection	trim_lob_with_timeout	covered	blocking twin present
-connection	oracledb::Connection	write_lob	oracledb::BlockingConnection	write_lob	covered	blocking twin present
-connection	oracledb::Connection	write_lob_with_timeout	oracledb::BlockingConnection	write_lob_with_timeout	covered	blocking twin present
-connection	oracledb::Connection	call_routine	oracledb::BlockingConnection	call_routine	covered	blocking twin present
-connection	oracledb::Connection	fetch_all_record_batch	oracledb::BlockingConnection	fetch_all_record_batch	covered	blocking twin present
-connection	oracledb::Connection	fetch_all_record_batch_columnar	oracledb::BlockingConnection	fetch_all_record_batch_columnar	covered	blocking twin present
-connection	oracledb::Connection	fetch_record_batches	oracledb::BlockingConnection	fetch_record_batches	covered	blocking twin present
-connection	oracledb::Connection	into_query_stream	oracledb::BlockingConnection	into_query_stream	exception	K10 OwnedRowStream is a futures_core::Stream, inherently async; a blocking caller uses BlockingConnection::query_all for eager owned rows.
-connection	oracledb::Connection	into_row_stream	oracledb::BlockingConnection	into_row_stream	exception	K10 OwnedRowStream is a futures_core::Stream, inherently async; a blocking caller uses BlockingConnection::query_all for eager owned rows.
-connection	oracledb::Connection	aq_deq_many	oracledb::BlockingConnection	aq_deq_many	covered	blocking twin present
-connection	oracledb::Connection	aq_deq_one	oracledb::BlockingConnection	aq_deq_one	covered	blocking twin present
-connection	oracledb::Connection	aq_enq_many	oracledb::BlockingConnection	aq_enq_many	covered	blocking twin present
-connection	oracledb::Connection	aq_enq_one	oracledb::BlockingConnection	aq_enq_one	covered	blocking twin present
-connection	oracledb::Connection	begin_sessionless_transaction	oracledb::BlockingConnection	begin_sessionless_transaction	covered	blocking twin present
-connection	oracledb::Connection	cancel	oracledb::BlockingConnection	cancel	covered	blocking twin present
-connection	oracledb::Connection	change_password	oracledb::BlockingConnection	change_password	covered	blocking twin present
-connection	oracledb::Connection	close	oracledb::BlockingConnection	close	covered	blocking twin present
-connection	oracledb::Connection	commit	oracledb::BlockingConnection	commit	covered	blocking twin present
-connection	oracledb::Connection	connect	oracledb::BlockingConnection	connect	covered	blocking twin present
-connection	oracledb::Connection	create_temp_lob	oracledb::BlockingConnection	create_temp_lob	covered	blocking twin present
-connection	oracledb::Connection	define_and_fetch_rows_with_columns	oracledb::BlockingConnection	define_and_fetch_rows_with_columns	covered	blocking twin present
-connection	oracledb::Connection	describe_object_type	oracledb::BlockingConnection	describe_object_type	covered	blocking twin present
-connection	oracledb::Connection	direct_path_load	oracledb::BlockingConnection	direct_path_load	covered	blocking twin present
-connection	oracledb::Connection	direct_path_load_prepared	oracledb::BlockingConnection	direct_path_load_prepared	covered	blocking twin present
-connection	oracledb::Connection	direct_path_load_stream	oracledb::BlockingConnection	direct_path_load_stream	exception	Low-level direct-path streaming primitive stays async-only; blocking direct_path_load/load_prepared cover owned batches.
-connection	oracledb::Connection	direct_path_op	oracledb::BlockingConnection	direct_path_op	exception	Low-level direct-path operation primitive stays async-only; blocking direct_path_load/load_prepared cover owned batches.
-connection	oracledb::Connection	direct_path_prepare	oracledb::BlockingConnection	direct_path_prepare	covered	blocking twin present
-connection	oracledb::Connection	enable_dbms_output	oracledb::BlockingConnection	enable_dbms_output	covered	blocking twin present
-connection	oracledb::Connection	execute	oracledb::BlockingConnection	execute	covered	blocking twin present
-connection	oracledb::Connection	execute_many	oracledb::BlockingConnection	execute_many	covered	blocking twin present
-connection	oracledb::Connection	execute_many_with	oracledb::BlockingConnection	execute_many_with	covered	blocking twin present
-connection	oracledb::Connection	execute_raw	oracledb::BlockingConnection	execute_raw	covered	blocking twin present
-connection	oracledb::Connection	execute_with	oracledb::BlockingConnection	execute_with	covered	blocking twin present
-connection	oracledb::Connection	fetch_cursor	oracledb::BlockingConnection	fetch_cursor	covered	blocking twin present
-connection	oracledb::Connection	fetch_rows	oracledb::BlockingConnection	fetch_rows	covered	blocking twin present
-connection	oracledb::Connection	fetch_rows_ref	oracledb::BlockingConnection	fetch_rows_ref	exception	Zero-copy borrowed fetch is async-only because borrowed buffers cannot cross the block_on facade.
-connection	oracledb::Connection	fetch_rows_ref_response	oracledb::BlockingConnection	fetch_rows_ref_response	exception	Zero-copy borrowed fetch response is async-only because borrowed buffers cannot cross the block_on facade.
-connection	oracledb::Connection	fetch_rows_request	oracledb::BlockingConnection	fetch_rows_request	exception	Half-round-trip borrowed-fetch primitive is async-only; blocking callers use fetch_rows/fetch_rows_with_columns.
-connection	oracledb::Connection	fetch_rows_with_columns	oracledb::BlockingConnection	fetch_rows_with_columns	covered	blocking twin present
-connection	oracledb::Connection	for_each_row_ref	oracledb::BlockingConnection	for_each_row_ref	exception	Borrowed-row callback is async-only because QueryValueRef lifetimes cannot cross the block_on facade.
-connection	oracledb::Connection	free_temp_lobs	oracledb::BlockingConnection	free_temp_lobs	covered	blocking twin present
-connection	oracledb::Connection	free_temp_lobs_with_timeout	oracledb::BlockingConnection	free_temp_lobs_with_timeout	covered	blocking twin present
-connection	oracledb::Connection	notify_register	oracledb::BlockingConnection	notify_register	covered	blocking twin present
-connection	oracledb::Connection	ping	oracledb::BlockingConnection	ping	covered	blocking twin present
-connection	oracledb::Connection	ping_with_timeout	oracledb::BlockingConnection	ping_with_timeout	covered	blocking twin present
-connection	oracledb::Connection	query	oracledb::BlockingConnection	query	covered	blocking twin present
-connection	oracledb::Connection	query_all	oracledb::BlockingConnection	query_all	covered	blocking twin present
-connection	oracledb::Connection	query_one	oracledb::BlockingConnection	query_one	covered	blocking twin present
-connection	oracledb::Connection	query_opt	oracledb::BlockingConnection	query_opt	covered	blocking twin present
-connection	oracledb::Connection	query_with	oracledb::BlockingConnection	query_with	covered	blocking twin present
-connection	oracledb::Connection	read_dbms_output	oracledb::BlockingConnection	read_dbms_output	covered	blocking twin present
-connection	oracledb::Connection	read_lob	oracledb::BlockingConnection	read_lob	covered	blocking twin present
-connection	oracledb::Connection	read_lob_with_timeout	oracledb::BlockingConnection	read_lob_with_timeout	covered	blocking twin present
-connection	oracledb::Connection	recv_notification	oracledb::BlockingConnection	recv_notification	covered	blocking twin present
-connection	oracledb::Connection	register_query	oracledb::BlockingConnection	register_query	covered	blocking twin present
-connection	oracledb::Connection	resume_sessionless_transaction	oracledb::BlockingConnection	resume_sessionless_transaction	covered	blocking twin present
-connection	oracledb::Connection	rollback	oracledb::BlockingConnection	rollback	covered	blocking twin present
-connection	oracledb::Connection	run_pipeline	oracledb::BlockingConnection	run_pipeline	covered	blocking twin present
-connection	oracledb::Connection	run_pipeline_decoded	oracledb::BlockingConnection	run_pipeline_decoded	covered	blocking twin present
-connection	oracledb::Connection	scroll_cursor	oracledb::BlockingConnection	scroll_cursor	covered	blocking twin present
-connection	oracledb::Connection	subscribe_register	oracledb::BlockingConnection	subscribe_register	covered	blocking twin present
-connection	oracledb::Connection	subscribe_unregister	oracledb::BlockingConnection	subscribe_unregister	covered	blocking twin present
-connection	oracledb::Connection	supplement_json_column_metadata	oracledb::BlockingConnection	supplement_json_column_metadata	covered	blocking twin present
-connection	oracledb::Connection	suspend_sessionless_transaction	oracledb::BlockingConnection	suspend_sessionless_transaction	covered	blocking twin present
-connection	oracledb::Connection	tpc_begin	oracledb::BlockingConnection	tpc_begin	covered	blocking twin present
-connection	oracledb::Connection	tpc_commit	oracledb::BlockingConnection	tpc_commit	covered	blocking twin present
-connection	oracledb::Connection	tpc_end	oracledb::BlockingConnection	tpc_end	covered	blocking twin present
-connection	oracledb::Connection	tpc_prepare	oracledb::BlockingConnection	tpc_prepare	covered	blocking twin present
-connection	oracledb::Connection	tpc_rollback	oracledb::BlockingConnection	tpc_rollback	covered	blocking twin present
-connection	oracledb::Connection	trim_lob	oracledb::BlockingConnection	trim_lob	covered	blocking twin present
-connection	oracledb::Connection	trim_lob_with_timeout	oracledb::BlockingConnection	trim_lob_with_timeout	covered	blocking twin present
-connection	oracledb::Connection	write_lob	oracledb::BlockingConnection	write_lob	covered	blocking twin present
-connection	oracledb::Connection	write_lob_with_timeout	oracledb::BlockingConnection	write_lob_with_timeout	covered	blocking twin present
-connection	oracledb::Connection	call_routine	oracledb::BlockingConnection	call_routine	covered	blocking twin present
-connection	oracledb::Connection	fetch_all_record_batch	oracledb::BlockingConnection	fetch_all_record_batch	covered	blocking twin present
-connection	oracledb::Connection	fetch_all_record_batch_columnar	oracledb::BlockingConnection	fetch_all_record_batch_columnar	covered	blocking twin present
-connection	oracledb::Connection	fetch_record_batches	oracledb::BlockingConnection	fetch_record_batches	covered	blocking twin present
-connection	oracledb::Connection	into_query_stream	oracledb::BlockingConnection	into_query_stream	exception	K10 OwnedRowStream is a futures_core::Stream, inherently async; a blocking caller uses BlockingConnection::query_all for eager owned rows.
-connection	oracledb::Connection	into_row_stream	oracledb::BlockingConnection	into_row_stream	exception	K10 OwnedRowStream is a futures_core::Stream, inherently async; a blocking caller uses BlockingConnection::query_all for eager owned rows.
-rows	oracledb::Rows	collect	oracledb::BlockingRows	collect	covered	blocking twin present
-rows	oracledb::Rows	next_batch	oracledb::BlockingRows	next_batch	covered	blocking twin present
-rows	oracledb::Rows	scroll	oracledb::BlockingRows	scroll	covered	blocking twin present
-cancel-handle	oracledb::CancelHandle	cancel	oracledb::CancelHandle	cancel_blocking	covered	blocking twin present
-pool	oracledb::pool::Pool	acquire	oracledb::pool::BlockingPool	acquire	covered	blocking twin present
-pool	oracledb::pool::Pool	blocking	oracledb::pool::BlockingPool	blocking	exception	Adapter that returns the blocking facade; not itself mirrored.
-pool	oracledb::pool::Pool	busy_count	oracledb::pool::BlockingPool	busy_count	covered	blocking twin present
-pool	oracledb::pool::Pool	close	oracledb::pool::BlockingPool	close	covered	blocking twin present
-pool	oracledb::pool::Pool	drain	oracledb::pool::BlockingPool	drain	covered	blocking twin present
-pool	oracledb::pool::Pool	getmode	oracledb::pool::BlockingPool	getmode	covered	blocking twin present
-pool	oracledb::pool::Pool	max_lifetime_session_secs	oracledb::pool::BlockingPool	max_lifetime_session_secs	covered	blocking twin present
-pool	oracledb::pool::Pool	open_count	oracledb::pool::BlockingPool	open_count	covered	blocking twin present
-pool	oracledb::pool::Pool	ping_interval_secs	oracledb::pool::BlockingPool	ping_interval_secs	covered	blocking twin present
-pool	oracledb::pool::Pool	set_getmode	oracledb::pool::BlockingPool	set_getmode	covered	blocking twin present
-pool	oracledb::pool::Pool	set_max_lifetime_session_secs	oracledb::pool::BlockingPool	set_max_lifetime_session_secs	covered	blocking twin present
-pool	oracledb::pool::Pool	set_ping_interval_secs	oracledb::pool::BlockingPool	set_ping_interval_secs	covered	blocking twin present
-pool	oracledb::pool::Pool	set_timeout_secs	oracledb::pool::BlockingPool	set_timeout_secs	covered	blocking twin present
-pool	oracledb::pool::Pool	set_wait_timeout_ms	oracledb::pool::BlockingPool	set_wait_timeout_ms	covered	blocking twin present
-pool	oracledb::pool::Pool	start	oracledb::pool::BlockingPool	start	exception	Constructor stays on Pool; BlockingPool is obtained with Pool::blocking.
-pool	oracledb::pool::Pool	stats	oracledb::pool::BlockingPool	stats	covered	blocking twin present
-pool	oracledb::pool::Pool	timeout_secs	oracledb::pool::BlockingPool	timeout_secs	covered	blocking twin present
-pool	oracledb::pool::Pool	wait_timeout_ms	oracledb::pool::BlockingPool	wait_timeout_ms	covered	blocking twin present
-pool	oracledb::pool::Pool	clone	oracledb::pool::BlockingPool	clone	covered	blocking twin present
-pooled-connection	oracledb::pool::PooledConnection	drop_from_pool	oracledb::pool::BlockingPooledConnection	drop_from_pool	covered	blocking twin present
-pooled-connection	oracledb::pool::PooledConnection	id	oracledb::pool::BlockingPooledConnection	id	covered	blocking twin present
-pooled-connection	oracledb::pool::PooledConnection	release	oracledb::pool::BlockingPooledConnection	release	covered	blocking twin present
-pooled-connection	oracledb::pool::PooledConnection	drop	oracledb::pool::BlockingPooledConnection	drop	exception	Drop is the RAII fallback, not a callable facade operation.
-arrow-record-batch	oracledb::arrow::RecordBatchFetch	next_batch	oracledb::BlockingConnection	next_record_batch	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	aq_deq_many	oraclemcp_driver_cx::BlockingConnection	aq_deq_many	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	aq_deq_one	oraclemcp_driver_cx::BlockingConnection	aq_deq_one	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	aq_enq_many	oraclemcp_driver_cx::BlockingConnection	aq_enq_many	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	aq_enq_one	oraclemcp_driver_cx::BlockingConnection	aq_enq_one	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	begin_sessionless_transaction	oraclemcp_driver_cx::BlockingConnection	begin_sessionless_transaction	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	cancel	oraclemcp_driver_cx::BlockingConnection	cancel	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	change_password	oraclemcp_driver_cx::BlockingConnection	change_password	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	close	oraclemcp_driver_cx::BlockingConnection	close	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	commit	oraclemcp_driver_cx::BlockingConnection	commit	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	connect	oraclemcp_driver_cx::BlockingConnection	connect	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	create_temp_lob	oraclemcp_driver_cx::BlockingConnection	create_temp_lob	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	define_and_fetch_rows_with_columns	oraclemcp_driver_cx::BlockingConnection	define_and_fetch_rows_with_columns	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	describe_object_type	oraclemcp_driver_cx::BlockingConnection	describe_object_type	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	direct_path_load	oraclemcp_driver_cx::BlockingConnection	direct_path_load	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	direct_path_load_prepared	oraclemcp_driver_cx::BlockingConnection	direct_path_load_prepared	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	direct_path_load_stream	oraclemcp_driver_cx::BlockingConnection	direct_path_load_stream	exception	Low-level direct-path streaming primitive stays async-only; blocking direct_path_load/load_prepared cover owned batches.
+connection	oraclemcp_driver_cx::Connection	direct_path_op	oraclemcp_driver_cx::BlockingConnection	direct_path_op	exception	Low-level direct-path operation primitive stays async-only; blocking direct_path_load/load_prepared cover owned batches.
+connection	oraclemcp_driver_cx::Connection	direct_path_prepare	oraclemcp_driver_cx::BlockingConnection	direct_path_prepare	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	enable_dbms_output	oraclemcp_driver_cx::BlockingConnection	enable_dbms_output	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	execute	oraclemcp_driver_cx::BlockingConnection	execute	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	execute_many	oraclemcp_driver_cx::BlockingConnection	execute_many	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	execute_many_with	oraclemcp_driver_cx::BlockingConnection	execute_many_with	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	execute_raw	oraclemcp_driver_cx::BlockingConnection	execute_raw	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	execute_with	oraclemcp_driver_cx::BlockingConnection	execute_with	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	fetch_cursor	oraclemcp_driver_cx::BlockingConnection	fetch_cursor	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	fetch_rows	oraclemcp_driver_cx::BlockingConnection	fetch_rows	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	fetch_rows_ref	oraclemcp_driver_cx::BlockingConnection	fetch_rows_ref	exception	Zero-copy borrowed fetch is async-only because borrowed buffers cannot cross the block_on facade.
+connection	oraclemcp_driver_cx::Connection	fetch_rows_ref_response	oraclemcp_driver_cx::BlockingConnection	fetch_rows_ref_response	exception	Zero-copy borrowed fetch response is async-only because borrowed buffers cannot cross the block_on facade.
+connection	oraclemcp_driver_cx::Connection	fetch_rows_request	oraclemcp_driver_cx::BlockingConnection	fetch_rows_request	exception	Half-round-trip borrowed-fetch primitive is async-only; blocking callers use fetch_rows/fetch_rows_with_columns.
+connection	oraclemcp_driver_cx::Connection	fetch_rows_with_columns	oraclemcp_driver_cx::BlockingConnection	fetch_rows_with_columns	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	for_each_row_ref	oraclemcp_driver_cx::BlockingConnection	for_each_row_ref	exception	Borrowed-row callback is async-only because QueryValueRef lifetimes cannot cross the block_on facade.
+connection	oraclemcp_driver_cx::Connection	free_temp_lobs	oraclemcp_driver_cx::BlockingConnection	free_temp_lobs	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	free_temp_lobs_with_timeout	oraclemcp_driver_cx::BlockingConnection	free_temp_lobs_with_timeout	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	notify_register	oraclemcp_driver_cx::BlockingConnection	notify_register	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	ping	oraclemcp_driver_cx::BlockingConnection	ping	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	ping_with_timeout	oraclemcp_driver_cx::BlockingConnection	ping_with_timeout	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	query	oraclemcp_driver_cx::BlockingConnection	query	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	query_all	oraclemcp_driver_cx::BlockingConnection	query_all	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	query_one	oraclemcp_driver_cx::BlockingConnection	query_one	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	query_opt	oraclemcp_driver_cx::BlockingConnection	query_opt	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	query_with	oraclemcp_driver_cx::BlockingConnection	query_with	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	read_dbms_output	oraclemcp_driver_cx::BlockingConnection	read_dbms_output	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	read_lob	oraclemcp_driver_cx::BlockingConnection	read_lob	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	read_lob_with_timeout	oraclemcp_driver_cx::BlockingConnection	read_lob_with_timeout	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	recv_notification	oraclemcp_driver_cx::BlockingConnection	recv_notification	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	register_query	oraclemcp_driver_cx::BlockingConnection	register_query	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	resume_sessionless_transaction	oraclemcp_driver_cx::BlockingConnection	resume_sessionless_transaction	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	rollback	oraclemcp_driver_cx::BlockingConnection	rollback	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	run_pipeline	oraclemcp_driver_cx::BlockingConnection	run_pipeline	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	run_pipeline_decoded	oraclemcp_driver_cx::BlockingConnection	run_pipeline_decoded	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	scroll_cursor	oraclemcp_driver_cx::BlockingConnection	scroll_cursor	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	subscribe_register	oraclemcp_driver_cx::BlockingConnection	subscribe_register	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	subscribe_unregister	oraclemcp_driver_cx::BlockingConnection	subscribe_unregister	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	supplement_json_column_metadata	oraclemcp_driver_cx::BlockingConnection	supplement_json_column_metadata	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	suspend_sessionless_transaction	oraclemcp_driver_cx::BlockingConnection	suspend_sessionless_transaction	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	tpc_begin	oraclemcp_driver_cx::BlockingConnection	tpc_begin	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	tpc_commit	oraclemcp_driver_cx::BlockingConnection	tpc_commit	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	tpc_end	oraclemcp_driver_cx::BlockingConnection	tpc_end	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	tpc_prepare	oraclemcp_driver_cx::BlockingConnection	tpc_prepare	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	tpc_rollback	oraclemcp_driver_cx::BlockingConnection	tpc_rollback	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	trim_lob	oraclemcp_driver_cx::BlockingConnection	trim_lob	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	trim_lob_with_timeout	oraclemcp_driver_cx::BlockingConnection	trim_lob_with_timeout	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	write_lob	oraclemcp_driver_cx::BlockingConnection	write_lob	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	write_lob_with_timeout	oraclemcp_driver_cx::BlockingConnection	write_lob_with_timeout	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	call_routine	oraclemcp_driver_cx::BlockingConnection	call_routine	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	fetch_all_record_batch	oraclemcp_driver_cx::BlockingConnection	fetch_all_record_batch	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	fetch_all_record_batch_columnar	oraclemcp_driver_cx::BlockingConnection	fetch_all_record_batch_columnar	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	fetch_record_batches	oraclemcp_driver_cx::BlockingConnection	fetch_record_batches	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	into_query_stream	oraclemcp_driver_cx::BlockingConnection	into_query_stream	exception	K10 OwnedRowStream is a futures_core::Stream, inherently async; a blocking caller uses BlockingConnection::query_all for eager owned rows.
+connection	oraclemcp_driver_cx::Connection	into_row_stream	oraclemcp_driver_cx::BlockingConnection	into_row_stream	exception	K10 OwnedRowStream is a futures_core::Stream, inherently async; a blocking caller uses BlockingConnection::query_all for eager owned rows.
+connection	oraclemcp_driver_cx::Connection	aq_deq_many	oraclemcp_driver_cx::BlockingConnection	aq_deq_many	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	aq_deq_one	oraclemcp_driver_cx::BlockingConnection	aq_deq_one	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	aq_enq_many	oraclemcp_driver_cx::BlockingConnection	aq_enq_many	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	aq_enq_one	oraclemcp_driver_cx::BlockingConnection	aq_enq_one	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	begin_sessionless_transaction	oraclemcp_driver_cx::BlockingConnection	begin_sessionless_transaction	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	cancel	oraclemcp_driver_cx::BlockingConnection	cancel	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	change_password	oraclemcp_driver_cx::BlockingConnection	change_password	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	close	oraclemcp_driver_cx::BlockingConnection	close	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	commit	oraclemcp_driver_cx::BlockingConnection	commit	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	connect	oraclemcp_driver_cx::BlockingConnection	connect	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	create_temp_lob	oraclemcp_driver_cx::BlockingConnection	create_temp_lob	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	define_and_fetch_rows_with_columns	oraclemcp_driver_cx::BlockingConnection	define_and_fetch_rows_with_columns	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	describe_object_type	oraclemcp_driver_cx::BlockingConnection	describe_object_type	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	direct_path_load	oraclemcp_driver_cx::BlockingConnection	direct_path_load	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	direct_path_load_prepared	oraclemcp_driver_cx::BlockingConnection	direct_path_load_prepared	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	direct_path_load_stream	oraclemcp_driver_cx::BlockingConnection	direct_path_load_stream	exception	Low-level direct-path streaming primitive stays async-only; blocking direct_path_load/load_prepared cover owned batches.
+connection	oraclemcp_driver_cx::Connection	direct_path_op	oraclemcp_driver_cx::BlockingConnection	direct_path_op	exception	Low-level direct-path operation primitive stays async-only; blocking direct_path_load/load_prepared cover owned batches.
+connection	oraclemcp_driver_cx::Connection	direct_path_prepare	oraclemcp_driver_cx::BlockingConnection	direct_path_prepare	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	enable_dbms_output	oraclemcp_driver_cx::BlockingConnection	enable_dbms_output	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	execute	oraclemcp_driver_cx::BlockingConnection	execute	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	execute_many	oraclemcp_driver_cx::BlockingConnection	execute_many	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	execute_many_with	oraclemcp_driver_cx::BlockingConnection	execute_many_with	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	execute_raw	oraclemcp_driver_cx::BlockingConnection	execute_raw	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	execute_with	oraclemcp_driver_cx::BlockingConnection	execute_with	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	fetch_cursor	oraclemcp_driver_cx::BlockingConnection	fetch_cursor	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	fetch_rows	oraclemcp_driver_cx::BlockingConnection	fetch_rows	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	fetch_rows_ref	oraclemcp_driver_cx::BlockingConnection	fetch_rows_ref	exception	Zero-copy borrowed fetch is async-only because borrowed buffers cannot cross the block_on facade.
+connection	oraclemcp_driver_cx::Connection	fetch_rows_ref_response	oraclemcp_driver_cx::BlockingConnection	fetch_rows_ref_response	exception	Zero-copy borrowed fetch response is async-only because borrowed buffers cannot cross the block_on facade.
+connection	oraclemcp_driver_cx::Connection	fetch_rows_request	oraclemcp_driver_cx::BlockingConnection	fetch_rows_request	exception	Half-round-trip borrowed-fetch primitive is async-only; blocking callers use fetch_rows/fetch_rows_with_columns.
+connection	oraclemcp_driver_cx::Connection	fetch_rows_with_columns	oraclemcp_driver_cx::BlockingConnection	fetch_rows_with_columns	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	for_each_row_ref	oraclemcp_driver_cx::BlockingConnection	for_each_row_ref	exception	Borrowed-row callback is async-only because QueryValueRef lifetimes cannot cross the block_on facade.
+connection	oraclemcp_driver_cx::Connection	free_temp_lobs	oraclemcp_driver_cx::BlockingConnection	free_temp_lobs	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	free_temp_lobs_with_timeout	oraclemcp_driver_cx::BlockingConnection	free_temp_lobs_with_timeout	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	notify_register	oraclemcp_driver_cx::BlockingConnection	notify_register	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	ping	oraclemcp_driver_cx::BlockingConnection	ping	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	ping_with_timeout	oraclemcp_driver_cx::BlockingConnection	ping_with_timeout	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	query	oraclemcp_driver_cx::BlockingConnection	query	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	query_all	oraclemcp_driver_cx::BlockingConnection	query_all	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	query_one	oraclemcp_driver_cx::BlockingConnection	query_one	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	query_opt	oraclemcp_driver_cx::BlockingConnection	query_opt	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	query_with	oraclemcp_driver_cx::BlockingConnection	query_with	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	read_dbms_output	oraclemcp_driver_cx::BlockingConnection	read_dbms_output	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	read_lob	oraclemcp_driver_cx::BlockingConnection	read_lob	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	read_lob_with_timeout	oraclemcp_driver_cx::BlockingConnection	read_lob_with_timeout	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	recv_notification	oraclemcp_driver_cx::BlockingConnection	recv_notification	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	register_query	oraclemcp_driver_cx::BlockingConnection	register_query	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	resume_sessionless_transaction	oraclemcp_driver_cx::BlockingConnection	resume_sessionless_transaction	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	rollback	oraclemcp_driver_cx::BlockingConnection	rollback	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	run_pipeline	oraclemcp_driver_cx::BlockingConnection	run_pipeline	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	run_pipeline_decoded	oraclemcp_driver_cx::BlockingConnection	run_pipeline_decoded	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	scroll_cursor	oraclemcp_driver_cx::BlockingConnection	scroll_cursor	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	subscribe_register	oraclemcp_driver_cx::BlockingConnection	subscribe_register	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	subscribe_unregister	oraclemcp_driver_cx::BlockingConnection	subscribe_unregister	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	supplement_json_column_metadata	oraclemcp_driver_cx::BlockingConnection	supplement_json_column_metadata	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	suspend_sessionless_transaction	oraclemcp_driver_cx::BlockingConnection	suspend_sessionless_transaction	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	tpc_begin	oraclemcp_driver_cx::BlockingConnection	tpc_begin	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	tpc_commit	oraclemcp_driver_cx::BlockingConnection	tpc_commit	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	tpc_end	oraclemcp_driver_cx::BlockingConnection	tpc_end	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	tpc_prepare	oraclemcp_driver_cx::BlockingConnection	tpc_prepare	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	tpc_rollback	oraclemcp_driver_cx::BlockingConnection	tpc_rollback	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	trim_lob	oraclemcp_driver_cx::BlockingConnection	trim_lob	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	trim_lob_with_timeout	oraclemcp_driver_cx::BlockingConnection	trim_lob_with_timeout	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	write_lob	oraclemcp_driver_cx::BlockingConnection	write_lob	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	write_lob_with_timeout	oraclemcp_driver_cx::BlockingConnection	write_lob_with_timeout	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	call_routine	oraclemcp_driver_cx::BlockingConnection	call_routine	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	fetch_all_record_batch	oraclemcp_driver_cx::BlockingConnection	fetch_all_record_batch	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	fetch_all_record_batch_columnar	oraclemcp_driver_cx::BlockingConnection	fetch_all_record_batch_columnar	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	fetch_record_batches	oraclemcp_driver_cx::BlockingConnection	fetch_record_batches	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	into_query_stream	oraclemcp_driver_cx::BlockingConnection	into_query_stream	exception	K10 OwnedRowStream is a futures_core::Stream, inherently async; a blocking caller uses BlockingConnection::query_all for eager owned rows.
+connection	oraclemcp_driver_cx::Connection	into_row_stream	oraclemcp_driver_cx::BlockingConnection	into_row_stream	exception	K10 OwnedRowStream is a futures_core::Stream, inherently async; a blocking caller uses BlockingConnection::query_all for eager owned rows.
+rows	oraclemcp_driver_cx::Rows	collect	oraclemcp_driver_cx::BlockingRows	collect	covered	blocking twin present
+rows	oraclemcp_driver_cx::Rows	next_batch	oraclemcp_driver_cx::BlockingRows	next_batch	covered	blocking twin present
+rows	oraclemcp_driver_cx::Rows	scroll	oraclemcp_driver_cx::BlockingRows	scroll	covered	blocking twin present
+cancel-handle	oraclemcp_driver_cx::CancelHandle	cancel	oraclemcp_driver_cx::CancelHandle	cancel_blocking	covered	blocking twin present
+pool	oraclemcp_driver_cx::pool::Pool	acquire	oraclemcp_driver_cx::pool::BlockingPool	acquire	covered	blocking twin present
+pool	oraclemcp_driver_cx::pool::Pool	blocking	oraclemcp_driver_cx::pool::BlockingPool	blocking	exception	Adapter that returns the blocking facade; not itself mirrored.
+pool	oraclemcp_driver_cx::pool::Pool	busy_count	oraclemcp_driver_cx::pool::BlockingPool	busy_count	covered	blocking twin present
+pool	oraclemcp_driver_cx::pool::Pool	close	oraclemcp_driver_cx::pool::BlockingPool	close	covered	blocking twin present
+pool	oraclemcp_driver_cx::pool::Pool	drain	oraclemcp_driver_cx::pool::BlockingPool	drain	covered	blocking twin present
+pool	oraclemcp_driver_cx::pool::Pool	getmode	oraclemcp_driver_cx::pool::BlockingPool	getmode	covered	blocking twin present
+pool	oraclemcp_driver_cx::pool::Pool	max_lifetime_session_secs	oraclemcp_driver_cx::pool::BlockingPool	max_lifetime_session_secs	covered	blocking twin present
+pool	oraclemcp_driver_cx::pool::Pool	open_count	oraclemcp_driver_cx::pool::BlockingPool	open_count	covered	blocking twin present
+pool	oraclemcp_driver_cx::pool::Pool	ping_interval_secs	oraclemcp_driver_cx::pool::BlockingPool	ping_interval_secs	covered	blocking twin present
+pool	oraclemcp_driver_cx::pool::Pool	set_getmode	oraclemcp_driver_cx::pool::BlockingPool	set_getmode	covered	blocking twin present
+pool	oraclemcp_driver_cx::pool::Pool	set_max_lifetime_session_secs	oraclemcp_driver_cx::pool::BlockingPool	set_max_lifetime_session_secs	covered	blocking twin present
+pool	oraclemcp_driver_cx::pool::Pool	set_ping_interval_secs	oraclemcp_driver_cx::pool::BlockingPool	set_ping_interval_secs	covered	blocking twin present
+pool	oraclemcp_driver_cx::pool::Pool	set_timeout_secs	oraclemcp_driver_cx::pool::BlockingPool	set_timeout_secs	covered	blocking twin present
+pool	oraclemcp_driver_cx::pool::Pool	set_wait_timeout_ms	oraclemcp_driver_cx::pool::BlockingPool	set_wait_timeout_ms	covered	blocking twin present
+pool	oraclemcp_driver_cx::pool::Pool	start	oraclemcp_driver_cx::pool::BlockingPool	start	exception	Constructor stays on Pool; BlockingPool is obtained with Pool::blocking.
+pool	oraclemcp_driver_cx::pool::Pool	stats	oraclemcp_driver_cx::pool::BlockingPool	stats	covered	blocking twin present
+pool	oraclemcp_driver_cx::pool::Pool	timeout_secs	oraclemcp_driver_cx::pool::BlockingPool	timeout_secs	covered	blocking twin present
+pool	oraclemcp_driver_cx::pool::Pool	wait_timeout_ms	oraclemcp_driver_cx::pool::BlockingPool	wait_timeout_ms	covered	blocking twin present
+pool	oraclemcp_driver_cx::pool::Pool	clone	oraclemcp_driver_cx::pool::BlockingPool	clone	covered	blocking twin present
+pooled-connection	oraclemcp_driver_cx::pool::PooledConnection	drop_from_pool	oraclemcp_driver_cx::pool::BlockingPooledConnection	drop_from_pool	covered	blocking twin present
+pooled-connection	oraclemcp_driver_cx::pool::PooledConnection	id	oraclemcp_driver_cx::pool::BlockingPooledConnection	id	covered	blocking twin present
+pooled-connection	oraclemcp_driver_cx::pool::PooledConnection	release	oraclemcp_driver_cx::pool::BlockingPooledConnection	release	covered	blocking twin present
+pooled-connection	oraclemcp_driver_cx::pool::PooledConnection	drop	oraclemcp_driver_cx::pool::BlockingPooledConnection	drop	exception	Drop is the RAII fallback, not a callable facade operation.
+arrow-record-batch	oraclemcp_driver_cx::arrow::RecordBatchFetch	next_batch	oraclemcp_driver_cx::BlockingConnection	next_record_batch	covered	blocking twin present

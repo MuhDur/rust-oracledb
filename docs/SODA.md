@@ -41,7 +41,7 @@ and `DBMS_SODA` PL/SQL — all of which the thin TTC protocol already runs. The
 implementation (`crates/oracledb/src/soda/`, feature `soda`) generates the SQL
 the thick OCI client would have generated internally and runs it through the
 existing `Connection` execute/fetch surface plus the OSON/JSON codecs in
-`oracledb-protocol`. No new wire-protocol work, no C client. The result is
+`oraclemcp-driver-cx-protocol`. No new wire-protocol work, no C client. The result is
 document access from a **pure-Rust thin driver** where python-oracledb thin has
 none.
 
@@ -52,7 +52,7 @@ none.
 oracledb = { version = "*", features = ["soda"] }
 ```
 
-Everything below lives under `oracledb::soda`. All collection/database
+Everything below lives under `oraclemcp_driver_cx::soda`. All collection/database
 operations are `async` and, like the rest of this driver, take an explicit
 `&mut Connection` and the Asupersync context `&Cx`.
 
@@ -68,7 +68,7 @@ The public types are `SodaDatabase`, `SodaCollection`, `SodaDocument`,
 `SodaDatabase` is a zero-sized facade; every method borrows the connection.
 
 ```rust
-use oracledb::soda::SodaDatabase;
+use oraclemcp_driver_cx::soda::SodaDatabase;
 
 let db = SodaDatabase::new();
 
@@ -93,7 +93,7 @@ A `SodaDocument` carries content plus the SODA-managed metadata (`key`,
 from raw bytes or from a decoded OSON value:
 
 ```rust
-use oracledb::soda::SodaDocument;
+use oraclemcp_driver_cx::soda::SodaDocument;
 
 // from raw JSON bytes (the server parses and VALIDATES the JSON):
 let doc = SodaDocument::from_bytes(br#"{"name":"George","age":47}"#.to_vec(), None, None);
@@ -140,7 +140,7 @@ plain `SodaOperation` struct with public fields, constructed with struct-update
 syntax. It is consumed by the read/write terminals below.
 
 ```rust
-use oracledb::soda::SodaOperation;
+use oraclemcp_driver_cx::soda::SodaOperation;
 
 let op = SodaOperation {
     key: Some(key.clone()),                 // single-key filter
@@ -353,7 +353,7 @@ The pure-Rust surface is additive: the existing parity path is untouched.
   Run them (they are `#[ignore]`d by default) with a live lane up:
 
   ```bash
-  cargo test -p oracledb --features soda --test live_soda -- --ignored
+  cargo test -p oraclemcp-driver-cx --features soda --test live_soda -- --ignored
   ```
 
 To reproduce the reference-suite numbers via the PyO3 shim:

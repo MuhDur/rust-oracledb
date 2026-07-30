@@ -207,10 +207,10 @@ lane_tcps() {
   local ok=1
   # C1/C2/C3: driver-side TCPS handshake, DN/name match, mTLS, 3DES wallet
   # decrypt, and the OCI IAM token frame + non-TCPS refusal.
-  if ! cargo test -q -p oracledb --test tls_handshake; then ok=0; fi
+  if ! cargo test -q -p oraclemcp-driver-cx --test tls_handshake; then ok=0; fi
   # Wallet reader breadth over the same synthetic fixtures (ewallet.pem incl.
   # encrypted keys, ewallet.p12/3DES, cwallet.sso).
-  if ! cargo test -q -p oracledb-protocol --test tls_wallet; then ok=0; fi
+  if ! cargo test -q -p oraclemcp-driver-cx-protocol --test tls_wallet; then ok=0; fi
   if [ "$ok" -eq 1 ]; then
     printf '%-7s FULL PASS\n' octcps
   else
@@ -230,7 +230,7 @@ run_free23_tstz_descriptor_probe() {
   PYO_TEST_CONNECT_STRING="localhost:$port/$service" \
   PYO_TEST_MAIN_USER="$user" \
   PYO_TEST_MAIN_PASSWORD="$password" \
-    cargo test -q -p oracledb --test live_object_precision_scale -- --ignored
+    cargo test -q -p oraclemcp-driver-cx --test live_object_precision_scale -- --ignored
 }
 
 lane_full() {
@@ -283,7 +283,7 @@ lane_truth() {
   printf '=== %s TRUTH (%s) localhost:%s/%s ===\n' "$lane" "$image" "$port" "$service"
   local out_dir="${TMPDIR:-/tmp}/oracledb-gt-$lane-$$"
   mkdir -p "$out_dir"
-  if ! cargo run -q -p oracledb --example statement_ground_truth -- \
+  if ! cargo run -q -p oraclemcp-driver-cx --example statement_ground_truth -- \
       "localhost:$port/$service" "$user" "$password" > "$out_dir/rust.json"; then
     printf '%-7s TRUTH FAILED (rust emitter)\n' "$lane"
     return 1
@@ -368,7 +368,7 @@ run_typed_skip_probe() {
   local lane="$1" suite="$2" logf="$3"
   case "$lane:$suite" in
     xe18:live_soda)
-      cargo test -q -p oracledb --features "$LIVE_SUITE_FEATURES" \
+      cargo test -q -p oraclemcp-driver-cx --features "$LIVE_SUITE_FEATURES" \
         --test live_soda soda_gated_on_pre21c_with_proof -- --ignored \
         > "$logf" 2>&1
       ;;
@@ -467,7 +467,7 @@ run_versions() {
       # written to suite logs or the JSON evidence artifact.
       elif PYO_TEST_SYSTEM_USER="${PYO_TEST_SYSTEM_USER:-system}" \
         PYO_TEST_SYSTEM_PASSWORD="${PYO_TEST_SYSTEM_PASSWORD:-$system_password}" \
-        cargo test -q -p oracledb --features "$LIVE_SUITE_FEATURES" \
+        cargo test -q -p oraclemcp-driver-cx --features "$LIVE_SUITE_FEATURES" \
           --test "$suite" -- --include-ignored > "$logf" 2>&1; then
         summ="$(grep -hE '^test result:' "$logf" | tail -1)"
         cell[$lane:$suite]=PASS

@@ -832,7 +832,7 @@ fn vector_to_f64(vector: &Vector) -> Result<Vec<f64>, ConversionError> {
 ///
 /// This is an extension trait (the [`QueryResult`] type lives in the protocol
 /// crate, which stays dependency-lean) — bring it into scope with
-/// `use oracledb::QueryResultExt;`.
+/// `use oraclemcp_driver_cx::QueryResultExt;`.
 pub trait QueryResultExt {
     /// Convert the cell at `(row, col)` into `T`. A SQL `NULL` cell yields a
     /// [`ConversionError::UnexpectedNull`] unless `T` is `Option<_>`; an
@@ -856,13 +856,13 @@ pub trait QueryResultExt {
     /// with that row's [`ConversionError`] (surfaced as [`crate::Error`]).
     ///
     /// ```no_run
-    /// use oracledb::{FromRow, QueryResultExt};
-    /// # use oracledb::protocol::thin::QueryResult;
+    /// use oraclemcp_driver_cx::{FromRow, QueryResultExt};
+    /// # use oraclemcp_driver_cx::protocol::thin::QueryResult;
     ///
     /// #[derive(FromRow)]
     /// struct Emp { id: i64, name: String, hired: Option<String> }
     ///
-    /// # fn demo(result: QueryResult) -> oracledb::Result<()> {
+    /// # fn demo(result: QueryResult) -> oraclemcp_driver_cx::Result<()> {
     /// let emps: Vec<Emp> = result.rows_as::<Emp>()?;
     /// # let _ = emps;
     /// # Ok(())
@@ -897,7 +897,7 @@ fn convert_cell_ce<T: FromSql>(
 /// Like [`convert_cell_ce`] but turns a SQL `NULL` cell into `None` rather than
 /// erroring. This is the path `#[derive(FromRow)]` takes for `Option<T>` fields,
 /// so a nullable column maps to `Option<T>` with `NULL` -> `None`. A *missing*
-/// column is still an error (a mistyped `#[oracledb(column = ...)]` should not
+/// column is still an error (a mistyped `#[driver_cx(column = ...)]` should not
 /// silently become `None`).
 fn convert_cell_opt_ce<T: FromSql>(
     cell: Option<&Option<QueryValue>>,
@@ -1070,7 +1070,7 @@ fn column_index(columns: &[ColumnMetadata], name: &str) -> Option<usize> {
 /// You almost never implement this by hand. Instead derive it:
 ///
 /// ```no_run
-/// use oracledb::FromRow;
+/// use oraclemcp_driver_cx::FromRow;
 ///
 /// #[derive(FromRow)]
 /// struct Emp {
@@ -1082,17 +1082,17 @@ fn column_index(columns: &[ColumnMetadata], name: &str) -> Option<usize> {
 /// ```
 ///
 /// The derive maps each field **by column name** (the field name by default;
-/// override per field with `#[oracledb(column = "...")]` or rename the whole
-/// struct with `#[oracledb(rename_all = "...")]`), pulling it out through the
+/// override per field with `#[driver_cx(column = "...")]` or rename the whole
+/// struct with `#[driver_cx(rename_all = "...")]`), pulling it out through the
 /// real [`FromSql`] conversion. Tuple structs map their fields **by position**.
 /// Then [`QueryResultExt::rows_as`] turns a whole result set into a `Vec<T>`:
 ///
 /// ```no_run
-/// # use oracledb::{FromRow, QueryResultExt};
-/// # use oracledb::protocol::thin::QueryResult;
+/// # use oraclemcp_driver_cx::{FromRow, QueryResultExt};
+/// # use oraclemcp_driver_cx::protocol::thin::QueryResult;
 /// # #[derive(FromRow)]
 /// # struct Emp { id: i64, name: String }
-/// # fn demo(result: QueryResult) -> oracledb::Result<()> {
+/// # fn demo(result: QueryResult) -> oraclemcp_driver_cx::Result<()> {
 /// let emps: Vec<Emp> = result.rows_as::<Emp>()?;
 /// # let _ = emps;
 /// # Ok(())
@@ -1494,7 +1494,7 @@ impl_into_binds_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
 /// this produces a `Vec<(String, BindValue)>` for the named-execute helpers.
 ///
 /// ```
-/// use oracledb::params;
+/// use oraclemcp_driver_cx::params;
 /// // positional
 /// let binds = params![40, "alice"];
 /// assert_eq!(binds.len(), 2);

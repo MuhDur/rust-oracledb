@@ -29,6 +29,8 @@
 //!     `TRANSPORT_CONNECT_TIMEOUT` alias, unit suffixes (`ms`/`min`), and the
 //!     unset default.
 
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::net::connectstring::{
     parse, Address, AddressList, ConnectData, Description, Descriptor, Protocol, Security,
     DEFAULT_TCP_CONNECT_TIMEOUT,

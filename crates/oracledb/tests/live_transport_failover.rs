@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::{ConnectOptions, Connection, Error};
 use oracledb_protocol::ClientIdentity;
 

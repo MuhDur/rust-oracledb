@@ -15,6 +15,9 @@
 
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
+// Keep the benchmark-oriented source compact; this alias is local to the example.
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::thin::{QueryValue, QueryValueRef};
 use oracledb::{ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;

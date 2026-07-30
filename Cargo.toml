@@ -17,8 +17,8 @@ repository = "https://github.com/MuhDur/rust-oracledb"
 homepage = "https://github.com/MuhDur/rust-oracledb"
 # docs.rs builds and hosts documentation automatically from the published crate;
 # leaving `documentation` pointing at it is the conventional default.
-documentation = "https://docs.rs/oracledb"
-description = "Pure-Rust async Oracle Database thin-mode driver."
+documentation = "https://docs.rs/oraclemcp-driver-cx"
+description = "Pure-Rust Oracle Database thin driver with asupersync Cx structured concurrency."
 keywords = ["oracle", "database", "driver", "async", "tns"]
 categories = ["database", "asynchronous"]
 
@@ -79,7 +79,7 @@ proptest = "1.11"
 # Keeping the deprecated extension-module feature out of the dependency lets
 # PyO3 link libpython when cargo runs the pyshim's Rust unit tests.
 pyo3 = { version = "0.29.0", features = ["abi3-py310", "experimental-async"] }
-# Proc-macro toolchain for the `#[derive(FromRow)]` derive in crates/oracledb-derive.
+# Proc-macro toolchain for the `#[derive(FromRow)]` derive crate.
 # These are build-time-only dependencies (they do not ship in the runtime binary),
 # and the 2.x line is already in the workspace dependency graph transitively, so
 # pinning to it adds no new compiled artifact to the default build.
@@ -93,7 +93,7 @@ sha1 = "0.10"
 sha2 = "0.10"
 thiserror = "2.0"
 # First-class OpenTelemetry-style observability (bead rust-oracledb-lv6). The
-# `tracing` facade is OPTIONAL and feature-gated behind oracledb's `tracing`
+# `tracing` facade is OPTIONAL and feature-gated behind the driver's `tracing`
 # feature: the default build pulls in NOTHING (no tracing-core compiled in,
 # zero per-round-trip overhead). `tracing-subscriber` is dev-only, used by the
 # span-capture test and the docs example.

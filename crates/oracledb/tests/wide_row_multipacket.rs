@@ -28,6 +28,8 @@
 //! cargo test -p oracledb --test wide_row_multipacket
 //! ```
 
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::thin::{BindValue, ExecuteOptions, QueryResult, QueryValue};
 use oracledb::{BlockingConnection, ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;

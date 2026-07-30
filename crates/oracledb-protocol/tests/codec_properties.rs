@@ -10,6 +10,8 @@
 //! property cites the reference `.pyx` (python-oracledb v4.0.1) or the Oracle
 //! wire invariant it enforces; none are tautologies.
 
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::oson::{decode_oson, encode_oson, OsonValue};
 use oracledb_protocol::thin::{decode_lob_text, encode_lob_text};
 use oracledb_protocol::vector::{

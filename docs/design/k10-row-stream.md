@@ -17,7 +17,7 @@ on the post-release branch.
 K10 exposes a paged stream of owned Oracle values over one open query cursor:
 
 ```rust
-Stream<Item = oracledb::Result<Vec<Option<QueryValue>>>>
+Stream<Item = oraclemcp_driver_cx::Result<Vec<Option<QueryValue>>>>
 ```
 
 It occupies the ergonomic space between the borrowing `Rows<'conn>` facade and
@@ -31,7 +31,7 @@ and eager `query_all` result parity.
 
 ```rust
 use futures_core::Stream;
-use oracledb::protocol::thin::{ColumnMetadata, QueryValue};
+use oraclemcp_driver_cx::protocol::thin::{ColumnMetadata, QueryValue};
 
 pub struct OwnedRowStream { /* private state */ }
 

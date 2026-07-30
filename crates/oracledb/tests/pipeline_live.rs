@@ -8,6 +8,8 @@
 //! (PYO_TEST_* variables) is not configured, so plain `cargo test` stays
 //! green offline.
 
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::thin::{
     parse_query_response, BindValue, ExecuteOptions, QueryResult, QueryValue,
 };

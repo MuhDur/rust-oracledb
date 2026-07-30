@@ -30,6 +30,8 @@
 //!   cargo test -p oracledb --test connect_trace_secret -- --ignored --nocapture
 //! ```
 
+extern crate oraclemcp_driver_cx as oracledb;
+
 use std::process::Command;
 
 /// Set on the re-exec'd child so it performs the connect instead of spawning.
@@ -78,12 +80,12 @@ fn password_absent_from_connect_trace() {
     // (i) The trace WORKS: protocol milestones are present (the field complaint
     //     was that RUST_LOG=trace produced none of these).
     for needle in [
-        "oracledb::connect: tcp connect",
-        "oracledb::connect: send CONNECT",
-        "oracledb::connect: read ACCEPT",
-        "oracledb::connect: ACCEPT", // negotiated-capabilities line (fast-auth visible)
-        "oracledb::connect: send AUTH phase one",
-        "oracledb::connect: session established",
+        "oraclemcp_driver_cx::connect: tcp connect",
+        "oraclemcp_driver_cx::connect: send CONNECT",
+        "oraclemcp_driver_cx::connect: read ACCEPT",
+        "oraclemcp_driver_cx::connect: ACCEPT", // negotiated-capabilities line (fast-auth visible)
+        "oraclemcp_driver_cx::connect: send AUTH phase one",
+        "oraclemcp_driver_cx::connect: session established",
     ] {
         assert!(
             stderr.contains(needle),

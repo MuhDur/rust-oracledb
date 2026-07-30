@@ -9,15 +9,17 @@ procedure.
 
 ## Driver Profiles
 
-The `oracledb` crate is nightly-only because the async runtime dependency uses
-nightly Rust. The sans-I/O `oracledb-protocol` crate has a separate stable lane
-tracked by W0-T3.4.
+The `oraclemcp-driver-cx` crate currently requires nightly because its
+asupersync dependency enables the default `nightly-outcome-try` feature. The
+driver source itself does not use that syntax. The sans-I/O
+`oraclemcp-driver-cx-protocol` crate has a separate stable lane tracked by
+W0-T3.4.
 
 | profile | command | contract |
 |---|---|---|
-| minimal | `cargo check -p oracledb --locked --no-default-features` | Driver core without `derive` or optional integrations. |
-| default | `cargo check -p oracledb --locked` | Standard user build; includes `derive`. |
-| all-features | `cargo check -p oracledb --locked --all-features` | Maximal compile smoke for the driver crate. This does not imply every arbitrary subset is individually supported. |
+| minimal | `cargo check -p oraclemcp-driver-cx --locked --no-default-features` | Driver core without `derive` or optional integrations. |
+| default | `cargo check -p oraclemcp-driver-cx --locked` | Standard user build; includes `derive`. |
+| all-features | `cargo check -p oraclemcp-driver-cx --locked --all-features` | Maximal compile smoke for the driver crate. This does not imply every arbitrary subset is individually supported. |
 
 ## Optional Integration Matrix
 
@@ -35,11 +37,11 @@ The supported optional integration slices are:
 CI exercises those slices with `cargo-hack 0.6.45`:
 
 ```sh
-cargo hack check -p oracledb --locked \
+cargo hack check -p oraclemcp-driver-cx --locked \
   --feature-powerset --depth 1 \
   --include-features chrono,uuid,serde_json,rust_decimal,arrow,soda
 
-cargo hack test -p oracledb --locked --lib \
+cargo hack test -p oraclemcp-driver-cx --locked --lib \
   --feature-powerset --depth 1 \
   --include-features chrono,uuid,serde_json,rust_decimal,arrow,soda
 ```
@@ -122,7 +124,7 @@ tested server releases are recorded by that live run, not asserted here
 The driver speaks Oracle TCPS using **rustls** driven over the asupersync TLS
 transport (`asupersync` `tls` feature — `crates/oracledb/Cargo.toml:67-69`). The
 sans-I/O crate holds the TLS *algorithms* (SNI string, DN match, wallet parsing);
-the `oracledb` crate builds the rustls `ClientConfig` and the custom verifier.
+the `oraclemcp-driver-cx` crate builds the rustls `ClientConfig` and the custom verifier.
 
 | aspect | 1.0 promise | citation |
 |---|---|---|
@@ -190,14 +192,14 @@ filesystem path stored in the error.
 CI runs entirely on `ubuntu-latest` and pins the project's nightly toolchain
 (`.github/workflows/ci.yml:29-49`; nightly is build-time-only — 1.0 ships a single
 static binary, so the nightly pin is invisible to consumers). There is no MSRV /
-stable lane for the `oracledb` driver crate (nightly-only, per the Driver Profiles
+stable lane for the `oraclemcp-driver-cx` driver crate (nightly-only, per the Driver Profiles
 note above).
 
 | target triple | tier | citation |
 |---|---|---|
 | `x86_64-unknown-linux-gnu` | **Tier 1** — all CI build/test/clippy/fuzz jobs run here. | `.github/workflows/ci.yml:29,42,58,72,90,103,121`; fuzz pinned to gnu `:141` |
-| `x86_64-unknown-linux-musl` | **Tier 1 (release artifact)** — the published static `oracledb-smoke` binary is built fully-static for musl in the release workflow. | `.github/workflows/release.yml:69-105` |
-| Other targets (other Linux arches, macOS, Windows) | **Best-effort / untested.** The crate is portable pure-Rust (`#![forbid(unsafe_code)]` in `oracledb-protocol`) but no CI proves these; treat as unverified for 1.0. | **intended/unverified** — no workflow builds them |
+| `x86_64-unknown-linux-musl` | **Tier 1 (release artifact)** — the published static `oraclemcp-driver-cx-smoke` binary is built fully-static for musl in the release workflow. | `.github/workflows/release.yml:69-105` |
+| Other targets (other Linux arches, macOS, Windows) | **Best-effort / untested.** The crate is portable pure-Rust (`#![forbid(unsafe_code)]` in `oraclemcp-driver-cx-protocol`) but no CI proves these; treat as unverified for 1.0. | **intended/unverified** — no workflow builds them |
 
 ## 5. Authentication modes (and fail-closed guarantee)
 

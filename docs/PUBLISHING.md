@@ -1,15 +1,17 @@
 # Publishing to crates.io
 
-This document is the runbook for cutting a release of the `oracledb` driver and
-its workspace crates to [crates.io](https://crates.io). It is the source of truth
-for the publish order, the version, what ships, and the post-publish checklist.
+This document is the runbook for cutting a release of the
+`oraclemcp-driver-cx` family to [crates.io](https://crates.io). It is the source
+of truth for publish order, version, package contents, and post-publish checks.
+Publishing remains operator-gated; this runbook is not authorization to upload.
 
 ## Release version
 
 | field | value |
 |---|---|
 | Initial public release | **0.1.0** |
-| Latest published release | **0.9.0** |
+| Latest legacy `oracledb` release | **0.9.0** |
+| First `oraclemcp-driver-cx` release | **0.9.1** (candidate; not yet published) |
 | Workspace release version | **0.9.1** |
 | Candidate source | `[workspace.package].version` in the root `Cargo.toml` |
 
@@ -69,27 +71,27 @@ asupersync (already on crates.io, 0.3.9)
         ^
         |  (external dep)
         |
-oracledb-protocol  ──┐
+oraclemcp-driver-cx-protocol  ──┐
         ^            │
         │            ▼
-oracledb-derive ──> oracledb   (the driver / flagship crate)
+oraclemcp-driver-cx-derive ──> oraclemcp-driver-cx
 ```
 
 Resolved publish order (dependencies first, so each crate's registry deps already
 exist when it is uploaded):
 
-1. `oracledb-protocol`  — sans-I/O TNS/TTC wire protocol core
-2. `oracledb-derive`    — `#[derive(FromRow)]` proc-macro
-3. `oracledb`           — the async thin-mode driver
+1. `oraclemcp-driver-cx-protocol` — sans-I/O TNS/TTC wire protocol core
+2. `oraclemcp-driver-cx-derive` — `#[derive(FromRow)]` proc-macro
+3. `oraclemcp-driver-cx` — the async thin-mode driver
 
-`oracledb` depends on `oracledb-protocol` (always) and `oracledb-derive` (under
-the default `derive` feature). Both are declared with **both** a `path` (used for
-local development) and a version pin matching the workspace release (for 0.9.1,
-`version = "0.9.1"`, used by crates.io when published):
+The driver depends on the protocol package always and the derive package under
+the default `derive` feature. Both use a local `path` and a registry version pin
+matching the workspace release. The dependency keys remain short internal
+aliases; `package` carries the public crates.io identity:
 
 ```toml
-oracledb-protocol = { path = "../oracledb-protocol", version = "0.9.0" }
-oracledb-derive   = { path = "../oracledb-derive",   version = "0.9.0", optional = true }
+oracledb-protocol = { package = "oraclemcp-driver-cx-protocol", path = "../oracledb-protocol", version = "0.9.1" }
+oracledb-derive = { package = "oraclemcp-driver-cx-derive", path = "../oracledb-derive", version = "0.9.1", optional = true }
 ```
 
 `asupersync = "=0.3.9"` is the only non-trivial external runtime dependency and
@@ -114,18 +116,18 @@ honored, and `--all-features` so the full API surface is verified.
 export CARGO_REGISTRY_TOKEN=<crates.io-publish-token>
 
 # 1. Dry-run everything first (see "Dry-run" below for expected results).
-cargo publish --dry-run -p oracledb-protocol
-cargo publish --dry-run -p oracledb-derive
-cargo publish --dry-run -p oracledb            # fails until 1 & 2 are live — expected
+cargo publish --dry-run -p oraclemcp-driver-cx-protocol
+cargo publish --dry-run -p oraclemcp-driver-cx-derive
+cargo package -p oraclemcp-driver-cx
 
 # 2. Real publish, dependency order. Wait for the index to update between steps.
-cargo publish -p oracledb-protocol --locked --all-features
-cargo publish -p oracledb-derive   --locked --all-features
-cargo publish -p oracledb          --locked --all-features
+cargo publish -p oraclemcp-driver-cx-protocol --locked --all-features
+cargo publish -p oraclemcp-driver-cx-derive --locked --all-features
+cargo publish -p oraclemcp-driver-cx --locked --all-features
 ```
 
 crates.io usually makes a new version resolvable within a minute or two. If the
-`oracledb` publish reports "no matching package named `oracledb-protocol`",
+`oraclemcp-driver-cx` publish reports a missing protocol or derive package,
 the index simply has not caught up yet — wait and retry. `cargo publish` recent
 versions block until the just-uploaded crate is available, so a manual wait is
 rarely needed.
@@ -137,20 +139,28 @@ dev-time assets are excluded to keep the tarball lean.
 
 | crate | `exclude` | rationale |
 |---|---|---|
-| `oracledb` | `tests/` | integration + live tests and the `tests/fixtures` cassette/TLS corpus (~300 KB) are dev-only. `benches/` and `examples/` are kept so the `[[bench]]` targets and doc examples resolve. |
-| `oracledb-protocol` | `tests/`, `fuzz/`, `proptest-regressions/` | the `tests/golden/` wire-trace corpus is ~744 KB; the `fuzz/` sub-crate and proptest regression seeds are dev-only. Inline `src/.../proptests.rs` stay (they are source). |
-| `oracledb-derive` | (none needed) | already only `src/lib.rs`. |
+| `oraclemcp-driver-cx` | `tests/` | integration + live tests and the `tests/fixtures` cassette/TLS corpus (~300 KB) are dev-only. `benches/` and `examples/` are kept so the `[[bench]]` targets and doc examples resolve. |
+| `oraclemcp-driver-cx-protocol` | `tests/`, `fuzz/`, `proptest-regressions/` | the `tests/golden/` wire-trace corpus is ~744 KB; the `fuzz/` sub-crate and proptest regression seeds are dev-only. Inline `src/.../proptests.rs` stay (they are source). |
+| `oraclemcp-driver-cx-derive` | (none needed) | already only `src/lib.rs`. |
 
-Resulting package file counts: `oracledb-protocol` ~38 files, `oracledb-derive`
-5 files, `oracledb` ~21 files (17 `src/` + README + manifests + benches/examples).
+Targeted rename qualification on 2026-07-30 recorded these package file counts:
+
+| crate | `cargo package --list` files |
+|---|---:|
+| `oraclemcp-driver-cx` | 49 |
+| `oraclemcp-driver-cx-protocol` | 46 |
+| `oraclemcp-driver-cx-derive` | 5 |
+
+These counts qualify the current dirty-tree candidate only. The publish task
+must record them again from the committed release candidate.
 
 ## README and license
 
-- `oracledb` ships a crate-local `crates/oracledb/README.md` (cargo cannot package
+- `oraclemcp-driver-cx` ships `crates/oracledb/README.md` (cargo cannot package
   a README outside the crate dir, so the rich repo-root `README.md` cannot be
   referenced directly; the crate README links to the repo for the full docs).
-- `oracledb-protocol` and `oracledb-derive` set `readme = false` — they are
-  internal crates whose user-facing docs live on the `oracledb` crate.
+- `oraclemcp-driver-cx-protocol` and `oraclemcp-driver-cx-derive` set
+  `readme = false`; user-facing docs live on `oraclemcp-driver-cx`.
 - Licensing is declared via the SPDX `license = "MIT OR Apache-2.0"` field
   (inherited from `[workspace.package]`). crates.io accepts the SPDX expression;
   no per-crate `LICENSE-*` file copy is required. The canonical `LICENSE-MIT`,
@@ -162,14 +172,38 @@ All three inherit `version`, `edition`, `license`, `repository`,
 and `homepage` from `[workspace.package]`, plus a `documentation = https://docs.rs/<crate>`
 default. Per-crate specifics:
 
-| field | oracledb | oracledb-protocol | oracledb-derive |
+| field | oraclemcp-driver-cx | oraclemcp-driver-cx-protocol | oraclemcp-driver-cx-derive |
 |---|---|---|---|
-| `description` | workspace default (driver) | "Sans-I/O Oracle TNS/TTC protocol core…" | "Procedural macros for the `oracledb` driver…" |
+| `description` | workspace default (driver) | "Sans-I/O Oracle TNS/TTC protocol core…" | "Procedural macros for oraclemcp-driver-cx…" |
 | `keywords` | oracle, database, driver, async, tns | oracle, database, protocol, tns, ttc | oracle, database, derive, proc-macro, fromrow |
 | `categories` | database, asynchronous | database, network-programming | database |
 | `readme` | `README.md` | `false` | `false` |
 
-## Dry-run results (recorded)
+## Renamed-family pre-publish qualification
+
+Targeted checks on 2026-07-30 established the dependency-order boundary without
+uploading any crate:
+
+- `cargo publish --dry-run -p oraclemcp-driver-cx-protocol --allow-dirty` ->
+  **PASS** (upload aborted by dry-run).
+- `cargo publish --dry-run -p oraclemcp-driver-cx-derive --allow-dirty` ->
+  **PASS** (upload aborted by dry-run).
+- `cargo package -p oraclemcp-driver-cx --allow-dirty --no-verify` ->
+  **expected registry-order failure**: `no matching package named
+  oraclemcp-driver-cx-derive found` on crates.io.
+
+The main package failure is not a source-build failure. Cargo resolves its
+versioned registry dependencies while preparing the package, so the protocol
+and derive crates must be published and visible in the index before the main
+crate can receive a green package/dry-run result. Task
+`rust-oracledb-cx-driver-handover-wgwq.4` therefore publishes the two leaves,
+waits for index visibility, re-runs the main package qualification, and only
+then publishes `oraclemcp-driver-cx`.
+
+## Pre-transition dry-run results (historical only)
+
+The results below qualify the old package names, not the renamed family. They
+must not be used as 0.9.1 release evidence:
 
 Run with `CARGO_TARGET_DIR` / `TMPDIR` pointed at a scratch cache:
 
@@ -189,14 +223,14 @@ Run with `CARGO_TARGET_DIR` / `TMPDIR` pointed at a scratch cache:
 
 After each `cargo publish`, and once all three are live:
 
-- [ ] Each crate page loads: `https://crates.io/crates/oracledb`,
-      `.../oracledb-protocol`, `.../oracledb-derive`.
-- [ ] docs.rs build succeeds: `https://docs.rs/oracledb` (check the build log;
+- [ ] Each crate page loads: `https://crates.io/crates/oraclemcp-driver-cx`,
+      `.../oraclemcp-driver-cx-protocol`, `.../oraclemcp-driver-cx-derive`.
+- [ ] docs.rs build succeeds: `https://docs.rs/oraclemcp-driver-cx` (check the build log;
       enable any required features there if the default docs are thin).
-- [ ] `cargo add oracledb@0.9.0` in a fresh project resolves `0.9.0` and compiles a
-      trivial `use oracledb::ConnectOptions;`.
+- [ ] `cargo add oraclemcp-driver-cx@0.9.1` in a fresh project resolves `0.9.1`
+      and compiles `use oraclemcp_driver_cx::ConnectOptions;`.
 - [ ] Tag the release in git: `git tag v0.9.0 && git push --tags`.
-- [ ] Verify the published `oracledb` README renders correctly on crates.io
+- [ ] Verify the published `oraclemcp-driver-cx` README renders correctly on crates.io
       (links point at the GitHub repo, not broken relative `docs/` paths).
 - [ ] Confirm `oracledb-pyshim` and `oracledb-protocol-fuzz` did NOT get
       published (they should not appear on crates.io).

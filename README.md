@@ -1,19 +1,24 @@
 <p align="center">
-  <img src=".github/assets/hero.svg" alt="rust-oracledb — pure-Rust async thin-mode Oracle Database driver" width="100%">
+  <img src=".github/assets/hero.svg" alt="oraclemcp-driver-cx - pure-Rust async thin-mode Oracle Database driver" width="100%">
 </p>
 
 <p align="center">
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="License: MIT OR Apache-2.0"></a>
-  <a href="https://crates.io/crates/oracledb"><img src="https://img.shields.io/crates/v/oracledb.svg" alt="crates.io"></a>
+  <a href="https://crates.io/crates/oraclemcp-driver-cx"><img src="https://img.shields.io/crates/v/oraclemcp-driver-cx.svg" alt="crates.io"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-nightly-orange.svg" alt="Rust: nightly"></a>
   <a href="#robustness"><img src="https://img.shields.io/badge/unsafe-forbidden-success.svg" alt="unsafe: forbidden"></a>
 </p>
 
-**A pure-Rust, async, thin-mode Oracle Database driver. A clean-room port of
+**`oraclemcp-driver-cx` is a pure-Rust, async, thin-mode Oracle Database driver. A clean-room port of
 python-oracledb v4.0.1 thin mode that passes the reference's own test suite, with
 no Oracle Instant Client, no OCI, and no C library at runtime.**
 
-`rust-oracledb` speaks the Oracle TNS/TTC wire protocol directly over TCP. You
+`Cx` means **context**: the driver is built around `asupersync::Cx`, carrying
+cancellation, deadlines, budgets, and scoped runtime capabilities through each
+operation. This is the differentiator encoded in the crate name, not an Oracle
+parity or official-driver claim.
+
+`oraclemcp-driver-cx` speaks the Oracle TNS/TTC wire protocol directly over TCP. You
 add the crate, point it at a listener, and connect; no Instant Client to
 install, no shared libraries to ship. It is a faithful re-implementation of the
 python-oracledb thin client, so its behaviour tracks that reference, verified by
@@ -22,6 +27,10 @@ running python-oracledb's **own** thin-mode test suite against the Rust engine.
 > This is an independent project and is not affiliated with Oracle. "Oracle" and
 > "python-oracledb" are referenced here only to describe what this driver is
 > compatible with.
+>
+> The project was previously published under the `oracledb` family. That legacy
+> namespace is being handed to Oracle; this maintained continuation deliberately
+> uses the distinct `oraclemcp-driver-cx` family.
 
 ---
 
@@ -91,8 +100,8 @@ Each of these is detailed in [The ledger](#the-better-than-python-oracledb-ledge
 ## Quick example
 
 ```rust
-use oracledb::{BlockingConnection, ConnectOptions, FromRow};
-use oracledb::protocol::ClientIdentity;
+use oraclemcp_driver_cx::{BlockingConnection, ConnectOptions, FromRow};
+use oraclemcp_driver_cx::protocol::ClientIdentity;
 
 #[derive(FromRow)]
 struct Emp {
@@ -101,7 +110,7 @@ struct Emp {
     manager_id: Option<i64>, // nullable column -> Option
 }
 
-fn main() -> Result<(), oracledb::Error> {
+fn main() -> Result<(), oraclemcp_driver_cx::Error> {
     // The session identity the database records in v$session. Unlike an OCI
     // client (which reports the host process and OS user it runs as), the
     // caller chooses these exactly.
@@ -408,11 +417,11 @@ async-runtime dependency, `asupersync`, currently uses
 `#![feature(try_trait_v2)]` and `#![feature(try_trait_v2_residual)]`. This is a
 build-time requirement; it does not add an Oracle client or compiler to the
 runtime artifact. The crate is published on crates.io as
-[`oracledb`](https://crates.io/crates/oracledb). The active pin and re-pin
+[`oraclemcp-driver-cx`](https://crates.io/crates/oraclemcp-driver-cx). The active pin and re-pin
 procedure are documented in [docs/TOOLCHAIN.md](docs/TOOLCHAIN.md):
 
 ```bash
-cargo add oracledb
+cargo add oraclemcp-driver-cx
 ```
 
 ```toml
@@ -428,7 +437,7 @@ one fully-static musl binary and shipped in an empty image:
 
 ```bash
 rustup target add x86_64-unknown-linux-musl
-cargo build --release -p oracledb --target x86_64-unknown-linux-musl
+cargo build --release -p oraclemcp-driver-cx --target x86_64-unknown-linux-musl
 ```
 
 The end-to-end recipe (musl C toolchain for `ring`, `FROM scratch` Dockerfile,
@@ -450,8 +459,8 @@ The async API mirrors the blocking one; every method takes an asupersync `&Cx`:
 ```rust
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::Cx;
-use oracledb::{Connection, ConnectOptions};
-use oracledb::protocol::ClientIdentity;
+use oraclemcp_driver_cx::{Connection, ConnectOptions};
+use oraclemcp_driver_cx::protocol::ClientIdentity;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = RuntimeBuilder::current_thread().build()?;
@@ -470,7 +479,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sum: i64 = conn.query_one(&cx, "select 7 + 5 from dual", ()).await?.get(0)?;
         assert_eq!(sum, 12);
         conn.close(&cx).await?;
-        Ok::<_, oracledb::Error>(())
+        Ok::<_, oraclemcp_driver_cx::Error>(())
     })?;
     Ok(())
 }
@@ -479,7 +488,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Binds and named parameters
 
 ```rust
-use oracledb::params;
+use oraclemcp_driver_cx::params;
 
 // Positional: a tuple, a slice, or `params!{...}`. `query` returns a streaming
 // `Rows` handle; `collect(&cx)` drains every batch into `Vec<Row>`.
@@ -507,7 +516,7 @@ let name: String = row.get("name")?;
 ### Typed rows with `#[derive(FromRow)]`
 
 ```rust
-use oracledb::FromRow;
+use oraclemcp_driver_cx::FromRow;
 
 #[derive(FromRow)]
 struct Emp {

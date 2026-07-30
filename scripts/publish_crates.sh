@@ -18,21 +18,21 @@ command -v jq >/dev/null 2>&1 || fail "missing jq"
 
 version="$(
   cargo metadata --no-deps --format-version 1 |
-    jq -r '.packages[] | select(.name == "oracledb") | .version'
+    jq -r '.packages[] | select(.name == "oraclemcp-driver-cx") | .version'
 )"
 if [ -z "$version" ] || [ "$version" = "null" ]; then
-  fail "could not resolve oracledb package version"
+  fail "could not resolve oraclemcp-driver-cx package version"
 fi
 
-# Dependency order: protocol -> derive -> oracledb. The PyO3 conformance harness
+# Dependency order: protocol -> derive -> driver. The PyO3 conformance harness
 # (oracledb-pyshim) is publish = false and never appears here.
 order=(
-  oracledb-protocol
-  oracledb-derive
-  oracledb
+  oraclemcp-driver-cx-protocol
+  oraclemcp-driver-cx-derive
+  oraclemcp-driver-cx
 )
 
-user_agent="oracledb-release-workflow (https://github.com/MuhDur/rust-oracledb)"
+user_agent="oraclemcp-driver-cx-release-workflow (https://github.com/MuhDur/rust-oracledb)"
 
 crate_version_exists() {
   local crate="$1"

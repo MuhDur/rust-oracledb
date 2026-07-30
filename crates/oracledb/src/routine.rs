@@ -105,8 +105,8 @@ enum RoutineArg {
 /// [`Connection::call_routine`]. Example (a function `pkg.add(a, b)`):
 ///
 /// ```no_run
-/// # use oracledb::{Connection, RoutineCall, OutType};
-/// # async fn demo(conn: &mut Connection, cx: &asupersync::Cx) -> oracledb::Result<()> {
+/// # use oraclemcp_driver_cx::{Connection, RoutineCall, OutType};
+/// # async fn demo(conn: &mut Connection, cx: &asupersync::Cx) -> oraclemcp_driver_cx::Result<()> {
 /// let outcome = conn
 ///     .call_routine(
 ///         cx,

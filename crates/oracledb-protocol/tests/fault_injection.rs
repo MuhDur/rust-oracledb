@@ -16,6 +16,8 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use hex::FromHex;
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::dpl::{
     parse_direct_path_prepare_response_with_limits, parse_direct_path_simple_response_with_limits,
     TNS_FUNC_DIRECT_PATH_LOAD_STREAM, TNS_FUNC_DIRECT_PATH_OP, TNS_FUNC_DIRECT_PATH_PREPARE,

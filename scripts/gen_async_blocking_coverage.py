@@ -15,7 +15,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-METHOD_RE = re.compile(r"^pub (?P<async>async )?fn (?P<full>oracledb::[^(]+)\(")
+CRATE_PATH = "oraclemcp_driver_cx"
+METHOD_RE = re.compile(
+    rf"^pub (?P<async>async )?fn (?P<full>{CRATE_PATH}::[^(]+)\("
+)
 
 
 def normalize_owner(owner: str) -> str:
@@ -43,8 +46,8 @@ class Surface:
 SURFACES = [
     Surface(
         name="connection",
-        async_owner="oracledb::Connection",
-        blocking_owner="oracledb::BlockingConnection",
+        async_owner=f"{CRATE_PATH}::Connection",
+        blocking_owner=f"{CRATE_PATH}::BlockingConnection",
         exceptions={
             "direct_path_load_stream": "Low-level direct-path streaming primitive stays async-only; blocking direct_path_load/load_prepared cover owned batches.",
             "direct_path_op": "Low-level direct-path operation primitive stays async-only; blocking direct_path_load/load_prepared cover owned batches.",
@@ -58,19 +61,19 @@ SURFACES = [
     ),
     Surface(
         name="rows",
-        async_owner="oracledb::Rows",
-        blocking_owner="oracledb::BlockingRows",
+        async_owner=f"{CRATE_PATH}::Rows",
+        blocking_owner=f"{CRATE_PATH}::BlockingRows",
     ),
     Surface(
         name="cancel-handle",
-        async_owner="oracledb::CancelHandle",
-        blocking_owner="oracledb::CancelHandle",
+        async_owner=f"{CRATE_PATH}::CancelHandle",
+        blocking_owner=f"{CRATE_PATH}::CancelHandle",
         method_map={"cancel": "cancel_blocking"},
     ),
     Surface(
         name="pool",
-        async_owner="oracledb::pool::Pool",
-        blocking_owner="oracledb::pool::BlockingPool",
+        async_owner=f"{CRATE_PATH}::pool::Pool",
+        blocking_owner=f"{CRATE_PATH}::pool::BlockingPool",
         exceptions={
             "blocking": "Adapter that returns the blocking facade; not itself mirrored.",
             "clone": "Clone is a trait method, not a pool operation.",
@@ -80,8 +83,8 @@ SURFACES = [
     ),
     Surface(
         name="pooled-connection",
-        async_owner="oracledb::pool::PooledConnection",
-        blocking_owner="oracledb::pool::BlockingPooledConnection",
+        async_owner=f"{CRATE_PATH}::pool::PooledConnection",
+        blocking_owner=f"{CRATE_PATH}::pool::BlockingPooledConnection",
         exceptions={
             "drop": "Drop is the RAII fallback, not a callable facade operation.",
         },
@@ -89,8 +92,8 @@ SURFACES = [
     ),
     Surface(
         name="arrow-record-batch",
-        async_owner="oracledb::arrow::RecordBatchFetch",
-        blocking_owner="oracledb::BlockingConnection",
+        async_owner=f"{CRATE_PATH}::arrow::RecordBatchFetch",
+        blocking_owner=f"{CRATE_PATH}::BlockingConnection",
         method_map={"next_batch": "next_record_batch"},
     ),
 ]

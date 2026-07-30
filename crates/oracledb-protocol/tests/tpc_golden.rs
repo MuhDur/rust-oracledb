@@ -16,6 +16,8 @@
 //! the begin RESPONSE and echoed on the following operations). Everything else
 //! must match the reference wire exactly.
 
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::thin::{
     build_tpc_change_state_payload_with_seq, build_tpc_switch_payload_with_seq,
     parse_tpc_change_state_response, parse_tpc_switch_response, ClientCapabilities, TpcXid,

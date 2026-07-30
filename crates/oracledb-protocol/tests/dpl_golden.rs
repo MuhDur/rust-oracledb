@@ -14,6 +14,8 @@
 //!
 //! Everything else must match byte-for-byte.
 
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::dpl::{
     build_direct_path_load_stream_payload, build_direct_path_op_payload,
     build_direct_path_prepare_payload, encode_direct_path_rows, parse_direct_path_prepare_response,

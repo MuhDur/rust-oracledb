@@ -197,7 +197,7 @@ EOF
     | [
         $pkg.name,
         .key,
-        (.value | sort | join(","))
+        (if (.value | length) == 0 then "-" else (.value | sort | join(",")) end)
       ]
     | @tsv
   ' <<<"$metadata"
@@ -205,15 +205,15 @@ EOF
 
 {
   printf 'profile\tcommand\n'
-  printf 'minimal\tcargo check -p oracledb --locked --no-default-features\n'
-  printf 'default\tcargo check -p oracledb --locked\n'
-  printf 'all-features\tcargo check -p oracledb --locked --all-features\n'
-  printf 'integration-matrix-check\tcargo hack check -p oracledb --locked --feature-powerset --depth 1 --include-features chrono,uuid,serde_json,rust_decimal,arrow,soda\n'
-  printf 'integration-matrix-lib-test\tcargo hack test -p oracledb --locked --lib --feature-powerset --depth 1 --include-features chrono,uuid,serde_json,rust_decimal,arrow,soda\n'
-  printf 'derive-trybuild\tcargo test -p oracledb --test derive_trybuild\n'
-  printf 'semver-advisory-protocol\tcargo semver-checks check-release -p oracledb-protocol\n'
-  printf 'semver-advisory-driver\tcargo semver-checks check-release -p oracledb\n'
-  printf 'protocol-stable\tcargo +stable test -p oracledb-protocol\n'
+  printf 'minimal\tcargo check -p oraclemcp-driver-cx --locked --no-default-features\n'
+  printf 'default\tcargo check -p oraclemcp-driver-cx --locked\n'
+  printf 'all-features\tcargo check -p oraclemcp-driver-cx --locked --all-features\n'
+  printf 'integration-matrix-check\tcargo hack check -p oraclemcp-driver-cx --locked --feature-powerset --depth 1 --include-features chrono,uuid,serde_json,rust_decimal,arrow,soda\n'
+  printf 'integration-matrix-lib-test\tcargo hack test -p oraclemcp-driver-cx --locked --lib --feature-powerset --depth 1 --include-features chrono,uuid,serde_json,rust_decimal,arrow,soda\n'
+  printf 'derive-trybuild\tcargo test -p oraclemcp-driver-cx --test derive_trybuild\n'
+  printf 'semver-advisory-protocol\tcargo semver-checks check-release -p oraclemcp-driver-cx-protocol\n'
+  printf 'semver-advisory-driver\tcargo semver-checks check-release -p oraclemcp-driver-cx\n'
+  printf 'protocol-stable\tcargo +stable test -p oraclemcp-driver-cx-protocol\n'
   printf 'fuzz-build\tcargo fuzz build --target x86_64-unknown-linux-gnu (cwd crates/oracledb-protocol)\n'
 } > "$OUT/supported_profiles.tsv"
 
@@ -243,18 +243,20 @@ generated_public_api=false
   printf 'profile\tpackage\tpath\tstatus\n'
   if command -v cargo-public-api >/dev/null 2>&1; then
     generated_public_api=true
-    run_public_api oracledb-minimal oracledb --no-default-features
-    run_public_api oracledb-default oracledb
-    run_public_api oracledb-all-features oracledb --all-features
-    run_public_api oracledb-chrono oracledb --features chrono
-    run_public_api oracledb-uuid oracledb --features uuid
-    run_public_api oracledb-serde_json oracledb --features serde_json
-    run_public_api oracledb-rust_decimal oracledb --features rust_decimal
-    run_public_api oracledb-arrow oracledb --features arrow
-    run_public_api oracledb-soda oracledb --features soda
-    run_public_api oracledb-tracing oracledb --features tracing
-    run_public_api protocol-default oracledb-protocol
-    run_public_api protocol-all-features oracledb-protocol --all-features
+    # Snapshot filenames remain stable to preserve review history; package
+    # headers and commands carry the new public identity.
+    run_public_api oracledb-minimal oraclemcp-driver-cx --no-default-features
+    run_public_api oracledb-default oraclemcp-driver-cx
+    run_public_api oracledb-all-features oraclemcp-driver-cx --all-features
+    run_public_api oracledb-chrono oraclemcp-driver-cx --features chrono
+    run_public_api oracledb-uuid oraclemcp-driver-cx --features uuid
+    run_public_api oracledb-serde_json oraclemcp-driver-cx --features serde_json
+    run_public_api oracledb-rust_decimal oraclemcp-driver-cx --features rust_decimal
+    run_public_api oracledb-arrow oraclemcp-driver-cx --features arrow
+    run_public_api oracledb-soda oraclemcp-driver-cx --features soda
+    run_public_api oracledb-tracing oraclemcp-driver-cx --features tracing
+    run_public_api protocol-default oraclemcp-driver-cx-protocol
+    run_public_api protocol-all-features oraclemcp-driver-cx-protocol --all-features
   else
     unavailable="$OUT/public_api/UNAVAILABLE.txt"
     printf 'cargo-public-api is not installed; install it with: cargo install cargo-public-api\n' > "$unavailable"

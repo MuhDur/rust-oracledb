@@ -12,6 +12,8 @@
 
 use std::path::PathBuf;
 
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::tls::dn::{check_cert_dn, check_server_name, name_matches};
 use oracledb_protocol::tls::sni::build_sni;
 use oracledb_protocol::tls::wallet::{

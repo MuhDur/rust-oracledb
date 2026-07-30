@@ -9,7 +9,7 @@
 #   3. asserts each packaged Cargo.toml strips inter-crate `path =` and pins the
 #      workspace version,
 #   4. extracts every .crate OUTSIDE the workspace and builds each one there —
-#      oracledb against the extracted sibling tarballs (never the workspace),
+#      oraclemcp-driver-cx against extracted sibling tarballs (never the workspace),
 #   5. runs `cargo publish --dry-run` for the two leaf crates.
 set -uo pipefail
 
@@ -24,22 +24,22 @@ command -v tar >/dev/null 2>&1 || fail "missing tar"
 
 version="$(
   cargo metadata --no-deps --format-version 1 \
-    | jq -r '.packages[] | select(.name == "oracledb") | .version'
+    | jq -r '.packages[] | select(.name == "oraclemcp-driver-cx") | .version'
 )"
 [ -n "$version" ] && [ "$version" != "null" ] || fail "could not resolve workspace version"
 note "workspace version $version"
 
 PKG_TARGET="${PKG_TARGET_DIR:-${CARGO_TARGET_DIR:-$ROOT/target}}"
 PKG_DIR="$PKG_TARGET/package"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/oracledb-standalone.XXXXXX")"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/oraclemcp-driver-cx-standalone.XXXXXX")"
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
-crates=(oracledb-protocol oracledb-derive oracledb)
+crates=(oraclemcp-driver-cx-protocol oraclemcp-driver-cx-derive oraclemcp-driver-cx)
 
 # 1) Package (build-verifies within the workspace).
 note "packaging ${crates[*]}"
-cargo package -p oracledb-protocol -p oracledb-derive -p oracledb --locked --allow-dirty \
+cargo package -p oraclemcp-driver-cx-protocol -p oraclemcp-driver-cx-derive -p oraclemcp-driver-cx --locked --allow-dirty \
   >"$WORK/package.log" 2>&1 || { cat "$WORK/package.log" >&2; fail "cargo package failed"; }
 
 # 2) + 3) Per-crate: list inspection + packaged-manifest assertions.
@@ -76,28 +76,28 @@ build_standalone() { # crate  extra-args...
 }
 
 # protocol + derive have no sibling deps -> build from crates.io directly.
-build_standalone oracledb-protocol --all-features
-build_standalone oracledb-derive
+build_standalone oraclemcp-driver-cx-protocol --all-features
+build_standalone oraclemcp-driver-cx-derive
 
-# oracledb: resolve the siblings from the EXTRACTED tarballs (never the workspace)
+# oraclemcp-driver-cx: resolve siblings from the extracted tarballs (never the workspace)
 # via a crates.io patch pointing at the other extracted packages.
-oradir="$WORK/oracledb-$version"
+driver_dir="$WORK/oraclemcp-driver-cx-$version"
 {
   echo ""
   echo "[patch.crates-io]"
-  echo "oracledb-protocol = { path = \"../oracledb-protocol-$version\" }"
-  echo "oracledb-derive = { path = \"../oracledb-derive-$version\" }"
-} >> "$oradir/Cargo.toml"
-note "building oracledb standalone against the extracted sibling tarballs (no workspace paths)"
-( cd "$oradir" && CARGO_TARGET_DIR="$WORK/target-oracledb" cargo build --all-features ) \
-  >"$WORK/build-oracledb.log" 2>&1 || { tail -30 "$WORK/build-oracledb.log" >&2; fail "oracledb failed to build standalone"; }
+  echo "oraclemcp-driver-cx-protocol = { path = \"../oraclemcp-driver-cx-protocol-$version\" }"
+  echo "oraclemcp-driver-cx-derive = { path = \"../oraclemcp-driver-cx-derive-$version\" }"
+} >> "$driver_dir/Cargo.toml"
+note "building oraclemcp-driver-cx standalone against extracted sibling tarballs (no workspace paths)"
+( cd "$driver_dir" && CARGO_TARGET_DIR="$WORK/target-oraclemcp-driver-cx" cargo build --all-features ) \
+  >"$WORK/build-oraclemcp-driver-cx.log" 2>&1 || { tail -30 "$WORK/build-oraclemcp-driver-cx.log" >&2; fail "oraclemcp-driver-cx failed to build standalone"; }
 
 # 5) Publish dry-runs for the leaf crates (full crates.io resolution; no upload).
-for crate in oracledb-protocol oracledb-derive; do
+for crate in oraclemcp-driver-cx-protocol oraclemcp-driver-cx-derive; do
   note "cargo publish --dry-run -p $crate"
   cargo publish --dry-run -p "$crate" --locked --allow-dirty \
     >"$WORK/dryrun-$crate.log" 2>&1 || { tail -20 "$WORK/dryrun-$crate.log" >&2; fail "$crate publish --dry-run failed"; }
 done
-note "oracledb publish --dry-run is deferred to release time (its siblings must be on crates.io first); its standalone build above is the pre-publish proof"
+note "oraclemcp-driver-cx publish --dry-run is deferred to release time (its siblings must be on crates.io first); its standalone build above is the pre-publish proof"
 
 note "OK — all three crates build standalone from packaged source with no workspace path resolution"

@@ -37,7 +37,11 @@ md = json.load(open(sys.argv[2]))
 packages = {p["id"]: p for p in md["packages"]}
 nodes = {n["id"]: n for n in md["resolve"]["nodes"]}
 
-PUBLISHED = {"oracledb", "oracledb-protocol", "oracledb-derive"}
+PUBLISHED = {
+    "oraclemcp-driver-cx",
+    "oraclemcp-driver-cx-protocol",
+    "oraclemcp-driver-cx-derive",
+}
 roots = [p["id"] for p in md["packages"]
          if p["name"] in PUBLISHED and p.get("source") is None]
 
@@ -80,7 +84,7 @@ def comp(p):
         c["licenses"] = [{"license": {"name": p["license"]}}]
     return c
 
-root = packages[roots[0]] if roots else {"name": "oracledb", "version": "0"}
+root = packages[roots[0]] if roots else {"name": "oraclemcp-driver-cx", "version": "0"}
 bom = {
     "bomFormat": "CycloneDX",
     "specVersion": "1.5",

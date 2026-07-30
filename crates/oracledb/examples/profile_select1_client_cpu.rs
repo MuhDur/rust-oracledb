@@ -20,8 +20,8 @@
 
 use std::time::Instant;
 
-use oracledb::protocol::ClientIdentity;
-use oracledb::{BlockingConnection, ConnectOptions};
+use oraclemcp_driver_cx::protocol::ClientIdentity;
+use oraclemcp_driver_cx::{BlockingConnection, ConnectOptions};
 
 fn connect_options() -> Option<ConnectOptions> {
     let connect_string = std::env::var("PYO_TEST_CONNECT_STRING").ok()?;
@@ -57,7 +57,7 @@ fn main() {
             "select 1 from dual",
             1,
             &[],
-            oracledb::protocol::thin::ExecuteOptions::default(),
+            oraclemcp_driver_cx::protocol::thin::ExecuteOptions::default(),
             None,
         )
         .expect("warm");
@@ -73,7 +73,7 @@ fn main() {
             "select 1 from dual",
             1,
             &[],
-            oracledb::protocol::thin::ExecuteOptions::default(),
+            oraclemcp_driver_cx::protocol::thin::ExecuteOptions::default(),
             None,
         )
         .expect("select 1");
@@ -93,7 +93,7 @@ fn main() {
             "select 1 from dual",
             1,
             &[],
-            oracledb::protocol::thin::ExecuteOptions::default(),
+            oraclemcp_driver_cx::protocol::thin::ExecuteOptions::default(),
             None,
         )
         .expect("select 1");

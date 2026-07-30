@@ -14,6 +14,8 @@
 
 use std::sync::Arc;
 
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::thin::{ColumnMetadata, ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_VARCHAR};
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, ColumnShape, ConnectOptions, Connection, StatementShapeCache};

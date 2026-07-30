@@ -23,6 +23,8 @@
 
 mod common;
 
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::arrow::{
     arrow_schema_for_columns, build_record_batch, build_record_batch_columnar, ArrowFetchOptions,
 };

@@ -12,6 +12,8 @@
 //!   cargo bench -p oracledb-protocol --bench number_decode
 
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion, Throughput};
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::thin::{encode_number_text, OracleNumber};
 
 /// Cells decoded per benchmark iteration (a fetch-page scale).

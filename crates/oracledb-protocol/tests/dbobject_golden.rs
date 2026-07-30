@@ -15,6 +15,8 @@
 //! the `>>>MARKER GetStringRep<<<` line) and asserts our encoder reproduces it
 //! byte-for-byte from the same attribute values.
 
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::thin::{
     image_begin, image_finalize, image_write_value_bytes, pack_bindvalue_into_image, BindValue,
     CS_FORM_IMPLICIT, ORA_TYPE_NUM_TIMESTAMP,

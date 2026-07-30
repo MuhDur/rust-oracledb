@@ -8,6 +8,8 @@
 //! Run: PYO_TEST_CONNECT_STRING=localhost:1522/FREEPDB1 PYO_TEST_MAIN_USER=pythontest \
 //!      PYO_TEST_MAIN_PASSWORD=pythontest \
 //!      cargo test -p oracledb --test live_ref_cursor -- --ignored --nocapture
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::thin::QueryValue;
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, ConnectOptions};

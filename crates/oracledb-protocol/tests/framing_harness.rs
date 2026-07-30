@@ -26,6 +26,8 @@
 //! packet segments and asserts the re-parsed `QueryResult` is byte-identical to
 //! the whole-buffer parse, regardless of split position.
 
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::thin::{
     parse_query_response, ClientCapabilities, QueryResult, TNS_DATA_FLAGS_END_OF_RESPONSE,
     TNS_MSG_TYPE_END_OF_RESPONSE,

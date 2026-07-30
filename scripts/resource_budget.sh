@@ -85,7 +85,7 @@ done
 # Measured on this host (128 cores, cargo jobs=4), by reading the run's own
 # cgroup pids.peak/memory.peak:
 #
-#   cargo build -p oracledb-protocol --tests   peak_tasks =  602   mem ~0.95 GiB
+#   cargo build -p oraclemcp-driver-cx-protocol --tests   peak_tasks = 602   mem ~0.95 GiB
 #   cargo mutants -j1, one file, cold deps     peak_tasks = 5850   mem ~1.6  GiB
 #
 # 5850 tasks to mutate ONE 91-line file is not intuitive, and it is why guessing

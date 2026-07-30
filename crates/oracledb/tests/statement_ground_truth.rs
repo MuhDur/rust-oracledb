@@ -20,6 +20,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::thin::{BindValue, QueryValue};
 use oracledb::protocol::ClientIdentity;
 use oracledb::{BlockingConnection, ConnectOptions, Query};

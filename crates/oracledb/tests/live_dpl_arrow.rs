@@ -14,6 +14,8 @@ use arrow_array::Array;
 use arrow_schema::{DataType, TimeUnit};
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::arrow::ArrowFetchOptions;
 use oracledb::{ConnectOptions, Connection};
 use oracledb_protocol::dpl::DirectPathColumnValue;

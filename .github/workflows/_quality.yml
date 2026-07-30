@@ -320,7 +320,7 @@ jobs:
       - name: Test cassette replay
         id: test_cassette
         continue-on-error: ${{ inputs.mode == 'prep' }}
-        run: cargo test -p oracledb --features cassette
+        run: cargo test -p oraclemcp-driver-cx --features cassette
 
       - name: Record prep outcomes
         if: ${{ always() && inputs.mode == 'prep' }}
@@ -424,7 +424,7 @@ jobs:
         id: stable_protocol
         if: ${{ inputs.profile != 'canary' }}
         continue-on-error: ${{ inputs.mode == 'prep' }}
-        run: cargo +stable test -p oracledb-protocol --locked
+        run: cargo +stable test -p oraclemcp-driver-cx-protocol --locked
 
       - name: Record prep outcomes
         if: ${{ always() && inputs.mode == 'prep' }}
@@ -644,13 +644,13 @@ jobs:
         run: |
           set -euo pipefail
           integration_features=chrono,uuid,serde_json,rust_decimal,arrow,soda
-          cargo check -p oracledb --locked --no-default-features
-          cargo check -p oracledb --locked
-          cargo check -p oracledb --locked --all-features
-          cargo hack check -p oracledb --locked \
+          cargo check -p oraclemcp-driver-cx --locked --no-default-features
+          cargo check -p oraclemcp-driver-cx --locked
+          cargo check -p oraclemcp-driver-cx --locked --all-features
+          cargo hack check -p oraclemcp-driver-cx --locked \
             --feature-powerset --depth 1 \
             --include-features "$integration_features"
-          cargo hack test -p oracledb --locked --lib \
+          cargo hack test -p oraclemcp-driver-cx --locked --lib \
             --feature-powerset --depth 1 \
             --include-features "$integration_features"
 
@@ -757,8 +757,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo semver-checks check-release -p oracledb-protocol
-          cargo semver-checks check-release -p oracledb
+          cargo semver-checks check-release -p oraclemcp-driver-cx-protocol
+          cargo semver-checks check-release -p oraclemcp-driver-cx
 
       - uses: taiki-e/install-action@6385177bd1684e175e09301c9ee3ae18c14a367e # cargo-deny
         continue-on-error: ${{ inputs.mode == 'prep' }}

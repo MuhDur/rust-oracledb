@@ -65,6 +65,8 @@
 
 use std::time::Instant;
 
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::thin::{QueryResult, QueryValue};
 use oracledb::{BlockingConnection, ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;

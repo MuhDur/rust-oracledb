@@ -1,3 +1,5 @@
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::{
     PYTHON_ORACLEDB_REFERENCE_COMMIT, PYTHON_ORACLEDB_REFERENCE_TAG, TNS_VERSION_DESIRED,
 };

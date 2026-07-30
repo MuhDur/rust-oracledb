@@ -22,6 +22,8 @@ use arrow_array::types::{
 };
 use arrow_array::Array;
 use arrow_schema::{DataType, TimeUnit};
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::arrow::{build_record_batch, ArrowFetchOptions};
 use oracledb_protocol::thin::{parse_query_response, ClientCapabilities};
 

@@ -10,6 +10,8 @@
 //! TTC sequence numbers are extracted from the capture itself and fed to our
 //! builders; everything else must match byte-for-byte.
 
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::thin::{
     build_begin_pipeline_piggyback, build_end_pipeline_payload_with_seq,
     build_execute_payload_with_bind_rows_with_seq_and_token,

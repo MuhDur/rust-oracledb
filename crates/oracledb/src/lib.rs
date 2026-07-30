@@ -3,7 +3,8 @@
 
 //! A pure-Rust, thin-mode driver for Oracle Database.
 //!
-//! `oracledb` speaks the Oracle TNS/TTC wire protocol directly over TCP. It
+//! `oraclemcp-driver-cx` speaks the Oracle TNS/TTC wire protocol directly over
+//! TCP. It
 //! needs no Oracle Instant Client, no OCI libraries, and no C toolchain: add
 //! the crate, point it at a listener, and connect. The driver is a faithful
 //! port of the python-oracledb thin client, so its behavior tracks that
@@ -27,10 +28,10 @@
 //! audit trail, and resource-manager rules.
 //!
 //! ```no_run
-//! use oracledb::{BlockingConnection, ConnectOptions};
-//! use oracledb::protocol::ClientIdentity;
+//! use oraclemcp_driver_cx::{BlockingConnection, ConnectOptions};
+//! use oraclemcp_driver_cx::protocol::ClientIdentity;
 //!
-//! # fn main() -> Result<(), oracledb::Error> {
+//! # fn main() -> Result<(), oraclemcp_driver_cx::Error> {
 //! // The identity the database will record for this session.
 //! let identity = ClientIdentity::new(
 //!     "billing-worker", // program
@@ -318,7 +319,7 @@ pub fn fetch_profile_arm(on: bool) {
 pub mod arrow;
 /// Executemany batch-chunk bookkeeping. Private module: the user-facing surface
 /// is the three items re-exported at the crate root below, so there is exactly
-/// one public path per item (no `oracledb::cursor_logic::…` second path).
+/// one public path per item (no `oraclemcp_driver_cx::cursor_logic::…` second path).
 mod cursor_logic;
 mod iam_pop;
 /// Feature-gated observability seam (bead rust-oracledb-lv6). Always compiled so
@@ -404,11 +405,11 @@ pub use sql_convert::{
 /// compile-time-checked field types.
 ///
 /// Available with the default-on `derive` feature. The derive and the
-/// [`FromRow`] trait share a name, so a single `use oracledb::FromRow;` brings
+/// [`FromRow`] trait share a name, so `use oraclemcp_driver_cx::FromRow;` brings
 /// both into scope.
 ///
 /// ```no_run
-/// use oracledb::FromRow;
+/// use oraclemcp_driver_cx::FromRow;
 ///
 /// #[derive(FromRow)]
 /// struct Emp {
@@ -418,7 +419,7 @@ pub use sql_convert::{
 /// }
 /// ```
 ///
-/// See the [`FromRow`] trait docs for the supported shapes and `#[oracledb(...)]`
+/// See the [`FromRow`] trait docs for the supported shapes and `#[driver_cx(...)]`
 /// attributes.
 #[cfg(feature = "derive")]
 pub use oracledb_derive::FromRow;
@@ -434,9 +435,9 @@ pub use oracledb_derive::FromRow;
 /// gathers them so callers can write one line:
 ///
 /// ```no_run
-/// use oracledb::prelude::*;
+/// use oraclemcp_driver_cx::prelude::*;
 ///
-/// # fn main() -> oracledb::Result<()> {
+/// # fn main() -> oraclemcp_driver_cx::Result<()> {
 /// let identity = ClientIdentity::new("app", "host", "user", "term", "rust-oracledb")?;
 /// let options = ConnectOptions::new("dbhost:1521/FREEPDB1", "app_user", "app_pw", identity);
 /// let mut conn = BlockingConnection::connect(options)?;
@@ -449,13 +450,15 @@ pub use oracledb_derive::FromRow;
 ///
 /// The prelude is a curated convenience namespace, not a second canonical home:
 /// each item's one obvious path is still its non-prelude path
-/// (`oracledb::Connection`, `oracledb::protocol::thin::QueryValue`, ...). Reach
+/// (`oraclemcp_driver_cx::Connection`,
+/// `oraclemcp_driver_cx::protocol::thin::QueryValue`, ...). Reach
 /// for an explicit `use` when you want exactly one name or a less common type.
 ///
 /// It deliberately does **not** re-export [`Result`] or [`Error`]: a 1-argument
 /// `Result` alias and an `Error` type in a glob import shadow
 /// `std::result::Result` / `std::error::Error`, which surprises callers. Name
-/// those explicitly as `oracledb::Result` / `oracledb::Error`.
+/// those explicitly as `oraclemcp_driver_cx::Result` /
+/// `oraclemcp_driver_cx::Error`.
 pub mod prelude {
     pub use crate::protocol::thin::{BindValue, QueryValue};
     pub use crate::protocol::ClientIdentity;
@@ -914,7 +917,7 @@ impl<T: WireTransport> ConnectionCore<T> {
 /// values, so multibyte SQL stays aligned; tabs count as one column.
 ///
 /// ```
-/// let d = oracledb::render_caret(
+/// let d = oraclemcp_driver_cx::render_caret(
 ///     "select * from no_such_table",
 ///     15,
 ///     "ORA-00942: table or view does not exist",
@@ -1484,7 +1487,7 @@ impl ColumnIndex for &str {
 /// ship with the driver so production retry / circuit-breaker code is trivial:
 ///
 /// ```no_run
-/// # use oracledb::Error;
+/// # use oraclemcp_driver_cx::Error;
 /// # fn classify(err: &Error) {
 /// if err.is_connection_lost() {
 ///     // reconnect, then retry
@@ -4740,14 +4743,14 @@ impl Connection {
     /// `Vec<BindValue>`, or the named [`params!`](crate::params) form:
     ///
     /// ```no_run
-    /// # use oracledb::Connection;
+    /// # use oraclemcp_driver_cx::Connection;
     /// # use asupersync::Cx;
-    /// # async fn demo(conn: &mut Connection, cx: &Cx) -> Result<(), oracledb::Error> {
+    /// # async fn demo(conn: &mut Connection, cx: &Cx) -> Result<(), oraclemcp_driver_cx::Error> {
     /// let positional = conn.query(cx, "select :1 + :2 from dual", (40, 2)).await?
     ///     .collect(cx)
     ///     .await?;
     /// let named = conn
-    ///     .query(cx, "select :a + :b from dual", oracledb::params!{ ":a" => 40, ":b" => 2 })
+    ///     .query(cx, "select :a + :b from dual", oraclemcp_driver_cx::params!{ ":a" => 40, ":b" => 2 })
     ///     .await?
     ///     .collect(cx)
     ///     .await?;
@@ -8267,10 +8270,10 @@ impl CancelHandle {
 /// driver from ordinary synchronous Rust.
 ///
 /// ```no_run
-/// use oracledb::{BlockingConnection, ConnectOptions};
-/// use oracledb::protocol::ClientIdentity;
+/// use oraclemcp_driver_cx::{BlockingConnection, ConnectOptions};
+/// use oraclemcp_driver_cx::protocol::ClientIdentity;
 ///
-/// # fn main() -> Result<(), oracledb::Error> {
+/// # fn main() -> Result<(), oraclemcp_driver_cx::Error> {
 /// let identity = ClientIdentity::new("svc", "host", "user", "term", "rust-oracledb")?;
 /// let mut conn = BlockingConnection::connect(
 ///     ConnectOptions::new("dbhost:1521/FREEPDB1", "app", "pw", identity),
@@ -11547,13 +11550,13 @@ fn json_lob_probe_candidates(columns: &[ColumnMetadata]) -> Vec<(usize, String)>
 
 fn trace_connect_step(step: &'static str) {
     if std::env::var_os("ORACLEDB_TRACE_CONNECT").is_some() {
-        eprintln!("oracledb::connect: {step}");
+        eprintln!("oraclemcp_driver_cx::connect: {step}");
     }
 }
 
 fn trace_connect_value(label: &'static str, value: &str) {
     if std::env::var_os("ORACLEDB_TRACE_CONNECT").is_some() {
-        eprintln!("oracledb::connect: {label}: {value}");
+        eprintln!("oraclemcp_driver_cx::connect: {label}: {value}");
     }
 }
 
@@ -11564,7 +11567,10 @@ fn trace_connect_bytes(label: &'static str, bytes: &[u8]) {
             use std::fmt::Write as _;
             let _ = write!(&mut hex, "{byte:02x}");
         }
-        eprintln!("oracledb::connect: {label} len={} hex={hex}", bytes.len());
+        eprintln!(
+            "oraclemcp_driver_cx::connect: {label} len={} hex={hex}",
+            bytes.len()
+        );
     }
 }
 
@@ -11575,7 +11581,10 @@ fn trace_query_bytes(label: &'static str, bytes: &[u8]) {
             use std::fmt::Write as _;
             let _ = write!(&mut hex, "{byte:02x}");
         }
-        eprintln!("oracledb::query: {label} len={} hex={hex}", bytes.len());
+        eprintln!(
+            "oraclemcp_driver_cx::query: {label} len={} hex={hex}",
+            bytes.len()
+        );
     }
 }
 

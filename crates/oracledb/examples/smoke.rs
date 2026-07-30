@@ -26,7 +26,7 @@
 
 use std::process::ExitCode;
 
-use oracledb::prelude::*;
+use oraclemcp_driver_cx::prelude::*;
 
 /// Resolve a connection parameter from (in order) a positional CLI argument,
 /// an environment variable, then a baked-in default.
@@ -75,7 +75,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "select 7+5 from dual",
         1,
         &[],
-        oracledb::protocol::thin::ExecuteOptions::default(),
+        oraclemcp_driver_cx::protocol::thin::ExecuteOptions::default(),
         None,
     )?;
     let sum = arithmetic
@@ -93,7 +93,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "select cast('rust-oracledb' as varchar2(32)) as label from dual",
         1,
         &[],
-        oracledb::protocol::thin::ExecuteOptions::default(),
+        oraclemcp_driver_cx::protocol::thin::ExecuteOptions::default(),
         None,
     )?;
     let label = typed

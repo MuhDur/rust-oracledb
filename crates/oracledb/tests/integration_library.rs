@@ -20,6 +20,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::pool::{
     AcquireOptions, Pool, PoolBackend, PoolConfig, PoolError, POOL_GETMODE_TIMEDWAIT,
     POOL_GETMODE_WAIT,

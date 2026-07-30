@@ -73,7 +73,7 @@ export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="x86_64-linux-musl-gcc"
 # ---------------------------------------------------------------------------
 say "building static $TARGET binary"
 rustup target add "$TARGET" >/dev/null 2>&1 || true
-cargo build --release --example smoke -p oracledb --target "$TARGET"
+cargo build --release --example smoke -p oraclemcp-driver-cx --target "$TARGET"
 
 BIN="$CARGO_TARGET_DIR/$TARGET/release/examples/smoke"
 [ -x "$BIN" ] || { echo "build did not produce $BIN" >&2; exit 1; }

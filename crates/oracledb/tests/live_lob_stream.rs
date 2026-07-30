@@ -19,6 +19,8 @@
 
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::thin::{
     encode_lob_text, LobValue, CS_FORM_IMPLICIT, ORA_TYPE_NUM_BLOB, ORA_TYPE_NUM_CLOB,
 };

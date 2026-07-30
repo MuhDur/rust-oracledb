@@ -98,8 +98,8 @@ helpers that `Connection::connect` already calls auto-wrap the halves in the
 needed.
 
 ```rust
-use oracledb::transport;
-use oracledb::{ConnectOptions, Connection};
+use oraclemcp_driver_cx::transport;
+use oraclemcp_driver_cx::{ConnectOptions, Connection};
 
 // Install BEFORE connect so the FULL session (connect, auth, execute, fetch,
 // close) is captured.
@@ -136,7 +136,7 @@ in order; the `ReplayWrite` half handles the driver's `C->S` writes per the
 chosen mode:
 
 ```rust
-use oracledb::transport::{self, ReplayWriteMode};
+use oraclemcp_driver_cx::transport::{self, ReplayWriteMode};
 
 let bytes = std::fs::read("session.tns-cassette")?;
 let (mut read, _write) = transport::replay_split(&bytes, ReplayWriteMode::Ignore)?;
@@ -192,11 +192,11 @@ check/ignore, mismatch flagging, capture-scope wrap/restore).
 cargo test --workspace --features cassette
 
 # Regenerate the synthetic fixture and manifest:
-cargo test -p oracledb --features cassette --test cassette_record_replay \
+cargo test -p oraclemcp-driver-cx --features cassette --test cassette_record_replay \
   write_synthetic_connect_execute_fetch_close_fixture -- --ignored --nocapture
 
 # Replay it offline (no DB needed):
-cargo test -p oracledb --features cassette --test cassette_record_replay \
+cargo test -p oraclemcp-driver-cx --features cassette --test cassette_record_replay \
   replay_synthetic_fixture_decodes_execute_and_fetch_offline
 ```
 
@@ -234,8 +234,9 @@ by default**.
 * With the feature **off**, the `Recording`/`Replay` enum variants and the
   `capture_scope` hook are `#[cfg]`-compiled out; the transport `poll_*` match
   arms reduce to exactly the pre-seam `Plain`/`Tls` arms.
-* The conformance shim (`oracledb-pyshim`) depends on `oracledb` **without** the
-  `cassette` feature, so the parity suite always runs against the byte-identical
+* The conformance shim (`oracledb-pyshim`) depends on `oraclemcp-driver-cx`
+  through its private `oracledb` dependency alias and **without** the `cassette`
+  feature, so the parity suite always runs against the byte-identical
   transport path. Parity sentinels `test_1100_connection` (57 passed / 5
   skipped) and `test_2200_number_var` (39 passed) are unchanged by this work.
 
@@ -268,7 +269,7 @@ The mechanism lives in
   captured, so the cassette is byte-reproducible and safe to commit.
 
   ```bash
-  cargo test -p oracledb --features cassette \
+  cargo test -p oraclemcp-driver-cx --features cassette \
     record_version_connect_cassettes -- --ignored --nocapture
   # per-lane connect strings default to the version_matrix.sh ports; override
   # with ORACLEDB_CASSETTE_XE11 / _XE18 / _XE21 / _FREE23, and the output dir

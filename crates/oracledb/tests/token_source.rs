@@ -21,6 +21,8 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::ClientIdentity;
 use oracledb::{
     BlockingConnection, BoxFuture, ConnectOptions, Error, TokenSource, TokenSourceError,

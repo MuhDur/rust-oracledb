@@ -6,6 +6,8 @@
 //! tests prove the const exists, is non-empty, is derived from the crate version
 //! (not a hand-written literal that could drift), and parses as `major.minor.*`.
 
+extern crate oraclemcp_driver_cx as oracledb;
+
 #[test]
 fn version_const_equals_crate_version() {
     // Evaluated here in an integration test of the `oracledb` crate,

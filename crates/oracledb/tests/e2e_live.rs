@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 
 use asupersync::runtime::{reactor, Runtime, RuntimeBuilder};
 use asupersync::Cx;
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::pool::{
     AcquireOptions, BlockingPool, Pool, PoolBackend, PoolConfig, PoolError, PoolStats,
     POOL_GETMODE_TIMEDWAIT, POOL_GETMODE_WAIT,

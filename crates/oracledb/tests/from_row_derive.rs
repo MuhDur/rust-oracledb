@@ -8,12 +8,14 @@
 //! * **Synthetic, no DB** — construct a [`QueryResult`] by hand and prove the
 //!   derived `from_row` / `rows_as` map it correctly through the real
 //!   [`FromSql`] conversion, including `Option<T>` NULL handling, by-name
-//!   mapping, `#[oracledb(column = ...)]` / `rename_all`, and tuple structs.
+//!   mapping, `#[driver_cx(column = ...)]` / `rename_all`, and tuple structs.
 //!   These run on a plain `cargo test` with no container.
 //! * **Live** — against the real container (self-skips when the `PYO_TEST_*`
 //!   environment is absent): create a scratch table, insert rows including a
 //!   NULL column and a `chrono` DATE, `select`, and map straight into a derived
 //!   struct via `rows_as`, asserting exact values.
+
+extern crate oraclemcp_driver_cx as oracledb;
 
 use oracledb::protocol::thin::{ColumnMetadata, QueryResult, QueryValue};
 use oracledb::{FromRow, QueryResultExt};
@@ -58,7 +60,7 @@ struct Emp {
 }
 
 #[derive(Debug, PartialEq, FromRow)]
-#[oracledb(rename_all = "SCREAMING_SNAKE_CASE")]
+#[driver_cx(rename_all = "SCREAMING_SNAKE_CASE")]
 struct Renamed {
     employee_id: i64,
     full_name: String,
@@ -66,9 +68,9 @@ struct Renamed {
 
 #[derive(Debug, PartialEq, FromRow)]
 struct Overridden {
-    #[oracledb(column = "EMPNO")]
+    #[driver_cx(column = "EMPNO")]
     id: i64,
-    #[oracledb(rename = "ENAME")]
+    #[driver_cx(rename = "ENAME")]
     name: String,
 }
 

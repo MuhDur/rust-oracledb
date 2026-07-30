@@ -1,4 +1,6 @@
 use asupersync::{runtime::RuntimeBuilder, Cx};
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::{ConnectOptions, Connection, Error};
 use oracledb_protocol::ClientIdentity;
 

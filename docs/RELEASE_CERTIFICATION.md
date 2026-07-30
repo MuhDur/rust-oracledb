@@ -103,7 +103,7 @@ no throughput/concurrency benchmark. (4) Bench host was shared/busy (variance no
   errors, pipelining (native single-round-trip runner), sessionless transactions, Arrow dataframes, direct path load.
 - **Explicitly excluded (coverage debt, by design):** AQ, SODA, XA/TPC, CQN/subscription, sharding,
   plus external-OCI/thick-only modules. 15 modules.
-- **Standalone-crate proof:** 13 native Rust integration tests exercise the public `oracledb` crate
+- **Standalone-crate proof:** 13 native Rust integration tests exercise the public `oraclemcp-driver-cx` crate
   directly (no shim, no Python) against the container, including the identity-masquerade v$session
   assertion. `crates/oracledb/tests/integration_*.rs`.
 

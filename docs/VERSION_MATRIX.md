@@ -52,7 +52,7 @@ export PYO_TEST_CONNECT_STRING=localhost:1518/XEPDB1 \
 # xe21 (21c): localhost:1520/XEPDB1  testuser / testpw
 # free23 (23ai): localhost:1522/FREEPDB1  pythontest / pythontest
 
-cargo test -p oracledb --test live_connect -- --ignored
+cargo test -p oraclemcp-driver-cx --test live_connect -- --ignored
 ```
 
 Suites that need a proxy or SODA also read `PYO_TEST_PROXY_USER` /

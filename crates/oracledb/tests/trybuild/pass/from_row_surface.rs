@@ -1,4 +1,4 @@
-use oracledb::FromRow;
+use oraclemcp_driver_cx::FromRow;
 
 #[derive(FromRow)]
 struct NamedRow {
@@ -8,7 +8,7 @@ struct NamedRow {
 }
 
 #[derive(FromRow)]
-#[oracledb(rename_all = "SCREAMING_SNAKE_CASE")]
+#[driver_cx(rename_all = "SCREAMING_SNAKE_CASE")]
 struct RenameAllRow {
     employee_id: i64,
     full_name: String,
@@ -16,16 +16,16 @@ struct RenameAllRow {
 
 #[derive(FromRow)]
 struct FieldOverrideRow {
-    #[oracledb(column = "EMPNO")]
+    #[driver_cx(column = "EMPNO")]
     id: i64,
-    #[oracledb(rename = "ENAME")]
+    #[driver_cx(rename = "ENAME")]
     name: String,
 }
 
 #[derive(FromRow)]
 struct TupleRow(i64, Option<String>);
 
-fn assert_from_row<T: oracledb::FromRow>() {}
+fn assert_from_row<T: oraclemcp_driver_cx::FromRow>() {}
 
 fn main() {
     assert_from_row::<NamedRow>();

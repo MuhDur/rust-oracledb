@@ -1,6 +1,6 @@
 [manifest]
 version = 1
-description = "Current release and runtime version surfaces for rust-oracledb."
+description = "Current release and runtime version surfaces for oraclemcp-driver-cx."
 generate_command = "python3 scripts/release_surface_manifest.py --write"
 check_command = "python3 scripts/release_surface_manifest.py --check"
 
@@ -31,8 +31,8 @@ match_count = 1
 name = "publishing_latest_release"
 source = "published_version"
 path = "docs/PUBLISHING.md"
-pattern = "\\| Latest published release \\| \\*\\*(?P<value>[0-9]+\\.[0-9]+\\.[0-9]+)\\*\\* \\|"
-replacement = "| Latest published release | **{published_version}** |"
+pattern = "\\| Latest legacy `oracledb` release \\| \\*\\*(?P<value>[0-9]+\\.[0-9]+\\.[0-9]+)\\*\\* \\|"
+replacement = "| Latest legacy `oracledb` release | **{published_version}** |"
 match_count = 1
 
 [[surface]]
@@ -73,7 +73,7 @@ name = "lockfile package versions"
 kind = "lock_package_versions"
 path = "Cargo.lock"
 source = "workspace_version"
-packages = ["oracledb-protocol", "oracledb", "oracledb-derive"]
+packages = ["oraclemcp-driver-cx-protocol", "oraclemcp-driver-cx", "oraclemcp-driver-cx-derive"]
 
 [[intentional_non_lockstep]]
 name = "nightly toolchain"

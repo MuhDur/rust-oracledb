@@ -53,7 +53,7 @@ fi
 echo "tsan-campaign: toolchain=$TOOLCHAIN target=$TARGET jobs=$CARGO_BUILD_JOBS threads=$TEST_THREADS"
 
 echo "tsan-campaign: [1/2] offline instrumented lib suite"
-cargo "+$TOOLCHAIN" test -p oracledb --lib \
+cargo "+$TOOLCHAIN" test -p oraclemcp-driver-cx --lib \
   -Zbuild-std --target "$TARGET" \
   -- --test-threads="$TEST_THREADS"
 
@@ -61,7 +61,7 @@ if [ -n "${PYO_TEST_CONNECT_STRING:-}" ] \
    && [ -n "${PYO_TEST_MAIN_USER:-}" ] \
    && [ -n "${PYO_TEST_MAIN_PASSWORD:-}" ]; then
   echo "tsan-campaign: [2/2] live cancel/teardown/LOB/stream suite ($PYO_TEST_CONNECT_STRING)"
-  cargo "+$TOOLCHAIN" test -p oracledb \
+  cargo "+$TOOLCHAIN" test -p oraclemcp-driver-cx \
     --test cancel_then_reuse \
     --test reuse_after_call_timeout \
     --test live_lob_stream \

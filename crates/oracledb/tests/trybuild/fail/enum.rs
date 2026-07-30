@@ -1,4 +1,4 @@
-use oracledb::FromRow;
+use oraclemcp_driver_cx::FromRow;
 
 #[derive(FromRow)]
 enum Row {

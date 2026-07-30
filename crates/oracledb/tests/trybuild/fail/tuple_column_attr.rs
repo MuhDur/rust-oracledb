@@ -1,6 +1,6 @@
-use oracledb::FromRow;
+use oraclemcp_driver_cx::FromRow;
 
 #[derive(FromRow)]
-struct Row(#[oracledb(column = "ID")] i64);
+struct Row(#[driver_cx(column = "ID")] i64);
 
 fn main() {}

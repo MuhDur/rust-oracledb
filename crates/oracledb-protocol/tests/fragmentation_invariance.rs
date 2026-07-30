@@ -43,6 +43,8 @@
 //! `has_end_of_response_correct` to the naive rule makes that property fail,
 //! confirming it is not a tautology.)
 
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::thin::{
     parse_query_response, parse_query_response_borrowed, ClientCapabilities, ColumnMetadata,
     QueryResult, QueryValue, QueryValueRef, TNS_DATA_FLAGS_END_OF_RESPONSE,

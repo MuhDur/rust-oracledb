@@ -24,7 +24,7 @@ trap 'rm -rf "$SNAP_DIR"' EXIT
 echo "perf-regression: running deterministic criterion benches (best-of-$SAMPLES, noise-robust)"
 for run in $(seq 1 "$SAMPLES"); do
   echo "perf-regression: sample $run/$SAMPLES"
-  cargo bench -p oracledb --features cassette --bench single_packet_passthrough --locked -- --noplot
+  cargo bench -p oraclemcp-driver-cx --features cassette --bench single_packet_passthrough --locked -- --noplot
   # Snapshot this run's per-bench median before the next run overwrites it.
   python3 - "$REFERENCE" "$CRITERION_DIR" "$SNAP_DIR/run_$run.json" <<'PY'
 import json

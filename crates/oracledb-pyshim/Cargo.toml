@@ -16,7 +16,9 @@ arrow-array = { workspace = true, features = ["ffi"] }
 arrow-data = { workspace = true, features = ["ffi"] }
 arrow-schema = { workspace = true, features = ["ffi"] }
 asupersync.workspace = true
-oracledb = { path = "../oracledb", features = ["arrow", "soda"] }
+# Keep the historical alias inside the unpublished python-oracledb conformance
+# harness; it is not part of the public Rust package or crate namespace.
+oracledb = { package = "oraclemcp-driver-cx", path = "../oracledb", features = ["arrow", "soda"] }
 pyo3.workspace = true
 serde_json.workspace = true
 

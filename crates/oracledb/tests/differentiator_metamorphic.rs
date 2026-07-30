@@ -34,6 +34,8 @@
 //! proptest case logs its generated input shape + the relation checked so a
 //! shrunk failure is diagnosable.
 
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::protocol::thin::{
     decode_lob_text, encode_lob_text, encode_number_text, parse_fetch_response_with_context,
     parse_query_response_borrowed, ClientCapabilities, ColumnMetadata, QueryValue,

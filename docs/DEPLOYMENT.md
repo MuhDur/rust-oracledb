@@ -105,7 +105,7 @@ export CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc
 export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
 
 # 3. fully-static release build
-cargo build --release --example smoke -p oracledb \
+cargo build --release --example smoke -p oraclemcp-driver-cx \
   --target x86_64-unknown-linux-musl
 
 # 4. (optional) strip for the smallest artifact

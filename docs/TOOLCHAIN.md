@@ -9,7 +9,7 @@ floating `nightly` so breakage is discovered before the pin must move.
 The driver depends on `asupersync` for its async runtime. `asupersync` currently
 uses `#![feature(try_trait_v2)]` and `#![feature(try_trait_v2_residual)]`, so the
 crate graph does not compile on stable Rust. A stable build fails with `E0554`
-before it reaches `oracledb` code.
+before it reaches `oraclemcp-driver-cx` code.
 
 This nightly requirement is build-time only for consumers that ship a static
 binary. The built driver has no OCI or Instant Client dependency, and the

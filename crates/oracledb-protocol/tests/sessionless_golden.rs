@@ -13,6 +13,8 @@
 //! TTC sequence numbers are read from the capture itself and fed to our
 //! builders; everything else must match byte-for-byte.
 
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::thin::{
     build_sessionless_piggyback, build_tpc_txn_switch_payload_with_seq,
     decode_sessionless_txn_state, SessionlessTxnState, TNS_FUNC_TPC_TXN_SWITCH,

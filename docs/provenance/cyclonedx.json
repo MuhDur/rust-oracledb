@@ -1985,8 +1985,8 @@
           }
         }
       ],
-      "name": "oracledb-derive",
-      "purl": "pkg:cargo/oracledb-derive@0.9.1",
+      "name": "oraclemcp-driver-cx-derive",
+      "purl": "pkg:cargo/oraclemcp-driver-cx-derive@0.9.1",
       "type": "library",
       "version": "0.9.1"
     },
@@ -1998,8 +1998,8 @@
           }
         }
       ],
-      "name": "oracledb-protocol",
-      "purl": "pkg:cargo/oracledb-protocol@0.9.1",
+      "name": "oraclemcp-driver-cx-protocol",
+      "purl": "pkg:cargo/oraclemcp-driver-cx-protocol@0.9.1",
       "type": "library",
       "version": "0.9.1"
     },
@@ -4067,8 +4067,8 @@
           }
         }
       ],
-      "name": "oracledb",
-      "purl": "pkg:cargo/oracledb@0.9.1",
+      "name": "oraclemcp-driver-cx",
+      "purl": "pkg:cargo/oraclemcp-driver-cx@0.9.1",
       "type": "library",
       "version": "0.9.1"
     }

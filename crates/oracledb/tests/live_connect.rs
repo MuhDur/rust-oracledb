@@ -1,5 +1,7 @@
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::{ConnectOptions, Connection};
 use oracledb_protocol::{thin::QueryValue, ClientIdentity};
 

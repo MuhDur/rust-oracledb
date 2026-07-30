@@ -14,6 +14,8 @@
 //! compile / fail the assertion until the inline form is implemented and proven
 //! byte-identical.
 
+extern crate oraclemcp_driver_cx_protocol as oracledb_protocol;
+
 use oracledb_protocol::thin::{decode_number_text_into, encode_number_text, OracleNumber};
 
 /// Legacy canonical text: the exact bytes the pre-i128 path produced.

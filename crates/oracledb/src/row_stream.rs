@@ -23,10 +23,10 @@
 //! use std::pin::Pin;
 //!
 //! use futures_core::Stream;
-//! use oracledb::protocol::thin::QueryValue;
-//! use oracledb::{ConnectOptions, Connection};
+//! use oraclemcp_driver_cx::protocol::thin::QueryValue;
+//! use oraclemcp_driver_cx::{ConnectOptions, Connection};
 //!
-//! # async fn demo(cx: &asupersync::Cx, options: ConnectOptions) -> oracledb::Result<()> {
+//! # async fn demo(cx: &asupersync::Cx, options: ConnectOptions) -> oraclemcp_driver_cx::Result<()> {
 //! let conn = Connection::connect(cx, options).await?;
 //! let mut stream = conn
 //!     .into_query_stream(cx, "select level from dual connect by level <= 5", ())

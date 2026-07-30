@@ -23,7 +23,7 @@
 #         lane. Including it would fail the whole instrumented run, so we mirror
 #         CI and leave it out. A pyshim coverage baseline is a documented
 #         follow-up, not silently folded in here.
-#       * The `cassette` feature (a separate `cargo test -p oracledb --features
+#       * The `cassette` feature (a separate `cargo test -p oraclemcp-driver-cx --features
 #         cassette` CI lane) and the live-DB / version-matrix suites are OUT of
 #         scope. This run sets NO `ORACLEDB_*` / `PYO_TEST_*` env, so the
 #         live-gated tests self-skip or stay `#[ignore]`d: the run is hermetic

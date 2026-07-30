@@ -29,12 +29,12 @@
 use std::fmt::Write as _;
 use std::process::ExitCode;
 
-use oracledb::protocol::thin::{
+use oraclemcp_driver_cx::protocol::thin::{
     decode_lob_text, BindValue, QueryValue, CS_FORM_IMPLICIT, ORA_TYPE_NUM_BLOB,
     ORA_TYPE_NUM_NUMBER, ORA_TYPE_NUM_VARCHAR,
 };
-use oracledb::protocol::ClientIdentity;
-use oracledb::{BlockingConnection, ConnectOptions, Connection, Execute, Query};
+use oraclemcp_driver_cx::protocol::ClientIdentity;
+use oraclemcp_driver_cx::{BlockingConnection, ConnectOptions, Connection, Execute, Query};
 
 /// Corpus schema version; bump when cases change so twins can refuse to diff
 /// mismatched corpora.
@@ -227,7 +227,7 @@ enum CaseResult {
     Error(String),
 }
 
-fn ora_code(err: &oracledb::Error) -> String {
+fn ora_code(err: &oraclemcp_driver_cx::Error) -> String {
     let text = err.to_string();
     if let Some(pos) = text.find("ORA-") {
         let code: String = text[pos..].chars().take(9).collect();

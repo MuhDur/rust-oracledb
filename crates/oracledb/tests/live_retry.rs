@@ -24,6 +24,8 @@ use std::cell::{Cell, RefCell};
 
 use asupersync::runtime::{reactor, RuntimeBuilder};
 use asupersync::Cx;
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::retry::{run_with_retry_reconnecting, Idempotency, RetryPolicy};
 use oracledb::{ConnectOptions, Connection};
 use oracledb_protocol::ClientIdentity;

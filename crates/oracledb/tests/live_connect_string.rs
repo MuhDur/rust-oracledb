@@ -13,6 +13,8 @@
 //! cargo test -p oracledb --test live_connect_string -- --nocapture
 //! ```
 
+extern crate oraclemcp_driver_cx as oracledb;
+
 use oracledb::{BlockingConnection, ConnectOptions, Connection};
 use oracledb_protocol::net::EasyConnect;
 use oracledb_protocol::ClientIdentity;

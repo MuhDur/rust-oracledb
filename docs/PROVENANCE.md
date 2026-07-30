@@ -12,7 +12,7 @@ tooling required; sorted, no timestamps, so they diff cleanly):
 
 | Artifact | Contents |
 | --- | --- |
-| `cyclonedx.json` | CycloneDX 1.5 SBOM of the published crates' **non-dev** dependency closure (`oracledb` + `oracledb-protocol` + `oracledb-derive`, following normal/build edges only). |
+| `cyclonedx.json` | CycloneDX 1.5 SBOM of the published crates' **non-dev** dependency closure (`oraclemcp-driver-cx` + `oraclemcp-driver-cx-protocol` + `oraclemcp-driver-cx-derive`, following normal/build edges only). |
 | `dependencies.tsv` | Human dependency inventory: `name`, `version`, `license`, `source`. |
 | `github-actions.tsv` | Every external `uses:` in `.github/workflows/`, with its pinned ref. |
 
@@ -27,8 +27,9 @@ The `Release` workflow (`.github/workflows/release.yml`) additionally:
 - builds the static `x86_64-unknown-linux-musl` smoke binary and emits a
   `*.tar.gz.sha256` checksum;
 - regenerates the SBOM + inventories and attaches them to the GitHub release
-  (`oracledb-sbom-cyclonedx-<tag>.json`, `oracledb-dependencies-<tag>.tsv`,
-  `oracledb-github-actions-<tag>.tsv`);
+  (`oraclemcp-driver-cx-sbom-cyclonedx-<tag>.json`,
+  `oraclemcp-driver-cx-dependencies-<tag>.tsv`,
+  `oraclemcp-driver-cx-github-actions-<tag>.tsv`);
 - records a signed GitHub **build-provenance attestation** for the static binary
   via `actions/attest-build-provenance` (job permissions `id-token: write` +
   `attestations: write`).
@@ -36,7 +37,7 @@ The `Release` workflow (`.github/workflows/release.yml`) additionally:
 Verify the binary attestation after a release:
 
 ```bash
-gh attestation verify oracledb-smoke-x86_64-unknown-linux-musl.tar.gz \
+gh attestation verify oraclemcp-driver-cx-smoke-x86_64-unknown-linux-musl.tar.gz \
   --repo MuhDur/rust-oracledb
 ```
 
@@ -50,17 +51,18 @@ Two checks prove the published crates are self-consistent and build without any
 workspace path resolution:
 
 - **Inter-crate version-pin guard** (`scripts/release_preflight.sh`, tested by
-  `scripts/test_release_preflight_pins.sh`): the published `oracledb` crate's
-  path-dependency version requirements on `oracledb-protocol` /
-  `oracledb-derive` must equal the workspace version. This closes the stale-pin
+  `scripts/test_release_preflight_pins.sh`): the published
+  `oraclemcp-driver-cx` crate's path-dependency version requirements on
+  `oraclemcp-driver-cx-protocol` / `oraclemcp-driver-cx-derive` must equal the
+  workspace version. This closes the stale-pin
   gap that bit 0.2.1/0.2.2 (a crate published with a requirement that resolves a
   wrong/old sibling from crates.io).
 - **Standalone packaged-crate build** (`scripts/check_standalone_package.sh`):
   packages all three crates, asserts each packaged `Cargo.toml` strips the
   inter-crate `path =` and pins the workspace version, then extracts every
-  `.crate` outside the workspace and builds each one there — `oracledb` against
-  the extracted sibling tarballs, never the workspace — plus `cargo publish
-  --dry-run` for the two leaf crates.
+  `.crate` outside the workspace and builds each one there —
+  `oraclemcp-driver-cx` against the extracted sibling tarballs, never the
+  workspace — plus `cargo publish --dry-run` for the two leaf crates.
 
 ## Crate integrity
 

@@ -65,7 +65,7 @@ evidence, install `hyperfine` and capture the same deterministic bench command:
 ```sh
 export CARGO_TARGET_DIR=/home/durakovic/.cargo-target-rust-oracledb-e9
 hyperfine --warmup 1 --runs 3 \
-  'cargo bench -p oracledb --features cassette --bench single_packet_passthrough --locked -- --noplot'
+  'cargo bench -p oraclemcp-driver-cx --features cassette --bench single_packet_passthrough --locked -- --noplot'
 ```
 
 Do not use hyperfine wall time as the CI pass/fail threshold; it measures the
