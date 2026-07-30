@@ -1,0 +1,65 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "rust-oracledb",
+  "generated_at": "2026-07-30T13:55:24Z",
+  "bead_id": "rust-oracledb-cx-driver-handover-wgwq.2",
+  "scope": {
+    "summary": "Rename the retained asupersync Cx driver family and its public Rust paths to oraclemcp-driver-cx without compatibility clones.",
+    "in_scope": [
+      "Published package and library target identities for the driver, protocol, and derive crates",
+      "Generated FromRow paths and driver_cx derive helper attributes",
+      "Workspace consumers, tests, examples, benchmarks, CI, release scripts, SBOM, baselines, and current user documentation",
+      "Targeted exact-SHA compile, test, API-ledger, release-contract, and package-surface checks"
+    ],
+    "out_of_scope": [
+      "Uploading any renamed crate to crates.io",
+      "Live Oracle Database qualification and hosted Required CI",
+      "Repinning oraclemcp to the renamed family",
+      "Adding an Oracle driver backend or transferring legacy crates.io ownership"
+    ]
+  },
+  "source": {
+    "sha": "a71bc5422d5ab9a0dd15824fbe02c32e3160acda",
+    "tree_clean": true,
+    "branch": "codex-canary-baseline-20260728"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Renamed driver package and public Rust crate",
+        "kind": "api",
+        "trace": "cargo clippy --all-targets, 348 default driver unit tests, 387 cassette-feature tests, 13 doctests, examples, benches, and pyshim compilation passed at source.sha."
+      },
+      {
+        "name": "FromRow derive public surface",
+        "kind": "api",
+        "trace": "derive_trybuild passed both compile-pass fixtures and all five compile-fail fixtures using ::oraclemcp_driver_cx and #[driver_cx(...)]."
+      },
+      {
+        "name": "Release and package identity contracts",
+        "kind": "config-gate",
+        "trace": "release_preflight, release_surface_manifest, secret_scan, cargo deny, gen_sbom, gen_baseline artifact diff, API ledger coverage of 3,763 lines, and single-path checks passed at source.sha."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The main crate registry-resolving package dry-run remains intentionally blocked until the renamed protocol and derive packages are published; rust-oracledb-cx-driver-handover-wgwq.4 owns that ordered transition.",
+    "This close does not claim live Oracle Database, hosted Required CI, crates.io visibility, or consumer-install evidence."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "rust-oracledb-cx-driver-handover-wgwq.3",
+    "rust-oracledb-cx-driver-handover-wgwq.4",
+    "rust-oracledb-cx-driver-handover-wgwq.5",
+    "rust-oracledb-cx-driver-handover-wgwq.6"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
