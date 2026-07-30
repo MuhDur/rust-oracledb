@@ -48,30 +48,21 @@ CARGO_TARGET_DIR="$PKG_TARGET" cargo package \
     fail "leaf cargo package failed"
   }
 
-# Before the renamed leaves have their first crates.io release, Cargo creates
-# the normalized main archive and then fails while resolving those registry
-# dependencies. Accept only that exact first-publication boundary; any other
-# package failure remains fatal. Once the leaves exist, this command succeeds
-# normally and the fallback is not used.
+# Before the renamed leaves have their first crates.io release, point Cargo's
+# registry resolution at their workspace sources. This lets Cargo finish its
+# normal manifest normalization while the extracted-tarball build below still
+# proves that the resulting main package has no workspace path dependency.
 note "packaging oraclemcp-driver-cx"
 main_archive="$PKG_DIR/oraclemcp-driver-cx-$version.crate"
-if ! CARGO_TARGET_DIR="$PKG_TARGET" cargo package \
-    -p oraclemcp-driver-cx --locked --allow-dirty --no-verify \
-    >"$WORK/package-main.log" 2>&1; then
-  if ! grep -Eq "no matching package named \`(oraclemcp-driver-cx-protocol|oraclemcp-driver-cx-derive)\` found" \
-      "$WORK/package-main.log"; then
+CARGO_TARGET_DIR="$PKG_TARGET" cargo package \
+  -p oraclemcp-driver-cx --locked --allow-dirty --no-verify \
+  --config "patch.crates-io.oraclemcp-driver-cx-protocol.path=\"$ROOT/crates/oracledb-protocol\"" \
+  --config "patch.crates-io.oraclemcp-driver-cx-derive.path=\"$ROOT/crates/oracledb-derive\"" \
+  >"$WORK/package-main.log" 2>&1 || {
     cat "$WORK/package-main.log" >&2
-    fail "main cargo package failed outside the absent-registry-sibling boundary"
-  fi
-
-  generated_main="$PKG_DIR/tmp-crate/oraclemcp-driver-cx-$version.crate"
-  [ -f "$generated_main" ] || {
-    cat "$WORK/package-main.log" >&2
-    fail "Cargo reported an absent renamed sibling without producing the normalized main archive"
+    fail "main cargo package failed"
   }
-  cp "$generated_main" "$main_archive"
-  note "accepted absent registry siblings; using Cargo's normalized main archive"
-fi
+[ -f "$main_archive" ] || fail "missing normalized main archive: $main_archive"
 
 # 2) + 3) Per-crate: list inspection + packaged-manifest assertions.
 for crate in "${crates[@]}"; do
