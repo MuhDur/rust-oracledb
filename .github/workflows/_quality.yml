@@ -745,11 +745,10 @@ jobs:
         continue-on-error: ${{ inputs.mode == 'prep' }}
         run: cargo install cargo-semver-checks --version "$CARGO_SEMVER_CHECKS_VERSION" --locked
 
-      # BLOCKING since 0.3.0 (road-to-1.0 W2-T1.5): the 0.3.0 public surface is
-      # the published SemVer baseline. A breaking change without an appropriate
-      # version bump now fails CI. (0.x minor bumps may still break — e.g. the
-      # pre-1.0 removal of the 0.3.0-deprecated methods — which semver-checks
-      # permits under a 0.x minor bump.)
+      # BLOCKING when a published baseline exists. The renamed crate family has
+      # no registry baseline before its first release, so only the exact
+      # crates.io "not found" result is skipped. Every other command failure,
+      # including a real SemVer regression, remains fatal.
       - name: SemVer advisory checks
         id: semver_checks
         if: ${{ inputs.profile != 'canary' }}
@@ -757,8 +756,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo semver-checks check-release -p oraclemcp-driver-cx-protocol
-          cargo semver-checks check-release -p oraclemcp-driver-cx
+          check_release() {
+            local package="$1"
+            local output
+
+            if output="$(CARGO_TERM_COLOR=never cargo semver-checks check-release -p "$package" 2>&1)"; then
+              printf '%s\n' "$output"
+              return 0
+            fi
+
+            printf '%s\n' "$output"
+            if grep -Fq "$package not found in registry (crates.io)" <<<"$output"; then
+              echo "::notice::Skipping SemVer advisory for $package: no published crates.io baseline exists yet"
+              return 0
+            fi
+            return 1
+          }
+
+          check_release oraclemcp-driver-cx-protocol
+          check_release oraclemcp-driver-cx
 
       - uses: taiki-e/install-action@6385177bd1684e175e09301c9ee3ae18c14a367e # cargo-deny
         continue-on-error: ${{ inputs.mode == 'prep' }}

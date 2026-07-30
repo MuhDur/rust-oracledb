@@ -1,5 +1,5 @@
 package	version	publish	manifest_path
-oracledb-pyshim	0.9.1		crates/oracledb-pyshim/Cargo.toml
-oraclemcp-driver-cx	0.9.1		crates/oracledb/Cargo.toml
-oraclemcp-driver-cx-derive	0.9.1		crates/oracledb-derive/Cargo.toml
-oraclemcp-driver-cx-protocol	0.9.1		crates/oracledb-protocol/Cargo.toml
+oracledb-pyshim	0.9.2		crates/oracledb-pyshim/Cargo.toml
+oraclemcp-driver-cx	0.9.2		crates/oracledb/Cargo.toml
+oraclemcp-driver-cx-derive	0.9.2		crates/oracledb-derive/Cargo.toml
+oraclemcp-driver-cx-protocol	0.9.2		crates/oracledb-protocol/Cargo.toml

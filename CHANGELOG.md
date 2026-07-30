@@ -31,6 +31,24 @@ artifacts, and the checked-in API/provenance ledgers.
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-07-30
+
+### Changed
+
+- The maintained crate family is now published as `oraclemcp-driver-cx`,
+  `oraclemcp-driver-cx-protocol`, and `oraclemcp-driver-cx-derive`. `Cx` names
+  the driver's `asupersync::Cx` structured-concurrency contract; the legacy
+  `oracledb` namespace is being handed to Oracle.
+- Consumer imports use `oraclemcp_driver_cx`; the derive helper attribute is
+  `#[driver_cx(...)]`. Internal dependency aliases retain their historical
+  short names and resolve to the renamed public packages.
+
+### Fixed
+
+- Required CI now treats a missing crates.io SemVer baseline as the expected
+  first-publication case for a renamed crate, while preserving failures for
+  actual SemVer regressions and all other `cargo-semver-checks` errors.
+
 ## [0.9.1] - 2026-07-22
 
 Consumer-driven patch release: every change here was surfaced by `oraclemcp`

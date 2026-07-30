@@ -9,16 +9,15 @@ Publishing remains operator-gated; this runbook is not authorization to upload.
 
 | field | value |
 |---|---|
-| Initial public release | **0.1.0** |
-| Latest legacy `oracledb` release | **0.9.0** |
-| First `oraclemcp-driver-cx` release | **0.9.1** (candidate; not yet published) |
-| Workspace release version | **0.9.1** |
+| Original legacy public release | **0.1.0** |
+| Latest legacy `oracledb` release | **0.9.1** |
+| First `oraclemcp-driver-cx` release | **0.9.2** (candidate; not yet published) |
+| Workspace release version | **0.9.2** |
 | Candidate source | `[workspace.package].version` in the root `Cargo.toml` |
 
-`0.1.0` (not `0.0.0`, which crates.io treats as a placeholder, and not a
-`-alpha` pre-release) is the deliberate first public cut: the driver passes the
-reference python-oracledb thin-mode test suite and is honestly usable, while the
-`0.x` major signals that the public API may still evolve before `1.0`.
+`0.9.2` deliberately preserves the project's version lineage for the first
+renamed-family publication instead of restarting at `0.1.0`. The `0.x` major
+continues to signal that the public API may evolve before `1.0`.
 
 All workspace crates share the workspace release version via `version.workspace = true`.
 
@@ -90,8 +89,8 @@ matching the workspace release. The dependency keys remain short internal
 aliases; `package` carries the public crates.io identity:
 
 ```toml
-oracledb-protocol = { package = "oraclemcp-driver-cx-protocol", path = "../oracledb-protocol", version = "0.9.1" }
-oracledb-derive = { package = "oraclemcp-driver-cx-derive", path = "../oracledb-derive", version = "0.9.1", optional = true }
+oracledb-protocol = { package = "oraclemcp-driver-cx-protocol", path = "../oracledb-protocol", version = "0.9.2" }
+oracledb-derive = { package = "oraclemcp-driver-cx-derive", path = "../oracledb-derive", version = "0.9.2", optional = true }
 ```
 
 `asupersync = "=0.3.9"` is the only non-trivial external runtime dependency and
@@ -203,7 +202,7 @@ then publishes `oraclemcp-driver-cx`.
 ## Pre-transition dry-run results (historical only)
 
 The results below qualify the old package names, not the renamed family. They
-must not be used as 0.9.1 release evidence:
+must not be used as 0.9.2 release evidence:
 
 Run with `CARGO_TARGET_DIR` / `TMPDIR` pointed at a scratch cache:
 
@@ -227,9 +226,9 @@ After each `cargo publish`, and once all three are live:
       `.../oraclemcp-driver-cx-protocol`, `.../oraclemcp-driver-cx-derive`.
 - [ ] docs.rs build succeeds: `https://docs.rs/oraclemcp-driver-cx` (check the build log;
       enable any required features there if the default docs are thin).
-- [ ] `cargo add oraclemcp-driver-cx@0.9.1` in a fresh project resolves `0.9.1`
+- [ ] `cargo add oraclemcp-driver-cx@0.9.2` in a fresh project resolves `0.9.2`
       and compiles `use oraclemcp_driver_cx::ConnectOptions;`.
-- [ ] Tag the release in git: `git tag v0.9.0 && git push --tags`.
+- [ ] Tag the release in git: `git tag v0.9.2 "$candidate_sha" && git push origin v0.9.2`.
 - [ ] Verify the published `oraclemcp-driver-cx` README renders correctly on crates.io
       (links point at the GitHub repo, not broken relative `docs/` paths).
 - [ ] Confirm `oracledb-pyshim` and `oracledb-protocol-fuzz` did NOT get

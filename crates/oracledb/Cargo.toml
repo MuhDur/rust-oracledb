@@ -96,8 +96,8 @@ futures-core = { version = "0.3", default-features = false }
 # The dependency keys intentionally preserve short internal identifiers. The
 # published packages and their direct-consumer crate paths use the driver-cx
 # names; these aliases are private implementation details of this crate.
-oracledb-derive = { package = "oraclemcp-driver-cx-derive", path = "../oracledb-derive", version = "0.9.1", optional = true }
-oracledb-protocol = { package = "oraclemcp-driver-cx-protocol", path = "../oracledb-protocol", version = "0.9.1" }
+oracledb-derive = { package = "oraclemcp-driver-cx-derive", path = "../oracledb-derive", version = "0.9.2", optional = true }
+oracledb-protocol = { package = "oraclemcp-driver-cx-protocol", path = "../oracledb-protocol", version = "0.9.2" }
 rust_decimal = { version = "1", optional = true, default-features = false, features = ["std"] }
 rustls.workspace = true
 rustls-native-certs.workspace = true

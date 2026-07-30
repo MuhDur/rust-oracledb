@@ -60,7 +60,7 @@ the reference driver runs against itself — in thin mode against Oracle Databas
 | Skips that hide a Rust-engine defect | **0** | Rust passes all 303 non-skip tests in the skip-bearing modules |
 | Regressions vs the recorded baseline | **0** | [docs/RELEASE_CERTIFICATION.md](docs/RELEASE_CERTIFICATION.md) |
 
-These are historical qualification results, not a claim that a fresh 0.8.4
+These are historical qualification results, not a claim that a fresh 0.9.2
 candidate run has already completed. The exact release-SHA evidence required for
 the candidate is tracked in [docs/CURRENT_ROADMAP.md](docs/CURRENT_ROADMAP.md).
 
@@ -426,7 +426,7 @@ cargo add oraclemcp-driver-cx
 
 ```toml
 [dependencies]
-oracledb = "0.8"
+oraclemcp-driver-cx = "0.9.2"
 # optional features: arrow, chrono, uuid, serde_json, rust_decimal, tracing, cassette, soda, experimental
 ```
 
@@ -563,23 +563,24 @@ matrix is defined in [docs/SUPPORT.md](docs/SUPPORT.md).
 Three crates, plus a test-only harness:
 
 ```text
-oracledb-protocol   sans-I/O TNS/TTC codec. #![forbid(unsafe_code)].
-   (codec core)     Decodes everything an untrusted server puts on the wire;
-                    every wire-length-driven allocation is BoundedReader-checked.
+oraclemcp-driver-cx-protocol   sans-I/O TNS/TTC codec. #![forbid(unsafe_code)].
+   (codec core)                Decodes everything an untrusted server puts on the wire;
+                               every wire-length-driven allocation is BoundedReader-checked.
         │
         ▼
-oracledb            async driver on the asupersync runtime, plus the
-   (the driver)     BlockingConnection synchronous facade. #![forbid(unsafe_code)].
-                    Connection / execute / fetch / LOB / pool / TLS / SODA.
+oraclemcp-driver-cx            async driver on the asupersync runtime, plus the
+   (the driver)                BlockingConnection synchronous facade. #![forbid(unsafe_code)].
+                               Connection / execute / fetch / LOB / pool / TLS / SODA.
         │
         ▼
-oracledb-pyshim     PyO3 module slotted under python-oracledb's public layer so
-   (test harness)   the reference's OWN pytest suite drives the Rust engine.
-                    The one quarantined `unsafe` (Arrow FFI) lives here, not in
-                    the published crates.
+oracledb-pyshim                PyO3 module slotted under python-oracledb's public layer so
+   (test harness)              the reference's OWN pytest suite drives the Rust engine.
+                               The one quarantined `unsafe` (Arrow FFI) lives here, not in
+                               the published crates.
 ```
 
-`oracledb-derive` is the build-time proc-macro crate behind `#[derive(FromRow)]`.
+`oraclemcp-driver-cx-derive` is the build-time proc-macro crate behind
+`#[derive(FromRow)]`.
 
 ---
 
@@ -788,7 +789,7 @@ Dual-licensed under either of:
 
 at your option.
 
-[`BlockingConnection`]: https://docs.rs/oracledb/latest/oracledb/struct.BlockingConnection.html
+[`BlockingConnection`]: https://docs.rs/oraclemcp-driver-cx/latest/oraclemcp_driver_cx/struct.BlockingConnection.html
 
 
 ---

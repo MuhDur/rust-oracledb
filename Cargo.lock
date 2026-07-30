@@ -1626,7 +1626,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "oracledb-pyshim"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "arrow-array",
  "arrow-data",
@@ -1639,7 +1639,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-driver-cx"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "allocation-counter",
  "arrow-array",
@@ -1675,7 +1675,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-driver-cx-derive"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1684,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-driver-cx-protocol"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "aes",
  "allocation-counter",

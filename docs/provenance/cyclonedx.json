@@ -1986,9 +1986,9 @@
         }
       ],
       "name": "oraclemcp-driver-cx-derive",
-      "purl": "pkg:cargo/oraclemcp-driver-cx-derive@0.9.1",
+      "purl": "pkg:cargo/oraclemcp-driver-cx-derive@0.9.2",
       "type": "library",
-      "version": "0.9.1"
+      "version": "0.9.2"
     },
     {
       "licenses": [
@@ -1999,9 +1999,9 @@
         }
       ],
       "name": "oraclemcp-driver-cx-protocol",
-      "purl": "pkg:cargo/oraclemcp-driver-cx-protocol@0.9.1",
+      "purl": "pkg:cargo/oraclemcp-driver-cx-protocol@0.9.2",
       "type": "library",
-      "version": "0.9.1"
+      "version": "0.9.2"
     },
     {
       "licenses": [
@@ -4068,9 +4068,9 @@
         }
       ],
       "name": "oraclemcp-driver-cx",
-      "purl": "pkg:cargo/oraclemcp-driver-cx@0.9.1",
+      "purl": "pkg:cargo/oraclemcp-driver-cx@0.9.2",
       "type": "library",
-      "version": "0.9.1"
+      "version": "0.9.2"
     }
   },
   "specVersion": "1.5",

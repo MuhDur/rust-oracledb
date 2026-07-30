@@ -11,7 +11,7 @@ toml_key = "workspace.package.version"
 
 [[canonical]]
 name = "published_version"
-value = "0.9.0"
+value = "0.9.1"
 
 [[canonical]]
 name = "runtime_version"
