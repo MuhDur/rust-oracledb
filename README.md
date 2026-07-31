@@ -1,3 +1,9 @@
+> **Project history:** `oraclemcp-driver-cx` preserves and continues the
+> independently developed `oracledb` codebase through its rename at version
+> `0.9.2`. The original `oracledb`, `oracledb-protocol`, and `oracledb-derive`
+> crates.io names are being handed to Oracle; this codebase continues under the
+> `oraclemcp-driver-cx` crate family.
+
 <p align="center">
   <img src=".github/assets/hero.svg" alt="oraclemcp-driver-cx - pure-Rust async thin-mode Oracle Database driver" width="100%">
 </p>
@@ -27,10 +33,6 @@ running python-oracledb's **own** thin-mode test suite against the Rust engine.
 > This is an independent project and is not affiliated with Oracle. "Oracle" and
 > "python-oracledb" are referenced here only to describe what this driver is
 > compatible with.
->
-> The project was previously published under the `oracledb` family. That legacy
-> namespace is being handed to Oracle; this maintained continuation deliberately
-> uses the distinct `oraclemcp-driver-cx` family.
 
 ---
 

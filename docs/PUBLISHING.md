@@ -11,12 +11,14 @@ Publishing remains operator-gated; this runbook is not authorization to upload.
 |---|---|
 | Original legacy public release | **0.1.0** |
 | Latest legacy `oracledb` release | **0.9.1** |
-| First `oraclemcp-driver-cx` release | **0.9.2** (candidate; not yet published) |
+| First `oraclemcp-driver-cx` release | **0.9.2** (published 2026-07-30) |
 | Workspace release version | **0.9.2** |
-| Candidate source | `[workspace.package].version` in the root `Cargo.toml` |
+| Release source | tag `v0.9.2` at `2d8d3257cfca13b47c72a4ca9e21f8d684e9eadc` |
 
-`0.9.2` deliberately preserves the project's version lineage for the first
-renamed-family publication instead of restarting at `0.1.0`. The `0.x` major
+`0.9.2` deliberately preserves the version lineage of the independently
+developed `oracledb` codebase at the rename point instead of restarting at
+`0.1.0`. The legacy `oracledb` crate family is being handed to Oracle; this
+codebase continues under the `oraclemcp-driver-cx` family. The `0.x` major
 continues to signal that the public API may evolve before `1.0`.
 
 All workspace crates share the workspace release version via `version.workspace = true`.
