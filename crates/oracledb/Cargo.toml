@@ -1,6 +1,9 @@
 [package]
 name = "oraclemcp-driver-cx"
-version.workspace = true
+# Docs-only republish: bump just this crate to surface the discontinued
+# README/disclaimer on the crates.io page Oracle's official driver links to.
+# The -protocol/-derive components are unchanged and stay at the workspace 0.9.2.
+version = "0.9.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

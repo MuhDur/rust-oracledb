@@ -1639,7 +1639,7 @@ dependencies = [
 
 [[package]]
 name = "oraclemcp-driver-cx"
-version = "0.9.2"
+version = "0.9.3"
 dependencies = [
  "allocation-counter",
  "arrow-array",
