@@ -420,7 +420,9 @@ fn timestamp_tz_preserves_negative_half_hour_offset_bytes() {
 #[test]
 fn datetime_boundary_cases() {
     let cases: &[(i32, u8, u8, u8, u8, u8, u32)] = &[
-        (1, 1, 1, 0, 0, 0, 0),                   // earliest representable
+        (-4712, 1, 1, 0, 0, 0, 0),               // Oracle minimum BC
+        (-1, 1, 1, 0, 0, 0, 0),                  // 1 BC; year zero does not exist
+        (1, 1, 1, 0, 0, 0, 0),                   // 1 AD
         (9999, 12, 31, 23, 59, 59, 999_999_999), // latest representable, max frac
         (1970, 1, 1, 0, 0, 0, 0),                // the epoch
         (1969, 12, 31, 23, 59, 59, 0),           // pre-epoch

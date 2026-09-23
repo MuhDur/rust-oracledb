@@ -10,7 +10,7 @@ pub(crate) fn encode_oracle_date(
     minute: u8,
     second: u8,
 ) -> Result<[u8; ORA_TYPE_SIZE_DATE as usize]> {
-    if !(1..=9999).contains(&year)
+    if !valid_oracle_date_year(year)
         || !(1..=12).contains(&month)
         || !(1..=31).contains(&day)
         || hour > 23
@@ -30,6 +30,10 @@ pub(crate) fn encode_oracle_date(
         minute + 1,
         second + 1,
     ])
+}
+
+fn valid_oracle_date_year(year: i32) -> bool {
+    (-4712..=-1).contains(&year) || (1..=9999).contains(&year)
 }
 
 pub(crate) fn encode_oracle_timestamp(
@@ -114,7 +118,12 @@ pub fn decode_datetime_value(bytes: &[u8]) -> Result<QueryValue> {
         return Err(ProtocolError::TtcDecode("invalid DATE/TIMESTAMP length"));
     }
     let year = (i32::from(bytes[0]) - 100) * 100 + i32::from(bytes[1]) - 100;
-    if !(1..=9999).contains(&year) {
+    // Oracle has no year zero. Require the canonical century/year pair as well
+    // as the representable civil year, so an aliased wire pair cannot sneak in.
+    if !valid_oracle_date_year(year)
+        || i32::from(bytes[0]) != year / 100 + 100
+        || i32::from(bytes[1]) != year % 100 + 100
+    {
         return Err(ProtocolError::TtcDecode("invalid DATE year"));
     }
     let month = bytes[2];
@@ -907,6 +916,62 @@ mod tests {
             assert!(
                 decode_datetime_value(&malformed).is_err(),
                 "{label} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn datetime_bc_boundary_bytes_and_absent_year_zero() {
+        // Literal TTC bytes are independent of encode_oracle_date. The first
+        // two bytes carry century+100 and year-in-century+100; time is +1.
+        for (label, year, wire) in [
+            ("Oracle minimum BC", -4712, [53, 88, 1, 1, 1, 1, 1]),
+            ("1 BC", -1, [100, 99, 1, 1, 1, 1, 1]),
+            ("1 AD", 1, [100, 101, 1, 1, 1, 1, 1]),
+            ("Oracle maximum AD", 9999, [199, 199, 12, 31, 24, 60, 60]),
+        ] {
+            assert_eq!(
+                decode_datetime_value(&wire).expect(label),
+                QueryValue::DateTime {
+                    year,
+                    month: wire[2],
+                    day: wire[3],
+                    hour: wire[4] - 1,
+                    minute: wire[5] - 1,
+                    second: wire[6] - 1,
+                    nanosecond: 0,
+                },
+                "{label}"
+            );
+            assert_eq!(
+                encode_oracle_date(
+                    year,
+                    wire[2],
+                    wire[3],
+                    wire[4] - 1,
+                    wire[5] - 1,
+                    wire[6] - 1
+                )
+                .expect(label),
+                wire,
+                "{label} outbound wire"
+            );
+        }
+        for (label, wire) in [
+            ("before Oracle minimum", [53, 87, 1, 1, 1, 1, 1]),
+            ("absent year zero", [100, 100, 1, 1, 1, 1, 1]),
+            ("above Oracle maximum", [200, 100, 1, 1, 1, 1, 1]),
+            (
+                "noncanonical pair aliasing 101 AD",
+                [100, 201, 1, 1, 1, 1, 1],
+            ),
+        ] {
+            assert!(decode_datetime_value(&wire).is_err(), "{label} decode");
+        }
+        for year in [-4713, 0, 10000] {
+            assert!(
+                encode_oracle_date(year, 1, 1, 0, 0, 0).is_err(),
+                "{year} encode"
             );
         }
     }

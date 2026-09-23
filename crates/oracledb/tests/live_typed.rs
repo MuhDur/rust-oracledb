@@ -1229,6 +1229,84 @@ fn assert_datetime(row: &Row, label: &str, expected: (i32, u8, u8, u8, u8, u8, u
     }
 }
 
+/// BC DATE wire decode and outbound bind against each configured Oracle lane.
+/// Run explicitly with PYO_TEST_* credentials for Free23, XE21, and XE18.
+#[test]
+#[ignore = "requires an explicit live Oracle lane"]
+fn live_bc_date_boundary_roundtrip() {
+    assert!(
+        common::live_creds_opt().is_some(),
+        "BC DATE live proof requires explicit PYO_TEST_* credentials"
+    );
+    with_connection("live_bc_date_boundary_roundtrip", |conn| {
+        for (label, sql, year, month, day, expected_text) in [
+            (
+                "Oracle minimum BC",
+                "SELECT TO_DATE('4712-01-01 BC','YYYY-MM-DD BC') AS V FROM dual",
+                -4712,
+                1,
+                1,
+                "-4712-01-01 BC",
+            ),
+            (
+                "1 BC",
+                "SELECT TO_DATE('0001-01-01 BC','YYYY-MM-DD BC') AS V FROM dual",
+                -1,
+                1,
+                1,
+                "-0001-01-01 BC",
+            ),
+            (
+                "1 AD",
+                "SELECT TO_DATE('0001-01-01 AD','YYYY-MM-DD BC') AS V FROM dual",
+                1,
+                1,
+                1,
+                "0001-01-01 AD",
+            ),
+            (
+                "Oracle maximum AD",
+                "SELECT TO_DATE('9999-12-31 AD','YYYY-MM-DD BC') AS V FROM dual",
+                9999,
+                12,
+                31,
+                "9999-12-31 AD",
+            ),
+        ] {
+            let server_value = BlockingConnection::query_one(conn, sql, ())
+                .unwrap_or_else(|error| panic!("{label} server DATE query: {error}"));
+            assert_datetime(&server_value, label, (year, month, day, 0, 0, 0, 0));
+
+            let bind = BindValue::DateTime {
+                year,
+                month,
+                day,
+                hour: 0,
+                minute: 0,
+                second: 0,
+            };
+            let rebound =
+                query_one_with_binds(conn, "SELECT :1 AS V FROM dual", vec![bind.clone()]);
+            assert_datetime(&rebound, label, (year, month, day, 0, 0, 0, 0));
+            let server_text = query_one_with_binds(
+                conn,
+                "SELECT TRIM(TO_CHAR(:1,'SYYYY-MM-DD BC')) AS V FROM dual",
+                vec![bind],
+            );
+            assert_text(&server_text, label, expected_text);
+            eprintln!("{label}: decoded, rebound, and server TO_CHAR agreed");
+        }
+
+        let zero = BlockingConnection::query_one(
+            conn,
+            "SELECT TO_DATE('0000-01-01 AD','YYYY-MM-DD BC') FROM dual",
+            (),
+        )
+        .expect_err("Oracle must reject year zero");
+        assert_eq!(zero.ora_code(), Some(1841));
+    });
+}
+
 fn assert_timestamp_tz(row: &Row, label: &str, expected: (i32, u8, u8, u8, u8, u8, u32, i32)) {
     let value = cell(row, label);
     match value {

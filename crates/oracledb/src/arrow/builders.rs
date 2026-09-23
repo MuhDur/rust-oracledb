@@ -284,7 +284,7 @@ fn epoch_parts_from_tstz(
     offset_minutes: i32,
 ) -> EpochParts {
     let mut parts = epoch_parts_from_components(year, month, day, hour, minute, second, nanosecond);
-    // `year` is wire-bounded to 1..=9999 and `offset_minutes` to -1439..=1439
+    // `year` is wire-bounded to -4712..=-1 or 1..=9999, and the offset to -1439..=1439
     // (`valid_tz_offset_minutes`), so `parts.seconds` sits nowhere near the
     // i64 edge; the plain `+=` cannot overflow.
     parts.seconds += i64::from(offset_minutes) * 60;
