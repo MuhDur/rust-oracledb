@@ -11841,41 +11841,83 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
     use tracing::field::{Field, Visit};
-    use tracing::instrument::WithSubscriber;
+    use tracing::instrument::Instrument;
     use tracing_subscriber::layer::{Context, Layer};
     use tracing_subscriber::prelude::*;
 
-    #[derive(Clone)]
-    struct ConnectPhaseRecorder(Arc<Mutex<Vec<String>>>);
+    struct ConnectTraceCaptureId(String);
 
-    struct ConnectPhaseVisitor(Option<String>);
+    struct ConnectPhaseRecorder {
+        phases: Arc<Mutex<Vec<String>>>,
+        capture_id: String,
+    }
+
+    #[derive(Default)]
+    struct ConnectPhaseVisitor {
+        phase: Option<String>,
+        capture_id: Option<String>,
+    }
 
     impl Visit for ConnectPhaseVisitor {
         fn record_str(&mut self, field: &Field, value: &str) {
             if field.name() == "phase" {
-                self.0 = Some(value.to_owned());
+                self.phase = Some(value.to_owned());
+            } else if field.name() == "capture_id" {
+                self.capture_id = Some(value.to_owned());
             }
         }
 
         fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            let value = format!("{value:?}").trim_matches('"').to_owned();
             if field.name() == "phase" {
-                self.0 = Some(format!("{value:?}").trim_matches('"').to_owned());
+                self.phase = Some(value);
+            } else if field.name() == "capture_id" {
+                self.capture_id = Some(value);
             }
         }
     }
 
     impl<S> Layer<S> for ConnectPhaseRecorder
     where
-        S: tracing::Subscriber,
+        S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
     {
-        fn on_event(&self, event: &tracing::Event<'_>, _context: Context<'_, S>) {
+        fn on_new_span(
+            &self,
+            attributes: &tracing::span::Attributes<'_>,
+            id: &tracing::span::Id,
+            context: Context<'_, S>,
+        ) {
+            if attributes.metadata().name() != "connect_phase_capture" {
+                return;
+            }
+            let mut visitor = ConnectPhaseVisitor::default();
+            attributes.record(&mut visitor);
+            if let Some(capture_id) = visitor.capture_id {
+                if let Some(span) = context.span(id) {
+                    span.extensions_mut()
+                        .insert(ConnectTraceCaptureId(capture_id));
+                }
+            }
+        }
+
+        fn on_event(&self, event: &tracing::Event<'_>, context: Context<'_, S>) {
             if event.metadata().target() != "oracledb::connect" {
                 return;
             }
-            let mut visitor = ConnectPhaseVisitor(None);
+            let Some(scope) = context.event_scope(event) else {
+                return;
+            };
+            if !scope.from_root().any(|span| {
+                span.extensions()
+                    .get::<ConnectTraceCaptureId>()
+                    .is_some_and(|id| id.0 == self.capture_id)
+            }) {
+                return;
+            }
+            let mut visitor = ConnectPhaseVisitor::default();
             event.record(&mut visitor);
-            if let Some(phase) = visitor.0 {
-                self.0.lock().expect("phase recorder lock").push(phase);
+            if let Some(phase) = visitor.phase {
+                self.phases.lock().expect("phase recorder lock").push(phase);
             }
         }
     }
@@ -11920,7 +11962,16 @@ mod tests {
 
     #[test]
     fn trace_events_cover_every_post_accept_step() {
-        fn loopback_trace(classic: bool) -> Vec<String> {
+        const CAPTURE_ID: &str = "loopback-connect-trace-test";
+        let phases = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(ConnectPhaseRecorder {
+            phases: Arc::clone(&phases),
+            capture_id: CAPTURE_ID.to_owned(),
+        });
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("loopback trace installs a process-wide recorder");
+
+        fn loopback_trace(classic: bool, phases: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
             let addr = listener.local_addr().expect("listener address");
             let server = thread::spawn(move || -> std::io::Result<()> {
@@ -11975,9 +12026,6 @@ mod tests {
                 Ok(())
             });
 
-            let phases = Arc::new(Mutex::new(Vec::new()));
-            let subscriber =
-                tracing_subscriber::registry().with(ConnectPhaseRecorder(Arc::clone(&phases)));
             let options = ConnectOptions::new(
                 format!(
                     "127.0.0.1:{}/FREEPDB1?transport_connect_timeout=2",
@@ -11988,13 +12036,14 @@ mod tests {
                 identity(),
             );
             let runtime = build_io_runtime().expect("Asupersync runtime");
+            let span = tracing::info_span!("connect_phase_capture", capture_id = CAPTURE_ID);
             let error = runtime
                 .block_on(
                     async {
                         let cx = Cx::current().expect("ambient Cx");
                         Connection::connect(&cx, options).await
                     }
-                    .with_subscriber(subscriber),
+                    .instrument(span),
                 )
                 .expect_err("loopback peer closes after receiving AUTH phase two");
             assert_eq!(error.connect_phase(), Some(ConnectPhase::AuthPhaseTwo));
@@ -12002,7 +12051,7 @@ mod tests {
                 .join()
                 .expect("loopback server joins")
                 .expect("wire exchange");
-            let recorded = phases.lock().expect("phase recorder lock").clone();
+            let recorded = std::mem::take(&mut *phases.lock().expect("phase recorder lock"));
             recorded
         }
 
@@ -12020,11 +12069,11 @@ mod tests {
         }
 
         assert_ordered(
-            &loopback_trace(false),
+            &loopback_trace(false, &phases),
             &["accept", "auth_phase_one", "auth_phase_two"],
         );
         assert_ordered(
-            &loopback_trace(true),
+            &loopback_trace(true, &phases),
             &[
                 "accept",
                 "negotiation",
