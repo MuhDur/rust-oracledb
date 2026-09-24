@@ -47,6 +47,10 @@ pub enum WalletError {
     /// The wallet directory did not contain the expected file.
     #[error("wallet file is missing")]
     FileMissing(String),
+    /// The opened wallet path was a symlink, directory, device, FIFO, or other
+    /// non-regular filesystem object. Rejected before reading any bytes.
+    #[error("wallet file is not a regular file: {path}")]
+    NotRegularFile { path: String },
     /// An I/O error occurred reading the wallet.
     #[error("failed to read wallet file: {source}")]
     Io {
@@ -106,6 +110,10 @@ impl std::fmt::Debug for WalletError {
         let redacted = |_: &String| REDACTED_PATH;
         match self {
             Self::FileMissing(path) => f.debug_tuple("FileMissing").field(&redacted(path)).finish(),
+            Self::NotRegularFile { path } => f
+                .debug_struct("NotRegularFile")
+                .field("path", &redacted(path))
+                .finish(),
             Self::Io { path, source } => f
                 .debug_struct("Io")
                 .field("path", &redacted(path))
@@ -537,10 +545,48 @@ pub fn read_ewallet_p12(
 /// The stream is cut off at one byte above [`MAX_WALLET_FILE_BYTES`], so this
 /// remains bounded even if file metadata races, is unavailable, or lies.
 pub fn read_wallet_file(path: &Path) -> Result<Vec<u8>, WalletError> {
-    let file = std::fs::File::open(path).map_err(|source| WalletError::Io {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    let file = options.open(path).map_err(|source| {
+        #[cfg(unix)]
+        if source.raw_os_error() == Some(libc::ELOOP) {
+            return WalletError::NotRegularFile {
+                path: path.display().to_string(),
+            };
+        }
+        WalletError::Io {
+            path: path.display().to_string(),
+            source,
+        }
+    })?;
+    let metadata = file.metadata().map_err(|source| WalletError::Io {
         path: path.display().to_string(),
         source,
     })?;
+    if !metadata.file_type().is_file() {
+        return Err(WalletError::NotRegularFile {
+            path: path.display().to_string(),
+        });
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(WalletError::NotRegularFile {
+                path: path.display().to_string(),
+            });
+        }
+    }
     match read_wallet_reader(file, MAX_WALLET_FILE_BYTES).map_err(|source| WalletError::Io {
         path: path.display().to_string(),
         source,
@@ -551,6 +597,15 @@ pub fn read_wallet_file(path: &Path) -> Result<Vec<u8>, WalletError> {
         }),
     }
 }
+
+/// `FILE_FLAG_OPEN_REPARSE_POINT` opens a reparse point itself so the handle
+/// metadata check can reject it without following its target.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
 /// Read at most `maximum_bytes + 1` bytes, returning `None` when the source is
 /// oversized. Kept separate from filesystem I/O so the boundary is directly
@@ -639,6 +694,118 @@ mod tests {
         let bytes = read_wallet_reader(std::io::Cursor::new([0u8; 17]), 16)
             .expect("in-memory reader is infallible");
         assert!(bytes.is_none(), "one byte over the cap must be rejected");
+    }
+
+    #[test]
+    fn read_wallet_file_reads_regular_file_unchanged() {
+        let dir = tempfile::tempdir().expect("temporary wallet directory");
+        let contents = b"synthetic wallet bytes\0unchanged";
+        for name in [
+            PEM_WALLET_FILE_NAME,
+            P12_WALLET_FILE_NAME,
+            SSO_WALLET_FILE_NAME,
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, contents).expect("write regular wallet");
+            assert_eq!(
+                read_wallet_file(&path).expect("read regular wallet"),
+                contents
+            );
+        }
+    }
+
+    #[test]
+    fn read_wallet_file_refuses_directory_at_wallet_name() {
+        let dir = tempfile::tempdir().expect("temporary wallet directory");
+        let path = dir.path().join(PEM_WALLET_FILE_NAME);
+        std::fs::create_dir(&path).expect("create directory wallet impostor");
+        assert!(matches!(
+            read_wallet_file(&path),
+            Err(WalletError::NotRegularFile { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_wallet_file_refuses_symlink_to_regular_wallet() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("temporary wallet directory");
+        let target = dir.path().join("target.pem");
+        let link = dir.path().join(PEM_WALLET_FILE_NAME);
+        std::fs::write(&target, b"regular target").expect("write symlink target");
+        symlink(&target, &link).expect("create wallet symlink");
+        assert!(matches!(
+            read_wallet_file(&link),
+            Err(WalletError::NotRegularFile { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_wallet_file_refuses_char_device() {
+        let path = Path::new("/dev/zero");
+        assert!(
+            path.exists(),
+            "/dev/zero must be present on Unix test hosts"
+        );
+        assert!(matches!(
+            read_wallet_file(path),
+            Err(WalletError::NotRegularFile { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_wallet_file_refuses_fifo_without_blocking() {
+        use std::process::Command;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().expect("temporary wallet directory");
+        for name in [
+            PEM_WALLET_FILE_NAME,
+            P12_WALLET_FILE_NAME,
+            SSO_WALLET_FILE_NAME,
+        ] {
+            let path = dir.path().join(name);
+            let status = Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .expect("run mkfifo for wallet FIFO");
+            assert!(status.success(), "mkfifo must create {name}");
+
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let read_path = path.clone();
+            let reader = std::thread::spawn(move || {
+                sender
+                    .send(read_wallet_file(&read_path))
+                    .expect("receiver remains available");
+            });
+            let result = match receiver.recv_timeout(Duration::from_secs(2)) {
+                Ok(result) => result,
+                Err(timeout) => {
+                    // Release a legacy blocking open/read before failing. This
+                    // is a hard test failure, never a skip or a leaked thread.
+                    drop(
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .open(&path)
+                            .expect("open FIFO writer to release blocked reader"),
+                    );
+                    let _ = receiver.recv_timeout(Duration::from_secs(2));
+                    reader
+                        .join()
+                        .expect("reader thread exits after watchdog release");
+                    panic!("read_wallet_file blocked on {name}: {timeout}");
+                }
+            };
+            reader.join().expect("reader thread exits");
+            assert!(
+                matches!(result, Err(WalletError::NotRegularFile { .. })),
+                "{name}: got {result:?}"
+            );
+        }
     }
 
     #[test]

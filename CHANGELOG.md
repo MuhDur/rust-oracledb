@@ -31,6 +31,11 @@ artifacts, and the checked-in API/provenance ledgers.
 
 ## [Unreleased]
 
+### Fixed
+
+- Wallet reads now refuse symlinks and non-regular files before reading, and
+  open FIFOs without blocking.
+
 ## [0.9.2] - 2026-07-30
 
 ### Changed
