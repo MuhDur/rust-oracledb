@@ -1614,7 +1614,9 @@ impl ThinConnImpl {
     }
 
     pub(crate) fn clear_end_user_security_context(&self) -> PyResult<()> {
-        Ok(())
+        Err(not_implemented(
+            "ThinConnImpl.clear_end_user_security_context",
+        ))
     }
 
     pub(crate) fn set_end_user_security_context(
@@ -2016,5 +2018,47 @@ impl EndUserSecurityContextImpl {
             payload,
             encoded_len,
         })
+    }
+}
+
+#[cfg(test)]
+mod end_user_security_context_tests {
+    use super::*;
+
+    #[test]
+    fn clearing_unsupported_end_user_security_context_refuses_explicitly() {
+        Python::initialize();
+        Python::attach(|py| {
+            let connection = ThinConnImpl {
+                connection: Arc::new(Mutex::new(None)),
+                cancel_handle: Arc::new(Mutex::new(None)),
+                cancel_requested: Arc::new(AtomicBool::new(false)),
+                state: Arc::new(Mutex::new(ThinConnState::new(20, None, false))),
+                dsn: "db.example:1521/service".to_string(),
+                username: "TEST_USER".to_string(),
+                proxy_user: None,
+                server_version: (0, 0, 0, 0, 0),
+                autocommit: false,
+                autocommit_state: Arc::new(Mutex::new(false)),
+                tag: None,
+                warning: None,
+                inputtypehandler: None,
+                outputtypehandler: None,
+                invoke_session_callback: false,
+                thin: true,
+                connect_password: None,
+                new_password: None,
+                pool_conn_id: None,
+                connect_options: Arc::new(Mutex::new(None)),
+            };
+
+            let error = connection
+                .clear_end_user_security_context()
+                .expect_err("unsupported clear must not report success");
+            assert!(error.is_instance_of::<pyo3::exceptions::PyNotImplementedError>(py));
+            assert!(error
+                .to_string()
+                .contains("clear_end_user_security_context"));
+        });
     }
 }
