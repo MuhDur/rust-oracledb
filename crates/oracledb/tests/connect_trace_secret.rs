@@ -30,6 +30,207 @@ use std::process::Command;
 
 /// Set on the re-exec'd child so it performs the connect instead of spawning.
 const CHILD_ENV: &str = "ORACLEDB_TRACE_SECRET_CHILD";
+const CONNECT_CANARY_USER: &str = "creamleopard-connect-user-canary";
+const CONNECT_CANARY_PASSWORD: &str = "creamleopard-connect-password-canary";
+const CONNECT_CANARY_TOKEN: &str = "creamleopard-connect-token-canary";
+
+/// Drive the real Connection::connect auth path against a loopback listener,
+/// while a child process lets the parent inspect the actual stderr bytes.
+/// A second ConnectOptions value plants an access token and verifies the
+/// driver's fail-closed refusal over plain TCP without printing the token.
+#[test]
+fn connect_trace_redacts_secrets_on_the_real_connect_path() {
+    if let Some(mode) = std::env::var_os(CHILD_ENV) {
+        run_loopback_auth_and_token_refusal();
+        let _ = mode;
+        return;
+    }
+
+    for mode in ["1", "raw"] {
+        let output = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "connect_trace_redacts_secrets_on_the_real_connect_path",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, mode)
+            .env("ORACLEDB_TRACE_CONNECT", mode)
+            .output()
+            .expect("spawn loopback connect child");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "loopback connect child failed: {:?}\n{stderr}\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout)
+        );
+
+        if mode == "1" {
+            for canary in [
+                CONNECT_CANARY_USER,
+                CONNECT_CANARY_PASSWORD,
+                CONNECT_CANARY_TOKEN,
+            ] {
+                assert!(
+                    !stderr.contains(canary),
+                    "default real-connect trace leaked {canary}:\n{stderr}"
+                );
+                let encoded = canary
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                assert!(
+                    !stderr.contains(&encoded),
+                    "default real-connect trace leaked encoded {canary}:\n{stderr}"
+                );
+            }
+            assert!(
+                !stderr.contains(" hex="),
+                "default mode emitted raw AUTH bytes"
+            );
+        } else {
+            let mut warning_for_next_hex = false;
+            let mut raw_auth_lines = 0;
+            for line in stderr.lines() {
+                if line.contains("WARNING raw trace includes credential-derived material") {
+                    warning_for_next_hex = true;
+                }
+                if line.contains(" hex=") {
+                    assert!(
+                        warning_for_next_hex,
+                        "raw AUTH bytes appeared before their warning: {line}\n{stderr}"
+                    );
+                    warning_for_next_hex = false;
+                    raw_auth_lines += 1;
+                }
+            }
+            assert!(
+                raw_auth_lines >= 2,
+                "expected real phase-one and phase-two AUTH bytes:\n{stderr}"
+            );
+        }
+    }
+}
+
+fn run_loopback_auth_and_token_refusal() {
+    use asupersync::runtime::{reactor, RuntimeBuilder};
+    use asupersync::Cx;
+    use oracledb::{ConnectOptions, Connection};
+    use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
+    use oracledb_protocol::{
+        thin::{TNS_DATA_FLAGS_END_OF_RESPONSE, TNS_PACKET_TYPE_ACCEPT, TNS_PACKET_TYPE_DATA},
+        ClientIdentity,
+    };
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    fn read_packet(socket: &mut std::net::TcpStream, large: bool) -> std::io::Result<()> {
+        let mut header = [0u8; 8];
+        socket.read_exact(&mut header)?;
+        let declared = if large {
+            usize::try_from(u32::from_be_bytes(
+                header[..4].try_into().expect("four bytes"),
+            ))
+            .unwrap_or(usize::MAX)
+        } else {
+            usize::from(u16::from_be_bytes([header[0], header[1]]))
+        };
+        let mut payload = vec![0; declared.saturating_sub(header.len())];
+        socket.read_exact(&mut payload)
+    }
+
+    fn golden(hex: &str) -> Vec<u8> {
+        let digits: Vec<_> = hex
+            .bytes()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .collect();
+        digits
+            .chunks_exact(2)
+            .map(|pair| {
+                let high = (pair[0] as char).to_digit(16).expect("hex digit");
+                let low = (pair[1] as char).to_digit(16).expect("hex digit");
+                ((high << 4) | low) as u8
+            })
+            .collect()
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind synthetic listener");
+    let addr = listener.local_addr().expect("listener address");
+    let server = std::thread::spawn(move || -> std::io::Result<()> {
+        let (mut socket, _) = listener.accept()?;
+        socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+        read_packet(&mut socket, false)?; // CONNECT
+        let accept = encode_packet(
+            TNS_PACKET_TYPE_ACCEPT,
+            0,
+            None,
+            &golden(include_str!(
+                "../../oracledb-protocol/tests/golden/free23_accept_payload.hex"
+            )),
+            PacketLengthWidth::Legacy16,
+        )
+        .expect("encode synthetic ACCEPT");
+        socket.write_all(&accept)?;
+        read_packet(&mut socket, true)?; // AUTH phase one
+        let auth_one = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(TNS_DATA_FLAGS_END_OF_RESPONSE),
+            &golden(include_str!(
+                "../../oracledb-protocol/tests/golden/pre23ai_xe18_auth_phase_one_response.hex"
+            )),
+            PacketLengthWidth::Large32,
+        )
+        .expect("encode synthetic AUTH challenge");
+        socket.write_all(&auth_one)?;
+        read_packet(&mut socket, true)?; // AUTH phase two
+        Ok(()) // close before a server response
+    });
+
+    let reactor = reactor::create_reactor().expect("native reactor");
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .expect("Asupersync runtime");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("ambient Cx");
+        let identity = || {
+            ClientIdentity::new(
+                "rust-oracledb",
+                "synthetic-host",
+                "synthetic-osuser",
+                "synthetic-terminal",
+                "rust-oracledb test",
+            )
+            .expect("synthetic identity")
+        };
+        let options = ConnectOptions::new(
+            format!(
+                "127.0.0.1:{}/FREEPDB1?transport_connect_timeout=2",
+                addr.port()
+            ),
+            CONNECT_CANARY_USER,
+            CONNECT_CANARY_PASSWORD,
+            identity(),
+        );
+        assert!(Connection::connect(&cx, options).await.is_err());
+
+        let token_options = ConnectOptions::new(
+            "127.0.0.1:1/FREEPDB1?transport_connect_timeout=1",
+            CONNECT_CANARY_USER,
+            CONNECT_CANARY_PASSWORD,
+            identity(),
+        )
+        .with_access_token(CONNECT_CANARY_TOKEN);
+        assert!(Connection::connect(&cx, token_options).await.is_err());
+    });
+    server
+        .join()
+        .expect("loopback peer joins")
+        .expect("wire exchange");
+}
 
 #[test]
 #[ignore = "requires a live listener + PYO_TEST_MAIN_PASSWORD; use a lane whose password != username (e.g. xe18 testuser/testpw)"]
@@ -100,6 +301,10 @@ fn password_absent_from_connect_trace() {
         );
         previous = Some(position);
     }
+    eprintln!(
+        "live connect trace reached phases: {}",
+        ordered_phases.join(" -> ")
+    );
     assert!(
         !stderr.contains(" hex="),
         "default trace must omit payload hex"

@@ -1,10 +1,11 @@
-# Observability — first-class, feature-gated `tracing` spans
+# Observability — operation spans and connect-phase events
 
-`rust-oracledb` emits structured **per-round-trip spans** through the
-[`tracing`](https://docs.rs/tracing) facade. The instrumentation is **opt-in**
-behind a Cargo feature and is **zero-cost when the feature is off**: a default
-build does not compile `tracing` in at all, and every span macro expands to
-nothing — the off-build is byte-for-byte the pre-feature build.
+`rust-oracledb` emits structured operation spans through the
+[`tracing`](https://docs.rs/tracing) facade when the `tracing` Cargo feature is
+enabled. Connect-phase events use that facade in every build; setting
+`ORACLEDB_TRACE_CONNECT` also mirrors redacted milestone text to stderr. The
+`tracing` crate is part of the default dependency graph, and connect-phase
+instrumentation has runtime cost even when operation spans are disabled.
 
 This is the observability story `python-oracledb` cannot match cleanly:
 **our spans are emitted from the GIL-free Rust engine**, so N concurrent
@@ -53,8 +54,9 @@ subscriber; you choose the backend (pretty console logs, JSON, Jaeger/OTLP via
 
 ## 2. What gets traced
 
-Each wire round trip opens an INFO-level span for the duration of its
-send/receive. The span names and their structured fields:
+Each instrumented wire operation opens an INFO-level span for the duration of
+its send/receive. Connect milestones are separate INFO-level events emitted in
+every build. The span names and their structured fields:
 
 | Span | Emitted by | Fields |
 | --- | --- | --- |
@@ -65,9 +67,15 @@ send/receive. The span names and their structured fields:
 | `oracledb.rollback` | `Connection::rollback` | — |
 | `oracledb.lob` | `read_lob` / `write_lob` | `db.operation`, `db.lob_offset`, `db.lob_amount` / `db.lob_bytes` |
 
-### Field hygiene — no secrets, ever
+The `oracledb.connect` span is enabled by the `tracing` feature. Connect
+milestone events such as `phase=accept`, `phase=auth_phase_one`, and
+`phase=session` are emitted in all builds to tracing subscribers. Set
+`ORACLEDB_TRACE_CONNECT=1` to mirror their structured, redacted form to stderr.
 
-Spans carry only **non-sensitive structured metadata**. In particular:
+### Field hygiene
+
+By default, events and spans carry only **non-sensitive structured metadata**.
+In particular:
 
 - `db.statement` is a **digest** — the statement *shape* (leading verb plus a
   whitespace-collapsed, length-capped copy), **never** the raw SQL with embedded
@@ -75,8 +83,10 @@ Spans carry only **non-sensitive structured metadata**. In particular:
   not a value.
 - **Bind values and fetched data are never put in a span at all.** Only *counts*
   are recorded (`db.bind_count`, `db.bind_rows`, `db.rows_fetched`).
-- The connect span carries the server address and service name but **never the
-  password**.
+- Connect events omit the username, password, access token, and raw packet
+  contents. `ORACLEDB_TRACE_CONNECT=raw` prints AUTH payloads as hexadecimal
+  after an explicit warning. Those payloads can contain credential-derived
+  material; keep raw output quarantined and disable raw mode for normal use.
 
 The digest contract is pinned by unit tests in `crates/oracledb/src/obs.rs`.
 
@@ -108,25 +118,26 @@ batch), with **no bind value anywhere**.
 
 ---
 
-## 4. Zero-cost when off — how, and how to verify
+## 4. Feature and environment controls
 
-The driver routes every span through two macros in `crates/oracledb/src/obs.rs`,
+The driver routes operation spans through two macros in `crates/oracledb/src/obs.rs`,
 `obs_span!` and `obs_record!`:
 
 - With `--features tracing`, they expand to `tracing::span!(…).entered()` and
   `Span::record(…)`.
-- Without the feature, they expand to a `()` guard and an empty statement, and
-  **the field expressions are not evaluated** — a row count or SQL digest is
-  never even computed on the off-build.
+- Without the feature, they expand to a no-op guard and an empty statement, and
+  their field expressions are not evaluated.
 
-Because the `tracing` dependency is `optional = true` and gated by the feature,
-the default build does not compile it in. Verify directly:
+This control applies to operation spans only. Connect-phase events remain
+enabled in every build and go to stderr when `ORACLEDB_TRACE_CONNECT` is set.
+The default build includes `tracing` for those events. Verify the dependency
+graph and optional operation-span feature directly:
 
 ```sh
-# Default build: NO tracing in the library dependency graph.
-cargo tree -p oraclemcp-driver-cx -e no-dev | grep -i tracing      # → no matches
+# Default build: tracing is present for connect-phase events.
+cargo tree -p oraclemcp-driver-cx -e no-dev | grep -i tracing
 
-# Feature on: tracing appears.
+# Feature on: operation spans are enabled as well.
 cargo tree -p oraclemcp-driver-cx --features tracing -e no-dev | grep -i '^.*tracing v'
 ```
 
@@ -141,9 +152,9 @@ The `-e no-dev` edge filter excludes dev-dependencies (the span-capture test's
 | --- | --- | --- |
 | Span emission | Under the CPython **GIL** | **GIL-free** Rust engine |
 | Concurrency | Span bookkeeping serializes on the GIL | N connections trace **in parallel** |
-| Cost when unused | Python-level overhead is always present | **Zero** — dependency not compiled in |
+| Cost when unused | Python-level overhead is always present | Connect events remain instrumented; operation spans are feature-gated |
 | Backend | Whatever the Python app wires up | Any `tracing` `Subscriber` / OpenTelemetry |
-| Secret safety | App's responsibility | Digest-only by construction; values never reach a span |
+| Secret safety | App's responsibility | Default events omit credentials; raw connect tracing exposes credential-derived AUTH bytes after a warning |
 
 The parallelism point is the headline: in a service driving many concurrent
 Oracle connections, python-oracledb's per-call instrumentation contends on the

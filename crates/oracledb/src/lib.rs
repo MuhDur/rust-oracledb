@@ -3143,8 +3143,9 @@ impl Connection {
         let inactivity_timeout = options.inactivity_timeout;
         let keepalive_idle = keepalive_idle_from_expire_time(primary_description.expire_time);
         let connect_result = time::timeout(time::wall_now(), connect_timeout, async {
-            // Connect span (feature-gated, zero-cost when off). Carries only the
-            // server address / port / service — never the password.
+            // Operation span (enabled with the `tracing` feature). The separate
+            // connect-phase events run in every build; neither surface carries
+            // the password in its structured fields.
             let _span = obs_span!(
                 "oracledb.connect",
                 db.system = "oracle",
@@ -11923,7 +11924,7 @@ mod tests {
     }
 
     #[test]
-    fn connect_trace_secret() {
+    fn connect_trace_formatter_redacts_default_bytes_and_warns_before_raw() {
         const CANARY: &str = "planted-connect-secret-canary";
         let bytes = CANARY.as_bytes();
         let default = connect_trace_bytes_lines("AUTH phase one payload", bytes, false).join("\n");
@@ -12150,7 +12151,7 @@ mod tests {
     }
 
     #[test]
-    fn connect_phase_reported_on_auth_phase_two_failure() -> Result<()> {
+    fn connect_phase_reported_on_auth_phase_one_failure() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let addr = listener.local_addr()?;
         let server = thread::spawn(move || -> std::io::Result<()> {
@@ -12158,25 +12159,28 @@ mod tests {
             socket.set_read_timeout(Some(Duration::from_secs(5)))?;
             let _connect = read_tns_packet_sync(&mut socket)?;
             let accept = decode_golden_packet_hex(include_str!(
-                "../../oracledb-protocol/tests/golden/free23_accept_payload.hex"
+                "../../oracledb-protocol/tests/golden/pre23ai_xe18_accept_payload.hex"
             ));
             send_tns_packet_sync(&mut socket, TNS_PACKET_TYPE_ACCEPT, &accept)?;
+            for response_hex in [
+                include_str!("../../oracledb-protocol/tests/golden/pre23ai_xe18_protocol_negotiation_response.hex"),
+                include_str!("../../oracledb-protocol/tests/golden/pre23ai_xe18_data_types_response.hex"),
+            ] {
+                let _request = read_tns_packet_large_sync(&mut socket)?;
+                let response = encode_packet(
+                    TNS_PACKET_TYPE_DATA,
+                    0,
+                    Some(oracledb_protocol::thin::TNS_DATA_FLAGS_END_OF_RESPONSE),
+                    &decode_golden_packet_hex(response_hex),
+                    PacketLengthWidth::Large32,
+                )
+                .expect("encode classic handshake response");
+                socket.write_all(&response)?;
+            }
             let _auth_phase_one = read_tns_packet_large_sync(&mut socket)?;
-            let auth_one = decode_golden_packet_hex(include_str!(
-                "../../oracledb-protocol/tests/golden/pre23ai_xe18_auth_phase_one_response.hex"
-            ));
-            let response = encode_packet(
-                TNS_PACKET_TYPE_DATA,
-                0,
-                Some(oracledb_protocol::thin::TNS_DATA_FLAGS_END_OF_RESPONSE),
-                &auth_one,
-                PacketLengthWidth::Large32,
-            )
-            .expect("encode fast-auth DATA response");
-            socket.write_all(&response)?;
-            let _auth_phase_two = read_tns_packet_large_sync(&mut socket)?;
-            // Drop the synthetic listener after receiving the real phase-two
-            // request so the connect path fails at that exact wire boundary.
+            // Close before returning a verifier challenge. Classic XE18 sets
+            // AuthPhaseOne only when it sends this request, so this proves the
+            // reported phase cannot be inherited from fast-auth setup.
             Ok(())
         });
         let options = ConnectOptions::new(
@@ -12194,11 +12198,11 @@ mod tests {
                 let cx = Cx::current().expect("ambient Cx");
                 Connection::connect(&cx, options).await
             })
-            .expect_err("listener drop after AUTH phase two must fail");
+            .expect_err("listener drop after AUTH phase one must fail");
         assert_eq!(
             err.connect_phase(),
-            Some(ConnectPhase::AuthPhaseTwo),
-            "unexpected auth-phase failure: {err:?}"
+            Some(ConnectPhase::AuthPhaseOne),
+            "classic peer drop after phase one was mislabeled: {err:?}"
         );
         server.join().expect("listener thread joins")?;
         Ok(())
