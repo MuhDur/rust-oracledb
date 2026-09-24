@@ -11841,6 +11841,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
     use tracing::field::{Field, Visit};
+    use tracing::instrument::WithSubscriber;
     use tracing_subscriber::layer::{Context, Layer};
     use tracing_subscriber::prelude::*;
 
@@ -11987,13 +11988,15 @@ mod tests {
                 identity(),
             );
             let runtime = build_io_runtime().expect("Asupersync runtime");
-            let error = tracing::subscriber::with_default(subscriber, || {
-                runtime.block_on(async {
-                    let cx = Cx::current().expect("ambient Cx");
-                    Connection::connect(&cx, options).await
-                })
-            })
-            .expect_err("loopback peer closes after receiving AUTH phase two");
+            let error = runtime
+                .block_on(
+                    async {
+                        let cx = Cx::current().expect("ambient Cx");
+                        Connection::connect(&cx, options).await
+                    }
+                    .with_subscriber(subscriber),
+                )
+                .expect_err("loopback peer closes after receiving AUTH phase two");
             assert_eq!(error.connect_phase(), Some(ConnectPhase::AuthPhaseTwo));
             server
                 .join()
