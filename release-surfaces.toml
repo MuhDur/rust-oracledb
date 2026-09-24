@@ -14,6 +14,11 @@ name = "published_version"
 value = "0.9.1"
 
 [[canonical]]
+name = "driver_package_version"
+path = "crates/oracledb/Cargo.toml"
+toml_key = "package.version"
+
+[[canonical]]
 name = "runtime_version"
 path = "Cargo.toml"
 toml_key = "workspace.dependencies.asupersync"
@@ -56,7 +61,6 @@ name = "workspace package inheritance"
 kind = "toml_workspace_version"
 paths = [
   "crates/oracledb-protocol/Cargo.toml",
-  "crates/oracledb/Cargo.toml",
   "crates/oracledb-derive/Cargo.toml",
   "crates/oracledb-pyshim/Cargo.toml",
 ]
@@ -73,7 +77,20 @@ name = "lockfile package versions"
 kind = "lock_package_versions"
 path = "Cargo.lock"
 source = "workspace_version"
-packages = ["oraclemcp-driver-cx-protocol", "oraclemcp-driver-cx", "oraclemcp-driver-cx-derive"]
+packages = ["oraclemcp-driver-cx-protocol", "oraclemcp-driver-cx-derive"]
+
+[[relationship]]
+name = "driver package lockfile version"
+kind = "lock_package_versions"
+path = "Cargo.lock"
+source = "driver_package_version"
+packages = ["oraclemcp-driver-cx"]
+
+[[relationship]]
+name = "driver package manifest version"
+kind = "toml_package_version"
+path = "crates/oracledb/Cargo.toml"
+source = "driver_package_version"
 
 [[intentional_non_lockstep]]
 name = "nightly toolchain"
@@ -92,6 +109,12 @@ name = "latest published crate version"
 canonical_path = "release-surfaces.toml"
 independent_from = "workspace_version"
 rationale = "The latest crates.io version changes only after an explicitly authorized, verified publish; a prepared workspace candidate can be newer."
+
+[[intentional_non_lockstep]]
+name = "driver docs-only republish"
+canonical_path = "crates/oracledb/Cargo.toml"
+independent_from = "workspace_version"
+rationale = "The driver's documented 0.9.3 docs-only republish is an independent package version; its protocol and derive companions remain at workspace version 0.9.2."
 
 [[numeric_scan]]
 name = "publishing current-release surface"

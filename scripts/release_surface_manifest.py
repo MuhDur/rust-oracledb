@@ -94,10 +94,22 @@ def check_relationships(root: Path, manifest: dict[str, Any], values: dict[str, 
         if kind == "toml_workspace_version":
             for relative_path in entry["paths"]:
                 package = read_toml(root, relative_path).get("package", {})
-                if package.get("version", {}).get("workspace") is not True:
+                package_version = package.get("version")
+                if (
+                    not isinstance(package_version, dict)
+                    or package_version.get("workspace") is not True
+                ):
                     raise SurfaceError(
                         f"{entry['name']}: {relative_path} must inherit package.version from the workspace"
                     )
+        elif kind == "toml_package_version":
+            package = read_toml(root, entry["path"]).get("package", {})
+            actual = package.get("version")
+            expected = values[entry["source"]]
+            if actual != expected:
+                raise SurfaceError(
+                    f"{entry['name']}: {entry['path']} package.version {actual!r} != {expected!r}"
+                )
         elif kind == "toml_dependency_versions":
             dependencies = read_toml(root, entry["path"]).get("dependencies", {})
             expected = values[entry["source"]]
