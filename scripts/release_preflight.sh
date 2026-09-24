@@ -36,6 +36,23 @@ live_matrix_checks=(
   "xe21 full suite"
 )
 
+# The published driver's docs-only 0.9.3 republish intentionally does not
+# advance the protocol, derive, or harness crates from workspace 0.9.2. Keep
+# workspace-version extraction narrow: every other package must still agree,
+# and release-surfaces.toml separately checks the driver manifest and lockfile.
+workspace_version_from_packages() {
+  local package_lines_input="$1"
+  local workspace_versions
+  local version_count
+  workspace_versions="$(printf '%s\n' "$package_lines_input" | awk -F '\t' '$1 != "oraclemcp-driver-cx" { print $2 }' | sort -u)"
+  version_count="$(printf '%s\n' "$workspace_versions" | sed '/^$/d' | wc -l | tr -d ' ')"
+  [ "$version_count" = "1" ] || {
+    printf '%s\n' "$workspace_versions" >&2
+    return 1
+  }
+  printf '%s' "$workspace_versions"
+}
+
 # Validate the machine-readable Required-CI report used by the pre-tag path.
 # This stays deliberately strict: an absent, non-terminal, red, or unknown
 # check is never evidence that the candidate can be tagged. The four live
@@ -94,6 +111,20 @@ run_self_test() {
   local docs_only_report
   local green_report
   local output
+  local split_workspace_packages
+  local mismatched_workspace_packages
+  local parsed_version
+
+  split_workspace_packages=$'oraclemcp-driver-cx-protocol\t0.9.2\noraclemcp-driver-cx-derive\t0.9.2\noraclemcp-driver-cx\t0.9.3\noraclemcp-pyshim\t0.9.2'
+  parsed_version="$(workspace_version_from_packages "$split_workspace_packages")" ||
+    fail "self-test rejected the explicit driver package version split"
+  [ "$parsed_version" = "0.9.2" ] ||
+    fail "self-test selected driver 0.9.3 instead of workspace 0.9.2"
+
+  mismatched_workspace_packages=$'oraclemcp-driver-cx-protocol\t0.9.2\noraclemcp-driver-cx-derive\t0.9.1\noraclemcp-driver-cx\t0.9.3\noraclemcp-pyshim\t0.9.2'
+  if workspace_version_from_packages "$mismatched_workspace_packages" >/dev/null 2>&1; then
+    fail "self-test accepted a mismatch among workspace-inheriting packages"
+  fi
 
   docs_only_report="$(jq -n --arg sha "$docs_only_sha" \
     --argjson missing "$(printf '%s\n' "${live_matrix_checks[@]}" | jq -R . | jq -s 'sort')" \
@@ -109,7 +140,7 @@ run_self_test() {
   check_pre_tag_ci_status "$green_sha" "$green_report" ||
     fail "self-test rejected a fully green Required-CI report"
 
-  echo "release-preflight: self-test OK — docs-only candidate is rejected until all four live matrix checks exist"
+  echo "release-preflight: self-test OK — version split and docs-only live-matrix guards"
 }
 
 mode="metadata"
@@ -135,27 +166,29 @@ fi
 
 need cargo
 need jq
+need python3
 
 bash "$ROOT/scripts/secret_scan.sh"
+python3 "$ROOT/scripts/release_surface_manifest.py" --check
 
 metadata="$(cargo metadata --no-deps --format-version 1)"
 
 mapfile -t package_lines < <(jq -r '.packages[] | [.name, .version] | @tsv' <<<"$metadata")
 [ "${#package_lines[@]}" -gt 0 ] || fail "no workspace packages found"
 
-# Every workspace crate (including the publish=false pyshim harness) inherits
-# [workspace.package].version, so they must all agree.
-versions="$(
-  printf '%s\n' "${package_lines[@]}" |
-    awk -F '\t' '{print $2}' |
-    sort -u
-)"
-version_count="$(printf '%s\n' "$versions" | sed '/^$/d' | wc -l | tr -d ' ')"
-[ "$version_count" = "1" ] || {
-  printf 'release-preflight: workspace packages must share one version:\n%s\n' "$versions" >&2
+# Workspace-inheriting packages (including the publish=false pyshim harness)
+# share [workspace.package].version. The driver package is checked separately
+# through release-surfaces.toml because its docs-only republish is intentional.
+package_lines_text="$(printf '%s\n' "${package_lines[@]}")"
+version="$(workspace_version_from_packages "$package_lines_text")" || {
+  printf 'release-preflight: all workspace-inheriting packages must share one version:\n' >&2
+  printf '%s\n' "$package_lines_text" | awk -F '\t' '$1 != "oraclemcp-driver-cx" { print }' >&2
   exit 1
 }
-version="$versions"
+
+driver_count="$(printf '%s\n' "$package_lines_text" | awk -F '\t' '$1 == "oraclemcp-driver-cx" { count++ } END { print count + 0 }')"
+[ "$driver_count" = "1" ] ||
+  fail "expected exactly one oraclemcp-driver-cx package in cargo metadata"
 
 # Release documentation must advance with the workspace version. Fail closed
 # when either source is absent/unreadable, require a real version heading (not a

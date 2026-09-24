@@ -61,6 +61,7 @@ pub fn oraclemcp_driver_cx::ConnectOptions::*	keep	ConnectOptions fields are alr
 *oraclemcp_driver_cx::Connection::execute_raw*	keep	W2-T1: low-level raw-execute primitive (returns the unprojected QueryResult). Execute-side counterpart to the retained fetch_rows*/define_and_fetch/scroll_cursor/fetch_cursor primitives; part of the 1.0 contract. Surfaced during the pyshim migration as the gap W1-T3 missed: the four families project QueryResult into curated outcomes, so a statement-type-agnostic / raw consumer needs an un-deprecated raw entry point.
 *oraclemcp_driver_cx::ConnectionDisposition*	keep	Public connection-reuse classification returned by Error::connection_disposition.
 *oraclemcp_driver_cx::Connection*	keep	Primary async connection API.
+*oraclemcp_driver_cx::ConnectPhase*	keep	Public connect-handshake phase taxonomy returned by Error::connect_phase so callers can diagnose the furthest phase reached.
 *oraclemcp_driver_cx::resolve_wallet*	keep	0.8.1: public wallet-resolution accessor returning the driver's real precedence decision (chosen file / fell-through / eligibility) so the server doctor reads it instead of mirroring the private load path.
 *oraclemcp_driver_cx::WalletResolution*	keep	0.8.1: the wallet-resolution outcome struct returned by resolve_wallet.
 *oraclemcp_driver_cx::WalletFile*	keep	0.8.1: enum of wallet file kinds (Pem/P12/Sso) named in WalletResolution.
