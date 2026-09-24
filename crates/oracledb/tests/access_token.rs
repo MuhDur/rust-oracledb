@@ -14,7 +14,8 @@ extern crate oraclemcp_driver_cx as oracledb;
 
 use oracledb::protocol::ClientIdentity;
 use oracledb::{
-    AccessToken, AuthModeKind, AuthModeSupport, BlockingConnection, ConnectOptions, Error,
+    AccessToken, AuthModeKind, AuthModeSupport, BlockingConnection, ConnectOptions, ConnectPhase,
+    Error,
 };
 
 const OPAQUE_AUTH_VALUE: &str = "opaque-redaction-value";
@@ -25,6 +26,13 @@ const SAMPLE_CERT_DN: &str = "CN=redaction-db";
 const SAMPLE_KERBEROS_PRINCIPAL: &str = "service/redaction-host@EXAMPLE.COM";
 const SAMPLE_KERBEROS_KEYTAB: &str = "/secure/keytabs/redaction.keytab";
 const SAMPLE_RADIUS_CHALLENGE: &str = "redaction-radius-challenge";
+
+fn connect_source(error: &Error) -> &Error {
+    match error {
+        Error::ConnectPhase { source, .. } => source,
+        other => panic!("connect error must retain its phase wrapper: {other:?}"),
+    }
+}
 
 #[test]
 fn access_token_is_redacted_in_debug() {
@@ -101,11 +109,12 @@ fn unsupported_auth_modes_are_typed_and_redacted() {
 
     let err = BlockingConnection::connect(external)
         .expect_err("external auth is a typed unsupported mode in this thin build");
+    assert_eq!(err.connect_phase(), Some(ConnectPhase::AuthPhaseOne));
     assert!(
-        matches!(err, Error::UnsupportedAuthMode(_)),
+        matches!(connect_source(&err), Error::UnsupportedAuthMode(_)),
         "expected UnsupportedAuthMode(External), got: {err:?}"
     );
-    let Error::UnsupportedAuthMode(reason) = err else {
+    let Error::UnsupportedAuthMode(reason) = connect_source(&err) else {
         return;
     };
     assert!(matches!(reason.mode(), AuthModeKind::External));
@@ -153,11 +162,12 @@ fn assert_unsupported_mode_before_io(
 ) {
     let err = BlockingConnection::connect(options)
         .expect_err("unsupported auth mode should fail before connecting to 127.0.0.1:1");
-    let reason = if let Error::UnsupportedAuthMode(reason) = &err {
+    assert_eq!(err.connect_phase(), Some(ConnectPhase::AuthPhaseOne));
+    let reason = if let Error::UnsupportedAuthMode(reason) = connect_source(&err) {
         reason
     } else {
         assert!(
-            matches!(&err, Error::UnsupportedAuthMode(_)),
+            matches!(connect_source(&err), Error::UnsupportedAuthMode(_)),
             "expected UnsupportedAuthMode({expected:?}) before network I/O, got {err:?}"
         );
         return;
@@ -189,8 +199,9 @@ fn access_token_over_plain_tcp_is_typed_error() {
     )
     .expect_err("token auth over plain TCP must fail");
 
+    assert_eq!(err.connect_phase(), Some(ConnectPhase::AuthPhaseOne));
     assert!(
-        matches!(err, Error::AccessTokenRequiresTcps),
+        matches!(connect_source(&err), Error::AccessTokenRequiresTcps),
         "expected AccessTokenRequiresTcps, got: {err:?}"
     );
     assert!(

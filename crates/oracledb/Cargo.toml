@@ -58,15 +58,12 @@ soda = ["dep:serde_json"]
 # `--features experimental` builds keep working.
 experimental = ["oracledb-protocol/experimental"]
 # First-class OpenTelemetry-style observability (bead rust-oracledb-lv6).
-# Emits per-round-trip `tracing` spans (connect / execute / fetch / round-trip /
-# commit / LOB ops) with structured fields (SQL digest, row count, rows fetched,
-# bind count — never secret values or bind data). ZERO-cost when off: the default
-# build does NOT compile `tracing` in and the span macros expand to nothing, so a
-# build without this feature is byte-for-byte the pre-feature build. Because our
-# spans are emitted from the GIL-free Rust engine, concurrent connections trace
-# in parallel — unlike python-oracledb's GIL-bound instrumentation. See
-# docs/OBSERVABILITY.md.
-tracing = ["dep:tracing"]
+# Enables per-round-trip operation spans (execute / fetch / round-trip / commit /
+# LOB ops) with structured fields. Connect-phase events use the tracing facade in
+# every build so installed subscribers can receive them; ORACLEDB_TRACE_CONNECT
+# controls only their stderr mirror. Connect event fields never include secrets.
+# See docs/OBSERVABILITY.md.
+tracing = []
 
 [dependencies]
 arrow-array = { workspace = true, optional = true }
@@ -107,9 +104,9 @@ rustls-native-certs.workspace = true
 rustls-pki-types.workspace = true
 rustls-webpki.workspace = true
 serde_json = { workspace = true, optional = true }
-# Optional, feature-gated observability facade (`tracing` feature). NOT in the
-# default build: see the `tracing` feature comment above.
-tracing = { workspace = true, optional = true }
+# Tracing facade for connect-phase events in all builds and operation spans when
+# the `tracing` feature is enabled.
+tracing.workspace = true
 x509-cert.workspace = true
 thiserror.workspace = true
 uuid = { version = "1", optional = true, default-features = false }

@@ -120,6 +120,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::process;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -654,12 +655,14 @@ impl<T: WireTransport> ConnectionCore<T> {
         cx: &Cx,
         token_auth: TokenAuthentication<'_>,
         sdu: usize,
+        connect_phase: &AtomicU8,
     ) -> Result<(AuthResponse, ClientCapabilities)> {
         let protocol_limits = self.protocol_limits;
         // Mirror the password path's classic negotiation, then send the
         // self-contained token phase-two payload (there is no password
         // challenge/response).
         let protocol_payload = build_protocol_negotiation_payload()?;
+        record_connect_phase(connect_phase, ConnectPhase::Negotiation);
         trace_connect_step("send protocol negotiation (classic token)");
         self.send_data_packet(cx, &protocol_payload, sdu).await?;
         trace_connect_step("read protocol negotiation");
@@ -668,6 +671,7 @@ impl<T: WireTransport> ConnectionCore<T> {
         let negotiated = parse_auth_response_with_limits(&response, protocol_limits)?;
 
         let data_types_payload = build_data_types_payload()?;
+        record_connect_phase(connect_phase, ConnectPhase::DataTypes);
         trace_connect_step("send data types (classic token)");
         self.send_data_packet(cx, &data_types_payload, sdu).await?;
         trace_connect_step("read data types");
@@ -685,6 +689,7 @@ impl<T: WireTransport> ConnectionCore<T> {
             token_auth.pop,
             token_auth.proxy_user,
         )?;
+        record_connect_phase(connect_phase, ConnectPhase::AuthPhaseTwo);
         trace_connect_step("send AUTH token (classic phase two)");
         self.send_data_packet(cx, &auth_payload, sdu).await?;
         trace_connect_step("read AUTH token response");
@@ -1249,6 +1254,95 @@ pub enum ErrorKind {
     Authentication,
 }
 
+/// Furthest phase reached while opening a database connection.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+#[repr(u8)]
+pub enum ConnectPhase {
+    Dns = 0,
+    Tcp,
+    Tls,
+    Wallet,
+    Connect,
+    Accept,
+    Negotiation,
+    DataTypes,
+    AuthPhaseOne,
+    AuthPhaseTwo,
+    Session,
+}
+
+impl ConnectPhase {
+    fn progress_rank(self) -> u8 {
+        match self {
+            Self::Dns => 0,
+            Self::Wallet => 1,
+            Self::Tcp => 2,
+            Self::Tls => 3,
+            Self::Connect => 4,
+            Self::Accept => 5,
+            Self::Negotiation => 6,
+            Self::DataTypes => 7,
+            Self::AuthPhaseOne => 8,
+            Self::AuthPhaseTwo => 9,
+            Self::Session => 10,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Tcp,
+            2 => Self::Tls,
+            3 => Self::Wallet,
+            4 => Self::Connect,
+            5 => Self::Accept,
+            6 => Self::Negotiation,
+            7 => Self::DataTypes,
+            8 => Self::AuthPhaseOne,
+            9 => Self::AuthPhaseTwo,
+            10 => Self::Session,
+            _ => Self::Dns,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Dns => "dns",
+            Self::Tcp => "tcp",
+            Self::Tls => "tls",
+            Self::Wallet => "wallet",
+            Self::Connect => "connect",
+            Self::Accept => "accept",
+            Self::Negotiation => "negotiation",
+            Self::DataTypes => "data_types",
+            Self::AuthPhaseOne => "auth_phase_one",
+            Self::AuthPhaseTwo => "auth_phase_two",
+            Self::Session => "session",
+        }
+    }
+}
+
+fn record_connect_phase(progress: &AtomicU8, phase: ConnectPhase) {
+    loop {
+        let current_value = progress.load(Ordering::Relaxed);
+        let current = ConnectPhase::from_u8(current_value);
+        if phase.progress_rank() <= current.progress_rank() {
+            return;
+        }
+        if progress
+            .compare_exchange_weak(
+                current_value,
+                phase as u8,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            return;
+        }
+    }
+}
+
 /// Whether the connection that produced an error can be reused.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ConnectionDisposition {
@@ -1268,6 +1362,12 @@ pub enum RetryHint {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    #[error("connect failed during {phase:?}: {source}")]
+    ConnectPhase {
+        phase: ConnectPhase,
+        #[source]
+        source: Box<Error>,
+    },
     #[error(transparent)]
     Protocol(#[from] oracledb_protocol::ProtocolError),
     #[error("I/O error: {0}")]
@@ -1505,9 +1605,19 @@ impl ColumnIndex for &str {
 /// The curated transient and connection-lost code sets are maintained in this
 /// module and exposed through the stable methods below.
 impl Error {
+    /// The furthest handshake phase reached when this error came from
+    /// [`Connection::connect`]. Errors from other operations return `None`.
+    pub fn connect_phase(&self) -> Option<ConnectPhase> {
+        match self {
+            Self::ConnectPhase { phase, .. } => Some(*phase),
+            _ => None,
+        }
+    }
+
     /// Stable top-level error category.
     pub fn kind(&self) -> ErrorKind {
         match self {
+            Error::ConnectPhase { source, .. } => source.kind(),
             Error::Protocol(err) => protocol_error_kind(err),
             Error::Io(_)
             | Error::ListenerRefused(_)
@@ -1544,6 +1654,7 @@ impl Error {
     pub fn resource_limit(&self) -> Option<oracledb_protocol::ResourceLimit> {
         match self {
             Error::Protocol(err) => err.resource_limit(),
+            Error::ConnectPhase { source, .. } => source.resource_limit(),
             _ => None,
         }
     }
@@ -1561,6 +1672,7 @@ impl Error {
     pub fn ora_code(&self) -> Option<i32> {
         match self {
             Error::Protocol(err) => protocol_error_ora_code(err).map(|code| code as i32),
+            Error::ConnectPhase { source, .. } => source.ora_code(),
             // A user cancel is the client-side shape of the server's ORA-01013
             // "user requested cancel of current operation".
             Error::Cancelled => Some(1013),
@@ -1580,6 +1692,7 @@ impl Error {
     pub fn offset(&self) -> Option<i32> {
         match self {
             Error::Protocol(err) => protocol_error_offset(err),
+            Error::ConnectPhase { source, .. } => source.offset(),
             _ => None,
         }
     }
@@ -1625,6 +1738,7 @@ impl Error {
     /// and surface [`Error::ConnectionClosed`], which *is* connection-lost.
     pub fn connection_disposition(&self) -> ConnectionDisposition {
         match self {
+            Error::ConnectPhase { source, .. } => source.connection_disposition(),
             Error::Io(_) | Error::ConnectionClosed(_) => ConnectionDisposition::Dead,
             _ if self
                 .ora_code()
@@ -1638,6 +1752,7 @@ impl Error {
 
     pub fn is_connection_lost(&self) -> bool {
         match self {
+            Error::ConnectPhase { source, .. } => source.is_connection_lost(),
             Error::Io(_) | Error::ConnectionClosed(_) => true,
             _ => self
                 .ora_code()
@@ -1659,6 +1774,7 @@ impl Error {
     /// also drains the wire and leaves the session alive.
     pub fn is_transient(&self) -> bool {
         matches!(self, Error::CallTimeout(_) | Error::Cancelled)
+            || matches!(self, Error::ConnectPhase { source, .. } if source.is_transient())
             || self
                 .ora_code()
                 .is_some_and(|code| TRANSIENT_ORA_CODES.contains(&(code as u32)))
@@ -2960,10 +3076,25 @@ impl Connection {
     /// the supplied [`ClientIdentity`]. On success the database has recorded a
     /// session whose `program` / `machine` / `osuser` / `terminal` are exactly
     /// the identity fields.
-    pub async fn connect(cx: &Cx, mut options: ConnectOptions) -> Result<Self> {
+    pub async fn connect(cx: &Cx, options: ConnectOptions) -> Result<Self> {
+        let phase = Arc::new(AtomicU8::new(ConnectPhase::Dns as u8));
+        Self::connect_inner(cx, options, Arc::clone(&phase))
+            .await
+            .map_err(|source| Error::ConnectPhase {
+                phase: ConnectPhase::from_u8(phase.load(Ordering::Relaxed)),
+                source: Box::new(source),
+            })
+    }
+
+    async fn connect_inner(
+        cx: &Cx,
+        mut options: ConnectOptions,
+        connect_phase: Arc<AtomicU8>,
+    ) -> Result<Self> {
         observe_cancellation_between_round_trips(cx)?;
         let protocol_limits = options.protocol_limits.validate()?;
         if let Some(unsupported) = options.auth_mode.unsupported_in_thin() {
+            record_connect_phase(&connect_phase, ConnectPhase::AuthPhaseOne);
             return Err(Error::UnsupportedAuthMode(unsupported));
         }
         let descriptor = EasyConnect::parse(&options.connect_string)?;
@@ -2980,6 +3111,7 @@ impl Connection {
         if (options.access_token.is_some() || options.token_source.is_some())
             && !descriptor.protocol.is_tls()
         {
+            record_connect_phase(&connect_phase, ConnectPhase::AuthPhaseOne);
             return Err(Error::AccessTokenRequiresTcps);
         }
         // Resolve a pluggable token source into a concrete access token once, at
@@ -2988,7 +3120,13 @@ impl Connection {
         // `Error::TokenSource`; its detail (and the token) never leak.
         if options.access_token.is_none() {
             if let Some(source) = options.token_source.clone() {
-                let token = source.get_token().await.map_err(Error::TokenSource)?;
+                let token = match source.get_token().await {
+                    Ok(token) => token,
+                    Err(error) => {
+                        record_connect_phase(&connect_phase, ConnectPhase::AuthPhaseOne);
+                        return Err(Error::TokenSource(error));
+                    }
+                };
                 options.access_token = Some(AccessToken::new(token));
             }
         }
@@ -3062,6 +3200,7 @@ impl Connection {
             // disable it. One resolved value now feeds both the verifier and
             // the wire descriptor, so they can never diverge.
             let prepared_tls = if descriptor.protocol.is_tls() {
+                record_connect_phase(&connect_phase, ConnectPhase::Wallet);
                 let tls_params = tls::resolve_tls_params(
                     &descriptor,
                     effective_wallet_location,
@@ -3105,9 +3244,11 @@ impl Connection {
             let dial = |host: String, port: u16| {
                 let connector = &connector;
                 let prepared_tls = prepared_tls.as_ref();
+                let connect_phase = Arc::clone(&connect_phase);
                 #[cfg(feature = "cassette")]
                 let capture_recorder = capture_recorder.as_ref();
                 async move {
+                    record_connect_phase(&connect_phase, ConnectPhase::Tcp);
                     trace_connect_step("tcp connect");
                     let stream = TcpStream::connect_timeout((host, port), connect_timeout).await?;
                     stream.set_nodelay(true)?;
@@ -3121,6 +3262,7 @@ impl Connection {
                     }
                     trace_connect_step("tcp connected");
                     let halves = if let Some(prepared_tls) = prepared_tls {
+                        record_connect_phase(&connect_phase, ConnectPhase::Tls);
                         trace_connect_step("tls handshake");
                         // Honor the same configured connect timeout that already
                         // bounds the TCP dial above, instead of a hard-coded
@@ -3162,6 +3304,7 @@ impl Connection {
             // connect. The overall connect deadline (the DSN transport connect
             // timeout) still bounds the total, shared across attempts.
             let candidates = resolve_connect_addresses(&full_descriptor, descriptor.protocol);
+            trace_connect_step("resolve DNS");
             let retry_count = primary_description.retry_count;
             let retry_delay = Duration::from_secs(u64::from(primary_description.retry_delay));
             let mut attempt_errors: Vec<String> = Vec::new();
@@ -3202,6 +3345,7 @@ impl Connection {
                     )));
                 }
             };
+            record_connect_phase(&connect_phase, ConnectPhase::Connect);
             // Rebind the working descriptor to the address that actually
             // connected so the CONNECT descriptor's ADDRESS clause reflects the
             // live endpoint (the TLS params/DN match keep the configured host).
@@ -3242,6 +3386,7 @@ impl Connection {
             let mut resend_rounds = 0u8;
             let mut redirect_rounds = 0u8;
             let accept = loop {
+                record_connect_phase(&connect_phase, ConnectPhase::Connect);
                 let connect_payload = build_connect_packet_payload(&connect_data, advertised_sdu)?;
                 let packet = encode_packet(
                     TNS_PACKET_TYPE_CONNECT,
@@ -3264,6 +3409,7 @@ impl Connection {
                     .await?;
                 }
 
+                record_connect_phase(&connect_phase, ConnectPhase::Accept);
                 trace_connect_step("read ACCEPT");
                 let reply = core.read_packet(PacketLengthWidth::Legacy16).await?;
                 trace_connect_value(
@@ -3273,6 +3419,15 @@ impl Connection {
                         reply.packet_type,
                         reply.packet_flags,
                         reply.payload.len()
+                    ),
+                );
+                trace_connect_event(
+                    ConnectPhase::Accept,
+                    "CONNECT reply packet",
+                    reply.payload.len(),
+                    &format!(
+                        "packet_type={} packet_flags=0x{:02x}",
+                        reply.packet_type, reply.packet_flags
                     ),
                 );
                 match reply.packet_type {
@@ -3324,6 +3479,7 @@ impl Connection {
                     other => return Err(Error::UnexpectedPacket(other)),
                 }
             };
+            record_connect_phase(&connect_phase, ConnectPhase::Accept);
             let accept_info = parse_accept_payload(&accept.payload)?;
             // Surface the negotiated ACCEPT capabilities so a captured trace
             // shows *why* the auth path forked: `fast_auth=true` takes the
@@ -3337,6 +3493,18 @@ impl Connection {
                 &format!(
                     "sdu={} fast_auth={} end_of_response={} oob={}",
                     accept_info.sdu,
+                    accept_info.supports_fast_auth,
+                    accept_info.supports_end_of_response,
+                    accept_info.supports_oob,
+                ),
+            );
+            trace_connect_event(
+                ConnectPhase::Accept,
+                "ACCEPT capabilities",
+                accept.payload.len(),
+                &format!(
+                    "protocol_version={} fast_auth={} end_of_response={} oob={}",
+                    accept_info.protocol_version,
                     accept_info.supports_fast_auth,
                     accept_info.supports_end_of_response,
                     accept_info.supports_oob,
@@ -3411,6 +3579,7 @@ impl Connection {
                         pop,
                         options.proxy_user.as_deref(),
                     )?;
+                    record_connect_phase(&connect_phase, ConnectPhase::AuthPhaseTwo);
                     trace_connect_step("send AUTH token (fast-auth phase two)");
                     core.send_data_packet(cx, &auth_payload, sdu).await?;
                     trace_connect_step("read AUTH token response");
@@ -3433,6 +3602,7 @@ impl Connection {
                             proxy_user: options.proxy_user.as_deref(),
                         },
                         sdu,
+                        &connect_phase,
                     )
                     .await?
                 };
@@ -3449,8 +3619,12 @@ impl Connection {
                 // slices of the fast-auth bundle, so both paths negotiate
                 // byte-identically.
                 let negotiated_capabilities = if accept_info.supports_fast_auth {
+                    // The fast-auth packet carries both password auth steps in
+                    // one bundle; a refusal from the server belongs to phase 2.
+                    record_connect_phase(&connect_phase, ConnectPhase::AuthPhaseTwo);
                     None
                 } else {
+                    record_connect_phase(&connect_phase, ConnectPhase::Negotiation);
                     let protocol_payload = build_protocol_negotiation_payload()?;
                     trace_connect_step("send protocol negotiation (classic)");
                     core.send_data_packet(cx, &protocol_payload, sdu).await?;
@@ -3460,6 +3634,7 @@ impl Connection {
                     let negotiated = parse_auth_response_with_limits(&response, protocol_limits)?;
 
                     let data_types_payload = build_data_types_payload()?;
+                    record_connect_phase(&connect_phase, ConnectPhase::DataTypes);
                     trace_connect_step("send data types (classic)");
                     core.send_data_packet(cx, &data_types_payload, sdu).await?;
                     trace_connect_step("read data types");
@@ -3488,6 +3663,7 @@ impl Connection {
                         client_pid,
                     )?
                 };
+                record_connect_phase(&connect_phase, ConnectPhase::AuthPhaseOne);
                 trace_connect_bytes("AUTH phase one payload", &auth_one);
                 trace_connect_step("send AUTH phase one");
                 core.send_data_packet(cx, &auth_one, sdu).await?;
@@ -3523,6 +3699,7 @@ impl Connection {
                     options.edition.as_deref(),
                     capabilities.ttc_field_version,
                 )?;
+                record_connect_phase(&connect_phase, ConnectPhase::AuthPhaseTwo);
                 trace_connect_bytes("AUTH phase two payload", &auth_two_payload);
                 trace_connect_step("send AUTH phase two");
                 core.send_data_packet(cx, &auth_two_payload, sdu).await?;
@@ -3542,16 +3719,14 @@ impl Connection {
                 (auth_two, capabilities, encrypted.combo_key)
             };
 
+            record_connect_phase(&connect_phase, ConnectPhase::Session);
             let session_id = parse_session_u32(&auth_two.session_data, "AUTH_SESSION_ID")?;
             let serial_num = parse_session_u16(&auth_two.session_data, "AUTH_SERIAL_NUM")?;
             // Final handshake milestone: authentication succeeded and the server
             // handed back a session. `sid`/`serial` are the v$session identifiers
             // (not secret) and let an operator correlate a captured trace with a
             // server-side session.
-            trace_connect_value(
-                "session established",
-                &format!("sid={session_id} serial={serial_num}"),
-            );
+            trace_connect_step("session established");
             let server_version = auth_two.session_data.get("AUTH_VERSION_STRING").cloned();
             let db_unique_name = parse_db_unique_name(&auth_two.session_data);
             let server_version_tuple = auth_two
@@ -11548,29 +11723,91 @@ fn json_lob_probe_candidates(columns: &[ColumnMetadata]) -> Vec<(usize, String)>
         .collect()
 }
 
-fn trace_connect_step(step: &'static str) {
-    if std::env::var_os("ORACLEDB_TRACE_CONNECT").is_some() {
-        eprintln!("oraclemcp_driver_cx::connect: {step}");
+fn connect_trace_phase(step: &str) -> ConnectPhase {
+    let step = step.to_ascii_lowercase();
+    if step.contains("dns") {
+        ConnectPhase::Dns
+    } else if step.contains("wallet") {
+        ConnectPhase::Wallet
+    } else if step.contains("tls") {
+        ConnectPhase::Tls
+    } else if step.contains("tcp") || step.contains("dns") || step.contains("failover") {
+        ConnectPhase::Tcp
+    } else if step.contains("accept") || step.contains("resend") || step.contains("redirect") {
+        ConnectPhase::Accept
+    } else if step.contains("data types") {
+        ConnectPhase::DataTypes
+    } else if step.contains("negotiation") {
+        ConnectPhase::Negotiation
+    } else if step.contains("auth phase one") {
+        ConnectPhase::AuthPhaseOne
+    } else if step.contains("auth") || step.contains("token") {
+        ConnectPhase::AuthPhaseTwo
+    } else if step.contains("session") {
+        ConnectPhase::Session
+    } else {
+        ConnectPhase::Connect
     }
 }
 
-fn trace_connect_value(label: &'static str, value: &str) {
+fn trace_connect_event(phase: ConnectPhase, step: &'static str, len: usize, flags: &str) {
+    let message_type = if matches!(
+        phase,
+        ConnectPhase::Dns | ConnectPhase::Tcp | ConnectPhase::Tls | ConnectPhase::Wallet
+    ) {
+        "TRANSPORT"
+    } else if step.to_ascii_lowercase().contains("auth") {
+        "AUTH"
+    } else if step.to_ascii_lowercase().contains("accept") {
+        "ACCEPT"
+    } else if step.to_ascii_lowercase().contains("connect") {
+        "CONNECT"
+    } else if step.to_ascii_lowercase().contains("data types") {
+        "DATA_TYPES"
+    } else if step.to_ascii_lowercase().contains("negotiation") {
+        "NEGOTIATION"
+    } else {
+        "TRANSPORT"
+    };
+    tracing::event!(target: "oracledb::connect", tracing::Level::INFO,
+        phase = phase.as_str(), step = step, message_type = message_type,
+        len = len, flags = flags);
     if std::env::var_os("ORACLEDB_TRACE_CONNECT").is_some() {
-        eprintln!("oraclemcp_driver_cx::connect: {label}: {value}");
+        eprintln!("oraclemcp_driver_cx::connect: phase={} step={step} message_type={message_type} len={len} flags={flags}", phase.as_str());
+    }
+}
+
+fn trace_connect_step(step: &'static str) {
+    trace_connect_event(connect_trace_phase(step), step, 0, "none");
+}
+
+fn trace_connect_value(label: &'static str, _value: &str) {
+    // Values can contain a descriptor, server error text, or identity. Emit the
+    // static milestone only; protocol capabilities use a separate flags field.
+    trace_connect_event(connect_trace_phase(label), label, 0, "redacted");
+}
+
+fn connect_trace_bytes_lines(label: &'static str, bytes: &[u8], raw: bool) -> Vec<String> {
+    let is_auth = label.to_ascii_lowercase().contains("auth");
+    if raw && is_auth {
+        let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        vec![
+            "WARNING raw trace includes credential-derived material; keep this output in quarantine".to_string(),
+            format!("{label} len={} hex={hex}", bytes.len()),
+        ]
+    } else {
+        vec![format!("{label} len={} payload=redacted", bytes.len())]
     }
 }
 
 fn trace_connect_bytes(label: &'static str, bytes: &[u8]) {
+    let phase = connect_trace_phase(label);
+    trace_connect_event(phase, label, bytes.len(), "redacted");
     if std::env::var_os("ORACLEDB_TRACE_CONNECT").is_some() {
-        let mut hex = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
-            use std::fmt::Write as _;
-            let _ = write!(&mut hex, "{byte:02x}");
+        let raw = std::env::var("ORACLEDB_TRACE_CONNECT").is_ok_and(|value| value == "raw");
+        for line in connect_trace_bytes_lines(label, bytes, raw) {
+            eprintln!("oraclemcp_driver_cx::connect: {line}");
         }
-        eprintln!(
-            "oraclemcp_driver_cx::connect: {label} len={} hex={hex}",
-            bytes.len()
-        );
     }
 }
 
@@ -11595,13 +11832,325 @@ mod tests {
     use asupersync::types::{Budget, CancelKind, Time};
     use oracledb_protocol::thin::QueryValue;
     use std::future::{poll_fn, Future};
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::pin::pin;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
     use std::task::{Poll, Waker};
     use std::thread;
     use std::time::{Duration, Instant};
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+
+    #[derive(Clone)]
+    struct ConnectPhaseRecorder(Arc<Mutex<Vec<String>>>);
+
+    struct ConnectPhaseVisitor(Option<String>);
+
+    impl Visit for ConnectPhaseVisitor {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            if field.name() == "phase" {
+                self.0 = Some(value.to_owned());
+            }
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "phase" {
+                self.0 = Some(format!("{value:?}").trim_matches('"').to_owned());
+            }
+        }
+    }
+
+    impl<S> Layer<S> for ConnectPhaseRecorder
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _context: Context<'_, S>) {
+            if event.metadata().target() != "oracledb::connect" {
+                return;
+            }
+            let mut visitor = ConnectPhaseVisitor(None);
+            event.record(&mut visitor);
+            if let Some(phase) = visitor.0 {
+                self.0.lock().expect("phase recorder lock").push(phase);
+            }
+        }
+    }
+
+    #[test]
+    fn connect_trace_secret() {
+        const CANARY: &str = "planted-connect-secret-canary";
+        let bytes = CANARY.as_bytes();
+        let default = connect_trace_bytes_lines("AUTH phase one payload", bytes, false).join("\n");
+        assert!(!default.contains(CANARY));
+        assert!(!default.contains("706c616e746564"));
+        assert!(default.contains("payload=redacted"));
+
+        let raw = connect_trace_bytes_lines("AUTH phase one payload", bytes, true);
+        assert!(raw[0].starts_with("WARNING"));
+        assert!(raw[1].contains("hex=706c616e7465642d636f6e6e6563742d7365637265742d63616e617279"));
+
+        let token = connect_trace_bytes_lines("AUTH token payload", bytes, false).join("\n");
+        assert!(!token.contains(CANARY));
+        assert!(token.contains("payload=redacted"));
+    }
+
+    #[test]
+    fn connect_phase_tracker_never_regresses_after_redirect() {
+        let progress = AtomicU8::new(ConnectPhase::Dns as u8);
+        for phase in [
+            ConnectPhase::Wallet,
+            ConnectPhase::Tcp,
+            ConnectPhase::Tls,
+            ConnectPhase::Connect,
+            ConnectPhase::Accept,
+            ConnectPhase::Tcp,
+        ] {
+            record_connect_phase(&progress, phase);
+        }
+        assert_eq!(
+            ConnectPhase::from_u8(progress.load(Ordering::Relaxed)),
+            ConnectPhase::Accept,
+            "a redirected reconnect must retain the furthest handshake phase"
+        );
+    }
+
+    #[test]
+    fn trace_events_cover_every_post_accept_step() {
+        fn loopback_trace(classic: bool) -> Vec<String> {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+            let addr = listener.local_addr().expect("listener address");
+            let server = thread::spawn(move || -> std::io::Result<()> {
+                let (mut socket, _) = listener.accept()?;
+                socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+                let _connect = read_tns_packet_sync(&mut socket)?;
+                let accept_hex = if classic {
+                    include_str!(
+                        "../../oracledb-protocol/tests/golden/pre23ai_xe18_accept_payload.hex"
+                    )
+                } else {
+                    include_str!("../../oracledb-protocol/tests/golden/free23_accept_payload.hex")
+                };
+                send_tns_packet_sync(
+                    &mut socket,
+                    TNS_PACKET_TYPE_ACCEPT,
+                    &decode_golden_packet_hex(accept_hex),
+                )?;
+
+                if classic {
+                    for response_hex in [
+                        include_str!("../../oracledb-protocol/tests/golden/pre23ai_xe18_protocol_negotiation_response.hex"),
+                        include_str!("../../oracledb-protocol/tests/golden/pre23ai_xe18_data_types_response.hex"),
+                    ] {
+                        let _request = read_tns_packet_large_sync(&mut socket)?;
+                        let response = encode_packet(
+                            TNS_PACKET_TYPE_DATA,
+                            0,
+                            Some(oracledb_protocol::thin::TNS_DATA_FLAGS_END_OF_RESPONSE),
+                            &decode_golden_packet_hex(response_hex),
+                            PacketLengthWidth::Large32,
+                        )
+                        .expect("encode classic handshake response");
+                        socket.write_all(&response)?;
+                    }
+                }
+
+                let _auth_phase_one = read_tns_packet_large_sync(&mut socket)?;
+                let auth_one = decode_golden_packet_hex(include_str!(
+                    "../../oracledb-protocol/tests/golden/pre23ai_xe18_auth_phase_one_response.hex"
+                ));
+                let response = encode_packet(
+                    TNS_PACKET_TYPE_DATA,
+                    0,
+                    Some(oracledb_protocol::thin::TNS_DATA_FLAGS_END_OF_RESPONSE),
+                    &auth_one,
+                    PacketLengthWidth::Large32,
+                )
+                .expect("encode auth phase-one response");
+                socket.write_all(&response)?;
+                let _auth_phase_two = read_tns_packet_large_sync(&mut socket)?;
+                Ok(())
+            });
+
+            let phases = Arc::new(Mutex::new(Vec::new()));
+            let subscriber =
+                tracing_subscriber::registry().with(ConnectPhaseRecorder(Arc::clone(&phases)));
+            let options = ConnectOptions::new(
+                format!(
+                    "127.0.0.1:{}/FREEPDB1?transport_connect_timeout=2",
+                    addr.port()
+                ),
+                "synthetic-user",
+                "synthetic-password",
+                identity(),
+            );
+            let runtime = build_io_runtime().expect("Asupersync runtime");
+            let error = tracing::subscriber::with_default(subscriber, || {
+                runtime.block_on(async {
+                    let cx = Cx::current().expect("ambient Cx");
+                    Connection::connect(&cx, options).await
+                })
+            })
+            .expect_err("loopback peer closes after receiving AUTH phase two");
+            assert_eq!(error.connect_phase(), Some(ConnectPhase::AuthPhaseTwo));
+            server
+                .join()
+                .expect("loopback server joins")
+                .expect("wire exchange");
+            let recorded = phases.lock().expect("phase recorder lock").clone();
+            recorded
+        }
+
+        fn assert_ordered(phases: &[String], expected: &[&str]) {
+            let mut cursor = 0;
+            for phase in phases {
+                if *phase == expected[cursor] {
+                    cursor += 1;
+                    if cursor == expected.len() {
+                        return;
+                    }
+                }
+            }
+            panic!("structured connect phases {phases:?} did not contain {expected:?} in order");
+        }
+
+        assert_ordered(
+            &loopback_trace(false),
+            &["accept", "auth_phase_one", "auth_phase_two"],
+        );
+        assert_ordered(
+            &loopback_trace(true),
+            &[
+                "accept",
+                "negotiation",
+                "data_types",
+                "auth_phase_one",
+                "auth_phase_two",
+            ],
+        );
+    }
+
+    #[test]
+    fn connect_phase_reported_on_accept_parse_failure() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            let mut header = [0u8; 8];
+            socket.read_exact(&mut header)?;
+            let declared = usize::from(u16::from_be_bytes([header[0], header[1]]));
+            let mut payload = vec![0; declared.saturating_sub(header.len())];
+            socket.read_exact(&mut payload)?;
+            let malformed_accept = encode_packet(
+                TNS_PACKET_TYPE_ACCEPT,
+                0,
+                None,
+                b"bad",
+                PacketLengthWidth::Legacy16,
+            )
+            .expect("encode malformed ACCEPT packet");
+            socket.write_all(&malformed_accept)
+        });
+        let options = ConnectOptions::new(
+            format!("127.0.0.1:{}/FREEPDB1", addr.port()),
+            "synthetic-user",
+            "synthetic-password",
+            identity(),
+        );
+        let runtime = build_io_runtime()?;
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("ambient Cx");
+                Connection::connect(&cx, options).await
+            })
+            .expect_err("malformed ACCEPT must fail closed");
+        assert_eq!(err.connect_phase(), Some(ConnectPhase::Accept));
+        server.join().expect("listener thread joins")?;
+        Ok(())
+    }
+
+    #[test]
+    fn connect_phase_reported_on_tls_failure() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (_socket, _) = listener.accept()?;
+            Ok(())
+        });
+        let options = ConnectOptions::new(
+            format!("tcps://127.0.0.1:{}/FREEPDB1", addr.port()),
+            "synthetic-user",
+            "synthetic-password",
+            identity(),
+        );
+        let runtime = build_io_runtime()?;
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("ambient Cx");
+                Connection::connect(&cx, options).await
+            })
+            .expect_err("plain listener must fail the TCPS handshake");
+        assert_eq!(err.connect_phase(), Some(ConnectPhase::Tls));
+        server.join().expect("listener thread joins")?;
+        Ok(())
+    }
+
+    #[test]
+    fn connect_phase_reported_on_auth_phase_two_failure() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let _connect = read_tns_packet_sync(&mut socket)?;
+            let accept = decode_golden_packet_hex(include_str!(
+                "../../oracledb-protocol/tests/golden/free23_accept_payload.hex"
+            ));
+            send_tns_packet_sync(&mut socket, TNS_PACKET_TYPE_ACCEPT, &accept)?;
+            let _auth_phase_one = read_tns_packet_large_sync(&mut socket)?;
+            let auth_one = decode_golden_packet_hex(include_str!(
+                "../../oracledb-protocol/tests/golden/pre23ai_xe18_auth_phase_one_response.hex"
+            ));
+            let response = encode_packet(
+                TNS_PACKET_TYPE_DATA,
+                0,
+                Some(oracledb_protocol::thin::TNS_DATA_FLAGS_END_OF_RESPONSE),
+                &auth_one,
+                PacketLengthWidth::Large32,
+            )
+            .expect("encode fast-auth DATA response");
+            socket.write_all(&response)?;
+            let _auth_phase_two = read_tns_packet_large_sync(&mut socket)?;
+            // Drop the synthetic listener after receiving the real phase-two
+            // request so the connect path fails at that exact wire boundary.
+            Ok(())
+        });
+        let options = ConnectOptions::new(
+            format!(
+                "127.0.0.1:{}/FREEPDB1?transport_connect_timeout=2",
+                addr.port()
+            ),
+            "synthetic-user",
+            "synthetic-password",
+            identity(),
+        );
+        let runtime = build_io_runtime()?;
+        let err = runtime
+            .block_on(async {
+                let cx = Cx::current().expect("ambient Cx");
+                Connection::connect(&cx, options).await
+            })
+            .expect_err("listener drop after AUTH phase two must fail");
+        assert_eq!(
+            err.connect_phase(),
+            Some(ConnectPhase::AuthPhaseTwo),
+            "unexpected auth-phase failure: {err:?}"
+        );
+        server.join().expect("listener thread joins")?;
+        Ok(())
+    }
 
     #[test]
     fn statement_is_query_recognizes_select_after_cte_list() {
@@ -12452,6 +13001,13 @@ mod tests {
     fn identity() -> ClientIdentity {
         ClientIdentity::new("program", "machine", "osuser", "terminal", "driver")
             .expect("test identity should be valid")
+    }
+
+    fn connect_source(error: &Error) -> &Error {
+        match error {
+            Error::ConnectPhase { source, .. } => source,
+            other => panic!("connect error must retain its phase wrapper: {other:?}"),
+        }
     }
 
     pub(crate) fn loopback_connection(
@@ -14607,7 +15163,7 @@ mod tests {
             })
             .expect_err("stalling listener should hit transport connect timeout");
         assert!(
-            matches!(err, Error::CallTimeout(ms) if ms == 100),
+            matches!(connect_source(&err), Error::CallTimeout(ms) if *ms == 100),
             "expected 100ms CallTimeout, got {err:?}"
         );
         assert!(
@@ -14941,13 +15497,16 @@ mod tests {
              error={rendered}"
         );
         assert!(
-            matches!(&err, Error::Tls(detail)
+            matches!(connect_source(&err), Error::Tls(detail)
                 if detail.contains("certificate") && detail.contains("not trusted")),
             "untrusted issuer must surface as a structured TLS certificate error, not timeout or \
              failover aggregation; got {rendered}"
         );
         assert!(
-            !matches!(err, Error::CallTimeout(_) | Error::AllAddressesFailed(_)),
+            !matches!(
+                connect_source(&err),
+                Error::CallTimeout(_) | Error::AllAddressesFailed(_)
+            ),
             "untrusted issuer must not be hidden as timeout/failover aggregation: {rendered}"
         );
         let _ = server.join();
@@ -16065,6 +16624,7 @@ mod tests {
                         proxy_user: None,
                     },
                     8192,
+                    &AtomicU8::new(ConnectPhase::AuthPhaseTwo as u8),
                 )
                 .await?;
             assert!(auth.session_data.is_empty());
@@ -21902,6 +22462,20 @@ mod tests {
         Ok((header[4], header[5], payload))
     }
 
+    fn read_tns_packet_large_sync(
+        socket: &mut std::net::TcpStream,
+    ) -> std::io::Result<(u8, u8, Vec<u8>)> {
+        let mut header = [0u8; 8];
+        socket.read_exact(&mut header)?;
+        let declared = usize::try_from(u32::from_be_bytes([
+            header[0], header[1], header[2], header[3],
+        ]))
+        .unwrap_or(usize::MAX);
+        let mut payload = vec![0u8; declared.saturating_sub(header.len())];
+        socket.read_exact(&mut payload)?;
+        Ok((header[4], header[5], payload))
+    }
+
     fn send_tns_packet_sync(
         socket: &mut std::net::TcpStream,
         packet_type: u8,
@@ -22077,7 +22651,7 @@ mod tests {
             })
             .expect_err("target listener refuses; the refusal must surface");
         assert!(
-            matches!(&err, Error::ListenerRefused(msg) if msg.contains("ERR=12514")),
+            matches!(connect_source(&err), Error::ListenerRefused(msg) if msg.contains("ERR=12514")),
             "expected the TARGET listener's refusal, got {err:?}"
         );
         let (first_type, first_flags) = first.join().expect("redirect listener thread")?;
@@ -22162,7 +22736,7 @@ mod tests {
             })
             .expect_err("target listener refuses; the refusal must surface");
         assert!(
-            matches!(&err, Error::ListenerRefused(msg) if msg.contains("ERR=12514")),
+            matches!(connect_source(&err), Error::ListenerRefused(msg) if msg.contains("ERR=12514")),
             "expected the TARGET listener's refusal, got {err:?}"
         );
         first.join().expect("redirect listener thread")?;
@@ -22224,8 +22798,8 @@ mod tests {
             })
             .expect_err("a redirect loop must terminate with a structured error");
         assert!(
-            matches!(err, Error::ConnectRedirectLoop(rounds)
-                if rounds == MAX_CONNECT_REDIRECT_ROUNDS + 1),
+            matches!(connect_source(&err), Error::ConnectRedirectLoop(rounds)
+                if *rounds == MAX_CONNECT_REDIRECT_ROUNDS + 1),
             "expected ConnectRedirectLoop, got {err:?}"
         );
         assert_eq!(err.kind(), ErrorKind::Protocol);
@@ -22271,8 +22845,8 @@ mod tests {
             })
             .expect_err("a resend loop must terminate with a structured error");
         assert!(
-            matches!(err, Error::ConnectResendLoop(rounds)
-                if rounds == MAX_CONNECT_RESEND_ROUNDS + 1),
+            matches!(connect_source(&err), Error::ConnectResendLoop(rounds)
+                if *rounds == MAX_CONNECT_RESEND_ROUNDS + 1),
             "expected ConnectResendLoop, got {err:?}"
         );
         assert_eq!(err.kind(), ErrorKind::Protocol);
@@ -22309,7 +22883,7 @@ mod tests {
             })
             .expect_err("every address refuses; the aggregate must surface");
         assert!(
-            matches!(&err, Error::AllAddressesFailed(detail) if detail.contains("tried 2 address(es)")
+            matches!(connect_source(&err), Error::AllAddressesFailed(detail) if detail.contains("tried 2 address(es)")
                 && detail.contains(host_a) && detail.contains(host_b)),
             "expected AllAddressesFailed naming both addresses, got {err:?}"
         );
@@ -22346,7 +22920,7 @@ mod tests {
             })
             .expect_err("the invalid client key must fail TLS preparation");
         assert!(
-            matches!(&error, Error::Tls(detail) if detail.contains("private key")),
+            matches!(connect_source(&error), Error::Tls(detail) if detail.contains("private key")),
             "the original typed TLS configuration error must surface, got {error:?}"
         );
 

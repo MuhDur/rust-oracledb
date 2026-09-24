@@ -151,3 +151,48 @@ fn live_endpoint_and_db_unique_name_accessors() {
             .expect("Rust thin logoff should round-trip");
     });
 }
+
+/// Bead .13.4: the live free23 listener rejects an intentionally wrong
+/// password after the real TNS/TTC exchange, and the returned error identifies
+/// an AUTH phase. Run only with the lab lane credentials configured.
+#[test]
+#[ignore = "requires the live FREE23 lane and PYO_TEST_MAIN_PASSWORD"]
+fn live_wrong_password_reports_auth_connect_phase() {
+    use oracledb::ConnectPhase;
+
+    let reactor = reactor::create_reactor().expect("native reactor should build for live I/O");
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .expect("current-thread Asupersync runtime should build");
+
+    runtime.block_on(async {
+        let cx = Cx::current().expect("Runtime::block_on should install an ambient Cx");
+        let password = std::env::var("PYO_TEST_MAIN_PASSWORD")
+            .expect("PYO_TEST_MAIN_PASSWORD must be set for the ignored live test");
+        let identity = ClientIdentity::new(
+            "rust-oracledb",
+            "rusthost",
+            "rustuser",
+            "rustterm",
+            "rust-oracledb thn : 0.0.0",
+        )
+        .expect("test identity should be valid");
+        let options = ConnectOptions::new(
+            common::live_conn_string_or(common::FREE23_CONNECT_STRING),
+            common::live_user_or(common::FREE23_USER),
+            format!("{password}-intentionally-wrong"),
+            identity,
+        );
+        let err = Connection::connect(&cx, options)
+            .await
+            .expect_err("FREE23 must reject the intentionally wrong password");
+        assert!(
+            matches!(
+                err.connect_phase(),
+                Some(ConnectPhase::AuthPhaseOne | ConnectPhase::AuthPhaseTwo)
+            ),
+            "wrong-password refusal must identify an AUTH phase"
+        );
+    });
+}

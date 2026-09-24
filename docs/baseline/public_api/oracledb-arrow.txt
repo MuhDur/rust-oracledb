@@ -663,6 +663,29 @@ pub fn oraclemcp_driver_cx::BindError::fmt(&self, &mut core::fmt::Formatter<'_>)
 impl core::fmt::Display for oraclemcp_driver_cx::BindError
 pub fn oraclemcp_driver_cx::BindError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oraclemcp_driver_cx::BindError
+#[non_exhaustive] #[repr(u8)] pub enum oraclemcp_driver_cx::ConnectPhase
+pub oraclemcp_driver_cx::ConnectPhase::Accept
+pub oraclemcp_driver_cx::ConnectPhase::AuthPhaseOne
+pub oraclemcp_driver_cx::ConnectPhase::AuthPhaseTwo
+pub oraclemcp_driver_cx::ConnectPhase::Connect
+pub oraclemcp_driver_cx::ConnectPhase::DataTypes
+pub oraclemcp_driver_cx::ConnectPhase::Dns = 0
+pub oraclemcp_driver_cx::ConnectPhase::Negotiation
+pub oraclemcp_driver_cx::ConnectPhase::Session
+pub oraclemcp_driver_cx::ConnectPhase::Tcp
+pub oraclemcp_driver_cx::ConnectPhase::Tls
+pub oraclemcp_driver_cx::ConnectPhase::Wallet
+impl core::clone::Clone for oraclemcp_driver_cx::ConnectPhase
+pub fn oraclemcp_driver_cx::ConnectPhase::clone(&self) -> oraclemcp_driver_cx::ConnectPhase
+impl core::cmp::Eq for oraclemcp_driver_cx::ConnectPhase
+impl core::cmp::PartialEq for oraclemcp_driver_cx::ConnectPhase
+pub fn oraclemcp_driver_cx::ConnectPhase::eq(&self, &oraclemcp_driver_cx::ConnectPhase) -> bool
+impl core::fmt::Debug for oraclemcp_driver_cx::ConnectPhase
+pub fn oraclemcp_driver_cx::ConnectPhase::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_driver_cx::ConnectPhase
+pub fn oraclemcp_driver_cx::ConnectPhase::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for oraclemcp_driver_cx::ConnectPhase
+impl core::marker::StructuralPartialEq for oraclemcp_driver_cx::ConnectPhase
 pub enum oraclemcp_driver_cx::ConnectionDisposition
 pub oraclemcp_driver_cx::ConnectionDisposition::Dead
 pub oraclemcp_driver_cx::ConnectionDisposition::Reusable
@@ -705,6 +728,9 @@ pub oraclemcp_driver_cx::Error::ArrowConversion(oraclemcp_driver_cx::arrow::Arro
 pub oraclemcp_driver_cx::Error::Bind(oraclemcp_driver_cx::BindError)
 pub oraclemcp_driver_cx::Error::CallTimeout(u32)
 pub oraclemcp_driver_cx::Error::Cancelled
+pub oraclemcp_driver_cx::Error::ConnectPhase
+pub oraclemcp_driver_cx::Error::ConnectPhase::phase: oraclemcp_driver_cx::ConnectPhase
+pub oraclemcp_driver_cx::Error::ConnectPhase::source: alloc::boxed::Box<oraclemcp_driver_cx::Error>
 pub oraclemcp_driver_cx::Error::ConnectRedirectLoop(u8)
 pub oraclemcp_driver_cx::Error::ConnectResendLoop(u8)
 pub oraclemcp_driver_cx::Error::ConnectionClosed(alloc::string::String)
@@ -730,6 +756,7 @@ pub oraclemcp_driver_cx::Error::UnsupportedSni(alloc::string::String)
 pub oraclemcp_driver_cx::Error::Wallet(oraclemcp_driver_cx_protocol::tls::wallet::WalletError)
 impl oraclemcp_driver_cx::Error
 pub fn oraclemcp_driver_cx::Error::caret(&self, &str) -> core::option::Option<alloc::string::String>
+pub fn oraclemcp_driver_cx::Error::connect_phase(&self) -> core::option::Option<oraclemcp_driver_cx::ConnectPhase>
 pub fn oraclemcp_driver_cx::Error::connection_disposition(&self) -> oraclemcp_driver_cx::ConnectionDisposition
 pub fn oraclemcp_driver_cx::Error::is_connection_lost(&self) -> bool
 pub fn oraclemcp_driver_cx::Error::is_retryable(&self) -> bool

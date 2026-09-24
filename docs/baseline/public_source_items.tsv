@@ -65,7 +65,7 @@ oracledb	crates/oracledb/src/lib.rs	pub async fn cancel(&mut self, cx: &Cx) -> R
 oracledb	crates/oracledb/src/lib.rs	pub async fn change_password(
 oracledb	crates/oracledb/src/lib.rs	pub async fn close(mut self, cx: &Cx) -> Result<()> {
 oracledb	crates/oracledb/src/lib.rs	pub async fn commit(&mut self, cx: &Cx) -> Result<()> {
-oracledb	crates/oracledb/src/lib.rs	pub async fn connect(cx: &Cx, mut options: ConnectOptions) -> Result<Self> {
+oracledb	crates/oracledb/src/lib.rs	pub async fn connect(cx: &Cx, options: ConnectOptions) -> Result<Self> {
 oracledb	crates/oracledb/src/lib.rs	pub async fn create_temp_lob(
 oracledb	crates/oracledb/src/lib.rs	pub async fn define_and_fetch_rows_with_columns(
 oracledb	crates/oracledb/src/lib.rs	pub async fn describe_object_type(
@@ -125,6 +125,7 @@ oracledb	crates/oracledb/src/lib.rs	pub const VERSION: &str = env!("CARGO_PKG_VE
 oracledb	crates/oracledb/src/lib.rs	pub enum AuthMode {
 oracledb	crates/oracledb/src/lib.rs	pub enum AuthModeKind {
 oracledb	crates/oracledb/src/lib.rs	pub enum AuthModeSupport {
+oracledb	crates/oracledb/src/lib.rs	pub enum ConnectPhase {
 oracledb	crates/oracledb/src/lib.rs	pub enum ConnectionDisposition {
 oracledb	crates/oracledb/src/lib.rs	pub enum Error {
 oracledb	crates/oracledb/src/lib.rs	pub enum ErrorKind {
@@ -159,6 +160,7 @@ oracledb	crates/oracledb/src/lib.rs	pub fn collection(
 oracledb	crates/oracledb/src/lib.rs	pub fn commit() -> Self {
 oracledb	crates/oracledb/src/lib.rs	pub fn commit(connection: &mut Connection) -> Result<()> {
 oracledb	crates/oracledb/src/lib.rs	pub fn connect(options: ConnectOptions) -> Result<Connection> {
+oracledb	crates/oracledb/src/lib.rs	pub fn connect_phase(&self) -> Option<ConnectPhase> {
 oracledb	crates/oracledb/src/lib.rs	pub fn connect_string(&self) -> &str {
 oracledb	crates/oracledb/src/lib.rs	pub fn connection_disposition(&self) -> ConnectionDisposition {
 oracledb	crates/oracledb/src/lib.rs	pub fn create_temp_lob(

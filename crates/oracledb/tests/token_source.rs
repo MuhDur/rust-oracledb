@@ -25,7 +25,8 @@ extern crate oraclemcp_driver_cx as oracledb;
 
 use oracledb::protocol::ClientIdentity;
 use oracledb::{
-    BlockingConnection, BoxFuture, ConnectOptions, Error, TokenSource, TokenSourceError,
+    BlockingConnection, BoxFuture, ConnectOptions, ConnectPhase, Error, TokenSource,
+    TokenSourceError,
 };
 
 /// A secret-shaped token value used to prove it never leaks through any error.
@@ -78,6 +79,13 @@ fn identity() -> ClientIdentity {
         .expect("test identity should be valid")
 }
 
+fn connect_source(error: &Error) -> &Error {
+    match error {
+        Error::ConnectPhase { source, .. } => source,
+        other => panic!("connect error must retain its phase wrapper: {other:?}"),
+    }
+}
+
 #[test]
 fn token_source_error_is_fully_redacted() {
     for variant in [
@@ -119,8 +127,9 @@ fn token_source_over_plaintext_is_refused_before_fetch() {
     )
     .expect_err("a token source over plaintext must be refused");
 
+    assert_eq!(err.connect_phase(), Some(ConnectPhase::AuthPhaseOne));
     assert!(
-        matches!(err, Error::AccessTokenRequiresTcps),
+        matches!(connect_source(&err), Error::AccessTokenRequiresTcps),
         "expected AccessTokenRequiresTcps, got: {err:?}"
     );
     assert_eq!(
@@ -149,8 +158,12 @@ fn token_source_failure_over_tcps_maps_to_redacted_error_before_dial() {
     )
     .expect_err("a failing token source must fail the connect");
 
+    assert_eq!(err.connect_phase(), Some(ConnectPhase::AuthPhaseOne));
     assert!(
-        matches!(err, Error::TokenSource(TokenSourceError::Exec)),
+        matches!(
+            connect_source(&err),
+            Error::TokenSource(TokenSourceError::Exec)
+        ),
         "expected Error::TokenSource(Exec), got: {err:?}"
     );
     assert_eq!(
@@ -214,8 +227,9 @@ fn token_source_and_key_refreshes_without_static_token_fallback() {
     for attempt in 1..=2 {
         let err = BlockingConnection::connect(options.clone())
             .expect_err("the test endpoint must not establish a TCPS session");
+        assert_eq!(err.connect_phase(), Some(ConnectPhase::Tcp));
         assert!(
-            matches!(err, Error::AllAddressesFailed(_)),
+            matches!(connect_source(&err), Error::AllAddressesFailed(_)),
             "expected the unopened endpoint's aggregate network failure, got: {err:?}"
         );
         assert_eq!(

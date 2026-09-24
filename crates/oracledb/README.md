@@ -33,7 +33,8 @@ running python-oracledb's **own** thin-mode test suite against the Rust engine.
 - **Typed rows** — `#[derive(FromRow)]` with compile-checked field types.
 - **Structured errors and binds** — `Error::ora_code()` / `is_retryable()`,
   `FromSql` / `ToSql`, the `params!` macro, and compiler-style caret diagnostics
-  for parse errors (`Error::caret`).
+  for parse errors (`Error::caret`). Connect errors also expose their furthest
+  handshake phase through `Error::connect_phase()`.
 - **Beyond basic queries** — REF CURSOR / implicit result sets
   (`fetch_cursor`), structured ADT object & collection decode
   (`describe_object_type` / `decode_object`), `DBMS_OUTPUT` capture
@@ -106,11 +107,24 @@ visible runtime. The async API is identical minus the blocking wrapper.
 | `arrow` | no | Apache Arrow row ingest |
 | `chrono` / `uuid` / `serde_json` / `rust_decimal` | no | typed `FromSql` / `ToSql` bridges |
 | `soda` | no | experimental thin-mode SODA |
-| `tracing` | no | OpenTelemetry-style spans (zero-cost when off) |
+| `tracing` | no | OpenTelemetry-style operation spans; safe connect phase events are always available to tracing subscribers |
 | `cassette` | no | `.tns-cassette` record / replay transport seam |
 | `experimental` | no | legacy compatibility no-op; wallet readers are always available |
 
 ## Documentation and source
+
+### Connect tracing
+
+Connect attempts emit structured `oracledb::connect` tracing events to installed
+subscribers. Set `ORACLEDB_TRACE_CONNECT=1` to also write a redacted stderr
+mirror through session establishment. Events carry the phase, step, message
+type, payload length, and protocol flags. Descriptor, identity, server text, and
+payload bytes are omitted. Every error returned by `Connection::connect` carries
+its furthest phase; inspect it with `error.connect_phase()`.
+
+`ORACLEDB_TRACE_CONNECT=raw` additionally hex-dumps AUTH payloads and responses
+after printing a warning that the trace contains credential-derived material.
+Keep raw output in gitignored quarantine and do not share it.
 
 Full documentation, the parity methodology, performance numbers, deployment
 guide, and the safety audit live in the repository:

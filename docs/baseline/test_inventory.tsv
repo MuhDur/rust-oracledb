@@ -59,7 +59,7 @@ crates/oracledb/src/arrow/ipc.rs	1
 crates/oracledb/src/arrow/mod.rs	40
 crates/oracledb/src/cursor_logic.rs	14
 crates/oracledb/src/iam_pop.rs	3
-crates/oracledb/src/lib.rs	159
+crates/oracledb/src/lib.rs	165
 crates/oracledb/src/lob_stream.rs	8
 crates/oracledb/src/obs.rs	6
 crates/oracledb/src/pool.rs	35
@@ -95,7 +95,7 @@ crates/oracledb/tests/from_row_derive.rs	10
 crates/oracledb/tests/integration_arrow.rs	3
 crates/oracledb/tests/integration_library.rs	13
 crates/oracledb/tests/live_borrowed_fetch.rs	2
-crates/oracledb/tests/live_connect.rs	2
+crates/oracledb/tests/live_connect.rs	3
 crates/oracledb/tests/live_connect_string.rs	1
 crates/oracledb/tests/live_dbms_output.rs	3
 crates/oracledb/tests/live_dpl_arrow.rs	1

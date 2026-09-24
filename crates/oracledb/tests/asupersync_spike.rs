@@ -18,10 +18,15 @@ fn connect_seam_is_cx_first_and_cancel_checkpointed() {
         Connection::connect(&cx, options).await
     });
 
+    let err = result.expect_err("the empty connect descriptor must be refused");
+    assert_eq!(err.connect_phase(), Some(oracledb::ConnectPhase::Dns));
+    let Error::ConnectPhase { source, .. } = err else {
+        panic!("connect errors must retain their phase wrapper");
+    };
     assert!(matches!(
-        result,
-        Err(Error::Protocol(
-            oracledb_protocol::ProtocolError::InvalidConnectDescriptor(_)
+        *source,
+        Error::Protocol(oracledb_protocol::ProtocolError::InvalidConnectDescriptor(
+            _
         ))
     ));
 }

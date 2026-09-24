@@ -8,7 +8,7 @@ oraclemcp-driver-cx	experimental	oracledb-protocol/experimental
 oraclemcp-driver-cx	rust_decimal	dep:rust_decimal
 oraclemcp-driver-cx	serde_json	dep:serde_json
 oraclemcp-driver-cx	soda	dep:serde_json
-oraclemcp-driver-cx	tracing	dep:tracing
+oraclemcp-driver-cx	tracing	-
 oraclemcp-driver-cx	uuid	dep:uuid
 oraclemcp-driver-cx-protocol	cassette	-
 oraclemcp-driver-cx-protocol	default	-

@@ -3,34 +3,28 @@
 //!
 //! Two properties, proven against a live listener:
 //!
-//!   1. The trace actually emits protocol steps. The field-triage complaint was
-//!      *zero* protocol detail, because the trace is gated on
-//!      `ORACLEDB_TRACE_CONNECT`, not `RUST_LOG`. This test asserts the
-//!      milestones (and a hex-dumped packet) are present when the env var is on.
-//!   2. The account password never appears in the trace — neither as ASCII nor
-//!      as its hex form — so an operator can safely share a captured handshake.
-//!      The password is O5LOGON-encrypted (`generate_verifier`) before it ever
-//!      reaches a traced payload, so the plaintext is structurally absent; this
-//!      pins that invariant against a future edit. (The token-auth path can't be
-//!      live-tested without a token source; it is covered deterministically by
-//!      `scripts/check_trace_secret_exclusion.sh`.)
+//!   1. Structured connect milestones are emitted under
+//!      `ORACLEDB_TRACE_CONNECT=1`, independent of `RUST_LOG`.
+//!   2. Default traces omit all payload bytes, so password, user, and token
+//!      material cannot be recovered from an AUTH hex dump.
 //!
 //! Test shape: the parent re-execs the test binary as a child with
 //! `ORACLEDB_TRACE_CONNECT=1`, the child performs a real connect (the handshake
 //! trace goes to its stderr), and the parent captures that stderr and inspects
 //! it. This avoids any unsafe fd redirection (the crate is `forbid(unsafe)`).
 //!
-//! Live-gated (`#[ignore]`). Run against a lane whose password DIFFERS from the
-//! username (else `AUTH_USER` in the trace trivially violates "password
-//! absent"). The xe18 lane fits (`testuser` / `testpw`):
+//! Live-gated (`#[ignore]`). Defaults to the local FREE23 lane; environment
+//! overrides can target another configured lab lane:
 //!
 //! ```text
-//! PYO_TEST_CONNECT_STRING=localhost:1518/XEPDB1 \
-//! PYO_TEST_MAIN_USER=testuser PYO_TEST_MAIN_PASSWORD=testpw \
+//! PYO_TEST_CONNECT_STRING=localhost:1522/FREEPDB1 \
+//! PYO_TEST_MAIN_USER=pythontest PYO_TEST_MAIN_PASSWORD=pythontest \
 //!   cargo test -p oracledb --test connect_trace_secret -- --ignored --nocapture
 //! ```
 
 extern crate oraclemcp_driver_cx as oracledb;
+
+mod common;
 
 use std::process::Command;
 
@@ -47,14 +41,8 @@ fn password_absent_from_connect_trace() {
         return;
     }
 
-    let password = std::env::var("PYO_TEST_MAIN_PASSWORD")
-        .expect("PYO_TEST_MAIN_PASSWORD must be set for this ignored live test");
-    let user = std::env::var("PYO_TEST_MAIN_USER").unwrap_or_else(|_| "testuser".to_string());
-    assert_ne!(
-        password, user,
-        "pick a lane whose password differs from the username, otherwise 'password absent' \
-         is trivially violated by AUTH_USER appearing in the trace"
-    );
+    let password = common::live_password_or(common::FREE23_PASSWORD);
+    let user = common::live_user_or(common::FREE23_USER);
 
     let exe = std::env::current_exe().expect("current test executable path");
     let output = Command::new(exe)
@@ -80,38 +68,51 @@ fn password_absent_from_connect_trace() {
     // (i) The trace WORKS: protocol milestones are present (the field complaint
     //     was that RUST_LOG=trace produced none of these).
     for needle in [
-        "oraclemcp_driver_cx::connect: tcp connect",
-        "oraclemcp_driver_cx::connect: send CONNECT",
-        "oraclemcp_driver_cx::connect: read ACCEPT",
-        "oraclemcp_driver_cx::connect: ACCEPT", // negotiated-capabilities line (fast-auth visible)
-        "oraclemcp_driver_cx::connect: send AUTH phase one",
-        "oraclemcp_driver_cx::connect: session established",
+        "step=tcp connect",
+        "step=send CONNECT",
+        "step=read ACCEPT",
+        "step=ACCEPT capabilities",
+        "step=send AUTH phase one",
+        "step=session established",
     ] {
         assert!(
             stderr.contains(needle),
             "expected handshake milestone `{needle}` in the trace; got:\n{stderr}"
         );
     }
-    // A hex-dumped packet must be present (packet-level, PYO_DEBUG_PACKETS parity).
+    let ordered_phases = [
+        "phase=dns",
+        "phase=tcp",
+        "phase=connect",
+        "phase=accept",
+        "phase=auth_phase_one",
+        "phase=auth_phase_two",
+        "phase=session",
+    ];
+    let mut previous = None;
+    for phase in ordered_phases {
+        let position = stderr
+            .find(phase)
+            .unwrap_or_else(|| panic!("missing structured phase `{phase}` in trace:\n{stderr}"));
+        assert!(
+            previous.is_none_or(|prior| prior < position),
+            "connect phases were out of order: {stderr}"
+        );
+        previous = Some(position);
+    }
     assert!(
-        stderr.contains(" hex="),
-        "expected at least one hex-dumped packet in the trace:\n{stderr}"
+        !stderr.contains(" hex="),
+        "default trace must omit payload hex"
     );
 
-    // (ii) The password is ABSENT — neither its ASCII form nor its hex encoding
-    //      appears anywhere in the captured trace.
+    // (ii) The configured password is absent from the default trace.
     assert!(
         !stderr.contains(password.as_str()),
         "SECURITY REGRESSION: plaintext password leaked into the connect trace"
     );
-    let password_hex: String = password
-        .as_bytes()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
     assert!(
-        !stderr.to_ascii_lowercase().contains(&password_hex),
-        "SECURITY REGRESSION: password bytes (hex {password_hex}) leaked into the trace hex dump"
+        !stderr.contains(user.as_str()),
+        "SECURITY REGRESSION: username leaked into the connect trace"
     );
 }
 
@@ -142,11 +143,9 @@ fn run_child_connect() {
         )
         .expect("test identity should be valid");
         let options = ConnectOptions::new(
-            std::env::var("PYO_TEST_CONNECT_STRING")
-                .unwrap_or_else(|_| "localhost:1518/XEPDB1".to_string()),
-            std::env::var("PYO_TEST_MAIN_USER").unwrap_or_else(|_| "testuser".to_string()),
-            std::env::var("PYO_TEST_MAIN_PASSWORD")
-                .expect("PYO_TEST_MAIN_PASSWORD must be set for the child connect"),
+            common::live_conn_string_or(common::FREE23_CONNECT_STRING),
+            common::live_user_or(common::FREE23_USER),
+            common::live_password_or(common::FREE23_PASSWORD),
             identity,
         );
         let conn = Connection::connect(&cx, options)

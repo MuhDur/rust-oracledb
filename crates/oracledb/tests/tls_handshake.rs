@@ -1525,8 +1525,15 @@ fn c3_mock_iam_token_over_plaintext_refused_before_io() {
     )
     .expect_err("token auth over a plaintext descriptor must be refused");
 
+    assert_eq!(
+        err.connect_phase(),
+        Some(oracledb::ConnectPhase::AuthPhaseOne)
+    );
     assert!(
-        matches!(err, Error::AccessTokenRequiresTcps),
+        matches!(
+            &err,
+            Error::ConnectPhase { source, .. } if matches!(source.as_ref(), Error::AccessTokenRequiresTcps)
+        ),
         "expected AccessTokenRequiresTcps, got: {err:?}"
     );
     assert!(
