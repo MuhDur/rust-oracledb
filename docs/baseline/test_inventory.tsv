@@ -30,7 +30,7 @@ crates/oracledb-protocol/src/tls/dn.rs	15
 crates/oracledb-protocol/src/tls/pfx.rs	2
 crates/oracledb-protocol/src/tls/sni.rs	6
 crates/oracledb-protocol/src/tls/sso.rs	4
-crates/oracledb-protocol/src/tls/wallet.rs	12
+crates/oracledb-protocol/src/tls/wallet.rs	17
 crates/oracledb-protocol/src/vector.rs	16
 crates/oracledb-protocol/src/wire.rs	18
 crates/oracledb-protocol/tests/_numi128_decode_allocs.rs	0

@@ -707,9 +707,14 @@ mod tests {
         ] {
             let path = dir.path().join(name);
             std::fs::write(&path, contents).expect("write regular wallet");
+            let started = std::time::Instant::now();
             assert_eq!(
                 read_wallet_file(&path).expect("read regular wallet"),
                 contents
+            );
+            println!(
+                "{{\"case_id\":\"read_wallet_file_reads_regular_file_unchanged\",\"wallet_file\":\"{name}\",\"file_kind\":\"regular\",\"expected\":\"unchanged bytes\",\"actual\":\"unchanged bytes\",\"elapsed_ms\":{}}}",
+                started.elapsed().as_millis()
             );
         }
     }
@@ -719,10 +724,16 @@ mod tests {
         let dir = tempfile::tempdir().expect("temporary wallet directory");
         let path = dir.path().join(PEM_WALLET_FILE_NAME);
         std::fs::create_dir(&path).expect("create directory wallet impostor");
+        let started = std::time::Instant::now();
         assert!(matches!(
             read_wallet_file(&path),
             Err(WalletError::NotRegularFile { .. })
         ));
+        println!(
+            "{{\"case_id\":\"read_wallet_file_refuses_directory_at_wallet_name\",\"wallet_file\":\"{}\",\"file_kind\":\"directory\",\"expected\":\"refused\",\"actual\":\"NotRegularFile\",\"elapsed_ms\":{}}}",
+            PEM_WALLET_FILE_NAME,
+            started.elapsed().as_millis()
+        );
     }
 
     #[cfg(unix)]
@@ -735,10 +746,16 @@ mod tests {
         let link = dir.path().join(PEM_WALLET_FILE_NAME);
         std::fs::write(&target, b"regular target").expect("write symlink target");
         symlink(&target, &link).expect("create wallet symlink");
+        let started = std::time::Instant::now();
         assert!(matches!(
             read_wallet_file(&link),
             Err(WalletError::NotRegularFile { .. })
         ));
+        println!(
+            "{{\"case_id\":\"read_wallet_file_refuses_symlink_to_regular_wallet\",\"wallet_file\":\"{}\",\"file_kind\":\"symlink\",\"expected\":\"refused\",\"actual\":\"NotRegularFile\",\"elapsed_ms\":{}}}",
+            PEM_WALLET_FILE_NAME,
+            started.elapsed().as_millis()
+        );
     }
 
     #[cfg(unix)]
@@ -749,10 +766,15 @@ mod tests {
             path.exists(),
             "/dev/zero must be present on Unix test hosts"
         );
+        let started = std::time::Instant::now();
         assert!(matches!(
             read_wallet_file(path),
             Err(WalletError::NotRegularFile { .. })
         ));
+        println!(
+            "{{\"case_id\":\"read_wallet_file_refuses_char_device\",\"wallet_file\":\"/dev/zero\",\"file_kind\":\"character_device\",\"expected\":\"refused\",\"actual\":\"NotRegularFile\",\"elapsed_ms\":{}}}",
+            started.elapsed().as_millis()
+        );
     }
 
     #[cfg(unix)]
@@ -775,6 +797,7 @@ mod tests {
                 .expect("run mkfifo for wallet FIFO");
             assert!(status.success(), "mkfifo must create {name}");
 
+            let started = std::time::Instant::now();
             let (sender, receiver) = mpsc::sync_channel(1);
             let read_path = path.clone();
             let reader = std::thread::spawn(move || {
@@ -804,6 +827,10 @@ mod tests {
             assert!(
                 matches!(result, Err(WalletError::NotRegularFile { .. })),
                 "{name}: got {result:?}"
+            );
+            println!(
+                "{{\"case_id\":\"read_wallet_file_refuses_fifo_without_blocking\",\"wallet_file\":\"{name}\",\"file_kind\":\"fifo\",\"expected\":\"refused\",\"actual\":\"NotRegularFile\",\"elapsed_ms\":{}}}",
+                started.elapsed().as_millis()
             );
         }
     }

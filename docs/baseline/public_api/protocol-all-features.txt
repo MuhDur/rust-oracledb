@@ -1629,6 +1629,8 @@ pub oraclemcp_driver_cx_protocol::tls::wallet::WalletError::Io::path: alloc::str
 pub oraclemcp_driver_cx_protocol::tls::wallet::WalletError::Io::source: std::io::error::Error
 pub oraclemcp_driver_cx_protocol::tls::wallet::WalletError::KeyDecrypt(alloc::string::String)
 pub oraclemcp_driver_cx_protocol::tls::wallet::WalletError::NoCertificates
+pub oraclemcp_driver_cx_protocol::tls::wallet::WalletError::NotRegularFile
+pub oraclemcp_driver_cx_protocol::tls::wallet::WalletError::NotRegularFile::path: alloc::string::String
 pub oraclemcp_driver_cx_protocol::tls::wallet::WalletError::PasswordRequired
 pub oraclemcp_driver_cx_protocol::tls::wallet::WalletError::PasswordRequired::format: &'static str
 pub oraclemcp_driver_cx_protocol::tls::wallet::WalletError::Pem(alloc::string::String)
