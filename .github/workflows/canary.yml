@@ -1,3 +1,4 @@
+# tier: B
 name: Canary
 
 on:
@@ -24,6 +25,8 @@ jobs:
     with:
       profile: canary
       budget: canary
+      # Canary evidence must stay gate-strict: every invoked check must pass.
+      mode: strict
       force_failure: ${{ github.event_name == 'workflow_dispatch' && inputs.force_failure || false }}
 
   report-canary-failure:

@@ -1,3 +1,4 @@
+# tier: C
 name: Release
 
 # Tag-driven full release, modelled on oraclemcp's proven pipeline. A pushed

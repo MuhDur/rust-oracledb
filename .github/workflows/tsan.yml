@@ -1,3 +1,4 @@
+# tier: B
 name: TSan cancel-safety
 
 # ThreadSanitizer campaign over the async cancel / concurrency paths (K10 and the

@@ -1,3 +1,4 @@
+# tier: A/B (reusable quality checks; each caller supplies the active profile)
 name: Reusable Quality
 
 # The original serial quality check name remains on a final compatibility job,

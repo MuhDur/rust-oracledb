@@ -1,3 +1,4 @@
+# tier: B
 name: Version matrix (live, multi-generation)
 
 # Standing multi-version live gate (bead rust-oracledb-pre23ai-connect-z47u.5):

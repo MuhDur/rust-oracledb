@@ -1,3 +1,4 @@
+# tier: B
 name: Live (database) tests
 
 # The driver's live tests are #[ignore] (they require an Oracle listener), so the
