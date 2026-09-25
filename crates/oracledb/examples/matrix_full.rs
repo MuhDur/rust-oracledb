@@ -1738,25 +1738,41 @@ fn run_expect_version_refusal(connect_string: &str, user: &str, password: &str) 
             let _ = BlockingConnection::close(conn);
             Err("connect unexpectedly SUCCEEDED against a below-floor server".into())
         }
+        Err(oracledb::Error::ConnectPhase {
+            phase: oracledb::ConnectPhase::Accept,
+            source,
+        }) => match *source {
+            oracledb::Error::Protocol(ProtocolError::UnsupportedVersion { version, minimum }) => {
+                verify_version_refusal(version, minimum)
+            }
+            other => Err(format!(
+                "expected the structured UnsupportedVersion refusal during ACCEPT, got: {other}"
+            )
+            .into()),
+        },
         Err(oracledb::Error::Protocol(ProtocolError::UnsupportedVersion { version, minimum })) => {
-            ensure!(
-                minimum == TNS_VERSION_MIN_ACCEPTED,
-                "refusal must name the floor {TNS_VERSION_MIN_ACCEPTED}, named {minimum}"
-            );
-            ensure!(
-                version < minimum,
-                "refused version {version} must be below the floor {minimum}"
-            );
-            eprintln!(
-                "[matrix-full] structured refusal verified: server protocol version {version} \
-                 refused against floor {minimum} (reference parity: DPY-3010)"
-            );
-            Ok(())
+            verify_version_refusal(version, minimum)
         }
         Err(other) => {
             Err(format!("expected the structured UnsupportedVersion refusal, got: {other}").into())
         }
     }
+}
+
+fn verify_version_refusal(version: u16, minimum: u16) -> Suite {
+    ensure!(
+        minimum == TNS_VERSION_MIN_ACCEPTED,
+        "refusal must name the floor {TNS_VERSION_MIN_ACCEPTED}, named {minimum}"
+    );
+    ensure!(
+        version < minimum,
+        "refused version {version} must be below the floor {minimum}"
+    );
+    eprintln!(
+        "[matrix-full] structured refusal verified: server protocol version {version} \
+         refused against floor {minimum} (reference parity: DPY-3010)"
+    );
+    Ok(())
 }
 
 fn main() -> ExitCode {
