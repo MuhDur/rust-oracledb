@@ -96,6 +96,13 @@ fn f1_dsn_connect_timeout_bounds_a_black_hole_dial() {
             detail.contains("timeout"),
             "aggregated failure should name the timeout, got {detail:?}"
         ),
+        Error::ConnectPhase {
+            phase: oracledb::ConnectPhase::Tcp,
+            source,
+        } => match *source {
+            Error::CallTimeout(_) | Error::Io(_) => {}
+            other => panic!("expected a bounded TCP timeout-class cause, got {other:?}"),
+        },
         Error::CallTimeout(_) | Error::Io(_) => {}
         other => panic!("expected a bounded timeout-class error, got {other:?}"),
     }
