@@ -180,6 +180,7 @@ pub fn oraclemcp_driver_cx::BlockingConnection::aq_enq_many(&mut oraclemcp_drive
 pub fn oraclemcp_driver_cx::BlockingConnection::aq_enq_one(&mut oraclemcp_driver_cx::Connection, &oraclemcp_driver_cx_protocol::thin::aq::AqQueueDesc, &oraclemcp_driver_cx_protocol::thin::aq::AqMsgProps, &oraclemcp_driver_cx_protocol::thin::aq::AqEnqOptions) -> oraclemcp_driver_cx::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn oraclemcp_driver_cx::BlockingConnection::begin_sessionless_transaction(&mut oraclemcp_driver_cx::Connection, &[u8], u32, bool) -> oraclemcp_driver_cx::Result<()>
 pub fn oraclemcp_driver_cx::BlockingConnection::cancel(&mut oraclemcp_driver_cx::Connection) -> oraclemcp_driver_cx::Result<()>
+pub fn oraclemcp_driver_cx::BlockingConnection::cancel_and_close(oraclemcp_driver_cx::Connection) -> oraclemcp_driver_cx::Result<()>
 pub fn oraclemcp_driver_cx::BlockingConnection::change_password(&mut oraclemcp_driver_cx::Connection, &str, &str) -> oraclemcp_driver_cx::Result<()>
 pub fn oraclemcp_driver_cx::BlockingConnection::close(oraclemcp_driver_cx::Connection) -> oraclemcp_driver_cx::Result<()>
 pub fn oraclemcp_driver_cx::BlockingConnection::commit(&mut oraclemcp_driver_cx::Connection) -> oraclemcp_driver_cx::Result<()>
@@ -296,6 +297,7 @@ pub async fn oraclemcp_driver_cx::Connection::aq_enq_many(&mut self, &asupersync
 pub async fn oraclemcp_driver_cx::Connection::aq_enq_one(&mut self, &asupersync::cx::cx::Cx, &oraclemcp_driver_cx_protocol::thin::aq::AqQueueDesc, &oraclemcp_driver_cx_protocol::thin::aq::AqMsgProps, &oraclemcp_driver_cx_protocol::thin::aq::AqEnqOptions) -> oraclemcp_driver_cx::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub async fn oraclemcp_driver_cx::Connection::begin_sessionless_transaction(&mut self, &asupersync::cx::cx::Cx, &[u8], u32, bool) -> oraclemcp_driver_cx::Result<()>
 pub async fn oraclemcp_driver_cx::Connection::cancel(&mut self, &asupersync::cx::cx::Cx) -> oraclemcp_driver_cx::Result<()>
+pub async fn oraclemcp_driver_cx::Connection::cancel_and_close(self, &asupersync::cx::cx::Cx) -> oraclemcp_driver_cx::Result<()>
 pub fn oraclemcp_driver_cx::Connection::cancel_handle(&self) -> oraclemcp_driver_cx::Result<oraclemcp_driver_cx::CancelHandle>
 pub async fn oraclemcp_driver_cx::Connection::change_password(&mut self, &asupersync::cx::cx::Cx, &str, &str) -> oraclemcp_driver_cx::Result<()>
 pub async fn oraclemcp_driver_cx::Connection::close(self, &asupersync::cx::cx::Cx) -> oraclemcp_driver_cx::Result<()>
@@ -940,6 +942,7 @@ pub fn oraclemcp_driver_cx::BlockingConnection::aq_enq_many(&mut oraclemcp_drive
 pub fn oraclemcp_driver_cx::BlockingConnection::aq_enq_one(&mut oraclemcp_driver_cx::Connection, &oraclemcp_driver_cx_protocol::thin::aq::AqQueueDesc, &oraclemcp_driver_cx_protocol::thin::aq::AqMsgProps, &oraclemcp_driver_cx_protocol::thin::aq::AqEnqOptions) -> oraclemcp_driver_cx::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn oraclemcp_driver_cx::BlockingConnection::begin_sessionless_transaction(&mut oraclemcp_driver_cx::Connection, &[u8], u32, bool) -> oraclemcp_driver_cx::Result<()>
 pub fn oraclemcp_driver_cx::BlockingConnection::cancel(&mut oraclemcp_driver_cx::Connection) -> oraclemcp_driver_cx::Result<()>
+pub fn oraclemcp_driver_cx::BlockingConnection::cancel_and_close(oraclemcp_driver_cx::Connection) -> oraclemcp_driver_cx::Result<()>
 pub fn oraclemcp_driver_cx::BlockingConnection::change_password(&mut oraclemcp_driver_cx::Connection, &str, &str) -> oraclemcp_driver_cx::Result<()>
 pub fn oraclemcp_driver_cx::BlockingConnection::close(oraclemcp_driver_cx::Connection) -> oraclemcp_driver_cx::Result<()>
 pub fn oraclemcp_driver_cx::BlockingConnection::commit(&mut oraclemcp_driver_cx::Connection) -> oraclemcp_driver_cx::Result<()>
@@ -1110,6 +1113,7 @@ pub async fn oraclemcp_driver_cx::Connection::aq_enq_many(&mut self, &asupersync
 pub async fn oraclemcp_driver_cx::Connection::aq_enq_one(&mut self, &asupersync::cx::cx::Cx, &oraclemcp_driver_cx_protocol::thin::aq::AqQueueDesc, &oraclemcp_driver_cx_protocol::thin::aq::AqMsgProps, &oraclemcp_driver_cx_protocol::thin::aq::AqEnqOptions) -> oraclemcp_driver_cx::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub async fn oraclemcp_driver_cx::Connection::begin_sessionless_transaction(&mut self, &asupersync::cx::cx::Cx, &[u8], u32, bool) -> oraclemcp_driver_cx::Result<()>
 pub async fn oraclemcp_driver_cx::Connection::cancel(&mut self, &asupersync::cx::cx::Cx) -> oraclemcp_driver_cx::Result<()>
+pub async fn oraclemcp_driver_cx::Connection::cancel_and_close(self, &asupersync::cx::cx::Cx) -> oraclemcp_driver_cx::Result<()>
 pub fn oraclemcp_driver_cx::Connection::cancel_handle(&self) -> oraclemcp_driver_cx::Result<oraclemcp_driver_cx::CancelHandle>
 pub async fn oraclemcp_driver_cx::Connection::change_password(&mut self, &asupersync::cx::cx::Cx, &str, &str) -> oraclemcp_driver_cx::Result<()>
 pub async fn oraclemcp_driver_cx::Connection::close(self, &asupersync::cx::cx::Cx) -> oraclemcp_driver_cx::Result<()>

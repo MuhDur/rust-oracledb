@@ -8015,6 +8015,45 @@ impl Connection {
         ))
     }
 
+    /// Cancel an abandoned call and permanently close its transport.
+    ///
+    /// Unlike reusable-session recovery, terminal cleanup never waits for a
+    /// cancel response or issues SQL behind the abandoned call. EOF and socket
+    /// shutdown are attempted even when the cancellation write fails.
+    pub async fn cancel_and_close(self, cx: &Cx) -> Result<()> {
+        let cleanup = async {
+            let mut write = lock_write(cx, &self.core.write).await?;
+            send_marker(&mut *write, TNS_MARKER_TYPE_INTERRUPT).await
+        };
+        let cancel = time::timeout(time::wall_now(), Duration::from_millis(500), cleanup).await;
+        let eof = encode_packet(
+            TNS_PACKET_TYPE_DATA,
+            0,
+            Some(oracledb_protocol::thin::TNS_DATA_FLAGS_EOF),
+            &[],
+            PacketLengthWidth::Large32,
+        )?;
+        let close = time::timeout(
+            time::wall_now(),
+            Duration::from_millis(500),
+            self.core.write_all(cx, &eof),
+        )
+        .await;
+        let shutdown = time::timeout(
+            time::wall_now(),
+            Duration::from_millis(500),
+            self.core.shutdown_write(cx),
+        )
+        .await;
+        match (cancel, close, shutdown) {
+            (Ok(Ok(())), Ok(Ok(())), Ok(Ok(()))) => Ok(()),
+            (Ok(Err(error)), _, _) | (_, Ok(Err(error)), _) | (_, _, Ok(Err(error))) => Err(error),
+            _ => Err(Error::ConnectionClosed(
+                "terminal cancellation cleanup exceeded its deadline".to_owned(),
+            )),
+        }
+    }
+
     /// Log off and close the connection, consuming it. Any uncommitted
     /// transaction is rolled back by the server.
     pub async fn close(mut self, cx: &Cx) -> Result<()> {
@@ -9308,6 +9347,11 @@ impl BlockingConnection {
         })
     }
 
+    /// Blocking wrapper for [`Connection::cancel_and_close`].
+    pub fn cancel_and_close(connection: Connection) -> Result<()> {
+        block_on_io(|cx| async move { connection.cancel_and_close(&cx).await })
+    }
+
     pub fn close(connection: Connection) -> Result<()> {
         let runtime = build_io_runtime()?;
         runtime.block_on(async {
@@ -10543,6 +10587,7 @@ where
 
 const TNS_PACKET_TYPE_MARKER: u8 = 12;
 const TNS_MARKER_TYPE_BREAK: u8 = 1;
+const TNS_MARKER_TYPE_INTERRUPT: u8 = 3;
 const TNS_MARKER_TYPE_RESET: u8 = 2;
 
 #[cfg(test)]
@@ -13052,6 +13097,37 @@ mod tests {
         let _ = render_caret("select 1", 0, "h");
         let _ = render_caret("", 5, "h");
         assert!(render_caret("abc", 4, "h").ends_with('^'));
+    }
+
+    #[test]
+    fn terminal_cancel_sends_interrupt_eof_and_closes_without_server_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            use std::io::Read as _;
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            assert_eq!(read_marker_type(&mut socket), TNS_MARKER_TYPE_INTERRUPT);
+            let mut eof = [0u8; 10];
+            socket.read_exact(&mut eof).unwrap();
+            assert_eq!(eof[4], TNS_PACKET_TYPE_DATA);
+            assert_eq!(
+                u16::from_be_bytes([eof[8], eof[9]]),
+                oracledb_protocol::thin::TNS_DATA_FLAGS_EOF
+            );
+            assert_eq!(socket.read(&mut [0u8; 1]).unwrap(), 0);
+        });
+        let runtime = build_io_runtime().unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let (read, write) = transport::plain_split(stream);
+            let connection = loopback_connection(read, write);
+            connection.cancel_and_close(&cx).await.unwrap();
+        });
+        server.join().unwrap();
     }
 
     fn identity() -> ClientIdentity {
