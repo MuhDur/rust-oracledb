@@ -312,8 +312,8 @@ file reservations (leases) so agents don't clobber each other.
   `file_reservation_paths(project_key, agent, ["crates/**"], ttl_seconds=3600, exclusive=true)`.
 - Communicate: `send_message(..., thread_id=…)`, then `fetch_inbox` /
   `acknowledge_message`. Pitfalls: `from_agent not registered` → re-`register_agent`
-  with the right `project_key`; `FILE_RESERVATION_CONFLICT` → adjust patterns or
-  wait for expiry.
+  with the right `project_key`; `FILE_RESERVATION_CONFLICT` → message the holder and
+  split the file or take turns; never idle-wait for expiry.
 
 ## Landing the plane (session completion)
 
