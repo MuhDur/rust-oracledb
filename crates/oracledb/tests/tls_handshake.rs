@@ -576,6 +576,58 @@ fn tcps_handshake_succeeds_with_ca_wallet_and_name_match() {
     server.join().expect("server thread");
 }
 
+#[test]
+fn tcps_handshake_matches_ip_sans_without_weakening_dns_names() {
+    for (host, matches) in [
+        ("127.0.0.1", true),
+        ("172.17.0.2", true),
+        ("127.0.0.2", false),
+        ("db.example.com", true),
+        ("localhost", true),
+        ("other.example.com", false),
+    ] {
+        let (port, server) = spawn_tls_server();
+        let params = ca_trust_params(host, true, None);
+        let desc = descriptor(port);
+        let result = io_runtime().block_on(async move {
+            let _cx = Cx::current().expect("ambient cx");
+            let tcp = TcpStream::connect((desc.host.clone(), desc.port))
+                .await
+                .expect("tcp connect");
+            let mut stream = match tls::tls_handshake(
+                &desc,
+                None,
+                &params,
+                tcp,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            {
+                Ok(stream) => stream,
+                Err(error) => return Err(error),
+            };
+            stream.write_all(b"ping\n").await.expect("write");
+            stream.flush().await.expect("flush");
+            let mut echo = [0; 5];
+            stream.read_exact(&mut echo).await.expect("read echo");
+            Ok(echo)
+        });
+        server.join().expect("server thread");
+        if matches {
+            assert_eq!(result.expect(host), *b"ping\n", "host {host}");
+        } else {
+            let error = result.expect_err("an absent identity must not match");
+            assert!(matches!(error, Error::Tls(_)), "{host}: {error}");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("server name \"{host}\"")),
+                "{host}: {error}",
+            );
+        }
+    }
+}
+
 /// bead F-DC4: `tls_handshake` previously hard-coded a ~20s handshake
 /// timeout regardless of what the caller configured. A peer that accepts
 /// the TCP connection but never sends a single TLS byte (a stalled network

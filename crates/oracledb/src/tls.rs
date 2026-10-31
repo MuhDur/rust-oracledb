@@ -15,6 +15,7 @@
 //! the same crypto rustls uses internally, just without the SNI name binding —
 //! exactly mirroring OpenSSL `check_hostname = False` plus `CERT_REQUIRED`.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -162,11 +163,29 @@ impl OracleServerCertVerifier {
         if !self.dn_match {
             return Ok(());
         }
-        let (subject_dn, san_dns, common_names) = parse_cert_identity(end_entity)?;
+        let identity = parse_cert_identity(end_entity)?;
         let result = if let Some(expected_dn) = self.server_cert_dn.as_deref() {
-            check_cert_dn(expected_dn, &subject_dn)
+            check_cert_dn(expected_dn, &identity.subject_dn)
+        } else if let Ok(ip) = self.expected_host.parse::<IpAddr>() {
+            // IP literals have their own SAN type. DNS names, CNs and
+            // wildcards cannot authenticate an IP address.
+            let octets = match ip {
+                IpAddr::V4(ip) => ip.octets().to_vec(),
+                IpAddr::V6(ip) => ip.octets().to_vec(),
+            };
+            if identity.san_ip.contains(&octets) {
+                Ok(())
+            } else {
+                Err(DnMatchError::NameMismatch {
+                    expected_name: self.expected_host.clone(),
+                })
+            }
         } else {
-            check_server_name(&self.expected_host, &san_dns, &common_names)
+            check_server_name(
+                &self.expected_host,
+                &identity.san_dns,
+                &identity.common_names,
+            )
         };
         result.map_err(dn_error_to_rustls)
     }
@@ -276,11 +295,15 @@ fn dn_error_to_rustls(err: DnMatchError) -> RustlsError {
     RustlsError::General(err.to_string())
 }
 
-/// Extract `(subject_dn_rfc4514, san_dns_names, common_names)` from a leaf
-/// certificate using `x509-cert`.
-fn parse_cert_identity(
-    cert: &CertificateDer<'_>,
-) -> Result<(String, Vec<String>, Vec<String>), RustlsError> {
+struct CertificateIdentity {
+    subject_dn: String,
+    san_dns: Vec<String>,
+    san_ip: Vec<Vec<u8>>,
+    common_names: Vec<String>,
+}
+
+/// Extract the subject, DNS/IP SANs and common names using `x509-cert`.
+fn parse_cert_identity(cert: &CertificateDer<'_>) -> Result<CertificateIdentity, RustlsError> {
     use x509_cert::der::Decode;
     let parsed = x509_cert::Certificate::from_der(cert.as_ref())
         .map_err(|e| RustlsError::General(format!("server certificate parse error: {e}")))?;
@@ -302,8 +325,10 @@ fn parse_cert_identity(
         }
     }
 
-    // SAN DNS names from the subjectAltName extension.
+    // Preserve the SAN type: an IP address is encoded as 4 or 16 octets,
+    // never as a DNS name. Other lengths cannot equal a parsed IP literal.
     let mut san_dns = Vec::new();
+    let mut san_ip = Vec::new();
     if let Some(extensions) = parsed.tbs_certificate.extensions.as_ref() {
         for ext in extensions.iter() {
             // SAN OID = 2.5.29.17
@@ -312,8 +337,14 @@ fn parse_cert_identity(
                     x509_cert::ext::pkix::SubjectAltName::from_der(ext.extn_value.as_bytes())
                 {
                     for name in san.0.iter() {
-                        if let x509_cert::ext::pkix::name::GeneralName::DnsName(dns) = name {
-                            san_dns.push(dns.as_str().to_string());
+                        match name {
+                            x509_cert::ext::pkix::name::GeneralName::DnsName(dns) => {
+                                san_dns.push(dns.as_str().to_string());
+                            }
+                            x509_cert::ext::pkix::name::GeneralName::IpAddress(ip) => {
+                                san_ip.push(ip.as_bytes().to_vec());
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -321,7 +352,12 @@ fn parse_cert_identity(
         }
     }
 
-    Ok((subject_dn, san_dns, common_names))
+    Ok(CertificateIdentity {
+        subject_dn,
+        san_dns,
+        san_ip,
+        common_names,
+    })
 }
 
 /// Build a rustls [`ClientConfig`] for a TCPS connection from [`TlsParams`].
@@ -975,6 +1011,93 @@ pub async fn tls_handshake(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use x509_cert::der::asn1::{Ia5String, OctetString};
+    use x509_cert::der::{Decode, Encode};
+    use x509_cert::ext::pkix::name::GeneralName;
+
+    // These certificates exercise identity parsing/matching only and are not
+    // re-signed. tls_handshake.rs separately validates real CA-signed chains.
+    fn check_test_identity(
+        host: &str,
+        common_name: &str,
+        names: Vec<GeneralName>,
+    ) -> Result<(), RustlsError> {
+        let pem = include_bytes!("../tests/fixtures/tls/leaf.crt");
+        let leaf = rustls_pemfile::certs(&mut std::io::Cursor::new(pem))
+            .next()
+            .expect("fixture certificate")
+            .expect("fixture PEM");
+        let mut cert = x509_cert::Certificate::from_der(leaf.as_ref()).expect("fixture DER");
+        cert.tbs_certificate.subject = format!("CN={common_name}").parse().expect("subject");
+        let san = cert
+            .tbs_certificate
+            .extensions
+            .as_mut()
+            .expect("extensions")
+            .iter_mut()
+            .find(|ext| ext.extn_id.to_string() == "2.5.29.17")
+            .expect("SAN extension");
+        san.extn_value = OctetString::new(
+            x509_cert::ext::pkix::SubjectAltName(names)
+                .to_der()
+                .expect("SAN DER"),
+        )
+        .expect("SAN octets");
+        let verifier = OracleServerCertVerifier {
+            trust_anchor_ders: Vec::new(),
+            supported_algs: rustls::crypto::ring::default_provider()
+                .signature_verification_algorithms,
+            dn_match: true,
+            server_cert_dn: None,
+            expected_host: host.to_string(),
+        };
+        verifier.run_dn_match(&CertificateDer::from(
+            cert.to_der().expect("certificate DER"),
+        ))
+    }
+
+    #[test]
+    fn ip_literals_match_only_exact_ip_san_octets() {
+        let names = vec![
+            GeneralName::from("127.0.0.1".parse::<IpAddr>().expect("IPv4")),
+            GeneralName::from("2001:db8::1".parse::<IpAddr>().expect("IPv6")),
+        ];
+        for (host, matches) in [
+            ("127.0.0.1", true),
+            ("127.0.0.2", false),
+            ("2001:db8::1", true),
+            ("2001:0db8:0:0:0:0:0:1", true),
+            ("2001:db8::2", false),
+            ("::ffff:127.0.0.1", false),
+        ] {
+            assert_eq!(
+                check_test_identity(host, "unused.example", names.clone()).is_ok(),
+                matches,
+                "host {host}",
+            );
+        }
+    }
+
+    #[test]
+    fn ip_literals_never_match_dns_sans_common_names_or_wildcards() {
+        for name in ["127.0.0.1", "*.0.0.1", "*", "other.example"] {
+            let names = vec![GeneralName::DnsName(Ia5String::new(name).expect("DNS SAN"))];
+            assert!(
+                check_test_identity("127.0.0.1", "127.0.0.1", names).is_err(),
+                "IP host must not match DNS SAN {name} or the matching CN",
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_ip_san_lengths_cannot_match_an_ip_prefix() {
+        for octets in [vec![127, 0, 0], vec![127, 0, 0, 1, 0]] {
+            let names = vec![GeneralName::IpAddress(
+                OctetString::new(octets).expect("SAN octets"),
+            )];
+            assert!(check_test_identity("127.0.0.1", "127.0.0.1", names).is_err());
+        }
+    }
 
     #[test]
     fn build_config_requires_trust_anchors() {
