@@ -570,9 +570,12 @@ pub(crate) enum PostSyncProtocolDisposition {
 /// Pre-sync/client-side validation errors return directly and keep any existing
 /// connection usable. Once a server response is being decoded, a resource-limit
 /// violation means the client intentionally stopped consuming an in-flight
-/// response, so the wire can no longer be assumed aligned.
+/// response, so the wire can no longer be assumed aligned. Any parse error that
+/// escapes a reader before a response boundary also leaves alignment unknown;
+/// only errors decoded after a proven boundary may retain a usable session.
 pub(crate) fn post_sync_protocol_error_disposition(
     err: &oracledb_protocol::ProtocolError,
+    response_boundary_seen: bool,
 ) -> PostSyncProtocolDisposition {
     match err {
         oracledb_protocol::ProtocolError::ResourceLimit { .. } => PostSyncProtocolDisposition::Dead,
@@ -581,12 +584,13 @@ pub(crate) fn post_sync_protocol_error_disposition(
         {
             PostSyncProtocolDisposition::Dead
         }
+        _ if !response_boundary_seen => PostSyncProtocolDisposition::Dead,
         _ => PostSyncProtocolDisposition::Ready,
     }
 }
 
 pub(crate) fn protocol_error_is_session_dead(err: &oracledb_protocol::ProtocolError) -> bool {
-    post_sync_protocol_error_disposition(err) == PostSyncProtocolDisposition::Dead
+    post_sync_protocol_error_disposition(err, true) == PostSyncProtocolDisposition::Dead
 }
 
 pub(crate) fn protocol_error_kind(err: &oracledb_protocol::ProtocolError) -> ErrorKind {

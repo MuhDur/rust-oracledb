@@ -731,7 +731,7 @@ impl<T: WireTransport> ConnectionCore<T> {
         &mut self,
         cx: &Cx,
         classic: bool,
-        probe: impl Fn(&[u8]) -> bool,
+        probe: impl Fn(&[u8]) -> oracledb_protocol::Result<bool>,
     ) -> Result<Vec<u8>> {
         if !classic {
             return self.read_data_response(cx).await;
@@ -758,7 +758,7 @@ impl<T: WireTransport> ConnectionCore<T> {
         &mut self,
         cx: &Cx,
         classic: bool,
-        probe: impl Fn(&[u8]) -> bool,
+        probe: impl Fn(&[u8]) -> oracledb_protocol::Result<bool>,
     ) -> Result<SessionCloseDisposition> {
         let write = Arc::clone(&self.write);
         let limits = self.protocol_limits;
@@ -782,7 +782,7 @@ impl<T: WireTransport> ConnectionCore<T> {
         &mut self,
         cx: &Cx,
         classic: bool,
-        probe: impl Fn(&[u8]) -> bool,
+        probe: impl Fn(&[u8]) -> oracledb_protocol::Result<bool>,
     ) -> Result<()> {
         if let Ok(response) = time::timeout(
             time::wall_now(),
@@ -816,7 +816,7 @@ impl<T: WireTransport> ConnectionCore<T> {
         cx: &Cx,
         sdu: usize,
         classic: bool,
-        probe: impl Fn(&[u8]) -> bool,
+        probe: impl Fn(&[u8]) -> oracledb_protocol::Result<bool>,
     ) -> Result<Vec<u8>> {
         if !classic {
             return self.read_data_response_flushing_out_binds(cx, sdu).await;
@@ -868,7 +868,8 @@ impl<T: WireTransport> ConnectionCore<T> {
 
     fn note_post_sync_result<U>(&self, result: Result<U>) -> Result<U> {
         if let Err(Error::Protocol(err)) = &result {
-            if post_sync_protocol_error_disposition(err) == PostSyncProtocolDisposition::Dead {
+            if post_sync_protocol_error_disposition(err, false) == PostSyncProtocolDisposition::Dead
+            {
                 self.recovery.mark_dead();
             }
         }
@@ -4016,7 +4017,7 @@ impl Connection {
         let limits = self.protocol_limits;
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                classic_connect_response_is_complete(bytes, limits).unwrap_or(true)
+                classic_connect_response_is_complete(bytes, limits)
             })
             .await?;
         self.note_parse(
@@ -4071,7 +4072,7 @@ impl Connection {
         let limits = self.protocol_limits;
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_subscribe_response_with_limits(
+                response_complete(parse_subscribe_response_with_limits(
                     bytes,
                     capabilities,
                     limits,
@@ -4134,7 +4135,7 @@ impl Connection {
         let limits = self.protocol_limits;
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_subscribe_response_with_limits(
+                response_complete(parse_subscribe_response_with_limits(
                     bytes,
                     capabilities,
                     limits,
@@ -4434,7 +4435,7 @@ impl Connection {
         let limits = self.protocol_limits;
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_tpc_txn_switch_response_with_limits(
+                response_complete(parse_tpc_txn_switch_response_with_limits(
                     bytes,
                     capabilities,
                     limits,
@@ -4519,7 +4520,7 @@ impl Connection {
         let limits = self.protocol_limits;
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_tpc_txn_switch_response_with_limits(
+                response_complete(parse_tpc_txn_switch_response_with_limits(
                     bytes,
                     capabilities,
                     limits,
@@ -4568,7 +4569,7 @@ impl Connection {
         let limits = self.protocol_limits;
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_tpc_switch_response_with_limits(
+                response_complete(parse_tpc_switch_response_with_limits(
                     bytes,
                     capabilities,
                     limits,
@@ -4612,7 +4613,7 @@ impl Connection {
         let limits = self.protocol_limits;
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_tpc_change_state_response_with_limits(
+                response_complete(parse_tpc_change_state_response_with_limits(
                     bytes,
                     capabilities,
                     limits,
@@ -5525,7 +5526,7 @@ impl Connection {
             let classic = !self.supports_end_of_response;
             let response = self
                 .read_flushing_out_binds_cancellable(cx, classic, |bytes| {
-                    response_complete(&parse_query_response_with_binds_options_columns_and_limits(
+                    response_complete(parse_query_response_with_binds_options_columns_and_limits(
                         bytes,
                         capabilities,
                         first_bind_row,
@@ -5784,7 +5785,7 @@ impl Connection {
         &mut self,
         cx: &Cx,
         classic: bool,
-        probe: impl Fn(&[u8]) -> bool,
+        probe: impl Fn(&[u8]) -> oracledb_protocol::Result<bool>,
     ) -> Result<Vec<u8>> {
         // Clone the Arc so the guard owns a handle independent of the `&mut self`
         // read borrow (the two touch disjoint state but the borrow checker can't
@@ -5837,7 +5838,7 @@ impl Connection {
         &mut self,
         cx: &Cx,
         classic: bool,
-        probe: impl Fn(&[u8]) -> bool,
+        probe: impl Fn(&[u8]) -> oracledb_protocol::Result<bool>,
     ) -> Result<Vec<u8>> {
         let recovery = Arc::clone(&self.core.recovery);
         let mut guard = CancelDrainGuard::arm(recovery)?;
@@ -5927,7 +5928,7 @@ impl Connection {
             let read_start = profile.then(time::wall_now);
             let response = self
                 .read_response_cancellable(cx, classic, |bytes| {
-                    response_complete(&if lob_prefetch {
+                    response_complete(if lob_prefetch {
                         parse_define_fetch_response_with_context_and_limits(
                             bytes,
                             capabilities,
@@ -6035,7 +6036,7 @@ impl Connection {
         let response = self
             .read_response_cancellable(cx, classic, |bytes| {
                 if lob_prefetch {
-                    response_complete(&parse_define_fetch_response_borrowed_with_limits(
+                    response_complete(parse_define_fetch_response_borrowed_with_limits(
                         bytes,
                         capabilities,
                         &columns,
@@ -6043,7 +6044,7 @@ impl Connection {
                         limits,
                     ))
                 } else {
-                    response_complete(&parse_query_response_borrowed_with_limits(
+                    response_complete(parse_query_response_borrowed_with_limits(
                         bytes,
                         capabilities,
                         &columns,
@@ -6197,7 +6198,7 @@ impl Connection {
         let response = self
             .read_response_cancellable(cx, classic, |bytes| {
                 if lob_prefetch {
-                    response_complete(&parse_define_fetch_response_borrowed_with_limits(
+                    response_complete(parse_define_fetch_response_borrowed_with_limits(
                         bytes,
                         capabilities,
                         &columns,
@@ -6205,7 +6206,7 @@ impl Connection {
                         limits,
                     ))
                 } else {
-                    response_complete(&parse_query_response_borrowed_with_limits(
+                    response_complete(parse_query_response_borrowed_with_limits(
                         bytes,
                         capabilities,
                         &columns,
@@ -6462,7 +6463,7 @@ impl Connection {
         let limits = self.protocol_limits;
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_define_fetch_response_with_context_and_limits(
+                response_complete(parse_define_fetch_response_with_context_and_limits(
                     bytes,
                     capabilities,
                     define_columns,
@@ -6708,7 +6709,7 @@ impl Connection {
         let limits = self.protocol_limits;
         let response = self
             .read_flushing_out_binds_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_query_response_with_binds_options_columns_and_limits(
+                response_complete(parse_query_response_with_binds_options_columns_and_limits(
                     bytes,
                     capabilities,
                     &[],
@@ -6770,7 +6771,7 @@ impl Connection {
             let limits = self.protocol_limits;
             let response = self
                 .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                    response_complete(&parse_lob_read_response_with_limits(
+                    response_complete(parse_lob_read_response_with_limits(
                         bytes,
                         capabilities,
                         locator,
@@ -6832,7 +6833,7 @@ impl Connection {
         let limits = self.protocol_limits;
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_aq_enq_response_with_limits(
+                response_complete(parse_aq_enq_response_with_limits(
                     bytes,
                     capabilities,
                     limits,
@@ -6875,7 +6876,7 @@ impl Connection {
         let limits = self.protocol_limits;
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_aq_deq_response_with_limits(
+                response_complete(parse_aq_deq_response_with_limits(
                     bytes,
                     capabilities,
                     &queue.kind,
@@ -6924,7 +6925,7 @@ impl Connection {
         let limits = self.protocol_limits;
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_aq_array_response_with_limits(
+                response_complete(parse_aq_array_response_with_limits(
                     bytes,
                     capabilities,
                     TNS_AQ_ARRAY_ENQ,
@@ -6978,7 +6979,7 @@ impl Connection {
         let limits = self.protocol_limits;
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_aq_array_response_with_limits(
+                response_complete(parse_aq_array_response_with_limits(
                     bytes,
                     capabilities,
                     TNS_AQ_ARRAY_DEQ,
@@ -7021,7 +7022,7 @@ impl Connection {
         let limits = self.protocol_limits;
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_lob_create_temp_response_with_limits(
+                response_complete(parse_lob_create_temp_response_with_limits(
                     bytes,
                     capabilities,
                     limits,
@@ -7070,7 +7071,7 @@ impl Connection {
             let limits = self.protocol_limits;
             let response = self
                 .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                    response_complete(&parse_lob_write_response_with_limits(
+                    response_complete(parse_lob_write_response_with_limits(
                         bytes,
                         capabilities,
                         locator,
@@ -7123,7 +7124,7 @@ impl Connection {
         let limits = self.protocol_limits;
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_lob_trim_response_with_limits(
+                response_complete(parse_lob_trim_response_with_limits(
                     bytes,
                     capabilities,
                     locator,
@@ -7182,7 +7183,7 @@ impl Connection {
         let limits = self.protocol_limits;
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_lob_free_temp_response_with_limits(
+                response_complete(parse_lob_free_temp_response_with_limits(
                     bytes,
                     capabilities,
                     returned_parameter_len,
@@ -7414,7 +7415,7 @@ impl Connection {
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 response_complete(
-                    &oracledb_protocol::dpl::parse_direct_path_prepare_response_with_limits(
+                    oracledb_protocol::dpl::parse_direct_path_prepare_response_with_limits(
                         bytes,
                         capabilities,
                         limits,
@@ -7456,7 +7457,7 @@ impl Connection {
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 response_complete(
-                    &oracledb_protocol::dpl::parse_direct_path_simple_response_with_limits(
+                    oracledb_protocol::dpl::parse_direct_path_simple_response_with_limits(
                         bytes,
                         capabilities,
                         limits,
@@ -7495,7 +7496,7 @@ impl Connection {
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
                 response_complete(
-                    &oracledb_protocol::dpl::parse_direct_path_simple_response_with_limits(
+                    oracledb_protocol::dpl::parse_direct_path_simple_response_with_limits(
                         bytes,
                         capabilities,
                         limits,
@@ -8172,7 +8173,7 @@ impl Connection {
         let limits = self.protocol_limits;
         self.core
             .finish_session_close(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_plain_function_response_with_limits(
+                response_complete(parse_plain_function_response_with_limits(
                     bytes,
                     capabilities,
                     limits,
@@ -8420,7 +8421,7 @@ impl Connection {
         let limits = self.protocol_limits;
         let response = self
             .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_plain_function_response_with_limits(
+                response_complete(parse_plain_function_response_with_limits(
                     bytes,
                     capabilities,
                     limits,
@@ -9857,7 +9858,7 @@ async fn read_session_close_response_with_limits<R, W, P>(
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
-    P: Fn(&[u8]) -> bool,
+    P: Fn(&[u8]) -> oracledb_protocol::Result<bool>,
 {
     let mut close_read = SessionCloseRead::new(read);
     let result = if classic {
@@ -9940,17 +9941,20 @@ where
     }
 }
 
-/// Probe predicate for classic (pre-END_OF_RESPONSE) response reassembly:
-/// whether a parse attempt over the accumulated payload says the response is
-/// complete. `TtcDecode` is the decoder's "ran out of bytes / short read"
-/// error — the response needs more packets. ANY other outcome means the
-/// parser consumed a full response: `Ok` is the happy path, a
-/// `ServerError`/`ServerErrorInfo` means the terminal ERROR message was
-/// reached (the caller's real parse will surface it), and structural errors
-/// (`UnknownMessageType`, `ResourceLimit`, ...) are returned to the caller by
-/// its real parse instead of hanging the read loop forever.
-fn response_complete<T>(result: &oracledb_protocol::Result<T>) -> bool {
-    !matches!(result, Err(oracledb_protocol::ProtocolError::TtcDecode(_)))
+/// Decide classic response completion without mistaking a structural parse
+/// failure for a terminal TTC message. A short decode needs another packet;
+/// server errors prove the ERROR boundary. Other errors cannot establish an
+/// aligned wire and must escape the reader so the session is quarantined.
+fn response_complete<T>(result: oracledb_protocol::Result<T>) -> oracledb_protocol::Result<bool> {
+    use oracledb_protocol::ProtocolError;
+    match result {
+        Ok(_)
+        | Err(ProtocolError::ServerError(_))
+        | Err(ProtocolError::ServerErrorWithRowCount { .. })
+        | Err(ProtocolError::ServerErrorInfo(_)) => Ok(true),
+        Err(ProtocolError::TtcDecode(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// Accumulates DATA packets for one classic (pre-END_OF_RESPONSE) post-connect
@@ -9970,7 +9974,7 @@ async fn read_classic_data_response_probed_with_limits<R, W, P>(
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
-    P: Fn(&[u8]) -> bool,
+    P: Fn(&[u8]) -> oracledb_protocol::Result<bool>,
 {
     let mut response = Vec::new();
     read_classic_data_response_probed_into(read, cx, write, probe, limits, &mut response).await?;
@@ -9992,7 +9996,7 @@ async fn read_classic_data_response_probed_into<R, W, P>(
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
-    P: Fn(&[u8]) -> bool,
+    P: Fn(&[u8]) -> oracledb_protocol::Result<bool>,
 {
     let mut pending_packet: Option<IncomingPacket> = None;
     let mut after_reset = false;
@@ -10026,7 +10030,7 @@ where
         )?;
         limits.check_response_bytes(combined)?;
         response.extend_from_slice(payload);
-        if (after_reset && post_reset_packet_ends_response(payload)) || probe(response) {
+        if (after_reset && post_reset_packet_ends_response(payload)) || probe(response)? {
             return Ok(());
         }
     }
@@ -10049,7 +10053,7 @@ async fn read_classic_data_response_flushing_out_binds_probed_with_limits<R, W, 
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + std::fmt::Debug + Unpin,
-    P: Fn(&[u8]) -> bool,
+    P: Fn(&[u8]) -> oracledb_protocol::Result<bool>,
 {
     let mut payload = Vec::new();
     read_classic_data_response_probed_into(read, cx, write, probe, limits, &mut payload).await?;
@@ -13938,7 +13942,7 @@ mod tests {
             maximum: 2,
         };
         assert_eq!(
-            post_sync_protocol_error_disposition(&err),
+            post_sync_protocol_error_disposition(&err, true),
             PostSyncProtocolDisposition::Dead,
             "a post-sync resource-limit decode failure leaves unread response bytes"
         );
@@ -14405,6 +14409,103 @@ mod tests {
         response.extend_from_slice(&number);
         response.push(TNS_MSG_TYPE_END_OF_RESPONSE);
         response
+    }
+
+    #[test]
+    fn classic_probe_only_accepts_success_or_terminal_server_error() {
+        use oracledb_protocol::ProtocolError;
+        assert!(response_complete(Ok(())).unwrap());
+        assert!(!response_complete::<()>(Err(ProtocolError::TtcDecode("short"))).unwrap());
+        for error in [
+            ProtocolError::ServerError("ORA-00942: missing table".into()),
+            ProtocolError::ServerErrorWithRowCount {
+                message: "ORA-00001: duplicate key".into(),
+                row_count: 0,
+            },
+        ] {
+            assert!(response_complete::<()>(Err(error)).unwrap());
+        }
+        for error in [
+            ProtocolError::UnknownMessageType {
+                message_type: 0x59,
+                position: 0,
+            },
+            ProtocolError::UnsupportedFeature("unknown response feature"),
+            ProtocolError::InvalidServerResponse,
+        ] {
+            assert_eq!(
+                post_sync_protocol_error_disposition(&error, false),
+                PostSyncProtocolDisposition::Dead
+            );
+            assert_eq!(
+                post_sync_protocol_error_disposition(&error, true),
+                PostSyncProtocolDisposition::Ready
+            );
+            assert!(response_complete::<()>(Err(error)).is_err());
+        }
+    }
+
+    #[test]
+    fn classic_unknown_before_boundary_quarantines_session_without_reuse() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<usize> {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+            assert_eq!(read_one_wire_packet(&mut socket), TNS_PACKET_TYPE_DATA);
+            // The unknown message is in a flagless packet before the logical
+            // STATUS boundary. Its tail must never answer a subsequent request.
+            socket.write_all(&data_packet(&[0x59], false))?;
+            socket.write_all(&data_packet(
+                &[oracledb_protocol::thin::TNS_MSG_TYPE_STATUS, 0, 0],
+                false,
+            ))?;
+            socket.flush()?;
+            let mut byte = [0u8; 1];
+            match socket.read(&mut byte) {
+                Ok(n) => Ok(n),
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => Ok(0),
+                Err(error) => Err(error),
+            }
+        });
+        let columns = vec![
+            ColumnMetadata::new("N", oracledb_protocol::thin::ORA_TYPE_NUM_NUMBER)
+                .with_buffer_size(22)
+                .with_max_size(22),
+        ];
+        let runtime = build_io_runtime()?;
+        let (error, phase, dead, next) = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            connection.supports_end_of_response = false;
+            let error = connection
+                .fetch_rows_with_columns(&cx, 42, 2, &columns, None)
+                .await
+                .expect_err("unknown TTC message must fail the fetch");
+            let phase = connection.core.recovery.phase();
+            let dead = connection.is_dead();
+            let next = connection.ping(&cx).await;
+            Ok::<_, Error>((error, phase, dead, next))
+        })?;
+        let bytes_after_failure = server.join().expect("classic unknown server joins")?;
+        assert!(matches!(
+            error,
+            Error::Protocol(oracledb_protocol::ProtocolError::UnknownMessageType {
+                message_type: 0x59,
+                ..
+            })
+        ));
+        assert_eq!(phase, SessionRecoveryPhase::Dead);
+        assert!(dead, "the incomplete response must quarantine its session");
+        assert!(matches!(next, Err(Error::ConnectionClosed(_))));
+        assert_eq!(
+            bytes_after_failure, 0,
+            "quarantine must prevent another request"
+        );
+        Ok(())
     }
 
     #[test]
@@ -14887,7 +14988,7 @@ mod tests {
                         .expect("probe snapshot lock")
                         .push(bytes.to_vec());
                     // "Parser consumed the whole response": needs all 4 bytes.
-                    bytes.len() >= 4
+                    Ok(bytes.len() >= 4)
                 })
                 .await
         })?;
@@ -14932,7 +15033,7 @@ mod tests {
             let (read, write) = transport::plain_split(stream);
             let mut conn = loopback_connection(read, write);
             conn.core
-                .read_data_response_probed(&cx, true, |bytes| !bytes.is_empty())
+                .read_data_response_probed(&cx, true, |bytes| Ok(!bytes.is_empty()))
                 .await
         })?;
 
@@ -14965,7 +15066,7 @@ mod tests {
             let (read, write) = transport::plain_split(stream);
             let mut conn = loopback_connection(read, write);
             conn.core
-                .read_data_response_probed(&cx, false, |_| false)
+                .read_data_response_probed(&cx, false, |_| Ok(false))
                 .await
         })?;
 
@@ -15002,7 +15103,7 @@ mod tests {
             let (read, write) = transport::plain_split(stream);
             let mut conn = loopback_connection(read, write);
             conn.core
-                .read_data_response_probed(&cx, true, |_| true)
+                .read_data_response_probed(&cx, true, |_| Ok(true))
                 .await
                 .expect_err("non-DATA packet must fail closed")
         });
@@ -21045,7 +21146,7 @@ mod tests {
         let mut clean_close = scripted_read(vec![missing_notify()]);
         let clean_disposition = runtime.block_on(async {
             let cx = test_cx()?;
-            let probe = |_bytes: &[u8]| false;
+            let probe = |_bytes: &[u8]| Ok(false);
             read_session_close_response_with_limits(
                 &mut clean_close,
                 &cx,
@@ -21079,7 +21180,7 @@ mod tests {
             );
             runtime.block_on(async {
                 let cx = test_cx()?;
-                core.finish_session_close(&cx, classic, |_bytes| false)
+                core.finish_session_close(&cx, classic, |_bytes| Ok(false))
                     .await
             })?;
             assert!(
@@ -21098,7 +21199,7 @@ mod tests {
             scripted_read(vec![ReadAction::bytes(complete, Some(3)), missing_notify()]);
         let complete_disposition = runtime.block_on(async {
             let cx = test_cx()?;
-            let probe = |_bytes: &[u8]| true;
+            let probe = |_bytes: &[u8]| Ok(true);
             read_session_close_response_with_limits(
                 &mut complete_close,
                 &cx,
@@ -21136,7 +21237,8 @@ mod tests {
         );
         runtime.block_on(async {
             let cx = test_cx()?;
-            core.finish_session_close(&cx, false, |_bytes| true).await
+            core.finish_session_close(&cx, false, |_bytes| Ok(true))
+                .await
         })?;
         assert!(
             state
@@ -21157,7 +21259,7 @@ mod tests {
         let truncated_error = runtime
             .block_on(async {
                 let cx = test_cx()?;
-                let probe = |_bytes: &[u8]| false;
+                let probe = |_bytes: &[u8]| Ok(false);
                 read_session_close_response_with_limits(
                     &mut truncated_close,
                     &cx,
