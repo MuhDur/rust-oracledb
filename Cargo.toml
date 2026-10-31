@@ -10,8 +10,8 @@ resolver = "2"
 [workspace.package]
 version = "0.9.2"
 edition = "2021"
-# No `rust-version`: asupersync's default `nightly-outcome-try` feature enables
-# `#![feature(try_trait_v2)]`. See `rust-toolchain.toml`; there is no stable MSRV.
+# Release builds retain the pinned nightly; Linux/macOS also build on current
+# stable. Keep asupersync defaults off so nightly-outcome-try stays absent.
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/MuhDur/rust-oracledb"
 homepage = "https://github.com/MuhDur/rust-oracledb"
@@ -54,7 +54,7 @@ arrow-schema = "59.0.0"
 # Exact pin: asupersync is the single load-bearing async-runtime dependency and
 # its `tls` feature pins the rustls/ring graph, so a 0.3.x point release could
 # silently re-shape the runtime. Bump deliberately, not via the caret floor.
-asupersync = "=0.3.9"
+asupersync = { version = "=0.3.9", default-features = false }
 # base64 encodes the OCI IAM database-token proof-of-possession signature
 # (`AUTH_SIGNATURE`). Already resolved in the graph transitively; a direct edge
 # adds no new compiled crate. MIT OR Apache-2.0.

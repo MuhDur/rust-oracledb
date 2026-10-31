@@ -43,7 +43,7 @@
 //! Enums, unions, and unit/zero-field structs produce a clear `compile_error!`.
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
 use syn::{parse_macro_input, spanned::Spanned, Data, DeriveInput, Fields, LitStr, Meta, Token};
 
@@ -157,7 +157,7 @@ struct ContainerOpts {
 /// Field-level options parsed from `#[driver_cx(...)]` on a field.
 #[derive(Default)]
 struct FieldOpts {
-    column: Option<String>,
+    column: Option<(String, Span)>,
 }
 
 /// Parse every `#[driver_cx(...)]` attribute on a struct into container options.
@@ -201,11 +201,13 @@ fn parse_field_opts(attrs: &[syn::Attribute]) -> syn::Result<FieldOpts> {
             match &meta {
                 Meta::NameValue(nv) if nv.path.is_ident("column") || nv.path.is_ident("rename") => {
                     let lit = expect_str_lit(&nv.value)?;
-                    opts.column = Some(lit.value());
+                    opts.column = Some((lit.value(), nv.path.span()));
                 }
                 _ => {
                     return Err(syn::Error::new(
-                        meta.span(),
+                        // Highlight the option key. Joining a whole expression
+                        // span differs between stable and nightly proc macros.
+                        meta.path().span(),
                         "unsupported #[driver_cx(...)] field option; \
                          expected `column = \"...\"` or `rename = \"...\"`",
                     ));
@@ -339,7 +341,7 @@ fn named_body(named: &syn::FieldsNamed, container: &ContainerOpts) -> syn::Resul
         let ty = &field.ty;
         let opts = parse_field_opts(&field.attrs)?;
         let column = match opts.column {
-            Some(explicit) => explicit,
+            Some((explicit, _)) => explicit,
             None => {
                 let base = ident.to_string();
                 let base = base.strip_prefix("r#").unwrap_or(&base);
@@ -373,9 +375,9 @@ fn unnamed_body(unnamed: &syn::FieldsUnnamed) -> syn::Result<TokenStream2> {
     for (index, field) in unnamed.unnamed.iter().enumerate() {
         // Reject field-level attributes that only make sense on named fields.
         let opts = parse_field_opts(&field.attrs)?;
-        if opts.column.is_some() {
+        if let Some((_, span)) = opts.column {
             return Err(syn::Error::new(
-                field.span(),
+                span,
                 "#[driver_cx(column = ...)] is not supported on a tuple struct field; \
                  tuple-struct fields map to columns by position",
             ));

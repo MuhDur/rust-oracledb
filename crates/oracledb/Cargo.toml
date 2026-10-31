@@ -73,7 +73,8 @@ arrow-ipc = { workspace = true, optional = true }
 arrow-schema = { workspace = true, optional = true }
 # asupersync's `tls` feature wraps rustls; we drive its sans-io ClientConnection
 # over the async TCP socket and supply our own Oracle ServerCertVerifier.
-asupersync = { workspace = true, features = ["tls"] }
+# proc-macros supplies join! in pool tests; neither needs nightly-outcome-try.
+asupersync = { workspace = true, default-features = false, features = ["tls", "proc-macros"] }
 # OCI IAM database-token proof-of-possession (AUTH_HEADER/AUTH_SIGNATURE): parse
 # the token's bound PKCS#8 private key (rustls-pemfile), sign the HTTP-Signatures
 # header with RSA-PKCS1v15-SHA256 (ring), base64-encode (base64), and stamp the

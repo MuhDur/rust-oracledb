@@ -2,4 +2,4 @@ error: unsupported #[driver_cx(...)] field option; expected `column = "..."` or 
  --> tests/trybuild/fail/invalid_field_attr.rs:5:17
   |
 5 |     #[driver_cx(foo = "ID")]
-  |                 ^^^^^^^^^^
+  |                 ^^^

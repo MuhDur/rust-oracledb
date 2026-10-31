@@ -18,12 +18,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# This driver requires NIGHTLY Rust (asupersync uses #![feature(try_trait_v2)]),
-# so every compiling job pins the nightly from rust-toolchain.toml via
-# a pinned dtolnay/rust-toolchain action SHA + toolchain input (dated nightlies
-# are not valid action @refs). There is no stable MSRV, hence no MSRV job. The
-# publish=false PyO3 harness needs Python. Its live reference-suite remains
-# operator-run-only, while the pyshim's Rust unit tests run in `pyshim-unit`.
+# Release jobs retain the pinned nightly for reproducibility. The stable matrix
+# checks Linux and macOS with asupersync's nightly-outcome-try feature disabled.
+# The publish=false PyO3 harness is checked with the whole workspace; its live
+# reference suite remains operator-run and Rust unit tests run in pyshim-unit.
 jobs:
   fmt:
     name: rustfmt
@@ -37,6 +35,47 @@ jobs:
           toolchain: nightly-2026-05-11
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  stable:
+    name: stable (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          key: stable-${{ matrix.os }}
+      - name: Refuse nightly runtime features on every target
+        shell: bash
+        run: |
+          set -euo pipefail
+          features="$(cargo +stable tree --locked -e features --workspace --all-features --target all -i asupersync)"
+          printf '%s\n' "$features"
+          case "$features" in
+            *'asupersync feature "nightly-outcome-try"'*)
+              echo 'nightly-outcome-try is forbidden in the stable runtime graph' >&2
+              exit 1
+              ;;
+          esac
+      - run: cargo +stable check --workspace --all-targets --locked
+      - run: cargo +stable test --workspace --exclude oracledb-pyshim --locked
+      - run: cargo +stable package -p oraclemcp-driver-cx-protocol -p oraclemcp-driver-cx-derive -p oraclemcp-driver-cx --no-verify --locked
 
   clippy:
     name: clippy (-D warnings)

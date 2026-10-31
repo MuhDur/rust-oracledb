@@ -1,5 +1,5 @@
 error: #[driver_cx(column = ...)] is not supported on a tuple struct field; tuple-struct fields map to columns by position
- --> tests/trybuild/fail/tuple_column_attr.rs:4:12
+ --> tests/trybuild/fail/tuple_column_attr.rs:4:24
   |
 4 | struct Row(#[driver_cx(column = "ID")] i64);
-  |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |                        ^^^^^^

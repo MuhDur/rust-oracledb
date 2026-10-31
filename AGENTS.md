@@ -116,13 +116,13 @@ refusal and each acceptance; CI can run it with your required local proofs.
 
 - Cargo workspace, `resolver = "2"`, workspace version **0.9.2**,
   `edition = "2021"`.
-- **NIGHTLY Rust is required** — pinned to **`nightly-2026-05-11`** in
-  `rust-toolchain.toml` (components `rustfmt`, `clippy`). There is **no stable
-  MSRV**: asupersync's default `nightly-outcome-try` feature (pinned `=0.3.9`)
-  enables `#![feature(try_trait_v2)]` / `try_trait_v2_residual`, so a stable
-  toolchain fails with `E0554` before any of this crate's code is reached. Bump
-  the pin in lockstep with asupersync upgrades (and the matching
-  `dtolnay/rust-toolchain` pins under `.github/workflows/`).
+- The default and release toolchain remains **`nightly-2026-05-11`** in
+  `rust-toolchain.toml` (components `rustfmt`, `clippy`). Linux and macOS also
+  check, test and package on stable. The exact asupersync `=0.3.9` dependency
+  disables defaults and explicitly enables `tls` and `proc-macros`; its optional
+  `nightly-outcome-try` feature must remain absent from the whole feature graph.
+  Windows server consumers still need nightly for `windows_by_handle` in both
+  `oraclemcp-core` and `oraclemcp-audit`; release builds retain the nightly pin.
 - The whole workspace forbids `unsafe`: `unsafe_code = "forbid"` in
   `[workspace.lints.rust]`, and the driver/protocol crates are each
   `#![forbid(unsafe_code)]`. The **only** `unsafe` is one audited Arrow C-Data
@@ -174,10 +174,11 @@ These are the reasons this project exists — never regress them:
 - **Thin mode only.** No thick mode, no OCI, no ODPI-C, no Instant Client. A
   thick path would re-introduce the native dependency the project exists to
   avoid. The driver links **no native Oracle library**.
-- **Nightly + asupersync stay.** asupersync is the single load-bearing
-  async-runtime dependency, pinned exactly (`=0.3.9`) because its `tls` feature
-  fixes the rustls/ring graph; its default `nightly-outcome-try` feature keeps
-  the release graph on nightly. Bump it deliberately, never via a caret floor.
+- **Pinned release toolchain + asupersync stay.** asupersync is the single
+  load-bearing async-runtime dependency, pinned exactly (`=0.3.9`) because its
+  `tls` feature fixes the rustls/ring graph. Keep defaults off so stable hosts
+  never acquire `nightly-outcome-try`; keep the pinned nightly for releases.
+  Bump the runtime deliberately, never via a caret floor.
 - **Fail-closed decode.** Every untrusted input path (wire decoder, TLS/wallet
   readers, connect-string parser) returns a structured error on hostile or
   malformed input — never a panic, OOM, or stack overflow. The
