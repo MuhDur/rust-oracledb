@@ -1485,11 +1485,11 @@ pub enum Error {
     /// never included in this error.
     #[error("DPY-3001: access token authentication requires a TLS (TCPS) connection")]
     AccessTokenRequiresTcps,
-    /// The connect descriptor names a setting this thin driver parses but
-    /// cannot honour (for example `SOURCE_ROUTE=ON`, `HTTPS_PROXY`,
-    /// `RECV_BUF_SIZE` or the DRCP `POOL_*` connect data). The connect is
-    /// refused before any network I/O instead of silently dropping the
-    /// setting; remove it from the connect string.
+    /// The connect descriptor routes the connection in a way this thin driver
+    /// cannot honour: `SOURCE_ROUTE=ON` (Connection Manager chaining) or an
+    /// `HTTPS_PROXY`. Connecting directly instead would bypass the configured
+    /// route, so the connect is refused before any network I/O; remove the
+    /// setting from the connect string.
     #[error("connect descriptor setting {0} is not supported by this thin driver")]
     UnsupportedConnectSetting(String),
     /// The OCI IAM database-token proof-of-possession private key could not be
@@ -3119,7 +3119,8 @@ impl Connection {
         }
         let descriptor = EasyConnect::parse(&options.connect_string)?;
         let full_descriptor = EasyConnect::parse_descriptor(&options.connect_string)?;
-        refuse_unmodelled_descriptor_settings(&full_descriptor)?;
+        refuse_unroutable_descriptor(&full_descriptor)?;
+        log_ignored_descriptor_hints(&full_descriptor);
         // Fail closed BEFORE any network I/O: a database access token (OCI IAM /
         // OAuth2) must never be put on the wire in clear text. The reference
         // enforces this during the auth exchange (protocol.pyx
@@ -11223,9 +11224,10 @@ fn prepare_description_connect_plan(
     })
 }
 
-/// Refuse, before any network I/O, a descriptor setting this driver parses
-/// but does not implement, so it is never silently dropped (oraclemcp-vs8lq).
-fn refuse_unmodelled_descriptor_settings(descriptor: &Descriptor) -> Result<()> {
+/// Refuse, before any network I/O, a descriptor whose route this driver
+/// cannot follow (oraclemcp-vs8lq). Dialling the endpoint directly instead
+/// would bypass a Connection Manager chain or the configured HTTPS proxy.
+fn refuse_unroutable_descriptor(descriptor: &Descriptor) -> Result<()> {
     let refuse = |setting: &str| Err(Error::UnsupportedConnectSetting(setting.to_string()));
     if descriptor.source_route {
         return refuse("DESCRIPTION_LIST SOURCE_ROUTE=ON");
@@ -11233,30 +11235,6 @@ fn refuse_unmodelled_descriptor_settings(descriptor: &Descriptor) -> Result<()> 
     for description in &descriptor.descriptions {
         if description.source_route {
             return refuse("DESCRIPTION SOURCE_ROUTE=ON");
-        }
-        for (key, value) in &description.extra {
-            match key.as_str() {
-                "ENABLE" if value.eq_ignore_ascii_case("broken") => {}
-                "ENABLE" => return refuse(&format!("ENABLE={value}")),
-                "RECV_BUF_SIZE" | "SEND_BUF_SIZE" => return refuse(key),
-                _ => {}
-            }
-        }
-        let connect_data = &description.connect_data;
-        for (present, setting) in [
-            (connect_data.cclass.is_some(), "POOL_CONNECTION_CLASS"),
-            (connect_data.purity.is_some(), "POOL_PURITY"),
-            (connect_data.pool_boundary.is_some(), "POOL_BOUNDARY"),
-            (connect_data.pool_name.is_some(), "POOL_NAME"),
-            (
-                connect_data.connection_id_prefix.is_some(),
-                "CONNECTION_ID_PREFIX",
-            ),
-            (connect_data.use_tcp_fast_open, "USE_TCP_FAST_OPEN"),
-        ] {
-            if present {
-                return refuse(setting);
-            }
         }
         for list in &description.address_lists {
             if list.source_route {
@@ -11272,6 +11250,57 @@ fn refuse_unmodelled_descriptor_settings(descriptor: &Descriptor) -> Result<()> 
         }
     }
     Ok(())
+}
+
+/// Descriptor hints this driver parses but does not implement. Each is a
+/// performance, tracing or pooling hint: ignoring it still connects to the
+/// same endpoint over the same security path (DRCP hints yield a dedicated
+/// session). Names only; values never reach the log.
+fn ignored_descriptor_hints(descriptor: &Descriptor) -> Vec<&'static str> {
+    let mut hints = Vec::new();
+    let mut note = |present: bool, hint: &'static str| {
+        if present && !hints.contains(&hint) {
+            hints.push(hint);
+        }
+    };
+    for description in &descriptor.descriptions {
+        for (key, value) in &description.extra {
+            match key.as_str() {
+                "ENABLE" => note(!value.eq_ignore_ascii_case("broken"), "ENABLE"),
+                "RECV_BUF_SIZE" => note(true, "RECV_BUF_SIZE"),
+                "SEND_BUF_SIZE" => note(true, "SEND_BUF_SIZE"),
+                _ => {}
+            }
+        }
+        let connect_data = &description.connect_data;
+        note(connect_data.cclass.is_some(), "POOL_CONNECTION_CLASS");
+        note(connect_data.purity.is_some(), "POOL_PURITY");
+        note(connect_data.pool_boundary.is_some(), "POOL_BOUNDARY");
+        note(connect_data.pool_name.is_some(), "POOL_NAME");
+        note(
+            connect_data.connection_id_prefix.is_some(),
+            "CONNECTION_ID_PREFIX",
+        );
+        note(connect_data.use_tcp_fast_open, "USE_TCP_FAST_OPEN");
+    }
+    hints
+}
+
+/// Log the ignored hints once per connect, at debug level (ruling R36:
+/// usable over strict).
+fn log_ignored_descriptor_hints(descriptor: &Descriptor) {
+    let hints = ignored_descriptor_hints(descriptor);
+    if hints.is_empty() {
+        return;
+    }
+    #[cfg(feature = "tracing")]
+    crate::__tracing::event!(
+        crate::__tracing::Level::DEBUG,
+        hints = %hints.join(","),
+        "connect descriptor hints are not supported by this thin driver and are ignored"
+    );
+    #[cfg(not(feature = "tracing"))]
+    let _ = hints;
 }
 
 /// The active children of one descriptor level (reference
@@ -13105,10 +13134,10 @@ mod tests {
     }
 
     #[test]
-    fn unmodelled_descriptor_settings_are_refused_before_any_dial() -> Result<()> {
+    fn unroutable_descriptor_settings_are_refused_before_any_dial() -> Result<()> {
         // Each setting sits in the second DESCRIPTION; neither endpoint may
         // be dialled.
-        for (list_part, description_part, address_part, connect_data_part, setting) in [
+        for (list_part, description_part, list_level, address_part, setting) in [
             (
                 "(SOURCE_ROUTE=ON)",
                 "",
@@ -13126,31 +13155,17 @@ mod tests {
             (
                 "",
                 "",
-                "(HTTPS_PROXY=proxy.invalid)(HTTPS_PROXY_PORT=8080)",
+                "(SOURCE_ROUTE=ON)",
                 "",
+                "ADDRESS_LIST SOURCE_ROUTE=ON",
+            ),
+            (
+                "",
+                "",
+                "",
+                "(HTTPS_PROXY=proxy.invalid)(HTTPS_PROXY_PORT=8080)",
                 "HTTPS_PROXY",
             ),
-            ("", "(RECV_BUF_SIZE=65536)", "", "", "RECV_BUF_SIZE"),
-            ("", "(SEND_BUF_SIZE=65536)", "", "", "SEND_BUF_SIZE"),
-            ("", "(ENABLE=ALWAYS)", "", "", "ENABLE=ALWAYS"),
-            (
-                "",
-                "",
-                "",
-                "(POOL_CONNECTION_CLASS=cc)",
-                "POOL_CONNECTION_CLASS",
-            ),
-            ("", "", "", "(POOL_PURITY=SELF)", "POOL_PURITY"),
-            ("", "", "", "(POOL_BOUNDARY=STATEMENT)", "POOL_BOUNDARY"),
-            ("", "", "", "(POOL_NAME=pool)", "POOL_NAME"),
-            (
-                "",
-                "",
-                "",
-                "(CONNECTION_ID_PREFIX=pfx)",
-                "CONNECTION_ID_PREFIX",
-            ),
-            ("", "", "", "(USE_TCP_FAST_OPEN=ON)", "USE_TCP_FAST_OPEN"),
         ] {
             let first = TcpListener::bind("127.0.0.1:0")?;
             let second = TcpListener::bind("127.0.0.1:0")?;
@@ -13160,21 +13175,23 @@ mod tests {
                  (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={}))\
                  (CONNECT_DATA=(SERVICE_NAME=svc)))\
                  (DESCRIPTION={description_part}\
-                 (ADDRESS_LIST=(ADDRESS={address_part}(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={})))\
-                 (CONNECT_DATA=(SERVICE_NAME=svc){connect_data_part})))",
+                 (ADDRESS_LIST={list_level}\
+                 (ADDRESS={address_part}(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={}))\
+                 (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={})))\
+                 (CONNECT_DATA=(SERVICE_NAME=svc))))",
                 first.local_addr()?.port(),
                 second.local_addr()?.port(),
+                second.local_addr()?.port(),
             );
-            let error = connect_must_fail(
+            let failure = connect_failure(connect_must_fail(
                 BlockingConnection::connect(ConnectOptions::new(
                     dsn,
                     "user",
                     "password",
                     identity(),
                 )),
-                "the setting is refused",
-            );
-            let failure = connect_failure(error);
+                "the route is refused",
+            ));
             assert!(
                 matches!(&failure, Error::UnsupportedConnectSetting(name) if name == setting),
                 "{setting}: {failure:?}"
@@ -13183,25 +13200,66 @@ mod tests {
             assert_never_dialled(&first);
             assert_never_dialled(&second);
         }
+        Ok(())
+    }
 
-        // ADDRESS_LIST-level SOURCE_ROUTE in the first DESCRIPTION.
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        let dsn = format!(
-            "(DESCRIPTION=(ADDRESS_LIST=(SOURCE_ROUTE=ON)\
-             (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={0}))\
-             (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={0})))\
+    #[test]
+    fn unsupported_descriptor_hints_are_ignored_and_still_connect() -> Result<()> {
+        // Each hint sits in the selected DESCRIPTION: the connect still
+        // reaches its listener with the selected service, and the hint is
+        // reported as ignored.
+        for (description_part, connect_data_part, hint) in [
+            ("(RECV_BUF_SIZE=65536)", "", "RECV_BUF_SIZE"),
+            ("(SEND_BUF_SIZE=65536)", "", "SEND_BUF_SIZE"),
+            ("(ENABLE=ALWAYS)", "", "ENABLE"),
+            ("", "(POOL_CONNECTION_CLASS=cc)", "POOL_CONNECTION_CLASS"),
+            ("", "(POOL_PURITY=SELF)", "POOL_PURITY"),
+            ("", "(POOL_BOUNDARY=STATEMENT)", "POOL_BOUNDARY"),
+            ("", "(POOL_NAME=pool)", "POOL_NAME"),
+            ("", "(CONNECTION_ID_PREFIX=pfx)", "CONNECTION_ID_PREFIX"),
+            ("", "(USE_TCP_FAST_OPEN=ON)", "USE_TCP_FAST_OPEN"),
+        ] {
+            let first_port = closed_port()?;
+            let (second_port, peer) = spawn_connect_peer(|_| Ok(()))?;
+            let dsn = format!(
+                "(DESCRIPTION_LIST=(LOAD_BALANCE=OFF)\
+                 (DESCRIPTION=\
+                 (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={first_port}))\
+                 (CONNECT_DATA=(SERVICE_NAME=first_service)))\
+                 (DESCRIPTION={description_part}\
+                 (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={second_port}))\
+                 (CONNECT_DATA=(SERVICE_NAME=selected_service){connect_data_part})))"
+            );
+            let descriptor = EasyConnect::parse_descriptor(&dsn).expect("parse");
+            assert_eq!(ignored_descriptor_hints(&descriptor), [hint]);
+            // The peer closes after CONNECT, before authentication.
+            let failure = connect_failure(connect_must_fail(
+                BlockingConnection::connect(ConnectOptions::new(
+                    dsn,
+                    "user",
+                    "password",
+                    identity(),
+                )),
+                "the peer closes after CONNECT",
+            ));
+            assert!(
+                !matches!(failure, Error::UnsupportedConnectSetting(_)),
+                "{hint}: {failure:?}"
+            );
+            let (payload, ()) = peer.join().expect("CONNECT peer joins")?;
+            let text = String::from_utf8_lossy(&payload);
+            assert!(
+                text.contains("(SERVICE_NAME=selected_service)"),
+                "{hint}: {text}"
+            );
+        }
+        // ENABLE=BROKEN is implemented (keepalive), not an ignored hint.
+        let broken = EasyConnect::parse_descriptor(
+            "(DESCRIPTION=(ENABLE=BROKEN)(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1))\
              (CONNECT_DATA=(SERVICE_NAME=svc)))",
-            listener.local_addr()?.port()
-        );
-        let failure = connect_failure(connect_must_fail(
-            BlockingConnection::connect(ConnectOptions::new(dsn, "user", "password", identity())),
-            "source route is refused",
-        ));
-        assert!(
-            matches!(&failure, Error::UnsupportedConnectSetting(name) if name == "ADDRESS_LIST SOURCE_ROUTE=ON"),
-            "{failure:?}"
-        );
-        assert_never_dialled(&listener);
+        )
+        .expect("parse");
+        assert!(ignored_descriptor_hints(&broken).is_empty());
         Ok(())
     }
 
