@@ -3181,9 +3181,6 @@ impl Connection {
             // `resolve_effective_sdu`); the wallet directory and the SNI toggle
             // fall back to the DSN `SECURITY`/`USE_SNI` when the structured
             // builder did not set them.
-            let advertised_sdu =
-                u16::try_from(resolve_effective_sdu(options.sdu, &primary_description))
-                    .unwrap_or(u16::MAX);
             let effective_use_sni = options.use_sni || primary_description.use_sni;
             let effective_wallet_location = options
                 .wallet_location
@@ -3360,6 +3357,14 @@ impl Connection {
                     )));
                 }
             };
+            // DESCRIPTION_LIST failover can select an endpoint from a later
+            // DESCRIPTION with its own SDU and CONNECT_DATA. Keep its index
+            // with the endpoint so load balancing preserves that association.
+            let active_description =
+                &full_descriptor.descriptions[active_address.description_index];
+            let advertised_sdu =
+                u16::try_from(resolve_effective_sdu(options.sdu, active_description.sdu))
+                    .unwrap_or(u16::MAX);
             record_connect_phase(&connect_phase, ConnectPhase::Connect);
             // Rebind the working descriptor to the address that actually
             // connected so the CONNECT descriptor's ADDRESS clause reflects the
@@ -3367,7 +3372,11 @@ impl Connection {
             let descriptor = EasyConnect {
                 host: active_address.host,
                 port: active_address.port,
-                service_name: descriptor.service_name.clone(),
+                service_name: active_description
+                    .connect_data
+                    .service_name
+                    .clone()
+                    .unwrap_or_default(),
                 protocol: descriptor.protocol,
             };
             let mut core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
@@ -3376,7 +3385,7 @@ impl Connection {
 
             let connect_descriptor = listener_connect_descriptor_with_server(
                 &descriptor,
-                &primary_description,
+                active_description,
                 &identity,
                 options.server_type_emon,
                 token_auth,
@@ -3574,7 +3583,7 @@ impl Connection {
             let mut ttc_seq_num = 1;
             let auth_connect_string = auth_connect_descriptor(
                 &descriptor,
-                &primary_description,
+                active_description,
                 token_auth,
                 descriptor_ssl_server_dn_match,
                 descriptor_ssl_server_cert_dn,
@@ -11064,12 +11073,12 @@ fn effective_ssl_server_dn_match(description: &Description, options: &ConnectOpt
 /// clamps the result to the 16-bit wire field (the classic CONNECT-packet SDU
 /// ceiling of 65535); the server negotiates the effective SDU down from the
 /// advertised value in its ACCEPT.
-fn resolve_effective_sdu(options_sdu: u16, description: &Description) -> u32 {
+fn resolve_effective_sdu(options_sdu: u16, dsn_sdu: u32) -> u32 {
     const BUILDER_DEFAULT_SDU: u16 = 8192;
     if options_sdu != BUILDER_DEFAULT_SDU {
         u32::from(options_sdu)
-    } else if description.sdu != DSN_DEFAULT_SDU {
-        description.sdu
+    } else if dsn_sdu != DSN_DEFAULT_SDU {
+        dsn_sdu
     } else {
         u32::from(BUILDER_DEFAULT_SDU)
     }
@@ -11080,6 +11089,7 @@ fn resolve_effective_sdu(options_sdu: u16, description: &Description) -> u32 {
 struct ConnectAddress {
     host: String,
     port: u16,
+    description_index: usize,
 }
 
 /// A failure that can only occur after deterministic connection configuration
@@ -11146,11 +11156,12 @@ fn resolve_connect_addresses(
     protocol: NetProtocol,
 ) -> Vec<ConnectAddress> {
     let mut out: Vec<ConnectAddress> = Vec::new();
-    let mut descriptions: Vec<&Description> = descriptor.descriptions.iter().collect();
+    let mut descriptions: Vec<(usize, &Description)> =
+        descriptor.descriptions.iter().enumerate().collect();
     if descriptor.load_balance {
         shuffle_in_place(&mut descriptions);
     }
-    for description in descriptions {
+    for (description_index, description) in descriptions {
         let mut lists: Vec<&AddressList> = description.address_lists.iter().collect();
         if description.load_balance {
             shuffle_in_place(&mut lists);
@@ -11176,6 +11187,7 @@ fn resolve_connect_addresses(
                     out.push(ConnectAddress {
                         host: host.clone(),
                         port: address.port,
+                        description_index,
                     });
                 }
             }
@@ -12407,6 +12419,73 @@ mod tests {
     }
 
     #[test]
+    fn failover_connect_advertises_the_selected_description_sdu() -> Result<()> {
+        for (first_sdu, second_sdu, override_sdu, expected) in [
+            (32768, 4096, None, 4096),
+            (4096, 32768, None, 32768),
+            (32768, 4096, Some(16384), 16384),
+        ] {
+            let unavailable = TcpListener::bind("127.0.0.1:0")?;
+            let first_port = unavailable.local_addr()?.port();
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let second_port = listener.local_addr()?.port();
+            drop(unavailable);
+            let server = thread::spawn(move || -> std::io::Result<Vec<u8>> {
+                listener.set_nonblocking(true)?;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let (mut socket, _) = loop {
+                    match listener.accept() {
+                        Ok(pair) => break pair,
+                        Err(err)
+                            if err.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(err) => return Err(err),
+                    }
+                };
+                socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+                let mut header = [0; 8];
+                socket.read_exact(&mut header)?;
+                assert_eq!(header[4], TNS_PACKET_TYPE_CONNECT);
+                let length = usize::from(u16::from_be_bytes([header[0], header[1]]));
+                let mut payload = vec![0; length - header.len()];
+                socket.read_exact(&mut payload)?;
+                Ok(payload)
+            });
+            let dsn = format!(
+                "(DESCRIPTION_LIST=(LOAD_BALANCE=OFF)\
+                 (DESCRIPTION=(SDU={first_sdu})(CONNECT_TIMEOUT=2)\
+                 (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={first_port}))\
+                 (CONNECT_DATA=(SERVICE_NAME=first_service)(SERVER=DEDICATED)))\
+                 (DESCRIPTION=(SDU={second_sdu})\
+                 (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={second_port}))\
+                 (CONNECT_DATA=(SERVICE_NAME=selected_service)(SERVER=SHARED)(FIXTURE_KEY=selected))))"
+            );
+            let mut options = ConnectOptions::new(dsn, "user", "password", identity());
+            if let Some(sdu) = override_sdu {
+                options = options.with_sdu(sdu);
+            }
+            // The peer captures CONNECT then closes, before authentication.
+            assert!(BlockingConnection::connect(options).is_err());
+            let payload = server.join().expect("CONNECT peer joins")?;
+            assert_eq!(
+                connect_packet_sdu(&payload),
+                expected,
+                "selected DESCRIPTION SDU {second_sdu}, builder override {override_sdu:?}"
+            );
+            let text = String::from_utf8_lossy(&payload);
+            assert!(text.contains("(SERVICE_NAME=selected_service)"), "{text}");
+            assert!(text.contains("(SERVER=shared)"), "{text}");
+            assert!(text.contains("(FIXTURE_KEY=selected)"), "{text}");
+            assert!(!text.contains("first_service"), "{text}");
+            assert!(!text.contains("dedicated"), "{text}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn f1_dsn_sdu_reaches_the_connect_config() {
         // A DSN-set SDU must reach the connect config when the structured
         // builder left SDU at its default (the common DSN-only case).
@@ -12419,7 +12498,7 @@ mod tests {
         assert_eq!(primary.sdu, 32768, "parser must capture DSN SDU");
         // builder default (8192) => DSN SDU wins.
         let advertised =
-            u16::try_from(resolve_effective_sdu(8192, primary)).expect("32768 fits u16");
+            u16::try_from(resolve_effective_sdu(8192, primary.sdu)).expect("32768 fits u16");
         assert_eq!(advertised, 32768);
         // and it reaches the actual CONNECT packet bytes.
         let payload = build_connect_packet_payload(
@@ -12440,15 +12519,18 @@ mod tests {
         .expect("parse");
         let desc = dsn.first_description();
         // explicit builder SDU wins over the DSN.
-        assert_eq!(resolve_effective_sdu(4096, desc), 4096);
+        assert_eq!(resolve_effective_sdu(4096, desc.sdu), 4096);
         // builder at default => DSN SDU used.
-        assert_eq!(resolve_effective_sdu(8192, desc), 16384);
+        assert_eq!(resolve_effective_sdu(8192, desc.sdu), 16384);
         // neither set => shared default.
         let plain = EasyConnect::parse_descriptor(
             "(DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=h)(PORT=1))(CONNECT_DATA=(SERVICE_NAME=s)))",
         )
         .expect("parse");
-        assert_eq!(resolve_effective_sdu(8192, plain.first_description()), 8192);
+        assert_eq!(
+            resolve_effective_sdu(8192, plain.first_description().sdu),
+            8192
+        );
     }
 
     #[test]
@@ -12644,11 +12726,13 @@ mod tests {
             vec![
                 ConnectAddress {
                     host: "primary".into(),
-                    port: 1521
+                    port: 1521,
+                    description_index: 0,
                 },
                 ConnectAddress {
                     host: "standby".into(),
-                    port: 1522
+                    port: 1522,
+                    description_index: 0,
                 },
             ]
         );
@@ -12668,7 +12752,8 @@ mod tests {
             addrs,
             vec![ConnectAddress {
                 host: "only".into(),
-                port: 1521
+                port: 1521,
+                description_index: 0,
             }]
         );
     }
@@ -12691,15 +12776,18 @@ mod tests {
             vec![
                 ConnectAddress {
                     host: "a".into(),
-                    port: 1
+                    port: 1,
+                    description_index: 0,
                 },
                 ConnectAddress {
                     host: "b".into(),
-                    port: 2
+                    port: 2,
+                    description_index: 0,
                 },
                 ConnectAddress {
                     host: "c".into(),
-                    port: 3
+                    port: 3,
+                    description_index: 0,
                 },
             ]
         );
@@ -12720,14 +12808,16 @@ mod tests {
             resolve_connect_addresses(&desc, NetProtocol::Tcp),
             vec![ConnectAddress {
                 host: "plain".into(),
-                port: 1521
+                port: 1521,
+                description_index: 0,
             }]
         );
         assert_eq!(
             resolve_connect_addresses(&desc, NetProtocol::Tcps),
             vec![ConnectAddress {
                 host: "secure".into(),
-                port: 2484
+                port: 2484,
+                description_index: 0,
             }]
         );
     }
@@ -21854,6 +21944,81 @@ mod tests {
             "expected a MARKER packet"
         );
         packet[10]
+    }
+
+    #[test]
+    fn pending_cursor_piggyback_never_enters_break_reset_or_interrupt_packets() -> Result<()> {
+        for terminal in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let addr = listener.local_addr()?;
+            let server = thread::spawn(move || -> std::io::Result<()> {
+                use std::io::Write as _;
+                let (mut socket, _) = listener.accept()?;
+                socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+                let mut packet = [0; 11];
+                socket.read_exact(&mut packet)?;
+                let kind = if terminal {
+                    TNS_MARKER_TYPE_INTERRUPT
+                } else {
+                    TNS_MARKER_TYPE_BREAK
+                };
+                assert_eq!(
+                    packet.as_slice(),
+                    marker_packet(kind),
+                    "marker must have exactly its three-byte body"
+                );
+                if terminal {
+                    let mut eof = [0; 10];
+                    socket.read_exact(&mut eof)?;
+                    assert_eq!(eof[4], TNS_PACKET_TYPE_DATA);
+                    assert_eq!(
+                        u16::from_be_bytes([eof[8], eof[9]]),
+                        oracledb_protocol::thin::TNS_DATA_FLAGS_EOF
+                    );
+                } else {
+                    socket.write_all(&marker_packet(TNS_MARKER_TYPE_BREAK))?;
+                    socket.read_exact(&mut packet)?;
+                    assert_eq!(packet.as_slice(), marker_packet(TNS_MARKER_TYPE_RESET));
+                    socket.write_all(&marker_packet(TNS_MARKER_TYPE_RESET))?;
+                    socket.write_all(&data_packet(
+                        &[oracledb_protocol::thin::TNS_MSG_TYPE_STATUS, 0, 0],
+                        true,
+                    ))?;
+                }
+                assert_eq!(
+                    socket.read(&mut [0; 1])?,
+                    0,
+                    "no piggyback may trail a marker"
+                );
+                Ok(())
+            });
+            let runtime = build_io_runtime()?;
+            runtime.block_on(async {
+                let cx = test_cx()?;
+                let stream = TcpStream::connect(addr).await?;
+                let (read, write) = transport::plain_split(stream);
+                let mut connection = loopback_connection(read, write);
+                connection.close_cursor(37);
+                assert_eq!(connection.cursors_to_close, vec![37]);
+                if terminal {
+                    connection.cancel_and_close(&cx).await?;
+                } else {
+                    connection.cancel(&cx).await?;
+                    assert_eq!(
+                        connection.cursors_to_close,
+                        vec![37],
+                        "recovery preserves the queued DATA piggyback"
+                    );
+                    assert_eq!(
+                        connection.core.recovery.phase(),
+                        SessionRecoveryPhase::Ready
+                    );
+                }
+                Ok::<_, Error>(())
+            })?;
+            server.join().expect("marker peer joins")?;
+        }
+        Ok(())
     }
 
     // THE FIX: break_and_drain_wire sends BREAK, then consumes the ENTIRE

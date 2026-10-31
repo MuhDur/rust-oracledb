@@ -43,6 +43,295 @@ fn execute_raw(
     )
 }
 
+/// Oracle's beta.4/beta.5 NUMBER bugs can survive a bind/fetch round trip when
+/// both ends share the same defect. Compare the server's bytes and equality to
+/// a SQL literal, as well as to an independent python-oracledb Decimal bind.
+#[test]
+#[ignore]
+fn upstream_number_bind_bytes_match_python_decimal_and_oracle_literals() {
+    use oracledb::protocol::thin::{BindValue, ExecuteOptions};
+    let numbers = [
+        "0", "0.5", "0.05", "0.005", "0.0005", "0.00005", "0.0123", "0.000123", "1E-4", "1E-130",
+        "-0.05", "-0.005", "101", "100", "2500", "-100", "10000", "123.4500", "0.0500", "-2500.00",
+    ];
+    let reference = std::process::Command::new("python3")
+        .args(["-c", r#"
+import decimal, os, sys, oracledb
+with oracledb.connect(user=os.environ['PYO_TEST_MAIN_USER'],
+    password=os.environ['PYO_TEST_MAIN_PASSWORD'],
+    dsn=os.environ['PYO_TEST_CONNECT_STRING']) as conn:
+    with conn.cursor() as cur:
+        for text in sys.argv[1:]:
+            sql = f"SELECT DUMP(:1,16), DUMP({text},16), CASE WHEN :2={text} THEN 1 ELSE 0 END, TO_CHAR(:3,'TM9','NLS_NUMERIC_CHARACTERS=''.,''') FROM SYS.DUAL"
+            value = decimal.Decimal(text)
+            row = cur.execute(sql, [value, value, value]).fetchone()
+            assert row[0] == row[1] and row[2] == 1, (text, row)
+            print(text, *row, sep='\t')
+"#])
+        .args(numbers)
+        .output().expect("python-oracledb reference must be installed");
+    assert!(
+        reference.status.success(),
+        "python reference: {}",
+        String::from_utf8_lossy(&reference.stderr)
+    );
+    let output = String::from_utf8(reference.stdout).unwrap();
+    let rows: Vec<_> = output.lines().collect();
+    assert_eq!(rows.len(), numbers.len());
+    let mut conn = BlockingConnection::connect(options()).unwrap();
+    for (number, reference) in numbers.into_iter().zip(rows) {
+        let expected: Vec<_> = reference.split('\t').collect();
+        assert_eq!(expected.len(), 5);
+        assert_eq!(expected[0], number);
+        let sql = format!(
+            "SELECT DUMP(:1,16), DUMP({number},16), \
+            CASE WHEN :2={number} THEN 1 ELSE 0 END, \
+            TO_CHAR(:3,'TM9','NLS_NUMERIC_CHARACTERS=''.,''') FROM SYS.DUAL"
+        );
+        let result = BlockingConnection::execute_raw(
+            &mut conn,
+            &sql,
+            2,
+            &[vec![BindValue::Number(number.into()); 3]],
+            ExecuteOptions::default(),
+            Some(3000),
+        )
+        .unwrap_or_else(|err| panic!("NUMBER {number}: {err}"));
+        assert_eq!(result.rows.len(), 1);
+        for col in [0, 1, 3] {
+            assert_eq!(
+                result.cell(0, col).and_then(QueryValue::as_text),
+                Some(expected[col + 1]),
+                "NUMBER {number}, column {col}"
+            );
+        }
+        assert_eq!(
+            result.cell(0, 2).and_then(QueryValue::as_i64),
+            Some(1),
+            "NUMBER {number}"
+        );
+    }
+    BlockingConnection::close(conn).unwrap();
+}
+
+#[test]
+#[ignore]
+fn upstream_repeated_and_null_columns_survive_prefetch_and_fetch_boundaries() {
+    let mut conn = BlockingConnection::connect(options()).unwrap();
+    for prefetch in [2, 3, 8, 50] {
+        let mut batch = execute_raw(
+            &mut conn,
+            "SELECT 'repeat', CAST(NULL AS VARCHAR2(20)), level \
+             FROM SYS.DUAL CONNECT BY level <= 43 ORDER BY level",
+            prefetch,
+        )
+        .unwrap();
+        assert_eq!(batch.rows.len(), usize::min(prefetch as usize, 43));
+        let mut seen = 0;
+        loop {
+            for row in &batch.rows {
+                seen += 1;
+                assert_eq!(
+                    row[0].as_ref().and_then(QueryValue::as_text),
+                    Some("repeat")
+                );
+                assert_eq!(row[1], None);
+                assert_eq!(row[2].as_ref().and_then(QueryValue::as_i64), Some(seen));
+            }
+            if !batch.more_rows {
+                break;
+            }
+            assert!(!batch.rows.is_empty(), "fetch must make progress");
+            batch = BlockingConnection::fetch_rows(
+                &mut conn,
+                batch.cursor_id,
+                7,
+                batch.rows.last().map(Vec::as_slice),
+            )
+            .unwrap();
+        }
+        assert_eq!(seen, 43, "prefetch {prefetch}");
+    }
+    BlockingConnection::close(conn).unwrap();
+}
+
+fn fixture_name(suffix: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    format!(
+        "VOP_{suffix}_{:X}_{:X}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros()
+    )
+}
+
+#[test]
+#[ignore]
+fn upstream_description_failover_authenticates_to_the_selected_service() {
+    let creds = common::live_creds_required();
+    let endpoint = oracledb::protocol::net::EasyConnect::parse(&creds.connect_string).unwrap();
+    assert_eq!(endpoint.protocol, oracledb::protocol::net::Protocol::Tcp);
+    let unavailable = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = unavailable.local_addr().unwrap().port();
+    drop(unavailable);
+    let dsn = format!(
+        "(DESCRIPTION_LIST=(LOAD_BALANCE=OFF)\
+        (DESCRIPTION=(CONNECT_TIMEOUT=3)(SDU=4096)\
+        (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={port}))\
+        (CONNECT_DATA=(SERVICE_NAME=VOP_NOT_A_SERVICE)))\
+        (DESCRIPTION=(SDU=16384)\
+        (ADDRESS=(PROTOCOL=tcp)(HOST={})(PORT={}))\
+        (CONNECT_DATA=(SERVICE_NAME={}))))",
+        endpoint.host, endpoint.port, endpoint.service_name
+    );
+    let identity = ClientIdentity::new("vop-failover", "host", "user", "term", "rust").unwrap();
+    let mut conn = BlockingConnection::connect(ConnectOptions::new(
+        dsn,
+        creds.user,
+        creds.password,
+        identity,
+    ))
+    .unwrap();
+    let value: i64 = BlockingConnection::query_one(&mut conn, "SELECT 42 FROM SYS.DUAL", ())
+        .unwrap()
+        .get(0)
+        .unwrap();
+    assert_eq!(value, 42);
+    BlockingConnection::close(conn).unwrap();
+}
+
+#[test]
+#[ignore]
+fn upstream_failed_parse_is_reparsed_after_the_missing_object_is_created() {
+    let mut conn = BlockingConnection::connect(options()).unwrap();
+    let table = fixture_name("PARSE");
+    let sql = format!("SELECT n FROM {table}");
+    let err = execute_raw(&mut conn, &sql, 2).unwrap_err();
+    assert_eq!(err.ora_code(), Some(942));
+    BlockingConnection::execute(&mut conn, &format!("CREATE TABLE {table} (n NUMBER)"), ())
+        .unwrap();
+    BlockingConnection::execute(&mut conn, &format!("INSERT INTO {table} VALUES (42)"), ())
+        .unwrap();
+    let result = execute_raw(&mut conn, &sql, 2).unwrap();
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.cell(0, 0).and_then(QueryValue::as_i64), Some(42));
+    BlockingConnection::rollback(&mut conn).unwrap();
+    BlockingConnection::execute(&mut conn, &format!("DROP TABLE {table} PURGE"), ()).unwrap();
+    BlockingConnection::close(conn).unwrap();
+}
+
+#[test]
+#[ignore]
+fn upstream_leading_line_comments_preserve_query_dml_and_plsql_execution() {
+    let mut conn = BlockingConnection::connect(options()).unwrap();
+    let table = fixture_name("COMMENT");
+    BlockingConnection::execute(&mut conn, &format!("CREATE TABLE {table} (n NUMBER)"), ())
+        .unwrap();
+    for prefix in [
+        "-- c\n",
+        "--c\n",
+        "\n-- c\n",
+        "-- one\r\n-- two\n",
+        "/* block */\n--line\n",
+    ] {
+        let result =
+            execute_raw(&mut conn, &format!("{prefix}SELECT 42 FROM SYS.DUAL"), 2).unwrap();
+        assert_eq!(result.cell(0, 0).and_then(QueryValue::as_i64), Some(42));
+        BlockingConnection::execute(
+            &mut conn,
+            &format!("{prefix}INSERT INTO {table} VALUES (1)"),
+            (),
+        )
+        .unwrap();
+        BlockingConnection::execute(
+            &mut conn,
+            &format!("{prefix}BEGIN INSERT INTO {table} VALUES (2); END;"),
+            (),
+        )
+        .unwrap();
+    }
+    let count: i64 =
+        BlockingConnection::query_one(&mut conn, &format!("SELECT COUNT(*) FROM {table}"), ())
+            .unwrap()
+            .get(0)
+            .unwrap();
+    assert_eq!(count, 10);
+    BlockingConnection::rollback(&mut conn).unwrap();
+    BlockingConnection::execute(&mut conn, &format!("DROP TABLE {table} PURGE"), ()).unwrap();
+    BlockingConnection::close(conn).unwrap();
+}
+
+#[test]
+#[ignore]
+fn upstream_returning_trigger_error_returns_oracle_error_and_keeps_session_usable() {
+    use oracledb::protocol::thin::{BindValue, ExecuteOptions, ORA_TYPE_NUM_NUMBER};
+    let mut conn = BlockingConnection::connect(options()).unwrap();
+    let table = fixture_name("RETURN");
+    let trigger = fixture_name("TRIGGER");
+    BlockingConnection::execute(&mut conn, &format!("CREATE TABLE {table} (n NUMBER)"), ())
+        .unwrap();
+    BlockingConnection::execute(
+        &mut conn,
+        &format!(
+            "CREATE TRIGGER {trigger} BEFORE INSERT ON {table} \
+        BEGIN RAISE_APPLICATION_ERROR(-20001, 'VOP returning regression'); END;"
+        ),
+        (),
+    )
+    .unwrap();
+    let sql = format!("INSERT INTO {table} VALUES (42) RETURNING n INTO :1");
+    let binds = [vec![BindValue::ReturnOutput {
+        ora_type_num: ORA_TYPE_NUM_NUMBER,
+        csfrm: 0,
+        buffer_size: 22,
+    }]];
+    let err = BlockingConnection::execute_raw(
+        &mut conn,
+        &sql,
+        0,
+        &binds,
+        ExecuteOptions::default(),
+        Some(3000),
+    )
+    .unwrap_err();
+    // A client timeout would bound a hang but would not prove the server error
+    // was decoded or that the response boundary was drained.
+    assert_eq!(err.ora_code(), Some(20001), "{err}");
+    assert!(!conn.is_dead());
+    let count: i64 =
+        BlockingConnection::query_one(&mut conn, &format!("SELECT COUNT(*) FROM {table}"), ())
+            .unwrap()
+            .get(0)
+            .unwrap();
+    assert_eq!(count, 0);
+    BlockingConnection::execute(&mut conn, &format!("ALTER TRIGGER {trigger} DISABLE"), ())
+        .unwrap();
+    let result = BlockingConnection::execute_raw(
+        &mut conn,
+        &sql,
+        0,
+        &binds,
+        ExecuteOptions::default(),
+        Some(3000),
+    )
+    .unwrap();
+    assert_eq!(result.row_count, 1);
+    assert_eq!(result.return_values.len(), 1);
+    assert_eq!(result.return_values[0].0, 0);
+    assert_eq!(result.return_values[0].1.len(), 1);
+    assert_eq!(
+        result.return_values[0].1[0]
+            .as_ref()
+            .and_then(QueryValue::as_i64),
+        Some(42)
+    );
+    BlockingConnection::rollback(&mut conn).unwrap();
+    BlockingConnection::execute(&mut conn, &format!("DROP TABLE {table} PURGE"), ()).unwrap();
+    BlockingConnection::close(conn).unwrap();
+}
+
 fn run_n_distinct(conn: &mut oracledb::Connection, n: i64) {
     for i in 1..=n {
         // Each statement is distinct SQL text, so each takes a cache slot.

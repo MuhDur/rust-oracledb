@@ -260,6 +260,43 @@ pub(crate) fn has_u32_flag(flags: u32, mask: u32) -> bool {
 mod boundary_tests {
     use super::*;
 
+    #[test]
+    fn ltxid_and_replay_context_use_ub4_then_chunked_bytes() {
+        for opcode in [
+            TNS_SERVER_PIGGYBACK_LTXID,
+            TNS_SERVER_PIGGYBACK_AC_REPLAY_CONTEXT,
+        ] {
+            for len in [0, 1, 251, 256, 65_537] {
+                let value: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+                let mut writer = TtcWriter::new();
+                writer.write_u8(opcode);
+                if opcode == TNS_SERVER_PIGGYBACK_AC_REPLAY_CONTEXT {
+                    writer.write_ub2(3);
+                    writer.write_u8(0);
+                    writer.write_ub4(0x1234);
+                    writer.write_ub4(0);
+                    writer.write_u8(0);
+                }
+                writer
+                    .write_bytes_with_two_lengths(Some(&value))
+                    .expect("encode context");
+                writer.write_u8(TNS_MSG_TYPE_END_OF_RESPONSE);
+                let bytes = writer.into_bytes();
+                let mut reader = TtcReader::new(&bytes);
+                assert_eq!(
+                    skip_server_side_piggyback(&mut reader).expect("decode context"),
+                    None
+                );
+                assert_eq!(
+                    reader.read_u8().expect("next message"),
+                    TNS_MSG_TYPE_END_OF_RESPONSE,
+                    "opcode {opcode}, context length {len}"
+                );
+                assert_eq!(reader.remaining(), 0);
+            }
+        }
+    }
+
     // Reference messages/base.pyx:238 gates the ub4 sql-type + ub4
     // server-checksum pair (return-info trailer) on ttc field version >= 20.1.
     // The live matrix crosses it (18c field ver 11 < 20.1 vs 21c ver 16), but
