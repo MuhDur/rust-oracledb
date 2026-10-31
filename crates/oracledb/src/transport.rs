@@ -195,6 +195,23 @@ pub(crate) fn tls_split(stream: TlsStream<TcpStream>) -> (OracleReadHalf, Oracle
     halves
 }
 
+/// Recover the TCP socket beneath a TLS transport so a fresh TLS session can
+/// start on it: Oracle's server-requested TLS renegotiation (a RESEND with the
+/// TLS-renegotiation packet flag) continues on the same socket with a new
+/// handshake. Returns `None` unless both halves are the one shared TLS stream
+/// and nothing else still holds it (plain, recording and replay transports
+/// have no TLS session to replace).
+pub(crate) fn reclaim_tls_tcp(read: OracleReadHalf, write: OracleWriteHalf) -> Option<TcpStream> {
+    match (read, write) {
+        (OracleReadHalf::Tls(read), OracleWriteHalf::Tls(write)) => {
+            drop(write);
+            let stream = Arc::try_unwrap(read).ok()?.into_inner().ok()?;
+            Some(stream.into_inner())
+        }
+        _ => None,
+    }
+}
+
 fn poisoned() -> io::Error {
     io::Error::other("TLS stream mutex poisoned")
 }

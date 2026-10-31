@@ -199,6 +199,10 @@ const DEFAULT_SDU: usize = 8192;
 /// server asks once (pre-23ai, long connect data); the bound only guards
 /// against a peer that never stops answering RESEND.
 const MAX_CONNECT_RESEND_ROUNDS: u8 = 8;
+/// RESEND packet flag: the server continues this TCPS session with a fresh TLS
+/// handshake on the same socket (reference constants.pxi
+/// `TNS_PACKET_FLAG_TLS_RENEG`; protocol.pyx `_connect_phase_one`).
+const TNS_PACKET_FLAG_TLS_RENEG: u8 = 0x08;
 
 /// Upper bound on listener REDIRECT hops before giving up. A real redirect
 /// chain is one hop (shared server / RAC dispatcher); the reference does not
@@ -541,6 +545,15 @@ impl<T: WireTransport> ConnectionCore<T> {
     fn set_protocol_limits(&mut self, limits: ProtocolLimits) -> Result<()> {
         self.protocol_limits = limits.validate()?;
         Ok(())
+    }
+
+    /// Give back the transport halves of a core that no request has used, so
+    /// the connect handshake can rebuild the transport (TLS renegotiation).
+    /// `None` when another holder still shares the write half.
+    fn into_halves(self) -> Option<(T::Read, T::Write)> {
+        let read = self.read?;
+        let write = Arc::try_unwrap(self.write).ok()?.into_inner().ok()?;
+        Some((read, write))
     }
 
     /// Sets the per-read inactivity deadline for this session (GH#14). `None`
@@ -3437,6 +3450,42 @@ impl Connection {
                         resend_rounds += 1;
                         if resend_rounds > MAX_CONNECT_RESEND_ROUNDS {
                             return Err(Error::ConnectResendLoop(resend_rounds));
+                        }
+                        if reply.packet_flags & TNS_PACKET_FLAG_TLS_RENEG != 0 {
+                            // The listener handed this TCPS session to a
+                            // dedicated server process, which starts a fresh
+                            // TLS handshake on the same socket. Continuing in
+                            // the old TLS session fails at the next read
+                            // ("cannot decrypt peer's message"). A renegotiation
+                            // request on plain TCP is a protocol violation.
+                            let Some(prepared_tls) = prepared_tls.as_ref() else {
+                                return Err(Error::UnexpectedPacket(TNS_PACKET_TYPE_RESEND));
+                            };
+                            record_connect_phase(&connect_phase, ConnectPhase::Tls);
+                            trace_connect_step("RESEND requested TLS renegotiation");
+                            let tcp = core
+                                .into_halves()
+                                .and_then(|(read, write)| transport::reclaim_tls_tcp(read, write))
+                                .ok_or_else(|| {
+                                    Error::ConnectionClosed(
+                                        "TLS renegotiation could not reclaim the TCPS socket"
+                                            .into(),
+                                    )
+                                })?;
+                            let tls_stream = tls::tls_handshake_prepared(
+                                prepared_tls,
+                                tcp,
+                                tls::handshake_timeout_from_connect_timeout(connect_timeout),
+                            )
+                            .await
+                            .map_err(|error| {
+                                TransportEstablishmentError::from(error).into_driver_error()
+                            })?;
+                            trace_connect_step("tls renegotiated");
+                            let (read, write) = connector.tls_split(tls_stream);
+                            core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
+                            core.set_protocol_limits(protocol_limits)?;
+                            core.set_inactivity_timeout(inactivity_timeout);
                         }
                         trace_connect_step("RESEND requested; resending CONNECT");
                         continue;

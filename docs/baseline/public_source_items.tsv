@@ -903,6 +903,7 @@ oracledb	crates/oracledb/src/transport.rs	pub(crate) fn capture_path_from_env() 
 oracledb	crates/oracledb/src/transport.rs	pub(crate) fn install_recorder_scope(recorder: CassetteRecorder) -> CaptureScope {
 oracledb	crates/oracledb/src/transport.rs	pub(crate) fn new(recorder: CassetteRecorder, path: PathBuf) -> Self {
 oracledb	crates/oracledb/src/transport.rs	pub(crate) fn plain_split(stream: TcpStream) -> (OracleReadHalf, OracleWriteHalf) {
+oracledb	crates/oracledb/src/transport.rs	pub(crate) fn reclaim_tls_tcp(read: OracleReadHalf, write: OracleWriteHalf) -> Option<TcpStream> {
 oracledb	crates/oracledb/src/transport.rs	pub(crate) fn recording_split(
 oracledb	crates/oracledb/src/transport.rs	pub(crate) fn replay_split(
 oracledb	crates/oracledb/src/transport.rs	pub(crate) fn replay_split_with_audit(
