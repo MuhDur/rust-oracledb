@@ -1922,6 +1922,7 @@ impl core::marker::StructuralPartialEq for oraclemcp_driver_cx_protocol::Resourc
 pub struct oraclemcp_driver_cx_protocol::ServerErrorDetails
 pub oraclemcp_driver_cx_protocol::ServerErrorDetails::array_dml_row_counts: core::option::Option<alloc::vec::Vec<u64>>
 pub oraclemcp_driver_cx_protocol::ServerErrorDetails::code: u32
+pub oraclemcp_driver_cx_protocol::ServerErrorDetails::cursor_id: u32
 pub oraclemcp_driver_cx_protocol::ServerErrorDetails::message: alloc::string::String
 pub oraclemcp_driver_cx_protocol::ServerErrorDetails::pos: i32
 pub oraclemcp_driver_cx_protocol::ServerErrorDetails::row_count: u64

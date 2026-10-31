@@ -156,3 +156,112 @@ fn rebind_type_change_on_cached_statement_redescribes() {
     assert_eq!(n2, 7);
     BlockingConnection::close(c).ok();
 }
+
+/// Requires an administrator in PYO_TEST_MAIN_USER. The observed application
+/// user receives only CREATE SESSION; its cursor count is read by the separate
+/// administrator so sampling cannot change the application session's cursors.
+#[test]
+#[ignore]
+fn failed_parses_retire_returned_cursors_on_the_same_session(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn cycle(c: &mut oracledb::Connection, index: usize) -> Result<(), Box<dyn std::error::Error>> {
+        // Eight SQL texts exceed the two-entry cache and force close piggybacks.
+        let value = (index % 8) as i64;
+        let actual: i64 =
+            BlockingConnection::query_one(c, &format!("select {value} from SYS.DUAL"), ())?
+                .get(0)?;
+        if actual != value {
+            return Err(format!("successful query returned {actual}, expected {value}").into());
+        }
+        let missing = BlockingConnection::query_one(c, "select * from QXP_MISSING_TABLE", ())
+            .err()
+            .ok_or("missing-table parse unexpectedly succeeded")?;
+        let denied = BlockingConnection::execute(c, "create table QXP_DENIED_TABLE (n number)", ())
+            .err()
+            .ok_or("CREATE TABLE unexpectedly succeeded for CREATE SESSION-only user")?;
+        if missing.ora_code() != Some(942) || denied.ora_code() != Some(1031) {
+            return Err(format!("expected ORA-00942/01031, got {missing}; {denied}").into());
+        }
+        Ok(())
+    }
+
+    fn opened_cursors(
+        admin: &mut oracledb::Connection,
+        sid: u32,
+        serial: u16,
+        user: &str,
+    ) -> oracledb::Result<i64> {
+        BlockingConnection::query_one(
+            admin,
+            "select st.value from SYS.V_$SESSTAT st \
+             join SYS.V_$STATNAME n on n.statistic# = st.statistic# \
+             join SYS.V_$SESSION s on s.sid = st.sid \
+             where s.sid = :1 and s.serial# = :2 and s.username = :3 \
+             and n.name = 'opened cursors current'",
+            (i64::from(sid), i64::from(serial), user),
+        )?
+        .get(0)
+    }
+
+    let creds = common::live_creds_required();
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros();
+    let user = format!("QXP{:X}{nonce:X}", std::process::id());
+    let password = format!("Qxp9_{nonce:X}");
+    let mut admin = BlockingConnection::connect(options())?;
+    BlockingConnection::execute(
+        &mut admin,
+        &format!("create user {user} identified by \"{password}\""),
+        (),
+    )?;
+    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+        BlockingConnection::execute(&mut admin, &format!("grant create session to {user}"), ())?;
+        let mut observations = Vec::new();
+        for cache_size in [0, 2] {
+            let identity =
+                ClientIdentity::new("failed-parse-custody", "host", "user", "term", "rust")?;
+            let mut app = BlockingConnection::connect(
+                ConnectOptions::new(&creds.connect_string, &user, &password, identity)
+                    .with_statement_cache_size(cache_size),
+            )?;
+            let sid = app.session_id();
+            let serial = app.serial_num();
+            let measured = (|| -> Result<_, Box<dyn std::error::Error>> {
+                // Warm two complete SQL-text cycles. Each sample is taken at
+                // the identical boundary: the final failed cursor awaits its
+                // next execute's close piggyback. No tolerance is added.
+                for index in 0..16 {
+                    cycle(&mut app, index)?;
+                }
+                let baseline = opened_cursors(&mut admin, sid, serial, &user)?;
+                let mut peak = baseline;
+                for index in 16..80 {
+                    cycle(&mut app, index)?;
+                    peak = peak.max(opened_cursors(&mut admin, sid, serial, &user)?);
+                }
+                if (app.session_id(), app.serial_num()) != (sid, serial) {
+                    return Err("application session changed during failed parses".into());
+                }
+                Ok((cache_size, sid, serial, baseline, peak))
+            })();
+            let closed = BlockingConnection::close(app);
+            observations.push(measured?);
+            closed?;
+        }
+        Ok(observations)
+    })();
+    // Always remove the owned disposable user, including on a driver error.
+    let dropped = BlockingConnection::execute(&mut admin, &format!("drop user {user} cascade"), ());
+    let closed = BlockingConnection::close(admin);
+    dropped?;
+    closed?;
+    let observations = result?;
+    for (cache_size, sid, serial, baseline, peak) in &observations {
+        eprintln!("cache={cache_size} sid={sid} serial={serial} opened cursors current: baseline={baseline}, peak={peak}");
+    }
+    for (cache_size, _, _, baseline, peak) in observations {
+        assert!(peak <= baseline, "failed parses leaked cursors with cache={cache_size}: baseline={baseline}, peak={peak}");
+    }
+    Ok(())
+}

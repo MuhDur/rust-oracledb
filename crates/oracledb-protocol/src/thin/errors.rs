@@ -24,6 +24,7 @@ impl ServerErrorInfo {
         crate::ServerErrorDetails {
             message: self.message,
             code: self.number,
+            cursor_id: u32::from(self.cursor_id),
             pos: self.pos,
             row_count: self.row_count,
             rowid: self.rowid,

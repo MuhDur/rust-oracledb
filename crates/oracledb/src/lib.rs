@@ -3901,7 +3901,8 @@ impl Connection {
         self.dead || self.core.recovery.is_dead()
     }
 
-    /// Wrap a protocol parse result, recording session-dead errors.
+    /// Wrap a protocol parse result, retiring failed cursors and recording
+    /// session-dead errors.
     fn note_parse<T>(
         &mut self,
         result: std::result::Result<T, oracledb_protocol::ProtocolError>,
@@ -3909,6 +3910,12 @@ impl Connection {
         match result {
             Ok(value) => Ok(value),
             Err(err) => {
+                // A failed fresh parse may have allocated a server cursor even
+                // when the request carried cursor 0. Its authoritative ERROR
+                // trailer is the only handle available to retire that cursor.
+                if let oracledb_protocol::ProtocolError::ServerErrorInfo(details) = &err {
+                    self.close_cursor(details.cursor_id);
+                }
                 if protocol_error_is_session_dead(&err) {
                     self.dead = true;
                     self.core.recovery.mark_dead();
@@ -7991,13 +7998,9 @@ impl Connection {
         {
             self.statement_cache.remove(index);
         }
-        if cursor_id != 0 {
-            self.cursors_to_close.push(cursor_id);
-            self.cursor_columns.remove(&cursor_id);
-            self.lob_prefetch_cursors.remove(&cursor_id);
-            self.in_use_cursors.remove(&cursor_id);
-            self.copied_cursors.remove(&cursor_id);
-        }
+        // note_parse may already have retired the same returned cursor. Use
+        // the common idempotent path instead of queuing a duplicate close.
+        self.close_cursor(cursor_id);
     }
 
     /// Builds the close-cursors piggyback bytes for any queued cursor ids;
@@ -8276,28 +8279,27 @@ impl Connection {
                     // A commit op answers with a plain function response; decode
                     // it the same way the standalone commit path does so the
                     // txn-in-progress bit is sampled identically.
-                    match parse_plain_function_response_with_limits(
+                    match self.note_parse(parse_plain_function_response_with_limits(
                         payload,
                         self.capabilities,
                         self.protocol_limits,
-                    ) {
+                    )) {
                         Ok(txn_in_progress) => Ok(QueryResult {
                             txn_in_progress: Some(txn_in_progress),
                             ..QueryResult::default()
                         }),
-                        Err(err) => Err(Error::Protocol(err)),
+                        Err(err) => Err(err),
                     }
                 }
                 PipelineRequest::Execute { sql, bind_rows, .. } => {
-                    parse_query_response_with_binds_options_columns_and_limits(
+                    self.note_parse(parse_query_response_with_binds_options_columns_and_limits(
                         payload,
                         self.capabilities,
                         bind_rows.first().map(Vec::as_slice).unwrap_or(&[]),
                         ExecuteOptions::default(),
                         &[],
                         self.protocol_limits,
-                    )
-                    .map_err(Error::Protocol)
+                    ))
                     .inspect(|result| {
                         // Track open query cursors so a later op or a follow-up
                         // fetch on this connection does not collide with them.
@@ -13939,6 +13941,64 @@ mod tests {
     }
 
     #[test]
+    fn failed_parse_retires_error_cursor_once_and_preserves_diagnostics() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (_socket, _) = listener.accept().expect("accept test client");
+        });
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        let mut conn = runtime.block_on(async {
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (read, write) = transport::plain_split(stream);
+            loopback_connection(read, write)
+        });
+        conn.statement_cache_put("failed", 37, Vec::new());
+        conn.statement_cache_put("unrelated", 73, Vec::new());
+        conn.cursor_columns.insert(37, Vec::new());
+        conn.in_use_cursors.insert(37);
+        conn.copied_cursors.insert(37);
+        conn.lob_prefetch_cursors.insert(37);
+        for cursor_id in [0, 37, 37] {
+            let error = conn
+                .note_parse::<()>(Err(oracledb_protocol::ProtocolError::ServerErrorInfo(
+                    Box::new(oracledb_protocol::ServerErrorDetails {
+                        code: 942,
+                        message: "ORA-00942: table or view does not exist".into(),
+                        pos: 9,
+                        cursor_id,
+                        ..Default::default()
+                    }),
+                )))
+                .expect_err("preserve server refusal");
+            assert_eq!(error.ora_code(), Some(942));
+            assert_eq!(error.offset(), Some(9));
+            assert!(
+                !conn.is_dead(),
+                "ordinary parse error keeps the session usable"
+            );
+            if cursor_id == 0 {
+                assert!(conn.cursors_to_close.is_empty());
+                assert_eq!(conn.statement_cache.len(), 2);
+            }
+        }
+        // Cached-error handling can invalidate this cursor again after the
+        // returned ERROR cursor has already been retired by note_parse.
+        conn.statement_cache_invalidate("failed", 37);
+        assert_eq!(conn.cursors_to_close, vec![37]);
+        assert_eq!(conn.statement_cache.len(), 1);
+        assert_eq!(conn.statement_cache[0].cursor_id, 73);
+        assert!(!conn.cursor_columns.contains_key(&37));
+        assert!(!conn.in_use_cursors.contains(&37));
+        assert!(!conn.copied_cursors.contains(&37));
+        assert!(!conn.lob_prefetch_cursors.contains(&37));
+        assert!(conn.take_close_cursors_piggyback().is_some());
+        assert!(conn.take_close_cursors_piggyback().is_none());
+        drop(conn);
+        server.join().expect("server joins");
+    }
+
+    #[test]
     fn protocol_version_and_fast_auth_accessors_report_negotiated_values() {
         // K2 ServerFeatures accessors: the two getters read the fields the
         // ACCEPT negotiation populates. Build a loopback connection, set the
@@ -14391,6 +14451,73 @@ mod tests {
                 "pipelined op {index} decodes byte-identically to the sequential path"
             );
         }
+    }
+
+    #[test]
+    fn pipeline_failed_operation_retires_returned_cursor() {
+        use oracledb_protocol::wire::TtcWriter;
+        use std::io::Write as _;
+
+        let original = synthetic_pipeline_execute_response_payload();
+        let cursor_id = sequential_op_decode(&original).cursor_id;
+        assert_ne!(cursor_id, 0);
+        // Preserve the response's describe/rows and cursor-bearing ERROR
+        // header, replacing only its final ORA-01403 trailer with a failure.
+        let terminal = original
+            .windows(8)
+            .rposition(|w| w == [2, 5, 0x7b, 1, 1, 1, 3, 0])
+            .expect("terminal no-data trailer");
+        let mut response = original[..terminal].to_vec();
+        let mut trailer = TtcWriter::new();
+        trailer.write_ub4(942);
+        trailer.write_ub8(1);
+        trailer.write_ub4(3);
+        trailer.write_ub4(0);
+        trailer
+            .write_bytes_with_length(b"ORA-00942: table or view does not exist")
+            .expect("failure message");
+        trailer.write_u8(TNS_MSG_TYPE_END_OF_RESPONSE);
+        response.extend(trailer.into_bytes());
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let addr = listener.local_addr().expect("listener address");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept test client");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            for _ in 0..2 {
+                read_one_wire_packet(&mut socket);
+            }
+            socket.write_all(&data_packet(&response, true)).unwrap();
+            socket
+                .write_all(&data_packet(&[TNS_MSG_TYPE_END_OF_RESPONSE], true))
+                .unwrap();
+        });
+        let runtime = build_io_runtime().expect("asupersync runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("ambient Cx");
+            let stream = TcpStream::connect(addr).await.expect("connect to listener");
+            let (read, write) = transport::plain_split(stream);
+            let mut conn = loopback_connection(read, write);
+            let results = conn
+                .run_pipeline_decoded(
+                    &cx,
+                    &[PipelineRequest::execute(
+                        "select * from missing",
+                        Vec::new(),
+                        2,
+                    )],
+                    true,
+                )
+                .await
+                .expect("pipeline response framing");
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].as_ref().unwrap_err().ora_code(), Some(942));
+            assert_eq!(conn.cursors_to_close, vec![cursor_id]);
+            assert!(!conn.is_dead());
+        });
+        server.join().expect("server joins");
     }
 
     #[test]

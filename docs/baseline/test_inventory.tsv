@@ -18,7 +18,7 @@ crates/oracledb-protocol/src/thin/connect.rs	4
 crates/oracledb-protocol/src/thin/dbobject.rs	11
 crates/oracledb-protocol/src/thin/errors.rs	1
 crates/oracledb-protocol/src/thin/execute.rs	4
-crates/oracledb-protocol/src/thin/fetch.rs	35
+crates/oracledb-protocol/src/thin/fetch.rs	36
 crates/oracledb-protocol/src/thin/mod.rs	32
 crates/oracledb-protocol/src/thin/number.rs	7
 crates/oracledb-protocol/src/thin/proptests.rs	24
@@ -60,7 +60,7 @@ crates/oracledb/src/arrow/ipc.rs	1
 crates/oracledb/src/arrow/mod.rs	40
 crates/oracledb/src/cursor_logic.rs	14
 crates/oracledb/src/iam_pop.rs	3
-crates/oracledb/src/lib.rs	166
+crates/oracledb/src/lib.rs	168
 crates/oracledb/src/lob_stream.rs	8
 crates/oracledb/src/obs.rs	6
 crates/oracledb/src/pool.rs	35
@@ -111,7 +111,7 @@ crates/oracledb/tests/live_ref_cursor.rs	3
 crates/oracledb/tests/live_retry.rs	1
 crates/oracledb/tests/live_routine_inout.rs	2
 crates/oracledb/tests/live_soda.rs	9
-crates/oracledb/tests/live_statement_cache.rs	4
+crates/oracledb/tests/live_statement_cache.rs	5
 crates/oracledb/tests/live_tpc_single_rm.rs	2
 crates/oracledb/tests/live_transport_failover.rs	3
 crates/oracledb/tests/live_typed.rs	17

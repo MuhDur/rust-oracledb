@@ -152,6 +152,9 @@ pub struct ServerErrorDetails {
     pub message: String,
     /// ORA error number (extended field).
     pub code: u32,
+    /// Server cursor returned by the failed operation, or zero when absent.
+    /// A fresh parse can allocate this cursor even though no result is returned.
+    pub cursor_id: u32,
     /// Error position / parse offset (sb2; 0 when not reported).
     pub pos: i32,
     /// Server-reported row count at the time of the error.

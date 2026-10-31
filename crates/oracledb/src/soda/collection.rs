@@ -707,6 +707,7 @@ fn server_like_err(message: &str) -> crate::Error {
         oracledb_protocol::ServerErrorDetails {
             message: message.to_string(),
             code,
+            cursor_id: 0,
             pos: 0,
             row_count: 0,
             rowid: None,

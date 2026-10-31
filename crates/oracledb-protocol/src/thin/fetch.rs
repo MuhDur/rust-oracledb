@@ -2736,6 +2736,49 @@ mod mutation_decode_tests {
     }
 
     #[test]
+    fn failed_parse_errors_preserve_returned_cursor_in_owned_and_borrowed_decoders() {
+        for number in [942, 1031] {
+            for cursor_id in [0, 37, u16::MAX] {
+                let message = format!("ORA-{number:05}: failed parse");
+                let mut payload = TtcWriter::new();
+                payload.write_u8(TNS_MSG_TYPE_ERROR);
+                write_error_info(
+                    &mut payload,
+                    ErrorInfo {
+                        number,
+                        message: &message,
+                        cursor_id,
+                        row_count: 0,
+                        call_status: 0,
+                        warning_flags: 0,
+                        rowid: None,
+                    },
+                );
+                let bytes = payload.into_bytes();
+                let owned = parse_query_response(&bytes, caps(TNS_CCAP_FIELD_VERSION_23_4))
+                    .expect_err("failed owned parse");
+                let borrowed = parse_query_response_borrowed_with_limits(
+                    &bytes,
+                    caps(TNS_CCAP_FIELD_VERSION_23_4),
+                    &[],
+                    None,
+                    ProtocolLimits::DEFAULT,
+                )
+                .expect_err("failed borrowed parse");
+                for error in [owned, borrowed] {
+                    let ProtocolError::ServerErrorInfo(details) = error else {
+                        panic!("failed parse lost structured diagnostics");
+                    };
+                    assert_eq!(details.cursor_id, u32::from(cursor_id));
+                    assert_eq!(details.code, number);
+                    assert_eq!(details.message, message);
+                    assert_eq!(details.row_count, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn no_data_error_marks_more_rows_false_when_columns_are_known() {
         let mut payload = TtcWriter::new();
         payload.write_u8(TNS_MSG_TYPE_ERROR);
