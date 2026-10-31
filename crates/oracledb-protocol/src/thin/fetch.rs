@@ -1341,6 +1341,25 @@ fn parse_column_slot<'buf>(
                     nanosecond,
                     offset_minutes,
                 })),
+                QueryValue::TimestampTzRegion {
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    nanosecond,
+                    region,
+                } => Ok(ColumnSlot::Wire(QueryValueRef::TimestampTzRegion {
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second,
+                    nanosecond,
+                    region,
+                })),
                 other => Ok(park(owned_arena, Some(other))),
             },
         }),
@@ -3365,6 +3384,7 @@ mod mutation_decode_tests {
             column("DS", ORA_TYPE_NUM_INTERVAL_DS, CS_FORM_IMPLICIT, 11),
             column("YM", ORA_TYPE_NUM_INTERVAL_YM, CS_FORM_IMPLICIT, 5),
             column("TS", ORA_TYPE_NUM_TIMESTAMP, CS_FORM_IMPLICIT, 11),
+            column("REGION", ORA_TYPE_NUM_TIMESTAMP_TZ, CS_FORM_IMPLICIT, 13),
         ];
         let mut writer = TtcWriter::new();
         writer.write_bytes_with_length(b"hello").expect("text");
@@ -3390,6 +3410,13 @@ mod mutation_decode_tests {
                 &encode_oracle_timestamp(2026, 7, 8, 9, 10, 11, 0).expect("timestamp"),
             )
             .expect("timestamp cell");
+        let mut named =
+            encode_oracle_timestamp_tz(2020, 11, 1, 5, 59, 59, 123_456_789).expect("UTC fields");
+        named[11] = 0x81;
+        named[12] = 0x90; // Oracle region ID 100, America/New_York.
+        writer
+            .write_bytes_with_length(&named)
+            .expect("named region cell");
         let buffer = writer.into_bytes();
         let ptr_range = {
             let start = buffer.as_ptr() as usize;
@@ -3448,6 +3475,27 @@ mod mutation_decode_tests {
                         nanosecond: 0
                     })
                 ));
+                let Some(QueryValueRef::TimestampTzRegion {
+                    year: 2020,
+                    month: 11,
+                    day: 1,
+                    hour: 5,
+                    minute: 59,
+                    second: 59,
+                    nanosecond: 123_456_789,
+                    region,
+                }) = row[8]
+                else {
+                    panic!(
+                        "named timestamp must use a scalar borrowed slot: {:?}",
+                        row[8]
+                    );
+                };
+                assert_eq!(region.name().expect("region"), "America/New_York");
+                assert_eq!(
+                    row[8].as_ref().map(QueryValueRef::to_owned_value),
+                    Some(decode_datetime_value(&named).expect("owned named timestamp"))
+                );
                 Ok::<(), ProtocolError>(())
             })
             .expect("borrowed scalar slots");

@@ -605,6 +605,9 @@ impl<'a> OsonDecoder<'a> {
                     nanosecond,
                 })
             }
+            QueryValue::TimestampTzRegion { .. } => Err(ProtocolError::UnsupportedFeature(
+                "named-region OSON timestamp requires explicit local-time projection",
+            )),
             _ => Err(ProtocolError::OsonInvalid("datetime decode mismatch")),
         }
     }
@@ -1607,6 +1610,32 @@ mod tests {
                 nanosecond: 123_400_000,
             }
         );
+    }
+
+    #[test]
+    fn named_region_oson_timestamp_refuses_unavailable_local_time() {
+        let mut bytes = vec![
+            TNS_JSON_MAGIC_BYTE_1,
+            TNS_JSON_MAGIC_BYTE_2,
+            TNS_JSON_MAGIC_BYTE_3,
+            TNS_JSON_VERSION_MAX_FNAME_255,
+            0,
+            TNS_JSON_FLAG_INLINE_LEAF as u8 | TNS_JSON_FLAG_IS_SCALAR as u8,
+            0,
+            14,
+            TNS_JSON_TYPE_TIMESTAMP_TZ,
+        ];
+        let mut named =
+            crate::thin::encode_oracle_timestamp_tz(2020, 11, 1, 5, 59, 59, 0).expect("UTC fields");
+        named[11] = 0x81;
+        named[12] = 0x90;
+        bytes.extend_from_slice(&named);
+        assert!(matches!(
+            decode_oson(&bytes),
+            Err(ProtocolError::UnsupportedFeature(
+                "named-region OSON timestamp requires explicit local-time projection"
+            ))
+        ));
     }
 
     #[test]

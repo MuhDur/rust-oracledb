@@ -820,6 +820,15 @@ pub oraclemcp_driver_cx_protocol::thin::QueryValue::TimestampTz::nanosecond: u32
 pub oraclemcp_driver_cx_protocol::thin::QueryValue::TimestampTz::offset_minutes: i32
 pub oraclemcp_driver_cx_protocol::thin::QueryValue::TimestampTz::second: u8
 pub oraclemcp_driver_cx_protocol::thin::QueryValue::TimestampTz::year: i32
+pub oraclemcp_driver_cx_protocol::thin::QueryValue::TimestampTzRegion
+pub oraclemcp_driver_cx_protocol::thin::QueryValue::TimestampTzRegion::day: u8
+pub oraclemcp_driver_cx_protocol::thin::QueryValue::TimestampTzRegion::hour: u8
+pub oraclemcp_driver_cx_protocol::thin::QueryValue::TimestampTzRegion::minute: u8
+pub oraclemcp_driver_cx_protocol::thin::QueryValue::TimestampTzRegion::month: u8
+pub oraclemcp_driver_cx_protocol::thin::QueryValue::TimestampTzRegion::nanosecond: u32
+pub oraclemcp_driver_cx_protocol::thin::QueryValue::TimestampTzRegion::region: oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion
+pub oraclemcp_driver_cx_protocol::thin::QueryValue::TimestampTzRegion::second: u8
+pub oraclemcp_driver_cx_protocol::thin::QueryValue::TimestampTzRegion::year: i32
 pub oraclemcp_driver_cx_protocol::thin::QueryValue::Vector(alloc::boxed::Box<oraclemcp_driver_cx_protocol::vector::Vector>)
 impl oraclemcp_driver_cx_protocol::thin::QueryValue
 pub fn oraclemcp_driver_cx_protocol::thin::QueryValue::as_bool(&self) -> core::option::Option<bool>
@@ -873,6 +882,15 @@ pub oraclemcp_driver_cx_protocol::thin::QueryValueRef::TimestampTz::nanosecond: 
 pub oraclemcp_driver_cx_protocol::thin::QueryValueRef::TimestampTz::offset_minutes: i32
 pub oraclemcp_driver_cx_protocol::thin::QueryValueRef::TimestampTz::second: u8
 pub oraclemcp_driver_cx_protocol::thin::QueryValueRef::TimestampTz::year: i32
+pub oraclemcp_driver_cx_protocol::thin::QueryValueRef::TimestampTzRegion
+pub oraclemcp_driver_cx_protocol::thin::QueryValueRef::TimestampTzRegion::day: u8
+pub oraclemcp_driver_cx_protocol::thin::QueryValueRef::TimestampTzRegion::hour: u8
+pub oraclemcp_driver_cx_protocol::thin::QueryValueRef::TimestampTzRegion::minute: u8
+pub oraclemcp_driver_cx_protocol::thin::QueryValueRef::TimestampTzRegion::month: u8
+pub oraclemcp_driver_cx_protocol::thin::QueryValueRef::TimestampTzRegion::nanosecond: u32
+pub oraclemcp_driver_cx_protocol::thin::QueryValueRef::TimestampTzRegion::region: oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion
+pub oraclemcp_driver_cx_protocol::thin::QueryValueRef::TimestampTzRegion::second: u8
+pub oraclemcp_driver_cx_protocol::thin::QueryValueRef::TimestampTzRegion::year: i32
 impl oraclemcp_driver_cx_protocol::thin::QueryValueRef<'_>
 pub fn oraclemcp_driver_cx_protocol::thin::QueryValueRef<'_>::as_number_text(&self) -> core::option::Option<&str>
 pub fn oraclemcp_driver_cx_protocol::thin::QueryValueRef<'_>::as_raw(&self) -> core::option::Option<&[u8]>
@@ -1214,6 +1232,20 @@ pub fn oraclemcp_driver_cx_protocol::thin::ObjectValue::eq(&self, &oraclemcp_dri
 impl core::fmt::Debug for oraclemcp_driver_cx_protocol::thin::ObjectValue
 pub fn oraclemcp_driver_cx_protocol::thin::ObjectValue::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for oraclemcp_driver_cx_protocol::thin::ObjectValue
+pub struct oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion
+impl oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion
+pub fn oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion::from_id(u16) -> oraclemcp_driver_cx_protocol::Result<Self>
+pub const fn oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion::id(self) -> u16
+pub fn oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion::name(self) -> oraclemcp_driver_cx_protocol::Result<&'static str>
+impl core::clone::Clone for oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion
+pub fn oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion::clone(&self) -> oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion
+impl core::cmp::Eq for oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion
+impl core::cmp::PartialEq for oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion
+pub fn oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion::eq(&self, &oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion) -> bool
+impl core::fmt::Debug for oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion
+pub fn oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion
+impl core::marker::StructuralPartialEq for oraclemcp_driver_cx_protocol::thin::OracleTimeZoneRegion
 pub struct oraclemcp_driver_cx_protocol::thin::QueryResult
 pub oraclemcp_driver_cx_protocol::thin::QueryResult::array_dml_row_counts: core::option::Option<alloc::vec::Vec<u64>>
 pub oraclemcp_driver_cx_protocol::thin::QueryResult::batch_errors: alloc::vec::Vec<oraclemcp_driver_cx_protocol::thin::BatchServerError>

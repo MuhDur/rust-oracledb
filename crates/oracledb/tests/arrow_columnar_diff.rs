@@ -137,6 +137,35 @@ fn columnar_empty_frame_byte_identical_to_row_path() {
 }
 
 #[test]
+fn named_region_timestamps_refuse_tz_naive_arrow_in_both_paths() {
+    // Arrow's existing TSTZ projection is a tz-naive local wall clock. A
+    // named region supplies an exact UTC instant, not a proven local offset.
+    let columns = vec![col("T", 181, 0, 9, 13)];
+    let mut writer = TtcWriter::new();
+    writer.write_u8(TNS_MSG_TYPE_ROW_DATA);
+    writer
+        .write_bytes_with_length(&[120, 120, 11, 1, 6, 60, 60, 7, 91, 205, 21, 0x81, 0x90])
+        .expect("named New York timestamp");
+    writer.write_u8(TNS_MSG_TYPE_END_OF_RESPONSE);
+    let payload = writer.into_bytes();
+    let caps = ClientCapabilities::default();
+    let options = ArrowFetchOptions::default();
+    let owned = parse_fetch_response_with_context(&payload, caps, &columns, None)
+        .expect("owned named-region decode");
+    let borrowed = parse_query_response_borrowed(&payload, caps, &columns, None)
+        .expect("borrowed named-region decode");
+    let schema = Arc::new(arrow_schema_for_columns(&columns, &options).expect("schema"));
+    assert!(matches!(
+        build_record_batch(&columns, &owned.rows, &options),
+        Err(oracledb::arrow::ArrowConversionError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        build_record_batch_columnar(schema, &columns, &borrowed.batch),
+        Err(oracledb::arrow::ArrowConversionError::InvalidValue { .. })
+    ));
+}
+
+#[test]
 fn columnar_fetch_decimals_byte_identical_to_row_path() {
     // fetch_decimals=true maps NUMBER(p,s) -> decimal128(p,s); exercise the
     // Decimal128 builder in BOTH paths and assert identity.

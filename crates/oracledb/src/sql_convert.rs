@@ -559,6 +559,27 @@ mod chrono_impls {
 
     impl FromSql for DateTime<Utc> {
         fn from_sql(value: &QueryValue) -> Result<Self, ConversionError> {
+            if let QueryValue::TimestampTzRegion {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+                ..
+            } = value
+            {
+                return Ok(Utc.from_utc_datetime(&naive_from_components(
+                    *year,
+                    *month,
+                    *day,
+                    *hour,
+                    *minute,
+                    *second,
+                    *nanosecond,
+                )?));
+            }
             DateTime::<FixedOffset>::from_sql(value).map(|datetime| datetime.with_timezone(&Utc))
         }
     }
@@ -2345,6 +2366,40 @@ mod tests {
             text,
             "f64 must lose precision here, proving Decimal is the lossless path"
         );
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn named_region_timestamp_converts_to_utc_without_inventing_local_time() {
+        use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Utc};
+        let value = QueryValue::TimestampTzRegion {
+            year: 2020,
+            month: 11,
+            day: 1,
+            hour: 5,
+            minute: 59,
+            second: 59,
+            nanosecond: 123_456_789,
+            region: oracledb_protocol::thin::OracleTimeZoneRegion::from_id(100).expect("New York"),
+        };
+        assert_eq!(
+            DateTime::<Utc>::from_sql(&value)
+                .expect("exact UTC instant")
+                .to_rfc3339(),
+            "2020-11-01T05:59:59.123456789+00:00",
+        );
+        assert!(matches!(
+            DateTime::<FixedOffset>::from_sql(&value),
+            Err(ConversionError::TypeMismatch { .. })
+        ));
+        assert!(matches!(
+            NaiveDateTime::from_sql(&value),
+            Err(ConversionError::TypeMismatch { .. })
+        ));
+        assert!(matches!(
+            NaiveDate::from_sql(&value),
+            Err(ConversionError::TypeMismatch { .. })
+        ));
     }
 
     #[cfg(feature = "chrono")]

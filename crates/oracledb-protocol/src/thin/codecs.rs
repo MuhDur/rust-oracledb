@@ -151,14 +151,23 @@ pub fn decode_datetime_value(bytes: &[u8]) -> Result<QueryValue> {
         0
     };
     if bytes.len() == ORA_TYPE_SIZE_TIMESTAMP_TZ as usize {
+        if bytes[11] & TNS_HAS_REGION_ID != 0 {
+            let region_id =
+                (u16::from(bytes[11] & !TNS_HAS_REGION_ID) << 6) | u16::from(bytes[12] >> 2);
+            return Ok(QueryValue::TimestampTzRegion {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+                region: OracleTimeZoneRegion::from_id(region_id)?,
+            });
+        }
         if bytes[11] == 0 || bytes[12] == 0 {
             return Err(ProtocolError::TtcDecode(
                 "invalid TIMESTAMP WITH TIME ZONE offset",
-            ));
-        }
-        if bytes[11] & TNS_HAS_REGION_ID != 0 {
-            return Err(ProtocolError::UnsupportedFeature(
-                "named TIMESTAMP WITH TIME ZONE region",
             ));
         }
         if !(1..(TZ_MINUTE_OFFSET * 2)).contains(&bytes[12]) {
@@ -1024,6 +1033,57 @@ mod tests {
                     .is_err(),
                 "outbound offset {offset_minutes} must fail closed"
             );
+        }
+    }
+
+    #[test]
+    fn named_region_tstz_retains_utc_fields_fraction_and_alias_identity() {
+        for (region_id, name) in [
+            (64_u16, "Africa/Windhoek"),
+            (100, "America/New_York"),
+            (612, "US/Eastern"),
+            (5121, "UTC"),
+        ] {
+            let mut wire =
+                encode_oracle_timestamp_tz_with_offset(2020, 11, 1, 5, 59, 59, 123_456_789, 0)
+                    .expect("UTC fields");
+            wire[11] = TNS_HAS_REGION_ID | (region_id >> 6) as u8;
+            wire[12] = ((region_id & 63) << 2) as u8;
+            let value = decode_datetime_value(&wire).expect("known named region");
+            let QueryValue::TimestampTzRegion {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+                region,
+            } = value
+            else {
+                panic!("named region must retain a distinct value variant: {value:?}");
+            };
+            assert_eq!(
+                (year, month, day, hour, minute, second, nanosecond),
+                (2020, 11, 1, 5, 59, 59, 123_456_789)
+            );
+            assert_eq!(region.id(), region_id);
+            assert_eq!(region.name().expect("region name"), name);
+        }
+    }
+
+    #[test]
+    fn unknown_named_region_wire_ids_fail_closed() {
+        let mut wire = encode_oracle_timestamp_tz(2020, 1, 1, 0, 0, 0, 0).expect("UTC fields");
+        for region_id in [0_u16, 8191] {
+            wire[11] = TNS_HAS_REGION_ID | (region_id >> 6) as u8;
+            wire[12] = ((region_id & 63) << 2) as u8;
+            assert!(matches!(
+                decode_datetime_value(&wire),
+                Err(ProtocolError::UnsupportedFeature(
+                    "unknown TIMESTAMP WITH TIME ZONE region ID"
+                ))
+            ));
         }
     }
 

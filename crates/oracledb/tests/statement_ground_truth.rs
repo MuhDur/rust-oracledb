@@ -44,6 +44,157 @@ fn repo_root() -> PathBuf {
     p
 }
 
+#[test]
+#[ignore = "requires local Oracle lane and python-oracledb; credentials in PYO_TEST_*"]
+fn named_region_tstz_matches_oracle_and_python_at_dst_edges() {
+    let (connect, user, password) = lane();
+    let python = python_with_oracledb().expect("python-oracledb reference is required");
+    let identity =
+        ClientIdentity::new("named-tstz", "local", "local", "local", "local").expect("identity");
+    let mut conn = BlockingConnection::connect(ConnectOptions::new(
+        connect.clone(),
+        user.clone(),
+        password.clone(),
+        identity,
+    ))
+    .expect("connect");
+    let versions = BlockingConnection::query_with(
+        &mut conn,
+        Query::new("SELECT VERSION FROM SYS.V_$TIMEZONE_FILE"),
+    )
+    .and_then(|rows| rows.collect())
+    .expect("timezone-file version");
+    let version = match versions[0].value(0) {
+        Some(QueryValue::Number(value)) => {
+            value.to_string().parse::<u32>().expect("version number")
+        }
+        other => panic!("timezone version is not a number: {other:?}"),
+    };
+    let mut cases = vec![
+        (
+            "2020-03-08 06:59:59.123456789",
+            "America/New_York",
+            "-05:00",
+        ),
+        (
+            "2020-03-08 07:00:00.987654321",
+            "America/New_York",
+            "-04:00",
+        ),
+        (
+            "2020-11-01 05:59:59.123456789",
+            "America/New_York",
+            "-04:00",
+        ),
+        (
+            "2020-11-01 06:00:00.987654321",
+            "America/New_York",
+            "-05:00",
+        ),
+        (
+            "2020-04-04 14:59:59.123456789",
+            "Australia/Lord_Howe",
+            "+11:00",
+        ),
+        (
+            "2020-04-04 15:00:00.987654321",
+            "Australia/Lord_Howe",
+            "+10:30",
+        ),
+        (
+            "2020-10-03 15:29:59.123456789",
+            "Australia/Lord_Howe",
+            "+10:30",
+        ),
+        (
+            "2020-10-03 15:30:00.987654321",
+            "Australia/Lord_Howe",
+            "+11:00",
+        ),
+        ("2020-03-29 00:59:59.123456789", "Europe/Vienna", "+01:00"),
+        ("2020-03-29 01:00:00.987654321", "Europe/Vienna", "+02:00"),
+        ("2020-10-25 00:59:59.123456789", "Europe/Vienna", "+02:00"),
+        ("2020-10-25 01:00:00.987654321", "Europe/Vienna", "+01:00"),
+    ];
+    if version >= 45 {
+        cases.push((
+            "2025-04-06 03:00:00.123456789",
+            "America/Coyhaique",
+            "-03:00",
+        ));
+    }
+    let input = cases
+        .iter()
+        .map(|(utc, region, _)| format!("{utc}\t{region}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // Python thin cannot fetch native named-region values. It independently
+    // asks Oracle for UTC/region/offset text, preserving all nine digits.
+    let reference = Command::new(python).arg("-c").arg(r#"
+import os, sys, oracledb
+with oracledb.connect(user=os.environ['Z779C_USER'], password=os.environ['Z779C_PASSWORD'], dsn=os.environ['Z779C_DSN']) as conn:
+    cur = conn.cursor()
+    for line in sys.argv[1].splitlines():
+        utc, region = line.split('\t')
+        cur.execute("SELECT TO_CHAR(SYS_EXTRACT_UTC(t),'YYYY-MM-DD\"T\"HH24:MI:SS.FF9\"Z\"'), EXTRACT(TIMEZONE_REGION FROM t), TO_CHAR(t,'TZH:TZM') FROM (SELECT FROM_TZ(TO_TIMESTAMP(:1,'YYYY-MM-DD HH24:MI:SS.FF9'),'+00:00') AT TIME ZONE (:2) AS t FROM SYS.DUAL)", [utc, region])
+        print('\t'.join(cur.fetchone()))
+"#).arg(input).env("Z779C_DSN", &connect).env("Z779C_USER", &user)
+        .env("Z779C_PASSWORD", &password).output().expect("python reference");
+    assert!(
+        reference.status.success(),
+        "python reference failed: {}",
+        String::from_utf8_lossy(&reference.stderr)
+    );
+    let output = String::from_utf8(reference.stdout).expect("reference UTF-8");
+    let reference_rows: Vec<_> = output.lines().collect();
+    assert_eq!(reference_rows.len(), cases.len());
+    for ((utc, region_name, expected_offset), reference) in cases.iter().zip(reference_rows) {
+        let sql = "SELECT t, TO_CHAR(SYS_EXTRACT_UTC(t),'YYYY-MM-DD\"T\"HH24:MI:SS.FF9\"Z\"'), EXTRACT(TIMEZONE_REGION FROM t), TO_CHAR(t,'TZH:TZM') FROM (SELECT FROM_TZ(TO_TIMESTAMP(:1,'YYYY-MM-DD HH24:MI:SS.FF9'),'+00:00') AT TIME ZONE (:2) AS t FROM SYS.DUAL)";
+        let rows = BlockingConnection::query_with(
+            &mut conn,
+            Query::new(sql).bind(vec![
+                BindValue::Text((*utc).into()),
+                BindValue::Text((*region_name).into()),
+            ]),
+        )
+        .and_then(|rows| rows.collect())
+        .expect("native named-region query");
+        assert_eq!(rows.len(), 1);
+        let Some(QueryValue::TimestampTzRegion {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+            region,
+        }) = rows[0].value(0)
+        else {
+            panic!("native region must remain distinct: {:?}", rows[0].value(0));
+        };
+        let decoded_utc = format!(
+            "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{nanosecond:09}Z"
+        );
+        let expected_utc = format!("{}Z", utc.replace(' ', "T"));
+        assert_eq!(decoded_utc, expected_utc, "{region_name}");
+        assert_eq!(region.name().expect("known region name"), *region_name);
+        let mut server = Vec::new();
+        for index in 1..=3 {
+            let Some(QueryValue::Text(text)) = rows[0].value(index) else {
+                panic!("server projection must be text: {:?}", rows[0].value(index));
+            };
+            server.push(text.as_str());
+        }
+        assert_eq!(
+            server,
+            vec![decoded_utc.as_str(), *region_name, *expected_offset]
+        );
+        assert_eq!(server.join("\t"), reference, "independent python reference");
+    }
+    BlockingConnection::close(conn).expect("close");
+}
+
 /// Locate a python interpreter that can import oracledb: `ORACLEDB_GT_PYTHON`
 /// overrides; default is the repo-pinned venv.
 fn python_with_oracledb() -> Option<PathBuf> {

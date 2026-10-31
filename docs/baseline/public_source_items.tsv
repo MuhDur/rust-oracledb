@@ -1683,6 +1683,8 @@ oracledb-protocol	crates/oracledb-protocol/src/thin/subscr.rs	pub struct MsgRow 
 oracledb-protocol	crates/oracledb-protocol/src/thin/subscr.rs	pub struct MsgTable {
 oracledb-protocol	crates/oracledb-protocol/src/thin/subscr.rs	pub struct NotificationMessage {
 oracledb-protocol	crates/oracledb-protocol/src/thin/subscr.rs	pub struct SubscribeResult {
+oracledb-protocol	crates/oracledb-protocol/src/thin/timezone.rs	pub(super) fn timezone_region_name(region_id: u16) -> Result<&'static str> {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub const fn id(self) -> u16 {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub enum BindValue {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub enum QueryValue {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub enum QueryValueRef<'buf> {
@@ -1718,6 +1720,7 @@ oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub fn domain_name(
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub fn domain_schema(&self) -> Option<&str> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub fn fetch_orientation(&self) -> u32 {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub fn fetch_pos(&self) -> u32 {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub fn from_id(id: u16) -> Result<Self> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub fn into_parts(self) -> (u32, u32, String) {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub fn is_array(&self) -> bool {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub fn is_json(&self) -> bool {
@@ -1727,6 +1730,7 @@ oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub fn max_size(&se
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub fn max_string_size(&self) -> u32 {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub fn message(&self) -> &str {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub fn name(&self) -> &str {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub fn name(self) -> Result<&'static str> {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub fn new(code: u32, offset: u32, message: impl Into<String>) -> Self {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub fn new(name: impl Into<String>, ora_type_num: u8) -> Self {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub fn no_prefetch(&self) -> bool {
@@ -1794,6 +1798,7 @@ oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub struct ExecuteO
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub struct LobReadResult {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub struct LobValue {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub struct ObjectValue {
+oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub struct OracleTimeZoneRegion {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub struct QueryResult {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub struct TpcChangeStateResponse {
 oracledb-protocol	crates/oracledb-protocol/src/thin/types.rs	pub struct TpcSwitchResponse {

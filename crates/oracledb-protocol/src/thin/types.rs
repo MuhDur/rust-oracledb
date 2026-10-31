@@ -313,6 +313,34 @@ pub struct LobValue {
     pub chunk_size: u32,
 }
 
+/// A known Oracle timezone-region identity, without local-time rules.
+///
+/// Named-region timestamps carry UTC fields on the wire. A region identity
+/// does not imply a numeric offset; ask Oracle to project local time with
+/// `AT TIME ZONE` when local time or an offset is required.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OracleTimeZoneRegion {
+    id: u16,
+}
+
+impl OracleTimeZoneRegion {
+    /// Resolve a known region ID, refusing unknown IDs rather than guessing.
+    pub fn from_id(id: u16) -> Result<Self> {
+        super::timezone::timezone_region_name(id)?;
+        Ok(Self { id })
+    }
+
+    /// Oracle's region ID, including any alias identity.
+    pub const fn id(self) -> u16 {
+        self.id
+    }
+
+    /// The known region name. This does not resolve an offset or local time.
+    pub fn name(self) -> Result<&'static str> {
+        super::timezone::timezone_region_name(self.id)
+    }
+}
+
 // `Eq` is intentionally omitted: VECTOR values carry floating-point elements,
 // which only implement `PartialEq`.
 //
@@ -377,6 +405,18 @@ pub enum QueryValue {
         second: u8,
         nanosecond: u32,
         offset_minutes: i32,
+    },
+    /// An exact UTC instant with a named timezone-region identity.
+    /// No numeric offset or local wall-clock time is inferred from the region.
+    TimestampTzRegion {
+        year: i32,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        nanosecond: u32,
+        region: OracleTimeZoneRegion,
     },
     /// ADT / collection image (cold): payload boxed, see [`ObjectValue`].
     Object(Box<ObjectValue>),
@@ -515,6 +555,7 @@ impl QueryValue {
             QueryValue::Cursor(_) => "Cursor",
             QueryValue::DateTime { .. } => "DateTime",
             QueryValue::TimestampTz { .. } => "TimestampTz",
+            QueryValue::TimestampTzRegion { .. } => "TimestampTzRegion",
             QueryValue::Object(_) => "Object",
             QueryValue::Lob(_) => "Lob",
             QueryValue::Vector(_) => "Vector",
@@ -600,6 +641,17 @@ pub enum QueryValueRef<'buf> {
         nanosecond: u32,
         offset_minutes: i32,
     },
+    /// UTC fields plus a known region, without an inferred numeric offset.
+    TimestampTzRegion {
+        year: i32,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        nanosecond: u32,
+        region: OracleTimeZoneRegion,
+    },
     /// Fallback for the cold / non-borrowable variants (Cursor / Object / Lob /
     /// Vector / Json, UTF-16 `NCHAR` text, synthesized `ROWID`, `BinaryDouble`).
     /// Boxed so the borrowed enum stays small. This is the rare path.
@@ -668,6 +720,25 @@ impl QueryValueRef<'_> {
                 second,
                 nanosecond,
                 offset_minutes,
+            },
+            QueryValueRef::TimestampTzRegion {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+                region,
+            } => QueryValue::TimestampTzRegion {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+                region,
             },
             QueryValueRef::Owned(value) => value.clone(),
         }
