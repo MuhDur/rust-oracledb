@@ -49,6 +49,75 @@ const OSUSER: &str = "itest-osuser";
 const TERMINAL: &str = "itest-terminal";
 const DRIVER: &str = "rust-oracledb thn : 0.0.0";
 
+/// The original trusted-view proof query puts a VARCHAR2 after its LONG.
+/// Keep both values exact; a LONG status trailer must not become the next cell.
+#[test]
+#[ignore]
+fn view_source_long_preserves_following_editioning_metadata(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let creds = common::live_creds_required();
+    let view = format!(
+        "G4{:X}{:X}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_micros()
+    );
+    let owner = creds.user.to_ascii_uppercase();
+    let mut setup =
+        BlockingConnection::connect(connect_options().ok_or("missing live credentials")?)?;
+    let mut reader =
+        BlockingConnection::connect(connect_options().ok_or("missing live credentials")?)?;
+    BlockingConnection::execute(
+        &mut setup,
+        &format!("create view {view} as select 42 as n from SYS.DUAL"),
+        (),
+    )?;
+    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+        let expected = BlockingConnection::query_one(&mut setup,
+            "SELECT text_vc, text_length, editioning_view FROM SYS.all_views WHERE owner = :1 AND view_name = :2 AND ROWNUM <= 2",
+            (owner.as_str(), view.as_str()))?;
+        let expected_text: String = expected.get(0)?;
+        let length: i64 = expected.get(1)?;
+        let expected_editioning: String = expected.get(2)?;
+        let mut actual_rows = Vec::new();
+        for round in 0..3 {
+            let actual = BlockingConnection::query_one(&mut reader,
+                "SELECT text, editioning_view FROM all_views WHERE owner = :1 AND view_name = :2 AND ROWNUM <= 2",
+                (owner.as_str(), view.as_str()))?;
+            let text: String = actual.get(0)?;
+            let editioning: String = actual.get(1)?;
+            actual_rows.push((text, editioning));
+            eprintln!("completed legacy LONG source execution {round}");
+        }
+        Ok((expected_text, length, expected_editioning, actual_rows))
+    })();
+    let reader_closed = BlockingConnection::close(reader);
+    let dropped = BlockingConnection::execute(&mut setup, &format!("drop view {view}"), ());
+    let setup_closed = BlockingConnection::close(setup);
+    dropped?;
+    setup_closed?;
+    let (expected, length, expected_editioning, actual_rows) = result?;
+    reader_closed?;
+    assert!(!expected.is_empty());
+    assert_eq!(
+        i64::try_from(expected.len())?,
+        length,
+        "complete short source reference"
+    );
+    for (actual, editioning) in actual_rows {
+        assert_eq!(
+            actual, expected,
+            "LONG source must match Oracle's complete TEXT_VC"
+        );
+        assert_eq!(
+            editioning, expected_editioning,
+            "cell after LONG must retain its value"
+        );
+    }
+    Ok(())
+}
+
 fn connect_options() -> Option<ConnectOptions> {
     let common::LiveCreds {
         connect_string,

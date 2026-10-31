@@ -445,6 +445,9 @@ fn parse_query_response_with_context_binds_options_lob_mode_and_limits(
         more_rows: true,
         ..QueryResult::default()
     };
+    // Query LONG/LONG RAW values carry status trailers even when a cached
+    // EXECUTE prefetches them inline. The cached columns are already known
+    // before a response that omits DESCRIBE. Output binds use separate decoders.
     // A re-executed cursor whose column type changed to CLOB/BLOB but was
     // previously fetched as CHAR/VARCHAR/RAW streams the value in LONG/LONG RAW
     // form (see `adjust_refetch_metadata`), which carries the LONG status
@@ -452,7 +455,13 @@ fn parse_query_response_with_context_binds_options_lob_mode_and_limits(
     // execute path that otherwise passes `fetch_long_status = false`. Promote
     // the flag when such an adjustment fires so `parse_row_data` consumes that
     // trailer instead of mis-framing the next message (bead rust-oracledb-f0ad).
-    let mut fetch_long_status = fetch_long_status;
+    let mut fetch_long_status = fetch_long_status
+        || result.columns.iter().any(|column| {
+            matches!(
+                column.ora_type_num,
+                ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_LONG_RAW
+            )
+        });
     let mut bit_vector: Option<Vec<u8>> = None;
     let mut out_bind_indexes: Vec<usize> = Vec::new();
     while reader.remaining() > 0 {
@@ -478,6 +487,12 @@ fn parse_query_response_with_context_binds_options_lob_mode_and_limits(
                         }
                     }
                 }
+                fetch_long_status |= result.columns.iter().any(|column| {
+                    matches!(
+                        column.ora_type_num,
+                        ORA_TYPE_NUM_LONG | ORA_TYPE_NUM_LONG_RAW
+                    )
+                });
             }
             TNS_MSG_TYPE_ROW_HEADER => {
                 bit_vector = parse_row_header(&mut reader)?;
@@ -2733,6 +2748,117 @@ mod mutation_decode_tests {
         let payload = [TNS_MSG_TYPE_FLUSH_OUT_BINDS, 0xff];
         parse_query_response(&payload, caps(TNS_CCAP_FIELD_VERSION_23_4))
             .expect("flush should stop response parsing before trailing bytes");
+    }
+
+    #[test]
+    fn execute_long_status_keeps_following_column_and_message_aligned() {
+        let chunked = vec![b'x'; 600];
+        for ora_type in [ORA_TYPE_NUM_LONG, ORA_TYPE_NUM_LONG_RAW] {
+            for value in [
+                None,
+                Some(b"view source".as_slice()),
+                Some(chunked.as_slice()),
+            ] {
+                for describe in [false, true] {
+                    let columns = [
+                        column("SOURCE", ora_type, CS_FORM_IMPLICIT, 4096),
+                        column("EDITIONING_VIEW", ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 1),
+                    ];
+                    let mut payload = TtcWriter::new();
+                    if describe {
+                        payload.write_u8(TNS_MSG_TYPE_DESCRIBE_INFO);
+                        payload.write_bytes_with_length(b"view").unwrap();
+                        write_describe_body(
+                            &mut payload,
+                            TNS_CCAP_FIELD_VERSION_23_4,
+                            &[
+                                ColumnRecord::scalar("SOURCE", ora_type, CS_FORM_IMPLICIT, 4096),
+                                ColumnRecord::scalar(
+                                    "EDITIONING_VIEW",
+                                    ORA_TYPE_NUM_VARCHAR,
+                                    CS_FORM_IMPLICIT,
+                                    1,
+                                ),
+                            ],
+                        );
+                    }
+                    payload.write_u8(TNS_MSG_TYPE_ROW_DATA);
+                    if let Some(bytes) = value {
+                        payload.write_bytes_with_length(bytes).unwrap();
+                    } else {
+                        payload.write_u8(0);
+                    }
+                    payload.write_sb4(0); // LONG null indicator
+                    payload.write_ub4(0); // LONG return code
+                    payload.write_bytes_with_length(b"N").unwrap();
+                    payload.write_u8(TNS_MSG_TYPE_END_OF_RESPONSE);
+                    let bytes = payload.into_bytes();
+                    let known = if describe { &[][..] } else { &columns[..] };
+                    let owned = parse_query_response_with_binds_options_columns_and_limits(
+                        &bytes,
+                        caps(TNS_CCAP_FIELD_VERSION_23_4),
+                        &[],
+                        ExecuteOptions::default(),
+                        known,
+                        ProtocolLimits::DEFAULT,
+                    )
+                    .expect("prefetched LONG execute row");
+                    let expected = value.map(|bytes| {
+                        if ora_type == ORA_TYPE_NUM_LONG {
+                            QueryValue::Text(String::from_utf8(bytes.to_vec()).unwrap())
+                        } else {
+                            QueryValue::Raw(bytes.to_vec())
+                        }
+                    });
+                    assert_eq!(
+                        owned.rows,
+                        vec![vec![expected, Some(QueryValue::Text("N".into()))]]
+                    );
+                    let borrowed = parse_query_response_borrowed_with_limits(
+                        &bytes,
+                        caps(TNS_CCAP_FIELD_VERSION_23_4),
+                        known,
+                        None,
+                        ProtocolLimits::DEFAULT,
+                    )
+                    .expect("borrowed LONG row");
+                    let mut rows = Vec::new();
+                    borrowed
+                        .batch
+                        .for_each_row_ref(|row| {
+                            rows.push(
+                                row.iter()
+                                    .map(|cell| cell.map(|v| v.to_owned_value()))
+                                    .collect::<Vec<_>>(),
+                            );
+                            Ok::<(), ProtocolError>(())
+                        })
+                        .unwrap();
+                    assert_eq!(rows, owned.rows);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn execute_long_without_status_is_refused() {
+        let columns = [column("SOURCE", ORA_TYPE_NUM_LONG, CS_FORM_IMPLICIT, 4096)];
+        let mut payload = TtcWriter::new();
+        payload.write_u8(TNS_MSG_TYPE_ROW_DATA);
+        payload.write_bytes_with_length(b"source").unwrap();
+        payload.write_u8(TNS_MSG_TYPE_END_OF_RESPONSE);
+        assert!(
+            parse_query_response_with_binds_options_columns_and_limits(
+                &payload.into_bytes(),
+                caps(TNS_CCAP_FIELD_VERSION_23_4),
+                &[],
+                ExecuteOptions::default(),
+                &columns,
+                ProtocolLimits::DEFAULT,
+            )
+            .is_err(),
+            "missing LONG status must not fabricate a complete row"
+        );
     }
 
     #[test]
