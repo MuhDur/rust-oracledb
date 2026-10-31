@@ -464,6 +464,7 @@ fn parse_query_response_with_context_binds_options_lob_mode_and_limits(
         });
     let mut bit_vector: Option<Vec<u8>> = None;
     let mut out_bind_indexes: Vec<usize> = Vec::new();
+    let mut response_boundary_seen = false;
     while reader.remaining() > 0 {
         let message_type = reader.read_u8()?;
         match message_type {
@@ -541,6 +542,7 @@ fn parse_query_response_with_context_binds_options_lob_mode_and_limits(
                 let call_status = reader.read_ub4()?;
                 let _seq = reader.read_ub2()?;
                 result.txn_in_progress = Some(call_status & TNS_EOCS_FLAGS_TXN_IN_PROGRESS != 0);
+                response_boundary_seen = true;
             }
             TNS_MSG_TYPE_IO_VECTOR => {
                 out_bind_indexes = parse_io_vector(&mut reader, bind_columns.len())?
@@ -548,7 +550,10 @@ fn parse_query_response_with_context_binds_options_lob_mode_and_limits(
                     .filter(|index| !output_bind_indexes.contains(index))
                     .collect();
             }
-            TNS_MSG_TYPE_FLUSH_OUT_BINDS => break,
+            TNS_MSG_TYPE_FLUSH_OUT_BINDS => {
+                response_boundary_seen = true;
+                break;
+            }
             TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => {
                 if let Some(update) = skip_server_side_piggyback(&mut reader)? {
                     result.sessionless_txn_state = Some(update);
@@ -581,7 +586,10 @@ fn parse_query_response_with_context_binds_options_lob_mode_and_limits(
                 }
                 result.implicit_resultsets = Some(resultsets);
             }
-            TNS_MSG_TYPE_END_OF_RESPONSE => break,
+            TNS_MSG_TYPE_END_OF_RESPONSE => {
+                response_boundary_seen = true;
+                break;
+            }
             // pipeline responses open with the token of the operation they
             // answer (messages/base.pyx:288-293); callers compare it against
             // the expected token (mismatch -> DPY-2052 at the driver layer)
@@ -590,6 +598,7 @@ fn parse_query_response_with_context_binds_options_lob_mode_and_limits(
             }
             TNS_MSG_TYPE_ERROR => {
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
+                response_boundary_seen = true;
                 // The end-of-call ERROR message (number 0 on success) carries
                 // the end-of-call status; sample the transaction-in-progress bit
                 // (reference protocol.pyx `_process_call_status`).
@@ -627,6 +636,12 @@ fn parse_query_response_with_context_binds_options_lob_mode_and_limits(
                 });
             }
         }
+    }
+    if !response_boundary_seen {
+        // A classic DATA packet may end exactly between rows while its fetch
+        // response continues in the next packet. Ok must mean a response (or
+        // flush boundary), not merely a syntactically complete row prefix.
+        return Err(ProtocolError::TtcDecode("incomplete query response"));
     }
     Ok(result)
 }
@@ -1657,6 +1672,7 @@ fn parse_query_response_borrowed_with_lob_mode_and_limits(
     let mut row_bit_vectors: Vec<Option<Vec<u8>>> = Vec::new();
     let mut any_bit_vector = false;
     let mut pending_bit_vector: Option<Vec<u8>> = None;
+    let mut response_boundary_seen = false;
     // The fetch path always consumes LONG/LONG RAW status trailers.
     let fetch_long_status = true;
 
@@ -1704,11 +1720,15 @@ fn parse_query_response_borrowed_with_lob_mode_and_limits(
             TNS_MSG_TYPE_STATUS => {
                 let _call_status = reader.read_ub4()?;
                 let _seq = reader.read_ub2()?;
+                response_boundary_seen = true;
             }
             TNS_MSG_TYPE_SERVER_SIDE_PIGGYBACK => {
                 let _ = skip_server_side_piggyback(&mut reader)?;
             }
-            TNS_MSG_TYPE_FLUSH_OUT_BINDS | TNS_MSG_TYPE_END_OF_RESPONSE => break,
+            TNS_MSG_TYPE_FLUSH_OUT_BINDS | TNS_MSG_TYPE_END_OF_RESPONSE => {
+                response_boundary_seen = true;
+                break;
+            }
             TNS_MSG_TYPE_TOKEN => {
                 let _token = reader.read_ub8()?;
             }
@@ -1732,6 +1752,7 @@ fn parse_query_response_borrowed_with_lob_mode_and_limits(
             }
             TNS_MSG_TYPE_ERROR => {
                 let info = parse_server_error_info(&mut reader, capabilities.ttc_field_version)?;
+                response_boundary_seen = true;
                 if info.cursor_id != 0 {
                     cursor_id = u32::from(info.cursor_id);
                 }
@@ -1759,6 +1780,9 @@ fn parse_query_response_borrowed_with_lob_mode_and_limits(
         }
     }
 
+    if !response_boundary_seen {
+        return Err(ProtocolError::TtcDecode("incomplete query response"));
+    }
     // If the batch never used duplicate-column compression, drop the per-row
     // bit-vector vector so iteration takes the zero-copy fast path (no owned
     // previous-row snapshotting).
@@ -2741,6 +2765,77 @@ mod mutation_decode_tests {
                 ]
             )]
         );
+    }
+
+    #[test]
+    fn query_prefix_without_response_boundary_needs_more_data() {
+        let columns = [column("N", ORA_TYPE_NUM_NUMBER, CS_FORM_IMPLICIT, 22)];
+        let mut row = TtcWriter::new();
+        row.write_u8(TNS_MSG_TYPE_ROW_DATA);
+        row.write_bytes_with_length(&encode_number_text("7").unwrap())
+            .unwrap();
+        let row = row.into_bytes();
+        // Empty input, a complete metadata message, and a complete row can
+        // each end a physical DATA packet without ending the Oracle call.
+        for prefix in [Vec::new(), vec![TNS_MSG_TYPE_TOKEN, 0], row] {
+            let owned = parse_fetch_response_with_context(&prefix, caps(0), &columns, None);
+            let borrowed = parse_query_response_borrowed(&prefix, caps(0), &columns, None);
+            assert!(matches!(owned, Err(ProtocolError::TtcDecode(_))));
+            assert!(matches!(borrowed, Err(ProtocolError::TtcDecode(_))));
+        }
+    }
+
+    #[test]
+    fn query_response_boundaries_preserve_owned_and_borrowed_rows() {
+        let field_version = TNS_CCAP_FIELD_VERSION_23_4;
+        let columns = [column("N", ORA_TYPE_NUM_NUMBER, CS_FORM_IMPLICIT, 22)];
+        for terminal in [
+            TNS_MSG_TYPE_STATUS,
+            TNS_MSG_TYPE_ERROR,
+            TNS_MSG_TYPE_END_OF_RESPONSE,
+            TNS_MSG_TYPE_FLUSH_OUT_BINDS,
+        ] {
+            let mut payload = TtcWriter::new();
+            payload.write_u8(TNS_MSG_TYPE_ROW_DATA);
+            payload
+                .write_bytes_with_length(&encode_number_text("7").unwrap())
+                .unwrap();
+            payload.write_u8(terminal);
+            if terminal == TNS_MSG_TYPE_STATUS {
+                payload.write_ub4(0);
+                payload.write_ub2(0);
+            } else if terminal == TNS_MSG_TYPE_ERROR {
+                write_error_info(
+                    &mut payload,
+                    ErrorInfo {
+                        number: 0,
+                        message: "",
+                        cursor_id: 42,
+                        row_count: 1,
+                        call_status: 0,
+                        warning_flags: 0,
+                        rowid: None,
+                    },
+                );
+            }
+            let payload = payload.into_bytes();
+            let owned =
+                parse_fetch_response_with_context(&payload, caps(field_version), &columns, None)
+                    .expect("complete owned response");
+            assert_eq!(owned.rows.len(), 1);
+            assert_eq!(owned.cell(0, 0).and_then(QueryValue::as_i64), Some(7));
+            let borrowed =
+                parse_query_response_borrowed(&payload, caps(field_version), &columns, None)
+                    .expect("complete borrowed response");
+            assert_eq!(borrowed.batch.row_count(), 1);
+            borrowed
+                .batch
+                .for_each_row_ref(|row| {
+                    assert_eq!(row[0].as_ref().and_then(|v| v.as_number_text()), Some("7"));
+                    Ok::<(), ProtocolError>(())
+                })
+                .unwrap();
+        }
     }
 
     #[test]

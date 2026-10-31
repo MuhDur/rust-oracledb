@@ -118,6 +118,120 @@ fn view_source_long_preserves_following_editioning_metadata(
     Ok(())
 }
 
+/// Requires Python's pinned thin driver as an independent full-row reference.
+/// Exercise the exact 32-owner/PUBLIC extraction shape across many fetches.
+#[test]
+#[ignore]
+fn public_synonyms_complete_across_classic_response_packets(
+) -> Result<(), Box<dyn std::error::Error>> {
+    const REFERENCE: &str = r#"
+import os, struct, sys, oracledb
+assert oracledb.__version__ == '4.0.2', 'python-oracledb 4.0.2 required'
+c = oracledb.connect(user=os.environ['PYO_TEST_MAIN_USER'], password=os.environ['PYO_TEST_MAIN_PASSWORD'], dsn=os.environ['PYO_TEST_CONNECT_STRING'], tcp_connect_timeout=8)
+c.call_timeout = 20000
+try:
+    q = c.cursor()
+    q.arraysize = 512
+    q.execute(sys.argv[1], ['NO_SUCH_W4_SCHEMA'] * 32 + [1])
+    assert all(d.type_code == oracledb.DB_TYPE_VARCHAR for d in q.description)
+    rows = q.fetchall()
+    assert 4096 < len(rows) <= 100000, 'large complete PUBLIC fixture required'
+    out = sys.stdout.buffer
+    out.write(struct.pack('>Q', len(rows)))
+    for row in rows:
+        for cell in row:
+            if cell is None:
+                out.write(struct.pack('>i', -1))
+            else:
+                data = cell.encode('utf-8')
+                out.write(struct.pack('>i', len(data)))
+                out.write(data)
+finally:
+    c.close()
+"#;
+    let owners = (1..=32)
+        .map(|n| format!(":{n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!("SELECT owner, synonym_name, table_owner, table_name, db_link FROM SYS.all_synonyms WHERE (owner <> 'PUBLIC' and owner in ({owners})) or (owner = 'PUBLIC' and :33 = 1) order by owner, synonym_name");
+    let reference = std::process::Command::new("python3")
+        .args(["-c", REFERENCE, &sql])
+        .output()?;
+    if !reference.status.success() {
+        return Err(format!(
+            "independent synonym reference failed: {}",
+            String::from_utf8_lossy(&reference.stderr)
+        )
+        .into());
+    }
+    let count = u64::from_be_bytes(
+        reference
+            .stdout
+            .get(..8)
+            .ok_or("missing reference row count")?
+            .try_into()?,
+    );
+    let mut conn =
+        BlockingConnection::connect(connect_options().ok_or("missing live credentials")?)?;
+    let identity = (conn.session_id(), conn.serial_num());
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        for nullable in [false, true] {
+            let mut binds = (0..32)
+                .map(|_| {
+                    if nullable {
+                        typed_null(ORA_TYPE_NUM_VARCHAR, CS_FORM_IMPLICIT, 128)
+                    } else {
+                        BindValue::Text("NO_SUCH_W4_SCHEMA".into())
+                    }
+                })
+                .collect::<Vec<_>>();
+            binds.push(BindValue::Number("1".into()));
+            let rows = BlockingConnection::query_with(
+                &mut conn,
+                Query::new(&sql)
+                    .bind(binds.as_slice())
+                    .arraysize(NonZeroU32::new(512).unwrap())
+                    .prefetch(512)
+                    .timeout(std::time::Duration::from_secs(20)),
+            )?
+            .collect()?;
+            let mut actual = u64::try_from(rows.len())?.to_be_bytes().to_vec();
+            for row in &rows {
+                for index in 0..5 {
+                    if let Some(value) = row.try_get::<String>(index)? {
+                        actual.extend_from_slice(&i32::try_from(value.len())?.to_be_bytes());
+                        actual.extend_from_slice(value.as_bytes());
+                    } else {
+                        actual.extend_from_slice(&(-1_i32).to_be_bytes());
+                    }
+                }
+            }
+            if actual != reference.stdout {
+                let first = actual
+                    .iter()
+                    .zip(&reference.stdout)
+                    .position(|(a, b)| a != b);
+                return Err(format!("full synonym data differs: Rust {} rows / {} bytes, reference {count} rows / {} bytes, first difference {first:?}", rows.len(), actual.len(), reference.stdout.len()).into());
+            }
+            assert_eq!(
+                (conn.session_id(), conn.serial_num()),
+                identity,
+                "no reconnect while extracting PUBLIC synonyms"
+            );
+            eprintln!("complete PUBLIC synonym extraction: {count} exact reference rows, nullable owners={nullable}");
+        }
+        Ok(())
+    })();
+    let closed = if result.is_ok() {
+        BlockingConnection::close(conn)
+    } else {
+        BlockingConnection::cancel_and_close(conn)
+    };
+    result?;
+    closed?;
+    Ok(())
+}
+
 fn connect_options() -> Option<ConnectOptions> {
     let common::LiveCreds {
         connect_string,

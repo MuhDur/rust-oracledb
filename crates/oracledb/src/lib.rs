@@ -14407,6 +14407,65 @@ mod tests {
         response
     }
 
+    #[test]
+    fn classic_fetch_waits_for_boundary_after_a_complete_row_packet() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = thread::spawn(move || -> std::io::Result<()> {
+            use std::io::Write as _;
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+            assert_eq!(read_one_wire_packet(&mut socket), TNS_PACKET_TYPE_DATA);
+            let mut first = synthetic_open_borrowed_fetch_response("1");
+            assert_eq!(first.pop(), Some(TNS_MSG_TYPE_END_OF_RESPONSE));
+            let mut second = synthetic_open_borrowed_fetch_response("2");
+            assert_eq!(second.pop(), Some(TNS_MSG_TYPE_END_OF_RESPONSE));
+            second.extend_from_slice(&[oracledb_protocol::thin::TNS_MSG_TYPE_STATUS, 0, 0]);
+            // Neither packet advertises the modern physical EOR flag. The
+            // first ends cleanly between rows, but only the second ends the call.
+            socket.write_all(&data_packet(&first, false))?;
+            socket.write_all(&data_packet(&second, false))?;
+            socket.flush()?;
+            assert_eq!(read_one_wire_packet(&mut socket), TNS_PACKET_TYPE_DATA);
+            socket.write_all(&data_packet(
+                &synthetic_open_borrowed_fetch_response("3"),
+                false,
+            ))?;
+            socket.flush()
+        });
+        let columns = vec![
+            ColumnMetadata::new("N", oracledb_protocol::thin::ORA_TYPE_NUM_NUMBER)
+                .with_buffer_size(22)
+                .with_max_size(22),
+        ];
+        let runtime = build_io_runtime()?;
+        let (first, next) = runtime.block_on(async {
+            let cx = test_cx()?;
+            let stream = TcpStream::connect(addr).await?;
+            let (read, write) = transport::plain_split(stream);
+            let mut connection = loopback_connection(read, write);
+            connection.supports_end_of_response = false;
+            let first = connection
+                .fetch_rows_with_columns(&cx, 42, 2, &columns, None)
+                .await?;
+            let next = connection
+                .fetch_rows_with_columns(&cx, 42, 2, &columns, None)
+                .await?;
+            Ok::<_, Error>((first, next))
+        })?;
+        server.join().expect("classic fetch server joins")?;
+        assert_eq!(
+            first.rows.len(),
+            2,
+            "one call must include both physical packets"
+        );
+        assert_eq!(first.cell(0, 0).and_then(QueryValue::as_i64), Some(1));
+        assert_eq!(first.cell(1, 0).and_then(QueryValue::as_i64), Some(2));
+        assert_eq!(next.rows.len(), 1);
+        assert_eq!(next.cell(0, 0).and_then(QueryValue::as_i64), Some(3));
+        Ok(())
+    }
+
     /// Reference decode of one op's response through the *same* public decoder
     /// the sequential execute path invokes (default caps/limits, matching the
     /// loopback connection) — the "sequential" side of the byte-identity check.
