@@ -30,6 +30,7 @@ node_modules/
 .venv*/
 venv/
 target/
+target-*/
 
 # Coverage instrumentation target dir (scripts/coverage_baseline.sh; regenerable, heavy)
 target-cov/
@@ -66,3 +67,6 @@ reference
 # Agent state (never commit)
 .claude/
 .ntm/
+
+# Beads compliance audit dir (managed by /beads-compliance-and-completion-verification skill)
+/beads_compliance_audit/
