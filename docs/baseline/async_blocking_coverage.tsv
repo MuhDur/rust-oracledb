@@ -5,6 +5,7 @@ connection	oraclemcp_driver_cx::Connection	aq_enq_many	oraclemcp_driver_cx::Bloc
 connection	oraclemcp_driver_cx::Connection	aq_enq_one	oraclemcp_driver_cx::BlockingConnection	aq_enq_one	covered	blocking twin present
 connection	oraclemcp_driver_cx::Connection	begin_sessionless_transaction	oraclemcp_driver_cx::BlockingConnection	begin_sessionless_transaction	covered	blocking twin present
 connection	oraclemcp_driver_cx::Connection	cancel	oraclemcp_driver_cx::BlockingConnection	cancel	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	cancel_and_close	oraclemcp_driver_cx::BlockingConnection	cancel_and_close	covered	blocking twin present
 connection	oraclemcp_driver_cx::Connection	change_password	oraclemcp_driver_cx::BlockingConnection	change_password	covered	blocking twin present
 connection	oraclemcp_driver_cx::Connection	close	oraclemcp_driver_cx::BlockingConnection	close	covered	blocking twin present
 connection	oraclemcp_driver_cx::Connection	commit	oraclemcp_driver_cx::BlockingConnection	commit	covered	blocking twin present
@@ -75,6 +76,7 @@ connection	oraclemcp_driver_cx::Connection	aq_enq_many	oraclemcp_driver_cx::Bloc
 connection	oraclemcp_driver_cx::Connection	aq_enq_one	oraclemcp_driver_cx::BlockingConnection	aq_enq_one	covered	blocking twin present
 connection	oraclemcp_driver_cx::Connection	begin_sessionless_transaction	oraclemcp_driver_cx::BlockingConnection	begin_sessionless_transaction	covered	blocking twin present
 connection	oraclemcp_driver_cx::Connection	cancel	oraclemcp_driver_cx::BlockingConnection	cancel	covered	blocking twin present
+connection	oraclemcp_driver_cx::Connection	cancel_and_close	oraclemcp_driver_cx::BlockingConnection	cancel_and_close	covered	blocking twin present
 connection	oraclemcp_driver_cx::Connection	change_password	oraclemcp_driver_cx::BlockingConnection	change_password	covered	blocking twin present
 connection	oraclemcp_driver_cx::Connection	close	oraclemcp_driver_cx::BlockingConnection	close	covered	blocking twin present
 connection	oraclemcp_driver_cx::Connection	commit	oraclemcp_driver_cx::BlockingConnection	commit	covered	blocking twin present

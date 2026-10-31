@@ -62,6 +62,7 @@ oracledb	crates/oracledb/src/lib.rs	pub async fn aq_enq_one(
 oracledb	crates/oracledb/src/lib.rs	pub async fn begin_sessionless_transaction(
 oracledb	crates/oracledb/src/lib.rs	pub async fn cancel(&mut self, _cx: &Cx) -> Result<()> {
 oracledb	crates/oracledb/src/lib.rs	pub async fn cancel(&mut self, cx: &Cx) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	pub async fn cancel_and_close(self, cx: &Cx) -> Result<()> {
 oracledb	crates/oracledb/src/lib.rs	pub async fn change_password(
 oracledb	crates/oracledb/src/lib.rs	pub async fn close(mut self, cx: &Cx) -> Result<()> {
 oracledb	crates/oracledb/src/lib.rs	pub async fn commit(&mut self, cx: &Cx) -> Result<()> {
@@ -149,6 +150,7 @@ oracledb	crates/oracledb/src/lib.rs	pub fn auth_mode(&self) -> &AuthMode {
 oracledb	crates/oracledb/src/lib.rs	pub fn begin_sessionless_transaction(
 oracledb	crates/oracledb/src/lib.rs	pub fn bind_rows(&self) -> Option<&[Vec<BindValue>]> {
 oracledb	crates/oracledb/src/lib.rs	pub fn cancel(connection: &mut Connection) -> Result<()> {
+oracledb	crates/oracledb/src/lib.rs	pub fn cancel_and_close(connection: Connection) -> Result<()> {
 oracledb	crates/oracledb/src/lib.rs	pub fn cancel_blocking(&mut self) -> Result<()> {
 oracledb	crates/oracledb/src/lib.rs	pub fn cancel_handle(&self) -> Result<CancelHandle> {
 oracledb	crates/oracledb/src/lib.rs	pub fn caret(&self, sql: &str) -> Option<String> {
