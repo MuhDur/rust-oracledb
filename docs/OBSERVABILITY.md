@@ -56,7 +56,15 @@ subscriber; you choose the backend (pretty console logs, JSON, Jaeger/OTLP via
 
 Each instrumented wire operation opens an INFO-level span for the duration of
 its send/receive. Connect milestones are separate INFO-level events emitted in
-every build. The span names and their structured fields:
+every build.
+
+Async operation spans are entered during each poll and while dropping the
+operation future. Suspension restores the caller's span, so unrelated tasks on
+that thread keep their own context. The instrumented futures remain `Send` when
+their operation inputs are `Send`, including with the `tracing` feature enabled.
+Synchronous bookkeeping uses `Span::in_scope`.
+
+The span names and their structured fields:
 
 | Span | Emitted by | Fields |
 | --- | --- | --- |

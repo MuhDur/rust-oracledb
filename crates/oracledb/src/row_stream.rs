@@ -76,13 +76,9 @@ type FetchOutcome = (Connection, Result<QueryResult>);
 /// everything it touches (the connection, a cloned `Cx`, the columns `Arc`, and
 /// the duplicate-column seed), so it holds no borrow of the stream.
 ///
-/// NOT `+ Send`: the fetch path transitively enters an observability span
-/// (`ensure_clean_before_request`'s `obs_span!`) whose `tracing::EnteredSpan`
-/// guard is held across an await, so under `--features tracing` the future is
-/// `!Send` (the driver's other async methods share this shape but are never
-/// boxed-as-`Send`, so it was never forced). `OwnedRowStream` is driven on a
-/// single asupersync lane (current-thread executor), so `Send` is not required.
-type FetchFuture = Pin<Box<dyn Future<Output = FetchOutcome>>>;
+/// Poll-scoped tracing keeps the fetch future Send, so the owning stream can
+/// move between executor threads while its continuation is suspended.
+type FetchFuture = Pin<Box<dyn Future<Output = FetchOutcome> + Send>>;
 
 /// Internal poll state of an [`OwnedRowStream`].
 enum OwnedRowStreamState {
@@ -597,6 +593,13 @@ mod tests {
     use oracledb_protocol::wire::{encode_packet, PacketLengthWidth};
 
     use super::*;
+
+    #[test]
+    fn owned_row_stream_is_send_including_pending_fetches() {
+        fn assert_send<T: Send>() {}
+        assert_send::<OwnedRowStream>();
+        assert_send::<FetchFuture>();
+    }
 
     fn cols(names: &[&str]) -> Vec<ColumnMetadata> {
         names.iter().map(|n| ColumnMetadata::new(*n, 0)).collect()

@@ -131,7 +131,7 @@ impl LobReader {
             db.lob_chunk_units = actual_amount,
             db.lob_chunk_bytes = data.len() as u64,
         );
-        Ok(Some(data))
+        crate::obs::in_scope(&_span, || Ok(Some(data)))
     }
 
     /// Drain the whole LOB into one buffer, one chunk at a time.
@@ -407,7 +407,7 @@ impl ClobReader {
                     db.lob_utf16_boundary_split = self.decoder.clone().finish().is_err(),
                     db.lob_chunk_chars = text.chars().count() as u64,
                 );
-                Ok(Some(text))
+                crate::obs::in_scope(&_span, || Ok(Some(text)))
             }
             None => Ok(None),
         }

@@ -244,12 +244,12 @@ impl BatchOutcome {
             db.batch_row_count = per_row_counts.as_ref().map_or(0, Vec::len) as u64,
             db.batch_rows_affected = rows_affected,
         );
-        Self {
+        crate::obs::in_scope(&_span, || Self {
             rows_affected,
             per_row_counts,
             errors,
             returning,
-        }
+        })
     }
 
     pub fn rows_affected(&self) -> u64 {
@@ -1004,9 +1004,11 @@ mod obs_tests {
     }
 
     /// Captures each new span's name + fields.
+    type CapturedSpan = (String, BTreeMap<String, String>);
+
     #[derive(Clone, Default)]
     struct SpanCapture {
-        spans: Arc<Mutex<Vec<(String, BTreeMap<String, String>)>>>,
+        spans: Arc<Mutex<Vec<CapturedSpan>>>,
     }
     impl Subscriber for SpanCapture {
         fn enabled(&self, _: &Metadata<'_>) -> bool {

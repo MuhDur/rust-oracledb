@@ -216,7 +216,7 @@ impl StatementShapeCache {
             },
             db.cache_generation = observation.generation,
         );
-        observation
+        crate::obs::in_scope(&_span, || observation)
     }
 
     /// Returns the currently-recorded `(generation, shape)` for `sql`, if any.
@@ -241,7 +241,7 @@ impl StatementShapeCache {
             db.cache_event = "invalidate",
             db.cache_existed = existed,
         );
-        existed
+        crate::obs::in_scope(&_span, || existed)
     }
 
     /// Number of distinct statements currently tracked.

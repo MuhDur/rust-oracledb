@@ -320,7 +320,7 @@ fn execute_and_fetch_emit_spans_with_structured_fields() {
     // value-looking literal beyond the statement shape, and that no field name
     // leaks bind/secret data.
     for span in capture.snapshot() {
-        for (key, _value) in &span.fields {
+        for key in span.fields.keys() {
             assert!(
                 !key.contains("password") && !key.contains("secret") && !key.contains("bind_value"),
                 "span {span:?} field {key} looks like it leaks sensitive data"

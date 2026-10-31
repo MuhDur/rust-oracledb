@@ -397,6 +397,10 @@ oracledb	crates/oracledb/src/lob_stream.rs	pub struct ClobReader {
 oracledb	crates/oracledb/src/lob_stream.rs	pub struct LobReader {
 oracledb	crates/oracledb/src/lob_stream.rs	pub struct LobWriter {
 oracledb	crates/oracledb/src/obs.rs	pub struct ObsSpanGuard;
+oracledb	crates/oracledb/src/obs.rs	pub(crate) fn in_scope<T>(_span: &ObsSpanGuard, f: impl FnOnce() -> T) -> T {
+oracledb	crates/oracledb/src/obs.rs	pub(crate) fn in_scope<T>(span: &tracing::Span, f: impl FnOnce() -> T) -> T {
+oracledb	crates/oracledb/src/obs.rs	pub(crate) fn instrument<F: std::future::Future>(
+oracledb	crates/oracledb/src/obs.rs	pub(crate) fn instrument<F: std::future::Future>(_span: &ObsSpanGuard, future: F) -> F {
 oracledb	crates/oracledb/src/obs.rs	pub(crate) fn sql_digest(sql: &str) -> String {
 oracledb	crates/oracledb/src/pool.rs	pub async fn acquire(
 oracledb	crates/oracledb/src/pool.rs	pub async fn acquire_async(&self, cx: &Cx, opts: AcquireOptions) -> Result<u64, PoolError> {

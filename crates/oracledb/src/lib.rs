@@ -3142,17 +3142,17 @@ impl Connection {
         // installed on the session core once the transport is established.
         let inactivity_timeout = options.inactivity_timeout;
         let keepalive_idle = keepalive_idle_from_expire_time(primary_description.expire_time);
-        let connect_result = time::timeout(time::wall_now(), connect_timeout, async {
-            // Operation span (enabled with the `tracing` feature). The separate
-            // connect-phase events run in every build; neither surface carries
-            // the password in its structured fields.
-            let _span = obs_span!(
-                "oracledb.connect",
-                db.system = "oracle",
-                server.address = %descriptor.host,
-                server.port = descriptor.port as u64,
-                db.name = %descriptor.service_name,
-            );
+        // Operation span (enabled with the `tracing` feature). The separate
+        // connect-phase events run in every build; neither surface carries
+        // the password in its structured fields.
+        let _span = obs_span!(
+            "oracledb.connect",
+            db.system = "oracle",
+            server.address = %descriptor.host,
+            server.port = descriptor.port as u64,
+            db.name = %descriptor.service_name,
+        );
+        let connect_future = async {
             let token_auth = options.access_token.is_some();
             let descriptor_ssl_server_dn_match =
                 effective_ssl_server_dn_match(&primary_description, &options);
@@ -3787,7 +3787,12 @@ impl Connection {
                 #[cfg(feature = "cassette")]
                 capture_guard,
             })
-        })
+        };
+        let connect_result = time::timeout(
+            time::wall_now(),
+            connect_timeout,
+            crate::obs::instrument(&_span, connect_future),
+        )
         .await;
         match connect_result {
             Ok(result) => result,
@@ -4218,19 +4223,25 @@ impl Connection {
     /// until committed.
     pub async fn commit(&mut self, cx: &Cx) -> Result<()> {
         let _span = obs_span!("oracledb.commit");
-        self.send_function(cx, TNS_FUNC_COMMIT).await?;
-        // a commit ends any active sessionless transaction on the server
-        // (reference clears `_sessionless_data` via the SYNC piggyback)
-        self.sessionless_data = None;
-        Ok(())
+        crate::obs::instrument(&_span, async {
+            self.send_function(cx, TNS_FUNC_COMMIT).await?;
+            // a commit ends any active sessionless transaction on the server
+            // (reference clears `_sessionless_data` via the SYNC piggyback)
+            self.sessionless_data = None;
+            Ok(())
+        })
+        .await
     }
 
     /// Roll back the current transaction, discarding uncommitted DML.
     pub async fn rollback(&mut self, cx: &Cx) -> Result<()> {
         let _span = obs_span!("oracledb.rollback");
-        self.send_function(cx, TNS_FUNC_ROLLBACK).await?;
-        self.sessionless_data = None;
-        Ok(())
+        crate::obs::instrument(&_span, async {
+            self.send_function(cx, TNS_FUNC_ROLLBACK).await?;
+            self.sessionless_data = None;
+            Ok(())
+        })
+        .await
     }
 
     /// Enable server-side `DBMS_OUTPUT` buffering for this session. `buffer_bytes`
@@ -5331,218 +5342,225 @@ impl Connection {
             db.bind_rows = bind_rows.len() as u64,
             db.rows_fetched = tracing::field::Empty,
         );
-        observe_cancellation_between_round_trips(cx)?;
-        // A parse-only describe carries no binds (the wire bind count is zero),
-        // and a scroll continuation re-uses an already-bound cursor; neither
-        // should be shape-validated. The raw validator only rejects ragged
-        // array-DML rows — see `validate_bind_rows_shape`.
-        if !exec_options.scroll_operation() && !exec_options.parse_only() {
-            crate::sql_convert::validate_bind_rows_shape(sql, bind_rows)?;
-            // First-execute type validation: array DML binds one type per column,
-            // so a batch row whose value type disagrees with the type the first
-            // typed row established would be silently coerced by the server into a
-            // cryptic ORA error. Reject it up front with a precise typed error
-            // (reference DPY-2006). A single-row execute always passes.
-            crate::sql_convert::validate_bind_rows_types(bind_rows)?;
-        }
-        // If a prior cancellable round trip was dropped mid-read, break + drain
-        // the stranded call before issuing this execute (Scope cancel-on-drop).
-        self.ensure_clean_before_request().await?;
-        let mut exec_options = exec_options.with_max_string_size(self.capabilities.max_string_size);
-        // a `suspend_on_success` execute folds a post-detach into the pending
-        // sessionless piggyback; validate (DPY-3034/3036) before any wire work
-        // (reference execute.pyx `_handle_sessionless_suspend`)
-        if exec_options.suspend_on_success() {
-            self.prepare_sessionless_suspend_on_success()?;
-        }
-        let use_cache = exec_options.cache_statement() && !exec_options.parse_only();
-        // Whether the cursor produced by this execute may be returned to the
-        // statement cache (reference `Statement._return_to_cache`). A statement
-        // that had to be copied because the cached cursor was in use is NOT
-        // returnable: returning it would evict the still-live original from the
-        // cache and reset its fetch position (ORA-01002).
-        let mut is_copy = false;
-        // Bind TYPE shape of this execute: a cached cursor is only reused when
-        // the shape it was parsed/bound with is still compatible, otherwise it
-        // is dropped and this execute re-parses with the new bind metadata
-        // (bead rust-oracledb-ilel: ORA-01722 on a NUMBER->TEXT rebind).
-        let bind_shape = bind_type_shape(bind_rows);
-        if exec_options.cursor_id() == 0 && !exec_options.parse_only() {
-            if use_cache {
-                if self.statement_is_in_use(sql) {
-                    // cached cursor busy: this execute parses a fresh (copy)
-                    // cursor that must not be returned to the cache
-                    is_copy = true;
-                } else if let Some(cursor_id) = self.statement_cache_get(sql, &bind_shape) {
+        crate::obs::instrument(&_span, async {
+            observe_cancellation_between_round_trips(cx)?;
+            // A parse-only describe carries no binds (the wire bind count is zero),
+            // and a scroll continuation re-uses an already-bound cursor; neither
+            // should be shape-validated. The raw validator only rejects ragged
+            // array-DML rows — see `validate_bind_rows_shape`.
+            if !exec_options.scroll_operation() && !exec_options.parse_only() {
+                crate::sql_convert::validate_bind_rows_shape(sql, bind_rows)?;
+                // First-execute type validation: array DML binds one type per column,
+                // so a batch row whose value type disagrees with the type the first
+                // typed row established would be silently coerced by the server into a
+                // cryptic ORA error. Reject it up front with a precise typed error
+                // (reference DPY-2006). A single-row execute always passes.
+                crate::sql_convert::validate_bind_rows_types(bind_rows)?;
+            }
+            // If a prior cancellable round trip was dropped mid-read, break + drain
+            // the stranded call before issuing this execute (Scope cancel-on-drop).
+            self.ensure_clean_before_request().await?;
+            let mut exec_options =
+                exec_options.with_max_string_size(self.capabilities.max_string_size);
+            // a `suspend_on_success` execute folds a post-detach into the pending
+            // sessionless piggyback; validate (DPY-3034/3036) before any wire work
+            // (reference execute.pyx `_handle_sessionless_suspend`)
+            if exec_options.suspend_on_success() {
+                self.prepare_sessionless_suspend_on_success()?;
+            }
+            let use_cache = exec_options.cache_statement() && !exec_options.parse_only();
+            // Whether the cursor produced by this execute may be returned to the
+            // statement cache (reference `Statement._return_to_cache`). A statement
+            // that had to be copied because the cached cursor was in use is NOT
+            // returnable: returning it would evict the still-live original from the
+            // cache and reset its fetch position (ORA-01002).
+            let mut is_copy = false;
+            // Bind TYPE shape of this execute: a cached cursor is only reused when
+            // the shape it was parsed/bound with is still compatible, otherwise it
+            // is dropped and this execute re-parses with the new bind metadata
+            // (bead rust-oracledb-ilel: ORA-01722 on a NUMBER->TEXT rebind).
+            let bind_shape = bind_type_shape(bind_rows);
+            if exec_options.cursor_id() == 0 && !exec_options.parse_only() {
+                if use_cache {
+                    if self.statement_is_in_use(sql) {
+                        // cached cursor busy: this execute parses a fresh (copy)
+                        // cursor that must not be returned to the cache
+                        is_copy = true;
+                    } else if let Some(cursor_id) = self.statement_cache_get(sql, &bind_shape) {
+                        exec_options = exec_options.with_cursor_id(cursor_id);
+                    }
+                } else if let Some(cursor_id) = self.statement_cache_take(sql, &bind_shape) {
+                    // reference pops the statement from the cache even when
+                    // cache_statement=False, reusing its open cursor once
                     exec_options = exec_options.with_cursor_id(cursor_id);
                 }
-            } else if let Some(cursor_id) = self.statement_cache_take(sql, &bind_shape) {
-                // reference pops the statement from the cache even when
-                // cache_statement=False, reusing its open cursor once
-                exec_options = exec_options.with_cursor_id(cursor_id);
             }
-        }
-        // Re-executing an open cursor whose columns require a client-side define
-        // (VECTOR) must suppress server-side prefetch (reference
-        // `stmt._no_prefetch`, set once during describe in messages/base.pyx
-        // 1159-1164 and persisted on the cached statement). Otherwise the
-        // re-execute prefetches the row inline and exhausts the cursor before
-        // the define-fetch runs, raising ORA-01002 on the next fetch.
-        if exec_options.cursor_id() != 0 && statement_is_query(sql) {
-            if let Some(columns) = self.cursor_columns.get(&exec_options.cursor_id()) {
-                if columns.iter().any(|column| {
-                    column.ora_type_num() == oracledb_protocol::thin::ORA_TYPE_NUM_VECTOR
-                }) {
-                    exec_options = exec_options.with_no_prefetch(true);
-                }
-            }
-        }
-        let piggyback = self.take_close_cursors_piggyback();
-        if piggyback.is_none() {
-            let has_ref_cursor_output = bind_rows.iter().any(|row| {
-                row.iter().any(|value| {
-                    matches!(
-                        value,
-                        BindValue::Output {
-                            ora_type_num: oracledb_protocol::thin::ORA_TYPE_NUM_CURSOR,
-                            ..
-                        }
-                    )
-                })
-            });
-            if has_ref_cursor_output {
-                // python-oracledb reserves this sequence slot for a
-                // close-cursor piggyback.
-                let _ = next_ttc_sequence(&mut self.ttc_seq_num);
-            }
-        }
-        // a deferred begin/resume or a folded-in suspend-on-success rides as a
-        // sessionless piggyback prepended to this execute (reference
-        // messages/base.pyx `_write_sessionless_piggyback`); its sequence number
-        // is consumed before the execute's, after the close-cursors piggyback's.
-        self.protocol_limits.check_batch_rows(bind_rows.len())?;
-        if let Some(first_row) = bind_rows.first() {
-            self.protocol_limits.check_binds(first_row.len())?;
-        }
-        let sessionless_piggyback = self.take_sessionless_piggyback();
-        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let mut payload = build_execute_payload_with_bind_rows_and_options_with_seq(
-            sql,
-            prefetch_rows,
-            seq_num,
-            statement_is_query(sql),
-            bind_rows,
-            exec_options,
-            self.capabilities.ttc_field_version,
-        )?;
-        if let Some(piggyback_bytes) = sessionless_piggyback {
-            let mut combined = piggyback_bytes;
-            combined.extend_from_slice(&payload);
-            payload = combined;
-        }
-        if let Some(mut piggyback_bytes) = piggyback {
-            piggyback_bytes.extend_from_slice(&payload);
-            payload = piggyback_bytes;
-        }
-        trace_query_bytes("EXECUTE query payload", &payload);
-        self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let known_columns = if exec_options.cursor_id() != 0 {
-            self.cursor_columns
-                .get(&exec_options.cursor_id())
-                .cloned()
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        // Read under a cancel-on-drop guard: a dropped execute future arms the
-        // next operation's break + drain. The classic probe is the same parse
-        // this site runs below, with its result discarded.
-        let capabilities = self.capabilities;
-        let limits = self.protocol_limits;
-        let first_bind_row = bind_rows.first().map(Vec::as_slice).unwrap_or(&[]);
-        let classic = !self.supports_end_of_response;
-        let response = self
-            .read_flushing_out_binds_cancellable(cx, classic, |bytes| {
-                response_complete(&parse_query_response_with_binds_options_columns_and_limits(
-                    bytes,
-                    capabilities,
-                    first_bind_row,
-                    exec_options,
-                    &known_columns,
-                    limits,
-                ))
-            })
-            .await?;
-        trace_query_bytes("EXECUTE query response", &response);
-        let parsed = parse_query_response_with_binds_options_columns_and_limits(
-            &response,
-            self.capabilities,
-            bind_rows.first().map(Vec::as_slice).unwrap_or(&[]),
-            exec_options,
-            &known_columns,
-            self.protocol_limits,
-        );
-        match self.note_parse(parsed) {
-            Ok(result) => {
-                if result.cursor_id != 0
-                    && !result.rows.is_empty()
-                    && columns_have_lob_prefetch_fields(&result.columns)
-                {
-                    self.lob_prefetch_cursors.insert(result.cursor_id);
-                }
-                // a deferred begin/resume or a suspend-on-success reports its
-                // outcome through the response's SYNC piggyback
-                self.apply_sessionless_state(result.sessionless_txn_state);
-                // refresh the transaction-in-progress flag from the wire
-                // end-of-call status (reference protocol.pyx
-                // `_process_call_status`); leave unchanged if the response
-                // carried no STATUS message.
-                if let Some(txn_in_progress) = result.txn_in_progress {
-                    self.txn_in_progress = txn_in_progress;
-                }
-                if is_copy {
-                    // a copied cursor is never returned to the statement cache;
-                    // it is closed when its owning cursor releases it (reference
-                    // `_return_to_cache = False` -> `_add_cursor_to_close`).
-                    if result.cursor_id != 0 {
-                        self.copied_cursors.insert(result.cursor_id);
+            // Re-executing an open cursor whose columns require a client-side define
+            // (VECTOR) must suppress server-side prefetch (reference
+            // `stmt._no_prefetch`, set once during describe in messages/base.pyx
+            // 1159-1164 and persisted on the cached statement). Otherwise the
+            // re-execute prefetches the row inline and exhausts the cursor before
+            // the define-fetch runs, raising ORA-01002 on the next fetch.
+            if exec_options.cursor_id() != 0 && statement_is_query(sql) {
+                if let Some(columns) = self.cursor_columns.get(&exec_options.cursor_id()) {
+                    if columns.iter().any(|column| {
+                        column.ora_type_num() == oracledb_protocol::thin::ORA_TYPE_NUM_VECTOR
+                    }) {
+                        exec_options = exec_options.with_no_prefetch(true);
                     }
-                } else if use_cache {
-                    self.statement_cache_put(sql, result.cursor_id, bind_shape);
                 }
-                // Mark the open query cursor as in use so a concurrent execute
-                // of the same SQL on another cursor of this connection does not
-                // reuse it (and reset its server-side fetch position). Released
-                // by `release_cursor` when the owning cursor closes or
-                // re-prepares (reference `Statement._in_use`). Only query
-                // cursors hold a fetch position vulnerable to ORA-01002.
-                if result.cursor_id != 0 && statement_is_query(sql) && !exec_options.parse_only() {
-                    self.in_use_cursors.insert(result.cursor_id);
-                }
-                // A cursor passed as an IN REF CURSOR bind may be closed
-                // server-side by the called PL/SQL (e.g. `close a_cursor`); its
-                // cached cursor_id is then invalid. Drop any statement-cache
-                // entry pointing at a bound cursor_id so the next execute on
-                // that cursor re-parses with a fresh one instead of reusing the
-                // closed one (ORA-01001). Test 1315 / 5815.
-                self.invalidate_bound_ref_cursors(bind_rows);
-                self.remember_cursor_columns(&result);
-                obs_record!(_span, db.rows_fetched = result.rows.len() as u64);
-                if exec_options.parse_only() {
-                    return Ok(result);
-                }
-                self.apply_refetch_metadata(cx, sql, result, prefetch_rows.max(2))
-                    .await
             }
-            Err(err) => {
-                // drop the cached cursor so the next execute re-parses
-                // (reference base.pyx:1186-1189 clear_cursor on errors)
-                if use_cache {
-                    self.statement_cache_invalidate(sql, exec_options.cursor_id());
+            let piggyback = self.take_close_cursors_piggyback();
+            if piggyback.is_none() {
+                let has_ref_cursor_output = bind_rows.iter().any(|row| {
+                    row.iter().any(|value| {
+                        matches!(
+                            value,
+                            BindValue::Output {
+                                ora_type_num: oracledb_protocol::thin::ORA_TYPE_NUM_CURSOR,
+                                ..
+                            }
+                        )
+                    })
+                });
+                if has_ref_cursor_output {
+                    // python-oracledb reserves this sequence slot for a
+                    // close-cursor piggyback.
+                    let _ = next_ttc_sequence(&mut self.ttc_seq_num);
                 }
-                Err(err)
             }
-        }
+            // a deferred begin/resume or a folded-in suspend-on-success rides as a
+            // sessionless piggyback prepended to this execute (reference
+            // messages/base.pyx `_write_sessionless_piggyback`); its sequence number
+            // is consumed before the execute's, after the close-cursors piggyback's.
+            self.protocol_limits.check_batch_rows(bind_rows.len())?;
+            if let Some(first_row) = bind_rows.first() {
+                self.protocol_limits.check_binds(first_row.len())?;
+            }
+            let sessionless_piggyback = self.take_sessionless_piggyback();
+            let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+            let mut payload = build_execute_payload_with_bind_rows_and_options_with_seq(
+                sql,
+                prefetch_rows,
+                seq_num,
+                statement_is_query(sql),
+                bind_rows,
+                exec_options,
+                self.capabilities.ttc_field_version,
+            )?;
+            if let Some(piggyback_bytes) = sessionless_piggyback {
+                let mut combined = piggyback_bytes;
+                combined.extend_from_slice(&payload);
+                payload = combined;
+            }
+            if let Some(mut piggyback_bytes) = piggyback {
+                piggyback_bytes.extend_from_slice(&payload);
+                payload = piggyback_bytes;
+            }
+            trace_query_bytes("EXECUTE query payload", &payload);
+            self.core.send_data_packet(cx, &payload, self.sdu).await?;
+            let known_columns = if exec_options.cursor_id() != 0 {
+                self.cursor_columns
+                    .get(&exec_options.cursor_id())
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            // Read under a cancel-on-drop guard: a dropped execute future arms the
+            // next operation's break + drain. The classic probe is the same parse
+            // this site runs below, with its result discarded.
+            let capabilities = self.capabilities;
+            let limits = self.protocol_limits;
+            let first_bind_row = bind_rows.first().map(Vec::as_slice).unwrap_or(&[]);
+            let classic = !self.supports_end_of_response;
+            let response = self
+                .read_flushing_out_binds_cancellable(cx, classic, |bytes| {
+                    response_complete(&parse_query_response_with_binds_options_columns_and_limits(
+                        bytes,
+                        capabilities,
+                        first_bind_row,
+                        exec_options,
+                        &known_columns,
+                        limits,
+                    ))
+                })
+                .await?;
+            trace_query_bytes("EXECUTE query response", &response);
+            let parsed = parse_query_response_with_binds_options_columns_and_limits(
+                &response,
+                self.capabilities,
+                bind_rows.first().map(Vec::as_slice).unwrap_or(&[]),
+                exec_options,
+                &known_columns,
+                self.protocol_limits,
+            );
+            match self.note_parse(parsed) {
+                Ok(result) => {
+                    if result.cursor_id != 0
+                        && !result.rows.is_empty()
+                        && columns_have_lob_prefetch_fields(&result.columns)
+                    {
+                        self.lob_prefetch_cursors.insert(result.cursor_id);
+                    }
+                    // a deferred begin/resume or a suspend-on-success reports its
+                    // outcome through the response's SYNC piggyback
+                    self.apply_sessionless_state(result.sessionless_txn_state);
+                    // refresh the transaction-in-progress flag from the wire
+                    // end-of-call status (reference protocol.pyx
+                    // `_process_call_status`); leave unchanged if the response
+                    // carried no STATUS message.
+                    if let Some(txn_in_progress) = result.txn_in_progress {
+                        self.txn_in_progress = txn_in_progress;
+                    }
+                    if is_copy {
+                        // a copied cursor is never returned to the statement cache;
+                        // it is closed when its owning cursor releases it (reference
+                        // `_return_to_cache = False` -> `_add_cursor_to_close`).
+                        if result.cursor_id != 0 {
+                            self.copied_cursors.insert(result.cursor_id);
+                        }
+                    } else if use_cache {
+                        self.statement_cache_put(sql, result.cursor_id, bind_shape);
+                    }
+                    // Mark the open query cursor as in use so a concurrent execute
+                    // of the same SQL on another cursor of this connection does not
+                    // reuse it (and reset its server-side fetch position). Released
+                    // by `release_cursor` when the owning cursor closes or
+                    // re-prepares (reference `Statement._in_use`). Only query
+                    // cursors hold a fetch position vulnerable to ORA-01002.
+                    if result.cursor_id != 0
+                        && statement_is_query(sql)
+                        && !exec_options.parse_only()
+                    {
+                        self.in_use_cursors.insert(result.cursor_id);
+                    }
+                    // A cursor passed as an IN REF CURSOR bind may be closed
+                    // server-side by the called PL/SQL (e.g. `close a_cursor`); its
+                    // cached cursor_id is then invalid. Drop any statement-cache
+                    // entry pointing at a bound cursor_id so the next execute on
+                    // that cursor re-parses with a fresh one instead of reusing the
+                    // closed one (ORA-01001). Test 1315 / 5815.
+                    self.invalidate_bound_ref_cursors(bind_rows);
+                    self.remember_cursor_columns(&result);
+                    obs_record!(_span, db.rows_fetched = result.rows.len() as u64);
+                    if exec_options.parse_only() {
+                        return Ok(result);
+                    }
+                    self.apply_refetch_metadata(cx, sql, result, prefetch_rows.max(2))
+                        .await
+                }
+                Err(err) => {
+                    // drop the cached cursor so the next execute re-parses
+                    // (reference base.pyx:1186-1189 clear_cursor on errors)
+                    if use_cache {
+                        self.statement_cache_invalidate(sql, exec_options.cursor_id());
+                    }
+                    Err(err)
+                }
+            }
+        })
+        .await
     }
 
     /// Low-level raw execute: run `sql` once per bind row with explicit
@@ -5819,94 +5837,97 @@ impl Connection {
             db.arraysize = arraysize as u64,
             db.rows_fetched = tracing::field::Empty,
         );
-        observe_cancellation_between_round_trips(cx)?;
-        // If a prior fetch future was cancelled mid-read, break + drain the
-        // stranded call before issuing this fetch (Scope-based cancel-on-drop).
-        self.ensure_clean_before_request().await?;
-        let columns = self
-            .cursor_columns
-            .get(&cursor_id)
-            .cloned()
-            .unwrap_or_else(|| known_columns.to_vec());
-        let lob_prefetch = self.lob_prefetch_cursors.contains(&cursor_id);
-        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let payload = if lob_prefetch {
-            build_define_fetch_payload_with_seq(
-                cursor_id,
-                arraysize,
-                seq_num,
-                &columns,
-                self.capabilities.ttc_field_version,
-            )?
-        } else {
-            build_fetch_payload_with_seq(
-                cursor_id,
-                arraysize,
-                seq_num,
-                self.capabilities.ttc_field_version,
-            )
-        };
-        trace_query_bytes("FETCH payload", &payload);
-        self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        // Read under a cancel-on-drop guard: if THIS fetch future is dropped
-        // mid-read, the next operation will break + drain the stranded call.
-        // The classic probe is the same parse this site runs below, with its
-        // result discarded.
-        let capabilities = self.capabilities;
-        let limits = self.protocol_limits;
-        let classic = !self.supports_end_of_response;
-        let profile = fetch_profile::enabled();
-        let read_start = profile.then(time::wall_now);
-        let response = self
-            .read_response_cancellable(cx, classic, |bytes| {
-                response_complete(&if lob_prefetch {
-                    parse_define_fetch_response_with_context_and_limits(
-                        bytes,
-                        capabilities,
-                        &columns,
-                        previous_row,
-                        limits,
-                    )
-                } else {
-                    parse_fetch_response_with_context_and_limits(
-                        bytes,
-                        capabilities,
-                        &columns,
-                        previous_row,
-                        limits,
-                    )
+        crate::obs::instrument(&_span, async {
+            observe_cancellation_between_round_trips(cx)?;
+            // If a prior fetch future was cancelled mid-read, break + drain the
+            // stranded call before issuing this fetch (Scope-based cancel-on-drop).
+            self.ensure_clean_before_request().await?;
+            let columns = self
+                .cursor_columns
+                .get(&cursor_id)
+                .cloned()
+                .unwrap_or_else(|| known_columns.to_vec());
+            let lob_prefetch = self.lob_prefetch_cursors.contains(&cursor_id);
+            let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+            let payload = if lob_prefetch {
+                build_define_fetch_payload_with_seq(
+                    cursor_id,
+                    arraysize,
+                    seq_num,
+                    &columns,
+                    self.capabilities.ttc_field_version,
+                )?
+            } else {
+                build_fetch_payload_with_seq(
+                    cursor_id,
+                    arraysize,
+                    seq_num,
+                    self.capabilities.ttc_field_version,
+                )
+            };
+            trace_query_bytes("FETCH payload", &payload);
+            self.core.send_data_packet(cx, &payload, self.sdu).await?;
+            // Read under a cancel-on-drop guard: if THIS fetch future is dropped
+            // mid-read, the next operation will break + drain the stranded call.
+            // The classic probe is the same parse this site runs below, with its
+            // result discarded.
+            let capabilities = self.capabilities;
+            let limits = self.protocol_limits;
+            let classic = !self.supports_end_of_response;
+            let profile = fetch_profile::enabled();
+            let read_start = profile.then(time::wall_now);
+            let response = self
+                .read_response_cancellable(cx, classic, |bytes| {
+                    response_complete(&if lob_prefetch {
+                        parse_define_fetch_response_with_context_and_limits(
+                            bytes,
+                            capabilities,
+                            &columns,
+                            previous_row,
+                            limits,
+                        )
+                    } else {
+                        parse_fetch_response_with_context_and_limits(
+                            bytes,
+                            capabilities,
+                            &columns,
+                            previous_row,
+                            limits,
+                        )
+                    })
                 })
-            })
-            .await?;
-        if let Some(start) = read_start {
-            fetch_profile::add_read(time::wall_now().duration_since(start));
-        }
-        trace_query_bytes("FETCH response", &response);
-        let decode_start = profile.then(time::wall_now);
-        let parsed = if lob_prefetch {
-            parse_define_fetch_response_with_context_and_limits(
-                &response,
-                self.capabilities,
-                &columns,
-                previous_row,
-                self.protocol_limits,
-            )
-        } else {
-            parse_fetch_response_with_context_and_limits(
-                &response,
-                self.capabilities,
-                &columns,
-                previous_row,
-                self.protocol_limits,
-            )
-        };
-        if let Some(start) = decode_start {
-            fetch_profile::add_decode(time::wall_now().duration_since(start));
-        }
-        let result = self.note_parse(parsed)?;
-        obs_record!(_span, db.rows_fetched = result.rows.len() as u64);
-        self.remember_cursor_columns(&result);
-        Ok(result)
+                .await?;
+            if let Some(start) = read_start {
+                fetch_profile::add_read(time::wall_now().duration_since(start));
+            }
+            trace_query_bytes("FETCH response", &response);
+            let decode_start = profile.then(time::wall_now);
+            let parsed = if lob_prefetch {
+                parse_define_fetch_response_with_context_and_limits(
+                    &response,
+                    self.capabilities,
+                    &columns,
+                    previous_row,
+                    self.protocol_limits,
+                )
+            } else {
+                parse_fetch_response_with_context_and_limits(
+                    &response,
+                    self.capabilities,
+                    &columns,
+                    previous_row,
+                    self.protocol_limits,
+                )
+            };
+            if let Some(start) = decode_start {
+                fetch_profile::add_decode(time::wall_now().duration_since(start));
+            }
+            let result = self.note_parse(parsed)?;
+            obs_record!(_span, db.rows_fetched = result.rows.len() as u64);
+            self.remember_cursor_columns(&result);
+            Ok(result)
+        })
+        .await
     }
 
     /// Zero-copy companion to [`fetch_rows`](Self::fetch_rows): fetch one batch
@@ -6221,148 +6242,151 @@ impl Connection {
             db.pages_fetched = tracing::field::Empty,
             db.prefetch_inflight_max = tracing::field::Empty,
         );
-        #[cfg(feature = "tracing")]
-        let mut rows_streamed: u64 = 0;
-        #[cfg(feature = "tracing")]
-        let mut pages_fetched: u64 = 0;
-        #[cfg(feature = "tracing")]
-        let mut prefetch_inflight_max: u64 = 0;
+        crate::obs::instrument(&_stream_span, async {
+            #[cfg(feature = "tracing")]
+            let mut rows_streamed: u64 = 0;
+            #[cfg(feature = "tracing")]
+            let mut pages_fetched: u64 = 0;
+            #[cfg(feature = "tracing")]
+            let mut prefetch_inflight_max: u64 = 0;
 
-        // First round trip: EXECUTE + first fetch batch (owned), to obtain the
-        // open cursor id and column metadata. The first batch's rows are decoded
-        // borrowed by re-parsing nothing — instead we capture them from the
-        // owned result below. To keep the borrowed guarantee for the first batch
-        // too, we re-fetch borrowed pages from the cursor.
-        let first = self
-            .execute_query_with_bind_rows_and_options_core(
-                cx,
-                sql,
-                arraysize,
-                &[],
-                ExecuteOptions::default(),
-            )
-            .await?;
-        let cursor_id = first.cursor_id;
-        let mut cursor = BorrowedStreamCursorGuard::new(self, cursor_id);
-        if cursor_id != 0 && columns_have_lob_prefetch_fields(&first.columns) {
-            cursor.connection().lob_prefetch_cursors.insert(cursor_id);
-        }
-
-        // Emit the first (owned) batch's rows as borrowed refs over owned values.
-        // The first execute round trip already materialized them; surfacing them
-        // through QueryValueRef::Owned keeps the callback's type uniform without
-        // a second round trip for batch one.
-        for row in &first.rows {
-            let refs: Vec<Option<QueryValueRef<'_>>> = row
-                .iter()
-                .map(|cell| cell.as_ref().map(QueryValueRef::Owned))
-                .collect();
-            callback(&refs)?;
-        }
-        #[cfg(feature = "tracing")]
-        {
-            rows_streamed += first.rows.len() as u64;
-        }
-
-        let mut more_rows = first.more_rows;
-        let mut previous_row: Option<Vec<Option<oracledb_protocol::thin::QueryValue>>> =
-            first.rows.last().cloned();
-
-        // Speculative next-page prefetch (bead xad / 3oi): overlap the wire round
-        // trip of page K+1 with the CPU decode of page K. The trick is that a
-        // FETCH *request* needs only the cursor id + arraysize (not page K's
-        // rows), while `previous_row` — page K's last row, the duplicate-column
-        // seed — is needed only when *decoding* K+1, by which point K is done.
-        //
-        // So the loop keeps one page of look-ahead outstanding on the wire:
-        //   1. request page K+1   (just the send; arms the prefetch drain guard)
-        //   2. read+decode page K (callback) — overlaps with K+1 in flight
-        //   3. read+decode page K+1 next iteration, immediately request K+2, ...
-        //
-        // Cancellation: `fetch_rows_request` leaves the recovery phase InFlight
-        // until the response is consumed, so a drop anywhere in this loop
-        // (including inside the callback, with a page in flight) leaves the
-        // stranded page to be broken + drained by the next op on this
-        // connection. Decode stays on this task, so the borrowed batch buffer
-        // never crosses a thread/await boundary that outlives it — the
-        // borrowed-fetch guarantee is preserved and `#![forbid(unsafe_code)]`
-        // holds.
-
-        // Prime the pipeline: request the first paged batch ahead of decoding.
-        if more_rows && cursor_id != 0 {
-            cursor
-                .connection()
-                .fetch_rows_request(cx, cursor_id, arraysize)
+            // First round trip: EXECUTE + first fetch batch (owned), to obtain the
+            // open cursor id and column metadata. The first batch's rows are decoded
+            // borrowed by re-parsing nothing — instead we capture them from the
+            // owned result below. To keep the borrowed guarantee for the first batch
+            // too, we re-fetch borrowed pages from the cursor.
+            let first = self
+                .execute_query_with_bind_rows_and_options_core(
+                    cx,
+                    sql,
+                    arraysize,
+                    &[],
+                    ExecuteOptions::default(),
+                )
                 .await?;
+            let cursor_id = first.cursor_id;
+            let mut cursor = BorrowedStreamCursorGuard::new(self, cursor_id);
+            if cursor_id != 0 && columns_have_lob_prefetch_fields(&first.columns) {
+                cursor.connection().lob_prefetch_cursors.insert(cursor_id);
+            }
+
+            // Emit the first (owned) batch's rows as borrowed refs over owned values.
+            // The first execute round trip already materialized them; surfacing them
+            // through QueryValueRef::Owned keeps the callback's type uniform without
+            // a second round trip for batch one.
+            for row in &first.rows {
+                let refs: Vec<Option<QueryValueRef<'_>>> = row
+                    .iter()
+                    .map(|cell| cell.as_ref().map(QueryValueRef::Owned))
+                    .collect();
+                callback(&refs)?;
+            }
             #[cfg(feature = "tracing")]
             {
-                // One page is now outstanding on the wire (look-ahead depth 1).
-                prefetch_inflight_max = 1;
+                rows_streamed += first.rows.len() as u64;
             }
-        }
 
-        while more_rows && cursor_id != 0 {
-            // Read + decode the page whose request is already in flight.
-            let result = cursor
-                .connection()
-                .fetch_rows_ref_response(cx, cursor_id, previous_row.as_deref())
-                .await?;
-            let next_more = result.more_rows;
+            let mut more_rows = first.more_rows;
+            let mut previous_row: Option<Vec<Option<oracledb_protocol::thin::QueryValue>>> =
+                first.rows.last().cloned();
 
-            // Speculatively request the NEXT page BEFORE running the callback, so
-            // its round trip overlaps this page's decode + the callback's work.
-            // The request needs no data from `result`, so `result`'s buffer stays
-            // alive and untouched across this send.
-            if next_more {
+            // Speculative next-page prefetch (bead xad / 3oi): overlap the wire round
+            // trip of page K+1 with the CPU decode of page K. The trick is that a
+            // FETCH *request* needs only the cursor id + arraysize (not page K's
+            // rows), while `previous_row` — page K's last row, the duplicate-column
+            // seed — is needed only when *decoding* K+1, by which point K is done.
+            //
+            // So the loop keeps one page of look-ahead outstanding on the wire:
+            //   1. request page K+1   (just the send; arms the prefetch drain guard)
+            //   2. read+decode page K (callback) — overlaps with K+1 in flight
+            //   3. read+decode page K+1 next iteration, immediately request K+2, ...
+            //
+            // Cancellation: `fetch_rows_request` leaves the recovery phase InFlight
+            // until the response is consumed, so a drop anywhere in this loop
+            // (including inside the callback, with a page in flight) leaves the
+            // stranded page to be broken + drained by the next op on this
+            // connection. Decode stays on this task, so the borrowed batch buffer
+            // never crosses a thread/await boundary that outlives it — the
+            // borrowed-fetch guarantee is preserved and `#![forbid(unsafe_code)]`
+            // holds.
+
+            // Prime the pipeline: request the first paged batch ahead of decoding.
+            if more_rows && cursor_id != 0 {
                 cursor
                     .connection()
                     .fetch_rows_request(cx, cursor_id, arraysize)
                     .await?;
+                #[cfg(feature = "tracing")]
+                {
+                    // One page is now outstanding on the wire (look-ahead depth 1).
+                    prefetch_inflight_max = 1;
+                }
             }
 
-            // Snapshot ONLY the last row of the page as the next page's
-            // duplicate-column seed; materializing every row to owned (the old
-            // behaviour) would defeat the zero-copy fast path. `row_count()` is
-            // the `for_each_row_ref` iteration count (both are `row_starts.len()`),
-            // so this captures exactly the row the old "overwrite every iteration"
-            // logic left in `last_owned`. Seed correctness is covered by the
-            // duplicate-CLOB compression regression in `live_borrowed_fetch`.
-            let row_count = result.batch.row_count();
-            #[cfg(feature = "tracing")]
-            {
-                pages_fetched += 1;
-                rows_streamed += row_count as u64;
+            while more_rows && cursor_id != 0 {
+                // Read + decode the page whose request is already in flight.
+                let result = cursor
+                    .connection()
+                    .fetch_rows_ref_response(cx, cursor_id, previous_row.as_deref())
+                    .await?;
+                let next_more = result.more_rows;
+
+                // Speculatively request the NEXT page BEFORE running the callback, so
+                // its round trip overlaps this page's decode + the callback's work.
+                // The request needs no data from `result`, so `result`'s buffer stays
+                // alive and untouched across this send.
                 if next_more {
-                    prefetch_inflight_max = prefetch_inflight_max.max(1);
+                    cursor
+                        .connection()
+                        .fetch_rows_request(cx, cursor_id, arraysize)
+                        .await?;
                 }
-            }
-            let mut last_owned: Option<Vec<Option<oracledb_protocol::thin::QueryValue>>> = None;
-            let mut row_idx = 0usize;
-            result.batch.for_each_row_ref(|row| {
-                if row_idx + 1 == row_count {
-                    last_owned = Some(
-                        row.iter()
-                            .map(|cell| cell.map(|v| v.to_owned_value()))
-                            .collect(),
-                    );
-                }
-                row_idx += 1;
-                callback(row)
-            })?;
-            if let Some(last) = last_owned {
-                previous_row = Some(last);
-            }
-            more_rows = next_more;
-        }
 
-        obs_record!(_stream_span, db.rows_streamed = rows_streamed);
-        obs_record!(_stream_span, db.pages_fetched = pages_fetched);
-        obs_record!(
-            _stream_span,
-            db.prefetch_inflight_max = prefetch_inflight_max
-        );
-        cursor.release();
-        Ok(())
+                // Snapshot ONLY the last row of the page as the next page's
+                // duplicate-column seed; materializing every row to owned (the old
+                // behaviour) would defeat the zero-copy fast path. `row_count()` is
+                // the `for_each_row_ref` iteration count (both are `row_starts.len()`),
+                // so this captures exactly the row the old "overwrite every iteration"
+                // logic left in `last_owned`. Seed correctness is covered by the
+                // duplicate-CLOB compression regression in `live_borrowed_fetch`.
+                let row_count = result.batch.row_count();
+                #[cfg(feature = "tracing")]
+                {
+                    pages_fetched += 1;
+                    rows_streamed += row_count as u64;
+                    if next_more {
+                        prefetch_inflight_max = prefetch_inflight_max.max(1);
+                    }
+                }
+                let mut last_owned: Option<Vec<Option<oracledb_protocol::thin::QueryValue>>> = None;
+                let mut row_idx = 0usize;
+                result.batch.for_each_row_ref(|row| {
+                    if row_idx + 1 == row_count {
+                        last_owned = Some(
+                            row.iter()
+                                .map(|cell| cell.map(|v| v.to_owned_value()))
+                                .collect(),
+                        );
+                    }
+                    row_idx += 1;
+                    callback(row)
+                })?;
+                if let Some(last) = last_owned {
+                    previous_row = Some(last);
+                }
+                more_rows = next_more;
+            }
+
+            obs_record!(_stream_span, db.rows_streamed = rows_streamed);
+            obs_record!(_stream_span, db.pages_fetched = pages_fetched);
+            obs_record!(
+                _stream_span,
+                db.prefetch_inflight_max = prefetch_inflight_max
+            );
+            cursor.release();
+            Ok(())
+        })
+        .await
     }
 
     pub async fn define_and_fetch_rows_with_columns(
@@ -6680,37 +6704,40 @@ impl Connection {
             db.lob_offset = offset,
             db.lob_amount = amount,
         );
-        observe_cancellation_between_round_trips(cx)?;
-        self.ensure_clean_before_request().await?;
-        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let payload = build_lob_read_payload_with_seq(
-            locator,
-            offset,
-            amount,
-            seq_num,
-            self.capabilities.ttc_field_version,
-        )?;
-        trace_query_bytes("LOB READ payload", &payload);
-        self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let capabilities = self.capabilities;
-        let limits = self.protocol_limits;
-        let response = self
-            .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_lob_read_response_with_limits(
-                    bytes,
-                    capabilities,
-                    locator,
-                    limits,
-                ))
-            })
-            .await?;
-        trace_query_bytes("LOB READ response", &response);
-        self.note_parse(parse_lob_read_response_with_limits(
-            &response,
-            self.capabilities,
-            locator,
-            self.protocol_limits,
-        ))
+        crate::obs::instrument(&_span, async {
+            observe_cancellation_between_round_trips(cx)?;
+            self.ensure_clean_before_request().await?;
+            let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+            let payload = build_lob_read_payload_with_seq(
+                locator,
+                offset,
+                amount,
+                seq_num,
+                self.capabilities.ttc_field_version,
+            )?;
+            trace_query_bytes("LOB READ payload", &payload);
+            self.core.send_data_packet(cx, &payload, self.sdu).await?;
+            let capabilities = self.capabilities;
+            let limits = self.protocol_limits;
+            let response = self
+                .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
+                    response_complete(&parse_lob_read_response_with_limits(
+                        bytes,
+                        capabilities,
+                        locator,
+                        limits,
+                    ))
+                })
+                .await?;
+            trace_query_bytes("LOB READ response", &response);
+            self.note_parse(parse_lob_read_response_with_limits(
+                &response,
+                self.capabilities,
+                locator,
+                self.protocol_limits,
+            ))
+        })
+        .await
     }
 
     pub async fn read_lob_with_timeout(
@@ -6975,39 +7002,42 @@ impl Connection {
             db.lob_offset = offset,
             db.lob_bytes = data.len() as u64,
         );
-        observe_cancellation_between_round_trips(cx)?;
-        self.ensure_clean_before_request().await?;
-        self.protocol_limits.check_frame_bytes(locator.len())?;
-        self.protocol_limits.check_frame_bytes(data.len())?;
-        let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
-        let payload = build_lob_write_payload_with_seq(
-            locator,
-            offset,
-            data,
-            seq_num,
-            self.capabilities.ttc_field_version,
-        )?;
-        trace_query_bytes("LOB WRITE payload", &payload);
-        self.core.send_data_packet(cx, &payload, self.sdu).await?;
-        let capabilities = self.capabilities;
-        let limits = self.protocol_limits;
-        let response = self
-            .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
-                response_complete(&parse_lob_write_response_with_limits(
-                    bytes,
-                    capabilities,
-                    locator,
-                    limits,
-                ))
-            })
-            .await?;
-        trace_query_bytes("LOB WRITE response", &response);
-        self.note_parse(parse_lob_write_response_with_limits(
-            &response,
-            self.capabilities,
-            locator,
-            self.protocol_limits,
-        ))
+        crate::obs::instrument(&_span, async {
+            observe_cancellation_between_round_trips(cx)?;
+            self.ensure_clean_before_request().await?;
+            self.protocol_limits.check_frame_bytes(locator.len())?;
+            self.protocol_limits.check_frame_bytes(data.len())?;
+            let seq_num = next_ttc_sequence(&mut self.ttc_seq_num);
+            let payload = build_lob_write_payload_with_seq(
+                locator,
+                offset,
+                data,
+                seq_num,
+                self.capabilities.ttc_field_version,
+            )?;
+            trace_query_bytes("LOB WRITE payload", &payload);
+            self.core.send_data_packet(cx, &payload, self.sdu).await?;
+            let capabilities = self.capabilities;
+            let limits = self.protocol_limits;
+            let response = self
+                .read_response_cancellable(cx, !self.supports_end_of_response, |bytes| {
+                    response_complete(&parse_lob_write_response_with_limits(
+                        bytes,
+                        capabilities,
+                        locator,
+                        limits,
+                    ))
+                })
+                .await?;
+            trace_query_bytes("LOB WRITE response", &response);
+            self.note_parse(parse_lob_write_response_with_limits(
+                &response,
+                self.capabilities,
+                locator,
+                self.protocol_limits,
+            ))
+        })
+        .await
     }
 
     pub async fn write_lob_with_timeout(

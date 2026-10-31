@@ -7,13 +7,14 @@
 //! keeps the dependency in ONE place and makes the off-build provably free:
 //!
 //! * With the `tracing` feature **on**, [`obs_span!`] expands to a
-//!   [`tracing::span!`] entered for the lexical scope of its returned guard, and
-//!   [`obs_record!`] records a structured field on a live span.
+//!   [`tracing::Span`]. Async operations enter it only while their future is
+//!   polled; synchronous operations enter it with `in_scope`. [`obs_record!`]
+//!   records a structured field on that span.
 //! * With the feature **off**, both macros expand to (essentially) nothing — a
-//!   `()` guard and an empty statement — and the field expressions are **not
+//!   zero-sized guard and an empty statement — and the field expressions are **not
 //!   evaluated**, so a row-count or digest is never even computed. The default
-//!   build does not compile `tracing` in at all (verify with
-//!   `cargo tree -p oracledb -e no-dev | grep tracing` → no matches).
+//!   operation instrumentation has no field-evaluation cost. Connect-phase
+//!   events still use the tracing facade in the default build.
 //!
 //! ## The beat-python angle
 //!
@@ -144,12 +145,12 @@ fn starts_numeric_literal(emitted_so_far: &str) -> bool {
     }
 }
 
-/// Open an observability span for the current scope.
+/// Create an unentered observability span.
 ///
-/// When the `tracing` feature is on this expands to an entered [`tracing::span!`]
-/// at INFO level; the returned guard keeps the span open until it drops (so bind
-/// it to a `let`). When the feature is off it expands to `()` and evaluates none
-/// of the field expressions.
+/// When the `tracing` feature is on this creates an INFO-level span. Enter it
+/// with `Instrument` for asynchronous work, or `Span::in_scope` for synchronous
+/// work; an entered guard must never survive an await. When the feature is off,
+/// it yields a zero-sized guard and evaluates none of the field expressions.
 ///
 /// ```ignore
 /// let _span = obs_span!("oracledb.execute", sql.digest = %digest, db.bind_count = binds);
@@ -158,10 +159,10 @@ fn starts_numeric_literal(emitted_so_far: &str) -> bool {
 #[macro_export]
 macro_rules! obs_span {
     ($name:expr $(,)?) => {{
-        $crate::__tracing::span!($crate::__tracing::Level::INFO, $name).entered()
+        $crate::__tracing::span!($crate::__tracing::Level::INFO, $name)
     }};
     ($name:expr, $($fields:tt)+) => {{
-        $crate::__tracing::span!($crate::__tracing::Level::INFO, $name, $($fields)+).entered()
+        $crate::__tracing::span!($crate::__tracing::Level::INFO, $name, $($fields)+)
     }};
 }
 
@@ -186,6 +187,31 @@ macro_rules! obs_span {
 #[doc(hidden)]
 pub struct ObsSpanGuard;
 
+/// Enter only for each poll and drop of the operation's future. In particular,
+/// returning Pending restores the caller's span before another task can run.
+#[cfg(feature = "tracing")]
+pub(crate) fn instrument<F: std::future::Future>(
+    span: &tracing::Span,
+    future: F,
+) -> tracing::instrument::Instrumented<F> {
+    tracing::Instrument::instrument(future, span.clone())
+}
+
+#[cfg(not(feature = "tracing"))]
+pub(crate) fn instrument<F: std::future::Future>(_span: &ObsSpanGuard, future: F) -> F {
+    future
+}
+
+#[cfg(feature = "tracing")]
+pub(crate) fn in_scope<T>(span: &tracing::Span, f: impl FnOnce() -> T) -> T {
+    span.in_scope(f)
+}
+
+#[cfg(not(feature = "tracing"))]
+pub(crate) fn in_scope<T>(_span: &ObsSpanGuard, f: impl FnOnce() -> T) -> T {
+    f()
+}
+
 /// Record a structured field on a live span guard (the value of an [`obs_span!`]).
 ///
 /// On the `tracing` build this forwards to [`tracing::Span::record`]; off, it is
@@ -198,17 +224,16 @@ pub struct ObsSpanGuard;
 #[macro_export]
 macro_rules! obs_record {
     ($guard:expr, $($field:ident).+ = $value:expr) => {{
-        // `EnteredSpan` derefs to the `Span` it entered; `record` takes the
-        // field name as a &str matching the field declared at span creation.
+        // Record on the unentered Span, independently of its current poll.
         let _ = $crate::__tracing::Span::record(
-            &*$guard,
+            &$guard,
             ::core::stringify!($($field).+),
             $value,
         );
     }};
 }
 
-/// Off-build: a no-op; the value expression is not evaluated, the guard is `()`.
+/// Off-build: a no-op; neither argument expression is evaluated.
 #[cfg(not(feature = "tracing"))]
 #[macro_export]
 macro_rules! obs_record {
@@ -328,10 +353,96 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
+    use super::instrument;
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Record};
     use tracing::subscriber::with_default;
     use tracing::{Id, Subscriber};
+
+    #[test]
+    fn suspended_operations_restore_parent_context_and_can_move_threads() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        fn assert_send<T: Send>(_: &T) {}
+        with_default(tracing_subscriber::registry(), || {
+            let parent = tracing::info_span!("caller");
+            parent.in_scope(|| {
+                let first = obs_span!("first_operation");
+                let second = obs_span!("second_operation");
+                let first_id = first.id();
+                let second_id = second.id();
+                let parent_id = parent.id();
+                let mut pending_once = true;
+                let mut operation = Box::pin(instrument(&first, async move {
+                    assert_eq!(tracing::Span::current().id(), first_id);
+                    std::future::poll_fn(|_| {
+                        if std::mem::take(&mut pending_once) {
+                            Poll::Pending
+                        } else {
+                            Poll::Ready(())
+                        }
+                    })
+                    .await;
+                    assert_eq!(tracing::Span::current().id(), first_id);
+                }));
+                assert_send(&operation);
+                let mut task = Context::from_waker(Waker::noop());
+                assert!(operation.as_mut().poll(&mut task).is_pending());
+                assert_eq!(tracing::Span::current().id(), parent_id);
+
+                let mut sibling = Box::pin(instrument(&second, async {
+                    assert_eq!(tracing::Span::current().id(), second_id);
+                }));
+                assert!(sibling.as_mut().poll(&mut task).is_ready());
+                assert_eq!(tracing::Span::current().id(), parent_id);
+
+                let dispatch = tracing::dispatcher::get_default(Clone::clone);
+                std::thread::spawn(move || {
+                    tracing::dispatcher::with_default(&dispatch, || {
+                        assert!(tracing::Span::current().is_none());
+                        let mut task = Context::from_waker(Waker::noop());
+                        assert!(operation.as_mut().poll(&mut task).is_ready());
+                        assert!(tracing::Span::current().is_none());
+                    });
+                })
+                .join()
+                .expect("suspended operation can resume on another thread");
+                assert_eq!(tracing::Span::current().id(), parent_id);
+            });
+        });
+    }
+
+    #[test]
+    fn dropping_suspended_operation_enters_only_its_own_span() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        struct OnDrop(Arc<Mutex<Option<Id>>>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                *self.0.lock().unwrap() = tracing::Span::current().id();
+            }
+        }
+        with_default(tracing_subscriber::registry(), || {
+            let parent = tracing::info_span!("drop_caller");
+            parent.in_scope(|| {
+                let operation = obs_span!("cancelled_operation");
+                let dropped_in = Arc::new(Mutex::new(None));
+                let observed = Arc::clone(&dropped_in);
+                let mut future = Box::pin(instrument(&operation, async move {
+                    let _drop = OnDrop(observed);
+                    std::future::pending::<()>().await;
+                }));
+                let mut task = Context::from_waker(Waker::noop());
+                assert!(future.as_mut().poll(&mut task).is_pending());
+                assert_eq!(tracing::Span::current().id(), parent.id());
+                drop(future);
+                assert_eq!(*dropped_in.lock().unwrap(), operation.id());
+                assert_eq!(tracing::Span::current().id(), parent.id());
+            });
+        });
+    }
 
     /// Every field rendered to a string, keyed by field name.
     #[derive(Default)]
@@ -529,5 +640,32 @@ mod tests {
             !digest.to_lowercase().contains("hunter2"),
             "a parameterized digest cannot contain a value the caller never put in it"
         );
+    }
+}
+
+#[cfg(all(test, not(feature = "tracing")))]
+mod off_tests {
+    #[test]
+    fn disabled_operation_spans_do_not_evaluate_fields() {
+        let evaluated = std::cell::Cell::new(false);
+        let span = crate::obs_span!(
+            "disabled",
+            db.field = {
+                evaluated.set(true);
+                1
+            }
+        );
+        crate::obs_record!(
+            span,
+            db.field = {
+                evaluated.set(true);
+                2
+            }
+        );
+        assert_eq!(super::in_scope(&span, || 7), 7);
+        let future = super::instrument(&span, std::future::ready(3));
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&future);
+        assert!(!evaluated.get());
     }
 }
