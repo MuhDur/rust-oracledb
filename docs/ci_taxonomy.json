@@ -357,6 +357,30 @@
       "path_filtered": false
     },
     {
+      "check_name": "stable (macos-latest)",
+      "tier": "required",
+      "workflow": "CI",
+      "workflow_file": "ci.yml",
+      "job_id": "stable",
+      "triggers": [
+        "pull_request",
+        "push"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "stable (ubuntu-latest)",
+      "tier": "required",
+      "workflow": "CI",
+      "workflow_file": "ci.yml",
+      "job_id": "stable",
+      "triggers": [
+        "pull_request",
+        "push"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "driver live tests (Oracle Free 23ai)",
       "tier": "scheduled",
       "workflow": "Live (database) tests",
@@ -1216,7 +1240,9 @@
         "musl size gate smoke",
         "pyshim Rust unit tests",
         "release metadata sync",
-        "rustfmt"
+        "rustfmt",
+        "stable (macos-latest)",
+        "stable (ubuntu-latest)"
       ]
     },
     "live.yml": {
@@ -1408,6 +1434,8 @@
       "required / quality-test-workspace (required/required)",
       "required / quality-validate (required/required)",
       "rustfmt",
+      "stable (macos-latest)",
+      "stable (ubuntu-latest)",
       "xe11 full suite",
       "xe18 full suite",
       "xe21 full suite"

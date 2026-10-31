@@ -21,7 +21,7 @@ toml_key = "package.version"
 [[canonical]]
 name = "runtime_version"
 path = "Cargo.toml"
-toml_key = "workspace.dependencies.asupersync"
+toml_key = "workspace.dependencies.asupersync.version"
 strip_prefix = "="
 
 [[surface]]
