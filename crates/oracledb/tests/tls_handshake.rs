@@ -1661,3 +1661,277 @@ fn a23_undecryptable_3des_wallet_preserves_typed_error_no_fallthrough() {
     }
     eprintln!("[A2.3] undecryptable 3DES wallet preserved its typed Pkcs12 error (no fallthrough)");
 }
+
+// ---------------------------------------------------------------------------
+// oraclemcp-vs8lq: after DESCRIPTION_LIST failover the selected DESCRIPTION's
+// own wallet, DN policy and SNI secure the transport. Each case lists two
+// TCPS DESCRIPTIONs with deliberately different settings; the first points
+// at a closed port so the second always supplies the endpoint, which is a
+// real rustls listener presenting the self-signed `server.crt`. Only the
+// fixture directory's `ewallet.pem` trusts that certificate; the synthetic
+// wallet does not.
+// ---------------------------------------------------------------------------
+
+/// The error of a connect that must fail (`BlockingConnection` is not `Debug`).
+fn connect_must_fail<T>(result: Result<T, Error>, why: &str) -> Error {
+    match result {
+        Ok(_) => panic!("{why}"),
+        Err(error) => error,
+    }
+}
+
+const TRUSTING_WALLET_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tls");
+const UNTRUSTING_WALLET_DIR: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tls/synthetic");
+/// Subject of `server.crt`.
+const SERVER_CRT_DN: &str = "CN=db.example.com,O=ExampleDB,C=US";
+
+/// What the selected listener observed: the ClientHello SNI (when a hello
+/// arrived) and the CONNECT payload (when the client trusted the server).
+struct SelectedListener {
+    sni: Option<Option<String>>,
+    connect: Option<Vec<u8>>,
+}
+
+fn self_signed_recording_config(
+    sni_tx: std::sync::mpsc::Sender<Option<String>>,
+) -> Arc<ServerConfig> {
+    let chain = rustls_pemfile_certs(&mut std::io::BufReader::new(&fixture("server.crt")[..]));
+    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(&fixture("server.key")[..]))
+        .expect("read key")
+        .expect("a private key");
+    let key = CertifiedKey::from_der(chain, key, &rustls::crypto::ring::default_provider())
+        .expect("server.crt and server.key match");
+    Arc::new(
+        ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(RecordingServerCertResolver {
+                key: Arc::new(key),
+                sni_tx,
+            })),
+    )
+}
+
+/// One-shot TCPS listener: completes the handshake if the client accepts the
+/// server, reads one TNS CONNECT packet, then closes.
+fn spawn_selected_tcps_listener() -> (u16, std::thread::JoinHandle<SelectedListener>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let (sni_tx, sni_rx) = std::sync::mpsc::channel();
+    let config = self_signed_recording_config(sni_tx);
+    let handle = std::thread::spawn(move || {
+        listener.set_nonblocking(true).expect("nonblocking");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut sock = loop {
+            match listener.accept() {
+                Ok((sock, _)) => break sock,
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(_) => {
+                    return SelectedListener {
+                        sni: None,
+                        connect: None,
+                    }
+                }
+            }
+        };
+        sock.set_nonblocking(false).expect("blocking socket");
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .expect("read timeout");
+        let mut conn = ServerConnection::new(config).expect("server conn");
+        let mut tls = rustls::Stream::new(&mut conn, &mut sock);
+        let mut read_packet = || {
+            let mut header = [0u8; 8];
+            tls.read_exact(&mut header).ok()?;
+            let length = usize::from(u16::from_be_bytes([header[0], header[1]]));
+            let mut payload = vec![0u8; length.saturating_sub(header.len())];
+            tls.read_exact(&mut payload).ok().map(|()| payload)
+        };
+        // A descriptor too long for the CONNECT packet follows in one DATA
+        // packet.
+        let connect = read_packet().and_then(|mut payload| {
+            if !byte_window_contains(&payload, b"(DESCRIPTION=") {
+                payload.extend(read_packet()?);
+            }
+            Some(payload)
+        });
+        SelectedListener {
+            sni: sni_rx.try_recv().ok(),
+            connect,
+        }
+    });
+    (port, handle)
+}
+
+fn closed_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("bind")
+        .local_addr()
+        .expect("addr")
+        .port()
+}
+
+/// Connect through `(first DESCRIPTION, selected DESCRIPTION)` and report the
+/// connect error with what the selected listener saw. The listener closes
+/// after CONNECT, so the connect itself always fails before authentication.
+fn connect_through_failover(first: &str, second: &str) -> (Error, SelectedListener) {
+    let first_port = closed_port();
+    let (second_port, listener) = spawn_selected_tcps_listener();
+    let dsn = format!(
+        "(DESCRIPTION_LIST=(LOAD_BALANCE=OFF)\
+         (DESCRIPTION=(CONNECT_TIMEOUT=5)\
+         (ADDRESS=(PROTOCOL=tcps)(HOST=127.0.0.1)(PORT={first_port})){first})\
+         (DESCRIPTION=(CONNECT_TIMEOUT=5)\
+         (ADDRESS=(PROTOCOL=tcps)(HOST=127.0.0.1)(PORT={second_port})){second}))"
+    );
+    let identity = ClientIdentity::new("vs8lq", "host", "user", "term", "rust")
+        .expect("test identity should be valid");
+    let error = connect_must_fail(
+        BlockingConnection::connect(ConnectOptions::new(dsn, "user", "password", identity)),
+        "the listener closes after CONNECT",
+    );
+    let error = match error {
+        Error::ConnectPhase { source, .. } => *source,
+        other => other,
+    };
+    (error, listener.join().expect("listener thread"))
+}
+
+#[test]
+fn failover_tcps_uses_the_selected_description_wallet() {
+    let (error, seen) = connect_through_failover(
+        &format!(
+            "(CONNECT_DATA=(SERVICE_NAME=first_service))\
+             (SECURITY=(SSL_SERVER_CERT_DN={SERVER_CRT_DN})(MY_WALLET_DIRECTORY={UNTRUSTING_WALLET_DIR}))"
+        ),
+        &format!(
+            "(CONNECT_DATA=(SERVICE_NAME=selected_service))\
+             (SECURITY=(SSL_SERVER_CERT_DN={SERVER_CRT_DN})(MY_WALLET_DIRECTORY={TRUSTING_WALLET_DIR}))"
+        ),
+    );
+    let connect = seen.connect.unwrap_or_else(|| {
+        panic!("the selected wallet trusts the server, so CONNECT arrives: {error:?}")
+    });
+    let text = String::from_utf8_lossy(&connect);
+    assert!(text.contains("(SERVICE_NAME=selected_service)"), "{text}");
+    assert!(text.contains("(SSL_SERVER_DN_MATCH=ON)"), "{text}");
+    assert!(!text.contains("first_service"), "{text}");
+
+    // Reversed: the first DESCRIPTION's trusting wallet must not rescue a
+    // selected DESCRIPTION whose own wallet does not trust the server.
+    let (error, seen) = connect_through_failover(
+        &format!(
+            "(CONNECT_DATA=(SERVICE_NAME=first_service))\
+             (SECURITY=(SSL_SERVER_CERT_DN={SERVER_CRT_DN})(MY_WALLET_DIRECTORY={TRUSTING_WALLET_DIR}))"
+        ),
+        &format!(
+            "(CONNECT_DATA=(SERVICE_NAME=selected_service))\
+             (SECURITY=(SSL_SERVER_CERT_DN={SERVER_CRT_DN})(MY_WALLET_DIRECTORY={UNTRUSTING_WALLET_DIR}))"
+        ),
+    );
+    assert!(matches!(error, Error::Tls(_)), "{error:?}");
+    assert!(
+        seen.sni.is_some(),
+        "the handshake reached the selected listener"
+    );
+    assert!(
+        seen.connect.is_none(),
+        "no CONNECT over an untrusted server"
+    );
+}
+
+#[test]
+fn failover_tcps_enforces_the_selected_description_dn_policy() {
+    // The first DESCRIPTION disables DN matching; the selected one pins a DN
+    // the server does not have. No downgrade: the connect must fail.
+    let (error, seen) = connect_through_failover(
+        &format!(
+            "(CONNECT_DATA=(SERVICE_NAME=first_service))\
+             (SECURITY=(SSL_SERVER_DN_MATCH=OFF)(MY_WALLET_DIRECTORY={TRUSTING_WALLET_DIR}))"
+        ),
+        &format!(
+            "(CONNECT_DATA=(SERVICE_NAME=selected_service))\
+             (SECURITY=(SSL_SERVER_CERT_DN=CN=wrong.example.com,O=ExampleDB,C=US)\
+             (MY_WALLET_DIRECTORY={TRUSTING_WALLET_DIR}))"
+        ),
+    );
+    assert!(matches!(error, Error::Tls(_)), "{error:?}");
+    assert!(
+        seen.sni.is_some(),
+        "the handshake reached the selected listener"
+    );
+    assert!(
+        seen.connect.is_none(),
+        "a DN mismatch must stop before CONNECT"
+    );
+
+    // The first DESCRIPTION pins the wrong DN; the selected one pins the
+    // server's real DN, which both the verifier and the wire descriptor use.
+    let (_, seen) = connect_through_failover(
+        &format!(
+            "(CONNECT_DATA=(SERVICE_NAME=first_service))\
+             (SECURITY=(SSL_SERVER_CERT_DN=CN=wrong.example.com,O=ExampleDB,C=US)\
+             (MY_WALLET_DIRECTORY={TRUSTING_WALLET_DIR}))"
+        ),
+        &format!(
+            "(CONNECT_DATA=(SERVICE_NAME=selected_service))\
+             (SECURITY=(SSL_SERVER_CERT_DN={SERVER_CRT_DN})\
+             (MY_WALLET_DIRECTORY={TRUSTING_WALLET_DIR}))"
+        ),
+    );
+    let connect = seen
+        .connect
+        .expect("the selected pinned DN matches, so CONNECT arrives");
+    let text = String::from_utf8_lossy(&connect);
+    assert!(
+        text.contains(&format!("(SSL_SERVER_CERT_DN={SERVER_CRT_DN})")),
+        "{text}"
+    );
+    assert!(!text.contains("wrong.example.com"), "{text}");
+}
+
+#[test]
+fn failover_tcps_derives_sni_from_the_selected_description() {
+    // Oracle's service-form SNI ends in a numeric label that rustls cannot
+    // send, so outside OCI an explicit USE_SNI=ON fails closed before any
+    // dial. The refusal names the selected DESCRIPTION's service: its own
+    // USE_SNI and service drive the SNI, not the first DESCRIPTION's.
+    let first = format!(
+        "(CONNECT_DATA=(SERVICE_NAME=firstsvc))\
+         (SECURITY=(SSL_SERVER_CERT_DN={SERVER_CRT_DN})(MY_WALLET_DIRECTORY={TRUSTING_WALLET_DIR}))"
+    );
+    let (error, seen) = connect_through_failover(
+        &first,
+        &format!(
+            "(USE_SNI=ON)(CONNECT_DATA=(SERVICE_NAME=selectedsvc))\
+             (SECURITY=(SSL_SERVER_CERT_DN={SERVER_CRT_DN})(MY_WALLET_DIRECTORY={TRUSTING_WALLET_DIR}))"
+        ),
+    );
+    let expected = tls::decide_sni(true, "127.0.0.1", "selectedsvc", None)
+        .expect_err("the service-form SNI is not a rustls DNS name");
+    assert_eq!(format!("{error}"), format!("{expected}"));
+    assert!(
+        matches!(&error, Error::UnsupportedSni(sni) if sni.contains(".selectedsvc.")),
+        "{error:?}"
+    );
+    assert!(seen.sni.is_none(), "refused before any dial");
+
+    // The selected DESCRIPTION leaves USE_SNI off: no SNI on the wire.
+    let (_, seen) = connect_through_failover(
+        &first,
+        &format!(
+            "(CONNECT_DATA=(SERVICE_NAME=selectedsvc))\
+             (SECURITY=(SSL_SERVER_CERT_DN={SERVER_CRT_DN})(MY_WALLET_DIRECTORY={TRUSTING_WALLET_DIR}))"
+        ),
+    );
+    assert_eq!(
+        seen.sni,
+        Some(None),
+        "the selected DESCRIPTION sends no SNI"
+    );
+    assert!(seen.connect.is_some());
+}

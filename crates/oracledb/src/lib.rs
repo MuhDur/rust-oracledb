@@ -184,9 +184,7 @@ use oracledb_protocol::thin::{TNS_AQ_ARRAY_DEQ, TNS_AQ_ARRAY_ENQ};
 use oracledb_protocol::wire::{encode_packet, PacketLengthWidth, ProtocolLimits};
 use oracledb_protocol::{
     net::{
-        connectstring::{
-            Address, AddressList, Description, Descriptor, DEFAULT_SDU as DSN_DEFAULT_SDU,
-        },
+        connectstring::{Description, Descriptor, DEFAULT_SDU as DSN_DEFAULT_SDU},
         EasyConnect, Protocol as NetProtocol,
     },
     ClientIdentity,
@@ -1487,6 +1485,13 @@ pub enum Error {
     /// never included in this error.
     #[error("DPY-3001: access token authentication requires a TLS (TCPS) connection")]
     AccessTokenRequiresTcps,
+    /// The connect descriptor names a setting this thin driver parses but
+    /// cannot honour (for example `SOURCE_ROUTE=ON`, `HTTPS_PROXY`,
+    /// `RECV_BUF_SIZE` or the DRCP `POOL_*` connect data). The connect is
+    /// refused before any network I/O instead of silently dropping the
+    /// setting; remove it from the connect string.
+    #[error("connect descriptor setting {0} is not supported by this thin driver")]
+    UnsupportedConnectSetting(String),
     /// The OCI IAM database-token proof-of-possession private key could not be
     /// used to sign the auth header: it was not a readable PKCS#8 RSA key, or
     /// the RSA-PKCS1v15-SHA256 signing operation failed. The key material, the
@@ -1639,6 +1644,7 @@ impl Error {
             | Error::ConnectionClosed(_)
             | Error::Tls(_)
             | Error::UnsupportedSni(_)
+            | Error::UnsupportedConnectSetting(_)
             | Error::Wallet(_) => ErrorKind::Network,
             Error::CallTimeout(_) => ErrorKind::Timeout,
             Error::Cancelled => ErrorKind::Cancel,
@@ -3112,6 +3118,8 @@ impl Connection {
             return Err(Error::UnsupportedAuthMode(unsupported));
         }
         let descriptor = EasyConnect::parse(&options.connect_string)?;
+        let full_descriptor = EasyConnect::parse_descriptor(&options.connect_string)?;
+        refuse_unmodelled_descriptor_settings(&full_descriptor)?;
         // Fail closed BEFORE any network I/O: a database access token (OCI IAM /
         // OAuth2) must never be put on the wire in clear text. The reference
         // enforces this during the auth exchange (protocol.pyx
@@ -3122,8 +3130,13 @@ impl Connection {
         // to the same rule and — crucially — is refused here BEFORE it is ever
         // consulted, so no token is fetched for a transport that could not carry
         // it securely.
+        // Every DESCRIPTION can supply the connected endpoint, so one plaintext
+        // address anywhere in the descriptor is enough to refuse.
         if (options.access_token.is_some() || options.token_source.is_some())
-            && !descriptor.protocol.is_tls()
+            && (!descriptor.protocol.is_tls()
+                || full_descriptor.addresses().any(|address| {
+                    address.host.is_some() && !NetProtocol::from(address.protocol).is_tls()
+                }))
         {
             record_connect_phase(&connect_phase, ConnectPhase::AuthPhaseOne);
             return Err(Error::AccessTokenRequiresTcps);
@@ -3144,18 +3157,11 @@ impl Connection {
                 options.access_token = Some(AccessToken::new(token));
             }
         }
-        let full_descriptor = EasyConnect::parse_descriptor(&options.connect_string)?;
-        let primary_description = full_descriptor.first_description().clone();
-        let connect_timeout =
-            transport_connect_timeout_duration(primary_description.tcp_connect_timeout);
-        let connect_timeout_ms = duration_to_millis_saturating(connect_timeout);
-        // GH#14: the opt-in per-read inactivity deadline, and the TCP keepalive
-        // idle interval derived from a DSN `EXPIRE_TIME` (minutes). Both are Copy
-        // values captured into the connect block: keepalive is set on the socket
-        // right after dial (before any TLS wrap), and the inactivity deadline is
-        // installed on the session core once the transport is established.
+        // GH#14: the opt-in per-read inactivity deadline, installed on the
+        // session core once the transport is established. The transport
+        // timeout, keepalive, TLS and retry settings belong to each DESCRIPTION
+        // and are resolved per endpoint below (oraclemcp-vs8lq).
         let inactivity_timeout = options.inactivity_timeout;
-        let keepalive_idle = keepalive_idle_from_expire_time(primary_description.expire_time);
         // Operation span (enabled with the `tracing` feature). The separate
         // connect-phase events run in every build; neither surface carries
         // the password in its structured fields.
@@ -3168,71 +3174,39 @@ impl Connection {
         );
         let connect_future = async {
             let token_auth = options.access_token.is_some();
-            let descriptor_ssl_server_dn_match =
-                effective_ssl_server_dn_match(&primary_description, &options);
-            let descriptor_ssl_server_cert_dn = options
-                .ssl_server_cert_dn
-                .as_deref()
-                .or(primary_description.security.ssl_server_cert_dn.as_deref());
-            let identity = options.identity;
-            // F1 (bead rust-oracledb-clvm): apply the DSN-parsed transport
-            // parameters that were previously parsed and dropped. The SDU
-            // advertised in the CONNECT packet honours a DSN `(SDU=...)` (see
-            // `resolve_effective_sdu`); the wallet directory and the SNI toggle
-            // fall back to the DSN `SECURITY`/`USE_SNI` when the structured
-            // builder did not set them.
-            let effective_use_sni = options.use_sni || primary_description.use_sni;
-            let effective_wallet_location = options
-                .wallet_location
-                .as_deref()
-                .or(primary_description.security.wallet_location.as_deref());
-            // TCPS: TLS parameters (wallet, DN-match, SNI policy) are resolved
-            // once and reused when a listener REDIRECT re-establishes the
-            // transport to a new address (the redirected connection keeps the
-            // original transport protocol, reference `_connect_phase_one`).
             let server_type = if options.server_type_emon {
                 Some("emon")
             } else {
                 None
             };
-            // F-DC2 (security fix): feed the TLS verifier the SAME resolved
-            // `SSL_SERVER_DN_MATCH` / `SSL_SERVER_CERT_DN` values that
-            // `descriptor_ssl_server_dn_match` / `descriptor_ssl_server_cert_dn`
-            // already computed above (options merged over the DSN-parsed
-            // descriptor) and that drive the outbound listener CONNECT
-            // descriptor below. Passing the raw, unmerged `options.*` fields
-            // here (the prior bug) meant a cert DN pinned ONLY in the connect
-            // string (`(SECURITY=(SSL_SERVER_CERT_DN=...)))`, never touching
-            // the `with_ssl_server_cert_dn` builder) never reached the
-            // verifier: `run_dn_match` would silently fall back to the
-            // hostname/SAN/CN match instead of enforcing the pinned DN, so
-            // DN pinning configured via the DSN did not actually pin. The
-            // same gap dropped a DSN-only `SSL_SERVER_DN_MATCH=OFF`, so the
-            // check stayed enforced even when the descriptor asked to
-            // disable it. One resolved value now feeds both the verifier and
-            // the wire descriptor, so they can never diverge.
-            let prepared_tls = if descriptor.protocol.is_tls() {
-                record_connect_phase(&connect_phase, ConnectPhase::Wallet);
-                let tls_params = tls::resolve_tls_params(
-                    &descriptor,
-                    effective_wallet_location,
-                    options.wallet_password.as_deref(),
-                    descriptor_ssl_server_dn_match,
-                    descriptor_ssl_server_cert_dn,
-                    effective_use_sni,
-                )?;
-                // Build the rustls config, validate the wallet key, and decide
-                // SNI before any address is dialled. These deterministic setup
-                // failures are returned directly and never enter the transient
-                // transport-failover loop below.
-                Some(tls::prepare_tls_handshake(
-                    &descriptor,
-                    server_type,
-                    &tls_params,
-                )?)
-            } else {
-                None
-            };
+            // F2 (bead rust-oracledb-clvm): sequential multi-address failover,
+            // honouring FAILOVER and LOAD_BALANCE at every level. Each endpoint
+            // keeps the index of the DESCRIPTION that owns it.
+            let candidates = resolve_connect_addresses(&full_descriptor);
+            trace_connect_step("resolve DNS");
+            // oraclemcp-vs8lq: every DESCRIPTION that owns a candidate gets its
+            // own transport timeout, keepalive, retry schedule and TLS setup
+            // (wallet, DN match, pinned DN, SNI; explicit options still take
+            // precedence). All of it is deterministic and is resolved before
+            // any address is dialled, so a configuration error never enters the
+            // transient-failover loop and no DESCRIPTION inherits another's
+            // security settings.
+            let mut plans: Vec<Option<DescriptionConnectPlan>> =
+                full_descriptor.descriptions.iter().map(|_| None).collect();
+            for candidate in &candidates {
+                if plans[candidate.description_index].is_none() {
+                    let description = &full_descriptor.descriptions[candidate.description_index];
+                    if candidate.protocol.is_tls() {
+                        record_connect_phase(&connect_phase, ConnectPhase::Wallet);
+                    }
+                    plans[candidate.description_index] = Some(prepare_description_connect_plan(
+                        description,
+                        &options,
+                        server_type,
+                    )?);
+                }
+            }
+            let identity = options.identity;
             let connector = DriverConnector::default();
             // Secret-free support capture (bead K6): when `ORACLEDB_CAPTURE` is
             // set, a recorder is created here and installed around each dial's
@@ -3253,23 +3227,56 @@ impl Connection {
             // splitting and before any TNS bytes are sent (implicit TLS,
             // matching python-oracledb thin's _connect_tcp ordering). Used
             // for the initial address and for every REDIRECT target.
-            let dial = |host: String, port: u16| {
+            let plans = &plans;
+            let dial = |host: String,
+                        port: u16,
+                        protocol: NetProtocol,
+                        description_index: usize| {
                 let connector = &connector;
-                let prepared_tls = prepared_tls.as_ref();
+                let plan = plans[description_index].as_ref();
                 let connect_phase = Arc::clone(&connect_phase);
                 #[cfg(feature = "cassette")]
                 let capture_recorder = capture_recorder.as_ref();
                 async move {
+                    let Some(plan) = plan else {
+                        return Err(TransportEstablishmentError::Io(std::io::Error::other(
+                            "endpoint has no prepared DESCRIPTION connect plan",
+                        )));
+                    };
+                    // A TCPS endpoint never falls back to plaintext.
+                    let prepared_tls = match (protocol.is_tls(), plan.prepared_tls.as_ref()) {
+                        (false, _) => None,
+                        (true, Some(prepared_tls)) => Some(prepared_tls),
+                        (true, None) => {
+                            return Err(TransportEstablishmentError::Io(std::io::Error::other(
+                                "TCPS endpoint has no prepared TLS configuration",
+                            )));
+                        }
+                    };
+                    let connect_timeout = plan.connect_timeout;
                     record_connect_phase(&connect_phase, ConnectPhase::Tcp);
                     trace_connect_step("tcp connect");
-                    let stream = TcpStream::connect_timeout((host, port), connect_timeout).await?;
+                    // The owning DESCRIPTION's transport timeout bounds this
+                    // attempt, name resolution included.
+                    let stream = time::timeout(
+                        time::wall_now(),
+                        connect_timeout,
+                        TcpStream::connect_timeout((host, port), connect_timeout),
+                    )
+                    .await
+                    .map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "transport connect timed out",
+                        )
+                    })??;
                     stream.set_nodelay(true)?;
                     // GH#14: enable TCP keepalive so a half-open/dead peer is
                     // detected instead of wedging a later read forever. The idle
                     // interval comes from the DSN `EXPIRE_TIME` (minutes); on a
                     // TCPS descriptor it is set on the underlying socket here,
                     // before the TLS handshake consumes the stream.
-                    if let Some(idle) = keepalive_idle {
+                    if let Some(idle) = plan.keepalive_idle {
                         stream.set_keepalive(Some(idle))?;
                     }
                     trace_connect_step("tcp connected");
@@ -3305,49 +3312,59 @@ impl Connection {
                     Ok::<_, TransportEstablishmentError>(halves)
                 }
             };
-            // F2 (bead rust-oracledb-clvm): sequential multi-address failover.
-            // A DESCRIPTION with an ADDRESS_LIST (or several ADDRESS entries)
-            // is tried in order — honouring LOAD_BALANCE (shuffle) and
-            // RETRY_COUNT/RETRY_DELAY — until one address establishes a
-            // transport; if every address fails, the per-address reasons are
-            // aggregated into `Error::AllAddressesFailed`. Only
+            // Each DESCRIPTION retries its own endpoints RETRY_COUNT times with
+            // its own RETRY_DELAY before the next DESCRIPTION is tried
+            // (reference `_connect_with_description`). Only
             // transport-establishment errors (TCP dial / TLS handshake) fail
-            // over to the next address; a configuration error aborts the whole
-            // connect. The overall connect deadline (the DSN transport connect
-            // timeout) still bounds the total, shared across attempts.
-            let candidates = resolve_connect_addresses(&full_descriptor, descriptor.protocol);
-            trace_connect_step("resolve DNS");
-            let retry_count = primary_description.retry_count;
-            let retry_delay = Duration::from_secs(u64::from(primary_description.retry_delay));
+            // over; a terminal error aborts the whole connect. If every
+            // endpoint fails, the reasons are aggregated into
+            // `Error::AllAddressesFailed`.
             let mut attempt_errors: Vec<String> = Vec::new();
             let mut connected = None;
-            'failover: for round in 0..=retry_count {
-                if round > 0 && !retry_delay.is_zero() {
-                    trace_connect_step("failover retry delay");
-                    // Sleep `retry_delay` by timing out a never-ready future
-                    // (asupersync exposes the deadline primitive, not a bare
-                    // sleep); the elapsed Err is expected and ignored.
-                    let _ =
-                        time::timeout(time::wall_now(), retry_delay, std::future::pending::<()>())
-                            .await;
-                }
-                for candidate in &candidates {
-                    match dial(candidate.host.clone(), candidate.port).await {
-                        Ok(halves) => {
-                            connected = Some((halves, candidate.clone()));
-                            break 'failover;
-                        }
-                        Err(err) => {
-                            if err.is_terminal() {
-                                return Err(err.into_driver_error());
+            'failover: for group in
+                candidates.chunk_by(|left, right| left.description_index == right.description_index)
+            {
+                let Some(plan) = plans[group[0].description_index].as_ref() else {
+                    continue;
+                };
+                for round in 0..=plan.retry_count {
+                    if round > 0 && !plan.retry_delay.is_zero() {
+                        trace_connect_step("failover retry delay");
+                        // Sleep `retry_delay` by timing out a never-ready future
+                        // (asupersync exposes the deadline primitive, not a bare
+                        // sleep); the elapsed Err is expected and ignored.
+                        let _ = time::timeout(
+                            time::wall_now(),
+                            plan.retry_delay,
+                            std::future::pending::<()>(),
+                        )
+                        .await;
+                    }
+                    for candidate in group {
+                        match dial(
+                            candidate.host.clone(),
+                            candidate.port,
+                            candidate.protocol,
+                            candidate.description_index,
+                        )
+                        .await
+                        {
+                            Ok(halves) => {
+                                connected = Some(((halves, candidate.clone()), plan));
+                                break 'failover;
                             }
-                            attempt_errors
-                                .push(format!("{}:{} ({err})", candidate.host, candidate.port));
+                            Err(err) => {
+                                if err.is_terminal() {
+                                    return Err(err.into_driver_error());
+                                }
+                                attempt_errors
+                                    .push(format!("{}:{} ({err})", candidate.host, candidate.port));
+                            }
                         }
                     }
                 }
             }
-            let ((read, write), active_address) = match connected {
+            let (((read, write), active_address), active_plan) = match connected {
                 Some(pair) => pair,
                 None => {
                     return Err(Error::AllAddressesFailed(format!(
@@ -3360,503 +3377,526 @@ impl Connection {
             // DESCRIPTION_LIST failover can select an endpoint from a later
             // DESCRIPTION with its own SDU and CONNECT_DATA. Keep its index
             // with the endpoint so load balancing preserves that association.
-            let active_description =
-                &full_descriptor.descriptions[active_address.description_index];
-            let advertised_sdu =
-                u16::try_from(resolve_effective_sdu(options.sdu, active_description.sdu))
-                    .unwrap_or(u16::MAX);
-            record_connect_phase(&connect_phase, ConnectPhase::Connect);
-            // Rebind the working descriptor to the address that actually
-            // connected so the CONNECT descriptor's ADDRESS clause reflects the
-            // live endpoint (the TLS params/DN match keep the configured host).
-            let descriptor = EasyConnect {
-                host: active_address.host,
-                port: active_address.port,
-                service_name: active_description
-                    .connect_data
-                    .service_name
-                    .clone()
-                    .unwrap_or_default(),
-                protocol: descriptor.protocol,
+            let active_index = active_address.description_index;
+            let active_description = &full_descriptor.descriptions[active_index];
+            let connect_timeout = active_plan.connect_timeout;
+            let connect_timeout_ms = duration_to_millis_saturating(connect_timeout);
+            let descriptor_ssl_server_dn_match = active_plan.ssl_server_dn_match;
+            let descriptor_ssl_server_cert_dn = active_plan.ssl_server_cert_dn.as_deref();
+            let prepared_tls = if active_address.protocol.is_tls() {
+                active_plan.prepared_tls.as_ref()
+            } else {
+                None
             };
-            let mut core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
-            core.set_protocol_limits(protocol_limits)?;
-            core.set_inactivity_timeout(inactivity_timeout);
-
-            let connect_descriptor = listener_connect_descriptor_with_server(
-                &descriptor,
-                active_description,
-                &identity,
-                options.server_type_emon,
-                token_auth,
-                descriptor_ssl_server_dn_match,
-                descriptor_ssl_server_cert_dn,
-            );
-            trace_connect_value("CONNECT descriptor", &connect_descriptor);
-            // A descriptor longer than TNS_MAX_CONNECT_DATA travels in a DATA
-            // packet right behind the CONNECT packet, and the server may answer
-            // with a RESEND packet asking for the whole exchange again before it
-            // ACCEPTs (reference protocol.pyx `_connect_phase_one`: "this may
-            // request the message to be resent multiple times"). Pre-23ai
-            // servers RESEND routinely; a bounded loop guards against a
-            // misbehaving peer that never stops asking. A REDIRECT answer
-            // reconnects the transport to the redirected address and resends
-            // the CONNECT there with the REDIRECT packet flag (and the
-            // redirect-supplied connect data); RESEND and REDIRECT may
-            // interleave — a RESEND after a redirect resends the redirected
-            // CONNECT, flag included.
-            let mut connect_data = connect_descriptor;
-            let mut packet_flags = 0u8;
-            let mut resend_rounds = 0u8;
-            let mut redirect_rounds = 0u8;
-            let accept = loop {
+            // The selected DESCRIPTION's transport timeout bounds the listener
+            // exchange and authentication, as the first DESCRIPTION's once did
+            // for the whole connect.
+            let established = async {
+                let advertised_sdu =
+                    u16::try_from(resolve_effective_sdu(options.sdu, active_description.sdu))
+                        .unwrap_or(u16::MAX);
                 record_connect_phase(&connect_phase, ConnectPhase::Connect);
-                let connect_payload = build_connect_packet_payload(&connect_data, advertised_sdu)?;
-                let packet = encode_packet(
-                    TNS_PACKET_TYPE_CONNECT,
-                    packet_flags,
-                    None,
-                    &connect_payload,
-                    PacketLengthWidth::Legacy16,
-                )?;
-                trace_connect_bytes("CONNECT packet", &packet);
-                let split_connect_data = !connect_data_fits_inline(&connect_data);
-                trace_connect_step("send CONNECT");
-                core.write_all(cx, &packet).await?;
-                if split_connect_data {
-                    trace_connect_step("send CONNECT descriptor (data packet)");
-                    core.send_connect_data_packet(
-                        cx,
-                        connect_data.as_bytes(),
-                        usize::from(advertised_sdu),
-                    )
-                    .await?;
-                }
+                // Rebind the working descriptor to the address that actually
+                // connected so the CONNECT descriptor's ADDRESS clause reflects the
+                // live endpoint (the TLS params/DN match keep the configured host).
+                let descriptor = EasyConnect {
+                    host: active_address.host,
+                    port: active_address.port,
+                    service_name: active_description
+                        .connect_data
+                        .service_name
+                        .clone()
+                        .unwrap_or_default(),
+                    protocol: active_address.protocol,
+                };
+                let mut core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
+                core.set_protocol_limits(protocol_limits)?;
+                core.set_inactivity_timeout(inactivity_timeout);
 
+                let connect_descriptor = listener_connect_descriptor_with_server(
+                    &descriptor,
+                    active_description,
+                    &identity,
+                    options.server_type_emon,
+                    token_auth,
+                    descriptor_ssl_server_dn_match,
+                    descriptor_ssl_server_cert_dn,
+                );
+                trace_connect_value("CONNECT descriptor", &connect_descriptor);
+                // A descriptor longer than TNS_MAX_CONNECT_DATA travels in a DATA
+                // packet right behind the CONNECT packet, and the server may answer
+                // with a RESEND packet asking for the whole exchange again before it
+                // ACCEPTs (reference protocol.pyx `_connect_phase_one`: "this may
+                // request the message to be resent multiple times"). Pre-23ai
+                // servers RESEND routinely; a bounded loop guards against a
+                // misbehaving peer that never stops asking. A REDIRECT answer
+                // reconnects the transport to the redirected address and resends
+                // the CONNECT there with the REDIRECT packet flag (and the
+                // redirect-supplied connect data); RESEND and REDIRECT may
+                // interleave — a RESEND after a redirect resends the redirected
+                // CONNECT, flag included.
+                let mut connect_data = connect_descriptor;
+                let mut packet_flags = 0u8;
+                let mut resend_rounds = 0u8;
+                let mut redirect_rounds = 0u8;
+                let accept = loop {
+                    record_connect_phase(&connect_phase, ConnectPhase::Connect);
+                    let connect_payload =
+                        build_connect_packet_payload(&connect_data, advertised_sdu)?;
+                    let packet = encode_packet(
+                        TNS_PACKET_TYPE_CONNECT,
+                        packet_flags,
+                        None,
+                        &connect_payload,
+                        PacketLengthWidth::Legacy16,
+                    )?;
+                    trace_connect_bytes("CONNECT packet", &packet);
+                    let split_connect_data = !connect_data_fits_inline(&connect_data);
+                    trace_connect_step("send CONNECT");
+                    core.write_all(cx, &packet).await?;
+                    if split_connect_data {
+                        trace_connect_step("send CONNECT descriptor (data packet)");
+                        core.send_connect_data_packet(
+                            cx,
+                            connect_data.as_bytes(),
+                            usize::from(advertised_sdu),
+                        )
+                        .await?;
+                    }
+
+                    record_connect_phase(&connect_phase, ConnectPhase::Accept);
+                    trace_connect_step("read ACCEPT");
+                    let reply = core.read_packet(PacketLengthWidth::Legacy16).await?;
+                    trace_connect_value(
+                        "CONNECT reply",
+                        &format!(
+                            "type={} flags=0x{:02x} payload_len={}",
+                            reply.packet_type,
+                            reply.packet_flags,
+                            reply.payload.len()
+                        ),
+                    );
+                    trace_connect_event(
+                        ConnectPhase::Accept,
+                        "CONNECT reply packet",
+                        reply.payload.len(),
+                        &format!(
+                            "packet_type={} packet_flags=0x{:02x}",
+                            reply.packet_type, reply.packet_flags
+                        ),
+                    );
+                    match reply.packet_type {
+                        TNS_PACKET_TYPE_ACCEPT => break reply,
+                        TNS_PACKET_TYPE_RESEND => {
+                            resend_rounds += 1;
+                            if resend_rounds > MAX_CONNECT_RESEND_ROUNDS {
+                                return Err(Error::ConnectResendLoop(resend_rounds));
+                            }
+                            if reply.packet_flags & TNS_PACKET_FLAG_TLS_RENEG != 0 {
+                                // The listener handed this TCPS session to a
+                                // dedicated server process, which starts a fresh
+                                // TLS handshake on the same socket. Continuing in
+                                // the old TLS session fails at the next read
+                                // ("cannot decrypt peer's message"). A renegotiation
+                                // request on plain TCP is a protocol violation.
+                                let Some(prepared_tls) = prepared_tls else {
+                                    return Err(Error::UnexpectedPacket(TNS_PACKET_TYPE_RESEND));
+                                };
+                                record_connect_phase(&connect_phase, ConnectPhase::Tls);
+                                trace_connect_step("RESEND requested TLS renegotiation");
+                                let tcp = core
+                                    .into_halves()
+                                    .and_then(|(read, write)| {
+                                        transport::reclaim_tls_tcp(read, write)
+                                    })
+                                    .ok_or_else(|| {
+                                        Error::ConnectionClosed(
+                                            "TLS renegotiation could not reclaim the TCPS socket"
+                                                .into(),
+                                        )
+                                    })?;
+                                let tls_stream = tls::tls_handshake_prepared(
+                                    prepared_tls,
+                                    tcp,
+                                    tls::handshake_timeout_from_connect_timeout(connect_timeout),
+                                )
+                                .await
+                                .map_err(|error| {
+                                    TransportEstablishmentError::from(error).into_driver_error()
+                                })?;
+                                trace_connect_step("tls renegotiated");
+                                let (read, write) = connector.tls_split(tls_stream);
+                                core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
+                                core.set_protocol_limits(protocol_limits)?;
+                                core.set_inactivity_timeout(inactivity_timeout);
+                            }
+                            trace_connect_step("RESEND requested; resending CONNECT");
+                            continue;
+                        }
+                        TNS_PACKET_TYPE_REDIRECT => {
+                            redirect_rounds += 1;
+                            if redirect_rounds > MAX_CONNECT_REDIRECT_ROUNDS {
+                                return Err(Error::ConnectRedirectLoop(redirect_rounds));
+                            }
+                            let redirect_data =
+                                read_redirect_data(&mut core, &reply.payload).await?;
+                            let target =
+                                parse_redirect_target(&redirect_data, descriptor.protocol)?;
+                            trace_connect_value(
+                                "REDIRECT target",
+                                &format!("{}:{}", target.host, target.port),
+                            );
+                            // Reconnect the transport to the redirected listener
+                            // (dropping the old connection closes it) and resend
+                            // the CONNECT there, flagged as a redirect follow-up
+                            // and carrying the redirect-supplied connect data
+                            // (reference `_connect_phase_one`).
+                            // The redirected transport keeps the selected
+                            // DESCRIPTION's protocol, timeout, keepalive and TLS.
+                            let (read, write) =
+                                dial(target.host, target.port, descriptor.protocol, active_index)
+                                    .await
+                                    .map_err(TransportEstablishmentError::into_driver_error)?;
+                            core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
+                            core.set_protocol_limits(protocol_limits)?;
+                            core.set_inactivity_timeout(inactivity_timeout);
+                            connect_data = target.connect_data;
+                            packet_flags = TNS_PACKET_FLAG_REDIRECT;
+                            // The redirected listener negotiates from scratch and
+                            // may itself ask for resends.
+                            resend_rounds = 0;
+                            trace_connect_step("REDIRECT: reconnected; resending CONNECT");
+                            continue;
+                        }
+                        TNS_PACKET_TYPE_REFUSE => {
+                            trace_connect_step("REFUSE received");
+                            return Err(Error::ListenerRefused(
+                                String::from_utf8_lossy(&reply.payload).to_string(),
+                            ));
+                        }
+                        other => return Err(Error::UnexpectedPacket(other)),
+                    }
+                };
                 record_connect_phase(&connect_phase, ConnectPhase::Accept);
-                trace_connect_step("read ACCEPT");
-                let reply = core.read_packet(PacketLengthWidth::Legacy16).await?;
+                let accept_info = parse_accept_payload(&accept.payload)?;
+                // Surface the negotiated ACCEPT capabilities so a captured trace
+                // shows *why* the auth path forked: `fast_auth=true` takes the
+                // combined fast-auth bundle, `fast_auth=false` falls back to the
+                // classic protocol-negotiation + data-types round trips. This is the
+                // single most useful line for diagnosing a "missing/failed fast-auth"
+                // exchange. None of these values are secret (they mirror v$session /
+                // negotiated SDU).
                 trace_connect_value(
-                    "CONNECT reply",
+                    "ACCEPT",
                     &format!(
-                        "type={} flags=0x{:02x} payload_len={}",
-                        reply.packet_type,
-                        reply.packet_flags,
-                        reply.payload.len()
+                        "sdu={} fast_auth={} end_of_response={} oob={}",
+                        accept_info.sdu,
+                        accept_info.supports_fast_auth,
+                        accept_info.supports_end_of_response,
+                        accept_info.supports_oob,
                     ),
                 );
                 trace_connect_event(
                     ConnectPhase::Accept,
-                    "CONNECT reply packet",
-                    reply.payload.len(),
+                    "ACCEPT capabilities",
+                    accept.payload.len(),
                     &format!(
-                        "packet_type={} packet_flags=0x{:02x}",
-                        reply.packet_type, reply.packet_flags
+                        "protocol_version={} fast_auth={} end_of_response={} oob={}",
+                        accept_info.protocol_version,
+                        accept_info.supports_fast_auth,
+                        accept_info.supports_end_of_response,
+                        accept_info.supports_oob,
                     ),
                 );
-                match reply.packet_type {
-                    TNS_PACKET_TYPE_ACCEPT => break reply,
-                    TNS_PACKET_TYPE_RESEND => {
-                        resend_rounds += 1;
-                        if resend_rounds > MAX_CONNECT_RESEND_ROUNDS {
-                            return Err(Error::ConnectResendLoop(resend_rounds));
-                        }
-                        if reply.packet_flags & TNS_PACKET_FLAG_TLS_RENEG != 0 {
-                            // The listener handed this TCPS session to a
-                            // dedicated server process, which starts a fresh
-                            // TLS handshake on the same socket. Continuing in
-                            // the old TLS session fails at the next read
-                            // ("cannot decrypt peer's message"). A renegotiation
-                            // request on plain TCP is a protocol violation.
-                            let Some(prepared_tls) = prepared_tls.as_ref() else {
-                                return Err(Error::UnexpectedPacket(TNS_PACKET_TYPE_RESEND));
-                            };
-                            record_connect_phase(&connect_phase, ConnectPhase::Tls);
-                            trace_connect_step("RESEND requested TLS renegotiation");
-                            let tcp = core
-                                .into_halves()
-                                .and_then(|(read, write)| transport::reclaim_tls_tcp(read, write))
-                                .ok_or_else(|| {
-                                    Error::ConnectionClosed(
-                                        "TLS renegotiation could not reclaim the TCPS socket"
-                                            .into(),
-                                    )
-                                })?;
-                            let tls_stream = tls::tls_handshake_prepared(
-                                prepared_tls,
-                                tcp,
-                                tls::handshake_timeout_from_connect_timeout(connect_timeout),
-                            )
-                            .await
-                            .map_err(|error| {
-                                TransportEstablishmentError::from(error).into_driver_error()
-                            })?;
-                            trace_connect_step("tls renegotiated");
-                            let (read, write) = connector.tls_split(tls_stream);
-                            core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
-                            core.set_protocol_limits(protocol_limits)?;
-                            core.set_inactivity_timeout(inactivity_timeout);
-                        }
-                        trace_connect_step("RESEND requested; resending CONNECT");
-                        continue;
-                    }
-                    TNS_PACKET_TYPE_REDIRECT => {
-                        redirect_rounds += 1;
-                        if redirect_rounds > MAX_CONNECT_REDIRECT_ROUNDS {
-                            return Err(Error::ConnectRedirectLoop(redirect_rounds));
-                        }
-                        let redirect_data = read_redirect_data(&mut core, &reply.payload).await?;
-                        let target = parse_redirect_target(&redirect_data, descriptor.protocol)?;
-                        trace_connect_value(
-                            "REDIRECT target",
-                            &format!("{}:{}", target.host, target.port),
-                        );
-                        // Reconnect the transport to the redirected listener
-                        // (dropping the old connection closes it) and resend
-                        // the CONNECT there, flagged as a redirect follow-up
-                        // and carrying the redirect-supplied connect data
-                        // (reference `_connect_phase_one`).
-                        let (read, write) = dial(target.host, target.port)
-                            .await
-                            .map_err(TransportEstablishmentError::into_driver_error)?;
-                        core = ConnectionCore::from_halves(read, write, "oracle_tcp_write");
-                        core.set_protocol_limits(protocol_limits)?;
-                        core.set_inactivity_timeout(inactivity_timeout);
-                        connect_data = target.connect_data;
-                        packet_flags = TNS_PACKET_FLAG_REDIRECT;
-                        // The redirected listener negotiates from scratch and
-                        // may itself ask for resends.
-                        resend_rounds = 0;
-                        trace_connect_step("REDIRECT: reconnected; resending CONNECT");
-                        continue;
-                    }
-                    TNS_PACKET_TYPE_REFUSE => {
-                        trace_connect_step("REFUSE received");
-                        return Err(Error::ListenerRefused(
-                            String::from_utf8_lossy(&reply.payload).to_string(),
-                        ));
-                    }
-                    other => return Err(Error::UnexpectedPacket(other)),
-                }
-            };
-            record_connect_phase(&connect_phase, ConnectPhase::Accept);
-            let accept_info = parse_accept_payload(&accept.payload)?;
-            // Surface the negotiated ACCEPT capabilities so a captured trace
-            // shows *why* the auth path forked: `fast_auth=true` takes the
-            // combined fast-auth bundle, `fast_auth=false` falls back to the
-            // classic protocol-negotiation + data-types round trips. This is the
-            // single most useful line for diagnosing a "missing/failed fast-auth"
-            // exchange. None of these values are secret (they mirror v$session /
-            // negotiated SDU).
-            trace_connect_value(
-                "ACCEPT",
-                &format!(
-                    "sdu={} fast_auth={} end_of_response={} oob={}",
-                    accept_info.sdu,
-                    accept_info.supports_fast_auth,
-                    accept_info.supports_end_of_response,
-                    accept_info.supports_oob,
-                ),
-            );
-            trace_connect_event(
-                ConnectPhase::Accept,
-                "ACCEPT capabilities",
-                accept.payload.len(),
-                &format!(
-                    "protocol_version={} fast_auth={} end_of_response={} oob={}",
-                    accept_info.protocol_version,
-                    accept_info.supports_fast_auth,
-                    accept_info.supports_end_of_response,
-                    accept_info.supports_oob,
-                ),
-            );
-            // Record the framing mode so the recovery drain (which runs on a raw
-            // read half, without the Connection) decides the trailing-error
-            // boundary the way this server frames it: pre-23ai (no
-            // END_OF_RESPONSE) needs message-driven completion (bead
-            // rust-oracledb-99xu).
-            core.set_classic_framing(!accept_info.supports_end_of_response);
-            let sdu = usize::try_from(accept_info.sdu)
-                .unwrap_or(DEFAULT_SDU)
-                .max(TNS_DATA_PACKET_OVERHEAD + 1);
+                // Record the framing mode so the recovery drain (which runs on a raw
+                // read half, without the Connection) decides the trailing-error
+                // boundary the way this server frames it: pre-23ai (no
+                // END_OF_RESPONSE) needs message-driven completion (bead
+                // rust-oracledb-99xu).
+                core.set_classic_framing(!accept_info.supports_end_of_response);
+                let sdu = usize::try_from(accept_info.sdu)
+                    .unwrap_or(DEFAULT_SDU)
+                    .max(TNS_DATA_PACKET_OVERHEAD + 1);
 
-            let mut ttc_seq_num = 1;
-            let auth_connect_string = auth_connect_descriptor(
-                &descriptor,
-                active_description,
-                token_auth,
-                descriptor_ssl_server_dn_match,
-                descriptor_ssl_server_cert_dn,
-            );
+                let mut ttc_seq_num = 1;
+                let auth_connect_string = auth_connect_descriptor(
+                    &descriptor,
+                    active_description,
+                    token_auth,
+                    descriptor_ssl_server_dn_match,
+                    descriptor_ssl_server_cert_dn,
+                );
 
-            // Authentication has two shapes. Token auth (OCI IAM / OAuth2) carries
-            // the credential in `AUTH_TOKEN` and skips the password-verifier round
-            // trip entirely; password auth does the classic phase-one challenge /
-            // phase-two verifier exchange. Both converge on a parsed auth response
-            // plus the negotiated capabilities; only password auth yields a combo key
-            // (used later to verify the server's response and for change-password).
-            let (auth_two, capabilities, combo_key) = if let Some(token) = &options.access_token {
-                // A database access token must never travel in clear text: require
-                // TLS/TCPS, exactly as the reference does
-                // (protocol.pyx `ERR_ACCESS_TOKEN_REQUIRES_TCPS`).
-                if !descriptor.protocol.is_tls() {
-                    return Err(Error::AccessTokenRequiresTcps);
-                }
-                // OCI IAM *database* tokens are proof-of-possession: the token is
-                // bound to an RSA private key and the server refuses the bearer
-                // token alone with ORA-01017. When the caller supplied the key,
-                // sign the HTTP-Signatures header now and carry it as
-                // AUTH_HEADER/AUTH_SIGNATURE on whichever auth path is taken. A
-                // plain OAuth2 bearer token has no key and skips this. Computed
-                // once; the borrowed `TokenPop` feeds both fast-auth and classic.
-                let pop_material = match options.access_token_private_key.as_ref() {
-                    Some(key) => {
-                        let header = iam_pop::build_signing_header(
-                            &descriptor.service_name,
-                            &descriptor.host,
-                            descriptor.port,
-                            std::time::SystemTime::now(),
-                        );
-                        let signature = iam_pop::sign_signing_header(key.expose(), &header)?;
-                        Some((header, signature))
+                // Authentication has two shapes. Token auth (OCI IAM / OAuth2) carries
+                // the credential in `AUTH_TOKEN` and skips the password-verifier round
+                // trip entirely; password auth does the classic phase-one challenge /
+                // phase-two verifier exchange. Both converge on a parsed auth response
+                // plus the negotiated capabilities; only password auth yields a combo key
+                // (used later to verify the server's response and for change-password).
+                let (auth_two, capabilities, combo_key) = if let Some(token) = &options.access_token
+                {
+                    // A database access token must never travel in clear text: require
+                    // TLS/TCPS, exactly as the reference does
+                    // (protocol.pyx `ERR_ACCESS_TOKEN_REQUIRES_TCPS`).
+                    if !descriptor.protocol.is_tls() {
+                        return Err(Error::AccessTokenRequiresTcps);
                     }
-                    None => None,
-                };
-                let pop = pop_material
-                    .as_ref()
-                    .map(|(header, signature)| TokenPop { header, signature });
-                let (auth, capabilities) = if accept_info.supports_fast_auth {
-                    // One combined fast-auth bundle carrying a phase-two
-                    // `AUTH_TOKEN` message; no resend. The payload embeds the
-                    // token, so it is never passed to `trace_connect_bytes`.
-                    let auth_payload = build_fast_auth_token_payload_with_pop_and_proxy(
+                    // OCI IAM *database* tokens are proof-of-possession: the token is
+                    // bound to an RSA private key and the server refuses the bearer
+                    // token alone with ORA-01017. When the caller supplied the key,
+                    // sign the HTTP-Signatures header now and carry it as
+                    // AUTH_HEADER/AUTH_SIGNATURE on whichever auth path is taken. A
+                    // plain OAuth2 bearer token has no key and skips this. Computed
+                    // once; the borrowed `TokenPop` feeds both fast-auth and classic.
+                    let pop_material = match options.access_token_private_key.as_ref() {
+                        Some(key) => {
+                            let header = iam_pop::build_signing_header(
+                                &descriptor.service_name,
+                                &descriptor.host,
+                                descriptor.port,
+                                std::time::SystemTime::now(),
+                            );
+                            let signature = iam_pop::sign_signing_header(key.expose(), &header)?;
+                            Some((header, signature))
+                        }
+                        None => None,
+                    };
+                    let pop = pop_material
+                        .as_ref()
+                        .map(|(header, signature)| TokenPop { header, signature });
+                    let (auth, capabilities) = if accept_info.supports_fast_auth {
+                        // One combined fast-auth bundle carrying a phase-two
+                        // `AUTH_TOKEN` message; no resend. The payload embeds the
+                        // token, so it is never passed to `trace_connect_bytes`.
+                        let auth_payload = build_fast_auth_token_payload_with_pop_and_proxy(
+                            &options.user,
+                            token.expose(),
+                            &identity.driver_name,
+                            PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
+                            &auth_connect_string,
+                            options.edition.as_deref(),
+                            pop,
+                            options.proxy_user.as_deref(),
+                        )?;
+                        record_connect_phase(&connect_phase, ConnectPhase::AuthPhaseTwo);
+                        trace_connect_step("send AUTH token (fast-auth phase two)");
+                        core.send_data_packet(cx, &auth_payload, sdu).await?;
+                        trace_connect_step("read AUTH token response");
+                        let response = core.read_data_response(cx).await?;
+                        trace_connect_bytes("AUTH token response", &response);
+                        let auth = parse_auth_response_with_limits(&response, protocol_limits)?;
+                        let capabilities = auth.capabilities.unwrap_or_default();
+                        (auth, capabilities)
+                    } else {
+                        core.authenticate_classic_token(
+                            cx,
+                            TokenAuthentication {
+                                user: &options.user,
+                                token: token.expose(),
+                                driver_name: &identity.driver_name,
+                                version_num: PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
+                                connect_string: &auth_connect_string,
+                                edition: options.edition.as_deref(),
+                                pop,
+                                proxy_user: options.proxy_user.as_deref(),
+                            },
+                            sdu,
+                            &connect_phase,
+                        )
+                        .await?
+                    };
+                    // Token auth derives no shared password key: there is no combo key,
+                    // hence no server-response MAC to verify and no change-password.
+                    (auth, capabilities, Vec::new())
+                } else {
+                    let client_pid = process::id();
+                    // Pre-23ai servers do not understand the combined fast-auth
+                    // bundle: run the classic handshake instead — protocol
+                    // negotiation and data types as their own round trips
+                    // (reference protocol.pyx `_connect_phase_two`), then the same
+                    // two-phase password auth. The standalone payloads are exact
+                    // slices of the fast-auth bundle, so both paths negotiate
+                    // byte-identically.
+                    let negotiated_capabilities = if accept_info.supports_fast_auth {
+                        // The fast-auth packet carries both password auth steps in
+                        // one bundle; a refusal from the server belongs to phase 2.
+                        record_connect_phase(&connect_phase, ConnectPhase::AuthPhaseTwo);
+                        None
+                    } else {
+                        record_connect_phase(&connect_phase, ConnectPhase::Negotiation);
+                        let protocol_payload = build_protocol_negotiation_payload()?;
+                        trace_connect_step("send protocol negotiation (classic)");
+                        core.send_data_packet(cx, &protocol_payload, sdu).await?;
+                        trace_connect_step("read protocol negotiation");
+                        let response = core.read_classic_data_response(cx).await?;
+                        trace_connect_bytes("protocol negotiation response", &response);
+                        let negotiated =
+                            parse_auth_response_with_limits(&response, protocol_limits)?;
+
+                        let data_types_payload = build_data_types_payload()?;
+                        record_connect_phase(&connect_phase, ConnectPhase::DataTypes);
+                        trace_connect_step("send data types (classic)");
+                        core.send_data_packet(cx, &data_types_payload, sdu).await?;
+                        trace_connect_step("read data types");
+                        let response = core.read_classic_data_response(cx).await?;
+                        trace_connect_bytes("data types response", &response);
+                        parse_auth_response_with_limits(&response, protocol_limits)?;
+
+                        Some(negotiated.capabilities.unwrap_or_default())
+                    };
+                    let auth_one = if accept_info.supports_fast_auth {
+                        build_fast_auth_phase_one_payload(
+                            &options.user,
+                            &identity.program,
+                            &identity.machine,
+                            &identity.osuser,
+                            &identity.terminal,
+                            client_pid,
+                        )?
+                    } else {
+                        build_auth_phase_one_payload(
+                            &options.user,
+                            &identity.program,
+                            &identity.machine,
+                            &identity.osuser,
+                            &identity.terminal,
+                            client_pid,
+                        )?
+                    };
+                    record_connect_phase(&connect_phase, ConnectPhase::AuthPhaseOne);
+                    trace_connect_bytes("AUTH phase one payload", &auth_one);
+                    trace_connect_step("send AUTH phase one");
+                    core.send_data_packet(cx, &auth_one, sdu).await?;
+                    trace_connect_step("read AUTH phase one");
+                    let auth_one_response = if accept_info.supports_fast_auth {
+                        core.read_data_response(cx).await?
+                    } else {
+                        core.read_classic_data_response(cx).await?
+                    };
+                    trace_connect_bytes("AUTH phase one response", &auth_one_response);
+                    let auth_one =
+                        parse_auth_response_with_limits(&auth_one_response, protocol_limits)?;
+                    let capabilities = negotiated_capabilities
+                        .or(auth_one.capabilities)
+                        .unwrap_or_default();
+                    let verifier_type = auth_one
+                        .verifier_type
+                        .ok_or(Error::MissingSessionField("AUTH_VFR_DATA verifier type"))?;
+                    let encrypted = oracledb_protocol::crypto::generate_verifier(
+                        options.password.as_bytes(),
+                        &auth_one.session_data,
+                        verifier_type,
+                    )?;
+                    let auth_two_payload = build_auth_phase_two_payload_with_proxy_with_seq(
                         &options.user,
-                        token.expose(),
+                        &encrypted,
                         &identity.driver_name,
                         PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
                         &auth_connect_string,
-                        options.edition.as_deref(),
-                        pop,
+                        next_ttc_sequence(&mut ttc_seq_num),
+                        &options.app_context,
                         options.proxy_user.as_deref(),
+                        options.edition.as_deref(),
+                        capabilities.ttc_field_version,
                     )?;
                     record_connect_phase(&connect_phase, ConnectPhase::AuthPhaseTwo);
-                    trace_connect_step("send AUTH token (fast-auth phase two)");
-                    core.send_data_packet(cx, &auth_payload, sdu).await?;
-                    trace_connect_step("read AUTH token response");
-                    let response = core.read_data_response(cx).await?;
-                    trace_connect_bytes("AUTH token response", &response);
-                    let auth = parse_auth_response_with_limits(&response, protocol_limits)?;
-                    let capabilities = auth.capabilities.unwrap_or_default();
-                    (auth, capabilities)
-                } else {
-                    core.authenticate_classic_token(
-                        cx,
-                        TokenAuthentication {
-                            user: &options.user,
-                            token: token.expose(),
-                            driver_name: &identity.driver_name,
-                            version_num: PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
-                            connect_string: &auth_connect_string,
-                            edition: options.edition.as_deref(),
-                            pop,
-                            proxy_user: options.proxy_user.as_deref(),
-                        },
-                        sdu,
-                        &connect_phase,
-                    )
-                    .await?
+                    trace_connect_bytes("AUTH phase two payload", &auth_two_payload);
+                    trace_connect_step("send AUTH phase two");
+                    core.send_data_packet(cx, &auth_two_payload, sdu).await?;
+                    trace_connect_step("read AUTH phase two");
+                    let auth_two_response = if accept_info.supports_fast_auth {
+                        core.read_data_response(cx).await?
+                    } else {
+                        core.read_classic_data_response(cx).await?
+                    };
+                    trace_connect_bytes("AUTH phase two response", &auth_two_response);
+                    let auth_two =
+                        parse_auth_response_with_limits(&auth_two_response, protocol_limits)?;
+                    oracledb_protocol::crypto::verify_server_response(
+                        &encrypted.combo_key,
+                        &auth_two.session_data,
+                    )?;
+                    (auth_two, capabilities, encrypted.combo_key)
                 };
-                // Token auth derives no shared password key: there is no combo key,
-                // hence no server-response MAC to verify and no change-password.
-                (auth, capabilities, Vec::new())
-            } else {
-                let client_pid = process::id();
-                // Pre-23ai servers do not understand the combined fast-auth
-                // bundle: run the classic handshake instead — protocol
-                // negotiation and data types as their own round trips
-                // (reference protocol.pyx `_connect_phase_two`), then the same
-                // two-phase password auth. The standalone payloads are exact
-                // slices of the fast-auth bundle, so both paths negotiate
-                // byte-identically.
-                let negotiated_capabilities = if accept_info.supports_fast_auth {
-                    // The fast-auth packet carries both password auth steps in
-                    // one bundle; a refusal from the server belongs to phase 2.
-                    record_connect_phase(&connect_phase, ConnectPhase::AuthPhaseTwo);
-                    None
-                } else {
-                    record_connect_phase(&connect_phase, ConnectPhase::Negotiation);
-                    let protocol_payload = build_protocol_negotiation_payload()?;
-                    trace_connect_step("send protocol negotiation (classic)");
-                    core.send_data_packet(cx, &protocol_payload, sdu).await?;
-                    trace_connect_step("read protocol negotiation");
-                    let response = core.read_classic_data_response(cx).await?;
-                    trace_connect_bytes("protocol negotiation response", &response);
-                    let negotiated = parse_auth_response_with_limits(&response, protocol_limits)?;
 
-                    let data_types_payload = build_data_types_payload()?;
-                    record_connect_phase(&connect_phase, ConnectPhase::DataTypes);
-                    trace_connect_step("send data types (classic)");
-                    core.send_data_packet(cx, &data_types_payload, sdu).await?;
-                    trace_connect_step("read data types");
-                    let response = core.read_classic_data_response(cx).await?;
-                    trace_connect_bytes("data types response", &response);
-                    parse_auth_response_with_limits(&response, protocol_limits)?;
+                record_connect_phase(&connect_phase, ConnectPhase::Session);
+                let session_id = parse_session_u32(&auth_two.session_data, "AUTH_SESSION_ID")?;
+                let serial_num = parse_session_u16(&auth_two.session_data, "AUTH_SERIAL_NUM")?;
+                // Final handshake milestone: authentication succeeded and the server
+                // handed back a session. `sid`/`serial` are the v$session identifiers
+                // (not secret) and let an operator correlate a captured trace with a
+                // server-side session.
+                trace_connect_step("session established");
+                let server_version = auth_two.session_data.get("AUTH_VERSION_STRING").cloned();
+                let db_unique_name = parse_db_unique_name(&auth_two.session_data);
+                let server_version_tuple = auth_two
+                    .session_data
+                    .get("AUTH_VERSION_NO")
+                    .and_then(|value| value.trim().parse::<u32>().ok())
+                    .map(|num| {
+                        decode_server_version_number(
+                            num,
+                            server_version_number_uses_extended_layout(
+                                capabilities.ttc_field_version,
+                            ),
+                        )
+                    });
 
-                    Some(negotiated.capabilities.unwrap_or_default())
-                };
-                let auth_one = if accept_info.supports_fast_auth {
-                    build_fast_auth_phase_one_payload(
-                        &options.user,
-                        &identity.program,
-                        &identity.machine,
-                        &identity.osuser,
-                        &identity.terminal,
-                        client_pid,
-                    )?
-                } else {
-                    build_auth_phase_one_payload(
-                        &options.user,
-                        &identity.program,
-                        &identity.machine,
-                        &identity.osuser,
-                        &identity.terminal,
-                        client_pid,
-                    )?
-                };
-                record_connect_phase(&connect_phase, ConnectPhase::AuthPhaseOne);
-                trace_connect_bytes("AUTH phase one payload", &auth_one);
-                trace_connect_step("send AUTH phase one");
-                core.send_data_packet(cx, &auth_one, sdu).await?;
-                trace_connect_step("read AUTH phase one");
-                let auth_one_response = if accept_info.supports_fast_auth {
-                    core.read_data_response(cx).await?
-                } else {
-                    core.read_classic_data_response(cx).await?
-                };
-                trace_connect_bytes("AUTH phase one response", &auth_one_response);
-                let auth_one =
-                    parse_auth_response_with_limits(&auth_one_response, protocol_limits)?;
-                let capabilities = negotiated_capabilities
-                    .or(auth_one.capabilities)
-                    .unwrap_or_default();
-                let verifier_type = auth_one
-                    .verifier_type
-                    .ok_or(Error::MissingSessionField("AUTH_VFR_DATA verifier type"))?;
-                let encrypted = oracledb_protocol::crypto::generate_verifier(
-                    options.password.as_bytes(),
-                    &auth_one.session_data,
-                    verifier_type,
-                )?;
-                let auth_two_payload = build_auth_phase_two_payload_with_proxy_with_seq(
-                    &options.user,
-                    &encrypted,
-                    &identity.driver_name,
-                    PYTHON_ORACLEDB_COMPAT_VERSION_NUM,
-                    &auth_connect_string,
-                    next_ttc_sequence(&mut ttc_seq_num),
-                    &options.app_context,
-                    options.proxy_user.as_deref(),
-                    options.edition.as_deref(),
-                    capabilities.ttc_field_version,
-                )?;
-                record_connect_phase(&connect_phase, ConnectPhase::AuthPhaseTwo);
-                trace_connect_bytes("AUTH phase two payload", &auth_two_payload);
-                trace_connect_step("send AUTH phase two");
-                core.send_data_packet(cx, &auth_two_payload, sdu).await?;
-                trace_connect_step("read AUTH phase two");
-                let auth_two_response = if accept_info.supports_fast_auth {
-                    core.read_data_response(cx).await?
-                } else {
-                    core.read_classic_data_response(cx).await?
-                };
-                trace_connect_bytes("AUTH phase two response", &auth_two_response);
-                let auth_two =
-                    parse_auth_response_with_limits(&auth_two_response, protocol_limits)?;
-                oracledb_protocol::crypto::verify_server_response(
-                    &encrypted.combo_key,
-                    &auth_two.session_data,
-                )?;
-                (auth_two, capabilities, encrypted.combo_key)
-            };
-
-            record_connect_phase(&connect_phase, ConnectPhase::Session);
-            let session_id = parse_session_u32(&auth_two.session_data, "AUTH_SESSION_ID")?;
-            let serial_num = parse_session_u16(&auth_two.session_data, "AUTH_SERIAL_NUM")?;
-            // Final handshake milestone: authentication succeeded and the server
-            // handed back a session. `sid`/`serial` are the v$session identifiers
-            // (not secret) and let an operator correlate a captured trace with a
-            // server-side session.
-            trace_connect_step("session established");
-            let server_version = auth_two.session_data.get("AUTH_VERSION_STRING").cloned();
-            let db_unique_name = parse_db_unique_name(&auth_two.session_data);
-            let server_version_tuple = auth_two
-                .session_data
-                .get("AUTH_VERSION_NO")
-                .and_then(|value| value.trim().parse::<u32>().ok())
-                .map(|num| {
-                    decode_server_version_number(
-                        num,
-                        server_version_number_uses_extended_layout(capabilities.ttc_field_version),
-                    )
-                });
-
-            // Arm the support-capture guard from the recorder installed at dial
-            // time (both `Some` iff `ORACLEDB_CAPTURE` was set). On drop/close it
-            // scrubs + gate-checks + persists the cassette.
-            #[cfg(feature = "cassette")]
-            let capture_guard = match (capture_recorder, capture_path) {
-                (Some(recorder), Some(path)) => Some(transport::CaptureGuard::new(recorder, path)),
-                _ => None,
-            };
-            Ok(Self {
-                descriptor,
-                identity,
-                core,
-                protocol_limits,
-                session_id,
-                serial_num,
-                server_version,
-                server_version_tuple,
-                db_unique_name,
-                capabilities,
-                ttc_seq_num,
-                sdu,
-                protocol_version: accept_info.protocol_version,
-                supports_fast_auth: accept_info.supports_fast_auth,
-                supports_end_of_response: accept_info.supports_end_of_response,
-                supports_oob: accept_info.supports_oob,
-                cursor_columns: BTreeMap::new(),
-                fetch_metadata_by_sql: HashMap::new(),
-                fetch_metadata_order: VecDeque::new(),
-                shape_cache: options.statement_shape_cache.clone().unwrap_or_default(),
-                dead: false,
-                user: options.user,
-                combo_key,
-                statement_cache: Vec::new(),
-                statement_cache_size: options.statement_cache_size,
-                in_use_cursors: HashSet::new(),
-                lob_prefetch_cursors: BTreeSet::new(),
-                copied_cursors: HashSet::new(),
-                cursors_to_close: Vec::new(),
-                sessionless_data: None,
-                notification_buffer: Vec::new(),
-                notification_header_consumed: false,
-                transaction_context: None,
-                txn_in_progress: false,
+                // Arm the support-capture guard from the recorder installed at dial
+                // time (both `Some` iff `ORACLEDB_CAPTURE` was set). On drop/close it
+                // scrubs + gate-checks + persists the cassette.
                 #[cfg(feature = "cassette")]
-                capture_guard,
-            })
+                let capture_guard = match (capture_recorder.clone(), capture_path) {
+                    (Some(recorder), Some(path)) => {
+                        Some(transport::CaptureGuard::new(recorder, path))
+                    }
+                    _ => None,
+                };
+                Ok(Self {
+                    descriptor,
+                    identity,
+                    core,
+                    protocol_limits,
+                    session_id,
+                    serial_num,
+                    server_version,
+                    server_version_tuple,
+                    db_unique_name,
+                    capabilities,
+                    ttc_seq_num,
+                    sdu,
+                    protocol_version: accept_info.protocol_version,
+                    supports_fast_auth: accept_info.supports_fast_auth,
+                    supports_end_of_response: accept_info.supports_end_of_response,
+                    supports_oob: accept_info.supports_oob,
+                    cursor_columns: BTreeMap::new(),
+                    fetch_metadata_by_sql: HashMap::new(),
+                    fetch_metadata_order: VecDeque::new(),
+                    shape_cache: options.statement_shape_cache.clone().unwrap_or_default(),
+                    dead: false,
+                    user: options.user,
+                    combo_key,
+                    statement_cache: Vec::new(),
+                    statement_cache_size: options.statement_cache_size,
+                    in_use_cursors: HashSet::new(),
+                    lob_prefetch_cursors: BTreeSet::new(),
+                    copied_cursors: HashSet::new(),
+                    cursors_to_close: Vec::new(),
+                    sessionless_data: None,
+                    notification_buffer: Vec::new(),
+                    notification_header_consumed: false,
+                    transaction_context: None,
+                    txn_in_progress: false,
+                    #[cfg(feature = "cassette")]
+                    capture_guard,
+                })
+            };
+            match time::timeout(time::wall_now(), connect_timeout, established).await {
+                Ok(result) => result,
+                Err(_) => Err(Error::CallTimeout(connect_timeout_ms)),
+            }
         };
-        let connect_result = time::timeout(
-            time::wall_now(),
-            connect_timeout,
-            crate::obs::instrument(&_span, connect_future),
-        )
-        .await;
-        match connect_result {
-            Ok(result) => result,
-            Err(_) => Err(Error::CallTimeout(connect_timeout_ms)),
-        }
+        crate::obs::instrument(&_span, connect_future).await
     }
 
     pub fn descriptor(&self) -> &EasyConnect {
@@ -11089,7 +11129,163 @@ fn resolve_effective_sdu(options_sdu: u16, dsn_sdu: u32) -> u32 {
 struct ConnectAddress {
     host: String,
     port: u16,
+    protocol: NetProtocol,
     description_index: usize,
+}
+
+/// Connect settings owned by one DESCRIPTION (oraclemcp-vs8lq). A failover
+/// endpoint is dialled, secured, retried and timed with the plan of the
+/// DESCRIPTION it came from, never with the first DESCRIPTION's.
+struct DescriptionConnectPlan {
+    connect_timeout: Duration,
+    keepalive_idle: Option<Duration>,
+    retry_count: u32,
+    retry_delay: Duration,
+    ssl_server_dn_match: bool,
+    ssl_server_cert_dn: Option<String>,
+    /// Present exactly when the DESCRIPTION has a TCPS endpoint.
+    prepared_tls: Option<tls::PreparedTlsHandshake>,
+}
+
+/// `ENABLE=BROKEN` turns on TCP keepalive with the operating system's idle
+/// interval (two hours on Linux, macOS and Windows); `EXPIRE_TIME` overrides it.
+const ENABLE_BROKEN_KEEPALIVE_IDLE: Duration = Duration::from_secs(2 * 60 * 60);
+
+fn description_keepalive_idle(description: &Description) -> Option<Duration> {
+    keepalive_idle_from_expire_time(description.expire_time).or_else(|| {
+        description
+            .extra
+            .iter()
+            .any(|(key, value)| key == "ENABLE" && value.eq_ignore_ascii_case("broken"))
+            .then_some(ENABLE_BROKEN_KEEPALIVE_IDLE)
+    })
+}
+
+/// Resolve one DESCRIPTION's connect plan. Explicit [`ConnectOptions`] keep
+/// their precedence: a builder wallet or pinned DN wins, and either side
+/// disabling DN matching disables it. The TLS identity check uses the
+/// DESCRIPTION's first TCPS host and its own service name for SNI.
+fn prepare_description_connect_plan(
+    description: &Description,
+    options: &ConnectOptions,
+    server_type: Option<&str>,
+) -> Result<DescriptionConnectPlan> {
+    let ssl_server_dn_match = effective_ssl_server_dn_match(description, options);
+    let ssl_server_cert_dn = options
+        .ssl_server_cert_dn
+        .clone()
+        .or_else(|| description.security.ssl_server_cert_dn.clone());
+    let tls_address = description
+        .addresses()
+        .find(|address| address.host.is_some() && NetProtocol::from(address.protocol).is_tls());
+    let prepared_tls = match tls_address {
+        Some(address) => {
+            let endpoint = EasyConnect {
+                host: address.host.clone().unwrap_or_default(),
+                port: address.port,
+                service_name: description
+                    .connect_data
+                    .service_name
+                    .clone()
+                    .unwrap_or_default(),
+                protocol: NetProtocol::from(address.protocol),
+            };
+            // F-DC2 (security fix): the verifier receives the same resolved
+            // DN-match and pinned-DN values as the outbound CONNECT descriptor,
+            // so a DN pinned only in the connect string is enforced.
+            let tls_params = tls::resolve_tls_params(
+                &endpoint,
+                options
+                    .wallet_location
+                    .as_deref()
+                    .or(description.security.wallet_location.as_deref()),
+                options.wallet_password.as_deref(),
+                ssl_server_dn_match,
+                ssl_server_cert_dn.as_deref(),
+                options.use_sni || description.use_sni,
+            )?;
+            Some(tls::prepare_tls_handshake(
+                &endpoint,
+                server_type,
+                &tls_params,
+            )?)
+        }
+        None => None,
+    };
+    Ok(DescriptionConnectPlan {
+        connect_timeout: transport_connect_timeout_duration(description.tcp_connect_timeout),
+        keepalive_idle: description_keepalive_idle(description),
+        retry_count: description.retry_count,
+        retry_delay: Duration::from_secs(u64::from(description.retry_delay)),
+        ssl_server_dn_match,
+        ssl_server_cert_dn,
+        prepared_tls,
+    })
+}
+
+/// Refuse, before any network I/O, a descriptor setting this driver parses
+/// but does not implement, so it is never silently dropped (oraclemcp-vs8lq).
+fn refuse_unmodelled_descriptor_settings(descriptor: &Descriptor) -> Result<()> {
+    let refuse = |setting: &str| Err(Error::UnsupportedConnectSetting(setting.to_string()));
+    if descriptor.source_route {
+        return refuse("DESCRIPTION_LIST SOURCE_ROUTE=ON");
+    }
+    for description in &descriptor.descriptions {
+        if description.source_route {
+            return refuse("DESCRIPTION SOURCE_ROUTE=ON");
+        }
+        for (key, value) in &description.extra {
+            match key.as_str() {
+                "ENABLE" if value.eq_ignore_ascii_case("broken") => {}
+                "ENABLE" => return refuse(&format!("ENABLE={value}")),
+                "RECV_BUF_SIZE" | "SEND_BUF_SIZE" => return refuse(key),
+                _ => {}
+            }
+        }
+        let connect_data = &description.connect_data;
+        for (present, setting) in [
+            (connect_data.cclass.is_some(), "POOL_CONNECTION_CLASS"),
+            (connect_data.purity.is_some(), "POOL_PURITY"),
+            (connect_data.pool_boundary.is_some(), "POOL_BOUNDARY"),
+            (connect_data.pool_name.is_some(), "POOL_NAME"),
+            (
+                connect_data.connection_id_prefix.is_some(),
+                "CONNECTION_ID_PREFIX",
+            ),
+            (connect_data.use_tcp_fast_open, "USE_TCP_FAST_OPEN"),
+        ] {
+            if present {
+                return refuse(setting);
+            }
+        }
+        for list in &description.address_lists {
+            if list.source_route {
+                return refuse("ADDRESS_LIST SOURCE_ROUTE=ON");
+            }
+            if list
+                .addresses
+                .iter()
+                .any(|address| address.https_proxy.is_some() || address.https_proxy_port != 0)
+            {
+                return refuse("HTTPS_PROXY");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The active children of one descriptor level (reference
+/// `_set_active_children`): `LOAD_BALANCE` shuffles them and `FAILOVER=OFF`
+/// keeps only the first, so a balanced list without failover picks one at
+/// random.
+fn active_children<T>(mut children: Vec<T>, failover: bool, load_balance: bool) -> Vec<T> {
+    if load_balance {
+        shuffle_in_place(&mut children);
+    }
+    if !failover {
+        children.truncate(1);
+    }
+    children
 }
 
 /// A failure that can only occur after deterministic connection configuration
@@ -11144,49 +11340,40 @@ impl From<tls::TlsHandshakeError> for TransportEstablishmentError {
 }
 
 /// Build the ordered list of transport endpoints to try for a (possibly
-/// multi-address) connect descriptor (F2, bead `rust-oracledb-clvm`),
-/// restricted to the primary transport `protocol`. Honours `LOAD_BALANCE`
-/// (shuffle within the balanced scope) and `FAILOVER=OFF` (only the first
-/// address of that list). Addresses without a host, or whose protocol differs
-/// from the primary, are skipped. The first entry equals the endpoint
-/// [`EasyConnect::parse`] selected as primary, so a single-address descriptor
-/// behaves exactly as before.
-fn resolve_connect_addresses(
-    descriptor: &Descriptor,
-    protocol: NetProtocol,
-) -> Vec<ConnectAddress> {
+/// multi-address) connect descriptor (F2, bead `rust-oracledb-clvm`).
+/// `FAILOVER` and `LOAD_BALANCE` apply at the DESCRIPTION_LIST, DESCRIPTION
+/// and ADDRESS_LIST levels; a DESCRIPTION's `LOAD_BALANCE` also shuffles the
+/// addresses inside its lists. Each endpoint keeps its own protocol and the
+/// index of its DESCRIPTION; addresses without a host are skipped. Endpoints of
+/// one DESCRIPTION stay contiguous so it can retry them as a group.
+fn resolve_connect_addresses(descriptor: &Descriptor) -> Vec<ConnectAddress> {
     let mut out: Vec<ConnectAddress> = Vec::new();
-    let mut descriptions: Vec<(usize, &Description)> =
-        descriptor.descriptions.iter().enumerate().collect();
-    if descriptor.load_balance {
-        shuffle_in_place(&mut descriptions);
-    }
+    let descriptions = active_children(
+        descriptor.descriptions.iter().enumerate().collect(),
+        descriptor.failover,
+        descriptor.load_balance,
+    );
     for (description_index, description) in descriptions {
-        let mut lists: Vec<&AddressList> = description.address_lists.iter().collect();
-        if description.load_balance {
-            shuffle_in_place(&mut lists);
-        }
+        let lists = active_children(
+            description.address_lists.iter().collect(),
+            description.failover,
+            description.load_balance,
+        );
         for list in lists {
-            let mut addresses: Vec<&Address> = list
-                .addresses
-                .iter()
-                .filter(|address| {
-                    address.host.is_some() && NetProtocol::from(address.protocol) == protocol
-                })
-                .collect();
-            if list.load_balance || description.load_balance {
-                shuffle_in_place(&mut addresses);
-            }
-            let limit = if list.failover {
-                addresses.len()
-            } else {
-                addresses.len().min(1)
-            };
-            for address in addresses.into_iter().take(limit) {
+            let addresses = active_children(
+                list.addresses
+                    .iter()
+                    .filter(|address| address.host.is_some())
+                    .collect(),
+                list.failover,
+                list.load_balance || description.load_balance,
+            );
+            for address in addresses {
                 if let Some(host) = &address.host {
                     out.push(ConnectAddress {
                         host: host.clone(),
                         port: address.port,
+                        protocol: NetProtocol::from(address.protocol),
                         description_index,
                     });
                 }
@@ -11332,13 +11519,25 @@ fn auth_connect_data_clause_from_service(
     description: &Description,
     fallback_service_name: Option<&str>,
 ) -> String {
-    let service_name = description
-        .connect_data
+    let connect_data = &description.connect_data;
+    let service_name = connect_data
         .service_name
         .as_deref()
-        .or(fallback_service_name)
-        .unwrap_or("");
-    format!("(CONNECT_DATA=(SERVICE_NAME={service_name})")
+        .or(fallback_service_name.filter(|name| !name.is_empty()));
+    let mut out = String::from("(CONNECT_DATA=");
+    if let Some(service_name) = service_name {
+        out.push_str(&format!("(SERVICE_NAME={service_name})"));
+    }
+    if let Some(instance_name) = &connect_data.instance_name {
+        out.push_str(&format!("(INSTANCE_NAME={instance_name})"));
+    } else if let Some(sid) = &connect_data.sid {
+        out.push_str(&format!("(SID={sid})"));
+    }
+    if service_name.is_none() && connect_data.instance_name.is_none() && connect_data.sid.is_none()
+    {
+        out.push_str("(SERVICE_NAME=)");
+    }
+    out
 }
 
 fn descriptor_security_clause(
@@ -12485,6 +12684,555 @@ mod tests {
         Ok(())
     }
 
+    type PeerHandle<R> = thread::JoinHandle<std::io::Result<(Vec<u8>, R)>>;
+
+    /// The error of a connect that must fail (`BlockingConnection` is not `Debug`).
+    fn connect_must_fail<T>(result: Result<T>, why: &str) -> Error {
+        match result {
+            Ok(_) => panic!("{why}"),
+            Err(error) => error,
+        }
+    }
+
+    /// The inner error of a failed connect (connect errors carry their phase).
+    fn connect_failure(error: Error) -> Error {
+        match error {
+            Error::ConnectPhase { source, .. } => *source,
+            other => other,
+        }
+    }
+
+    /// A port with nothing listening: the dial is refused at once.
+    fn closed_port() -> std::io::Result<u16> {
+        Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
+    }
+
+    /// A one-shot listener peer: accepts one connection, reads its CONNECT
+    /// packet, then runs `then` on the socket. Returns the CONNECT payload
+    /// with `then`'s result.
+    fn spawn_connect_peer<R, F>(then: F) -> std::io::Result<(u16, PeerHandle<R>)>
+    where
+        R: Send + 'static,
+        F: FnOnce(&mut std::net::TcpStream) -> std::io::Result<R> + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        let handle = thread::spawn(move || {
+            listener.set_nonblocking(true)?;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let (mut socket, _) = loop {
+                match listener.accept() {
+                    Ok(pair) => break pair,
+                    Err(err)
+                        if err.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(err) => return Err(err),
+                }
+            };
+            socket.set_nonblocking(false)?;
+            socket.set_read_timeout(Some(Duration::from_secs(10)))?;
+            let mut header = [0; 8];
+            socket.read_exact(&mut header)?;
+            assert_eq!(header[4], TNS_PACKET_TYPE_CONNECT);
+            let length = usize::from(u16::from_be_bytes([header[0], header[1]]));
+            let mut payload = vec![0; length - header.len()];
+            socket.read_exact(&mut payload)?;
+            let result = then(&mut socket)?;
+            Ok((payload, result))
+        });
+        Ok((port, handle))
+    }
+
+    /// Accepts and immediately drops every connection until `stop`, counting
+    /// them: each accepted TCPS dial then fails its TLS handshake transiently.
+    fn spawn_counting_peer(
+        stop: Arc<AtomicBool>,
+    ) -> std::io::Result<(u16, thread::JoinHandle<std::io::Result<usize>>)> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        let handle = thread::spawn(move || {
+            listener.set_nonblocking(true)?;
+            let mut accepted = 0;
+            loop {
+                match listener.accept() {
+                    Ok((socket, _)) => {
+                        accepted += 1;
+                        drop(socket);
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        if stop.load(Ordering::SeqCst) {
+                            return Ok(accepted);
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        });
+        Ok((port, handle))
+    }
+
+    fn assert_never_dialled(listener: &TcpListener) {
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        match listener.accept() {
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            other => panic!("the endpoint must never be dialled: {other:?}"),
+        }
+    }
+
+    const FIXTURE_WALLET_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tls");
+
+    #[test]
+    fn failover_connect_is_bounded_by_the_selected_description_timeout() -> Result<()> {
+        // The first DESCRIPTION allows 30 s, the selected one 1 s: a listener
+        // that never answers CONNECT must time out after the selected budget.
+        let first_port = closed_port()?;
+        let (second_port, peer) = spawn_connect_peer(|_| {
+            thread::sleep(Duration::from_secs(4));
+            Ok(())
+        })?;
+        let dsn = format!(
+            "(DESCRIPTION_LIST=(LOAD_BALANCE=OFF)\
+             (DESCRIPTION=(CONNECT_TIMEOUT=30)\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={first_port}))\
+             (CONNECT_DATA=(SERVICE_NAME=first_service)))\
+             (DESCRIPTION=(CONNECT_TIMEOUT=1)\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={second_port}))\
+             (CONNECT_DATA=(SERVICE_NAME=selected_service))))"
+        );
+        let started = Instant::now();
+        let error = connect_must_fail(
+            BlockingConnection::connect(ConnectOptions::new(dsn, "user", "password", identity())),
+            "a silent listener cannot complete the connect",
+        );
+        let elapsed = started.elapsed();
+        let failure = connect_failure(error);
+        assert!(
+            matches!(failure, Error::CallTimeout(1000)),
+            "selected 1 s budget, got {failure:?}"
+        );
+        assert!(elapsed < Duration::from_secs(4), "{elapsed:?}");
+        let (payload, ()) = peer.join().expect("CONNECT peer joins")?;
+        assert!(String::from_utf8_lossy(&payload).contains("(SERVICE_NAME=selected_service)"));
+
+        // Reversed: the first DESCRIPTION allows 1 s, the selected one 10 s,
+        // and the listener answers after 1.5 s.
+        let first_port = closed_port()?;
+        let (second_port, peer) = spawn_connect_peer(|socket| {
+            thread::sleep(Duration::from_millis(1500));
+            let refuse = encode_packet(
+                TNS_PACKET_TYPE_REFUSE,
+                0,
+                None,
+                b"(DESCRIPTION=(ERR=12514))",
+                PacketLengthWidth::Legacy16,
+            )
+            .map_err(std::io::Error::other)?;
+            socket.write_all(&refuse)
+        })?;
+        let dsn = format!(
+            "(DESCRIPTION_LIST=(LOAD_BALANCE=OFF)\
+             (DESCRIPTION=(CONNECT_TIMEOUT=1)\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={first_port}))\
+             (CONNECT_DATA=(SERVICE_NAME=first_service)))\
+             (DESCRIPTION=(CONNECT_TIMEOUT=10)\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={second_port}))\
+             (CONNECT_DATA=(SERVICE_NAME=selected_service))))"
+        );
+        let error = connect_must_fail(
+            BlockingConnection::connect(ConnectOptions::new(dsn, "user", "password", identity())),
+            "the listener refuses",
+        );
+        let failure = connect_failure(error);
+        assert!(
+            matches!(&failure, Error::ListenerRefused(text) if text.contains("12514")),
+            "selected 10 s budget outlasts the 1.5 s answer, got {failure:?}"
+        );
+        peer.join().expect("CONNECT peer joins")?;
+        Ok(())
+    }
+
+    #[test]
+    fn failover_retries_each_description_with_its_own_schedule() -> Result<()> {
+        // (first RETRY_COUNT, first RETRY_DELAY, second RETRY_COUNT, second
+        // RETRY_DELAY, first attempts, second attempts, minimum elapsed)
+        for (rc1, rd1, rc2, rd2, want1, want2, min_elapsed) in [
+            (2, 0, 0, 0, 3, 1, Duration::ZERO),
+            (0, 0, 2, 0, 1, 3, Duration::ZERO),
+            (0, 0, 1, 1, 1, 2, Duration::from_secs(1)),
+        ] {
+            let stop = Arc::new(AtomicBool::new(false));
+            let (first_port, first) = spawn_counting_peer(Arc::clone(&stop))?;
+            let (second_port, second) = spawn_counting_peer(Arc::clone(&stop))?;
+            let dsn = format!(
+                "(DESCRIPTION_LIST=(LOAD_BALANCE=OFF)\
+                 (DESCRIPTION=(RETRY_COUNT={rc1})(RETRY_DELAY={rd1})(CONNECT_TIMEOUT=5)\
+                 (ADDRESS=(PROTOCOL=tcps)(HOST=127.0.0.1)(PORT={first_port}))\
+                 (CONNECT_DATA=(SERVICE_NAME=first_service))\
+                 (SECURITY=(MY_WALLET_DIRECTORY={FIXTURE_WALLET_DIR})))\
+                 (DESCRIPTION=(RETRY_COUNT={rc2})(RETRY_DELAY={rd2})(CONNECT_TIMEOUT=5)\
+                 (ADDRESS=(PROTOCOL=tcps)(HOST=127.0.0.1)(PORT={second_port}))\
+                 (CONNECT_DATA=(SERVICE_NAME=selected_service))\
+                 (SECURITY=(MY_WALLET_DIRECTORY={FIXTURE_WALLET_DIR}))))"
+            );
+            let started = Instant::now();
+            let error = connect_must_fail(
+                BlockingConnection::connect(ConnectOptions::new(
+                    dsn,
+                    "user",
+                    "password",
+                    identity(),
+                )),
+                "every handshake is dropped",
+            );
+            let elapsed = started.elapsed();
+            stop.store(true, Ordering::SeqCst);
+            let failure = connect_failure(error);
+            let attempts = (
+                first.join().expect("first peer joins")?,
+                second.join().expect("second peer joins")?,
+            );
+            assert!(
+                matches!(&failure, Error::AllAddressesFailed(text)
+                    if text.starts_with(&format!("tried {} address(es)", want1 + want2))),
+                "{failure:?}"
+            );
+            assert_eq!(
+                attempts,
+                (want1, want2),
+                "RETRY_COUNT {rc1}/{rc2}, RETRY_DELAY {rd1}/{rd2}"
+            );
+            assert!(elapsed >= min_elapsed, "{elapsed:?} < {min_elapsed:?}");
+            assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+        }
+        Ok(())
+    }
+
+    /// The `tr:tm->when` timer of the established client socket
+    /// `local_port -> remote_port` in `/proc/net/tcp` (`tr` 2 is keepalive;
+    /// `when` counts USER_HZ ticks).
+    #[cfg(target_os = "linux")]
+    fn proc_tcp_timer(local_port: u16, remote_port: u16) -> Option<(u8, u64)> {
+        let table = std::fs::read_to_string("/proc/net/tcp").ok()?;
+        table.lines().skip(1).find_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let local = fields.get(1)?;
+            let remote = fields.get(2)?;
+            if fields.get(3) != Some(&"01")
+                || !local.ends_with(&format!(":{local_port:04X}"))
+                || !remote.ends_with(&format!(":{remote_port:04X}"))
+            {
+                return None;
+            }
+            let (timer, when) = fields.get(5)?.split_once(':')?;
+            Some((
+                u8::from_str_radix(timer, 16).ok()?,
+                u64::from_str_radix(when, 16).ok()?,
+            ))
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failover_socket_keepalive_comes_from_the_selected_description() -> Result<()> {
+        const USER_HZ: u64 = 100;
+        // (first DESCRIPTION knob, selected DESCRIPTION knob, expected idle s)
+        for (first, second, idle) in [
+            ("", "(EXPIRE_TIME=7)", Some(420)),
+            ("(EXPIRE_TIME=7)", "", None),
+            ("", "(ENABLE=BROKEN)", Some(7200)),
+        ] {
+            let first_port = closed_port()?;
+            let (second_port, peer) = spawn_connect_peer(|socket| {
+                // Let the CONNECT's ACK settle so only the idle timer remains.
+                thread::sleep(Duration::from_millis(300));
+                let client_port = socket.peer_addr()?.port();
+                let server_port = socket.local_addr()?.port();
+                Ok(proc_tcp_timer(client_port, server_port))
+            })?;
+            let dsn = format!(
+                "(DESCRIPTION_LIST=(LOAD_BALANCE=OFF)\
+                 (DESCRIPTION={first}\
+                 (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={first_port}))\
+                 (CONNECT_DATA=(SERVICE_NAME=first_service)))\
+                 (DESCRIPTION={second}\
+                 (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={second_port}))\
+                 (CONNECT_DATA=(SERVICE_NAME=selected_service))))"
+            );
+            // The peer closes after sampling, before authentication.
+            assert!(BlockingConnection::connect(ConnectOptions::new(
+                dsn,
+                "user",
+                "password",
+                identity(),
+            ))
+            .is_err());
+            let (_, timer) = peer.join().expect("CONNECT peer joins")?;
+            let (kind, ticks) = timer.expect("the client socket is in /proc/net/tcp");
+            match idle {
+                Some(seconds) => {
+                    assert_eq!(kind, 2, "{first} / {second}: keepalive timer armed");
+                    let remaining = ticks / USER_HZ;
+                    assert!(
+                        (seconds - 20..=seconds).contains(&remaining),
+                        "{first} / {second}: {remaining} s left of {seconds} s"
+                    );
+                }
+                None => assert_eq!(kind, 0, "{first} / {second}: no keepalive timer"),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn failover_connect_data_carries_the_selected_sid_and_instance() -> Result<()> {
+        // The first DESCRIPTION is TCPS and the selected one plaintext: each
+        // endpoint is dialled with its own protocol.
+        for (connect_data, present, absent) in [
+            (
+                "(SID=selsid)",
+                &["(CONNECT_DATA=(SID=selsid)"][..],
+                &["SERVICE_NAME", "first_service"][..],
+            ),
+            (
+                "(SERVICE_NAME=selected_service)(INSTANCE_NAME=inst2)(SID=unused)",
+                &["(CONNECT_DATA=(SERVICE_NAME=selected_service)(INSTANCE_NAME=inst2)"][..],
+                &["SID=", "first_service"][..],
+            ),
+        ] {
+            let first_port = closed_port()?;
+            let (second_port, peer) = spawn_connect_peer(|_| Ok(()))?;
+            let dsn = format!(
+                "(DESCRIPTION_LIST=(LOAD_BALANCE=OFF)\
+                 (DESCRIPTION=\
+                 (ADDRESS=(PROTOCOL=tcps)(HOST=127.0.0.1)(PORT={first_port}))\
+                 (CONNECT_DATA=(SERVICE_NAME=first_service))\
+                 (SECURITY=(MY_WALLET_DIRECTORY={FIXTURE_WALLET_DIR})))\
+                 (DESCRIPTION=\
+                 (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={second_port}))\
+                 (CONNECT_DATA={connect_data})))"
+            );
+            assert!(BlockingConnection::connect(ConnectOptions::new(
+                dsn,
+                "user",
+                "password",
+                identity(),
+            ))
+            .is_err());
+            let (payload, ()) = peer.join().expect("CONNECT peer joins")?;
+            let text = String::from_utf8_lossy(&payload);
+            for needle in present {
+                assert!(text.contains(needle), "{needle}: {text}");
+            }
+            for needle in absent {
+                assert!(!text.contains(needle), "{needle}: {text}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn f2_failover_off_applies_at_description_list_and_description_level() {
+        let list = EasyConnect::parse_descriptor(
+            "(DESCRIPTION_LIST=(FAILOVER=OFF)(LOAD_BALANCE=OFF)\
+             (DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=first)(PORT=1)))\
+             (DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=second)(PORT=2))))",
+        )
+        .expect("parse");
+        assert_eq!(
+            resolve_connect_addresses(&list)
+                .iter()
+                .map(|address| address.host.as_str())
+                .collect::<Vec<_>>(),
+            ["first"]
+        );
+        let description = EasyConnect::parse_descriptor(
+            "(DESCRIPTION=(FAILOVER=OFF)\
+             (ADDRESS_LIST=(ADDRESS=(PROTOCOL=tcp)(HOST=first)(PORT=1)))\
+             (ADDRESS_LIST=(ADDRESS=(PROTOCOL=tcp)(HOST=second)(PORT=2)))\
+             (CONNECT_DATA=(SERVICE_NAME=svc)))",
+        )
+        .expect("parse");
+        assert_eq!(
+            resolve_connect_addresses(&description)
+                .iter()
+                .map(|address| address.host.as_str())
+                .collect::<Vec<_>>(),
+            ["first"]
+        );
+    }
+
+    #[test]
+    fn failover_off_never_dials_a_later_description() -> Result<()> {
+        for template in [
+            "(DESCRIPTION_LIST=(FAILOVER=OFF)(LOAD_BALANCE=OFF)\
+             (DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT=FIRST))\
+             (CONNECT_DATA=(SERVICE_NAME=svc)))\
+             (DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT=SECOND))\
+             (CONNECT_DATA=(SERVICE_NAME=svc))))",
+            "(DESCRIPTION=(FAILOVER=OFF)\
+             (ADDRESS_LIST=(ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT=FIRST)))\
+             (ADDRESS_LIST=(ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT=SECOND)))\
+             (CONNECT_DATA=(SERVICE_NAME=svc)))",
+        ] {
+            let first_port = closed_port()?;
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let dsn = template
+                .replace("FIRST", &first_port.to_string())
+                .replace("SECOND", &listener.local_addr()?.port().to_string());
+            let error = connect_must_fail(
+                BlockingConnection::connect(ConnectOptions::new(
+                    dsn,
+                    "user",
+                    "password",
+                    identity(),
+                )),
+                "the only active endpoint is closed",
+            );
+            let failure = connect_failure(error);
+            assert!(
+                matches!(&failure, Error::AllAddressesFailed(text) if text.starts_with("tried 1 address(es)")),
+                "{failure:?}"
+            );
+            assert_never_dialled(&listener);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unmodelled_descriptor_settings_are_refused_before_any_dial() -> Result<()> {
+        // Each setting sits in the second DESCRIPTION; neither endpoint may
+        // be dialled.
+        for (list_part, description_part, address_part, connect_data_part, setting) in [
+            (
+                "(SOURCE_ROUTE=ON)",
+                "",
+                "",
+                "",
+                "DESCRIPTION_LIST SOURCE_ROUTE=ON",
+            ),
+            (
+                "",
+                "(SOURCE_ROUTE=ON)",
+                "",
+                "",
+                "DESCRIPTION SOURCE_ROUTE=ON",
+            ),
+            (
+                "",
+                "",
+                "(HTTPS_PROXY=proxy.invalid)(HTTPS_PROXY_PORT=8080)",
+                "",
+                "HTTPS_PROXY",
+            ),
+            ("", "(RECV_BUF_SIZE=65536)", "", "", "RECV_BUF_SIZE"),
+            ("", "(SEND_BUF_SIZE=65536)", "", "", "SEND_BUF_SIZE"),
+            ("", "(ENABLE=ALWAYS)", "", "", "ENABLE=ALWAYS"),
+            (
+                "",
+                "",
+                "",
+                "(POOL_CONNECTION_CLASS=cc)",
+                "POOL_CONNECTION_CLASS",
+            ),
+            ("", "", "", "(POOL_PURITY=SELF)", "POOL_PURITY"),
+            ("", "", "", "(POOL_BOUNDARY=STATEMENT)", "POOL_BOUNDARY"),
+            ("", "", "", "(POOL_NAME=pool)", "POOL_NAME"),
+            (
+                "",
+                "",
+                "",
+                "(CONNECTION_ID_PREFIX=pfx)",
+                "CONNECTION_ID_PREFIX",
+            ),
+            ("", "", "", "(USE_TCP_FAST_OPEN=ON)", "USE_TCP_FAST_OPEN"),
+        ] {
+            let first = TcpListener::bind("127.0.0.1:0")?;
+            let second = TcpListener::bind("127.0.0.1:0")?;
+            let dsn = format!(
+                "(DESCRIPTION_LIST=(LOAD_BALANCE=OFF){list_part}\
+                 (DESCRIPTION=\
+                 (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={}))\
+                 (CONNECT_DATA=(SERVICE_NAME=svc)))\
+                 (DESCRIPTION={description_part}\
+                 (ADDRESS_LIST=(ADDRESS={address_part}(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={})))\
+                 (CONNECT_DATA=(SERVICE_NAME=svc){connect_data_part})))",
+                first.local_addr()?.port(),
+                second.local_addr()?.port(),
+            );
+            let error = connect_must_fail(
+                BlockingConnection::connect(ConnectOptions::new(
+                    dsn,
+                    "user",
+                    "password",
+                    identity(),
+                )),
+                "the setting is refused",
+            );
+            let failure = connect_failure(error);
+            assert!(
+                matches!(&failure, Error::UnsupportedConnectSetting(name) if name == setting),
+                "{setting}: {failure:?}"
+            );
+            assert_eq!(failure.kind(), ErrorKind::Network);
+            assert_never_dialled(&first);
+            assert_never_dialled(&second);
+        }
+
+        // ADDRESS_LIST-level SOURCE_ROUTE in the first DESCRIPTION.
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let dsn = format!(
+            "(DESCRIPTION=(ADDRESS_LIST=(SOURCE_ROUTE=ON)\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={0}))\
+             (ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={0})))\
+             (CONNECT_DATA=(SERVICE_NAME=svc)))",
+            listener.local_addr()?.port()
+        );
+        let failure = connect_failure(connect_must_fail(
+            BlockingConnection::connect(ConnectOptions::new(dsn, "user", "password", identity())),
+            "source route is refused",
+        ));
+        assert!(
+            matches!(&failure, Error::UnsupportedConnectSetting(name) if name == "ADDRESS_LIST SOURCE_ROUTE=ON"),
+            "{failure:?}"
+        );
+        assert_never_dialled(&listener);
+        Ok(())
+    }
+
+    #[test]
+    fn access_token_is_refused_when_any_description_is_plaintext() -> Result<()> {
+        let first = TcpListener::bind("127.0.0.1:0")?;
+        let second = TcpListener::bind("127.0.0.1:0")?;
+        let dsn = format!(
+            "(DESCRIPTION_LIST=(LOAD_BALANCE=OFF)\
+             (DESCRIPTION=(ADDRESS=(PROTOCOL=tcps)(HOST=127.0.0.1)(PORT={}))\
+             (CONNECT_DATA=(SERVICE_NAME=svc)))\
+             (DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=127.0.0.1)(PORT={}))\
+             (CONNECT_DATA=(SERVICE_NAME=svc))))",
+            first.local_addr()?.port(),
+            second.local_addr()?.port(),
+        );
+        let options = ConnectOptions::new(dsn, "user", "", identity())
+            .with_access_token("header.payload.sig");
+        let failure = connect_failure(connect_must_fail(
+            BlockingConnection::connect(options),
+            "a plaintext DESCRIPTION could carry the token",
+        ));
+        assert!(
+            matches!(failure, Error::AccessTokenRequiresTcps),
+            "{failure:?}"
+        );
+        assert_never_dialled(&first);
+        assert_never_dialled(&second);
+        Ok(())
+    }
+
     #[test]
     fn f1_dsn_sdu_reaches_the_connect_config() {
         // A DSN-set SDU must reach the connect config when the structured
@@ -12720,18 +13468,20 @@ mod tests {
              (CONNECT_DATA=(SERVICE_NAME=svc)))",
         )
         .expect("parse");
-        let addrs = resolve_connect_addresses(&desc, NetProtocol::Tcp);
+        let addrs = resolve_connect_addresses(&desc);
         assert_eq!(
             addrs,
             vec![
                 ConnectAddress {
                     host: "primary".into(),
                     port: 1521,
+                    protocol: NetProtocol::Tcp,
                     description_index: 0,
                 },
                 ConnectAddress {
                     host: "standby".into(),
                     port: 1522,
+                    protocol: NetProtocol::Tcp,
                     description_index: 0,
                 },
             ]
@@ -12747,12 +13497,13 @@ mod tests {
              (CONNECT_DATA=(SERVICE_NAME=svc)))",
         )
         .expect("parse");
-        let addrs = resolve_connect_addresses(&desc, NetProtocol::Tcp);
+        let addrs = resolve_connect_addresses(&desc);
         assert_eq!(
             addrs,
             vec![ConnectAddress {
                 host: "only".into(),
                 port: 1521,
+                protocol: NetProtocol::Tcp,
                 description_index: 0,
             }]
         );
@@ -12769,7 +13520,7 @@ mod tests {
              (CONNECT_DATA=(SERVICE_NAME=svc)))",
         )
         .expect("parse");
-        let mut addrs = resolve_connect_addresses(&desc, NetProtocol::Tcp);
+        let mut addrs = resolve_connect_addresses(&desc);
         addrs.sort_by_key(|address| address.port);
         assert_eq!(
             addrs,
@@ -12777,16 +13528,19 @@ mod tests {
                 ConnectAddress {
                     host: "a".into(),
                     port: 1,
+                    protocol: NetProtocol::Tcp,
                     description_index: 0,
                 },
                 ConnectAddress {
                     host: "b".into(),
                     port: 2,
+                    protocol: NetProtocol::Tcp,
                     description_index: 0,
                 },
                 ConnectAddress {
                     host: "c".into(),
                     port: 3,
+                    protocol: NetProtocol::Tcp,
                     description_index: 0,
                 },
             ]
@@ -12794,9 +13548,11 @@ mod tests {
     }
 
     #[test]
-    fn f2_only_primary_protocol_addresses_are_candidates() {
-        // A mixed-protocol descriptor only yields the primary-protocol
-        // endpoints (the transport/TLS setup is resolved for one protocol).
+    fn f2_each_address_keeps_its_own_protocol() {
+        // A mixed-protocol descriptor yields every endpoint with its own
+        // protocol; TCPS endpoints are dialled with TLS and plaintext ones
+        // without (oraclemcp-vs8lq; reference connects each address with
+        // its own protocol).
         let desc = EasyConnect::parse_descriptor(
             "(DESCRIPTION=(ADDRESS_LIST=\
              (ADDRESS=(PROTOCOL=tcp)(HOST=plain)(PORT=1521))\
@@ -12805,20 +13561,21 @@ mod tests {
         )
         .expect("parse");
         assert_eq!(
-            resolve_connect_addresses(&desc, NetProtocol::Tcp),
-            vec![ConnectAddress {
-                host: "plain".into(),
-                port: 1521,
-                description_index: 0,
-            }]
-        );
-        assert_eq!(
-            resolve_connect_addresses(&desc, NetProtocol::Tcps),
-            vec![ConnectAddress {
-                host: "secure".into(),
-                port: 2484,
-                description_index: 0,
-            }]
+            resolve_connect_addresses(&desc),
+            vec![
+                ConnectAddress {
+                    host: "plain".into(),
+                    port: 1521,
+                    protocol: NetProtocol::Tcp,
+                    description_index: 0,
+                },
+                ConnectAddress {
+                    host: "secure".into(),
+                    port: 2484,
+                    protocol: NetProtocol::Tcps,
+                    description_index: 0,
+                },
+            ]
         );
     }
 

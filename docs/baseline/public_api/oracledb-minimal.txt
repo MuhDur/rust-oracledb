@@ -647,6 +647,7 @@ pub oraclemcp_driver_cx::Error::TooManyRows
 pub oraclemcp_driver_cx::Error::UnexpectedPacket(u8)
 pub oraclemcp_driver_cx::Error::UnknownTransactionState(u32)
 pub oraclemcp_driver_cx::Error::UnsupportedAuthMode(oraclemcp_driver_cx::UnsupportedAuthMode)
+pub oraclemcp_driver_cx::Error::UnsupportedConnectSetting(alloc::string::String)
 pub oraclemcp_driver_cx::Error::UnsupportedSni(alloc::string::String)
 pub oraclemcp_driver_cx::Error::Wallet(oraclemcp_driver_cx_protocol::tls::wallet::WalletError)
 impl oraclemcp_driver_cx::Error
