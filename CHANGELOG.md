@@ -29,10 +29,70 @@ artifacts, and the checked-in API/provenance ledgers.
 - [0.8.2 runtime timer correction](https://github.com/MuhDur/rust-oracledb/commit/9059165a34b43921f44d56c6a2c12009f2fb23db)
 - [0.8.2 K10 owning row stream](https://github.com/MuhDur/rust-oracledb/commit/06244bfa4c8aab2efb62bfdbd8793dc1e089bd02)
 
-## [Unreleased]
+## [Unreleased] (0.10.0)
+
+### Added
+
+- `Connection::cancel_and_close(cx)` and
+  `BlockingConnection::cancel_and_close(connection)` cancel an abandoned call
+  and permanently close its transport. They never wait for a cancel response
+  or issue SQL behind the abandoned call, and they still send EOF and shut the
+  socket down when the cancel write fails.
+- `Error::connect_phase()` returns the furthest `ConnectPhase` a failed
+  `Connection::connect` reached (DNS, TCP, TLS, wallet, CONNECT, ACCEPT,
+  negotiation, data types, the two authentication phases, session). Connect
+  phases are also emitted as tracing events in every build; no event carries
+  the password.
+- Named-region `TIMESTAMP WITH TIME ZONE` values decode as an exact UTC
+  instant plus a region identity (`QueryValue::TimestampTzRegion`,
+  `OracleTimeZoneRegion`) instead of failing with `UnsupportedFeature`.
+  Unknown region IDs fail closed, and a named-region OSON timestamp that
+  would need local-time rules is refused. Region IDs and names come from
+  Oracle timezone file version 45.
+
+### Changed
+
+- The driver builds and tests on current stable Rust on Linux and macOS.
+  `asupersync` is used with its default features off, so the nightly-only
+  `nightly-outcome-try` feature is no longer enabled. Release builds keep the
+  pinned nightly toolchain.
+- Each DESCRIPTION in a `DESCRIPTION_LIST` gets its own connect plan, so an
+  endpoint reached by failover uses that DESCRIPTION's transport timeout,
+  `EXPIRE_TIME` / `ENABLE=BROKEN` keepalive, `RETRY_COUNT` / `RETRY_DELAY`,
+  TLS wallet, DN match, pinned DN, SNI, SDU and `CONNECT_DATA`. Before, every
+  endpoint used the first DESCRIPTION's settings. Redirects and TLS
+  renegotiation keep the selected plan, and a TCPS endpoint never falls back
+  to plaintext.
+- `Error::UnsupportedConnectSetting` is raised only for `SOURCE_ROUTE` and
+  `HTTPS_PROXY`, whose omission would change where the driver connects. Other
+  descriptor hints it does not act on (`RECV_BUF_SIZE`, `SEND_BUF_SIZE`,
+  `ENABLE` values other than `BROKEN`, `USE_TCP_FAST_OPEN`,
+  `CONNECTION_ID_PREFIX`, the DRCP `POOL_*` fields) are accepted and logged
+  at debug level.
+- Dependency updates for upstream security fixes: `rustls` 0.23.46,
+  `rustls-webpki` 0.103.16 and `ctutils` 0.4.4.
 
 ### Fixed
 
+- TCPS through a listener that hands the session to a dedicated server: when
+  the server answers CONNECT with RESEND carrying the TLS-renegotiation flag
+  (`0x08`), the driver runs a fresh TLS handshake on the socket. It used to
+  resend CONNECT inside the old TLS session, and the next read failed at
+  ACCEPT with "cannot decrypt peer's message".
+- An IP-literal host is verified only against IP SANs. DNS SANs, common names
+  and wildcards no longer authenticate an IP address.
+- A classic DATA packet that ends between rows is no longer taken as the end
+  of the query response; the reader waits for the response boundary.
+- An unknown TTC message before a classic response boundary quarantines the
+  session instead of leaving it reusable.
+- LONG and LONG RAW status trailers are consumed when a cached EXECUTE
+  prefetches the values inline, so the following column stays aligned. A
+  LONG value without its status trailer is refused.
+- A server cursor allocated by a failed parse is retired instead of leaked;
+  `ServerErrorDetails::cursor_id` carries it.
+- BC `DATE` years (-4712 to -1) decode and bind. Year zero is rejected.
+- Operation tracing spans are entered only while their future is being
+  polled.
 - Wallet reads now refuse symlinks and non-regular files before reading, and
   open FIFOs without blocking.
 
