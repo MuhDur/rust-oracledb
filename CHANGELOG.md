@@ -96,6 +96,20 @@ artifacts, and the checked-in API/provenance ledgers.
 - Wallet reads now refuse symlinks and non-regular files before reading, and
   open FIFOs without blocking.
 
+## [0.9.3] - 2026-08-06
+
+Published to crates.io for `oraclemcp-driver-cx` only. There is no `v0.9.3`
+git tag. `oraclemcp-driver-cx-protocol` and `oraclemcp-driver-cx-derive` stay
+at 0.9.2. No code changed.
+
+### Changed
+
+- The crate README replaces its note about the legacy `oracledb` package
+  family with a project-history note: `oraclemcp-driver-cx` continues the
+  independently developed `oracledb` codebase through its rename at 0.9.2,
+  and the original `oracledb`, `oracledb-protocol` and `oracledb-derive`
+  crates.io names are being handed to Oracle.
+
 ## [0.9.2] - 2026-07-30
 
 ### Changed
