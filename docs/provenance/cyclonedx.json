@@ -829,9 +829,9 @@
         }
       ],
       "name": "ctutils",
-      "purl": "pkg:cargo/ctutils@0.4.2",
+      "purl": "pkg:cargo/ctutils@0.4.4",
       "type": "library",
-      "version": "0.4.2"
+      "version": "0.4.4"
     },
     {
       "licenses": [
@@ -2545,9 +2545,9 @@
         }
       ],
       "name": "rustls",
-      "purl": "pkg:cargo/rustls@0.23.45",
+      "purl": "pkg:cargo/rustls@0.23.46",
       "type": "library",
-      "version": "0.23.45"
+      "version": "0.23.46"
     },
     {
       "licenses": [
@@ -2597,9 +2597,9 @@
         }
       ],
       "name": "rustls-webpki",
-      "purl": "pkg:cargo/rustls-webpki@0.103.15",
+      "purl": "pkg:cargo/rustls-webpki@0.103.16",
       "type": "library",
-      "version": "0.103.15"
+      "version": "0.103.16"
     },
     {
       "licenses": [
