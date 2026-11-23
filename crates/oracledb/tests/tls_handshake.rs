@@ -26,6 +26,7 @@ extern crate oraclemcp_driver_cx as oracledb;
 use oracledb_protocol::net::EasyConnect;
 use oracledb_protocol::tls::wallet::parse_ewallet_pem;
 use ring::signature::{UnparsedPublicKey, RSA_PKCS1_2048_8192_SHA256, RSA_PSS_2048_8192_SHA256};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use rustls::server::{
     danger::{ClientCertVerified, ClientCertVerifier},
@@ -83,15 +84,12 @@ fn fixture_server_credentials() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<
     let ca = fixture("ca.crt");
 
     let mut leaf_reader = std::io::BufReader::new(&leaf[..]);
-    let mut chain: Vec<CertificateDer<'static>> = rustls_pemfile_certs(&mut leaf_reader);
+    let mut chain: Vec<CertificateDer<'static>> = pem_certs(&mut leaf_reader);
     // Include the CA so the client (which trusts the CA) sees a full chain.
     let mut ca_reader = std::io::BufReader::new(&ca[..]);
-    chain.extend(rustls_pemfile_certs(&mut ca_reader));
+    chain.extend(pem_certs(&mut ca_reader));
 
-    let mut key_reader = std::io::BufReader::new(&key[..]);
-    let key_der = rustls_pemfile::private_key(&mut key_reader)
-        .expect("read key")
-        .expect("a private key");
+    let key_der = PrivateKeyDer::from_pem_slice(&key).expect("a private key");
 
     (chain, key_der)
 }
@@ -120,7 +118,7 @@ struct V1ClientCertVerifier {
 impl V1ClientCertVerifier {
     fn fixture_ca_public_key() -> Vec<u8> {
         let ca_pem = fixture("ca.crt");
-        let ca_der = rustls_pemfile_certs(&mut std::io::BufReader::new(&ca_pem[..]))
+        let ca_der = pem_certs(&mut std::io::BufReader::new(&ca_pem[..]))
             .into_iter()
             .next()
             .expect("fixture CA must contain a certificate");
@@ -271,8 +269,8 @@ fn server_config_requiring_v1_client_auth_with(
     )
 }
 
-fn rustls_pemfile_certs(reader: &mut dyn std::io::BufRead) -> Vec<CertificateDer<'static>> {
-    rustls_pemfile::certs(reader)
+fn pem_certs(reader: &mut dyn std::io::BufRead) -> Vec<CertificateDer<'static>> {
+    rustls::pki_types::pem::ReadIter::<_, CertificateDer<'static>>::new(reader)
         .filter_map(Result::ok)
         .collect()
 }
@@ -344,13 +342,12 @@ type V1MtlsServer = (
 /// client certificate and reports its negotiated protocol version.
 fn spawn_tls_server_requiring_client_auth() -> V1MtlsServer {
     let (chain, key_der) = fixture_server_credentials();
-    let expected_leaf =
-        rustls_pemfile_certs(&mut std::io::BufReader::new(&fixture("client_v1.crt")[..]))
-            .into_iter()
-            .next()
-            .expect("v1 client fixture must contain a certificate")
-            .as_ref()
-            .to_vec();
+    let expected_leaf = pem_certs(&mut std::io::BufReader::new(&fixture("client_v1.crt")[..]))
+        .into_iter()
+        .next()
+        .expect("v1 client fixture must contain a certificate")
+        .as_ref()
+        .to_vec();
     spawn_tls_server_requiring_v1_client_auth_with(
         chain,
         key_der,
@@ -1015,11 +1012,10 @@ fn synthetic_server_identity() -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'
     let ca = synthetic_fixture("ca.pem");
 
     let mut chain: Vec<CertificateDer<'static>> =
-        rustls_pemfile_certs(&mut std::io::BufReader::new(&ewallet[..]));
-    chain.extend(rustls_pemfile_certs(&mut std::io::BufReader::new(&ca[..])));
+        pem_certs(&mut std::io::BufReader::new(&ewallet[..]));
+    chain.extend(pem_certs(&mut std::io::BufReader::new(&ca[..])));
 
-    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(&ewallet[..]))
-        .expect("read synthetic server key")
+    let key = PrivateKeyDer::from_pem_slice(&ewallet)
         .expect("synthetic ewallet.pem carries a private key");
     (chain, key)
 }
@@ -1033,7 +1029,7 @@ fn synthetic_server_config(require_client_auth: bool) -> Arc<ServerConfig> {
     let builder = ServerConfig::builder();
     let config = if require_client_auth {
         let mut roots = RootCertStore::empty();
-        for ca in rustls_pemfile_certs(&mut std::io::BufReader::new(
+        for ca in pem_certs(&mut std::io::BufReader::new(
             &synthetic_fixture("ca.pem")[..],
         )) {
             roots
@@ -1341,7 +1337,7 @@ fn synthetic_tcps_mutual_tls_presents_wallet_client_cert() {
         Some(ProtocolVersion::TLSv1_3),
         "the default rustls client/server configurations must negotiate TLS 1.3"
     );
-    let expected_leaf = rustls_pemfile_certs(&mut std::io::BufReader::new(
+    let expected_leaf = pem_certs(&mut std::io::BufReader::new(
         &synthetic_fixture("ewallet.pem")[..],
     ))
     .into_iter()
@@ -1748,10 +1744,8 @@ struct SelectedListener {
 fn self_signed_recording_config(
     sni_tx: std::sync::mpsc::Sender<Option<String>>,
 ) -> Arc<ServerConfig> {
-    let chain = rustls_pemfile_certs(&mut std::io::BufReader::new(&fixture("server.crt")[..]));
-    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(&fixture("server.key")[..]))
-        .expect("read key")
-        .expect("a private key");
+    let chain = pem_certs(&mut std::io::BufReader::new(&fixture("server.crt")[..]));
+    let key = PrivateKeyDer::from_pem_slice(&fixture("server.key")).expect("a private key");
     let key = CertifiedKey::from_der(chain, key, &rustls::crypto::ring::default_provider())
         .expect("server.crt and server.key match");
     Arc::new(

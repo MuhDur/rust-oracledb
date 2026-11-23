@@ -31,17 +31,11 @@ unmaintained = "workspace"
 # The pyo3 advisories RUSTSEC-2026-0176 / 0177 were resolved for real by the
 # 0.29 bump (bead rust-oracledb-aaf) and need NO entry here.
 #
-# The single documented allow-list entry below is for an *unmaintained* note
-# (not a vulnerability) on a transitively-required PEM parser:
-ignore = [
-    # rustls-pemfile is unmaintained (repo archived 2025-08); upstream points
-    # to rustls-pki-types' PemObject. It is pulled in directly by
-    # oracledb-protocol and transitively by asupersync/rustls for TLS/TCPS PEM
-    # loading. No vulnerability, no safe upgrade yet — tracked for migration to
-    # rustls-pki-types::pem. Allow-listed so the gate stays green while the
-    # migration is pending; remove once oracledb-protocol drops rustls-pemfile.
-    "RUSTSEC-2025-0134",
-]
+# rustls-pemfile (RUSTSEC-2025-0134, unmaintained) is no longer a direct
+# dependency: the workspace parses PEM with rustls-pki-types. It is still
+# reached transitively through asupersync, where `unmaintained = "workspace"`
+# reports it as a warning, so it needs no ignore entry.
+ignore = []
 
 # ---------------------------------------------------------------------------
 # Licenses. The allow-list is the exact union of SPDX atoms present in the

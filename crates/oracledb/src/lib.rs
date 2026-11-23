@@ -16738,16 +16738,16 @@ mod tests {
         let key = std::fs::read(fixtures.join("leaf.key")).expect("read leaf.key fixture");
         let ca = std::fs::read(fixtures.join("ca.crt")).expect("read ca.crt fixture");
 
+        use rustls::pki_types::pem::PemObject;
         let mut chain: Vec<rustls::pki_types::CertificateDer<'static>> =
-            rustls_pemfile::certs(&mut std::io::BufReader::new(&leaf[..]))
+            rustls::pki_types::CertificateDer::pem_slice_iter(&leaf)
                 .filter_map(std::result::Result::ok)
                 .collect();
         chain.extend(
-            rustls_pemfile::certs(&mut std::io::BufReader::new(&ca[..]))
+            rustls::pki_types::CertificateDer::pem_slice_iter(&ca)
                 .filter_map(std::result::Result::ok),
         );
-        let key_der = rustls_pemfile::private_key(&mut std::io::BufReader::new(&key[..]))
-            .expect("read leaf.key")
+        let key_der = rustls::pki_types::PrivateKeyDer::from_pem_slice(&key)
             .expect("leaf.key must contain a private key");
 
         let config = rustls::ServerConfig::builder()

@@ -463,7 +463,7 @@ fn load_system_roots() -> Vec<Vec<u8>> {
     for path in BUNDLES {
         if let Ok(bytes) = std::fs::read(path) {
             let mut reader = std::io::BufReader::new(&bytes[..]);
-            let certs: Vec<Vec<u8>> = rustls_pemfile_certs(&mut reader);
+            let certs: Vec<Vec<u8>> = pem_certificates(&mut reader);
             if !certs.is_empty() {
                 return certs;
             }
@@ -486,10 +486,9 @@ fn union_trust_anchors(
     system_roots
 }
 
-/// Parse all CERTIFICATE blocks from a PEM reader into DER byte vectors,
-/// without adding a direct rustls-pemfile dependency to this crate (the
-/// protocol crate already depends on it; reuse its re-export).
-fn rustls_pemfile_certs(reader: &mut dyn std::io::BufRead) -> Vec<Vec<u8>> {
+/// Parse all CERTIFICATE blocks from a PEM reader into DER byte vectors, using
+/// the protocol crate's wallet PEM reader.
+fn pem_certificates(reader: &mut dyn std::io::BufRead) -> Vec<Vec<u8>> {
     oracledb_protocol::tls::wallet::parse_pem_certificates(reader)
 }
 
@@ -1011,6 +1010,7 @@ pub async fn tls_handshake(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustls::pki_types::pem::PemObject;
     use x509_cert::der::asn1::{Ia5String, OctetString};
     use x509_cert::der::{Decode, Encode};
     use x509_cert::ext::pkix::name::GeneralName;
@@ -1023,7 +1023,7 @@ mod tests {
         names: Vec<GeneralName>,
     ) -> Result<(), RustlsError> {
         let pem = include_bytes!("../tests/fixtures/tls/leaf.crt");
-        let leaf = rustls_pemfile::certs(&mut std::io::Cursor::new(pem))
+        let leaf = rustls::pki_types::CertificateDer::pem_slice_iter(pem)
             .next()
             .expect("fixture certificate")
             .expect("fixture PEM");
@@ -1330,7 +1330,7 @@ mod tests {
             };
             let expected = std::fs::File::open(&expected_cert_file)
                 .map(std::io::BufReader::new)
-                .map(|mut reader| rustls_pemfile_certs(&mut reader))
+                .map(|mut reader| pem_certificates(&mut reader))
                 .expect("read fixture certificate");
             assert!(
                 !expected.is_empty(),
