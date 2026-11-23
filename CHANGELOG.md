@@ -71,6 +71,10 @@ artifacts, and the checked-in API/provenance ledgers.
   at debug level.
 - Dependency updates for upstream security fixes: `rustls` 0.23.46,
   `rustls-webpki` 0.103.16 and `ctutils` 0.4.4.
+- PEM wallets, OS root bundles and the IAM token key are parsed with the
+  `rustls-pki-types` PEM reader instead of the unmaintained `rustls-pemfile`
+  (RUSTSEC-2025-0134). Parsing behaviour is unchanged; `rustls-pemfile` is no
+  longer a direct dependency and its `deny.toml` ignore entry is removed.
 
 ### Fixed
 

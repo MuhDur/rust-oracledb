@@ -23,6 +23,8 @@ use std::time::SystemTime;
 use base64::Engine as _;
 use ring::rand::SystemRandom;
 use ring::signature::{RsaKeyPair, RSA_PKCS1_SHA256};
+use rustls_pki_types::pem::PemObject;
+use rustls_pki_types::PrivatePkcs8KeyDer;
 
 use crate::{Error, Result};
 
@@ -58,21 +60,13 @@ pub(crate) fn sign_signing_header(private_key_pkcs8_pem: &str, header: &str) -> 
 }
 
 /// Extracts the DER body of the first PKCS#8 `PRIVATE KEY` PEM block, using the
-/// same `rustls-pemfile` reader the wallet loader uses (`Item::Pkcs8Key`). OCI
-/// IAM database tokens ship an unencrypted PKCS#8 RSA key; a PKCS#1
+/// same `rustls-pki-types` PEM reader the wallet loader uses; other blocks are
+/// skipped. OCI IAM database tokens ship an unencrypted PKCS#8 RSA key; a PKCS#1
 /// (`RSA PRIVATE KEY`) or encrypted key is refused with the redacted PoP error.
 fn pkcs8_pem_to_der(pem: &str) -> Result<Vec<u8>> {
-    let mut reader = std::io::BufReader::new(pem.as_bytes());
-    loop {
-        match rustls_pemfile::read_one(&mut reader).map_err(|_| Error::IamTokenProofOfPossession)? {
-            Some(rustls_pemfile::Item::Pkcs8Key(der)) => {
-                return Ok(der.secret_pkcs8_der().to_vec())
-            }
-            // Skip any non-key blocks (e.g. a stray certificate) and keep looking.
-            Some(_) => continue,
-            None => return Err(Error::IamTokenProofOfPossession),
-        }
-    }
+    let key = PrivatePkcs8KeyDer::from_pem_slice(pem.as_bytes())
+        .map_err(|_| Error::IamTokenProofOfPossession)?;
+    Ok(key.secret_pkcs8_der().to_vec())
 }
 
 #[cfg(test)]

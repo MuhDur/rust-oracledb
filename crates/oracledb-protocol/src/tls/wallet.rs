@@ -26,6 +26,9 @@
 use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 
+use rustls_pki_types::pem::{self as pki_pem, SectionKind};
+use rustls_pki_types::CertificateDer;
+
 /// File name of the PEM wallet (python-oracledb `PEM_WALLET_FILE_NAME`).
 pub const PEM_WALLET_FILE_NAME: &str = "ewallet.pem";
 /// File name of the standalone PKCS#12 wallet.
@@ -342,7 +345,7 @@ pub fn parse_ewallet_pem(
 ) -> Result<WalletContents, WalletError> {
     ensure_wallet_size(pem.len())?;
     // Legacy OpenSSL PEM-level encryption scrambles the base64 payload of a
-    // PKCS#1 block; rustls-pemfile would surface it as a garbage key. Reject it
+    // PKCS#1 block; the PEM reader would surface it as a garbage key. Reject it
     // up front with a typed remediation (fail closed).
     if pem_contains_legacy_encryption(pem) {
         return Err(WalletError::KeyDecrypt(
@@ -360,22 +363,16 @@ pub fn parse_ewallet_pem(
     let mut keys: Vec<Vec<u8>> = Vec::new();
 
     loop {
-        match rustls_pemfile::read_one(&mut reader) {
-            Ok(Some(item)) => match item {
-                rustls_pemfile::Item::X509Certificate(der) => {
-                    all_certs.push(der.as_ref().to_vec());
+        match pki_pem::from_buf(&mut reader) {
+            Ok(Some((kind, der))) => match kind {
+                SectionKind::Certificate => all_certs.push(der),
+                SectionKind::PrivateKey
+                | SectionKind::RsaPrivateKey
+                | SectionKind::EcPrivateKey => {
+                    keys.push(der);
                 }
-                rustls_pemfile::Item::Pkcs8Key(der) => {
-                    keys.push(der.secret_pkcs8_der().to_vec());
-                }
-                rustls_pemfile::Item::Pkcs1Key(der) => {
-                    keys.push(der.secret_pkcs1_der().to_vec());
-                }
-                rustls_pemfile::Item::Sec1Key(der) => {
-                    keys.push(der.secret_sec1_der().to_vec());
-                }
-                // ENCRYPTED PRIVATE KEY blocks are not handled by
-                // rustls-pemfile; they are extracted and decrypted below.
+                // ENCRYPTED PRIVATE KEY blocks are not a PEM section kind the
+                // reader returns; they are extracted and decrypted below.
                 _ => {}
             },
             Ok(None) => break,
@@ -495,9 +492,9 @@ fn pem_contains_legacy_encryption(pem: &[u8]) -> bool {
 /// Parse all `CERTIFICATE` blocks from a PEM reader into DER byte vectors.
 ///
 /// Exposed so the I/O crate can load OS root bundles (for the no-wallet TCPS
-/// path) without taking its own `rustls-pemfile` dependency.
+/// path) without taking its own PEM-parsing dependency.
 pub fn parse_pem_certificates(reader: &mut dyn BufRead) -> Vec<Vec<u8>> {
-    rustls_pemfile::certs(reader)
+    pki_pem::ReadIter::<_, CertificateDer<'static>>::new(reader)
         .filter_map(Result::ok)
         .map(|der| der.as_ref().to_vec())
         .collect()
